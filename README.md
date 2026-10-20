@@ -1,0 +1,156 @@
+<p align="center">
+  <img src="ferrifuge-logo.png" alt="ferrifuge" width="480">
+</p>
+
+<p align="center">
+  A <a href="https://centrifugal.dev">Centrifugo</a> client SDK for Rust.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-0BSD-6B7280.svg" alt="License: 0BSD"></a>
+  <img src="https://img.shields.io/badge/MSRV-1.88-6B7280.svg" alt="MSRV 1.88">
+</p>
+
+## Overview
+
+ferrifuge connects Rust applications to a Centrifugo server over its client
+protocol. It is written from scratch against the
+[Client SDK spec](https://centrifugal.dev/docs/transports/client_api), with
+[centrifuge-js](https://github.com/centrifugal/centrifuge-js) as the
+implementation reference.
+
+The core is a sans-IO state machine with no async runtime of its own. The
+default `tokio` feature adds a ready-to-use `Client` that runs the machine on
+tokio. Any other runtime can drive the core through `ferrifuge::machine`.
+
+## Status
+
+Early development; the API will change. Work is organised in blocks
+specified in [CLAUDE.md](CLAUDE.md).
+
+Available now:
+
+- connect and disconnect, with the client state and its events;
+- reconnect attempts with exponential backoff and full jitter;
+- an `error` event for every failed connection attempt;
+- websocket transport (`ws://` and `wss://`) with the JSON protocol.
+
+Not yet available:
+
+| Planned | Where |
+|---|---|
+| Recovery from server-initiated disconnects, disconnect codes | Block 1 (1b), Block 3 |
+| Connection tokens and their refresh | Block 1 (1c) |
+| Answering server pings | Block 4 |
+| Subscriptions, publications, RPC | later blocks |
+| http_stream and sse transports, Protobuf encoding | later blocks |
+
+Until then, the server must allow connections without a token. Because pings
+go unanswered, Centrifugo also closes each connection within about half a
+minute with its default settings, and the client then reconnects.
+
+## Usage
+
+ferrifuge is not on crates.io yet. Depend on the repository:
+
+```toml
+[dependencies]
+ferrifuge = { git = "https://github.com/jbiscella/ferrifuge" }
+futures-util = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+```rust
+use ferrifuge::{Client, ClientEvent, Config};
+use futures_util::StreamExt;
+
+#[tokio::main]
+async fn main() {
+    let client = Client::new("ws://localhost:8000/connection/websocket", Config::default());
+    let mut events = client.events();
+    client.connect();
+
+    while let Some(event) = events.next().await {
+        match event {
+            ClientEvent::Connecting { code, reason } => println!("connecting: {code} {reason}"),
+            ClientEvent::Connected { client_id, .. } => println!("connected as {client_id}"),
+            ClientEvent::Disconnected { code, reason } => {
+                println!("disconnected: {code} {reason}");
+                break;
+            }
+            ClientEvent::Error(error) => eprintln!("error: {}", error.message),
+        }
+    }
+}
+```
+
+To try it against a local server that accepts connections without a token:
+
+```sh
+docker run --rm -p 8000:8000 \
+  -e CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN=true \
+  centrifugo/centrifugo:v6.10.1 centrifugo
+```
+
+### Client
+
+`Client::new` must be called inside a tokio runtime. `connect()` and
+`disconnect()` change the state before they return. `events()` returns a
+`Stream` of the events emitted from then on; each call returns an independent
+stream. Dropping the client disconnects it.
+
+### States and events
+
+The client is `Disconnected`, `Connecting` or `Connected`. Each change emits
+`Connecting`, `Connected` or `Disconnected`. `Connecting` and `Disconnected`
+carry a numeric `code` and a `reason`. Client-side codes are in
+`ferrifuge::codes`, and their values follow centrifuge-js. `Error` events
+report problems that do not change the state, such as a failed attempt
+while the client keeps reconnecting.
+
+### Configuration
+
+| `Config` field | Default | Meaning |
+|---|---|---|
+| `min_reconnect_delay` | 500 ms | Lower bound of the reconnect delay |
+| `max_reconnect_delay` | 20 s | Upper bound of the reconnect delay |
+| `timeout` | 5 s | Time allowed from opening the transport to the connect reply |
+| `name` | `ferrifuge` | Client name reported to the server |
+| `version` | crate version | Client version reported to the server |
+
+### Cargo features
+
+| Feature | Default | Adds |
+|---|---|---|
+| `tokio` | yes | `Client`, the websocket transport, TLS through rustls (ring) with the platform's root certificates |
+
+Without default features, ferrifuge has no runtime or network dependency.
+`ferrifuge::machine::Machine` then takes inputs (API calls, transport
+activity, timers) and returns the actions to perform.
+
+## Development
+
+You need Rust 1.88 or newer, and Docker for the tests that run a real
+Centrifugo.
+
+```sh
+git submodule update --init      # Claude Code skills used in this repo
+cargo test --all-targets         # unit tests, BDD scenarios, fixture smoke tests
+cargo test --test bdd -- --tags @A   # one test layer of the scenarios
+cargo deny check                 # advisories, licenses, sources
+```
+
+The behaviour is specified as Gherkin scenarios in [CLAUDE.md](CLAUDE.md).
+Each file in `tests/features/` is a verbatim copy of one of them, and a test
+fails if the two drift apart. `tests/bdd.rs` lists the scenarios that are
+implemented so far.
+
+CI runs rustfmt, clippy (pedantic, warnings denied) with and without default
+features, rustdoc, the tests with a 70% line-coverage floor, an MSRV build
+and cargo-deny. cargo-deny also runs daily.
+
+## License
+
+[0BSD](LICENSE). [`proto/client.proto`](proto/client.proto) is copied from
+[centrifugal/protocol](https://github.com/centrifugal/protocol) and keeps its
+MIT license ([`proto/LICENSE`](proto/LICENSE)).
