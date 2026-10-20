@@ -18,6 +18,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Its ref is the Rust toolchain version (e.g. @1.88 in the msrv job),
+      # not an action release; bumping it would silently move the MSRV.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]
