@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::wire::{
-    Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, Reply, ReplyResult,
+    Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
+    RefreshResult, Reply, ReplyResult,
 };
 
 /// A frame that is not valid JSON client protocol.
@@ -47,6 +48,13 @@ struct JsonCommand<'a> {
     id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     connect: Option<JsonConnectRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh: Option<JsonRefreshRequest<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonRefreshRequest<'a> {
+    token: &'a str,
 }
 
 #[derive(Serialize)]
@@ -73,6 +81,12 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     name,
                     version,
                 }),
+                refresh: None,
+            },
+            Method::Refresh(RefreshRequest { token }) => Self {
+                id: command.id,
+                connect: None,
+                refresh: Some(JsonRefreshRequest { token }),
             },
         }
     }
@@ -89,6 +103,7 @@ struct JsonReply {
     id: u32,
     error: Option<JsonError>,
     connect: Option<JsonConnectResult>,
+    refresh: Option<JsonRefreshResult>,
     push: Option<JsonPush>,
     #[serde(flatten)]
     other: serde_json::Map<String, serde_json::Value>,
@@ -115,6 +130,13 @@ struct JsonConnectResult {
     pong: bool,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct JsonRefreshResult {
+    expires: bool,
+    ttl: u32,
+}
+
 #[derive(Deserialize)]
 struct JsonPush {
     disconnect: Option<JsonDisconnect>,
@@ -138,6 +160,11 @@ impl From<JsonReply> for Reply {
                 ttl: connect.ttl,
                 ping: connect.ping,
                 pong: connect.pong,
+            })
+        } else if let Some(refresh) = reply.refresh {
+            ReplyResult::Refresh(RefreshResult {
+                expires: refresh.expires,
+                ttl: refresh.ttl,
             })
         } else if let Some(push) = reply.push {
             ReplyResult::Push(match push.disconnect {
@@ -217,6 +244,36 @@ mod tests {
                     pong: true,
                 }),
             }]
+        );
+    }
+
+    #[test]
+    fn encodes_refresh_command() {
+        let frame = encode(&[Command {
+            id: 7,
+            method: Method::Refresh(RefreshRequest {
+                token: "t".to_owned(),
+            }),
+        }]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":7,"refresh":{"token":"t"}}"#
+        );
+    }
+
+    #[test]
+    fn decodes_refresh_reply() {
+        let replies =
+            decode(br#"{"id":7,"refresh":{"client":"c","version":"6","expires":true,"ttl":60}}"#)
+                .unwrap();
+
+        assert_eq!(
+            replies[0].result,
+            ReplyResult::Refresh(RefreshResult {
+                expires: true,
+                ttl: 60
+            })
         );
     }
 

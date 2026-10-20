@@ -15,6 +15,7 @@ pub(crate) struct Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Method {
     Connect(ConnectRequest),
+    Refresh(RefreshRequest),
 }
 
 /// `ConnectRequest` of `client.proto`.
@@ -23,6 +24,12 @@ pub(crate) struct ConnectRequest {
     pub(crate) token: String,
     pub(crate) name: String,
     pub(crate) version: String,
+}
+
+/// `RefreshRequest` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RefreshRequest {
+    pub(crate) token: String,
 }
 
 /// A reply or push received from the server.
@@ -38,6 +45,7 @@ pub(crate) struct Reply {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReplyResult {
     Connect(ConnectResult),
+    Refresh(RefreshResult),
     Push(Push),
     /// An empty reply: a server ping, or a reply carrying only an error.
     Empty,
@@ -62,6 +70,13 @@ pub(crate) struct ConnectResult {
     pub(crate) ttl: u32,
     pub(crate) ping: u32,
     pub(crate) pong: bool,
+}
+
+/// `RefreshResult` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RefreshResult {
+    pub(crate) expires: bool,
+    pub(crate) ttl: u32,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.
