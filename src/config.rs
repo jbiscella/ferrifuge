@@ -16,6 +16,8 @@ pub struct Config {
     pub name: String,
     /// Client version reported to the server, for analytics.
     pub version: String,
+    /// Connection token (JWT) sent with the first connect. Empty for none.
+    pub token: String,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             timeout: Duration::from_secs(5),
             name: "ferrifuge".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            token: String::new(),
         }
     }
 }

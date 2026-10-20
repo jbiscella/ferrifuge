@@ -13,7 +13,7 @@ use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{Action, Input, Machine, Timer, TransportId};
-use crate::{ClientEvent, Config, State};
+use crate::{ClientEvent, Config, State, TokenError};
 
 /// Centrifugo client running on tokio.
 ///
@@ -69,6 +69,59 @@ impl Shared {
     }
 }
 
+/// Async callback returning a fresh connection token.
+type GetToken =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>> + Send + Sync>;
+
+/// Builds a [`Client`] with options beyond [`Config`].
+pub struct ClientBuilder {
+    endpoint: String,
+    config: Config,
+    get_token: Option<GetToken>,
+}
+
+impl std::fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("endpoint", &self.endpoint)
+            .field("config", &self.config)
+            .field("get_token", &self.get_token.is_some())
+            .finish()
+    }
+}
+
+impl ClientBuilder {
+    /// Sets the options; [`Config::default`] otherwise.
+    #[must_use]
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Sets the callback that provides a new connection token when the
+    /// current one expires, or when there is none to connect with.
+    /// Return [`TokenError::Unauthorized`] to disconnect the client for good.
+    #[must_use]
+    pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
+    {
+        self.get_token = Some(Arc::new(move || Box::pin(get_token())));
+        self
+    }
+
+    /// Creates the disconnected client.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a tokio runtime: the client runs as a task on it.
+    #[must_use]
+    pub fn build(self) -> Client {
+        Client::start(self.endpoint, self.config)
+    }
+}
+
 impl Client {
     /// Creates a disconnected client for the websocket `endpoint`, e.g.
     /// `ws://localhost:8000/connection/websocket`.
@@ -78,6 +131,19 @@ impl Client {
     /// When called outside a tokio runtime: the client runs as a task on it.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, config: Config) -> Self {
+        Self::builder(endpoint).config(config).build()
+    }
+
+    /// Starts building a client for the websocket `endpoint`.
+    pub fn builder(endpoint: impl Into<String>) -> ClientBuilder {
+        ClientBuilder {
+            endpoint: endpoint.into(),
+            config: Config::default(),
+            get_token: None,
+        }
+    }
+
+    fn start(endpoint: String, config: Config) -> Self {
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
                 machine: Machine::new(config),
@@ -88,7 +154,7 @@ impl Client {
             closed: AtomicBool::new(false),
         });
         let driver = Driver {
-            endpoint: endpoint.into(),
+            endpoint,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,

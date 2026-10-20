@@ -4,7 +4,7 @@ use cucumber::{given, then, when};
 use ferrifuge::{ClientEvent, ErrorKind, State, codes};
 use serde_json::json;
 
-use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT};
+use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event};
 use crate::support::proxy;
 
 /// Server disconnect code advising a reconnect (spec: 3000-3499, 4000-4499).
@@ -181,10 +181,4 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
         assert_eq!(error.transport.as_deref(), Some("websocket"), "{error:?}");
     }
     assert_eq!(world.client().state(), State::Connecting);
-}
-
-async fn expect_event(world: &mut ClientWorld, expected: &str) -> ClientEvent {
-    let event = world.next_event().await;
-    assert_eq!(event.name(), expected, "{event:?}");
-    event
 }
