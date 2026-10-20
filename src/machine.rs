@@ -355,10 +355,11 @@ impl Machine {
     }
 }
 
-/// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect;
-/// every other server code is terminal.
+/// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect,
+/// 3500-3999 and 4500-4999 are terminal. Codes from 5000 are reserved by
+/// Centrifuge and reconnect (`client.proto`, `Disconnect`; owner decision).
 fn reconnect_advised(code: u32) -> bool {
-    matches!(code, 3000..=3499 | 4000..=4499)
+    !matches!(code, 3500..=3999 | 4500..=4999)
 }
 
 #[cfg(test)]
@@ -533,7 +534,7 @@ mod tests {
 
     #[test]
     fn reconnect_advice_follows_the_spec_ranges() {
-        let advised: Vec<_> = [3000, 3499, 3500, 3999, 4000, 4499, 4500, 4999, 5000]
+        let advised: Vec<_> = [3000, 3499, 3500, 3999, 4000, 4499, 4500, 4999, 5000, 6000]
             .into_iter()
             .map(|code| (code, reconnect_advised(code)))
             .collect();
@@ -549,7 +550,8 @@ mod tests {
                 (4499, true),
                 (4500, false),
                 (4999, false),
-                (5000, false),
+                (5000, true),
+                (6000, true),
             ]
         );
     }
