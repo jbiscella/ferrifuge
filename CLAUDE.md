@@ -25,6 +25,11 @@ Markers used below:
 | Serialization | JSON and Protobuf | Both supported by centrifuge-js |
 | Transports | websocket, http_stream, sse | Fallback in this order |
 | `closed` client state | Not implemented | Spec marks it optional |
+| Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) | Owner's choice |
+| Scenario execution | cucumber-rs; `.feature` files under `tests/features/` are verbatim copies of the Gherkin in this file | Scenario text is the test; drift is checked mechanically |
+| Real server for @A/@B | testcontainers-rs, image `centrifugo/centrifugo:v6.10.1` | `cargo test` needs only Docker |
+| Protobuf codegen | prost, `client.proto` vendored at a pinned upstream commit, protoc from `protoc-bin-vendored` | No system protoc needed |
+| Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD | Split only when a second crate is justified |
 
 ### References
 
