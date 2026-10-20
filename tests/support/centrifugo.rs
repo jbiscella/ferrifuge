@@ -5,13 +5,15 @@
 
 use serde_json::Value;
 use testcontainers::core::wait::HttpWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
+use testcontainers::core::{ContainerPort, Host, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 pub(crate) const IMAGE: &str = "centrifugo/centrifugo";
 pub(crate) const TAG: &str = "v6.10.1";
 pub(crate) const API_KEY: &str = "test-api-key";
+/// Name under which the container reaches the host, e.g. a proxy backend.
+pub(crate) const HOST_GATEWAY: &str = "host.docker.internal";
 
 const PORT: u16 = 8000;
 
@@ -32,6 +34,7 @@ impl Centrifugo {
                 HttpWaitStrategy::new("/health").with_expected_status_code(200u16),
             ))
             .with_cmd(["centrifugo"])
+            .with_host(HOST_GATEWAY, Host::HostGateway)
             .with_env_var("CENTRIFUGO_HTTP_API_KEY", API_KEY)
             .with_env_var("CENTRIFUGO_HEALTH_ENABLED", "true");
         for (name, value) in env {

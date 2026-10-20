@@ -17,6 +17,7 @@ use cucumber::gherkin::{Feature, GherkinEnv};
 
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
+use support::proxy::ConnectProxy;
 
 const FEATURES: &str = "tests/features";
 
@@ -28,6 +29,9 @@ const IMPLEMENTED: &[&str] = &[
     "Explicit disconnect stops reconnection",
     "Connect after explicit disconnect",
     "Connect failures not reflected in state are reported as errors",
+    // Block 1, sub-increment 1b.
+    "Temporary connection loss then successful reconnect",
+    "Connection loss then terminal error on reconnect",
 ];
 
 /// Server configuration of @A scenarios.
@@ -44,6 +48,15 @@ async fn main() {
             Box::pin(async move {
                 if scenario.tags.iter().any(|tag| tag == "A") {
                     world.server = Some(Centrifugo::start(SERVER_A).await);
+                } else if scenario.tags.iter().any(|tag| tag == "B") {
+                    let proxy = ConnectProxy::start().await;
+                    let env = proxy.centrifugo_env();
+                    let env: Vec<_> = env
+                        .iter()
+                        .map(|(name, value)| (*name, value.as_str()))
+                        .collect();
+                    world.server = Some(Centrifugo::start(&env).await);
+                    world.proxy = Some(proxy);
                 }
             })
         })

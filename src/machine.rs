@@ -148,9 +148,11 @@ impl Machine {
             Input::TransportFailed { transport, message } if self.is_current(transport) => {
                 self.transport_failed(message);
             }
-            Input::TransportClosed { transport, .. } if self.is_current(transport) => {
-                self.transport_closed();
-            }
+            Input::TransportClosed {
+                transport,
+                code,
+                reason,
+            } if self.is_current(transport) => self.transport_closed(code, &reason),
             Input::Frame { transport, data } if self.is_current(transport) => self.frame(&data),
             Input::TimerFired(Timer::Reconnect) => {
                 if self.state == State::Connecting && self.transport.is_none() {
@@ -230,11 +232,14 @@ impl Machine {
         self.reconnect_after_transport_closed();
     }
 
-    fn transport_closed(&mut self) {
-        if self.state == State::Connecting && !self.transport_open {
-            self.transport_failed("transport closed".to_owned());
-        } else {
-            self.reconnect_after_transport_closed();
+    fn transport_closed(&mut self, code: Option<u16>, reason: &str) {
+        match code.map(u32::from) {
+            // Codes from 3000 are disconnect codes set by the server.
+            Some(code) if code >= 3000 => self.disconnect(code, reason, reconnect_advised(code)),
+            _ if self.state == State::Connecting && !self.transport_open => {
+                self.transport_failed("transport closed".to_owned());
+            }
+            _ => self.reconnect_after_transport_closed(),
         }
     }
 
@@ -348,6 +353,13 @@ impl Machine {
     fn emit(&mut self, event: ClientEvent) {
         self.actions.push(Action::Emit(event));
     }
+}
+
+/// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect,
+/// 3500-3999 and 4500-4999 are terminal. Codes from 5000 are reserved by
+/// Centrifuge and reconnect (`client.proto`, `Disconnect`; owner decision).
+fn reconnect_advised(code: u32) -> bool {
+    !matches!(code, 3500..=3999 | 4500..=4999)
 }
 
 #[cfg(test)]
@@ -509,6 +521,71 @@ mod tests {
             transport,
             code: None,
             reason: String::new(),
+        });
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Connecting {
+                code: codes::connecting::TRANSPORT_CLOSED,
+                reason: "transport closed".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn reconnect_advice_follows_the_spec_ranges() {
+        let advised: Vec<_> = [3000, 3499, 3500, 3999, 4000, 4499, 4500, 4999, 5000, 6000]
+            .into_iter()
+            .map(|code| (code, reconnect_advised(code)))
+            .collect();
+
+        assert_eq!(
+            advised,
+            [
+                (3000, true),
+                (3499, true),
+                (3500, false),
+                (3999, false),
+                (4000, true),
+                (4499, true),
+                (4500, false),
+                (4999, false),
+                (5000, true),
+                (6000, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_server_code_while_connected_disconnects_without_retry() {
+        let (mut machine, transport) = awaiting_connect_reply();
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        let actions = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3500),
+            reason: "bye".into(),
+        });
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Disconnected {
+                code: 3500,
+                reason: "bye".into()
+            }]
+        );
+        assert!(!actions.iter().any(|a| matches!(a, Action::SetTimer(..))));
+    }
+
+    #[test]
+    fn close_codes_below_3000_are_transport_closures() {
+        let (mut machine, transport) = awaiting_connect_reply();
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        let actions = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(1006),
+            reason: "abnormal".into(),
         });
 
         assert_eq!(
