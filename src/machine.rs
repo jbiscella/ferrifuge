@@ -100,7 +100,10 @@ pub enum Input {
 }
 
 /// Something the owner of the machine must do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output shows only the length of a [`Action::Send`] frame:
+/// connect and refresh frames carry the connection token.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Action {
     /// Open a transport to the endpoint; report the outcome with
     /// [`Input::TransportOpened`] or [`Input::TransportFailed`].
@@ -124,6 +127,26 @@ pub enum Action {
     /// report the answer with [`Input::TokenFetched`]. Only issued by a
     /// machine created with [`Machine::with_token_source`].
     FetchToken(FetchId),
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenTransport(id) => f.debug_tuple("OpenTransport").field(id).finish(),
+            Self::CloseTransport(id) => f.debug_tuple("CloseTransport").field(id).finish(),
+            Self::Send { transport, frame } => f
+                .debug_struct("Send")
+                .field("transport", transport)
+                .field("frame", &format_args!("<{} bytes>", frame.len()))
+                .finish(),
+            Self::SetTimer(timer, delay) => {
+                f.debug_tuple("SetTimer").field(timer).field(delay).finish()
+            }
+            Self::CancelTimer(timer) => f.debug_tuple("CancelTimer").field(timer).finish(),
+            Self::Emit(event) => f.debug_tuple("Emit").field(event).finish(),
+            Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
+        }
+    }
 }
 
 /// The client connection state machine.
@@ -1014,6 +1037,25 @@ mod tests {
             code: codes::disconnected::UNAUTHORIZED,
             reason: "unauthorized".into()
         }));
+    }
+
+    #[test]
+    fn debug_output_of_send_actions_shows_only_the_frame_length() {
+        let mut machine = token_machine("t0");
+        let transport = opened_transport(&machine.handle(Input::Connect));
+
+        let actions = machine.handle(Input::TransportOpened(transport));
+
+        let Action::Send { frame, .. } = &actions[0] else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(
+            format!("{:?}", actions[0]),
+            format!(
+                "Send {{ transport: {transport:?}, frame: <{} bytes> }}",
+                frame.len()
+            )
+        );
     }
 
     #[test]

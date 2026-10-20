@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use support::centrifugo::{Centrifugo, TAG};
 use support::proxy::ConnectProxy;
+use support::relay::CountingRelay;
 use support::token::{HMAC_SECRET, connection_token};
 
 #[tokio::test]
@@ -111,4 +112,21 @@ async fn expiring_token_is_accepted_and_refreshed() {
     assert_eq!(refreshed["refresh"]["expires"], true, "{refreshed}");
     let ttl = refreshed["refresh"]["ttl"].as_u64().expect("ttl");
     assert!((58..=60).contains(&ttl), "{refreshed}");
+}
+
+#[tokio::test]
+async fn relay_counts_each_connection_and_relays_traffic() {
+    let server = Centrifugo::start(&[(
+        "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
+        "true",
+    )])
+    .await;
+    let relay = CountingRelay::start(server.address().to_owned()).await;
+
+    let first = raw_connect(&relay.websocket_url()).await;
+    let second = raw_connect(&relay.websocket_url()).await;
+
+    assert!(first.contains(r#""connect":{"client""#), "{first}");
+    assert!(second.contains(r#""connect":{"client""#), "{second}");
+    assert_eq!(relay.connections(), 2);
 }

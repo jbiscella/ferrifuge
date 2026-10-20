@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event};
 use crate::support::proxy;
+use crate::support::relay::CountingRelay;
 
 /// Server disconnect code advising a reconnect (spec: 3000-3499, 4000-4499).
 const RECONNECT_CODE: u32 = 4000;
@@ -142,18 +143,24 @@ async fn the_client_reaches_state(world: &mut ClientWorld, expected: String) {
 
 #[then("no further connect attempt is made")]
 async fn no_further_connect_attempt(world: &mut ClientWorld) {
+    let connections = world.relay.as_ref().map(CountingRelay::connections);
     let attempts = world.proxy.as_ref().map(proxy::ConnectProxy::requests);
     let events = world.events_during(QUIET_PERIOD).await;
 
     assert!(events.is_empty(), "unexpected events: {events:?}");
+    assert_eq!(
+        world.relay.as_ref().map(CountingRelay::connections),
+        connections,
+        "the client opened another connection"
+    );
     assert_eq!(
         world.proxy.as_ref().map(proxy::ConnectProxy::requests),
         attempts,
         "connect attempts reached the proxy"
     );
     assert_eq!(world.client().state(), State::Disconnected);
-    // Not checked on the server: its `info` statistics are republished
-    // about every 3 s, so they lag behind the client (measured on v6.10.1).
+    // Not via the server's `info` statistics: they are republished about
+    // every 3 s, so they lag behind the client (measured on v6.10.1).
 }
 
 #[then(r#"the client emits an "error" event for each failed transport attempt"#)]

@@ -18,6 +18,7 @@ use cucumber::gherkin::{Feature, GherkinEnv};
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
 use support::proxy::ConnectProxy;
+use support::relay::CountingRelay;
 use support::token::HMAC_SECRET;
 
 const FEATURES: &str = "tests/features";
@@ -63,6 +64,9 @@ async fn main() {
                         .collect();
                     world.server = Some(Centrifugo::start(&env).await);
                     world.proxy = Some(proxy);
+                }
+                if let Some(server) = &world.server {
+                    world.relay = Some(CountingRelay::start(server.address().to_owned()).await);
                 }
             })
         })

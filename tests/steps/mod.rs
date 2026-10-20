@@ -12,6 +12,7 @@ use futures_util::{Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
 use crate::support::proxy::ConnectProxy;
+use crate::support::relay::CountingRelay;
 
 mod connection;
 mod token;
@@ -32,6 +33,8 @@ pub(crate) struct ClientWorld {
     pub(crate) server: Option<Centrifugo>,
     /// Started before @B scenarios; the server calls it on every connect.
     pub(crate) proxy: Option<ConnectProxy>,
+    /// Between the client and the server: counts transport connections.
+    pub(crate) relay: Option<CountingRelay>,
     client: Option<Client>,
     events: Option<Events>,
     /// Connection id from the last "connected" event.
@@ -67,10 +70,11 @@ impl ClientWorld {
     }
 
     /// Endpoint of the scenario's server.
+    /// Endpoint of the scenario's server, through the counting relay.
     pub(crate) fn server_endpoint(&self) -> String {
-        self.server
+        self.relay
             .as_ref()
-            .expect("this step needs a server: tag the scenario @A")
+            .expect("this step needs a server: tag the scenario @A or @B")
             .websocket_url()
     }
 
