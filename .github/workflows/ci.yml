@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The core must not depend on an async runtime.
+      - name: clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Pulled up front so container start-up does not count against test timeouts.
+      - name: Pull Centrifugo image
+        run: docker pull centrifugo/centrifugo:v6.10.1
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check on MSRV
+        run: cargo check --all-targets
