@@ -4,4 +4,6 @@
 //! scope, references and the scenarios each block implements.
 
 mod backoff;
+mod json;
 pub(crate) mod protocol;
+mod wire;
