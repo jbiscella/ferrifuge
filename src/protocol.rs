@@ -5,6 +5,8 @@
 //! so it needs its own codec rather than a serde derive on these types.
 
 #![allow(dead_code)] // Consumed as blocks are implemented.
+// Generated code: its style is prost's, not ours.
+#![allow(missing_docs, unreachable_pub, clippy::pedantic)]
 
 include!(concat!(
     env!("OUT_DIR"),

@@ -7,7 +7,7 @@
 use cucumber::World;
 
 #[derive(Debug, Default, World)]
-pub struct ClientWorld {}
+struct ClientWorld {}
 
 #[tokio::main]
 async fn main() {

@@ -9,13 +9,13 @@ use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
-pub const IMAGE: &str = "centrifugo/centrifugo";
-pub const TAG: &str = "v6.10.1";
-pub const API_KEY: &str = "test-api-key";
+pub(crate) const IMAGE: &str = "centrifugo/centrifugo";
+pub(crate) const TAG: &str = "v6.10.1";
+pub(crate) const API_KEY: &str = "test-api-key";
 
 const PORT: u16 = 8000;
 
-pub struct Centrifugo {
+pub(crate) struct Centrifugo {
     // Dropping the handle stops and removes the container.
     _container: ContainerAsync<GenericImage>,
     base_url: String,
@@ -25,7 +25,7 @@ pub struct Centrifugo {
 impl Centrifugo {
     /// Starts a server with the HTTP API and health endpoint enabled, plus
     /// `env`: extra `CENTRIFUGO_*` variables for this config variant.
-    pub async fn start(env: &[(&str, &str)]) -> Self {
+    pub(crate) async fn start(env: &[(&str, &str)]) -> Self {
         let mut request = GenericImage::new(IMAGE, TAG)
             .with_exposed_port(ContainerPort::Tcp(PORT))
             .with_wait_for(WaitFor::http(
@@ -53,28 +53,28 @@ impl Centrifugo {
         }
     }
 
-    pub fn websocket_url(&self) -> String {
+    pub(crate) fn websocket_url(&self) -> String {
         format!(
             "{}/connection/websocket",
             self.base_url.replacen("http", "ws", 1)
         )
     }
 
-    pub fn api(&self) -> &ServerApi {
+    pub(crate) fn api(&self) -> &ServerApi {
         &self.api
     }
 }
 
-/// Client for the server HTTP API (https://centrifugal.dev/docs/server/server_api).
-pub struct ServerApi {
+/// Client for the server HTTP API (<https://centrifugal.dev/docs/server/server_api>).
+pub(crate) struct ServerApi {
     http: reqwest::Client,
     base_url: String,
 }
 
 #[derive(Debug)]
-pub struct ApiError {
-    pub code: u64,
-    pub message: String,
+pub(crate) struct ApiError {
+    pub(crate) code: u64,
+    pub(crate) message: String,
 }
 
 impl ServerApi {
@@ -87,7 +87,7 @@ impl ServerApi {
 
     /// Calls `method` and returns its `result`. Centrifugo reports method
     /// errors in the body with HTTP 200; transport failures panic.
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value, ApiError> {
+    pub(crate) async fn call(&self, method: &str, params: Value) -> Result<Value, ApiError> {
         let response = self
             .http
             .post(format!("{}/api/{method}", self.base_url))
