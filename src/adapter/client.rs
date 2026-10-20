@@ -20,9 +20,17 @@ use crate::{ClientEvent, Config, State, TokenError};
 /// Centrifugo client running on tokio.
 ///
 /// Dropping the client disconnects it.
-#[derive(Debug)]
 pub struct Client {
     shared: Arc<Shared>,
+}
+
+impl std::fmt::Debug for Client {
+    // Only the state: queued frames may carry the connection token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the client handle and its driver task share.
@@ -486,6 +494,23 @@ mod tests {
             matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
             "{error:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn debug_output_of_builder_and_client_never_shows_tokens() {
+        let config = Config {
+            token: "secret-token".into(),
+            ..Config::default()
+        };
+        let builder = Client::builder("ws://127.0.0.1:1/connection/websocket").config(config);
+        let printed_builder = format!("{builder:?}");
+        let client = builder.build();
+        // Queues the connect command, which carries the token, unperformed.
+        client.connect();
+
+        let printed = format!("{printed_builder} {client:?}");
+
+        assert!(!printed.contains("secret-token"), "{printed}");
     }
 
     #[tokio::test]

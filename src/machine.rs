@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use crate::backoff::{self, Backoff};
+use crate::token::Secret;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Error, Method, RefreshRequest, RefreshResult, Reply,
     ReplyResult,
@@ -140,9 +141,9 @@ pub struct Machine {
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
     /// Current connection token; empty for none.
-    token: String,
+    token: Secret,
     /// Token sent with the pending connect command.
-    connect_token: String,
+    connect_token: Secret,
     /// Whether the owner answers [`Action::FetchToken`].
     token_source: bool,
     /// The server rejected the token as expired: get a new one first.
@@ -171,7 +172,7 @@ impl Machine {
 
     fn with_rng(config: Config, token_source: bool, rng: fastrand::Rng) -> Self {
         let backoff = Backoff::new(config.min_reconnect_delay, config.max_reconnect_delay);
-        let token = config.token.clone();
+        let token = Secret(config.token.clone());
         Self {
             config,
             state: State::Disconnected,
@@ -183,7 +184,7 @@ impl Machine {
             next_command: 0,
             connect_command: None,
             token,
-            connect_token: String::new(),
+            connect_token: Secret::default(),
             token_source,
             refresh_required: false,
             fetch: None,
@@ -280,7 +281,7 @@ impl Machine {
     fn start_attempt(&mut self) {
         // centrifuge-js `_startReconnecting`: get a token first when the
         // last one expired, or when there is none but a callback.
-        let token_needed = self.refresh_required || (self.token.is_empty() && self.token_source);
+        let token_needed = self.refresh_required || (self.token.0.is_empty() && self.token_source);
         if !token_needed {
             self.open_transport();
         } else if self.token_source {
@@ -311,7 +312,7 @@ impl Machine {
         let command = Command {
             id,
             method: Method::Connect(ConnectRequest {
-                token: self.token.clone(),
+                token: self.token.0.clone(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
             }),
@@ -441,7 +442,11 @@ impl Machine {
         self.transport_open = false;
         self.connect_command = None;
         self.refresh_command = None;
-        self.fetch = None;
+        // A refresh fetch outlives a reconnect: the application's answer,
+        // in particular a denial, must still apply.
+        if !(reconnect && matches!(self.fetch, Some((_, FetchPurpose::Refresh)))) {
+            self.fetch = None;
+        }
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
         self.actions.push(Action::CancelTimer(Timer::Reconnect));
@@ -502,7 +507,7 @@ impl Machine {
             Ok(token) if token.is_empty() => self.unauthorized(),
             Err(TokenError::Unauthorized) => self.unauthorized(),
             Ok(token) => {
-                self.token = token;
+                self.token = Secret(token);
                 match purpose {
                     FetchPurpose::Connect => {
                         if self.state == State::Connecting && self.transport.is_none() {
@@ -510,7 +515,10 @@ impl Machine {
                             self.open_transport();
                         }
                     }
-                    FetchPurpose::Refresh => self.send_refresh(),
+                    // While reconnecting, the new token is kept for the next
+                    // attempt; once connected again, it is sent.
+                    FetchPurpose::Refresh if self.state == State::Connected => self.send_refresh(),
+                    FetchPurpose::Refresh => {}
                 }
             }
             Err(TokenError::Failed(message)) => match purpose {
@@ -524,6 +532,8 @@ impl Machine {
                     let delay = self.backoff.next_delay(&mut self.rng);
                     self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
                 }
+                // Reconnecting: the next connection gets its own refresh timer.
+                FetchPurpose::Refresh if self.state != State::Connected => {}
                 FetchPurpose::Refresh => {
                     self.emit(ClientEvent::Error(ClientError {
                         kind: ErrorKind::RefreshToken,
@@ -546,7 +556,7 @@ impl Machine {
         let command = Command {
             id,
             method: Method::Refresh(RefreshRequest {
-                token: self.token.clone(),
+                token: self.token.0.clone(),
             }),
         };
         self.actions.push(Action::Send {
@@ -982,6 +992,42 @@ mod tests {
         assert!(refresh_timer(&actions).is_some(), "{actions:?}");
         assert_eq!(late, [], "a reply after the timeout is ignored");
         assert_eq!(machine.state(), State::Connected);
+    }
+
+    #[test]
+    fn denial_arriving_after_the_transport_dropped_still_disconnects() {
+        let (mut machine, transport, _) = connected_with_token(30);
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+
+        let actions = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Err(TokenError::Unauthorized),
+        });
+
+        assert_eq!(machine.state(), State::Disconnected, "{actions:?}");
+        assert!(events(&actions).contains(&&ClientEvent::Disconnected {
+            code: codes::disconnected::UNAUTHORIZED,
+            reason: "unauthorized".into()
+        }));
+    }
+
+    #[test]
+    fn debug_output_never_shows_tokens() {
+        let (machine, _, _) = connected_with_token(30);
+        let config = Config {
+            token: "secret-token".into(),
+            ..Config::default()
+        };
+
+        let printed = format!("{config:?} {machine:?}");
+
+        assert!(!printed.contains("secret-token"), "{printed}");
+        assert!(!printed.contains("\"t0\""), "{printed}");
     }
 
     #[test]

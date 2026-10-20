@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 /// Options of a client. Defaults follow centrifuge-js.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output redacts the token.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     /// Lower bound of the reconnect delay. Default 500 ms.
     pub min_reconnect_delay: Duration,
@@ -30,5 +32,24 @@ impl Default for Config {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             token: String::new(),
         }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct Token<'a>(&'a str);
+        impl std::fmt::Debug for Token<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                crate::token::redacted(self.0, f)
+            }
+        }
+        f.debug_struct("Config")
+            .field("min_reconnect_delay", &self.min_reconnect_delay)
+            .field("max_reconnect_delay", &self.max_reconnect_delay)
+            .field("timeout", &self.timeout)
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("token", &Token(&self.token))
+            .finish()
     }
 }
