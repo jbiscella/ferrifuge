@@ -3,11 +3,12 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
@@ -19,15 +20,42 @@ use crate::{ClientEvent, Config, State};
 /// Dropping the client disconnects it.
 #[derive(Debug)]
 pub struct Client {
-    commands: mpsc::UnboundedSender<Input>,
     shared: Arc<Shared>,
 }
 
 /// What the client handle and its driver task share.
 #[derive(Debug)]
 struct Shared {
-    state: Mutex<State>,
+    core: Mutex<Core>,
     subscribers: Mutex<Vec<events::UnboundedSender<ClientEvent>>>,
+    /// Wakes the driver when actions are queued.
+    actions_queued: Notify,
+    /// Set when the client handle is dropped: the driver stops once the
+    /// queued actions are performed.
+    closed: AtomicBool,
+}
+
+/// The machine and its pending actions, locked together: API calls change
+/// the state before they return, and the driver performs actions in the
+/// order the machine produced them, whoever fed the input.
+#[derive(Debug)]
+struct Core {
+    machine: Machine,
+    actions: VecDeque<Action>,
+}
+
+impl Shared {
+    fn apply(&self, input: Input) {
+        let mut core = lock(&self.core);
+        let actions = core.machine.handle(input);
+        core.actions.extend(actions);
+        drop(core);
+        self.actions_queued.notify_one();
+    }
+
+    fn next_action(&self) -> Option<Action> {
+        lock(&self.core).actions.pop_front()
+    }
 }
 
 impl Client {
@@ -39,29 +67,31 @@ impl Client {
     /// When called outside a tokio runtime: the client runs as a task on it.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, config: Config) -> Self {
-        let (commands, inputs) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
-            state: Mutex::new(State::Disconnected),
+            core: Mutex::new(Core {
+                machine: Machine::new(config),
+                actions: VecDeque::new(),
+            }),
             subscribers: Mutex::new(Vec::new()),
+            actions_queued: Notify::new(),
+            closed: AtomicBool::new(false),
         });
         let driver = Driver {
             endpoint: endpoint.into(),
-            machine: Machine::new(config),
             shared: Arc::clone(&shared),
-            pending: VecDeque::new(),
             opening: None,
             transport: None,
             reconnect: None,
             connect_timeout: None,
         };
-        tokio::spawn(driver.run(inputs));
-        Self { commands, shared }
+        tokio::spawn(driver.run());
+        Self { shared }
     }
 
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> State {
-        *lock(&self.shared.state)
+        lock(&self.shared.core).machine.state()
     }
 
     /// Events from now on. Each call returns an independent stream.
@@ -71,15 +101,24 @@ impl Client {
         receiver
     }
 
-    /// Starts connecting; reconnects until connected or disconnected.
+    /// Starts connecting; reconnects until connected or disconnected. The
+    /// state is [`State::Connecting`] when this returns.
     pub fn connect(&self) {
-        // Fails only once the driver has stopped, which a live handle prevents.
-        let _ = self.commands.send(Input::Connect);
+        self.shared.apply(Input::Connect);
     }
 
-    /// Disconnects and stops reconnecting.
+    /// Disconnects and stops reconnecting. The state is
+    /// [`State::Disconnected`] when this returns.
     pub fn disconnect(&self) {
-        let _ = self.commands.send(Input::Disconnect);
+        self.shared.apply(Input::Disconnect);
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.shared.apply(Input::Disconnect);
+        self.shared.closed.store(true, Ordering::Release);
+        self.shared.actions_queued.notify_one();
     }
 }
 
@@ -90,14 +129,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 type Opening = Pin<Box<dyn Future<Output = Result<WebSocket, String>> + Send>>;
 
-/// Runs the machine: turns API calls, transport activity and timers into
-/// inputs, and performs the actions they produce.
+/// Performs the machine's actions, and turns transport activity and timers
+/// into inputs for it.
 struct Driver {
     endpoint: String,
-    machine: Machine,
     shared: Arc<Shared>,
-    /// Inputs produced while performing actions, e.g. a failed send.
-    pending: VecDeque<Input>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, WebSocket)>,
     reconnect: Option<Pin<Box<Sleep>>>,
@@ -105,17 +141,17 @@ struct Driver {
 }
 
 impl Driver {
-    async fn run(mut self, mut inputs: mpsc::UnboundedReceiver<Input>) {
+    async fn run(mut self) {
         loop {
+            while let Some(action) = self.shared.next_action() {
+                self.perform(action).await;
+            }
+            if self.shared.closed.load(Ordering::Acquire) {
+                return;
+            }
             let input = tokio::select! {
-                input = inputs.recv() => {
-                    let Some(input) = input else {
-                        // Every client handle is gone.
-                        self.handle(Input::Disconnect).await;
-                        return;
-                    };
-                    input
-                }
+                // Queued by an API call; performed at the top of the loop.
+                () = self.shared.actions_queued.notified() => continue,
                 (id, result) = opened(&mut self.opening) => {
                     self.opening = None;
                     match result {
@@ -142,20 +178,7 @@ impl Driver {
                     Input::TimerFired(Timer::ConnectTimeout)
                 }
             };
-            self.handle(input).await;
-        }
-    }
-
-    async fn handle(&mut self, input: Input) {
-        self.pending.push_back(input);
-        while let Some(input) = self.pending.pop_front() {
-            let actions = self.machine.handle(input);
-            // Before any event goes out: a subscriber reacting to an event
-            // must see the state it reports.
-            *lock(&self.shared.state) = self.machine.state();
-            for action in actions {
-                self.perform(action).await;
-            }
+            self.shared.apply(input);
         }
     }
 
@@ -186,7 +209,7 @@ impl Driver {
                     && websocket.send(frame).await.is_err()
                 {
                     self.transport = None;
-                    self.pending.push_back(Input::TransportClosed {
+                    self.shared.apply(Input::TransportClosed {
                         transport,
                         code: None,
                         reason: String::new(),
@@ -246,6 +269,20 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn state_changes_as_soon_as_connect_and_disconnect_return() {
+        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+
+        client.connect();
+        let after_connect = client.state();
+        client.disconnect();
+        let after_disconnect = client.state();
+
+        assert_eq!(after_connect, State::Connecting);
+        assert_eq!(after_disconnect, State::Disconnected);
+    }
 
     #[tokio::test]
     async fn huge_connect_timeout_does_not_panic_the_driver() {
