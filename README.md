@@ -32,6 +32,8 @@ Available now:
 
 - connect and disconnect, with the client state and its events;
 - reconnect attempts with exponential backoff and full jitter;
+- server disconnects: the client reconnects or stops according to the
+  server's disconnect code, as the spec defines;
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON protocol.
 
@@ -39,7 +41,7 @@ Not yet available:
 
 | Planned | Where |
 |---|---|
-| Recovery from server-initiated disconnects, disconnect codes | Block 1 (1b), Block 3 |
+| Scenario tables for every disconnect code range | Block 3 |
 | Connection tokens and their refresh | Block 1 (1c) |
 | Answering server pings | Block 4 |
 | Subscriptions, publications, RPC | later blocks |
