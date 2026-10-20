@@ -1,0 +1,31 @@
+name: dependencies
+
+# Supply-chain gate driven by deny.toml: RustSec advisories, licenses,
+# bans and sources. Also runs daily, because new advisories are published
+# against the same Cargo.lock without any change in this repository.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependencies-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

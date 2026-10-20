@@ -1,0 +1,41 @@
+# cargo-deny: dependency security and supply-chain policy.
+# Run locally with `cargo deny check`; CI runs the same command.
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Dev-dependencies are checked too: they run in CI with network and Docker access.
+all-features = true
+
+[advisories]
+# RustSec advisory DB: vulnerabilities, unmaintained, unsound and yanked crates.
+# Every entry in `ignore` needs a reason and an issue link.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only: anything ferrifuge ships must stay usable under 0BSD terms.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = false
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

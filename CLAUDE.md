@@ -30,6 +30,9 @@ Markers used below:
 | Real server for @A/@B | testcontainers-rs, image `centrifugo/centrifugo:v6.10.1` | `cargo test` needs only Docker |
 | Protobuf codegen | prost, `client.proto` vendored at a pinned upstream commit, protoc from `protoc-bin-vendored` | No system protoc needed |
 | Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD | Split only when a second crate is justified |
+| Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
+| Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only | New dependencies must pass it; an exception needs a reason in `deny.toml` |
+| Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
 
 ### References
 

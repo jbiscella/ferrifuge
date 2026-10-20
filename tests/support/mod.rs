@@ -2,4 +2,4 @@
 
 #![allow(dead_code)] // Each test target uses a different subset.
 
-pub mod centrifugo;
+pub(crate) mod centrifugo;
