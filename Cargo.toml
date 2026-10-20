@@ -1,0 +1,17 @@
+[package]
+name = "ferrifuge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Centrifugo client SDK for Rust"
+license = "0BSD"
+repository = "https://github.com/jbiscella/ferrifuge"
+keywords = ["centrifugo", "centrifuge", "websocket", "realtime", "pubsub"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = ["tokio"]
+# Runtime adapter. The core must compile without it: `cargo check --no-default-features`.
+tokio = []
+
+[dependencies]
