@@ -46,6 +46,7 @@ If none exists, use the defaults below and tell the user once that they can crea
     // pattern that meets the justification bar is allowed.
     "allow": [],
     // Patterns that must never be introduced (team has decided against them).
+    // Default: [] (nothing denied). The values here are examples.
     "deny": ["singleton", "abstract_factory"],
     // Hard ceiling on abstraction the skill may add without explicit user OK.
     // "maxNewAbstractionLayers": cap on layers of indirection introduced per unit.
@@ -84,11 +85,10 @@ All fields are optional. An empty `{}` is valid and means "all defaults."
 ## Precedence
 
 When signals conflict, resolve in this order (highest wins):
-1. Explicit instruction in the **user's current message**.
-2. **`exclude`** globs (always respected).
-3. **`patterns.deny`** (never introduce a denied pattern).
-4. **`.solidifier.json`** values.
-5. Skill defaults.
+1. **`exclude`** globs and **`patterns.deny`**: hard project policy. They hold even against the current message, unless that message explicitly names the excluded path or the denied pattern; then confirm with the user before acting, and never apply it silently.
+2. Explicit instruction in the **user's current message**.
+3. **`.solidifier.json`** values.
+4. Skill defaults.
 
 A user's in-message instruction can raise or lower rigor for one task without editing the file — honor it for that task only, and don't persist it unless asked.
 

@@ -23,7 +23,7 @@ If a refactor adds more indirection than it removes complexity, **do not do it**
 
 1. **Read the configuration** (see `references/configuration.md`). Look for a `.solidifier.json` (or `solidifier` key in the project config) in the target area or project root. If none exists, use the defaults below and mention that the user can create one to tune behavior. The config sets the rigor level, the scope, and any principle/pattern toggles.
 
-2. **Scope the work.** Apply changes *only* to the files, directories, or modules the user named or the config's `scope` globs cover. Do not refactor adjacent code, do not reorganize the whole project, and do not rename things outside the target unless required for the change to compile. State the scope you're operating on before making changes.
+2. **Scope the work.** Apply changes *only* to the files, directories, or modules the user named; when the config also sets `scope`, only to the part of the named target inside it (the intersection). The config's `scope` alone applies only when the user named no target. Do not refactor adjacent code, do not reorganize the whole project, and do not rename things outside the target unless required for the change to compile. State the scope you're operating on before making changes.
 
 3. **Diagnose before prescribing.** Read the target code and identify *actual* design problems — name the specific SOLID violation or the specific smell, and say what concrete pain it causes (hard to test, change ripples, duplicated logic, etc.). A principle is not violated just because the code is simple. Skip code that is already fine; "already well-structured, no change needed" is a valid and valuable outcome.
 
@@ -36,6 +36,8 @@ If a refactor adds more indirection than it removes complexity, **do not do it**
 ## Rigor levels (the configurable dial)
 
 The dial controls **how invasive the work is and how high the justification bar sits** — not how many patterns to cram in. Restraint applies at every level. Default is `conservative`.
+
+A request that only asks to review, audit, assess or explain code runs as `advisory`, whatever the configured rigor: no edits unless the user also asks for changes.
 
 - **`advisory`** — Do not modify code. Produce a review: list violations and smells, ranked by the pain they cause, each with a concrete suggested refactor and its tradeoff. Use this for audits and learning.
 - **`conservative`** (default) — Fix only unambiguous violations where the refactor clearly reduces total complexity (e.g., a class doing four unrelated jobs, a direct dependency on a concrete DB client buried in business logic). Bias strongly toward leaving working code alone. Introduce a pattern only when the absence of one is actively causing duplication or untestability *right now*.
