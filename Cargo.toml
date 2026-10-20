@@ -10,7 +10,7 @@ keywords = ["centrifugo", "centrifuge", "websocket", "realtime", "pubsub"]
 categories = ["network-programming", "asynchronous"]
 
 [features]
-default = ["tokio"]
+default = []
 # Runtime adapter. The core must compile without it: `cargo check --no-default-features`.
 tokio = []
 
@@ -20,3 +20,11 @@ prost = "0.14.4"
 [build-dependencies]
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.3.0"
+
+[dev-dependencies]
+cucumber = "0.21.1"
+tokio = { version = "1.54.0", features = ["macros", "rt-multi-thread", "time"] }
+
+[[test]]
+name = "bdd"
+harness = false
