@@ -1,0 +1,25 @@
+version: 2
+
+# Weekly, grouped update PRs so dependency drift stays small. Each PR goes
+# through the ci and dependencies workflows like any other change.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "[deps]"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "[deps]"
