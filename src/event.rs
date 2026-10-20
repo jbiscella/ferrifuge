@@ -84,8 +84,10 @@ pub struct ClientError {
 /// Origin of a [`ClientError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
-    /// The transport failed to open or closed before the connection was
-    /// established.
+    /// The transport failed to open, or closed before it opened. As in
+    /// centrifuge-js, a transport that opened and then closed before the
+    /// connect reply is not reported as an error: the client, still
+    /// connecting, schedules the next attempt without an event.
     Transport,
     /// The server answered the connect command with a temporary error.
     Connect,

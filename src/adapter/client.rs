@@ -37,7 +37,9 @@ struct Shared {
 
 /// The machine and its pending actions, locked together: API calls change
 /// the state before they return, and the driver performs actions in the
-/// order the machine produced them, whoever fed the input.
+/// order the machine produced them, whoever fed the input. Events are not
+/// queued: they go out while the lock is held, so a stream created after a
+/// call never receives that call's events.
 #[derive(Debug)]
 struct Core {
     machine: Machine,
@@ -47,10 +49,19 @@ struct Core {
 impl Shared {
     fn apply(&self, input: Input) {
         let mut core = lock(&self.core);
-        let actions = core.machine.handle(input);
-        core.actions.extend(actions);
+        for action in core.machine.handle(input) {
+            match action {
+                Action::Emit(event) => self.emit(&event),
+                action => core.actions.push_back(action),
+            }
+        }
         drop(core);
         self.actions_queued.notify_one();
+    }
+
+    fn emit(&self, event: &ClientEvent) {
+        lock(&self.subscribers)
+            .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
     }
 
     fn next_action(&self) -> Option<Action> {
@@ -221,10 +232,7 @@ impl Driver {
                 *self.timer(timer) = Some(Box::pin(tokio::time::sleep(delay)));
             }
             Action::CancelTimer(timer) => *self.timer(timer) = None,
-            Action::Emit(event) => {
-                lock(&self.shared.subscribers)
-                    .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
-            }
+            Action::Emit(event) => self.shared.emit(&event),
         }
     }
 
@@ -282,6 +290,24 @@ mod tests {
 
         assert_eq!(after_connect, State::Connecting);
         assert_eq!(after_disconnect, State::Disconnected);
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_stream_starts_after_events_already_emitted() {
+        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+
+        client.connect();
+        let mut events = client.events();
+        client.disconnect();
+        let first = tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("an event");
+
+        assert!(
+            matches!(first, Some(ClientEvent::Disconnected { .. })),
+            "{first:?}"
+        );
     }
 
     #[tokio::test]
