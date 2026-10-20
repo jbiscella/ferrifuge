@@ -1,0 +1,3 @@
+[submodule ".claude/external/skills-dungeon"]
+	path = .claude/external/skills-dungeon
+	url = https://github.com/jbiscella/skills-dungeon
