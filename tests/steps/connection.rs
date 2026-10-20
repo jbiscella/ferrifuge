@@ -47,6 +47,7 @@ fn disconnect_is_called(world: &mut ClientWorld) {
 }
 
 #[then(expr = "the client state is {string}")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn the_client_state_is(world: &mut ClientWorld, expected: String) {
     assert_eq!(world.client().state().as_str(), expected);
 }
@@ -77,7 +78,13 @@ async fn no_further_connect_attempt(world: &mut ClientWorld) {
 
 #[then(r#"the client emits an "error" event for each failed transport attempt"#)]
 async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
-    let events = world.events_during(QUIET_PERIOD).await;
+    let mut events = world.events_during(QUIET_PERIOD).await;
+    // The "connecting" that connect() itself emits (see "Successful connect").
+    if let Some(ClientEvent::Connecting { code, .. }) = events.first()
+        && *code == codes::connecting::CONNECT_CALLED
+    {
+        events.remove(0);
+    }
 
     assert!(
         events.len() >= 2,
@@ -85,7 +92,7 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
     );
     for event in &events {
         let ClientEvent::Error(error) = event else {
-            panic!("expected only error events, got {events:?}");
+            panic!("expected only error events after connecting, got {events:?}");
         };
         assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
         assert_eq!(error.code, codes::error::TRANSPORT_CLOSED, "{error:?}");

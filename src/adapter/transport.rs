@@ -11,9 +11,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-/// Transport name reported in events, as in centrifuge-js.
-pub(crate) const NAME: &str = "websocket";
-
 /// An open websocket connection to the server.
 pub(crate) struct WebSocket {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -60,14 +57,11 @@ impl WebSocket {
     /// Cancel-safe: dropping the future loses no message.
     pub(crate) async fn recv(&mut self) -> Inbound {
         loop {
-            let message = match self.stream.next().await {
-                Some(Ok(message)) => message,
-                Some(Err(_)) | None => {
-                    return Inbound::Closed {
-                        code: None,
-                        reason: String::new(),
-                    };
-                }
+            let Some(Ok(message)) = self.stream.next().await else {
+                return Inbound::Closed {
+                    code: None,
+                    reason: String::new(),
+                };
             };
             match message {
                 Message::Text(text) => return Inbound::Frame(text.as_bytes().to_vec()),

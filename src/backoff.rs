@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     const MIN: Duration = Duration::from_millis(500);
-    const MAX: Duration = Duration::from_millis(20_000);
+    const MAX: Duration = Duration::from_secs(20);
 
     #[test]
     fn delays_stay_within_min_and_max() {

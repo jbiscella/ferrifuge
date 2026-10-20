@@ -10,6 +10,7 @@ pub mod codes;
 mod config;
 mod event;
 mod json;
+pub mod machine;
 pub(crate) mod protocol;
 mod wire;
 
