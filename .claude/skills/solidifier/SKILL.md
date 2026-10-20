@@ -29,9 +29,9 @@ If a refactor adds more indirection than it removes complexity, **do not do it**
 
 4. **Apply with restraint, matched to the rigor level.** For each problem worth fixing, choose the lightest intervention that resolves it. Prefer extracting a function over a class, a class over an interface, an interface over a pattern, a known pattern over a bespoke framework. Honor the configured rigor level (below).
 
-5. **Justify every change.** For each refactor, state in one or two sentences: which principle/pattern, what problem it fixes, and what it costs. If you introduced an abstraction, name the second concrete use case that justifies it. If you can't name one, reconsider.
+5. **Justify every change** (unless the config sets `requireJustification: false`). For each refactor, state in one or two sentences: which principle/pattern, what problem it fixes, and what it costs. If you introduced an abstraction, name the second concrete use case that justifies it. If you can't name one, reconsider.
 
-6. **Preserve behavior.** Refactoring must not change observable behavior. Keep public contracts stable unless the user asked otherwise. If tests exist, they must still pass; if they don't, note which behaviors a test should pin down.
+6. **Preserve behavior.** Refactoring must not change observable behavior. Keep public contracts stable unless the user asked otherwise or the config sets `allowContractChanges: true`. If tests exist, they must still pass; if they don't, note which behaviors a test should pin down.
 
 ## Rigor levels (the configurable dial)
 
@@ -64,6 +64,6 @@ Quick selection heuristic: name the *axis of variation or the specific pain* fir
 
 ## Output
 
-- When modifying code: make the edits within scope, then give a short, plain summary — what changed, which principle/pattern, what problem it fixed, what it cost. No lecturing.
+- When modifying code: make the edits within scope, then give a short, plain summary — what changed, and (unless `requireJustification` is `false`) which principle/pattern, what problem it fixed, what it cost. No lecturing.
 - When in `advisory` mode: a ranked list of findings, each with location, the named principle/smell, the concrete pain, a suggested fix, and its tradeoff.
 - Always be honest when the right answer is "leave it alone." Recommending no change on already-sound code is a successful use of this skill.

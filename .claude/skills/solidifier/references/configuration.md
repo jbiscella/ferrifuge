@@ -26,6 +26,8 @@ If none exists, use the defaults below and tell the user once that they can crea
   "scope": ["src/services/**", "src/domain/**"],
 
   // Globs to never touch even if inside scope (generated code, vendored, migrations).
+  // Default: generated, vendored and migration code is excluded even when this
+  // field is omitted; listed globs add to that. The values here are examples.
   "exclude": ["**/*.generated.*", "**/migrations/**", "**/node_modules/**"],
 
   // Per-principle controls. "on" = apply normally, "advisory" = only flag,
@@ -85,7 +87,7 @@ All fields are optional. An empty `{}` is valid and means "all defaults."
 ## Precedence
 
 When signals conflict, resolve in this order (highest wins):
-1. **`exclude`** globs and **`patterns.deny`**: hard project policy. They hold even against the current message, unless that message explicitly names the excluded path or the denied pattern; then confirm with the user before acting, and never apply it silently.
+1. **`scope`**, **`exclude`** globs and **`patterns.deny`**: hard project policy. They hold even against the current message, unless that message explicitly names the path outside `scope`, the excluded path or the denied pattern; then confirm with the user before acting, and never apply it silently.
 2. Explicit instruction in the **user's current message**.
 3. **`.solidifier.json`** values.
 4. Skill defaults.

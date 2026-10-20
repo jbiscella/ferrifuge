@@ -23,4 +23,9 @@ Wording fixes from the Codex review of ferrifuge PR #10, kept minimal:
   request naming them, after confirmation (upstream ranked the message
   first while calling them "always respected").
 
+- Second review round: `scope` joins `exclude` and `patterns.deny` as hard
+  policy in the precedence list; `exclude` states its default (generated,
+  vendored and migration code); `SKILL.md` honours `requireJustification:
+  false` and `allowContractChanges: true` from the config.
+
 Re-apply these when updating from upstream, unless upstream fixed them.
