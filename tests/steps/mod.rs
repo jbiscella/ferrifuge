@@ -9,6 +9,7 @@ use ferrifuge::{Client, ClientEvent, Config};
 use futures_util::{Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
+use crate::support::proxy::ConnectProxy;
 
 mod connection;
 
@@ -24,16 +25,25 @@ type Events = Pin<Box<dyn Stream<Item = ClientEvent> + Send>>;
 
 #[derive(Default, World)]
 pub(crate) struct ClientWorld {
-    /// Started before @A scenarios.
+    /// Started before @A and @B scenarios.
     pub(crate) server: Option<Centrifugo>,
+    /// Started before @B scenarios; the server calls it on every connect.
+    pub(crate) proxy: Option<ConnectProxy>,
     client: Option<Client>,
     events: Option<Events>,
+    /// Connection id from the last "connected" event.
+    client_id: Option<String>,
+    /// Code and reason of the last disconnect the server was asked to send.
+    server_disconnect: Option<(u32, String)>,
+    /// Code and reason the proxy was programmed to answer with.
+    proxy_disconnect: Option<(u32, String)>,
 }
 
 impl fmt::Debug for ClientWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientWorld")
             .field("server", &self.server.is_some())
+            .field("proxy", &self.proxy.is_some())
             .field("client", &self.client)
             .finish_non_exhaustive()
     }
