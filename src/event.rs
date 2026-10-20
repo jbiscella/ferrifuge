@@ -91,4 +91,13 @@ pub enum ErrorKind {
     Transport,
     /// The server answered the connect command with a temporary error.
     Connect,
+    /// The token callback failed while getting a token to connect with.
+    ConnectToken,
+    /// The token callback failed while getting a token to refresh with.
+    RefreshToken,
+    /// The server answered the refresh command with a temporary error.
+    Refresh,
+    /// The client options cannot work, e.g. a token expires without a
+    /// token callback to refresh it.
+    Configuration,
 }

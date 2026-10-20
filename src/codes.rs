@@ -15,10 +15,19 @@ pub mod connecting {
 pub mod disconnected {
     /// `disconnect()` was called.
     pub const DISCONNECT_CALLED: u32 = 0;
+    /// The token callback denied access, or an expiring token could not be
+    /// refreshed for lack of a callback.
+    pub const UNAUTHORIZED: u32 = 1;
 }
 
 /// Codes of [`crate::ClientError`].
 pub mod error {
     /// The transport failed to open or closed while connecting.
     pub const TRANSPORT_CLOSED: u32 = 2;
+    /// The token callback failed while getting a token to connect with.
+    pub const CONNECT_TOKEN: u32 = 5;
+    /// The token callback failed while getting a token to refresh with.
+    pub const REFRESH_TOKEN: u32 = 6;
+    /// The client is misconfigured, e.g. a token expires without a callback.
+    pub const BAD_CONFIGURATION: u32 = 12;
 }

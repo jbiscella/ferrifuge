@@ -152,10 +152,8 @@ async fn no_further_connect_attempt(world: &mut ClientWorld) {
         "connect attempts reached the proxy"
     );
     assert_eq!(world.client().state(), State::Disconnected);
-    if let Some(server) = &world.server {
-        let info = server.api().call("info", json!({})).await.expect("info");
-        assert_eq!(info["nodes"][0]["num_clients"], 0, "{info}");
-    }
+    // Not checked on the server: its `info` statistics are republished
+    // about every 3 s, so they lag behind the client (measured on v6.10.1).
 }
 
 #[then(r#"the client emits an "error" event for each failed transport attempt"#)]
