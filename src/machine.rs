@@ -584,10 +584,8 @@ impl Machine {
     }
 
     fn set_refresh_timer(&mut self, ttl_seconds: u32) {
-        self.actions.push(Action::SetTimer(
-            Timer::Refresh,
-            Duration::from_secs(ttl_seconds.into()),
-        ));
+        self.actions
+            .push(Action::SetTimer(Timer::Refresh, refresh_delay(ttl_seconds)));
     }
 
     fn unauthorized(&mut self) {
@@ -602,6 +600,19 @@ impl Machine {
     fn emit(&mut self, event: ClientEvent) {
         self.actions.push(Action::Emit(event));
     }
+}
+
+/// When to start refreshing a connection that expires in `ttl_seconds`.
+///
+/// `client.proto` (`ConnectResult.expires`) requires the refresh to be sent
+/// before the ttl elapses, so it starts early enough for the token callback
+/// and the round trip: a margin of 10% of the ttl, at most 30 s. centrifuge-js
+/// waits for the full ttl; the proto takes precedence (see CLAUDE.md).
+fn refresh_delay(ttl_seconds: u32) -> Duration {
+    const MAX_MARGIN: Duration = Duration::from_secs(30);
+    let ttl = Duration::from_secs(ttl_seconds.into());
+    // Cannot underflow: the margin is at most a tenth of the ttl.
+    ttl.saturating_sub((ttl / 10).min(MAX_MARGIN))
 }
 
 /// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect,
@@ -888,10 +899,30 @@ mod tests {
     }
 
     #[test]
-    fn expiring_connection_arms_the_refresh_timer_at_its_ttl() {
+    fn refresh_starts_before_the_ttl_with_a_capped_margin() {
+        let delays: Vec<_> = [0, 1, 3, 30, 300, 3600]
+            .into_iter()
+            .map(|ttl| (ttl, refresh_delay(ttl)))
+            .collect();
+
+        assert_eq!(
+            delays,
+            [
+                (0, Duration::ZERO),
+                (1, Duration::from_millis(900)),
+                (3, Duration::from_millis(2700)),
+                (30, Duration::from_secs(27)),
+                (300, Duration::from_secs(270)),
+                (3600, Duration::from_secs(3570)),
+            ]
+        );
+    }
+
+    #[test]
+    fn expiring_connection_arms_the_refresh_timer_before_its_ttl() {
         let (_, _, actions) = connected_with_token(30);
 
-        assert_eq!(refresh_timer(&actions), Some(Duration::from_secs(30)));
+        assert_eq!(refresh_timer(&actions), Some(Duration::from_secs(27)));
     }
 
     #[test]
@@ -918,7 +949,7 @@ mod tests {
                 Action::SetTimer(Timer::RefreshReply, Config::default().timeout)
             ]
         );
-        assert_eq!(refresh_timer(&rearmed), Some(Duration::from_secs(60)));
+        assert_eq!(refresh_timer(&rearmed), Some(Duration::from_secs(54)));
     }
 
     #[test]
