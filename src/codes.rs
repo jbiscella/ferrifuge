@@ -22,6 +22,8 @@ pub mod disconnected {
 
 /// Codes of [`crate::ClientError`].
 pub mod error {
+    /// The server did not reply to a command in time.
+    pub const TIMEOUT: u32 = 1;
     /// The transport failed to open or closed while connecting.
     pub const TRANSPORT_CLOSED: u32 = 2;
     /// The token callback failed while getting a token to connect with.

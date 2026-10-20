@@ -10,7 +10,7 @@ pub struct Config {
     /// Upper bound of the reconnect delay. Default 20 s.
     pub max_reconnect_delay: Duration,
     /// Time allowed for a connection attempt, from opening the transport to
-    /// the connect reply. Default 5 s.
+    /// the connect reply, and for the reply to other commands. Default 5 s.
     pub timeout: Duration,
     /// Client name reported to the server, for analytics.
     pub name: String,

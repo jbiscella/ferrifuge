@@ -38,6 +38,8 @@ pub enum Timer {
     ConnectTimeout,
     /// When the connection token must be refreshed.
     Refresh,
+    /// Deadline for the refresh command to get its reply.
+    RefreshReply,
 }
 
 /// Why the machine needs a token.
@@ -231,6 +233,16 @@ impl Machine {
                     self.refresh();
                 }
             }
+            Input::TimerFired(Timer::RefreshReply) => {
+                if self.state == State::Connected && self.refresh_command.take().is_some() {
+                    // centrifuge-js: a command timeout is error code 1.
+                    self.refresh_error(&Error {
+                        code: codes::error::TIMEOUT,
+                        message: "timeout".to_owned(),
+                        temporary: false,
+                    });
+                }
+            }
             Input::TokenFetched { fetch, result } => {
                 if let Some((id, purpose)) = self.fetch
                     && id == fetch
@@ -361,6 +373,7 @@ impl Machine {
         }
         if self.state == State::Connected && self.refresh_command == Some(reply.id) {
             self.refresh_command = None;
+            self.actions.push(Action::CancelTimer(Timer::RefreshReply));
             match (reply.error, reply.result) {
                 (Some(error), _) => self.refresh_error(&error),
                 (None, ReplyResult::Refresh(result)) => self.refreshed(&result),
@@ -433,6 +446,7 @@ impl Machine {
             .push(Action::CancelTimer(Timer::ConnectTimeout));
         self.actions.push(Action::CancelTimer(Timer::Reconnect));
         self.actions.push(Action::CancelTimer(Timer::Refresh));
+        self.actions.push(Action::CancelTimer(Timer::RefreshReply));
 
         let state = if reconnect {
             State::Connecting
@@ -539,6 +553,8 @@ impl Machine {
             transport,
             frame: json::encode(&[command]),
         });
+        self.actions
+            .push(Action::SetTimer(Timer::RefreshReply, self.config.timeout));
     }
 
     fn refreshed(&mut self, result: &RefreshResult) {
@@ -894,12 +910,47 @@ mod tests {
 
         assert_eq!(
             sent,
-            [Action::Send {
-                transport,
-                frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec()
-            }]
+            [
+                Action::Send {
+                    transport,
+                    frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec()
+                },
+                Action::SetTimer(Timer::RefreshReply, Config::default().timeout)
+            ]
         );
         assert_eq!(refresh_timer(&rearmed), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn unanswered_refresh_times_out_and_is_retried() {
+        let (mut machine, transport, _) = connected_with_token(30);
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let sent = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+        assert!(sent.contains(&Action::SetTimer(
+            Timer::RefreshReply,
+            Config::default().timeout
+        )));
+
+        let actions = machine.handle(Input::TimerFired(Timer::RefreshReply));
+        let late = machine.handle(frame(
+            transport,
+            r#"{"id":2,"refresh":{"expires":true,"ttl":60}}"#,
+        ));
+
+        assert!(matches!(
+            events(&actions)[..],
+            [ClientEvent::Error(ClientError {
+                kind: ErrorKind::Refresh,
+                code: codes::error::TIMEOUT,
+                ..
+            })]
+        ));
+        assert!(refresh_timer(&actions).is_some(), "{actions:?}");
+        assert_eq!(late, [], "a reply after the timeout is ignored");
+        assert_eq!(machine.state(), State::Connected);
     }
 
     #[test]

@@ -170,6 +170,7 @@ impl Client {
             reconnect: None,
             connect_timeout: None,
             refresh: None,
+            refresh_reply: None,
         };
         tokio::spawn(driver.run());
         Self { shared }
@@ -229,6 +230,7 @@ struct Driver {
     reconnect: Option<Pin<Box<Sleep>>>,
     connect_timeout: Option<Pin<Box<Sleep>>>,
     refresh: Option<Pin<Box<Sleep>>>,
+    refresh_reply: Option<Pin<Box<Sleep>>>,
 }
 
 impl Driver {
@@ -271,6 +273,10 @@ impl Driver {
                 () = fired(&mut self.refresh) => {
                     self.refresh = None;
                     Input::TimerFired(Timer::Refresh)
+                }
+                () = fired(&mut self.refresh_reply) => {
+                    self.refresh_reply = None;
+                    Input::TimerFired(Timer::RefreshReply)
                 }
                 (fetch, result) = fetched(&mut self.fetching) => {
                     self.fetching = None;
@@ -324,16 +330,19 @@ impl Driver {
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
-                    // A panicking callback fails this fetch, not the driver.
-                    let fetch = AssertUnwindSafe(get_token()).catch_unwind();
-                    self.fetching = Some((
-                        id,
-                        Box::pin(async move {
-                            fetch.await.unwrap_or_else(|_| {
-                                Err(TokenError::Failed("token callback panicked".to_owned()))
-                            })
-                        }),
-                    ));
+                    // A panicking callback fails this fetch, not the driver:
+                    // whether it panics creating its future or polling it.
+                    let fetching: Fetching =
+                        match std::panic::catch_unwind(AssertUnwindSafe(|| get_token())) {
+                            Ok(future) => Box::pin(async move {
+                                AssertUnwindSafe(future)
+                                    .catch_unwind()
+                                    .await
+                                    .unwrap_or_else(|_| Err(callback_panicked()))
+                            }),
+                            Err(_) => Box::pin(std::future::ready(Err(callback_panicked()))),
+                        };
+                    self.fetching = Some((id, fetching));
                 }
             }
         }
@@ -344,8 +353,13 @@ impl Driver {
             Timer::Reconnect => &mut self.reconnect,
             Timer::ConnectTimeout => &mut self.connect_timeout,
             Timer::Refresh => &mut self.refresh,
+            Timer::RefreshReply => &mut self.refresh_reply,
         }
     }
+}
+
+fn callback_panicked() -> TokenError {
+    TokenError::Failed("token callback panicked".to_owned())
 }
 
 /// Resolves when the transport being opened is ready; never without one.
@@ -444,6 +458,30 @@ mod tests {
             matches!(connecting, Some(ClientEvent::Connecting { .. })),
             "{connecting:?}"
         );
+        assert!(
+            matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_callback_panicking_before_its_future_is_a_failed_fetch() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .get_token(|| -> std::future::Ready<Result<String, TokenError>> {
+                panic!("callback bug")
+            })
+            .build();
+        let mut events = client.events();
+
+        client.connect();
+        let mut next = async || {
+            tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("an event")
+        };
+        next().await;
+        let error = next().await;
+
         assert!(
             matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
             "{error:?}"
