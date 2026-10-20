@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use futures_channel::mpsc as events;
 use futures_core::Stream;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, Sleep};
+use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{Action, Input, Machine, Timer, TransportId};
@@ -194,8 +194,8 @@ impl Driver {
                 }
             }
             Action::SetTimer(timer, delay) => {
-                *self.timer(timer) =
-                    Some(Box::pin(tokio::time::sleep_until(Instant::now() + delay)));
+                // sleep() clamps delays too large for an Instant instead of panicking.
+                *self.timer(timer) = Some(Box::pin(tokio::time::sleep(delay)));
             }
             Action::CancelTimer(timer) => *self.timer(timer) = None,
             Action::Emit(event) => {
@@ -236,5 +236,47 @@ async fn fired(timer: &mut Option<Pin<Box<Sleep>>>) {
     match timer {
         Some(sleep) => sleep.await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn huge_connect_timeout_does_not_panic_the_driver() {
+        let client = Client::new(
+            "ws://127.0.0.1:1/connection/websocket",
+            Config {
+                timeout: Duration::MAX,
+                ..Config::default()
+            },
+        );
+        let mut events = client.events();
+        let mut next = async || {
+            tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("driver stopped emitting events")
+        };
+
+        client.connect();
+        let connecting = next().await;
+        let error = next().await;
+        client.disconnect();
+        let disconnected = next().await;
+
+        assert!(
+            matches!(connecting, Some(ClientEvent::Connecting { .. })),
+            "{connecting:?}"
+        );
+        assert!(matches!(error, Some(ClientEvent::Error(_))), "{error:?}");
+        assert!(
+            matches!(disconnected, Some(ClientEvent::Disconnected { .. })),
+            "{disconnected:?}"
+        );
     }
 }
