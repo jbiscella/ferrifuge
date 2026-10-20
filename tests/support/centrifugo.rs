@@ -40,14 +40,24 @@ impl Centrifugo {
         let container = request.start().await.expect("start Centrifugo container");
 
         let host = container.get_host().await.expect("container host");
-        let port = container.get_host_port_ipv4(PORT).await.expect("container port");
+        let port = container
+            .get_host_port_ipv4(PORT)
+            .await
+            .expect("container port");
         let base_url = format!("http://{host}:{port}");
         let api = ServerApi::new(&base_url);
-        Self { _container: container, base_url, api }
+        Self {
+            _container: container,
+            base_url,
+            api,
+        }
     }
 
     pub fn websocket_url(&self) -> String {
-        format!("{}/connection/websocket", self.base_url.replacen("http", "ws", 1))
+        format!(
+            "{}/connection/websocket",
+            self.base_url.replacen("http", "ws", 1)
+        )
     }
 
     pub fn api(&self) -> &ServerApi {
@@ -69,7 +79,10 @@ pub struct ApiError {
 
 impl ServerApi {
     fn new(base_url: &str) -> Self {
-        Self { http: reqwest::Client::new(), base_url: base_url.to_owned() }
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.to_owned(),
+        }
     }
 
     /// Calls `method` and returns its `result`. Centrifugo reports method

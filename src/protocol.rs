@@ -6,4 +6,7 @@
 
 #![allow(dead_code)] // Consumed as blocks are implemented.
 
-include!(concat!(env!("OUT_DIR"), "/centrifugal.centrifuge.protocol.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/centrifugal.centrifuge.protocol.rs"
+));

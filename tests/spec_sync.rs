@@ -7,7 +7,12 @@ use std::fs;
 use std::path::Path;
 
 fn normalize(text: &str) -> String {
-    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_owned()
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
 }
 
 fn feature_name(text: &str) -> Option<&str> {
@@ -21,11 +26,16 @@ fn spec_features(claude_md: &str) -> HashMap<String, String> {
     let mut rest = claude_md;
     while let Some(start) = rest.find("```gherkin\n") {
         let body = &rest[start + "```gherkin\n".len()..];
-        let end = body.find("\n```").expect("unterminated gherkin block in CLAUDE.md");
+        let end = body
+            .find("\n```")
+            .expect("unterminated gherkin block in CLAUDE.md");
         let block = &body[..end];
         let name = feature_name(block).expect("gherkin block without a Feature: line");
         let previous = features.insert(name.to_owned(), normalize(block));
-        assert!(previous.is_none(), "duplicate feature {name:?} in CLAUDE.md");
+        assert!(
+            previous.is_none(),
+            "duplicate feature {name:?} in CLAUDE.md"
+        );
         rest = &body[end..];
     }
     features
