@@ -37,6 +37,12 @@ const IMPLEMENTED: &[&str] = &[
     "Connection loss then terminal error on reconnect",
     // Block 1, sub-increment 1c.
     "Terminal condition while connected",
+    // Block 2.
+    "Delays never exceed the maximum",
+    "Delay upper bound grows exponentially until capped",
+    "Delay upper bound per attempt",
+    "Delays are jittered",
+    "Backoff options are configurable",
     // Block 3.
     "Application disconnect codes sent via server API",
     "Protocol-range disconnect codes",
