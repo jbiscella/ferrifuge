@@ -15,6 +15,7 @@ use crate::support::fake_server::{Announce, FakeServer};
 use crate::support::proxy::ConnectProxy;
 use crate::support::relay::CountingRelay;
 
+mod backoff;
 mod codes;
 mod connection;
 mod ping;
@@ -52,6 +53,12 @@ pub(crate) struct ClientWorld {
     pub(crate) sent_disconnect: Option<(u32, String)>,
     /// The state event that answered it.
     pub(crate) state_event: Option<ClientEvent>,
+    /// Backoff options of an @E scenario.
+    pub(crate) backoff_config: Option<Config>,
+    /// Delays computed by an @E scenario.
+    pub(crate) computed_delays: Vec<Duration>,
+    /// Estimated upper bound of the delay, per attempt.
+    pub(crate) upper_bounds: Vec<Duration>,
     /// Client option set by a step before the client is created.
     pub(crate) max_server_ping_delay: Option<Duration>,
     /// Events seen while a step let time elapse.
