@@ -401,13 +401,13 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 **Out of scope:** client certificates; custom root certificates; HTTPS, which uses the same configuration once Block 8 adds it.
 
-**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
+**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). aws-lc-rs is pinned to `>=1.17, <1.18`: from 1.18 its `fips` feature uses AWS-LC-FIPS 4.x, submitted to NIST but not yet certified, while 1.17.x ships the FIPS 140-3 validated 3.x module (CMVP certificates #5314 static, #5298 dynamic; aws-lc-rs 1.18.0 release notes, which advise this pin for FIPS compliance); revisit the pin when 4.x is certified. The supported operating environments are those of the module's security policy. Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
 
 `VERIFY:` the build requirements of aws-lc-rs and of its FIPS mode (C toolchain, CMake, Go) on the CI runners; and that a FIPS build reports FIPS mode at run time (aws-lc-rs API).
 
 Value clause: As an app developer deploying under FedRAMP, I want to build the client with FIPS-validated cryptography, so that its TLS connections meet the FIPS 140 requirement.
 
-**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); mixed builds keep the precedence: `--features aws-lc-rs` (ring still on by default) uses aws-lc-rs, `--features fips` uses FIPS mode, both verified by the per-build unit test; CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives); `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement.
+**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); mixed builds keep the precedence: `--features aws-lc-rs` (ring still on by default) uses aws-lc-rs, `--features fips` uses FIPS mode, both verified by the per-build unit test; CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives) and the linked AWS-LC module is the validated 3.x generation (its reported version), so a dependency update cannot silently switch to an uncertified module; `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement.
 
 The test server's certificate is issued by a test CA that the client trusts through `SSL_CERT_FILE`, which `rustls-native-certs` reads (verified in its source); no custom-root API is added.
 
@@ -493,7 +493,9 @@ Feature: Protobuf encoding
 - reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope;
 - a client configured with the Protobuf protocol and an http_stream or sse endpoint is rejected when it is built, with a configuration error naming the combination, rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
-- an empty top-level push on these transports is a server ping (`client.proto`, `Push`): it proves the connection alive and is not answered.
+- an empty top-level push on these transports is a server ping (`client.proto`, `Push`): it proves the connection alive and is not answered;
+- an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried;
+- a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`).
 
 `VERIFY:` the bidirectional emulation protocol (stream request, `/emulation` command requests and their session and node fields) in centrifuge-js `transport_http_stream.ts` and `transport_sse.ts`; there is no other implementation to cross-check against. Centrifugo v6 defaults verified: `http_stream.enabled` and `sse.enabled` are false, the emulation handler prefix is `/emulation`.
 
@@ -544,6 +546,20 @@ Feature: Transport fallback
     When 6 s elapse
     Then the client stays "connected"
 
+  @B
+  Scenario: A failed emulation request makes the client reconnect
+    Given a client connected over transport "http_stream" through a proxy that rejects the next emulation request
+    When the client sends a command
+    Then the client emits "connecting" with code 1
+    And then the client emits "connected" over transport "http_stream"
+
+  @A
+  Scenario: An HTTP stream that never answers the handshake falls back
+    Given a server with http_stream and sse enabled, whose http_stream endpoint is behind a relay that accepts but never answers
+    And a client configured with an unreachable websocket endpoint, the relayed http_stream endpoint and the server's sse endpoint
+    When connect is called
+    Then within the configured timeout plus tolerance the client emits "connected" over transport "sse"
+
   Scenario: Every transport unreachable
     Given a client configured with unreachable websocket, http_stream and sse endpoints
     When connect is called
@@ -592,9 +608,9 @@ Feature: Transport fallback
 
 **Dependencies:** Blocks 1–5, 8 (publications over the emulated transports arrive as top-level pushes rather than websocket's reply envelope, so delivery is checked over every transport here).
 
-**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches.
+**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches; tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one.
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle (matters on the emulated transports, whose commands travel as separate requests); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle (matters on the emulated transports, whose commands travel as separate requests); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -705,6 +721,14 @@ Feature: Client-side subscriptions
     Given a client subscribed to channel "news" on the fake server
     When the fake server pushes a publication whose data is the non-canonical JSON {"b": 1.0,  "a":2}
     Then the subscription receives a publication whose data is exactly those bytes
+
+  @D
+  Scenario: A subscribe without a reply makes the client reconnect
+    Given a client connected to the fake server that never answers the first subscribe command
+    When a subscription to channel "news" is subscribed
+    Then within the configured timeout plus tolerance the client emits "connecting" with code 3
+    And the client opens a new connection
+    And the subscription reaches state "subscribed" on it
 
   @B
   Scenario: Data returned with the subscribe reply is delivered
@@ -987,6 +1011,16 @@ Feature: Subscription recovery
     And the subscription receives exactly those 2 publications in order
 
   @A
+  Scenario: Publications made while explicitly disconnected are recovered
+    Given a client subscribed to a channel with history and recovery
+    And the subscription has received 1 live publication
+    When disconnect is called
+    And 2 publications are made to the channel
+    And connect is called
+    Then the subscription emits "subscribed" with was_recovering true and recovered true
+    And the subscription receives exactly those 2 publications in order
+
+  @A
   Scenario: The since option recovers on the first subscribe
     Given a channel with history and recovery holding 3 publications
     And a subscription to the channel with the since option at the position of the first one
@@ -1063,7 +1097,7 @@ Feature: Subscription recovery
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
-**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`), and the same context as client-side ones: granted `positioned` and `recoverable`, `was_recovering`, `recovered` and the stream position (centrifuge-js `ServerSubscribedContext`); a channel can have both a client-side and a server-side subscription, kept apart, with a pushed publication routed to the server-side one unless the client-side one is subscribed (centrifuge-js `_getSubForPush`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
 
 `VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim), and the server API `subscribe` method for a live connection.
 
@@ -1095,7 +1129,17 @@ Feature: Server-side subscriptions
     And the client has received 1 live server-side publication on channel "alerts"
     And the client is disconnected with a reconnect-advised code
     When 2 publications are made to channel "alerts" while the client reconnects
-    Then the client receives exactly those 2 server-side publications in order
+    Then the client emits a server-side "subscribed" event for channel "alerts" reporting recoverable true, was_recovering true, recovered true and the new stream position
+    And the client receives exactly those 2 server-side publications in order
+
+  @D
+  Scenario: Client-side and server-side subscriptions to one channel stay separate
+    Given a client with an unsubscribed client-side subscription to channel "alerts"
+    And the fake server grants a server-side subscription to channel "alerts" at connect
+    And the client is connected to the fake server
+    When the fake server pushes a publication on channel "alerts"
+    Then the client receives it as a server-side publication
+    And the client-side subscription receives nothing and stays "unsubscribed"
 
   @B
   Scenario: Server-side subscriptions survive an explicit disconnect and connect
@@ -1230,15 +1274,21 @@ Feature: Client commands
 
   @A
   Scenario: A client-published publication carries its publisher
-    Given two clients of different users subscribed to channel "news"
+    Given two clients of different users with connection and channel info subscribed to channel "news"
     When the first client publishes {"text":"hi"} to channel "news"
-    Then the second client's subscription receives a publication whose info names the first client and its user
+    Then the second client's subscription receives a publication whose info names the first client, its user, its connection info and its channel info
 
   @D
-  Scenario: Asynchronous server messages are delivered
+  Scenario: Asynchronous server messages are delivered with their exact bytes
     Given a client connected to the fake server
-    When the fake server sends a message push with data {"note":"x"}
-    Then the client emits a "message" event with data {"note":"x"}
+    When the fake server sends a message push whose data is the non-canonical JSON {"b": 1.0,  "a":2}
+    Then the client emits a "message" event whose data is exactly those bytes
+
+  @D
+  Scenario: Asynchronous server messages over Protobuf keep binary data
+    Given a client configured with the Protobuf protocol connected to the fake server
+    When the fake server sends a Protobuf message push with the bytes ff 00 fe
+    Then the client emits a "message" event with the bytes ff 00 fe
 
   @B
   Scenario: Temporary RPC error is reported as such
