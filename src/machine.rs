@@ -9,6 +9,13 @@
 
 use std::time::Duration;
 
+mod tokens;
+
+use tokens::{
+    BeforeConnect, FetchPurpose, REFRESH_RETRY_MAX, REFRESH_RETRY_MIN, TOKEN_EXPIRED, Tokens,
+    refresh_delay,
+};
+
 use crate::backoff::{self, Backoff};
 use crate::token::Secret;
 use crate::wire::{
@@ -73,19 +80,6 @@ impl Timer {
         }
     }
 }
-
-/// Why the machine needs a token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FetchPurpose {
-    Connect,
-    Refresh,
-}
-
-/// centrifuge-js `_getRefreshRetryDelay`: 5 to 10 s.
-const REFRESH_RETRY_MIN: Duration = Duration::from_secs(5);
-const REFRESH_RETRY_MAX: Duration = Duration::from_secs(10);
-/// Server error code of an expired connection token.
-const TOKEN_EXPIRED: u32 = 109;
 
 /// Something that happened, for the machine to react to.
 ///
@@ -243,18 +237,8 @@ pub struct Machine {
     next_command: u32,
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
-    /// Current connection token; empty for none.
-    token: Secret,
-    /// Token sent with the pending connect command.
-    connect_token: Secret,
-    /// Whether the owner answers [`Action::FetchToken`].
-    token_source: bool,
-    /// The server rejected the token as expired: get a new one first.
-    refresh_required: bool,
-    fetch: Option<(FetchId, FetchPurpose)>,
-    next_fetch: u64,
-    /// Id of the refresh command awaiting its reply.
-    refresh_command: Option<u32>,
+    /// Connection token state and policy.
+    tokens: Tokens,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -277,7 +261,7 @@ impl Machine {
 
     fn with_rng(config: Config, token_source: bool, rng: fastrand::Rng) -> Self {
         let backoff = Backoff::new(config.min_reconnect_delay, config.max_reconnect_delay);
-        let token = Secret(config.token.clone());
+        let tokens = Tokens::new(config.token.clone(), token_source);
         Self {
             config,
             state: State::Disconnected,
@@ -288,13 +272,7 @@ impl Machine {
             next_transport: 0,
             next_command: 0,
             connect_command: None,
-            token,
-            connect_token: Secret::default(),
-            token_source,
-            refresh_required: false,
-            fetch: None,
-            next_fetch: 0,
-            refresh_command: None,
+            tokens,
             pings: None,
             actions: Vec::new(),
         }
@@ -336,8 +314,7 @@ impl Machine {
                 }
             }
             Input::TimerFired(Timer::Refresh) => {
-                let in_flight = self.fetch.is_some() || self.refresh_command.is_some();
-                if self.state == State::Connected && !in_flight {
+                if self.state == State::Connected && !self.tokens.refresh_in_flight() {
                     self.refresh();
                 }
             }
@@ -347,7 +324,7 @@ impl Machine {
                 }
             }
             Input::TimerFired(Timer::RefreshReply) => {
-                if self.state == State::Connected && self.refresh_command.take().is_some() {
+                if self.state == State::Connected && self.tokens.refresh_timed_out() {
                     // centrifuge-js: a command timeout is error code 1.
                     self.refresh_error(&Error {
                         code: codes::error::TIMEOUT,
@@ -357,10 +334,7 @@ impl Machine {
                 }
             }
             Input::TokenFetched { fetch, result } => {
-                if let Some((id, purpose)) = self.fetch
-                    && id == fetch
-                {
-                    self.fetch = None;
+                if let Some(purpose) = self.tokens.take_fetch(fetch) {
                     self.token_fetched(purpose, result);
                 }
             }
@@ -391,15 +365,10 @@ impl Machine {
     }
 
     fn start_attempt(&mut self) {
-        // centrifuge-js `_startReconnecting`: get a token first when the
-        // last one expired, or when there is none but a callback.
-        let token_needed = self.refresh_required || (self.token.0.is_empty() && self.token_source);
-        if !token_needed {
-            self.open_transport();
-        } else if self.token_source {
-            self.fetch_token(FetchPurpose::Connect);
-        } else {
-            self.no_token_source();
+        match self.tokens.before_connect() {
+            BeforeConnect::Ready => self.open_transport(),
+            BeforeConnect::Fetch => self.fetch_token(FetchPurpose::Connect),
+            BeforeConnect::NoSource => self.no_token_source(),
         }
     }
 
@@ -420,11 +389,10 @@ impl Machine {
         self.transport_open = true;
         let id = self.command_id();
         self.connect_command = Some(id);
-        self.connect_token.clone_from(&self.token);
         let command = Command {
             id,
             method: Method::Connect(ConnectRequest {
-                token: self.token.0.clone(),
+                token: self.tokens.for_connect(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
             }),
@@ -497,8 +465,7 @@ impl Machine {
             }
             return;
         }
-        if self.state == State::Connected && self.refresh_command == Some(reply.id) {
-            self.refresh_command = None;
+        if self.state == State::Connected && self.tokens.take_refresh_reply(reply.id) {
             self.actions.push(Action::CancelTimer(Timer::RefreshReply));
             match (reply.error, reply.result) {
                 (Some(error), _) => self.refresh_error(&error),
@@ -524,7 +491,7 @@ impl Machine {
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
         self.backoff.reset();
-        self.refresh_required = false;
+        self.tokens.connected();
         if result.expires {
             self.set_refresh_timer(result.ttl);
         }
@@ -542,9 +509,8 @@ impl Machine {
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
     fn connect_error(&mut self, error: &Error) {
-        // Unless the application set another token meanwhile.
-        if error.code == TOKEN_EXPIRED && self.connect_token == self.token {
-            self.refresh_required = true;
+        if error.code == TOKEN_EXPIRED {
+            self.tokens.connect_token_expired();
         }
         if error.code < 100 || error.temporary || error.code == TOKEN_EXPIRED {
             self.emit(ClientEvent::Error(ClientError {
@@ -571,12 +537,7 @@ impl Machine {
         }
         self.transport_open = false;
         self.connect_command = None;
-        self.refresh_command = None;
-        // A refresh fetch outlives a reconnect: the application's answer,
-        // in particular a denial, must still apply.
-        if !(reconnect && matches!(self.fetch, Some((_, FetchPurpose::Refresh)))) {
-            self.fetch = None;
-        }
+        self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
         // reconnect timer is set again below when reconnecting.
         for timer in Timer::ALL {
@@ -605,15 +566,13 @@ impl Machine {
     }
 
     fn fetch_token(&mut self, purpose: FetchPurpose) {
-        let id = FetchId(self.next_fetch);
-        self.next_fetch += 1;
-        self.fetch = Some((id, purpose));
+        let id = self.tokens.start_fetch(purpose);
         self.actions.push(Action::FetchToken(id));
     }
 
     /// The refresh timer fired while connected.
     fn refresh(&mut self) {
-        if self.token_source {
+        if self.tokens.has_source() {
             self.fetch_token(FetchPurpose::Refresh);
         } else {
             self.no_token_source();
@@ -638,11 +597,10 @@ impl Machine {
             Ok(token) if token.is_empty() => self.unauthorized(),
             Err(TokenError::Unauthorized) => self.unauthorized(),
             Ok(token) => {
-                self.token = Secret(token);
+                self.tokens.store(token, purpose);
                 match purpose {
                     FetchPurpose::Connect => {
                         if self.state == State::Connecting && self.transport.is_none() {
-                            self.refresh_required = false;
                             self.open_transport();
                         }
                     }
@@ -686,11 +644,10 @@ impl Machine {
         // while the token was being fetched, must not start another refresh.
         self.actions.push(Action::CancelTimer(Timer::Refresh));
         let id = self.command_id();
-        self.refresh_command = Some(id);
         let command = Command {
             id,
             method: Method::Refresh(RefreshRequest {
-                token: self.token.0.clone(),
+                token: self.tokens.for_refresh(id),
             }),
         };
         self.actions.push(Action::Send {
@@ -773,19 +730,6 @@ impl Machine {
     fn emit(&mut self, event: ClientEvent) {
         self.actions.push(Action::Emit(event));
     }
-}
-
-/// When to start refreshing a connection that expires in `ttl_seconds`.
-///
-/// `client.proto` (`ConnectResult.expires`) requires the refresh to be sent
-/// before the ttl elapses, so it starts early enough for the token callback
-/// and the round trip: a margin of 10% of the ttl, at most 30 s. centrifuge-js
-/// waits for the full ttl; the proto takes precedence (see CLAUDE.md).
-fn refresh_delay(ttl_seconds: u32) -> Duration {
-    const MAX_MARGIN: Duration = Duration::from_secs(30);
-    let ttl = Duration::from_secs(ttl_seconds.into());
-    // Cannot underflow: the margin is at most a tenth of the ttl.
-    ttl.saturating_sub((ttl / 10).min(MAX_MARGIN))
 }
 
 /// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect,
