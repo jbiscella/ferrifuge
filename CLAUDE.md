@@ -407,7 +407,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 Value clause: As an app developer deploying under FedRAMP, I want to build the client with FIPS-validated cryptography, so that its TLS connections meet the FIPS 140 requirement.
 
-**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives); `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement.
+**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); mixed builds keep the precedence: `--features aws-lc-rs` (ring still on by default) uses aws-lc-rs, `--features fips` uses FIPS mode, both verified by the per-build unit test; CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives); `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement.
 
 The test server's certificate is issued by a test CA that the client trusts through `SSL_CERT_FILE`, which `rustls-native-certs` reads (verified in its source); no custom-root API is added.
 
@@ -594,7 +594,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches.
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle (matters on the emulated transports, whose commands travel as separate requests); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`); the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle (matters on the emulated transports, whose commands travel as separate requests); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -692,6 +692,19 @@ Feature: Client-side subscriptions
     When connect is called
     Then the subscription emits "subscribed"
     And a publication to channel "news" is received
+
+  @D
+  Scenario: Initial publications in the subscribe reply are delivered
+    Given a client connected to the fake server
+    When a subscription to channel "news" is subscribed and the fake server answers with 1 initial publication
+    Then the subscription emits "subscribed"
+    And then the subscription receives that publication
+
+  @D
+  Scenario: JSON publication bytes are exposed exactly as received
+    Given a client subscribed to channel "news" on the fake server
+    When the fake server pushes a publication whose data is the non-canonical JSON {"b": 1.0,  "a":2}
+    Then the subscription receives a publication whose data is exactly those bytes
 
   @B
   Scenario: Data returned with the subscribe reply is delivered
@@ -822,6 +835,19 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     And the refresh is retried after 5 to 10 s
 
   @E
+  Scenario: A refresh reply without expiry stops refreshing
+    Given a subscribed subscription whose token expires
+    When the server answers its sub_refresh with expires false
+    Then no further refresh is scheduled
+
+  @D
+  Scenario: After a resubscribe-advised unsubscribe the subscription is subscribed again
+    Given a client subscribed to channel "news" on the fake server
+    When the fake server unsubscribes the subscription with code 2500
+    Then the subscription emits "subscribing"
+    And then the subscription emits "subscribed" after the fake server answers the new subscribe command
+
+  @E
   Scenario: A permanent sub_refresh error unsubscribes
     Given a subscribed subscription whose token expires
     When the server answers its sub_refresh with a permanent error
@@ -895,7 +921,7 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
-**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) clears the connection token, so the next connect fetches a new one when a callback exists, and the stream positions of every client-side and server-side subscription, then reconnects; unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); the server decides, so the `subscribed` event reports the granted `positioned` and `recoverable` and the stream position (`epoch`, `offset`) from `SubscribeResult` (centrifuge-js); the stored position follows every publication delivered, live or recovered, including a changed `epoch` (`client.proto`, `Publication.epoch`); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) clears the connection token, so the next connect fetches a new one when a callback exists, and the stream positions of every client-side and server-side subscription, then reconnects; unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
 `VERIFY:` the Centrifugo v6 channel options for history and recovery (including allowing client-requested positioning and recovery), and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
 
@@ -915,6 +941,32 @@ Feature: Subscription recovery
     Given a client connected to the fake server
     When a subscription to channel "news" with the positioned and recoverable options is subscribed
     Then the fake server received a subscribe command for "news" requesting positioned and recoverable
+
+  @D
+  Scenario Outline: The subscribed event reports the granted capabilities
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the positioned and recoverable options is subscribed and the fake server grants <granted>
+    Then the subscription emits "subscribed" reporting positioned <positioned>, recoverable <recoverable> and the fake server's stream position
+
+    Examples:
+      | granted          | positioned | recoverable |
+      | both             | true       | true        |
+      | positioned only  | true       | false       |
+      | neither          | false      | false       |
+
+  @D
+  Scenario: A changed epoch on a live publication is used for recovery
+    Given a client subscribed to recoverable channel "news" on the fake server
+    When the fake server pushes a publication with a new epoch
+    And the fake server disconnects the client with a reconnect-advised code
+    Then the next subscribe command for "news" carries the new epoch and that publication's offset
+
+  @D
+  Scenario: Recovered publications advance the stored position
+    Given a client subscribed to recoverable channel "news" on the fake server
+    And the client recovered 2 publications after a reconnect
+    When the fake server disconnects the client with a reconnect-advised code again
+    Then the next subscribe command for "news" carries the offset of the second recovered publication
 
   @A
   Scenario: Missed publications are recovered
@@ -984,10 +1036,13 @@ Feature: Subscription recovery
 
   @D
   Scenario: Connection state invalidation clears the token and every position
-    Given a client using a connection token callback, subscribed to channel "news" with a stream position, connected to the fake server
+    Given a client using a connection token callback, connected to the fake server
+    And a client-side subscription to channel "news" with a stream position
+    And a server-side subscription to channel "alerts" with a stream position from the connect reply
     When the fake server disconnects the client with code 3014
     Then the connection token callback is called before the next connect
-    And the next connect and subscribe commands carry no stream position
+    And the next connect command carries no position for "alerts"
+    And the next subscribe command for "news" carries no stream position
 
   @D
   Scenario: State invalidation drops a fixed subscription token
@@ -1008,7 +1063,7 @@ Feature: Subscription recovery
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
-**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
 
 `VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim), and the server API `subscribe` method for a live connection.
 
@@ -1071,6 +1126,14 @@ Feature: Server-side subscriptions
     Then the client emits a server-side "subscribed" event for channel "alerts"
     And a publication to channel "alerts" is received as a server-side publication
 
+  @D
+  Scenario: Server-side subscribed events carry the server's data
+    Given the fake server grants a server-side subscription to channel "alerts" with data {"tier":"gold"} at connect
+    And a client connected to the fake server
+    Then the client emits a server-side "subscribed" event for channel "alerts" with data {"tier":"gold"}
+    When the fake server pushes a server-side subscription to channel "news" with data {"tier":"silver"}
+    Then the client emits a server-side "subscribed" event for channel "news" with data {"tier":"silver"}
+
   @A
   Scenario: A server-side subscription removed by the server is unsubscribed
     Given a connected client
@@ -1099,7 +1162,7 @@ Feature: Server-side subscriptions
 
 **Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
 
-**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and `disconnect()` fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`); a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout` (centrifuge-js `subscription.ts`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
+**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and `disconnect()` fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`); losing the transport fails calls already sent at once with "connection closed" (centrifuge-js error code 11), since their replies can no longer arrive; a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout` (centrifuge-js `subscription.ts`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 
 `VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
@@ -1267,7 +1330,20 @@ Feature: Client commands
       | history        |
       | presence       |
       | presence_stats |
-      | send           |
+
+  @D
+  Scenario: Send over Protobuf is received without a reply
+    Given a client configured with the Protobuf protocol connected to the fake server
+    When the client sends the bytes ff 00 fe
+    Then the fake server received a Protobuf send command with the bytes ff 00 fe and no command id
+
+  @D
+  Scenario: Losing the transport fails calls already sent at once
+    Given a client connected to the fake server that never replies to commands
+    And the client calls RPC "slow"
+    And the fake server has received the RPC command
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the call fails with a "connection closed" error before the configured timeout
 
   @A
   Scenario: Presence stats count clients and users
