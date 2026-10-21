@@ -54,6 +54,8 @@ const IMPLEMENTED: &[&str] = &[
     "Regular pings keep the connection alive",
     // Block 5, sub-increment 5b.
     "Token refreshed before expiry keeps the connection",
+    // Block 5, sub-increment 5c.
+    "The client speaks JSON by default",
 ];
 
 /// Server configuration of @A scenarios.
