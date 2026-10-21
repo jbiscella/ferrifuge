@@ -35,7 +35,7 @@ Markers used below:
 | Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
-| TLS crypto provider | Chosen at build time by cargo features: `ring` (a default feature), `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode). A non-ring build disables default features, so ring is not linked; when several are enabled the strongest wins (`fips` > `aws-lc-rs` > `ring`) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring needs no C toolchain |
+| TLS crypto provider | Chosen at build time by cargo features: `ring` (a default feature), `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode). A non-ring build disables default features, so ring is not linked; when several are enabled the strongest wins (`fips` > `aws-lc-rs` > `ring`) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring builds with a C compiler alone, the FIPS build also needs CMake and Go |
 | HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider` and `stream`, given the client's own TLS configuration | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
 | Publication payload type | Raw bytes (`Vec<u8>`): raw JSON text with the JSON protocol, any bytes with Protobuf | Every official SDK uses bytes (Go, Java, Swift, Dart) and so does tokio-centrifuge |
 | Protocol selection | A `Config` option, JSON by default, fixed when the client is created | Every SDK fixes it at creation (Go constructors, centrifuge-js builds); tokio-centrifuge uses a config enum |
@@ -395,7 +395,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 ## Block 6 — TLS crypto provider
 
-**Goal:** the cryptography used for `wss://` (and later HTTPS) is chosen at build time, so that a FedRAMP deployment can build with FIPS-validated cryptography and others need no C toolchain.
+**Goal:** the cryptography used for `wss://` (and later HTTPS) is chosen at build time, so that a FedRAMP deployment can build with FIPS-validated cryptography and others avoid the FIPS build's extra toolchain (ring needs only a C compiler; aws-lc's FIPS mode also needs CMake and Go).
 
 **Dependencies:** Block 1 (websocket transport).
 
@@ -407,9 +407,23 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 Value clause: As an app developer deploying under FedRAMP, I want to build the client with FIPS-validated cryptography, so that its TLS connections meet the FIPS 140 requirement.
 
-**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones; a unit test per build reports the provider in use, and FIPS mode for `fips`.
+**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives).
 
-**Exceptions introduced:** no Gherkin scenario: the provider is a build configuration, not run-time behaviour; it is verified by the CI feature matrix and its unit tests.
+The test server's certificate is issued by a test CA that the client trusts through `SSL_CERT_FILE`, which `rustls-native-certs` reads (verified in its source); no custom-root API is added.
+
+```gherkin
+Feature: TLS crypto provider
+
+  @A
+  Scenario: Secure websocket connection with the build's provider
+    Given a server serving TLS with a certificate from the test CA
+    And a client configured with the server's wss endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected"
+```
+
+**Exceptions introduced:** the provider choice itself is a build configuration, verified by the CI feature matrix (each build runs the scenario above) and its unit tests rather than by a scenario per provider.
 
 ---
 
@@ -495,6 +509,14 @@ Feature: Transport fallback
     And then the client emits "connected" over transport "http_stream"
 
   @A
+  Scenario: Fallback over HTTPS uses the build's TLS provider
+    Given a server serving TLS with a certificate from the test CA, with http_stream enabled
+    And a client configured with an unreachable websocket endpoint and the server's https http_stream endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "http_stream"
+
+  @A
   Scenario: Fallback to sse when websocket and http_stream are unreachable
     Given a server with http_stream and sse enabled
     And a client configured with unreachable websocket and http_stream endpoints and the server's sse endpoint
@@ -539,7 +561,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0).
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -562,7 +584,10 @@ Feature: Client-side subscriptions
 
   @A
   Scenario: Subscribe before connect
-    Given a new client with a subscribed subscription to channel "news"
+    Given a new client
+    When a subscription to channel "news" is created and subscribed
+    Then the subscription state is "subscribing"
+    And the subscription emits "subscribing"
     When connect is called
     Then the subscription reaches state "subscribed"
 
@@ -596,6 +621,14 @@ Feature: Client-side subscriptions
     Given the subscribe proxy answers channel "news" with error code 403
     When a subscription to channel "news" is subscribed on a connected client
     Then the subscription emits "unsubscribed" with code 403
+
+  @B
+  Scenario: Subscription data is sent on subscribe and on resubscribe
+    Given a subscribe proxy recording requests
+    And a client subscribed to channel "news" with subscription data {"room":1}
+    When the server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the subscribe proxy recorded data {"room":1} on both subscribe requests
 
   Scenario: Subscriptions are found by channel and listed
     Given a new client with subscriptions to channels "news" and "sport"
@@ -791,6 +824,8 @@ Feature: Subscription recovery
     And the channel history expires while the client is disconnected
     When the client resubscribes
     Then the getState callback is called a second time
+    And the next subscribe command carries the stream position it returned
+    And the subscription emits "subscribed"
 
   @E
   Scenario: A failing getState is retried before subscribing
@@ -895,7 +930,7 @@ Feature: Server-side subscriptions
 
 **Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and fails at once on `disconnect()` (centrifuge-js `_methodCall`); a command without a reply fails with the timeout error (code 1).
 
-`VERIFY:` the Centrifugo v6 RPC proxy request and response shape, and how a test observes `send` (the message reaches the application only through a proxy; confirm which), for the @B fixtures.
+`VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
 Value clause: As an app developer, I want to call RPC, publish, send, history and presence over the client's connection, so that request/response work needs no separate HTTP client.
 
@@ -948,9 +983,10 @@ Feature: Client commands
     When the client calls RPC "slow"
     Then the call fails with a timeout error within the configured timeout plus tolerance
 
-  @A
+  @B
   Scenario: A call made while connecting waits for the connection
-    Given a new client
+    Given an RPC proxy answering method "echo" with its input
+    And a new client
     When connect is called
     And the client calls RPC "echo" before it is connected
     Then the call completes once the client is connected
@@ -968,11 +1004,11 @@ Feature: Client commands
     When disconnect is called
     Then the call fails with a "disconnected" error
 
-  @B
+  @D
   Scenario: Send delivers a message without a reply
-    Given a connected client and a message proxy recording messages
+    Given a client connected to the fake server
     When the client sends {"note":"x"}
-    Then the message proxy records {"note":"x"}
+    Then the fake server received a send command with data {"note":"x"} and no command id
 
   @A
   Scenario: Presence lists the subscribed clients
