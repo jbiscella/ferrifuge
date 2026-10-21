@@ -557,11 +557,11 @@ Feature: Transport fallback
 
 **Goal:** subscriptions with the states `unsubscribed`, `subscribing` and `subscribed`, a client registry, publications, and automatic resubscribe after a reconnect (spec, "Subscription states", "Subscription management", "Listen to channel publications").
 
-**Dependencies:** Blocks 1–5.
+**Dependencies:** Blocks 1–5, 8 (publications over the emulated transports arrive as top-level pushes rather than websocket's reply envelope, so delivery is checked over every transport here).
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0).
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -596,6 +596,26 @@ Feature: Client-side subscriptions
     Given a client subscribed to channel "news"
     When the server API publishes {"text":"hello"} to channel "news"
     Then the subscription receives a publication with data {"text":"hello"}
+
+  @A
+  Scenario Outline: Publication delivered over each transport
+    Given a server with http_stream and sse enabled
+    And a client connected over transport "<transport>" and subscribed to channel "news"
+    When the server API publishes {"text":"hello"} to channel "news"
+    Then the subscription receives a publication with data {"text":"hello"}
+
+    Examples:
+      | transport   |
+      | websocket   |
+      | http_stream |
+      | sse         |
+
+  @A
+  Scenario: Publication metadata is delivered
+    Given a client subscribed to channel "news" with history
+    When the server API publishes {"text":"hello"} to channel "news" with tags {"kind":"greeting"}
+    Then the subscription receives a publication with tags {"kind":"greeting"}
+    And the publication carries the channel's next stream offset
 
   @A
   Scenario: Resubscribe after reconnect
@@ -691,6 +711,14 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Then the subscription stays "subscribed"
 
   @E
+  Scenario: A failing first subscription token fetch is retried before subscribing
+    Given a subscription to a private channel without an initial token whose token callback fails once
+    When the subscription is subscribed on a connected client
+    Then the subscription emits an "error" event
+    And the token callback is called again after the resubscribe backoff delay
+    And the subscribe command carries the token the second call returned
+
+  @E
   Scenario: A failing subscription token callback is retried
     Given a subscribed subscription whose token expires and whose token callback fails once
     When the subscription refresh is due
@@ -764,9 +792,9 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
-**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
-`VERIFY:` the Centrifugo v6 channel options for history and recovery, and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
+`VERIFY:` the Centrifugo v6 channel options for history and recovery (including allowing client-requested positioning and recovery), and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
 
 Value clause: As an app developer, I want missed publications recovered after a reconnect, or my state reloaded when recovery fails, so that my application sees no gap in a channel's stream.
 
@@ -778,6 +806,12 @@ Feature: Subscription recovery
     Given a connected client
     When a subscription to a channel with history and recovery is subscribed
     Then the subscription emits "subscribed" with was_recovering false and recovered false
+
+  @D
+  Scenario: Positioned and recoverable options are requested
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the positioned and recoverable options is subscribed
+    Then the fake server received a subscribe command for "news" requesting positioned and recoverable
 
   @A
   Scenario: Missed publications are recovered
@@ -928,7 +962,7 @@ Feature: Server-side subscriptions
 
 **Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
 
-**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and fails at once on `disconnect()` (centrifuge-js `_methodCall`); a command without a reply fails with the timeout error (code 1).
+**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and fails at once on `disconnect()` (centrifuge-js `_methodCall`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 
 `VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
@@ -954,6 +988,30 @@ Feature: Client commands
     Given a channel with history holding 3 publications
     When a connected client requests the last 2 publications of the channel
     Then it receives those 2 publications with their offsets
+
+  @A
+  Scenario: History since a known position
+    Given a channel with history holding 3 publications
+    When a connected client requests the channel's history since the position of the first one
+    Then it receives the 2 later publications and the stream's current position
+
+  @A
+  Scenario: History with limit 0 returns only the stream position
+    Given a channel with history holding 3 publications
+    When a connected client requests the channel's history with limit 0
+    Then it receives no publications and the stream's current epoch and offset
+
+  @A
+  Scenario: A client-published publication carries its publisher
+    Given two clients of different users subscribed to channel "news"
+    When the first client publishes {"text":"hi"} to channel "news"
+    Then the second client's subscription receives a publication whose info names the first client and its user
+
+  @D
+  Scenario: Asynchronous server messages are delivered
+    Given a client connected to the fake server
+    When the fake server sends a message push with data {"note":"x"}
+    Then the client emits a "message" event with data {"note":"x"}
 
   @B
   Scenario: Temporary RPC error is reported as such
