@@ -41,6 +41,8 @@ pub enum Timer {
     Refresh,
     /// Deadline for the refresh command to get its reply.
     RefreshReply,
+    /// Deadline for data from a server that announced pings.
+    ServerPing,
 }
 
 /// Why the machine needs a token.
@@ -190,6 +192,14 @@ impl std::fmt::Debug for Action {
     }
 }
 
+/// Server pings announced in the connect reply.
+#[derive(Debug, Clone, Copy)]
+struct Pings {
+    interval: Duration,
+    /// Whether the server expects a pong for each ping.
+    pong: bool,
+}
+
 /// The client connection state machine.
 #[derive(Debug)]
 pub struct Machine {
@@ -216,6 +226,8 @@ pub struct Machine {
     next_fetch: u64,
     /// Id of the refresh command awaiting its reply.
     refresh_command: Option<u32>,
+    /// Pings announced by the server for the current connection.
+    pings: Option<Pings>,
     actions: Vec<Action>,
 }
 
@@ -254,6 +266,7 @@ impl Machine {
             fetch: None,
             next_fetch: 0,
             refresh_command: None,
+            pings: None,
             actions: Vec::new(),
         }
     }
@@ -297,6 +310,11 @@ impl Machine {
                 let in_flight = self.fetch.is_some() || self.refresh_command.is_some();
                 if self.state == State::Connected && !in_flight {
                     self.refresh();
+                }
+            }
+            Input::TimerFired(Timer::ServerPing) => {
+                if self.state == State::Connected {
+                    self.disconnect(codes::connecting::NO_PING, "no ping", true);
                 }
             }
             Input::TimerFired(Timer::RefreshReply) => {
@@ -424,6 +442,11 @@ impl Machine {
             self.reconnect_after_transport_closed();
             return;
         };
+        // Any data from the server proves the connection alive, as in
+        // centrifuge-js `_dataReceived`.
+        if !replies.is_empty() {
+            self.wait_server_ping();
+        }
         for reply in replies {
             self.reply(reply);
             if self.transport.is_none() {
@@ -435,6 +458,14 @@ impl Machine {
 
     fn reply(&mut self, reply: Reply) {
         if reply.id == 0 {
+            // An empty reply is a server ping (client.proto, Reply).
+            if self.state == State::Connected
+                && self.pings.is_some_and(|pings| pings.pong)
+                && reply.error.is_none()
+                && reply.result == ReplyResult::Empty
+            {
+                self.pong();
+            }
             return;
         }
         if self.state == State::Connected && self.refresh_command == Some(reply.id) {
@@ -469,6 +500,11 @@ impl Machine {
             self.set_refresh_timer(result.ttl);
         }
         self.state = State::Connected;
+        self.pings = (result.ping > 0).then(|| Pings {
+            interval: Duration::from_secs(result.ping.into()),
+            pong: result.pong,
+        });
+        self.wait_server_ping();
         self.emit(ClientEvent::Connected {
             client_id: result.client.clone(),
             transport: TRANSPORT.to_owned(),
@@ -517,6 +553,8 @@ impl Machine {
         self.actions.push(Action::CancelTimer(Timer::Reconnect));
         self.actions.push(Action::CancelTimer(Timer::Refresh));
         self.actions.push(Action::CancelTimer(Timer::RefreshReply));
+        self.actions.push(Action::CancelTimer(Timer::ServerPing));
+        self.pings = None;
 
         let state = if reconnect {
             State::Connecting
@@ -664,6 +702,35 @@ impl Machine {
     fn set_refresh_timer(&mut self, ttl_seconds: u32) {
         self.actions
             .push(Action::SetTimer(Timer::Refresh, refresh_delay(ttl_seconds)));
+    }
+
+    /// centrifuge-js `_waitServerPing`: (re)arms the deadline for data from a
+    /// server that announced pings; disabled by a zero `max_server_ping_delay`.
+    fn wait_server_ping(&mut self) {
+        let Some(pings) = self.pings else {
+            return;
+        };
+        if self.state != State::Connected || self.config.max_server_ping_delay.is_zero() {
+            return;
+        }
+        let deadline = pings
+            .interval
+            .saturating_add(self.config.max_server_ping_delay);
+        self.actions
+            .push(Action::SetTimer(Timer::ServerPing, deadline));
+    }
+
+    fn pong(&mut self) {
+        let Some(transport) = self.transport else {
+            return;
+        };
+        self.actions.push(Action::Send {
+            transport,
+            frame: json::encode(&[Command {
+                id: 0,
+                method: Method::Pong,
+            }]),
+        });
     }
 
     fn unauthorized(&mut self) {
@@ -1338,6 +1405,72 @@ mod tests {
         });
 
         assert_eq!(actions, []);
+    }
+
+    /// A machine connected to a server announcing `ping` seconds; returns
+    /// the actions of the connect reply.
+    fn connected_with_ping(ping: u32, max_delay: Duration) -> (Machine, TransportId, Vec<Action>) {
+        let mut machine = Machine::with_rng(
+            Config {
+                max_server_ping_delay: max_delay,
+                ..Config::default()
+            },
+            false,
+            fastrand::Rng::with_seed(7),
+        );
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        let actions = machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":1,"connect":{{"client":"c","ping":{ping},"pong":true}}}}"#),
+        ));
+        (machine, transport, actions)
+    }
+
+    fn server_ping_timer(actions: &[Action]) -> Option<Duration> {
+        actions.iter().find_map(|action| match action {
+            Action::SetTimer(Timer::ServerPing, delay) => Some(*delay),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn ping_deadline_is_interval_plus_max_delay_and_off_without_pings_or_delay() {
+        let (_, _, with_pings) = connected_with_ping(25, Duration::from_secs(10));
+        let (_, _, no_pings) = connected_with_ping(0, Duration::from_secs(10));
+        let (_, _, check_off) = connected_with_ping(25, Duration::ZERO);
+
+        assert_eq!(
+            server_ping_timer(&with_pings),
+            Some(Duration::from_secs(35))
+        );
+        assert_eq!(server_ping_timer(&no_pings), None);
+        assert_eq!(server_ping_timer(&check_off), None);
+    }
+
+    #[test]
+    fn any_frame_from_the_server_rearms_the_ping_deadline() {
+        let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
+
+        let actions = machine.handle(frame(transport, r#"{"push":{"channel":"c","pub":{}}}"#));
+
+        assert_eq!(server_ping_timer(&actions), Some(Duration::from_secs(35)));
+    }
+
+    #[test]
+    fn missing_ping_reconnects_with_no_ping_code() {
+        let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
+
+        let actions = machine.handle(Input::TimerFired(Timer::ServerPing));
+
+        assert!(actions.contains(&Action::CloseTransport(transport)));
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Connecting {
+                code: codes::connecting::NO_PING,
+                reason: "no ping".into()
+            }]
+        );
     }
 
     #[test]
