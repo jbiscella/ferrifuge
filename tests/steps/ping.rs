@@ -9,6 +9,7 @@ use serde_json::json;
 use super::connection::a_connected_client;
 use super::{ClientWorld, EVENT_TIMEOUT};
 use crate::support::fake_server::Announce;
+use crate::support::relay::CountingRelay;
 
 /// Ping interval announced when a scenario does not specify one: long enough
 /// that only the pings a step sends arrive.
@@ -65,7 +66,14 @@ fn the_fake_server_stops_sending_pings(world: &mut ClientWorld) {
 
 #[when(regex = r"^(\d+) s elapse$")]
 async fn time_elapses(world: &mut ClientWorld, seconds: u64) {
+    let connections = world.relay.as_ref().map(CountingRelay::connections);
     world.elapsed_events = world.events_during(Duration::from_secs(seconds)).await;
+    world.elapsed_new_connections = world
+        .relay
+        .as_ref()
+        .map(CountingRelay::connections)
+        .zip(connections)
+        .map_or(0, |(after, before)| after - before);
 }
 
 #[then("the client sends a pong")]
@@ -118,6 +126,10 @@ fn the_client_stays(world: &mut ClientWorld, expected: String) {
         world.elapsed_events.is_empty(),
         "unexpected events: {:?}",
         world.elapsed_events
+    );
+    assert_eq!(
+        world.elapsed_new_connections, 0,
+        "the client opened a new connection"
     );
     assert_eq!(world.client().state().as_str(), expected);
 }

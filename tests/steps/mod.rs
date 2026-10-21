@@ -67,6 +67,8 @@ pub(crate) struct ClientWorld {
     pub(crate) max_server_ping_delay: Option<Duration>,
     /// Events seen while a step let time elapse.
     pub(crate) elapsed_events: Vec<ClientEvent>,
+    /// Transport connections opened while a step let time elapse.
+    pub(crate) elapsed_new_connections: usize,
     /// When set, the client's token callback answers "unauthorized".
     pub(crate) token_denied: Arc<AtomicBool>,
 }
