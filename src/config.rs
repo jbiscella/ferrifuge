@@ -20,6 +20,10 @@ pub struct Config {
     pub version: String,
     /// Connection token (JWT) sent with the first connect. Empty for none.
     pub token: String,
+    /// How long past the server's ping interval to wait for data before
+    /// considering the connection broken and reconnecting. Zero disables
+    /// the check. Default 10 s.
+    pub max_server_ping_delay: Duration,
 }
 
 impl Default for Config {
@@ -31,6 +35,7 @@ impl Default for Config {
             name: "ferrifuge".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             token: String::new(),
+            max_server_ping_delay: Duration::from_secs(10),
         }
     }
 }
@@ -50,6 +55,7 @@ impl std::fmt::Debug for Config {
             .field("name", &self.name)
             .field("version", &self.version)
             .field("token", &Token(&self.token))
+            .field("max_server_ping_delay", &self.max_server_ping_delay)
             .finish()
     }
 }

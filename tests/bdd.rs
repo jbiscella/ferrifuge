@@ -41,6 +41,11 @@ const IMPLEMENTED: &[&str] = &[
     "Application disconnect codes sent via server API",
     "Protocol-range disconnect codes",
     "Disconnect returned by the connect proxy",
+    // Block 4.
+    "Client answers ping with pong",
+    "Client does not answer when pong is not expected",
+    "Missing pings trigger reconnect",
+    "Regular pings keep the connection alive",
 ];
 
 /// Server configuration of @A scenarios.
