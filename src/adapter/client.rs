@@ -156,6 +156,7 @@ impl Client {
     }
 
     fn start(endpoint: String, config: Config, get_token: Option<GetToken>) -> Self {
+        let subprotocol = config.protocol.websocket_subprotocol();
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
         } else {
@@ -172,6 +173,7 @@ impl Client {
         });
         let driver = Driver {
             endpoint,
+            subprotocol,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
@@ -229,6 +231,8 @@ type Fetching = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>
 /// into inputs for it.
 struct Driver {
     endpoint: String,
+    /// Websocket subprotocol of the configured encoding, if it needs one.
+    subprotocol: Option<&'static str>,
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, WebSocket)>,
@@ -318,9 +322,10 @@ impl Driver {
                 kind,
             } => {
                 let endpoint = self.endpoint.clone();
+                let subprotocol = self.subprotocol;
                 let opening: Opening = match kind {
                     TransportKind::WebSocket => {
-                        Box::pin(async move { WebSocket::open(&endpoint).await })
+                        Box::pin(async move { WebSocket::open(&endpoint, subprotocol).await })
                     }
                 };
                 self.opening = Some((id, opening));

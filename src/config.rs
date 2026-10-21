@@ -24,6 +24,32 @@ pub struct Config {
     /// considering the connection broken and reconnecting. Zero disables
     /// the check. Default 10 s.
     pub max_server_ping_delay: Duration,
+    /// Encoding of the client protocol, fixed for the client's lifetime.
+    /// Default JSON.
+    pub protocol: Protocol,
+}
+
+/// Encoding of the client protocol (`client.proto`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Protocol {
+    /// JSON, in text frames.
+    #[default]
+    Json,
+    /// Protobuf, in binary frames. Publication and other payloads can then
+    /// be any bytes, not only JSON.
+    Protobuf,
+}
+
+impl Protocol {
+    /// The websocket subprotocol a transport requests for this encoding;
+    /// `None` for JSON, which needs none.
+    #[must_use]
+    pub fn websocket_subprotocol(self) -> Option<&'static str> {
+        match self {
+            Self::Json => None,
+            Self::Protobuf => Some("centrifuge-protobuf"),
+        }
+    }
 }
 
 impl Default for Config {
@@ -36,6 +62,7 @@ impl Default for Config {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             token: String::new(),
             max_server_ping_delay: Duration::from_secs(10),
+            protocol: Protocol::Json,
         }
     }
 }
@@ -56,6 +83,7 @@ impl std::fmt::Debug for Config {
             .field("version", &self.version)
             .field("token", &Token(&self.token))
             .field("max_server_ping_delay", &self.max_server_ping_delay)
+            .field("protocol", &self.protocol)
             .finish()
     }
 }

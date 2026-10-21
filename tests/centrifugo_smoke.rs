@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use support::centrifugo::{Centrifugo, TAG};
 use support::fake_server::{Announce, FakeServer};
+use support::protobuf;
 use support::proxy::ConnectProxy;
 use support::relay::CountingRelay;
 use support::token::{HMAC_SECRET, connection_token};
@@ -211,4 +212,108 @@ async fn fake_server_pings_periodically_until_stopped() {
     let silence = tokio::time::timeout(Duration::from_millis(400), ws.next()).await;
 
     assert!(silence.is_err(), "no ping after stop_pinging: {silence:?}");
+}
+
+/// Opens a websocket asking for the Protobuf subprotocol and sends a
+/// connect command; the server's first reply, decoded.
+async fn raw_protobuf_connect(
+    url: &str,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    protobuf::Reply,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    let mut request = url.into_client_request().expect("request");
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        HeaderValue::from_static(protobuf::SUBPROTOCOL),
+    );
+    let (mut ws, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("open");
+    assert_eq!(
+        response.headers().get("sec-websocket-protocol"),
+        Some(&HeaderValue::from_static(protobuf::SUBPROTOCOL))
+    );
+    let connect = protobuf::Command {
+        id: 1,
+        connect: Some(protobuf::ConnectRequest::default()),
+        ..Default::default()
+    };
+    ws.send(Message::binary(connect.encode_length_delimited_to_vec()))
+        .await
+        .expect("send connect");
+    let reply = match ws.next().await {
+        Some(Ok(Message::Binary(frame))) => {
+            protobuf::Reply::decode_length_delimited(frame.as_ref()).expect("Protobuf reply")
+        }
+        other => panic!("unexpected {other:?}"),
+    };
+    (ws, reply)
+}
+
+/// Block 7 VERIFY: Centrifugo v6.10.1 has no option disabling Protobuf; its
+/// default configuration accepts the subprotocol and answers in Protobuf.
+#[tokio::test]
+async fn centrifugo_speaks_protobuf_by_default() {
+    let server = Centrifugo::start(&[(
+        "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
+        "true",
+    )])
+    .await;
+
+    let (_ws, reply) = raw_protobuf_connect(&server.websocket_url()).await;
+
+    assert_eq!(reply.id, 1);
+    assert!(
+        reply
+            .connect
+            .as_ref()
+            .is_some_and(|result| !result.client.is_empty()),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn fake_server_speaks_protobuf_when_asked() {
+    use futures_util::StreamExt;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let fake = FakeServer::start(Announce {
+        ping: 25,
+        pong: true,
+    })
+    .await;
+
+    let (mut ws, reply) =
+        raw_protobuf_connect(&format!("ws://{}/connection/websocket", fake.address())).await;
+    fake.ping_every(Duration::from_millis(50));
+    let ping = ws.next().await;
+    fake.send_protobuf(&[protobuf::Reply::default(), protobuf::Reply::default()]);
+    let two_pings = ws.next().await;
+
+    let connect = reply.connect.expect("connect result");
+    assert_eq!((reply.id, connect.ping, connect.pong), (1, 25, true));
+    assert!(
+        fake.received_protobuf()
+            .first()
+            .is_some_and(|command| command.connect.is_some())
+    );
+    let Some(Ok(Message::Binary(ping))) = ping else {
+        panic!("{ping:?}");
+    };
+    assert_eq!(
+        protobuf::Reply::decode_length_delimited(ping.as_ref()).expect("ping"),
+        protobuf::Reply::default()
+    );
+    let Some(Ok(Message::Binary(two_pings))) = two_pings else {
+        panic!("{two_pings:?}");
+    };
+    assert_eq!(two_pings.as_ref(), [0, 0]);
 }

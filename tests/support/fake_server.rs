@@ -1,18 +1,24 @@
-//! Scripted fake server for @D scenarios: speaks the client protocol (JSON
-//! over websocket) and lets a step drive the current connection in ways a
-//! real Centrifugo cannot be made to, e.g. arbitrary close codes.
+//! Scripted fake server for @D scenarios: speaks the client protocol over
+//! websocket, in JSON or, when the client asks for the `centrifuge-protobuf`
+//! subprotocol, in Protobuf. It lets a step drive the current connection in
+//! ways a real Centrifugo cannot be made to, e.g. arbitrary close codes.
 //! Prior art: `fakeserver_test.go` in centrifuge-go.
 
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
+use prost::Message as _;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+use super::protobuf;
 
 /// What the fake server announces in its connect replies.
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,7 +31,9 @@ pub(crate) struct Announce {
 
 /// An instruction for the current connection.
 enum Control {
-    Send(String),
+    Send(Message),
+    /// A server ping, in the connection's encoding.
+    Ping,
     Close(u16, String),
 }
 
@@ -34,8 +42,10 @@ struct State {
     /// Instructions to the latest connection, if one is open.
     current: Option<mpsc::UnboundedSender<Control>>,
     connections: usize,
-    /// Every message received from clients, in order.
+    /// Every JSON message received from clients, in order.
     received: Vec<Value>,
+    /// Every Protobuf command received from clients, in order.
+    received_protobuf: Vec<protobuf::Command>,
 }
 
 pub(crate) struct FakeServer {
@@ -55,7 +65,24 @@ impl FakeServer {
         let shared = Arc::clone(&state);
         let server = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
-                let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else {
+                let mut protobuf = false;
+                // The callback's error type is tungstenite's, not ours.
+                #[allow(clippy::result_large_err)]
+                let accepted = tokio_tungstenite::accept_hdr_async(
+                    tcp,
+                    |request: &Request, mut response: Response| {
+                        protobuf = asks_for_protobuf(request);
+                        if protobuf {
+                            response.headers_mut().insert(
+                                "sec-websocket-protocol",
+                                HeaderValue::from_static(protobuf::SUBPROTOCOL),
+                            );
+                        }
+                        Ok(response)
+                    },
+                )
+                .await;
+                let Ok(ws) = accepted else {
                     continue;
                 };
                 let (control, commands) = mpsc::unbounded_channel();
@@ -64,7 +91,14 @@ impl FakeServer {
                     state.connections += 1;
                     state.current = Some(control);
                 }
-                tokio::spawn(serve(ws, commands, announce, Arc::clone(&shared)));
+                let connection = Connection {
+                    ws,
+                    protobuf,
+                    announce,
+                    state: Arc::clone(&shared),
+                    client_id: 0,
+                };
+                tokio::spawn(connection.serve(commands));
             }
         });
         Self {
@@ -84,7 +118,7 @@ impl FakeServer {
             loop {
                 ticks.tick().await;
                 if let Some(current) = &state.lock().unwrap().current {
-                    let _ = current.send(Control::Send("{}".to_owned()));
+                    let _ = current.send(Control::Ping);
                 }
             }
         });
@@ -111,7 +145,24 @@ impl FakeServer {
 
     /// Sends a raw text frame over the current connection.
     pub(crate) fn send(&self, frame: &str) {
-        self.control(Control::Send(frame.to_owned()));
+        self.control(Control::Send(Message::text(frame)));
+    }
+
+    /// Sends a raw binary frame over the current connection.
+    pub(crate) fn send_binary(&self, frame: Vec<u8>) {
+        self.control(Control::Send(Message::binary(frame)));
+    }
+
+    /// Sends `replies` length-delimited in one binary frame, as the Protobuf
+    /// encoding joins several messages.
+    pub(crate) fn send_protobuf(&self, replies: &[protobuf::Reply]) {
+        let mut frame = Vec::new();
+        for reply in replies {
+            reply
+                .encode_length_delimited(&mut frame)
+                .expect("encoding into a Vec cannot fail");
+        }
+        self.send_binary(frame);
     }
 
     /// Connections accepted so far.
@@ -119,9 +170,14 @@ impl FakeServer {
         self.state.lock().unwrap().connections
     }
 
-    /// Every message received from clients so far.
+    /// Every JSON message received from clients so far.
     pub(crate) fn received(&self) -> Vec<Value> {
         self.state.lock().unwrap().received.clone()
+    }
+
+    /// Every Protobuf command received from clients so far.
+    pub(crate) fn received_protobuf(&self) -> Vec<protobuf::Command> {
+        self.state.lock().unwrap().received_protobuf.clone()
     }
 
     fn control(&self, control: Control) {
@@ -143,60 +199,128 @@ impl Drop for FakeServer {
     }
 }
 
-async fn serve(
-    mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    mut commands: mpsc::UnboundedReceiver<Control>,
+fn asks_for_protobuf(request: &Request) -> bool {
+    request
+        .headers()
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|protocol| protocol.trim() == protobuf::SUBPROTOCOL)
+}
+
+struct Connection {
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    protobuf: bool,
     announce: Announce,
     state: Arc<Mutex<State>>,
-) {
-    let mut client_id = 0;
-    loop {
-        tokio::select! {
-            message = ws.next() => {
-                let Some(Ok(Message::Text(text))) = message else {
-                    return;
-                };
-                for line in text.lines() {
-                    let Ok(message) = serde_json::from_str::<Value>(line) else {
-                        continue;
+    client_id: u32,
+}
+
+impl Connection {
+    async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) {
+        loop {
+            tokio::select! {
+                message = self.ws.next() => {
+                    let replies = match message {
+                        Some(Ok(Message::Text(text))) => self.json_commands(&text),
+                        Some(Ok(Message::Binary(frame))) => self.protobuf_commands(&frame),
+                        _ => return,
                     };
-                    let reply = message["connect"].is_object().then(|| {
-                        client_id += 1;
-                        json!({
-                            "id": message["id"],
-                            "connect": {
-                                "client": format!("fake-{client_id}"),
-                                "version": "fake",
-                                "ping": announce.ping,
-                                "pong": announce.pong,
-                            },
-                        })
-                    });
-                    state.lock().unwrap().received.push(message);
-                    if let Some(reply) = reply
-                        && ws.send(Message::text(reply.to_string())).await.is_err()
-                    {
+                    for reply in replies {
+                        if self.ws.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                command = commands.recv() => {
+                    let message = match command {
+                        Some(Control::Send(message)) => message,
+                        Some(Control::Ping) => self.ping(),
+                        Some(Control::Close(code, reason)) => {
+                            let _ = self
+                                .ws
+                                .close(Some(CloseFrame {
+                                    code: CloseCode::from(code),
+                                    reason: reason.into(),
+                                }))
+                                .await;
+                            return;
+                        }
+                        None => return,
+                    };
+                    if self.ws.send(message).await.is_err() {
                         return;
                     }
                 }
             }
-            command = commands.recv() => match command {
-                Some(Control::Send(frame)) => {
-                    if ws.send(Message::text(frame)).await.is_err() {
-                        return;
-                    }
-                }
-                Some(Control::Close(code, reason)) => {
-                    let _ = ws
-                        .close(Some(CloseFrame {
-                            code: CloseCode::from(code),
-                            reason: reason.into(),
-                        }))
-                        .await;
-                    return;
-                }
-                None => return,
-            },
         }
+    }
+
+    /// Records the JSON commands of a text frame; the replies to send.
+    fn json_commands(&mut self, text: &str) -> Vec<Message> {
+        let mut replies = Vec::new();
+        for line in text.lines() {
+            let Ok(message) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if message["connect"].is_object() {
+                let client = self.next_client();
+                replies.push(Message::text(
+                    json!({
+                        "id": message["id"],
+                        "connect": {
+                            "client": client,
+                            "version": "fake",
+                            "ping": self.announce.ping,
+                            "pong": self.announce.pong,
+                        },
+                    })
+                    .to_string(),
+                ));
+            }
+            self.state.lock().unwrap().received.push(message);
+        }
+        replies
+    }
+
+    /// Records the Protobuf commands of a binary frame; the replies to send.
+    /// A frame that does not decode is dropped.
+    fn protobuf_commands(&mut self, mut frame: &[u8]) -> Vec<Message> {
+        let mut replies = Vec::new();
+        while !frame.is_empty() {
+            let Ok(command) = protobuf::Command::decode_length_delimited(&mut frame) else {
+                return replies;
+            };
+            if command.connect.is_some() {
+                let reply = protobuf::Reply {
+                    id: command.id,
+                    connect: Some(protobuf::ConnectResult {
+                        client: self.next_client(),
+                        version: "fake".to_owned(),
+                        ping: self.announce.ping,
+                        pong: self.announce.pong,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                replies.push(Message::binary(reply.encode_length_delimited_to_vec()));
+            }
+            self.state.lock().unwrap().received_protobuf.push(command);
+        }
+        replies
+    }
+
+    fn ping(&self) -> Message {
+        if self.protobuf {
+            Message::binary(protobuf::Reply::default().encode_length_delimited_to_vec())
+        } else {
+            Message::text("{}")
+        }
+    }
+
+    fn next_client(&mut self) -> String {
+        self.client_id += 1;
+        format!("fake-{}", self.client_id)
     }
 }

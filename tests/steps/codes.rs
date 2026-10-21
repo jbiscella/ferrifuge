@@ -11,7 +11,7 @@ use super::{ClientWorld, EVENT_TIMEOUT};
 use crate::support::proxy;
 
 #[given("a client connected to the fake server")]
-async fn a_client_connected_to_the_fake_server(world: &mut ClientWorld) {
+pub(super) async fn a_client_connected_to_the_fake_server(world: &mut ClientWorld) {
     a_connected_client(world).await;
 }
 
