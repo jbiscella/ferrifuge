@@ -58,6 +58,12 @@ const IMPLEMENTED: &[&str] = &[
     "The client speaks JSON by default",
     // Block 5, sub-increment 5d.
     "The connected event names the transport",
+    // Block 7.
+    "Connect with Protobuf",
+    "Frames are binary Protobuf",
+    "Ping answered in Protobuf",
+    "Every message of a multi-message Protobuf frame is handled",
+    "Malformed Protobuf frame forces a reconnect",
 ];
 
 /// Server configuration of @A scenarios.

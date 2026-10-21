@@ -18,6 +18,6 @@ mod wire;
 
 #[cfg(feature = "tokio")]
 pub use adapter::{Client, ClientBuilder};
-pub use config::Config;
+pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, State};
 pub use token::TokenError;
