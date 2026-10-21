@@ -7,6 +7,8 @@ use rustls::crypto::ring;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use tokio::net::TcpStream;
+
+use crate::machine::FrameType;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
@@ -44,13 +46,17 @@ impl WebSocket {
         Ok(Self { stream })
     }
 
-    /// Sends one frame of JSON-encoded commands.
-    pub(crate) async fn send(&mut self, frame: Vec<u8>) -> Result<(), String> {
-        let text = String::from_utf8(frame).map_err(|e| e.to_string())?;
-        self.stream
-            .send(Message::text(text))
-            .await
-            .map_err(|e| e.to_string())
+    /// Sends one frame of encoded commands as a text or binary message.
+    pub(crate) async fn send(
+        &mut self,
+        frame: Vec<u8>,
+        frame_type: FrameType,
+    ) -> Result<(), String> {
+        let message = match frame_type {
+            FrameType::Text => Message::text(String::from_utf8(frame).map_err(|e| e.to_string())?),
+            FrameType::Binary => Message::binary(frame),
+        };
+        self.stream.send(message).await.map_err(|e| e.to_string())
     }
 
     /// Waits for the next frame or for the end of the connection.
@@ -147,7 +153,9 @@ mod tests {
         let url = echo_then_close(3001, "shutdown").await;
         let mut ws = WebSocket::open(&url).await.unwrap();
 
-        ws.send(b"{\"id\":1}".to_vec()).await.unwrap();
+        ws.send(b"{\"id\":1}".to_vec(), FrameType::Text)
+            .await
+            .unwrap();
         let echoed = ws.recv().await;
         let closed = ws.recv().await;
 
@@ -159,6 +167,34 @@ mod tests {
                 reason: "shutdown".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn frames_go_out_as_text_or_binary_messages_by_type() {
+        // The server answers each message with its kind.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let kind = match message {
+                    Message::Text(_) => "text",
+                    Message::Binary(_) => "binary",
+                    _ => continue,
+                };
+                ws.send(Message::text(kind)).await.unwrap();
+            }
+        });
+        let mut ws = WebSocket::open(&format!("ws://{address}")).await.unwrap();
+
+        ws.send(b"{}".to_vec(), FrameType::Text).await.unwrap();
+        let text = ws.recv().await;
+        ws.send(vec![0xff, 0x00], FrameType::Binary).await.unwrap();
+        let binary = ws.recv().await;
+
+        assert_eq!(text, Inbound::Frame(b"text".to_vec()));
+        assert_eq!(binary, Inbound::Frame(b"binary".to_vec()));
     }
 
     #[tokio::test]
