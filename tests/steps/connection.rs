@@ -192,3 +192,12 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
     }
     assert_eq!(world.client().state(), State::Connecting);
 }
+
+#[then(regex = r#"^(?:then )?the client emits "connected" over transport "(\w+)"$"#)]
+async fn the_client_emits_connected_over(world: &mut ClientWorld, expected: String) {
+    let event = expect_event(world, "connected").await;
+    let ClientEvent::Connected { transport, .. } = &event else {
+        unreachable!("expect_event checked the name");
+    };
+    assert_eq!(transport, &expected, "{event:?}");
+}

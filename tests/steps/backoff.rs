@@ -39,7 +39,7 @@ fn reconnect_delays(config: &Config, attempts: usize) -> Vec<Duration> {
         let transport = actions
             .iter()
             .find_map(|action| match action {
-                Action::OpenTransport(id) => Some(*id),
+                Action::OpenTransport { transport, .. } => Some(*transport),
                 _ => None,
             })
             .expect("an attempt opens a transport");

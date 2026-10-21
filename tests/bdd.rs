@@ -56,6 +56,8 @@ const IMPLEMENTED: &[&str] = &[
     "Token refreshed before expiry keeps the connection",
     // Block 5, sub-increment 5c.
     "The client speaks JSON by default",
+    // Block 5, sub-increment 5d.
+    "The connected event names the transport",
 ];
 
 /// Server configuration of @A scenarios.

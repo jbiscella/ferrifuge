@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
-use crate::machine::{Action, FetchId, Input, Machine, Timer, TransportId};
+use crate::machine::{Action, FetchId, Input, Machine, Timer, TransportId, TransportKind};
 use crate::{ClientEvent, Config, State, TokenError};
 
 /// Centrifugo client running on tokio.
@@ -313,12 +313,17 @@ impl Driver {
 
     async fn perform(&mut self, action: Action) {
         match action {
-            Action::OpenTransport(id) => {
+            Action::OpenTransport {
+                transport: id,
+                kind,
+            } => {
                 let endpoint = self.endpoint.clone();
-                self.opening = Some((
-                    id,
-                    Box::pin(async move { WebSocket::open(&endpoint).await }),
-                ));
+                let opening: Opening = match kind {
+                    TransportKind::WebSocket => {
+                        Box::pin(async move { WebSocket::open(&endpoint).await })
+                    }
+                };
+                self.opening = Some((id, opening));
             }
             Action::CloseTransport(id) => {
                 if self

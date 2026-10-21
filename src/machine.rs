@@ -25,8 +25,25 @@ use crate::wire::{
 };
 use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
 
-/// Name of the only transport implemented so far.
-const TRANSPORT: &str = "websocket";
+/// A transport the client can connect over. Further kinds (`http_stream`,
+/// `sse`) come with the transports block; `#[non_exhaustive]` so that adding
+/// them breaks no owner's `match`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TransportKind {
+    /// Websocket, `ws://` or `wss://`.
+    WebSocket,
+}
+
+impl TransportKind {
+    /// Name of the transport as reported in events, as in centrifuge-js.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+        }
+    }
+}
 
 /// Identifies one transport the machine asked to open. Inputs about a
 /// transport the machine has since abandoned are ignored.
@@ -135,7 +152,12 @@ pub enum Input {
 pub enum Action {
     /// Open a transport to the endpoint; report the outcome with
     /// [`Input::TransportOpened`] or [`Input::TransportFailed`].
-    OpenTransport(TransportId),
+    OpenTransport {
+        /// Identifies this transport in later inputs and actions.
+        transport: TransportId,
+        /// Which kind of transport to open.
+        kind: TransportKind,
+    },
     /// Close the transport and report nothing more about it.
     CloseTransport(TransportId),
     /// Send a frame over the transport.
@@ -201,7 +223,11 @@ impl std::fmt::Debug for Input {
 impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OpenTransport(id) => f.debug_tuple("OpenTransport").field(id).finish(),
+            Self::OpenTransport { transport, kind } => f
+                .debug_struct("OpenTransport")
+                .field("transport", transport)
+                .field("kind", kind)
+                .finish(),
             Self::CloseTransport(id) => f.debug_tuple("CloseTransport").field(id).finish(),
             Self::Send {
                 transport,
@@ -259,6 +285,8 @@ pub struct Machine {
     tokens: Tokens,
     /// Encoding of the client protocol.
     codec: Codec,
+    /// Transport to connect over.
+    transport_kind: TransportKind,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -294,6 +322,7 @@ impl Machine {
             connect_command: None,
             tokens,
             codec: Codec::default(),
+            transport_kind: TransportKind::WebSocket,
             pings: None,
             actions: Vec::new(),
         }
@@ -398,7 +427,10 @@ impl Machine {
         self.next_transport += 1;
         self.transport = Some(id);
         self.transport_open = false;
-        self.actions.push(Action::OpenTransport(id));
+        self.actions.push(Action::OpenTransport {
+            transport: id,
+            kind: self.transport_kind,
+        });
         self.actions
             .push(Action::SetTimer(Timer::ConnectTimeout, self.config.timeout));
     }
@@ -427,7 +459,7 @@ impl Machine {
             kind: ErrorKind::Transport,
             code: codes::error::TRANSPORT_CLOSED,
             message,
-            transport: Some(TRANSPORT.to_owned()),
+            transport: Some(self.transport_kind.name().to_owned()),
         }));
         self.reconnect_after_transport_closed();
     }
@@ -521,7 +553,7 @@ impl Machine {
         self.wait_server_ping();
         self.emit(ClientEvent::Connected {
             client_id: result.client.clone(),
-            transport: TRANSPORT.to_owned(),
+            transport: self.transport_kind.name().to_owned(),
         });
     }
 
@@ -774,7 +806,7 @@ mod tests {
         actions
             .iter()
             .find_map(|action| match action {
-                Action::OpenTransport(id) => Some(*id),
+                Action::OpenTransport { transport, .. } => Some(*transport),
                 _ => None,
             })
             .expect("an OpenTransport action")
@@ -1360,7 +1392,7 @@ mod tests {
         assert!(
             !actions
                 .iter()
-                .any(|a| matches!(a, Action::OpenTransport(_)))
+                .any(|a| matches!(a, Action::OpenTransport { .. }))
         );
     }
 
