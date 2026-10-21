@@ -31,6 +31,7 @@ Wording fixes from the Codex review of ferrifuge PR #10, kept minimal:
 - Third review round (ferrifuge PR #15): out-of-scope edits are never made
   to make a change compile (stop or pick another refactor instead); the
   config is the nearest `.solidifier.json` from the target up to the
-  project root; `scope`/`exclude` globs are relative to the defining file.
+  project root, resolved per target when a request names several; `scope`/
+  `exclude` globs are relative to the defining file.
 
 Re-apply these when updating from upstream, unless upstream fixed them.

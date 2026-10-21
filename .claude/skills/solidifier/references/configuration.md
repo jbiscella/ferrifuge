@@ -9,7 +9,7 @@ Look, in order, for:
 2. The nearest `.solidifier.json`: in the target's directory, then each parent directory up to and including the project root. A package-level config therefore applies to files inside that package.
 3. A `"solidifier"` key inside an existing project config (e.g. `package.json`, `pyproject.toml [tool.solidifier]`).
 
-Only the first configuration found applies; configurations are not merged.
+For each target, only the first configuration found applies; configurations are not merged. When a request names several targets, resolve the configuration for each target separately and apply each one to its own target only: one package's `scope`, `exclude` and `patterns.deny` never govern another package's files. Where targets end up with different rigor levels, state which applies to which.
 
 Globs in `scope` and `exclude` are relative to the directory of the file that defines them: the `.solidifier.json` itself, or the project config holding the `"solidifier"` key.
 
