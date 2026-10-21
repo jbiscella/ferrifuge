@@ -92,6 +92,7 @@ fn a_client_with_fixed_backoff_options(world: &mut ClientWorld) {
 #[when(regex = r"^(\d+) consecutive reconnect attempts fail$")]
 fn consecutive_attempts_fail(world: &mut ClientWorld, attempts: usize) {
     world.computed_delays = reconnect_delays(backoff_config(world), attempts);
+    world.delays_by_attempt = true;
 }
 
 #[when("consecutive reconnect attempts fail")]
@@ -110,6 +111,7 @@ fn attempts_keep_failing(world: &mut ClientWorld) {
 #[when(regex = r"^the delay for attempt (\d+) is computed (\d+) times$")]
 fn delay_for_attempt_computed(world: &mut ClientWorld, attempt: usize, times: usize) {
     world.computed_delays = attempt_delays(backoff_config(world), attempt, times);
+    world.delays_by_attempt = false;
 }
 
 #[when(regex = r"^the delay for the same attempt number is computed (\d+) times$")]
@@ -121,11 +123,24 @@ fn delay_for_same_attempt_computed(world: &mut ClientWorld, times: usize) {
         .collect();
 }
 
-/// Also checks the lower bound: the Goal bounds delays by min and max.
+/// Also checks the lower bound, as the Goal bounds delays by min and max,
+/// and, for delays of consecutive attempts, each attempt's own bound: with
+/// a configured minimum this shows the option is applied (the first delay
+/// cannot exceed twice the minimum).
 #[then(regex = r"^every computed delay is at most (\d+) ms$")]
 fn every_delay_is_at_most(world: &mut ClientWorld, millis: u64) {
     let limit = Duration::from_millis(millis);
-    let min = backoff_config(world).min_reconnect_delay;
+    let config = backoff_config(world);
+    let min = config.min_reconnect_delay;
+    if world.delays_by_attempt {
+        for (attempt, delay) in world.computed_delays.iter().enumerate() {
+            let bound = expected_bound(min, config.max_reconnect_delay, attempt);
+            assert!(
+                *delay <= bound,
+                "attempt {attempt}: delay {delay:?} above its bound {bound:?}"
+            );
+        }
+    }
     assert!(!world.computed_delays.is_empty(), "no delays computed");
     let out: Vec<_> = world
         .computed_delays
