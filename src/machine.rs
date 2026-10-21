@@ -45,6 +45,35 @@ pub enum Timer {
     ServerPing,
 }
 
+impl Timer {
+    /// Number of timer kinds.
+    pub const COUNT: usize = 5;
+
+    /// Every timer kind, in [`Timer::index`] order.
+    pub const ALL: [Timer; Self::COUNT] = [
+        Self::Reconnect,
+        Self::ConnectTimeout,
+        Self::Refresh,
+        Self::RefreshReply,
+        Self::ServerPing,
+    ];
+
+    /// Position in [`Timer::ALL`], e.g. for an owner keeping one slot per
+    /// kind, as the tokio adapter does.
+    #[must_use]
+    pub fn index(self) -> usize {
+        // Exhaustive: a new kind fails to compile until it gets an index
+        // (and a place in `ALL`, checked by a test).
+        match self {
+            Self::Reconnect => 0,
+            Self::ConnectTimeout => 1,
+            Self::Refresh => 2,
+            Self::RefreshReply => 3,
+            Self::ServerPing => 4,
+        }
+    }
+}
+
 /// Why the machine needs a token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchPurpose {
@@ -548,12 +577,11 @@ impl Machine {
         if !(reconnect && matches!(self.fetch, Some((_, FetchPurpose::Refresh)))) {
             self.fetch = None;
         }
-        self.actions
-            .push(Action::CancelTimer(Timer::ConnectTimeout));
-        self.actions.push(Action::CancelTimer(Timer::Reconnect));
-        self.actions.push(Action::CancelTimer(Timer::Refresh));
-        self.actions.push(Action::CancelTimer(Timer::RefreshReply));
-        self.actions.push(Action::CancelTimer(Timer::ServerPing));
+        // Every timer belongs to the connection being torn down; the
+        // reconnect timer is set again below when reconnecting.
+        for timer in Timer::ALL {
+            self.actions.push(Action::CancelTimer(timer));
+        }
         self.pings = None;
 
         let state = if reconnect {
@@ -1471,6 +1499,27 @@ mod tests {
                 reason: "no ping".into()
             }]
         );
+    }
+
+    #[test]
+    fn timer_all_lists_every_kind_at_its_index() {
+        let indices: Vec<_> = Timer::ALL.iter().map(|timer| timer.index()).collect();
+
+        assert_eq!(indices, (0..Timer::COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn disconnect_cancels_every_timer() {
+        let (mut machine, _) = awaiting_connect_reply();
+
+        let actions = machine.handle(Input::Disconnect);
+
+        for timer in Timer::ALL {
+            assert!(
+                actions.contains(&Action::CancelTimer(timer)),
+                "{timer:?}: {actions:?}"
+            );
+        }
     }
 
     #[test]
