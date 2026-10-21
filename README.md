@@ -36,6 +36,8 @@ Available now:
   server's disconnect code, as the spec defines;
 - connection tokens (JWT), refreshed through a callback before they
   expire;
+- server pings: answered with pongs, and a connection whose pings stop is
+  re-established;
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON protocol.
 
@@ -43,12 +45,8 @@ Not yet available:
 
 | Planned | Where |
 |---|---|
-| Answering server pings | Block 4 |
 | Subscriptions, publications, RPC | later blocks |
 | http_stream and sse transports, Protobuf encoding | later blocks |
-
-Because pings go unanswered, Centrifugo closes each connection within about
-half a minute with its default settings, and the client then reconnects.
 
 ## Usage
 
@@ -147,6 +145,7 @@ while the client keeps reconnecting.
 | `name` | `ferrifuge` | Client name reported to the server |
 | `version` | crate version | Client version reported to the server |
 | `token` | empty | Connection token sent with the first connect |
+| `max_server_ping_delay` | 10 s | Wait past the server's ping interval before reconnecting; 0 disables |
 
 ### Cargo features
 

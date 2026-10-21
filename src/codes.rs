@@ -9,6 +9,8 @@ pub mod connecting {
     pub const CONNECT_CALLED: u32 = 0;
     /// The transport closed; the client reconnects.
     pub const TRANSPORT_CLOSED: u32 = 1;
+    /// No data, not even a ping, arrived from the server in time.
+    pub const NO_PING: u32 = 2;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].

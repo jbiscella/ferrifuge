@@ -16,6 +16,8 @@ pub(crate) struct Command {
 pub(crate) enum Method {
     Connect(ConnectRequest),
     Refresh(RefreshRequest),
+    /// The empty command answering a server ping; sent with id 0.
+    Pong,
 }
 
 /// `ConnectRequest` of `client.proto`.

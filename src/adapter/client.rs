@@ -179,6 +179,7 @@ impl Client {
             connect_timeout: None,
             refresh: None,
             refresh_reply: None,
+            server_ping: None,
         };
         tokio::spawn(driver.run());
         Self { shared }
@@ -239,6 +240,7 @@ struct Driver {
     connect_timeout: Option<Pin<Box<Sleep>>>,
     refresh: Option<Pin<Box<Sleep>>>,
     refresh_reply: Option<Pin<Box<Sleep>>>,
+    server_ping: Option<Pin<Box<Sleep>>>,
 }
 
 impl Driver {
@@ -285,6 +287,10 @@ impl Driver {
                 () = fired(&mut self.refresh_reply) => {
                     self.refresh_reply = None;
                     Input::TimerFired(Timer::RefreshReply)
+                }
+                () = fired(&mut self.server_ping) => {
+                    self.server_ping = None;
+                    Input::TimerFired(Timer::ServerPing)
                 }
                 (fetch, result) = fetched(&mut self.fetching) => {
                     self.fetching = None;
@@ -362,6 +368,7 @@ impl Driver {
             Timer::ConnectTimeout => &mut self.connect_timeout,
             Timer::Refresh => &mut self.refresh,
             Timer::RefreshReply => &mut self.refresh_reply,
+            Timer::ServerPing => &mut self.server_ping,
         }
     }
 }

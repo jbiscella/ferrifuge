@@ -88,6 +88,11 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 connect: None,
                 refresh: Some(JsonRefreshRequest { token }),
             },
+            Method::Pong => Self {
+                id: command.id,
+                connect: None,
+                refresh: None,
+            },
         }
     }
 }
@@ -260,6 +265,16 @@ mod tests {
             String::from_utf8(frame).unwrap(),
             r#"{"id":7,"refresh":{"token":"t"}}"#
         );
+    }
+
+    #[test]
+    fn encodes_pong_as_an_empty_object() {
+        let frame = encode(&[Command {
+            id: 0,
+            method: Method::Pong,
+        }]);
+
+        assert_eq!(frame, b"{}");
     }
 
     #[test]

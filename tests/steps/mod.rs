@@ -11,12 +11,13 @@ use ferrifuge::{Client, ClientBuilder, ClientEvent, Config};
 use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
-use crate::support::fake_server::FakeServer;
+use crate::support::fake_server::{Announce, FakeServer};
 use crate::support::proxy::ConnectProxy;
 use crate::support::relay::CountingRelay;
 
 mod codes;
 mod connection;
+mod ping;
 mod token;
 
 /// How long a step waits for an event it expects.
@@ -51,6 +52,10 @@ pub(crate) struct ClientWorld {
     pub(crate) sent_disconnect: Option<(u32, String)>,
     /// The state event that answered it.
     pub(crate) state_event: Option<ClientEvent>,
+    /// Client option set by a step before the client is created.
+    pub(crate) max_server_ping_delay: Option<Duration>,
+    /// Events seen while a step let time elapse.
+    pub(crate) elapsed_events: Vec<ClientEvent>,
     /// When set, the client's token callback answers "unauthorized".
     pub(crate) token_denied: Arc<AtomicBool>,
 }
@@ -68,7 +73,24 @@ impl fmt::Debug for ClientWorld {
 impl ClientWorld {
     /// Creates the scenario's client and starts recording its events.
     fn new_client(&mut self, endpoint: String) {
-        self.build_client(Client::builder(endpoint).config(test_config()));
+        let mut config = test_config();
+        if let Some(delay) = self.max_server_ping_delay {
+            config.max_server_ping_delay = delay;
+        }
+        self.build_client(Client::builder(endpoint).config(config));
+    }
+
+    /// Replaces the scenario's fake server with one announcing `announce`.
+    pub(crate) async fn restart_fake(&mut self, announce: Announce) {
+        let fake = FakeServer::start(announce).await;
+        self.relay = Some(CountingRelay::start(fake.address()).await);
+        self.fake = Some(fake);
+    }
+
+    pub(crate) fn fake(&self) -> &FakeServer {
+        self.fake
+            .as_ref()
+            .expect("this step needs the fake server: tag the scenario @D")
     }
 
     pub(crate) fn build_client(&mut self, builder: ClientBuilder) {
@@ -90,7 +112,7 @@ impl ClientWorld {
         self.client.as_ref().expect("no client created yet")
     }
 
-    async fn next_event(&mut self) -> ClientEvent {
+    pub(crate) async fn next_event(&mut self) -> ClientEvent {
         let events = self.events.as_mut().expect("no client created yet");
         tokio::time::timeout(EVENT_TIMEOUT, events.next())
             .await
@@ -109,7 +131,7 @@ impl ClientWorld {
     }
 
     /// Every event emitted during `period`.
-    async fn events_during(&mut self, period: Duration) -> Vec<ClientEvent> {
+    pub(crate) async fn events_during(&mut self, period: Duration) -> Vec<ClientEvent> {
         let events = self.events.as_mut().expect("no client created yet");
         let mut seen = Vec::new();
         let deadline = tokio::time::sleep(period);

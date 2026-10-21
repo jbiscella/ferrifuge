@@ -281,6 +281,8 @@ Rule (spec): the client answers server PINGs with PONGs; if no PING arrives with
 
 `VERIFY:` where the ping interval and the "pong expected" flag are communicated (connect reply fields in `client.proto`).
 
+Verified (`client.proto` at the pinned commit; centrifuge-js `163dcba` agrees): `ConnectResult.ping` is the interval in seconds (0: no pings) and `ConnectResult.pong` whether the client must answer; a ping is an empty `Reply` (`{}` in JSON) and a pong an empty `Command` (`{}`). centrifuge-js re-arms the no-ping deadline on any data from the server, and `maxServerPingDelay` 0 disables the check. Centrifugo v6.10.1 defaults: ping 25 s, pong expected.
+
 ```gherkin
 Feature: Ping/pong
 

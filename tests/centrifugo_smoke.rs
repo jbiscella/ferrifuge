@@ -177,3 +177,38 @@ async fn fake_server_replies_to_connect_records_frames_and_closes_with_any_code(
         [serde_json::json!({"id": 1, "connect": {}})]
     );
 }
+
+#[tokio::test]
+async fn fake_server_pings_periodically_until_stopped() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let server = FakeServer::start(Announce {
+        ping: 1,
+        pong: true,
+    })
+    .await;
+    let url = format!("ws://{}/connection/websocket", server.address());
+    let (mut ws, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .expect("open");
+    ws.send(Message::text(r#"{"id":1,"connect":{}}"#))
+        .await
+        .expect("send");
+    ws.next().await;
+
+    server.ping_every(Duration::from_millis(100));
+    let mut pings = 0;
+    while pings < 3 {
+        let message = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        assert!(
+            matches!(message, Ok(Some(Ok(Message::Text(ref t)))) if t.as_str() == "{}"),
+            "{message:?}"
+        );
+        pings += 1;
+    }
+    server.stop_pinging();
+    let silence = tokio::time::timeout(Duration::from_millis(400), ws.next()).await;
+
+    assert!(silence.is_err(), "no ping after stop_pinging: {silence:?}");
+}
