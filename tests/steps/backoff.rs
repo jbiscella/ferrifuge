@@ -24,6 +24,9 @@ const JITTER_ATTEMPT: usize = 3;
 /// The jitter range is split into this many equal parts, each of which must
 /// receive samples: full jitter spreads delays over the whole range.
 const JITTER_BUCKETS: usize = 10;
+/// An estimated bound may fall short of the true one by 1/50 of the jitter
+/// range: with 1000 uniform samples that happens with a chance near 1e-9.
+const BOUND_SLACK_DIVISOR: u64 = 50;
 
 /// Reconnect delays scheduled for `attempts` consecutive failed attempts.
 fn reconnect_delays(config: &Config, attempts: usize) -> Vec<Duration> {
@@ -129,10 +132,22 @@ fn every_delay_is_at_most(world: &mut ClientWorld, millis: u64) {
     );
 }
 
+/// The scenario promises exponential growth: besides growing, each attempt's
+/// estimated bound must match the verified formula
+/// `min(max, min + min * 2^n)` (Block 2 VERIFY), within the sampling slack.
 #[then("the upper bound of the delay for attempt n+1 is greater than for attempt n")]
 fn upper_bound_grows(world: &mut ClientWorld) {
-    let max = backoff_config(world).max_reconnect_delay;
+    let config = backoff_config(world);
+    let (min, max) = (config.min_reconnect_delay, config.max_reconnect_delay);
     let bounds = &world.upper_bounds;
+    for (n, bound) in bounds.iter().enumerate() {
+        let expected = expected_bound(min, max, n);
+        let slack = (millis(expected) - millis(min)) / BOUND_SLACK_DIVISOR;
+        assert!(
+            millis(*bound) <= millis(expected) && millis(*bound) + slack >= millis(expected),
+            "attempt {n}: bound {bound:?}, expected {expected:?}: {bounds:?}"
+        );
+    }
     for n in 0..bounds.len() - 1 {
         if bounds[n] == max {
             break;
@@ -195,6 +210,12 @@ fn delays_not_all_equal(world: &mut ClientWorld) {
         buckets.iter().all(|count| *count > 0),
         "delays do not cover {low}..={high} ms: {buckets:?}"
     );
+}
+
+/// Upper bound of the delay for 0-based `attempt` (Block 2 VERIFY).
+fn expected_bound(min: Duration, max: Duration, attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt).expect("small attempt").min(31);
+    max.min(min + min * (1 << exponent))
 }
 
 fn millis(duration: Duration) -> u64 {
