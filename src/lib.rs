@@ -6,6 +6,7 @@
 #[cfg(feature = "tokio")]
 mod adapter;
 mod backoff;
+mod codec;
 pub mod codes;
 mod config;
 mod event;

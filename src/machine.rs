@@ -17,12 +17,13 @@ use tokens::{
 };
 
 use crate::backoff::{self, Backoff};
+use crate::codec::Codec;
 use crate::token::Secret;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Error, Method, RefreshRequest, RefreshResult, Reply,
     ReplyResult,
 };
-use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes, json};
+use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
 
 /// Name of the only transport implemented so far.
 const TRANSPORT: &str = "websocket";
@@ -143,6 +144,8 @@ pub enum Action {
         transport: TransportId,
         /// Encoded commands.
         frame: Vec<u8>,
+        /// How the frame travels on transports with typed frames.
+        frame_type: FrameType,
     },
     /// Start a timer, replacing a running one of the same kind.
     SetTimer(Timer, Duration),
@@ -200,10 +203,15 @@ impl std::fmt::Debug for Action {
         match self {
             Self::OpenTransport(id) => f.debug_tuple("OpenTransport").field(id).finish(),
             Self::CloseTransport(id) => f.debug_tuple("CloseTransport").field(id).finish(),
-            Self::Send { transport, frame } => f
+            Self::Send {
+                transport,
+                frame,
+                frame_type,
+            } => f
                 .debug_struct("Send")
                 .field("transport", transport)
                 .field("frame", &format_args!("<{} bytes>", frame.len()))
+                .field("frame_type", frame_type)
                 .finish(),
             Self::SetTimer(timer, delay) => {
                 f.debug_tuple("SetTimer").field(timer).field(delay).finish()
@@ -213,6 +221,16 @@ impl std::fmt::Debug for Action {
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
         }
     }
+}
+
+/// How a frame travels on a transport that types its frames, such as a
+/// websocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FrameType {
+    /// UTF-8 text (JSON encoding).
+    Text,
+    /// Bytes (Protobuf encoding).
+    Binary,
 }
 
 /// Server pings announced in the connect reply.
@@ -239,6 +257,8 @@ pub struct Machine {
     connect_command: Option<u32>,
     /// Connection token state and policy.
     tokens: Tokens,
+    /// Encoding of the client protocol.
+    codec: Codec,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -273,6 +293,7 @@ impl Machine {
             next_command: 0,
             connect_command: None,
             tokens,
+            codec: Codec::default(),
             pings: None,
             actions: Vec::new(),
         }
@@ -397,10 +418,7 @@ impl Machine {
                 version: self.config.version.clone(),
             }),
         };
-        self.actions.push(Action::Send {
-            transport,
-            frame: json::encode(&[command]),
-        });
+        self.send(transport, &[command]);
     }
 
     /// The attempt failed before a connection was established.
@@ -434,7 +452,7 @@ impl Machine {
     }
 
     fn frame(&mut self, data: &[u8]) {
-        let Ok(replies) = json::decode(data) else {
+        let Some(replies) = self.codec.decode(data) else {
             // Not client protocol data, e.g. from a misconfigured proxy.
             self.reconnect_after_transport_closed();
             return;
@@ -650,10 +668,7 @@ impl Machine {
                 token: self.tokens.for_refresh(id),
             }),
         };
-        self.actions.push(Action::Send {
-            transport,
-            frame: json::encode(&[command]),
-        });
+        self.send(transport, &[command]);
         self.actions
             .push(Action::SetTimer(Timer::RefreshReply, self.config.timeout));
     }
@@ -709,12 +724,20 @@ impl Machine {
         let Some(transport) = self.transport else {
             return;
         };
-        self.actions.push(Action::Send {
+        self.send(
             transport,
-            frame: json::encode(&[Command {
+            &[Command {
                 id: 0,
                 method: Method::Pong,
-            }]),
+            }],
+        );
+    }
+
+    fn send(&mut self, transport: TransportId, commands: &[Command]) {
+        self.actions.push(Action::Send {
+            transport,
+            frame: self.codec.encode(commands),
+            frame_type: self.codec.frame_type(),
         });
     }
 
@@ -1062,7 +1085,8 @@ mod tests {
                 Action::CancelTimer(Timer::Refresh),
                 Action::Send {
                     transport,
-                    frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec()
+                    frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec(),
+                    frame_type: FrameType::Text,
                 },
                 Action::SetTimer(Timer::RefreshReply, Config::default().timeout)
             ]
@@ -1137,7 +1161,7 @@ mod tests {
         assert_eq!(
             format!("{:?}", actions[0]),
             format!(
-                "Send {{ transport: {transport:?}, frame: <{} bytes> }}",
+                "Send {{ transport: {transport:?}, frame: <{} bytes>, frame_type: Text }}",
                 frame.len()
             )
         );

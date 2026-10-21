@@ -332,10 +332,14 @@ impl Driver {
                     tokio::spawn(websocket.close());
                 }
             }
-            Action::Send { transport, frame } => {
+            Action::Send {
+                transport,
+                frame,
+                frame_type,
+            } => {
                 if let Some((id, websocket)) = &mut self.transport
                     && *id == transport
-                    && websocket.send(frame).await.is_err()
+                    && websocket.send(frame, frame_type).await.is_err()
                 {
                     self.transport = None;
                     self.shared.apply(Input::TransportClosed {

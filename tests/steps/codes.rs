@@ -126,3 +126,15 @@ fn the_event_carries_code_and_reason(world: &mut ClientWorld, code: u32) {
     };
     assert_eq!((*got_code, got_reason.as_str()), (code, reason.as_str()));
 }
+
+#[then("the fake server received the connect command as JSON")]
+fn fake_server_received_json_connect(world: &mut ClientWorld) {
+    // The fake server records only text frames that parse as JSON objects.
+    let received = world.fake().received();
+    assert!(
+        received
+            .first()
+            .is_some_and(|first| first["connect"].is_object()),
+        "{received:?}"
+    );
+}
