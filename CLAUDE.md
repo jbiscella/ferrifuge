@@ -596,9 +596,9 @@ Feature: Transport fallback
 
   @A
   Scenario Outline: Server pings over an HTTP transport are answered
-    Given a server with http_stream and sse enabled, a ping interval of 1 s and a pong timeout of 1 s
+    Given a server with http_stream and sse enabled, a ping interval of 2 s and a pong timeout of 1 s
     And a client connected over transport "<transport>"
-    When 4 s elapse
+    When 6 s elapse
     Then the client stays "connected"
 
     Examples:
