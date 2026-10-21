@@ -202,6 +202,9 @@ struct Decoder {
     data: Option<Vec<u8>>,
     /// The last byte was a CR ending an sse line.
     after_cr: bool,
+    /// A line was ended already: the stream's first line may start with a
+    /// byte order mark.
+    past_first_line: bool,
 }
 
 impl Decoder {
@@ -249,7 +252,14 @@ impl Decoder {
         Ok(())
     }
 
-    fn end_line(&mut self, line: Vec<u8>, messages: &mut VecDeque<Vec<u8>>) {
+    fn end_line(&mut self, mut line: Vec<u8>, messages: &mut VecDeque<Vec<u8>>) {
+        // One leading byte order mark is ignored (WHATWG HTML, "Parsing an
+        // event stream").
+        if self.sse && !std::mem::replace(&mut self.past_first_line, true) {
+            line = line
+                .strip_prefix(b"\xEF\xBB\xBF")
+                .map_or(line.clone(), <[u8]>::to_vec);
+        }
         if !self.sse {
             // Blank lines carry nothing, e.g. keep-alives of an intermediary
             // (centrifuge-js `decodeReplies`).
@@ -354,6 +364,17 @@ mod tests {
         );
 
         assert_eq!(messages, [r#"{"a":1}"#, "{}", "2"]);
+    }
+
+    #[test]
+    fn a_leading_byte_order_mark_is_ignored_once() {
+        let messages = decode(
+            true,
+            &[b"\xEF\xBB", b"\xBFdata: {}\n\n\xEF\xBB\xBFdata: x\n\n"],
+        );
+
+        // A later mark is part of the line: the field is unknown.
+        assert_eq!(messages, ["{}"]);
     }
 
     #[test]

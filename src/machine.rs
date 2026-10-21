@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 mod tokens;
+mod transports;
 
 use tokens::{
     BeforeConnect, FetchPurpose, REFRESH_RETRY_MAX, REFRESH_RETRY_MIN, TOKEN_EXPIRED, Tokens,
@@ -26,6 +27,7 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
+use transports::Transports;
 
 /// A transport the client can connect over. `#[non_exhaustive]` so that
 /// adding one breaks no owner's `match`.
@@ -323,20 +325,14 @@ pub struct Machine {
     tokens: Tokens,
     /// Encoding of the client protocol.
     codec: Codec,
-    /// Transports to try, in order (Block 8).
-    transports: Vec<TransportKind>,
-    /// Index in `transports` of the one in use, or to try next.
-    transport_index: usize,
-    /// A connection was established over the transport at
-    /// `transport_index`: every reconnect uses it (centrifuge-js
-    /// `_transportWasOpen`).
-    transport_chosen: bool,
-    /// Every transport was tried once without one being chosen: later
-    /// attempts wait for the reconnect backoff (centrifuge-js
-    /// `_triedAllTransports`).
-    tried_all_transports: bool,
+    /// Transports to try, in order, and the one chosen (Block 8).
+    transports: Transports,
     /// Session and node of the emulated connection, from its connect reply.
     emulation: Option<(String, String)>,
+    /// The connection is emulated and only its stream is proven: the backoff
+    /// resets once the server pings or answers a command, not on the connect
+    /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
+    backoff_reset_pending: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -379,11 +375,8 @@ impl Machine {
                 Some(*kind),
             ));
         }
-        self.transports = kinds;
         // A new list starts a new fallback sequence.
-        self.transport_index = 0;
-        self.transport_chosen = false;
-        self.tried_all_transports = false;
+        self.transports = Transports::new(kinds);
         Ok(self)
     }
 
@@ -410,11 +403,9 @@ impl Machine {
             connect_command: None,
             tokens,
             codec,
-            transports: vec![TransportKind::WebSocket],
-            transport_index: 0,
-            transport_chosen: false,
-            tried_all_transports: false,
+            transports: Transports::new(vec![TransportKind::WebSocket]),
             emulation: None,
+            backoff_reset_pending: false,
             pings: None,
             actions: Vec::new(),
         }
@@ -529,7 +520,7 @@ impl Machine {
         self.actions.push(Action::OpenTransport {
             transport: id,
             kind,
-            endpoint: self.transport_index,
+            endpoint: self.transports.index(),
             initial_frame,
         });
         self.actions
@@ -548,7 +539,7 @@ impl Machine {
         }
         // An open websocket keeps its transport, even if the connect reply
         // is slow (centrifuge-js `onOpen`).
-        self.transport_chosen = true;
+        self.transports.choose();
         let command = self.connect_command();
         self.send(transport, &[command]);
     }
@@ -568,7 +559,7 @@ impl Machine {
     }
 
     fn transport_kind(&self) -> TransportKind {
-        self.transports[self.transport_index]
+        self.transports.current()
     }
 
     /// The attempt failed before a connection was established.
@@ -622,6 +613,11 @@ impl Machine {
     }
 
     fn reply(&mut self, reply: Reply) {
+        // A reply to a command proves the connection usable (centrifuge-js
+        // `_handleReply`); a connect reply sets the reset pending after this.
+        if reply.id > 0 {
+            self.reset_backoff_if_pending();
+        }
         if reply.id == 0 {
             match reply.result {
                 // Transports without close frames, such as http_stream and
@@ -631,12 +627,13 @@ impl Machine {
                     self.disconnect(code, &reason, reconnect_advised(code));
                 }
                 // An empty reply is a server ping (client.proto, Reply).
-                ReplyResult::Empty
-                    if self.state == State::Connected
-                        && self.pings.is_some_and(|pings| pings.pong)
-                        && reply.error.is_none() =>
-                {
-                    self.pong();
+                ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
+                    // A ping proves the connection usable (centrifuge-js
+                    // `_handleServerPing`).
+                    self.reset_backoff_if_pending();
+                    if self.pings.is_some_and(|pings| pings.pong) {
+                        self.pong();
+                    }
                 }
                 _ => {}
             }
@@ -667,11 +664,18 @@ impl Machine {
     fn connected(&mut self, result: &ConnectResult) {
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
-        self.transport_chosen = true;
+        self.transports.choose();
         if self.transport_kind().is_emulated() {
             self.emulation = Some((result.session.clone(), result.node.clone()));
         }
-        self.backoff.reset();
+        if self.transport_kind().is_emulated() {
+            // A connect reply over an emulated transport proves only the
+            // stream; commands go through the emulation endpoint, which may
+            // keep failing (centrifuge-js `_connectResponse`).
+            self.backoff_reset_pending = true;
+        } else {
+            self.backoff.reset();
+        }
         self.tokens.connected();
         if result.expires {
             self.set_refresh_timer(result.ttl);
@@ -715,18 +719,15 @@ impl Machine {
         }
         if let Some(transport) = self.transport.take() {
             self.actions.push(Action::CloseTransport(transport));
-            if reconnect && !self.transport_chosen {
-                // The attempt failed: the next one tries the next transport
-                // (centrifuge-js `_advanceTransportIndex`).
-                self.transport_index += 1;
-                if self.transport_index == self.transports.len() {
-                    self.transport_index = 0;
-                    self.tried_all_transports = true;
-                }
+            if reconnect {
+                self.transports.attempt_failed();
             }
         }
         self.transport_open = false;
         self.emulation = None;
+        // A connection that ends before it proved usable keeps the backoff
+        // growing.
+        self.backoff_reset_pending = false;
         self.connect_command = None;
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
@@ -753,10 +754,10 @@ impl Machine {
         if reconnect {
             // The first round over the transports is the handshake: each is
             // tried at once (centrifuge-js `_scheduleReconnect`).
-            let delay = if self.transport_chosen || self.tried_all_transports {
-                self.backoff.next_delay(&mut self.rng)
-            } else {
+            let delay = if self.transports.in_first_round() {
                 Duration::ZERO
+            } else {
+                self.backoff.next_delay(&mut self.rng)
             };
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
         }
@@ -912,6 +913,12 @@ impl Machine {
         );
     }
 
+    fn reset_backoff_if_pending(&mut self) {
+        if std::mem::take(&mut self.backoff_reset_pending) {
+            self.backoff.reset();
+        }
+    }
+
     fn send(&mut self, transport: TransportId, commands: &[Command]) {
         let mut frame = self.codec.encode(commands);
         if let Some((session, node)) = &self.emulation {
@@ -1052,6 +1059,54 @@ mod tests {
             )),
             "{actions:?}"
         );
+    }
+
+    /// Connects an `http_stream`-only machine, then closes the stream;
+    /// the reconnect delay, after `ping` if set.
+    fn emulated_reconnect_delay(machine: &mut Machine, ping: bool) -> Duration {
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        let connect_id = machine.connect_command.expect("connect command pending");
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{connect_id},"connect":{{"client":"c"}}}}"#),
+        ));
+        if ping {
+            machine.handle(frame(transport, "{}"));
+        }
+        let actions = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        machine.handle(Input::Disconnect);
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                _ => None,
+            })
+            .expect("a reconnect")
+    }
+
+    #[test]
+    fn an_emulated_connect_reply_alone_does_not_reset_the_backoff() {
+        let mut machine = machine()
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+
+        let delays: Vec<_> = (0..8)
+            .map(|_| emulated_reconnect_delay(&mut machine, false))
+            .collect();
+        let after_ping = emulated_reconnect_delay(&mut machine, true);
+
+        // Attempt 0 is bounded by twice the minimum; later ones grow.
+        let first_bound = Config::default().min_reconnect_delay * 2;
+        assert!(
+            delays.iter().any(|delay| *delay > first_bound),
+            "{delays:?}"
+        );
+        assert!(after_ping <= first_bound, "{after_ping:?}");
     }
 
     #[test]
