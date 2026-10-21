@@ -94,6 +94,7 @@ pub struct ClientBuilder {
     endpoints: Vec<(TransportKind, String)>,
     config: Config,
     get_token: Option<GetToken>,
+    emulation_endpoint: Option<String>,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -102,6 +103,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("endpoints", &self.endpoints)
             .field("config", &self.config)
             .field("get_token", &self.get_token.is_some())
+            .field("emulation_endpoint", &self.emulation_endpoint)
             .finish()
     }
 }
@@ -127,6 +129,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets the absolute URL of the emulation endpoint, where commands over
+    /// `http_stream` and sse go, e.g. when the server is behind a path
+    /// prefix; by default `/emulation` on the server of the stream endpoint
+    /// (centrifuge-js `emulationEndpoint`).
+    #[must_use]
+    pub fn emulation_endpoint(mut self, url: impl Into<String>) -> Self {
+        self.emulation_endpoint = Some(url.into());
+        self
+    }
+
     /// Creates the disconnected client.
     ///
     /// # Errors
@@ -138,7 +150,7 @@ impl ClientBuilder {
     ///
     /// When called outside a tokio runtime: the client runs as a task on it.
     pub fn build(self) -> Result<Client, ClientError> {
-        Client::start(self.endpoints, self.config, self.get_token)
+        Client::start(self)
     }
 }
 
@@ -173,14 +185,17 @@ impl Client {
             endpoints: endpoints.into_iter().collect(),
             config: Config::default(),
             get_token: None,
+            emulation_endpoint: None,
         }
     }
 
-    fn start(
-        endpoints: Vec<(TransportKind, String)>,
-        config: Config,
-        get_token: Option<GetToken>,
-    ) -> Result<Self, ClientError> {
+    fn start(builder: ClientBuilder) -> Result<Self, ClientError> {
+        let ClientBuilder {
+            endpoints,
+            config,
+            get_token,
+            emulation_endpoint,
+        } = builder;
         let subprotocol = config.protocol.websocket_subprotocol();
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
@@ -203,6 +218,7 @@ impl Client {
                 .map(|(_, endpoint)| endpoint)
                 .collect(),
             subprotocol,
+            emulation_endpoint,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
@@ -263,6 +279,8 @@ struct Driver {
     endpoints: Vec<String>,
     /// Websocket subprotocol of the configured encoding, if it needs one.
     subprotocol: Option<&'static str>,
+    /// Where commands over emulated transports go, when not the default.
+    emulation_endpoint: Option<String>,
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
@@ -361,11 +379,19 @@ impl Driver {
                             .await
                             .map(|websocket| Transport::WebSocket(Box::new(websocket)))
                     }),
-                    TransportKind::HttpStream | TransportKind::Sse => Box::pin(async move {
-                        HttpTransport::open(kind, &url, initial_frame.unwrap_or_default())
+                    TransportKind::HttpStream | TransportKind::Sse => {
+                        let emulation = self.emulation_endpoint.clone();
+                        Box::pin(async move {
+                            HttpTransport::open(
+                                kind,
+                                &url,
+                                initial_frame.unwrap_or_default(),
+                                emulation.as_deref(),
+                            )
                             .await
                             .map(|http| Transport::Http(Box::new(http)))
-                    }),
+                        })
+                    }
                 };
                 self.opening = Some((id, opening));
             }
