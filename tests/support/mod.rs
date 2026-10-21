@@ -4,6 +4,7 @@
 
 pub(crate) mod centrifugo;
 pub(crate) mod fake_server;
+pub(crate) mod http_proxy;
 pub(crate) mod protobuf;
 pub(crate) mod proxy;
 pub(crate) mod relay;
