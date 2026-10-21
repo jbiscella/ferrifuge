@@ -28,4 +28,9 @@ Wording fixes from the Codex review of ferrifuge PR #10, kept minimal:
   vendored and migration code); `SKILL.md` honours `requireJustification:
   false` and `allowContractChanges: true` from the config.
 
+- Third review round (ferrifuge PR #15): out-of-scope edits are never made
+  to make a change compile (stop or pick another refactor instead); the
+  config is the nearest `.solidifier.json` from the target up to the
+  project root; `scope`/`exclude` globs are relative to the defining file.
+
 Re-apply these when updating from upstream, unless upstream fixed them.

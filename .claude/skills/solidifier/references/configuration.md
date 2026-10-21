@@ -6,9 +6,12 @@ The skill is tuned by a project config file. This lets a team or user fix the ri
 
 Look, in order, for:
 1. A path the user named explicitly in the request.
-2. `.solidifier.json` in the target directory.
-3. `.solidifier.json` in the project root.
-4. A `"solidifier"` key inside an existing project config (e.g. `package.json`, `pyproject.toml [tool.solidifier]`).
+2. The nearest `.solidifier.json`: in the target's directory, then each parent directory up to and including the project root. A package-level config therefore applies to files inside that package.
+3. A `"solidifier"` key inside an existing project config (e.g. `package.json`, `pyproject.toml [tool.solidifier]`).
+
+Only the first configuration found applies; configurations are not merged.
+
+Globs in `scope` and `exclude` are relative to the directory of the file that defines them: the `.solidifier.json` itself, or the project config holding the `"solidifier"` key.
 
 If none exists, use the defaults below and tell the user once that they can create a `.solidifier.json` to tune behavior — optionally offer to scaffold one. Never create or modify this file without the user's go-ahead (it's persistent project configuration).
 
@@ -21,7 +24,8 @@ If none exists, use the defaults below and tell the user once that they can crea
   // Default: "conservative". See SKILL.md "Rigor levels".
   "rigor": "conservative",
 
-  // Glob(s) the skill MAY touch. Nothing outside this is modified.
+  // Glob(s) the skill MAY touch, relative to this file's directory.
+  // Nothing outside this is modified.
   // If omitted, scope = exactly what the user named in the request.
   "scope": ["src/services/**", "src/domain/**"],
 
