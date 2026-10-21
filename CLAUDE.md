@@ -618,7 +618,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches; tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one.
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -695,9 +695,9 @@ Feature: Client-side subscriptions
 
   @B
   Scenario: Permanent subscribe error
-    Given the subscribe proxy answers channel "news" with error code 403
+    Given the subscribe proxy answers channel "news" with error code 403 and message "news is closed"
     When a subscription to channel "news" is subscribed on a connected client
-    Then the subscription emits "unsubscribed" with code 403
+    Then the subscription emits "unsubscribed" with code 403 and reason "news is closed"
 
   @B
   Scenario: Unsubscribe during an in-flight subscribe over an emulated transport
@@ -775,6 +775,14 @@ Feature: Client-side subscriptions
     And the data callback is called again after the resubscribe backoff delay
     And the subscribe command carries the data the second call returned
 
+  @E
+  Scenario: A data callback denying access unsubscribes
+    Given a subscription whose data callback signals "unauthorized"
+    When the subscription is subscribed on a connected client
+    Then the subscription emits "unsubscribed" with code 1
+    And no subscribe command is sent
+    And no resubscribe is scheduled
+
   Scenario: Subscriptions are found by channel and listed
     Given a new client with subscriptions to channels "news" and "sport"
     Then looking up channel "news" returns its subscription
@@ -816,7 +824,7 @@ Feature: Client-side subscriptions
 
 **Out of scope:** recovery (Block 11); connection tokens (Block 1).
 
-**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2, and the attempt counter resets when the subscription reaches `subscribed` (centrifuge-js); a subscribe answered with error 109 (token expired) drops the token and resubscribes, so the callback supplies a new one (centrifuge-js `_subscribeError`); a failing subscription token callback or a temporary `sub_refresh` error emits an `error` event and retries the refresh after 5 to 10 s, as for connection tokens (centrifuge-js `subscription.ts`).
+**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2, and the attempt counter resets when the subscription reaches `subscribed` (centrifuge-js); a subscribe answered with error 109 (token expired) drops the token and resubscribes, so the callback supplies a new one (centrifuge-js `_subscribeError`); a failing subscription token callback or a temporary `sub_refresh` error emits an `error` event and retries the refresh after 5 to 10 s, as for connection tokens (centrifuge-js `subscription.ts`); a `sub_refresh` without a reply within `Config::timeout` fails with the timeout error (code 1), which, as any error code below 100, is retried like a temporary one (centrifuge-js `_refreshError`); a token callback that signals "unauthorized", on the first fetch as on a refresh, unsubscribes with code 1 "unauthorized", sends no subscribe command and schedules no retry (centrifuge-js `_failUnauthorized`); `unsubscribe()` and removal cancel a scheduled resubscribe, so no subscribe command follows them (centrifuge-js `_setUnsubscribed`).
 
 `VERIFY:` whether the server API `unsubscribe` accepts a code (if not, the code table runs on @D only, as decided); the client-side unsubscribed code for a denied token (centrifuge-js `unsubscribedCodes`).
 
@@ -874,6 +882,34 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When the server answers its sub_refresh with a temporary error
     Then the subscription emits an "error" event
     And the refresh is retried after 5 to 10 s
+
+  @E
+  Scenario: A sub_refresh without a reply is retried
+    Given a subscribed subscription whose token expires
+    When the server never answers its sub_refresh
+    Then after the configured timeout the subscription emits an "error" event with the timeout code
+    And the subscription token callback is called again after 5 to 10 s
+    And a new sub_refresh carrying the new token is sent
+
+  @E
+  Scenario: A subscription token denied before the first subscribe unsubscribes
+    Given a subscription to a private channel without an initial token whose token callback signals "unauthorized"
+    When the subscription is subscribed on a connected client
+    Then the subscription emits "unsubscribed" with code 1
+    And no subscribe command is sent
+    And no resubscribe is scheduled
+
+  @E
+  Scenario Outline: Ending a subscription during the resubscribe backoff cancels the retry
+    Given a subscription whose subscribe attempt failed with a temporary error
+    When <action> before the resubscribe delay elapses
+    Then the subscription emits "unsubscribed" with code 0
+    And no subscribe command is sent after the resubscribe delay
+
+    Examples:
+      | action                                        |
+      | unsubscribe is called on the subscription     |
+      | the subscription is removed from the client   |
 
   @E
   Scenario: A refresh reply without expiry stops refreshing
@@ -1059,6 +1095,13 @@ Feature: Subscription recovery
     When the client resubscribes
     Then the subscription emits "subscribed" with was_recovering true and recovered false
 
+  @D
+  Scenario: A failed recovery's reply replaces the stored position
+    Given a client subscribed to recoverable channel "news" on the fake server
+    And a resubscribe after a reconnect that the fake server answered with recovered false and a new stream position
+    When the fake server disconnects the client with a reconnect-advised code again
+    Then the next subscribe command for "news" asks to recover from the new stream position
+
   @B
   Scenario: getState provides the position of the initial subscribe
     Given a subscribe proxy recording requests
@@ -1103,6 +1146,12 @@ Feature: Subscription recovery
     And the next subscribe command for "news" carries no stream position
 
   @D
+  Scenario: Connection state invalidation drops a fixed connection token
+    Given a client using a fixed connection token and no token callback, connected to the fake server
+    When the fake server disconnects the client with code 3014
+    Then the next connect command carries no token
+
+  @D
   Scenario: State invalidation drops a fixed subscription token
     Given a client subscribed to channel "news" on the fake server using a fixed subscription token
     When the fake server unsubscribes the subscription with code 2502
@@ -1121,7 +1170,7 @@ Feature: Subscription recovery
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
-**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`), and the same context as client-side ones: granted `positioned` and `recoverable`, `was_recovering`, `recovered` and the stream position (centrifuge-js `ServerSubscribedContext`); a channel can have both a client-side and a server-side subscription, kept apart, with a pushed publication routed to the server-side one unless the client-side one is subscribed (centrifuge-js `_getSubForPush`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`), and the same context as client-side ones: granted `positioned` and `recoverable`, `was_recovering`, `recovered` and the stream position (centrifuge-js `ServerSubscribedContext`); a channel can have both a client-side and a server-side subscription, kept apart, with a pushed publication routed to the server-side one unless the client-side one is subscribed (centrifuge-js `_getSubForPush`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`); that position comes from the `ConnectResult.subs` entry or the `Subscribe` push that added the subscription, and follows every server-side publication delivered, live or recovered (centrifuge-js `_handleSubscribe`, `_handlePublication`); publications in a `ConnectResult.subs` entry are delivered after its `subscribed` event whether or not it recovers, as for client-side subscribe replies (Block 9; `client.proto` puts no condition on `SubscribeResult.publications`, while centrifuge-js delivers them only when recovered: not ported); a subscription absent from a reconnect's `ConnectResult.subs` emits `unsubscribed` once and is removed from the registry with its position (centrifuge-js `_processServerSubs`); the server-side `unsubscribed` event carries the code and reason of the `Unsubscribe` push (`client.proto`; centrifuge-js passes only the channel: extended, as the proto carries them).
 
 `VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim), and the server API `subscribe` method for a live connection.
 
@@ -1232,6 +1281,46 @@ Feature: Server-side subscriptions
     And the connect proxy will subscribe the next connection to no channel
     When the server disconnects the client with a reconnect-advised code
     Then the client emits a server-side "unsubscribed" event for channel "alerts"
+
+  @D
+  Scenario: A server-side subscription missing after reconnect is forgotten
+    Given the fake server grants a recoverable server-side subscription to channel "alerts" with a stream position at connect
+    And a client connected to the fake server
+    And the fake server will grant no server-side subscription on later connects
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the client emits a server-side "unsubscribed" event for channel "alerts"
+    When the fake server disconnects the client with a reconnect-advised code again
+    Then the next connect command carries no entry for "alerts"
+    And no second server-side "unsubscribed" event for channel "alerts" is emitted
+
+  @D
+  Scenario: A pushed server-side subscription's position is used for recovery
+    Given a client connected to the fake server
+    When the fake server pushes a recoverable server-side subscription to channel "alerts" with a stream position
+    And the fake server disconnects the client with a reconnect-advised code before any publication
+    Then the next connect command asks to recover "alerts" from that stream position
+
+  @D
+  Scenario: Recovered server-side publications advance the stored position
+    Given the fake server grants a recoverable server-side subscription to channel "alerts" with a stream position at connect
+    And a client connected to the fake server
+    And the client recovered 2 server-side publications on channel "alerts" after a reconnect
+    When the fake server disconnects the client with a reconnect-advised code again
+    Then the next connect command asks to recover "alerts" from the offset of the second recovered publication
+
+  @D
+  Scenario: Initial publications of a server-side subscription granted at connect are delivered
+    Given the fake server grants a server-side subscription to channel "alerts" with 1 initial publication and recovered false at connect
+    When a client connects to the fake server
+    Then the client emits a server-side "subscribed" event for channel "alerts"
+    And then the client receives that publication as a server-side publication
+
+  @D
+  Scenario: A server-side unsubscribe carries its code and reason
+    Given the fake server grants a server-side subscription to channel "alerts" at connect
+    And a client connected to the fake server
+    When the fake server pushes an unsubscribe for channel "alerts" with code 2000 and reason "alerts closed"
+    Then the client emits a server-side "unsubscribed" event for channel "alerts" with code 2000 and reason "alerts closed"
 ```
 
 **Exceptions introduced:** none.
@@ -1246,7 +1335,7 @@ Feature: Server-side subscriptions
 
 **Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
 
-**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and `disconnect()` fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`); losing the transport fails calls already sent at once with "connection closed" (centrifuge-js error code 11), since their replies can no longer arrive; a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout` (centrifuge-js `subscription.ts`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
+**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, also on a client whose `connect()` was never called, and entering `disconnected`, by `disconnect()` or a terminal condition (terminal disconnect code, denied token), fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`, which rejects them whenever it does not reconnect); losing the transport fails calls already sent at once with "connection closed" (centrifuge-js error code 11), since their replies can no longer arrive; a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout`, made while it is `unsubscribed` fails at once with "subscription unsubscribed" (centrifuge-js error code 7) and sends nothing, and a waiting call fails the same way when the subscription becomes `unsubscribed` (centrifuge-js `_methodCall`, `_setUnsubscribed`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 
 `VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
@@ -1371,6 +1460,38 @@ Feature: Client commands
     When connect is called
     And the client calls RPC "echo"
     Then the call fails with a timeout error within the configured timeout plus tolerance
+
+  Scenario: A call on a client never connected fails after the timeout
+    Given a new client
+    When the client calls RPC "echo"
+    And connect is never called
+    Then the call fails with a timeout error within the configured timeout plus tolerance
+
+  @B
+  Scenario: A terminal connect failure fails a queued call at once
+    Given an RPC proxy answering method "echo" with its input
+    And the connect proxy answers after 1 s with disconnect code 4500
+    And a new client
+    When connect is called
+    And the client calls RPC "echo" before it is connected
+    Then the client emits "disconnected" with code 4500
+    And the call fails with a "disconnected" error before the configured timeout
+
+  @D
+  Scenario: A subscription command on an unsubscribed subscription fails at once
+    Given a client connected to the fake server with an unsubscribed subscription to channel "news"
+    When its history is requested
+    Then the call fails at once with a "subscription unsubscribed" error
+    And the fake server receives no history command
+
+  @D
+  Scenario: A subscription command waiting for a failed subscribe fails at once
+    Given a client connected to the fake server that answers subscribe commands after 1 s with a permanent error
+    When a subscription to channel "news" is subscribed
+    And its history is requested at once
+    Then the subscription emits "unsubscribed"
+    And the call fails with a "subscription unsubscribed" error before the configured timeout
+    And the fake server receives no history command
 
   Scenario: Disconnect fails a queued call at once
     Given a client configured with an unreachable endpoint
