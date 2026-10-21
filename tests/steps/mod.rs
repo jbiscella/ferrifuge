@@ -20,6 +20,7 @@ mod codes;
 mod connection;
 mod ping;
 mod protobuf;
+mod tls;
 mod token;
 
 /// How long a step waits for an event it expects.

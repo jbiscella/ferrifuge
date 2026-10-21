@@ -23,6 +23,10 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "MIT",
+    # aws-lc-sys and aws-lc-fips-sys (aws-lc-rs and fips features): owner
+    # decision to allow it globally rather than per crate (CLAUDE.md, Block 0).
+    # Its advertising clause is noted in the README.
+    "OpenSSL",
     "Unicode-3.0",
     "Zlib",
 ]

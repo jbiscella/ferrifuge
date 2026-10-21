@@ -40,7 +40,9 @@ Available now:
   re-established;
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON or the
-  Protobuf protocol.
+  Protobuf protocol;
+- the TLS crypto provider chosen at build time: ring, aws-lc-rs, or
+  aws-lc-rs in FIPS mode.
 
 Not yet available:
 
@@ -153,7 +155,26 @@ while the client keeps reconnecting.
 
 | Feature | Default | Adds |
 |---|---|---|
-| `tokio` | yes | `Client`, the websocket transport, TLS through rustls (ring) with the platform's root certificates |
+| `tokio` | yes | `Client`, the websocket transport, TLS through rustls with the platform's root certificates |
+| `ring` | yes | ring as the TLS crypto provider; builds with a C compiler |
+| `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
+| `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
+
+`tokio` needs one of the provider features. Cargo features are additive, so
+a build without ring turns default features off:
+
+```toml
+ferrifuge = { version = "0.1", default-features = false, features = ["tokio", "fips"] }
+```
+
+When several providers are enabled, the strongest one is used: `fips`, then
+`aws-lc-rs`, then `ring`.
+
+`fips` builds the AWS-LC-FIPS 4.x module. That module has been submitted to
+NIST for FIPS 140-3 validation but is not certified yet. The certified 3.x
+module needs aws-lc-rs 1.17, which only rustls versions with known
+vulnerabilities (RUSTSEC-2026-0285, RUSTSEC-2026-0346) accept. Check the
+module's status on the NIST CMVP list before relying on it for compliance.
 
 Without default features, ferrifuge has no runtime or network dependency.
 `ferrifuge::machine::Machine` then takes inputs (API calls, transport
@@ -185,3 +206,7 @@ and cargo-deny. cargo-deny also runs daily.
 [0BSD](LICENSE). [`proto/client.proto`](proto/client.proto) is copied from
 [centrifugal/protocol](https://github.com/centrifugal/protocol) and keeps its
 MIT license ([`proto/LICENSE`](proto/LICENSE)).
+
+Builds with the `aws-lc-rs` or `fips` feature include AWS-LC, which is
+partly under the OpenSSL license. That license requires its attribution
+notice in advertising and in redistributions of the built binaries.

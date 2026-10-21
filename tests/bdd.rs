@@ -10,7 +10,8 @@ mod steps;
 mod support;
 
 use std::collections::HashSet;
-use std::fs;
+use std::process::{self, Command};
+use std::{env, fs};
 
 use cucumber::World;
 use cucumber::gherkin::{Feature, GherkinEnv};
@@ -20,6 +21,7 @@ use support::centrifugo::Centrifugo;
 use support::fake_server::{Announce, FakeServer};
 use support::proxy::ConnectProxy;
 use support::relay::CountingRelay;
+use support::tls;
 use support::token::HMAC_SECRET;
 
 const FEATURES: &str = "tests/features";
@@ -58,6 +60,8 @@ const IMPLEMENTED: &[&str] = &[
     "The client speaks JSON by default",
     // Block 5, sub-increment 5d.
     "The connected event names the transport",
+    // Block 6.
+    "Secure websocket connection with the build's provider",
     // Block 7.
     "Connect with Protobuf",
     "Frames are binary Protobuf",
@@ -67,7 +71,7 @@ const IMPLEMENTED: &[&str] = &[
 ];
 
 /// Server configuration of @A scenarios.
-const SERVER_A: &[(&str, &str)] = &[
+pub(crate) const SERVER_A: &[(&str, &str)] = &[
     (
         "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
         "true",
@@ -78,8 +82,12 @@ const SERVER_A: &[(&str, &str)] = &[
     ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "1s"),
 ];
 
+/// Marks the runner process started by [`trust_test_ca`].
+const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
+
 #[tokio::main]
 async fn main() {
+    trust_test_ca();
     assert_implemented_scenarios_exist();
     ClientWorld::cucumber()
         .before(|_, _, scenario, world| {
@@ -114,6 +122,25 @@ async fn main() {
             IMPLEMENTED.contains(&scenario.name.as_str())
         })
         .await;
+}
+
+/// Makes the client trust the test CA of the encrypted scenarios (Block 6).
+///
+/// `rustls-native-certs` reads `SSL_CERT_FILE` when the first secure
+/// connection is configured. Setting a variable in-process is `unsafe`, so
+/// the runner creates the CA and runs itself again with the variable set.
+fn trust_test_ca() {
+    if env::var_os(TEST_CA_MARKER).is_some() {
+        return;
+    }
+    tls::create();
+    let status = Command::new(env::current_exe().expect("runner path"))
+        .args(env::args_os().skip(1))
+        .env("SSL_CERT_FILE", tls::ca_path())
+        .env(TEST_CA_MARKER, "1")
+        .status()
+        .expect("run the scenarios");
+    process::exit(status.code().unwrap_or(1));
 }
 
 /// A misspelt entry in [`IMPLEMENTED`] would silently run nothing.
