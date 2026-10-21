@@ -12,13 +12,18 @@ use ferrifuge::machine::{Action, Input, Machine, Timer};
 
 use super::ClientWorld;
 
-/// Samples taken to estimate the upper bound of an attempt's delay.
+/// Samples taken to estimate the upper bound of an attempt's delay. Once an
+/// attempt is capped, a delay lands exactly on the maximum with probability
+/// about 1/40 (min / max of the jitter range), so the largest of 1000
+/// samples is the maximum itself, short of a 1e-11 chance.
 const SAMPLES: usize = 1000;
 /// Attempts examined for the growth of the upper bound.
 const ATTEMPTS: usize = 12;
-/// An estimate within this fraction of the maximum counts as having reached it:
-/// the largest of 1000 jittered samples falls just short of the true bound.
-const REACHED: f64 = 0.95;
+/// Attempt whose delays the jitter scenario samples.
+const JITTER_ATTEMPT: usize = 3;
+/// The jitter range is split into this many equal parts, each of which must
+/// receive samples: full jitter spreads delays over the whole range.
+const JITTER_BUCKETS: usize = 10;
 
 /// Reconnect delays scheduled for `attempts` consecutive failed attempts.
 fn reconnect_delays(config: &Config, attempts: usize) -> Vec<Duration> {
@@ -104,19 +109,24 @@ fn delay_for_attempt_computed(world: &mut ClientWorld, attempt: usize, times: us
 
 #[when(regex = r"^the delay for the same attempt number is computed (\d+) times$")]
 fn delay_for_same_attempt_computed(world: &mut ClientWorld, times: usize) {
-    world.computed_delays = attempt_delays(backoff_config(world), 3, times);
+    world.computed_delays = attempt_delays(backoff_config(world), JITTER_ATTEMPT, times);
 }
 
+/// Also checks the lower bound: the Goal bounds delays by min and max.
 #[then(regex = r"^every computed delay is at most (\d+) ms$")]
 fn every_delay_is_at_most(world: &mut ClientWorld, millis: u64) {
     let limit = Duration::from_millis(millis);
+    let min = backoff_config(world).min_reconnect_delay;
     assert!(!world.computed_delays.is_empty(), "no delays computed");
-    let over: Vec<_> = world
+    let out: Vec<_> = world
         .computed_delays
         .iter()
-        .filter(|delay| **delay > limit)
+        .filter(|delay| **delay > limit || **delay < min)
         .collect();
-    assert!(over.is_empty(), "delays above {limit:?}: {over:?}");
+    assert!(
+        out.is_empty(),
+        "delays outside {min:?}..={limit:?}: {out:?}"
+    );
 }
 
 #[then("the upper bound of the delay for attempt n+1 is greater than for attempt n")]
@@ -124,7 +134,7 @@ fn upper_bound_grows(world: &mut ClientWorld) {
     let max = backoff_config(world).max_reconnect_delay;
     let bounds = &world.upper_bounds;
     for n in 0..bounds.len() - 1 {
-        if reached(bounds[n], max) {
+        if bounds[n] == max {
             break;
         }
         assert!(
@@ -143,26 +153,47 @@ fn upper_bound_stops_growing(world: &mut ClientWorld, millis: u64) {
     let bounds = &world.upper_bounds;
     let first = bounds
         .iter()
-        .position(|bound| reached(*bound, max))
+        .position(|bound| *bound == max)
         .unwrap_or_else(|| panic!("the bound never reached {max:?}: {bounds:?}"));
     assert!(
-        bounds[first..]
-            .iter()
-            .all(|bound| reached(*bound, max) && *bound <= max),
+        bounds[first..].iter().all(|bound| *bound == max),
         "{bounds:?}"
     );
 }
 
+/// Also checks that the jitter is full: delays spread over the whole range
+/// `[min, min + min * 2^attempt]` (Block 2 VERIFY), so a delay that only
+/// takes a few values fails even though not all of them are equal.
 #[then("the computed delays are not all equal")]
 fn delays_not_all_equal(world: &mut ClientWorld) {
-    let first = world.computed_delays.first().expect("delays computed");
+    let delays = &world.computed_delays;
+    let first = delays.first().expect("delays computed");
     assert!(
-        world.computed_delays.iter().any(|delay| delay != first),
+        delays.iter().any(|delay| delay != first),
         "all {} delays equal {first:?}",
-        world.computed_delays.len()
+        delays.len()
+    );
+
+    let config = backoff_config(world);
+    let low = millis(config.min_reconnect_delay);
+    let high = millis(config.max_reconnect_delay).min(low + low * (1 << JITTER_ATTEMPT));
+    let width = (high - low).div_ceil(JITTER_BUCKETS as u64);
+    let mut buckets = [0usize; JITTER_BUCKETS];
+    for delay in delays {
+        let offset = millis(*delay)
+            .checked_sub(low)
+            .unwrap_or_else(|| panic!("{delay:?} below the jitter range"));
+        let bucket = usize::try_from(offset / width).expect("small index");
+        *buckets
+            .get_mut(bucket)
+            .unwrap_or_else(|| panic!("{delay:?} above the jitter range")) += 1;
+    }
+    assert!(
+        buckets.iter().all(|count| *count > 0),
+        "delays do not cover {low}..={high} ms: {buckets:?}"
     );
 }
 
-fn reached(bound: Duration, max: Duration) -> bool {
-    bound.as_secs_f64() >= max.as_secs_f64() * REACHED
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).expect("delays fit in u64 ms")
 }
