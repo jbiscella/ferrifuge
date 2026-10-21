@@ -46,6 +46,58 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # The default build uses ring and must not link aws-lc (Block 6).
+      - name: default build links only ring
+        run: test -z "$(cargo tree -e normal -i aws-lc-rs 2>/dev/null)"
+
+  # Builds with an aws-lc TLS provider (Block 6). The default ring build is
+  # tested by the test job.
+  providers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [aws-lc-rs, fips]
+    env:
+      WITHOUT_RING: --no-default-features --features tokio,${{ matrix.provider }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.provider }}
+
+      # aws-lc builds with a C compiler; its FIPS module also needs CMake and
+      # Go. Installed explicitly rather than relying on the runner image.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Pull Centrifugo image
+        run: docker pull centrifugo/centrifugo:v6.10.1
+
+      - name: ring is not linked
+        run: test -z "$(cargo tree -e normal $WITHOUT_RING -i ring 2>/dev/null)"
+
+      - name: clippy
+        run: cargo clippy --all-targets $WITHOUT_RING -- -D warnings
+
+      # Every scenario, the encrypted one included, with this provider.
+      - name: cargo test
+        run: cargo test --all-targets $WITHOUT_RING
+
+      # Default features keep ring enabled: the stronger provider must win.
+      - name: precedence over the default ring
+        run: cargo test --lib --features ${{ matrix.provider }} -- tls_config fips_build
+
   test:
     runs-on: ubuntu-latest
     steps:

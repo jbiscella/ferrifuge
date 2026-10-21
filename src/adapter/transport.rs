@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use futures_util::{SinkExt, StreamExt};
-use rustls::crypto::ring;
+use rustls::crypto::CryptoProvider;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use tokio::net::TcpStream;
@@ -85,11 +85,33 @@ impl WebSocket {
     }
 }
 
+#[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
+compile_error!(
+    "the tokio adapter needs a TLS crypto provider: enable the `ring` (default), `aws-lc-rs` or `fips` feature"
+);
+
+/// The crypto provider chosen by the build's features (Block 6). Features
+/// are additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
+#[cfg(feature = "fips")]
+fn crypto_provider() -> CryptoProvider {
+    rustls::crypto::default_fips_provider()
+}
+
+#[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
+fn crypto_provider() -> CryptoProvider {
+    rustls::crypto::aws_lc_rs::default_provider()
+}
+
+#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
+fn crypto_provider() -> CryptoProvider {
+    rustls::crypto::ring::default_provider()
+}
+
 /// TLS settings for `wss://`, built once per process.
 ///
 /// The crypto provider is set explicitly rather than taken from the process
-/// default: when another crate also enables rustls's aws-lc-rs provider,
-/// rustls cannot pick a default and panics.
+/// default: when another crate also enables another rustls provider, rustls
+/// cannot pick a default and panics.
 fn tls_config() -> Result<Arc<ClientConfig>, String> {
     static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
@@ -100,7 +122,7 @@ fn tls_config() -> Result<Arc<ClientConfig>, String> {
             if added == 0 {
                 return Err("no platform root certificates found".to_owned());
             }
-            let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
                 .with_safe_default_protocol_versions()
                 .map_err(|e| e.to_string())?
                 .with_root_certificates(roots)
