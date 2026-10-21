@@ -10,6 +10,9 @@ use tokio::net::TcpStream;
 
 use crate::machine::FrameType;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
@@ -28,8 +31,9 @@ pub(crate) enum Inbound {
 }
 
 impl WebSocket {
-    /// Opens a connection to `url` (`ws://` or `wss://`).
-    pub(crate) async fn open(url: &str) -> Result<Self, String> {
+    /// Opens a connection to `url` (`ws://` or `wss://`), asking for
+    /// `subprotocol` if any.
+    pub(crate) async fn open(url: &str, subprotocol: Option<&str>) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
             .get(..6)
@@ -39,8 +43,15 @@ impl WebSocket {
         } else {
             Connector::Plain
         };
+        let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+        if let Some(subprotocol) = subprotocol {
+            let value = HeaderValue::from_str(subprotocol).map_err(|e| e.to_string())?;
+            request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
+        }
+        // tungstenite fails the handshake unless the server accepts the
+        // subprotocol asked for.
         let (stream, _) =
-            tokio_tungstenite::connect_async_tls_with_config(url, None, true, Some(connector))
+            tokio_tungstenite::connect_async_tls_with_config(request, None, true, Some(connector))
                 .await
                 .map_err(|e| e.to_string())?;
         Ok(Self { stream })
@@ -173,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url).await.unwrap();
+        let mut ws = WebSocket::open(&url, None).await.unwrap();
 
         ws.send(b"{\"id\":1}".to_vec(), FrameType::Text)
             .await
@@ -208,7 +219,9 @@ mod tests {
                 ws.send(Message::text(kind)).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}")).await.unwrap();
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None)
+            .await
+            .unwrap();
 
         ws.send(b"{}".to_vec(), FrameType::Text).await.unwrap();
         let text = ws.recv().await;
@@ -225,7 +238,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         drop(listener);
 
-        let result = WebSocket::open(&format!("ws://{address}")).await;
+        let result = WebSocket::open(&format!("ws://{address}"), None).await;
 
         assert!(result.is_err());
     }

@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use cucumber::World;
-use ferrifuge::{Client, ClientBuilder, ClientEvent, Config};
+use ferrifuge::{Client, ClientBuilder, ClientEvent, Config, Protocol};
 use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
@@ -19,6 +19,7 @@ mod backoff;
 mod codes;
 mod connection;
 mod ping;
+mod protobuf;
 mod tls;
 mod token;
 
@@ -66,6 +67,8 @@ pub(crate) struct ClientWorld {
     pub(crate) upper_bounds: Vec<Duration>,
     /// Client option set by a step before the client is created.
     pub(crate) max_server_ping_delay: Option<Duration>,
+    /// Encoding of the clients the scenario creates.
+    pub(crate) protocol: Protocol,
     /// Events seen while a step let time elapse.
     pub(crate) elapsed_events: Vec<ClientEvent>,
     /// Transport connections opened while a step let time elapse.
@@ -91,6 +94,7 @@ impl ClientWorld {
         if let Some(delay) = self.max_server_ping_delay {
             config.max_server_ping_delay = delay;
         }
+        config.protocol = self.protocol;
         self.build_client(Client::builder(endpoint).config(config));
     }
 

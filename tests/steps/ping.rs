@@ -22,7 +22,7 @@ const NO_PONG_PERIOD: Duration = Duration::from_millis(500);
 #[given(
     regex = r"^a client connected to the fake server that announces pong is (expected|not expected)$"
 )]
-async fn connected_announcing_pong(world: &mut ClientWorld, expected: String) {
+pub(super) async fn connected_announcing_pong(world: &mut ClientWorld, expected: String) {
     world
         .restart_fake(Announce {
             ping: QUIET_PING_INTERVAL,

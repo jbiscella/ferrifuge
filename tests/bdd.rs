@@ -62,6 +62,12 @@ const IMPLEMENTED: &[&str] = &[
     "The connected event names the transport",
     // Block 6.
     "Secure websocket connection with the build's provider",
+    // Block 7.
+    "Connect with Protobuf",
+    "Frames are binary Protobuf",
+    "Ping answered in Protobuf",
+    "Every message of a multi-message Protobuf frame is handled",
+    "Malformed Protobuf frame forces a reconnect",
 ];
 
 /// Server configuration of @A scenarios.

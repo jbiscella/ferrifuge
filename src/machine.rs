@@ -310,6 +310,7 @@ impl Machine {
     fn with_rng(config: Config, token_source: bool, rng: fastrand::Rng) -> Self {
         let backoff = Backoff::new(config.min_reconnect_delay, config.max_reconnect_delay);
         let tokens = Tokens::new(config.token.clone(), token_source);
+        let codec = Codec::from(config.protocol);
         Self {
             config,
             state: State::Disconnected,
@@ -321,7 +322,7 @@ impl Machine {
             next_command: 0,
             connect_command: None,
             tokens,
-            codec: Codec::default(),
+            codec,
             transport_kind: TransportKind::WebSocket,
             pings: None,
             actions: Vec::new(),
