@@ -374,6 +374,10 @@ impl Machine {
             ));
         }
         self.transports = kinds;
+        // A new list starts a new fallback sequence.
+        self.transport_index = 0;
+        self.transport_chosen = false;
+        self.tried_all_transports = false;
         Ok(self)
     }
 
@@ -1009,6 +1013,39 @@ mod tests {
             transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
         }
         assert_eq!(machine.state(), State::Connecting);
+    }
+
+    #[test]
+    fn new_transports_start_a_new_fallback_sequence() {
+        let three = vec![
+            TransportKind::WebSocket,
+            TransportKind::HttpStream,
+            TransportKind::Sse,
+        ];
+        let mut machine = machine().with_transports(three).unwrap();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportFailed {
+            transport,
+            message: "refused".into(),
+        });
+        machine.handle(Input::Disconnect);
+
+        let mut machine = machine
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        let actions = machine.handle(Input::Connect);
+
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::OpenTransport {
+                    kind: TransportKind::HttpStream,
+                    endpoint: 0,
+                    ..
+                }
+            )),
+            "{actions:?}"
+        );
     }
 
     #[test]

@@ -43,18 +43,17 @@ pub(crate) struct HttpTransport {
 
 impl HttpTransport {
     /// Opens the stream at `url`, sending `initial_frame`, the encoded
-    /// connect command, with the request.
+    /// connect command, with the request. Commands then go to
+    /// `emulation_endpoint`, by default `/emulation` on the stream's server.
     pub(crate) async fn open(
         kind: TransportKind,
         url: &str,
         initial_frame: Vec<u8>,
+        emulation_endpoint: Option<&str>,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
         let http = http_client(url.scheme() == "https")?;
-        let mut emulation_url = url.clone();
-        emulation_url.set_path(EMULATION_PATH);
-        emulation_url.set_query(None);
-        emulation_url.set_fragment(None);
+        let emulation_url = emulation_url(&url, emulation_endpoint)?;
         let sse = kind == TransportKind::Sse;
         let request = if sse {
             url.query_pairs_mut()
@@ -66,14 +65,23 @@ impl HttpTransport {
                 .header(CONTENT_TYPE, JSON)
                 .body(initial_frame)
         };
-        let response = request.send().await.map_err(|e| e.to_string())?;
+        // Without the URL: the sse one carries the connect command, token
+        // included, which must not reach error events.
+        let response = request
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!("HTTP status {status}"));
         }
         let body = response
             .bytes_stream()
-            .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|e| e.to_string()))
+            .map(|chunk| {
+                chunk
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|e| e.without_url().to_string())
+            })
             .boxed();
         Ok(Self {
             http,
@@ -142,6 +150,19 @@ impl HttpTransport {
             }
         }
     }
+}
+
+/// Where emulation requests go: `configured`, absolute, or `/emulation` on
+/// the server of `stream` (centrifuge-js `emulationEndpoint`).
+fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> {
+    if let Some(endpoint) = configured {
+        return Url::parse(endpoint).map_err(|e| e.to_string());
+    }
+    let mut url = stream.clone();
+    url.set_path(EMULATION_PATH);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
 }
 
 /// The HTTP client for `https://` endpoints or for plain ones, built once
@@ -253,6 +274,40 @@ mod tests {
             .into_iter()
             .map(|message| String::from_utf8(message).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn emulation_requests_go_to_the_stream_server_unless_configured() {
+        let stream = Url::parse("https://example.com:8443/connection/sse?cf_connect=x").unwrap();
+
+        let default = emulation_url(&stream, None).unwrap();
+        let configured =
+            emulation_url(&stream, Some("https://example.com/centrifugo/emulation")).unwrap();
+
+        assert_eq!(default.as_str(), "https://example.com:8443/emulation");
+        assert_eq!(
+            configured.as_str(),
+            "https://example.com/centrifugo/emulation"
+        );
+        assert!(emulation_url(&stream, Some("not a url")).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_sse_request_does_not_reveal_the_connect_command() {
+        let connect = br#"{"id":1,"connect":{"token":"secret-token"}}"#.to_vec();
+
+        let result = HttpTransport::open(
+            TransportKind::Sse,
+            "http://127.0.0.1:1/connection/sse",
+            connect,
+            None,
+        )
+        .await;
+
+        let Err(message) = result else {
+            panic!("connected to a closed port");
+        };
+        assert!(!message.contains("secret"), "{message}");
     }
 
     #[test]

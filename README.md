@@ -122,7 +122,9 @@ let client = Client::builder_with_transports([
 ```
 
 The server must enable them (`http_stream.enabled` and `sse.enabled` in
-Centrifugo). They carry JSON only: building a client with the Protobuf
+Centrifugo). Their commands go to the server's emulation endpoint,
+`/emulation` on the same host by default; set another with
+`ClientBuilder::emulation_endpoint`, e.g. behind a path prefix. They carry JSON only: building a client with the Protobuf
 protocol and one of them fails with a configuration error.
 
 ### Connection tokens
