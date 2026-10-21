@@ -15,8 +15,11 @@ use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::time::Sleep;
 
+use super::http::HttpTransport;
 use super::transport::{Inbound, WebSocket};
-use crate::machine::{Action, FetchId, Input, Machine, Timer, TransportId, TransportKind};
+use crate::machine::{
+    Action, FetchId, FrameType, Input, Machine, Timer, TransportId, TransportKind,
+};
 use crate::{ClientError, ClientEvent, Config, State, TokenError};
 
 /// Centrifugo client running on tokio.
@@ -135,7 +138,7 @@ impl ClientBuilder {
     ///
     /// When called outside a tokio runtime: the client runs as a task on it.
     pub fn build(self) -> Result<Client, ClientError> {
-        Ok(Client::start(self.endpoints, self.config, self.get_token))
+        Client::start(self.endpoints, self.config, self.get_token)
     }
 }
 
@@ -177,18 +180,14 @@ impl Client {
         endpoints: Vec<(TransportKind, String)>,
         config: Config,
         get_token: Option<GetToken>,
-    ) -> Self {
-        let endpoint = endpoints
-            .into_iter()
-            .next()
-            .map(|(_, endpoint)| endpoint)
-            .unwrap_or_default();
+    ) -> Result<Self, ClientError> {
         let subprotocol = config.protocol.websocket_subprotocol();
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
         } else {
             Machine::new(config)
         };
+        let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
                 machine,
@@ -199,7 +198,10 @@ impl Client {
             closed: AtomicBool::new(false),
         });
         let driver = Driver {
-            endpoint,
+            endpoints: endpoints
+                .into_iter()
+                .map(|(_, endpoint)| endpoint)
+                .collect(),
             subprotocol,
             shared: Arc::clone(&shared),
             opening: None,
@@ -209,7 +211,7 @@ impl Client {
             timers: Timers::default(),
         };
         tokio::spawn(driver.run());
-        Self { shared }
+        Ok(Self { shared })
     }
 
     /// Current connection state.
@@ -251,18 +253,19 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-type Opening = Pin<Box<dyn Future<Output = Result<WebSocket, String>> + Send>>;
+type Opening = Pin<Box<dyn Future<Output = Result<Transport, String>> + Send>>;
 type Fetching = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>;
 
 /// Performs the machine's actions, and turns transport activity and timers
 /// into inputs for it.
 struct Driver {
-    endpoint: String,
+    /// Endpoints of the transports, in the machine's order.
+    endpoints: Vec<String>,
     /// Websocket subprotocol of the configured encoding, if it needs one.
     subprotocol: Option<&'static str>,
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
-    transport: Option<(TransportId, WebSocket)>,
+    transport: Option<(TransportId, Transport)>,
     get_token: Option<GetToken>,
     fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
@@ -318,8 +321,8 @@ impl Driver {
                 (id, result) = opened(&mut self.opening) => {
                     self.opening = None;
                     match result {
-                        Ok(websocket) => {
-                            self.transport = Some((id, websocket));
+                        Ok(transport) => {
+                            self.transport = Some((id, transport));
                             Input::TransportOpened(id)
                         }
                         Err(message) => Input::TransportFailed { transport: id, message },
@@ -347,16 +350,22 @@ impl Driver {
             Action::OpenTransport {
                 transport: id,
                 kind,
+                endpoint,
+                initial_frame,
             } => {
-                let endpoint = self.endpoint.clone();
+                let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
                 let subprotocol = self.subprotocol;
                 let opening: Opening = match kind {
-                    TransportKind::WebSocket => {
-                        Box::pin(async move { WebSocket::open(&endpoint, subprotocol).await })
-                    }
-                    TransportKind::HttpStream | TransportKind::Sse => {
-                        Box::pin(async { Err("not implemented".to_owned()) })
-                    }
+                    TransportKind::WebSocket => Box::pin(async move {
+                        WebSocket::open(&url, subprotocol)
+                            .await
+                            .map(|websocket| Transport::WebSocket(Box::new(websocket)))
+                    }),
+                    TransportKind::HttpStream | TransportKind::Sse => Box::pin(async move {
+                        HttpTransport::open(kind, &url, initial_frame.unwrap_or_default())
+                            .await
+                            .map(|http| Transport::Http(Box::new(http)))
+                    }),
                 };
                 self.opening = Some((id, opening));
             }
@@ -368,8 +377,8 @@ impl Driver {
                 {
                     self.opening = None;
                 }
-                if let Some((_, websocket)) = self.transport.take_if(|(open, _)| *open == id) {
-                    tokio::spawn(websocket.close());
+                if let Some((_, transport)) = self.transport.take_if(|(open, _)| *open == id) {
+                    transport.close();
                 }
             }
             Action::Send {
@@ -377,9 +386,9 @@ impl Driver {
                 frame,
                 frame_type,
             } => {
-                if let Some((id, websocket)) = &mut self.transport
+                if let Some((id, open)) = &mut self.transport
                     && *id == transport
-                    && websocket.send(frame, frame_type).await.is_err()
+                    && open.send(frame, frame_type).await.is_err()
                 {
                     self.transport = None;
                     self.shared.apply(Input::TransportClosed {
@@ -418,10 +427,48 @@ fn callback_panicked() -> TokenError {
     TokenError::Failed("token callback panicked".to_owned())
 }
 
+/// An open transport of any kind.
+enum Transport {
+    // Boxed: the transports differ much in size, and one is held at a time.
+    WebSocket(Box<WebSocket>),
+    Http(Box<HttpTransport>),
+}
+
+impl Transport {
+    async fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
+        match self {
+            Self::WebSocket(websocket) => websocket.send(frame, frame_type).await,
+            // Failures end the transport through `recv`.
+            Self::Http(http) => {
+                http.send(frame);
+                Ok(())
+            }
+        }
+    }
+
+    /// Cancel-safe.
+    async fn recv(&mut self) -> Inbound {
+        match self {
+            Self::WebSocket(websocket) => websocket.recv().await,
+            Self::Http(http) => http.recv().await,
+        }
+    }
+
+    fn close(self) {
+        match self {
+            Self::WebSocket(websocket) => {
+                tokio::spawn(websocket.close());
+            }
+            // Dropping the response and the requests in flight closes them.
+            Self::Http(_) => {}
+        }
+    }
+}
+
 /// Resolves when the transport being opened is ready; never without one.
 async fn opened(
     opening: &mut Option<(TransportId, Opening)>,
-) -> (TransportId, Result<WebSocket, String>) {
+) -> (TransportId, Result<Transport, String>) {
     match opening {
         Some((id, future)) => (*id, future.await),
         None => std::future::pending().await,
@@ -439,9 +486,9 @@ async fn fetched(
 }
 
 /// Resolves with the next inbound message; never without a transport.
-async fn received(transport: &mut Option<(TransportId, WebSocket)>) -> (TransportId, Inbound) {
+async fn received(transport: &mut Option<(TransportId, Transport)>) -> (TransportId, Inbound) {
     match transport {
-        Some((id, websocket)) => (*id, websocket.recv().await),
+        Some((id, transport)) => (*id, transport.recv().await),
         None => std::future::pending().await,
     }
 }

@@ -255,7 +255,10 @@ async fn within_the_timeout_connected_over(world: &mut ClientWorld, transport: S
     let event = tokio::time::timeout(limit, async {
         loop {
             match world.next_event().await {
+                // Failed attempts, and the event of connect() itself.
                 ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {}
+                ClientEvent::Connecting { code, .. }
+                    if code == codes::connecting::CONNECT_CALLED => {}
                 event => return event,
             }
         }

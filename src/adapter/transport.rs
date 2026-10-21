@@ -96,6 +96,17 @@ impl WebSocket {
     }
 }
 
+/// TLS settings of an HTTP client that only ever speaks plain `http://`:
+/// no root certificates, so it works on hosts without platform ones, and
+/// still the build's provider, as the HTTP client takes no default one.
+pub(super) fn plain_tls_config() -> ClientConfig {
+    ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("the provider supports the default protocol versions")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth()
+}
+
 #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
 compile_error!(
     "the tokio adapter needs a TLS crypto provider: enable the `ring` (default), `aws-lc-rs` or `fips` feature"
@@ -118,12 +129,12 @@ fn crypto_provider() -> CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
 
-/// TLS settings for `wss://`, built once per process.
+/// TLS settings for `wss://` and `https://`, built once per process.
 ///
 /// The crypto provider is set explicitly rather than taken from the process
 /// default: when another crate also enables another rustls provider, rustls
 /// cannot pick a default and panics.
-fn tls_config() -> Result<Arc<ClientConfig>, String> {
+pub(super) fn tls_config() -> Result<Arc<ClientConfig>, String> {
     static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {

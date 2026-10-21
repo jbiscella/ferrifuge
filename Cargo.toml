@@ -20,6 +20,7 @@ tokio = [
     "dep:futures-core",
     "dep:rustls",
     "dep:rustls-native-certs",
+    "dep:reqwest",
 ]
 # TLS crypto provider of the tokio adapter, chosen at build time (Block 6).
 # A build without ring disables default features. When several are enabled
@@ -35,6 +36,9 @@ futures-channel = { version = "0.3.34", optional = true }
 futures-core = { version = "0.3.34", optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"], optional = true }
 prost = "0.14.4"
+# http_stream and sse (Block 8). No provider of its own: it is given the
+# client's TLS configuration, so the build's provider applies (Block 6).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream"], optional = true }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "logging"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
