@@ -4,8 +4,9 @@ use cucumber::{given, then, when};
 use ferrifuge::{ClientEvent, ErrorKind, State, codes};
 use serde_json::json;
 
-use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT};
+use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event};
 use crate::support::proxy;
+use crate::support::relay::CountingRelay;
 
 /// Server disconnect code advising a reconnect (spec: 3000-3499, 4000-4499).
 const RECONNECT_CODE: u32 = 4000;
@@ -142,20 +143,24 @@ async fn the_client_reaches_state(world: &mut ClientWorld, expected: String) {
 
 #[then("no further connect attempt is made")]
 async fn no_further_connect_attempt(world: &mut ClientWorld) {
+    let connections = world.relay.as_ref().map(CountingRelay::connections);
     let attempts = world.proxy.as_ref().map(proxy::ConnectProxy::requests);
     let events = world.events_during(QUIET_PERIOD).await;
 
     assert!(events.is_empty(), "unexpected events: {events:?}");
+    assert_eq!(
+        world.relay.as_ref().map(CountingRelay::connections),
+        connections,
+        "the client opened another connection"
+    );
     assert_eq!(
         world.proxy.as_ref().map(proxy::ConnectProxy::requests),
         attempts,
         "connect attempts reached the proxy"
     );
     assert_eq!(world.client().state(), State::Disconnected);
-    if let Some(server) = &world.server {
-        let info = server.api().call("info", json!({})).await.expect("info");
-        assert_eq!(info["nodes"][0]["num_clients"], 0, "{info}");
-    }
+    // Not via the server's `info` statistics: they are republished about
+    // every 3 s, so they lag behind the client (measured on v6.10.1).
 }
 
 #[then(r#"the client emits an "error" event for each failed transport attempt"#)]
@@ -181,10 +186,4 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
         assert_eq!(error.transport.as_deref(), Some("websocket"), "{error:?}");
     }
     assert_eq!(world.client().state(), State::Connecting);
-}
-
-async fn expect_event(world: &mut ClientWorld, expected: &str) -> ClientEvent {
-    let event = world.next_event().await;
-    assert_eq!(event.name(), expected, "{event:?}");
-    event
 }

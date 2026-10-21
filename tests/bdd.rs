@@ -18,6 +18,8 @@ use cucumber::gherkin::{Feature, GherkinEnv};
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
 use support::proxy::ConnectProxy;
+use support::relay::CountingRelay;
+use support::token::HMAC_SECRET;
 
 const FEATURES: &str = "tests/features";
 
@@ -32,13 +34,18 @@ const IMPLEMENTED: &[&str] = &[
     // Block 1, sub-increment 1b.
     "Temporary connection loss then successful reconnect",
     "Connection loss then terminal error on reconnect",
+    // Block 1, sub-increment 1c.
+    "Terminal condition while connected",
 ];
 
 /// Server configuration of @A scenarios.
-const SERVER_A: &[(&str, &str)] = &[(
-    "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
-    "true",
-)];
+const SERVER_A: &[(&str, &str)] = &[
+    (
+        "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
+        "true",
+    ),
+    ("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY", HMAC_SECRET),
+];
 
 #[tokio::main]
 async fn main() {
@@ -57,6 +64,9 @@ async fn main() {
                         .collect();
                     world.server = Some(Centrifugo::start(&env).await);
                     world.proxy = Some(proxy);
+                }
+                if let Some(server) = &world.server {
+                    world.relay = Some(CountingRelay::start(server.address().to_owned()).await);
                 }
             })
         })

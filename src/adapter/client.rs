@@ -2,25 +2,35 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
-use crate::machine::{Action, Input, Machine, Timer, TransportId};
-use crate::{ClientEvent, Config, State};
+use crate::machine::{Action, FetchId, Input, Machine, Timer, TransportId};
+use crate::{ClientEvent, Config, State, TokenError};
 
 /// Centrifugo client running on tokio.
 ///
 /// Dropping the client disconnects it.
-#[derive(Debug)]
 pub struct Client {
     shared: Arc<Shared>,
+}
+
+impl std::fmt::Debug for Client {
+    // Only the state: queued frames may carry the connection token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("state", &self.state())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the client handle and its driver task share.
@@ -69,6 +79,59 @@ impl Shared {
     }
 }
 
+/// Async callback returning a fresh connection token.
+type GetToken =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>> + Send + Sync>;
+
+/// Builds a [`Client`] with options beyond [`Config`].
+pub struct ClientBuilder {
+    endpoint: String,
+    config: Config,
+    get_token: Option<GetToken>,
+}
+
+impl std::fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("endpoint", &self.endpoint)
+            .field("config", &self.config)
+            .field("get_token", &self.get_token.is_some())
+            .finish()
+    }
+}
+
+impl ClientBuilder {
+    /// Sets the options; [`Config::default`] otherwise.
+    #[must_use]
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Sets the callback that provides a new connection token when the
+    /// current one expires, or when there is none to connect with.
+    /// Return [`TokenError::Unauthorized`] to disconnect the client for good.
+    #[must_use]
+    pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
+    {
+        self.get_token = Some(Arc::new(move || Box::pin(get_token())));
+        self
+    }
+
+    /// Creates the disconnected client.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a tokio runtime: the client runs as a task on it.
+    #[must_use]
+    pub fn build(self) -> Client {
+        Client::start(self.endpoint, self.config, self.get_token)
+    }
+}
+
 impl Client {
     /// Creates a disconnected client for the websocket `endpoint`, e.g.
     /// `ws://localhost:8000/connection/websocket`.
@@ -78,9 +141,27 @@ impl Client {
     /// When called outside a tokio runtime: the client runs as a task on it.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, config: Config) -> Self {
+        Self::builder(endpoint).config(config).build()
+    }
+
+    /// Starts building a client for the websocket `endpoint`.
+    pub fn builder(endpoint: impl Into<String>) -> ClientBuilder {
+        ClientBuilder {
+            endpoint: endpoint.into(),
+            config: Config::default(),
+            get_token: None,
+        }
+    }
+
+    fn start(endpoint: String, config: Config, get_token: Option<GetToken>) -> Self {
+        let machine = if get_token.is_some() {
+            Machine::with_token_source(config)
+        } else {
+            Machine::new(config)
+        };
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
-                machine: Machine::new(config),
+                machine,
                 actions: VecDeque::new(),
             }),
             subscribers: Mutex::new(Vec::new()),
@@ -88,12 +169,16 @@ impl Client {
             closed: AtomicBool::new(false),
         });
         let driver = Driver {
-            endpoint: endpoint.into(),
+            endpoint,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
+            get_token,
+            fetching: None,
             reconnect: None,
             connect_timeout: None,
+            refresh: None,
+            refresh_reply: None,
         };
         tokio::spawn(driver.run());
         Self { shared }
@@ -139,6 +224,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 type Opening = Pin<Box<dyn Future<Output = Result<WebSocket, String>> + Send>>;
+type Fetching = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>;
 
 /// Performs the machine's actions, and turns transport activity and timers
 /// into inputs for it.
@@ -147,8 +233,12 @@ struct Driver {
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, WebSocket)>,
+    get_token: Option<GetToken>,
+    fetching: Option<(FetchId, Fetching)>,
     reconnect: Option<Pin<Box<Sleep>>>,
     connect_timeout: Option<Pin<Box<Sleep>>>,
+    refresh: Option<Pin<Box<Sleep>>>,
+    refresh_reply: Option<Pin<Box<Sleep>>>,
 }
 
 impl Driver {
@@ -187,6 +277,18 @@ impl Driver {
                 () = fired(&mut self.connect_timeout) => {
                     self.connect_timeout = None;
                     Input::TimerFired(Timer::ConnectTimeout)
+                }
+                () = fired(&mut self.refresh) => {
+                    self.refresh = None;
+                    Input::TimerFired(Timer::Refresh)
+                }
+                () = fired(&mut self.refresh_reply) => {
+                    self.refresh_reply = None;
+                    Input::TimerFired(Timer::RefreshReply)
+                }
+                (fetch, result) = fetched(&mut self.fetching) => {
+                    self.fetching = None;
+                    Input::TokenFetched { fetch, result }
                 }
             };
             self.shared.apply(input);
@@ -233,6 +335,24 @@ impl Driver {
             }
             Action::CancelTimer(timer) => *self.timer(timer) = None,
             Action::Emit(event) => self.shared.emit(&event),
+            Action::FetchToken(id) => {
+                // The machine asks only when it was built with a token source.
+                if let Some(get_token) = &self.get_token {
+                    // A panicking callback fails this fetch, not the driver:
+                    // whether it panics creating its future or polling it.
+                    let fetching: Fetching =
+                        match std::panic::catch_unwind(AssertUnwindSafe(|| get_token())) {
+                            Ok(future) => Box::pin(async move {
+                                AssertUnwindSafe(future)
+                                    .catch_unwind()
+                                    .await
+                                    .unwrap_or_else(|_| Err(callback_panicked()))
+                            }),
+                            Err(_) => Box::pin(std::future::ready(Err(callback_panicked()))),
+                        };
+                    self.fetching = Some((id, fetching));
+                }
+            }
         }
     }
 
@@ -240,8 +360,14 @@ impl Driver {
         match timer {
             Timer::Reconnect => &mut self.reconnect,
             Timer::ConnectTimeout => &mut self.connect_timeout,
+            Timer::Refresh => &mut self.refresh,
+            Timer::RefreshReply => &mut self.refresh_reply,
         }
     }
+}
+
+fn callback_panicked() -> TokenError {
+    TokenError::Failed("token callback panicked".to_owned())
 }
 
 /// Resolves when the transport being opened is ready; never without one.
@@ -249,6 +375,16 @@ async fn opened(
     opening: &mut Option<(TransportId, Opening)>,
 ) -> (TransportId, Result<WebSocket, String>) {
     match opening {
+        Some((id, future)) => (*id, future.await),
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves with the token callback's answer; never without a fetch.
+async fn fetched(
+    fetching: &mut Option<(FetchId, Fetching)>,
+) -> (FetchId, Result<String, TokenError>) {
+    match fetching {
         Some((id, future)) => (*id, future.await),
         None => std::future::pending().await,
     }
@@ -308,6 +444,73 @@ mod tests {
             matches!(first, Some(ClientEvent::Disconnected { .. })),
             "{first:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn panicking_token_callback_is_reported_as_a_failed_fetch() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .get_token(|| async { panic!("callback bug") })
+            .build();
+        let mut events = client.events();
+
+        client.connect();
+        let mut next = async || {
+            tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("an event")
+        };
+        let connecting = next().await;
+        let error = next().await;
+
+        assert!(
+            matches!(connecting, Some(ClientEvent::Connecting { .. })),
+            "{connecting:?}"
+        );
+        assert!(
+            matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_callback_panicking_before_its_future_is_a_failed_fetch() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .get_token(|| -> std::future::Ready<Result<String, TokenError>> {
+                panic!("callback bug")
+            })
+            .build();
+        let mut events = client.events();
+
+        client.connect();
+        let mut next = async || {
+            tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("an event")
+        };
+        next().await;
+        let error = next().await;
+
+        assert!(
+            matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn debug_output_of_builder_and_client_never_shows_tokens() {
+        let config = Config {
+            token: "secret-token".into(),
+            ..Config::default()
+        };
+        let builder = Client::builder("ws://127.0.0.1:1/connection/websocket").config(config);
+        let printed_builder = format!("{builder:?}");
+        let client = builder.build();
+        // Queues the connect command, which carries the token, unperformed.
+        client.connect();
+
+        let printed = format!("{printed_builder} {client:?}");
+
+        assert!(!printed.contains("secret-token"), "{printed}");
     }
 
     #[tokio::test]

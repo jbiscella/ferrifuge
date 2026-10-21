@@ -34,6 +34,8 @@ Available now:
 - reconnect attempts with exponential backoff and full jitter;
 - server disconnects: the client reconnects or stops according to the
   server's disconnect code, as the spec defines;
+- connection tokens (JWT), refreshed through a callback before they
+  expire;
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON protocol.
 
@@ -42,14 +44,12 @@ Not yet available:
 | Planned | Where |
 |---|---|
 | Scenario tables for every disconnect code range | Block 3 |
-| Connection tokens and their refresh | Block 1 (1c) |
 | Answering server pings | Block 4 |
 | Subscriptions, publications, RPC | later blocks |
 | http_stream and sse transports, Protobuf encoding | later blocks |
 
-Until then, the server must allow connections without a token. Because pings
-go unanswered, Centrifugo also closes each connection within about half a
-minute with its default settings, and the client then reconnects.
+Because pings go unanswered, Centrifugo closes each connection within about
+half a minute with its default settings, and the client then reconnects.
 
 ## Usage
 
@@ -86,7 +86,8 @@ async fn main() {
 }
 ```
 
-To try it against a local server that accepts connections without a token:
+To try it against a local server that accepts connections without a token
+(see [Connection tokens](#connection-tokens) otherwise):
 
 ```sh
 docker run --rm -p 8000:8000 \
@@ -100,6 +101,33 @@ docker run --rm -p 8000:8000 \
 `disconnect()` change the state before they return. `events()` returns a
 `Stream` of the events emitted from then on; each call returns an independent
 stream. Dropping the client disconnects it.
+
+### Connection tokens
+
+Set the initial token in `Config::token`, and give the builder a callback
+that returns a new one:
+
+```rust
+use ferrifuge::{Client, Config, TokenError};
+
+let client = Client::builder("ws://localhost:8000/connection/websocket")
+    .config(Config {
+        token: initial_token,
+        ..Config::default()
+    })
+    .get_token(|| async {
+        // Ask your backend for a new token.
+        fetch_token().await.map_err(|e| TokenError::Failed(e.to_string()))
+    })
+    .build();
+```
+
+When the server says the token expires, the client calls the callback before
+then and sends the new token. It also calls it to connect when it has no
+token, or after the server rejected one as expired. Return
+`TokenError::Unauthorized` (or an empty token) to disconnect the client for
+good, with code 1. Any other error is reported as an `error` event and
+retried.
 
 ### States and events
 
@@ -119,6 +147,7 @@ while the client keeps reconnecting.
 | `timeout` | 5 s | Time allowed from opening the transport to the connect reply |
 | `name` | `ferrifuge` | Client name reported to the server |
 | `version` | crate version | Client version reported to the server |
+| `token` | empty | Connection token sent with the first connect |
 
 ### Cargo features
 

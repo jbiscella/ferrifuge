@@ -56,6 +56,11 @@ impl Centrifugo {
         }
     }
 
+    /// `host:port` of the server's client and API endpoints.
+    pub(crate) fn address(&self) -> &str {
+        self.base_url.trim_start_matches("http://")
+    }
+
     pub(crate) fn websocket_url(&self) -> String {
         format!(
             "{}/connection/websocket",

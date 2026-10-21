@@ -12,9 +12,11 @@ mod event;
 mod json;
 pub mod machine;
 pub(crate) mod protocol;
+mod token;
 mod wire;
 
 #[cfg(feature = "tokio")]
-pub use adapter::Client;
+pub use adapter::{Client, ClientBuilder};
 pub use config::Config;
 pub use event::{ClientError, ClientEvent, ErrorKind, State};
+pub use token::TokenError;
