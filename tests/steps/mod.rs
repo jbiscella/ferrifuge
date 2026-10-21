@@ -19,6 +19,7 @@ mod backoff;
 mod codes;
 mod connection;
 mod ping;
+mod tls;
 mod token;
 
 /// How long a step waits for an event it expects.

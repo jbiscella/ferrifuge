@@ -10,7 +10,7 @@ keywords = ["centrifugo", "centrifuge", "websocket", "realtime", "pubsub"]
 categories = ["network-programming", "asynchronous"]
 
 [features]
-default = ["tokio"]
+default = ["tokio", "ring"]
 # Runtime adapter. The core must compile without it: `cargo check --no-default-features`.
 tokio = [
     "dep:tokio",
@@ -21,6 +21,13 @@ tokio = [
     "dep:rustls",
     "dep:rustls-native-certs",
 ]
+# TLS crypto provider of the tokio adapter, chosen at build time (Block 6).
+# A build without ring disables default features. When several are enabled
+# the strongest wins: fips > aws-lc-rs > ring.
+ring = ["rustls?/ring"]
+aws-lc-rs = ["rustls?/aws-lc-rs"]
+# aws-lc-rs in FIPS mode; building it needs CMake and Go.
+fips = ["aws-lc-rs", "rustls?/fips"]
 
 [dependencies]
 fastrand = "2.5.0"
@@ -40,6 +47,9 @@ prost-build = "0.14.4"
 protoc-bin-vendored = "3.3.0"
 
 [dev-dependencies]
+# Reports the linked AWS-LC module in the fips build's unit test. Its
+# backend comes from rustls (fips) or reqwest (other test builds).
+aws-lc-rs = { version = "1.18.2", default-features = false }
 axum = "0.8.9"
 base64 = "0.23.1"
 cucumber = "0.23"

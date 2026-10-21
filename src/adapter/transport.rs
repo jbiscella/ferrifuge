@@ -216,4 +216,34 @@ mod tests {
 
         assert!(config.is_ok(), "{config:?}");
     }
+
+    /// The build's strongest provider feature selects the provider
+    /// (Block 6): fips > aws-lc-rs > ring.
+    #[test]
+    fn tls_config_uses_the_build_provider() {
+        let config = tls_config().expect("TLS configuration");
+
+        let key_provider = format!("{:?}", config.crypto_provider().key_provider);
+
+        let expected = if cfg!(feature = "aws-lc-rs") {
+            "AwsLcRs"
+        } else {
+            "Ring"
+        };
+        assert_eq!(key_provider, expected);
+        // rustls also checks TLS-level FIPS requirements here, beyond the
+        // provider's primitives.
+        assert_eq!(config.fips(), cfg!(feature = "fips"));
+    }
+
+    /// A dependency update must not switch the FIPS build to another
+    /// module generation unnoticed (Block 6: AWS-LC-FIPS 4.x).
+    #[cfg(feature = "fips")]
+    #[test]
+    fn fips_build_links_the_4x_fips_module() {
+        let version = aws_lc_rs::awslc_version();
+
+        assert!(version.starts_with("4."), "AWS-LC module {version}");
+        assert!(aws_lc_rs::try_fips_mode().is_ok(), "not in FIPS mode");
+    }
 }

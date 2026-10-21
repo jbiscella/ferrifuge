@@ -60,6 +60,8 @@ const IMPLEMENTED: &[&str] = &[
     "The client speaks JSON by default",
     // Block 5, sub-increment 5d.
     "The connected event names the transport",
+    // Block 6.
+    "Secure websocket connection with the build's provider",
 ];
 
 /// Server configuration of @A scenarios.
