@@ -20,6 +20,10 @@ use crate::machine::TransportKind;
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
 const JSON: &str = "application/json";
+/// Largest message accepted from a stream: the websocket transport's limit
+/// (tungstenite's default `max_message_size`). A server sending more without
+/// ending a message would otherwise grow the buffer without bound.
+const MAX_MESSAGE: usize = 64 << 20;
 
 /// An emulation request in flight; its failure ends the transport.
 type Request = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -32,6 +36,8 @@ pub(crate) struct HttpTransport {
     decoder: Decoder,
     /// Messages decoded but not received yet.
     frames: VecDeque<Vec<u8>>,
+    /// Why the stream cannot go on, reported once `frames` are received.
+    failed: Option<String>,
     requests: FuturesUnordered<Request>,
 }
 
@@ -73,8 +79,9 @@ impl HttpTransport {
             http,
             emulation_url,
             body,
-            decoder: Decoder::new(sse),
+            decoder: Decoder::new(sse, MAX_MESSAGE),
             frames: VecDeque::new(),
+            failed: None,
             requests: FuturesUnordered::new(),
         })
     }
@@ -111,9 +118,16 @@ impl HttpTransport {
             if let Some(frame) = self.frames.pop_front() {
                 return Inbound::Frame(frame);
             }
+            if let Some(reason) = self.failed.take() {
+                return Inbound::Closed { code: None, reason };
+            }
             tokio::select! {
                 chunk = self.body.next() => match chunk {
-                    Some(Ok(chunk)) => self.decoder.push(&chunk, &mut self.frames),
+                    Some(Ok(chunk)) => {
+                        if let Err(reason) = self.decoder.push(&chunk, &mut self.frames) {
+                            self.failed = Some(reason);
+                        }
+                    }
                     Some(Err(reason)) => return Inbound::Closed { code: None, reason },
                     None => {
                         return Inbound::Closed {
@@ -157,6 +171,8 @@ fn http_client(secure: bool) -> Result<reqwest::Client, String> {
 #[derive(Debug, Default)]
 struct Decoder {
     sse: bool,
+    /// Largest message, in bytes.
+    limit: usize,
     /// The line being received.
     line: Vec<u8>,
     /// Data lines of the sse event being received, newline-separated.
@@ -164,15 +180,21 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn new(sse: bool) -> Self {
+    fn new(sse: bool, limit: usize) -> Self {
         Self {
             sse,
+            limit,
             ..Self::default()
         }
     }
 
     /// Adds `chunk`, appending each message it completes to `messages`.
-    fn push(&mut self, chunk: &[u8], messages: &mut VecDeque<Vec<u8>>) {
+    ///
+    /// # Errors
+    ///
+    /// When a message grows past the limit; the messages completed before
+    /// it are appended still.
+    fn push(&mut self, chunk: &[u8], messages: &mut VecDeque<Vec<u8>>) -> Result<(), String> {
         for &byte in chunk {
             if byte == b'\n' {
                 let mut line = std::mem::take(&mut self.line);
@@ -183,7 +205,12 @@ impl Decoder {
             } else {
                 self.line.push(byte);
             }
+            let pending = self.line.len() + self.data.as_ref().map_or(0, Vec::len);
+            if pending > self.limit {
+                return Err(format!("message larger than {} bytes", self.limit));
+            }
         }
+        Ok(())
     }
 
     fn end_line(&mut self, line: Vec<u8>, messages: &mut VecDeque<Vec<u8>>) {
@@ -217,10 +244,10 @@ mod tests {
     use super::*;
 
     fn decode(sse: bool, chunks: &[&[u8]]) -> Vec<String> {
-        let mut decoder = Decoder::new(sse);
+        let mut decoder = Decoder::new(sse, MAX_MESSAGE);
         let mut messages = VecDeque::new();
         for chunk in chunks {
-            decoder.push(chunk, &mut messages);
+            decoder.push(chunk, &mut messages).unwrap();
         }
         messages
             .into_iter()
@@ -257,6 +284,22 @@ mod tests {
         );
 
         assert_eq!(messages, ["{}\n{}"]);
+    }
+
+    #[test]
+    fn a_message_past_the_limit_fails_after_the_complete_ones() {
+        for (sse, chunk) in [
+            (false, &b"{}\n0123456789"[..]),
+            (true, &b"data: {}\n\ndata: 0123\ndata: 456789"[..]),
+        ] {
+            let mut decoder = Decoder::new(sse, 8);
+            let mut messages = VecDeque::new();
+
+            let result = decoder.push(chunk, &mut messages);
+
+            assert!(result.is_err(), "sse {sse}");
+            assert_eq!(messages, [b"{}".to_vec()], "sse {sse}");
+        }
     }
 
     #[test]
