@@ -439,6 +439,8 @@ Feature: TLS crypto provider
 
 `VERIFY:` what Centrifugo v6 does when Protobuf is requested and its configuration does not allow it; encode the observed behaviour as a scenario before implementing.
 
+Verified (Centrifugo v6.10.1, configuration types and a raw websocket client, while implementing Block 7): no option disables the Protobuf encoding, so the case does not arise and needs no scenario; with the default configuration the server accepts the `centrifuge-protobuf` subprotocol, echoes it in the handshake, and answers a length-delimited Protobuf connect command in a binary frame.
+
 Value clause: As an app developer, I want to use the Protobuf encoding, so that I can send and receive binary payloads (centrifuge-js README: "if you want to send binary payloads").
 
 ```gherkin
