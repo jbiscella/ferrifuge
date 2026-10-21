@@ -52,6 +52,8 @@ const IMPLEMENTED: &[&str] = &[
     "Client does not answer when pong is not expected",
     "Missing pings trigger reconnect",
     "Regular pings keep the connection alive",
+    // Block 5, sub-increment 5b.
+    "Token refreshed before expiry keeps the connection",
 ];
 
 /// Server configuration of @A scenarios.
@@ -61,6 +63,9 @@ const SERVER_A: &[(&str, &str)] = &[
         "true",
     ),
     ("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY", HMAC_SECRET),
+    // An expired, unrefreshed connection is closed within a scenario
+    // (default 25 s).
+    ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "1s"),
 ];
 
 #[tokio::main]
