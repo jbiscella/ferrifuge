@@ -495,6 +495,7 @@ Feature: Protobuf encoding
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
 - an empty top-level push on these transports is a server ping (`client.proto`, `Push`): it proves the connection alive and is not answered;
 - an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried;
+- within the first sequence the next transport is tried at once; once every transport has failed, the next sequence starts after the reconnect backoff delay (Block 2), as centrifuge-js counts only the first round as handshake;
 - a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`).
 
 `VERIFY:` the bidirectional emulation protocol (stream request, `/emulation` command requests and their session and node fields) in centrifuge-js `transport_http_stream.ts` and `transport_sse.ts`; there is no other implementation to cross-check against. Centrifugo v6 defaults verified: `http_stream.enabled` and `sse.enabled` are false, the emulation handler prefix is `/emulation`.
@@ -566,6 +567,13 @@ Feature: Transport fallback
     Then the client state is "connecting"
     And the client emits an "error" event for each failed transport attempt
 
+  @E
+  Scenario: A failed fallback sequence is retried after the reconnect backoff
+    Given a client configured with websocket, http_stream and sse endpoints
+    When connect is called and every transport attempt fails
+    Then the transports of the first sequence are tried without delay
+    And the next sequence starts only after the reconnect backoff delay
+
   @A
   Scenario: The fallback sequence is retried until a transport succeeds
     Given a server with http_stream and sse enabled, whose http_stream endpoint is behind a relay that is down
@@ -610,7 +618,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches; tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one.
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle (matters on the emulated transports, whose commands travel as separate requests); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -772,6 +780,15 @@ Feature: Client-side subscriptions
     Then looking up channel "news" returns its subscription
     And looking up channel "weather" returns none
     And the client lists the subscriptions to "news" and "sport"
+
+  @B
+  Scenario: A subscription recreated after removal stays subscribed on an emulated transport
+    Given a client connected over transport "http_stream" through a proxy that delays the next unsubscribe emulation request by 1 s
+    And a client subscribed to channel "news"
+    When the subscription is removed from the client
+    And a new subscription to channel "news" is created and subscribed at once
+    Then the new subscription reaches state "subscribed" after the delayed unsubscribe is settled
+    And a publication to channel "news" is received by the new subscription
 
   @A
   Scenario: Removing a subscription unsubscribes it first
@@ -979,6 +996,13 @@ Feature: Subscription recovery
       | neither          | false      | false       |
 
   @D
+  Scenario: The first subscribe reply's position is used for recovery
+    Given a client connected to the fake server
+    And a subscription to recoverable channel "news" whose subscribe reply carries a stream position
+    When the fake server disconnects the client with a reconnect-advised code before any publication
+    Then the next subscribe command for "news" asks to recover from that stream position
+
+  @D
   Scenario: A changed epoch on a live publication is used for recovery
     Given a client subscribed to recoverable channel "news" on the fake server
     When the fake server pushes a publication with a new epoch
@@ -1093,7 +1117,7 @@ Feature: Subscription recovery
 
 **Goal:** the client tracks subscriptions made by the server at connect and reports their events (spec, "Server-side subscriptions").
 
-**Dependencies:** Block 9.
+**Dependencies:** Blocks 8 (over the emulated transports the handshake arrives as a `Connect` push, whose `subs` must be read too), 9.
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
@@ -1140,6 +1164,10 @@ Feature: Server-side subscriptions
     When the fake server pushes a publication on channel "alerts"
     Then the client receives it as a server-side publication
     And the client-side subscription receives nothing and stays "unsubscribed"
+    When the client-side subscription is subscribed
+    Then it reaches state "subscribed"
+    And the next publication on channel "alerts" goes to the client-side subscription
+    And the server-side registry still lists channel "alerts"
 
   @B
   Scenario: Server-side subscriptions survive an explicit disconnect and connect
@@ -1169,6 +1197,18 @@ Feature: Server-side subscriptions
     When the server API subscribes the client to channel "alerts"
     Then the client emits a server-side "subscribed" event for channel "alerts"
     And a publication to channel "alerts" is received as a server-side publication
+
+  @B
+  Scenario Outline: Server-side subscriptions granted at connect over an emulated transport
+    Given a server with http_stream and sse enabled
+    And the connect proxy subscribes the connection to channel "alerts"
+    When a client connects over transport "<transport>"
+    Then the client emits a server-side "subscribed" event for channel "alerts"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
 
   @D
   Scenario: Server-side subscribed events carry the server's data
@@ -1386,6 +1426,14 @@ Feature: Client commands
     Given a client configured with the Protobuf protocol connected to the fake server
     When the client sends the bytes ff 00 fe
     Then the fake server received a Protobuf send command with the bytes ff 00 fe and no command id
+
+  @B
+  Scenario: A call whose emulation request fails fails at once
+    Given an RPC proxy answering method "echo" with its input
+    And a client connected over transport "http_stream" through a proxy that rejects the next emulation request
+    When the client calls RPC "echo"
+    Then the call fails with a "connection closed" error before the configured timeout
+    And the client reconnects over transport "http_stream"
 
   @D
   Scenario: Losing the transport fails calls already sent at once
