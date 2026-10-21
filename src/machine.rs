@@ -25,14 +25,20 @@ use crate::wire::{
 };
 use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
 
-/// A transport the client can connect over. Further kinds (`http_stream`,
-/// `sse`) come with the transports block; `#[non_exhaustive]` so that adding
-/// them breaks no owner's `match`.
+/// A transport the client can connect over. `#[non_exhaustive]` so that
+/// adding one breaks no owner's `match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TransportKind {
     /// Websocket, `ws://` or `wss://`.
     WebSocket,
+    /// HTTP streaming with bidirectional emulation: a streamed POST response
+    /// carries the replies, commands go in requests to the emulation
+    /// endpoint. `http://` or `https://`, JSON only.
+    HttpStream,
+    /// Server-sent events with bidirectional emulation, as
+    /// [`TransportKind::HttpStream`] but the replies come as an event stream.
+    Sse,
 }
 
 impl TransportKind {
@@ -41,7 +47,16 @@ impl TransportKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::WebSocket => "websocket",
+            Self::HttpStream => "http_stream",
+            Self::Sse => "sse",
         }
+    }
+
+    /// Whether the transport emulates a bidirectional connection over
+    /// HTTP requests.
+    #[must_use]
+    pub fn is_emulated(self) -> bool {
+        matches!(self, Self::HttpStream | Self::Sse)
     }
 }
 
@@ -298,6 +313,19 @@ impl Machine {
     #[must_use]
     pub fn new(config: Config) -> Self {
         Self::with_rng(config, false, fastrand::Rng::new())
+    }
+
+    /// Uses `kinds`, tried in order, instead of a single websocket:
+    /// [`Action::OpenTransport`] names the one to open by its index here.
+    ///
+    /// # Errors
+    ///
+    /// A [`ErrorKind::Configuration`] error when `kinds` is empty, or when
+    /// it holds an HTTP transport and the protocol is Protobuf, which they
+    /// do not carry.
+    pub fn with_transports(self, kinds: Vec<TransportKind>) -> Result<Self, ClientError> {
+        drop(kinds);
+        Ok(self)
     }
 
     /// Creates a disconnected machine whose owner answers

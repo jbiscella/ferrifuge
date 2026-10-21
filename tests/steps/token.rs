@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use cucumber::{given, when};
-use ferrifuge::{Client, ClientEvent, Config, TokenError};
+use ferrifuge::{Client, ClientBuilder, ClientEvent, Config, TokenError};
 
 use super::{ClientWorld, expect_event, test_config};
 use crate::support::token::connection_token;
@@ -17,8 +17,21 @@ const TOKEN_LIFETIME: Duration = Duration::from_secs(3);
 
 #[given("a connected client using a connection token with expiration")]
 async fn a_connected_client_with_expiring_token(world: &mut ClientWorld) {
+    let builder = with_expiring_token(world, Client::builder(world.server_endpoint()));
+    world.build_client(builder);
+    world.client().connect();
+    expect_event(world, "connecting").await;
+    let ClientEvent::Connected { client_id, .. } = expect_event(world, "connected").await else {
+        unreachable!("expect_event checked the name");
+    };
+    world.client_id = Some(client_id);
+}
+
+/// `builder` with a connection token that expires within the scenario, and
+/// a callback refreshing it until [`ClientWorld::token_denied`] is set.
+pub(super) fn with_expiring_token(world: &ClientWorld, builder: ClientBuilder) -> ClientBuilder {
     let denied = Arc::clone(&world.token_denied);
-    let builder = Client::builder(world.server_endpoint())
+    builder
         .config(Config {
             token: connection_token(USER, TOKEN_LIFETIME),
             ..test_config()
@@ -32,14 +45,7 @@ async fn a_connected_client_with_expiring_token(world: &mut ClientWorld) {
                     Ok(connection_token(USER, TOKEN_LIFETIME))
                 }
             }
-        });
-    world.build_client(builder);
-    world.client().connect();
-    expect_event(world, "connecting").await;
-    let ClientEvent::Connected { client_id, .. } = expect_event(world, "connected").await else {
-        unreachable!("expect_event checked the name");
-    };
-    world.client_id = Some(client_id);
+        })
 }
 
 #[when(r#"the token callback signals "unauthorized" during refresh"#)]
