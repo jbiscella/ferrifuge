@@ -43,7 +43,6 @@ Not yet available:
 
 | Planned | Where |
 |---|---|
-| Scenario tables for every disconnect code range | Block 3 |
 | Answering server pings | Block 4 |
 | Subscriptions, publications, RPC | later blocks |
 | http_stream and sse transports, Protobuf encoding | later blocks |
