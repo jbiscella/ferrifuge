@@ -57,6 +57,8 @@ pub(crate) struct ClientWorld {
     pub(crate) backoff_config: Option<Config>,
     /// Delays computed by an @E scenario.
     pub(crate) computed_delays: Vec<Duration>,
+    /// Delays sampled by the jitter scenario, per attempt.
+    pub(crate) jitter_samples: Vec<(usize, Vec<Duration>)>,
     /// Estimated upper bound of the delay, per attempt.
     pub(crate) upper_bounds: Vec<Duration>,
     /// Client option set by a step before the client is created.
