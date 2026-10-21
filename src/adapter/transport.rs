@@ -263,9 +263,11 @@ mod tests {
     #[cfg(feature = "fips")]
     #[test]
     fn fips_build_links_the_4x_fips_module() {
-        let version = aws_lc_rs::awslc_version();
+        // The FIPS module generation, not the AWS-LC release
+        // (`awslc_version`), which aws-lc-rs documents as unfit for it.
+        let generation = aws_lc_rs::fips_version();
 
-        assert!(version.starts_with("4."), "AWS-LC module {version}");
+        assert_eq!(generation, Some(4), "FIPS module generation");
         assert!(aws_lc_rs::try_fips_mode().is_ok(), "not in FIPS mode");
     }
 }
