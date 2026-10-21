@@ -182,6 +182,11 @@ fn http_client(secure: bool) -> Result<reqwest::Client, String> {
             };
             reqwest::Client::builder()
                 .tls_backend_preconfigured(tls)
+                // The TLS setup and the emulation endpoint follow from the
+                // configured URL: a redirect elsewhere fails the attempt,
+                // like an unreachable endpoint, rather than splitting the
+                // stream and the commands between two servers.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| e.to_string())
         })
@@ -200,6 +205,8 @@ struct Decoder {
     line: Vec<u8>,
     /// Data lines of the sse event being received, newline-separated.
     data: Option<Vec<u8>>,
+    /// Type of the sse event being received, when named.
+    event: Option<Vec<u8>>,
     /// The last byte was a CR ending an sse line.
     after_cr: bool,
     /// A line was ended already: the stream's first line may start with a
@@ -269,9 +276,18 @@ impl Decoder {
             return;
         }
         // Event stream format: a blank line ends an event; of the fields,
-        // only data matters (comments, event, id and retry carry nothing).
+        // data and event matter (comments, id and retry carry nothing).
         if line.is_empty() {
-            messages.extend(self.data.take());
+            // Only events of the default type reach the reference transport
+            // (centrifuge-js `onmessage`, WHATWG "dispatch the event").
+            let event = self.event.take();
+            let data = self.data.take();
+            if event.is_none_or(|event| event == b"message") {
+                messages.extend(data);
+            }
+        } else if let Some(value) = line.strip_prefix(b"event:") {
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            self.event = Some(value.to_vec());
         } else if let Some(value) = line.strip_prefix(b"data:") {
             let value = value.strip_prefix(b" ").unwrap_or(value);
             match &mut self.data {
@@ -378,10 +394,47 @@ mod tests {
     }
 
     #[test]
+    fn only_sse_events_of_the_default_type_are_delivered() {
+        let messages = decode(
+            true,
+            &[b"event: notice\ndata: 1\n\nevent: message\ndata: 2\n\ndata: 3\n\n"],
+        );
+
+        assert_eq!(messages, ["2", "3"]);
+    }
+
+    #[tokio::test]
+    async fn a_redirecting_endpoint_fails_the_attempt() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/connection/http_stream",
+            listener.local_addr().unwrap()
+        );
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // The request, sent in one go: answered after it is read.
+            let _ = socket.read(&mut [0; 4096]).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        });
+
+        let result =
+            HttpTransport::open(TransportKind::HttpStream, &url, b"{}".to_vec(), None).await;
+
+        let Err(message) = result else {
+            panic!("followed the redirect");
+        };
+        assert!(message.contains("307"), "{message}");
+    }
+
+    #[test]
     fn sse_comments_and_other_fields_are_ignored_and_data_lines_joined() {
         let messages = decode(
             true,
-            &[b": keep-alive\n\nevent: x\nid: 7\ndata:{}\ndata: {}\nretry: 1\n\n"],
+            &[b": keep-alive\n\nid: 7\ndata:{}\ndata: {}\nretry: 1\n\n"],
         );
 
         assert_eq!(messages, ["{}\n{}"]);
