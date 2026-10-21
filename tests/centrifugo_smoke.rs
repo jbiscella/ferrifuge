@@ -9,6 +9,7 @@ use support::centrifugo::{Centrifugo, TAG};
 use support::fake_server::{Announce, FakeServer};
 use support::proxy::ConnectProxy;
 use support::relay::CountingRelay;
+use support::tls;
 use support::token::{HMAC_SECRET, connection_token};
 
 #[tokio::test]
@@ -22,6 +23,30 @@ async fn server_api_reaches_the_pinned_centrifugo_version() {
         version.starts_with(TAG.trim_start_matches('v')),
         "expected {TAG}, server reports {version}"
     );
+}
+
+/// The TLS variant serves the client endpoints with the test CA's server
+/// certificate and keeps the API plain.
+#[tokio::test]
+async fn tls_server_serves_client_endpoints_with_the_test_ca() {
+    tls::create();
+    let (cert, key) = tls::server_pem();
+    let server = Centrifugo::start_tls(&[], &cert, &key).await;
+    let ca = std::fs::read(tls::ca_path()).expect("CA certificate");
+    let https = reqwest::Client::builder()
+        .tls_certs_only([reqwest::Certificate::from_pem(&ca).expect("CA PEM")])
+        .build()
+        .expect("HTTPS client");
+
+    let response = https
+        .get(format!("https://{}/connection/websocket", server.address()))
+        .send()
+        .await;
+    let info = server.api().call("info", json!({})).await;
+
+    let response = response.expect("TLS handshake with the test CA");
+    assert!(response.status().is_client_error(), "{response:?}");
+    assert!(info.is_ok(), "{info:?}");
 }
 
 #[tokio::test]

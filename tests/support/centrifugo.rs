@@ -16,11 +16,15 @@ pub(crate) const API_KEY: &str = "test-api-key";
 pub(crate) const HOST_GATEWAY: &str = "host.docker.internal";
 
 const PORT: u16 = 8000;
+/// Port of the API and health endpoints when the client endpoints use TLS.
+const INTERNAL_PORT: u16 = 9000;
 
 pub(crate) struct Centrifugo {
     // Dropping the handle stops and removes the container.
     _container: ContainerAsync<GenericImage>,
-    base_url: String,
+    /// `host:port` of the client endpoints.
+    address: String,
+    tls: bool,
     api: ServerApi,
 }
 
@@ -28,15 +32,43 @@ impl Centrifugo {
     /// Starts a server with the HTTP API and health endpoint enabled, plus
     /// `env`: extra `CENTRIFUGO_*` variables for this config variant.
     pub(crate) async fn start(env: &[(&str, &str)]) -> Self {
-        let mut request = GenericImage::new(IMAGE, TAG)
-            .with_exposed_port(ContainerPort::Tcp(PORT))
+        Self::launch(env, None).await
+    }
+
+    /// Like [`Self::start`], with the client endpoints served over TLS with
+    /// `cert_pem` and `key_pem`. The API and health endpoints stay plain
+    /// HTTP on an internal port, so the test drives the server as usual.
+    pub(crate) async fn start_tls(env: &[(&str, &str)], cert_pem: &str, key_pem: &str) -> Self {
+        Self::launch(env, Some((cert_pem, key_pem))).await
+    }
+
+    async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>) -> Self {
+        let api_port = if tls.is_some() { INTERNAL_PORT } else { PORT };
+        let mut image = GenericImage::new(IMAGE, TAG).with_exposed_port(ContainerPort::Tcp(PORT));
+        if tls.is_some() {
+            image = image.with_exposed_port(ContainerPort::Tcp(INTERNAL_PORT));
+        }
+        let mut request = image
             .with_wait_for(WaitFor::http(
-                HttpWaitStrategy::new("/health").with_expected_status_code(200u16),
+                HttpWaitStrategy::new("/health")
+                    .with_port(ContainerPort::Tcp(api_port))
+                    .with_expected_status_code(200u16),
             ))
             .with_cmd(["centrifugo"])
             .with_host(HOST_GATEWAY, Host::HostGateway)
             .with_env_var("CENTRIFUGO_HTTP_API_KEY", API_KEY)
             .with_env_var("CENTRIFUGO_HEALTH_ENABLED", "true");
+        if let Some((cert_pem, key_pem)) = tls {
+            request = request
+                .with_env_var("CENTRIFUGO_HTTP_SERVER_TLS_ENABLED", "true")
+                .with_env_var("CENTRIFUGO_HTTP_SERVER_TLS_CERT_PEM", cert_pem)
+                .with_env_var("CENTRIFUGO_HTTP_SERVER_TLS_KEY_PEM", key_pem)
+                .with_env_var("CENTRIFUGO_HTTP_SERVER_TLS_EXTERNAL", "true")
+                .with_env_var(
+                    "CENTRIFUGO_HTTP_SERVER_INTERNAL_PORT",
+                    INTERNAL_PORT.to_string(),
+                );
+        }
         for (name, value) in env {
             request = request.with_env_var(*name, *value);
         }
@@ -47,25 +79,28 @@ impl Centrifugo {
             .get_host_port_ipv4(PORT)
             .await
             .expect("container port");
-        let base_url = format!("http://{host}:{port}");
-        let api = ServerApi::new(&base_url);
+        let api_port = container
+            .get_host_port_ipv4(api_port)
+            .await
+            .expect("container API port");
+        let api = ServerApi::new(&format!("http://{host}:{api_port}"));
         Self {
             _container: container,
-            base_url,
+            address: format!("{host}:{port}"),
+            tls: tls.is_some(),
             api,
         }
     }
 
-    /// `host:port` of the server's client and API endpoints.
+    /// `host:port` of the server's client endpoints, and of its API unless
+    /// they use TLS.
     pub(crate) fn address(&self) -> &str {
-        self.base_url.trim_start_matches("http://")
+        &self.address
     }
 
     pub(crate) fn websocket_url(&self) -> String {
-        format!(
-            "{}/connection/websocket",
-            self.base_url.replacen("http", "ws", 1)
-        )
+        let scheme = if self.tls { "wss" } else { "ws" };
+        format!("{scheme}://{}/connection/websocket", self.address)
     }
 
     pub(crate) fn api(&self) -> &ServerApi {
