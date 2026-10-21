@@ -6,6 +6,8 @@ use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
+use std::time::Duration;
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
@@ -175,11 +177,7 @@ impl Client {
             transport: None,
             get_token,
             fetching: None,
-            reconnect: None,
-            connect_timeout: None,
-            refresh: None,
-            refresh_reply: None,
-            server_ping: None,
+            timers: Timers::default(),
         };
         tokio::spawn(driver.run());
         Self { shared }
@@ -236,11 +234,42 @@ struct Driver {
     transport: Option<(TransportId, WebSocket)>,
     get_token: Option<GetToken>,
     fetching: Option<(FetchId, Fetching)>,
-    reconnect: Option<Pin<Box<Sleep>>>,
-    connect_timeout: Option<Pin<Box<Sleep>>>,
-    refresh: Option<Pin<Box<Sleep>>>,
-    refresh_reply: Option<Pin<Box<Sleep>>>,
-    server_ping: Option<Pin<Box<Sleep>>>,
+    timers: Timers,
+}
+
+/// The machine's timers: one slot per [`Timer`] kind, so a new kind needs
+/// no change here.
+#[derive(Default)]
+struct Timers([Option<Pin<Box<Sleep>>>; Timer::COUNT]);
+
+impl Timers {
+    fn set(&mut self, timer: Timer, delay: Duration) {
+        // sleep() clamps delays too large for an Instant instead of panicking.
+        self.0[timer.index()] = Some(Box::pin(tokio::time::sleep(delay)));
+    }
+
+    fn cancel(&mut self, timer: Timer) {
+        self.0[timer.index()] = None;
+    }
+
+    /// Resolves with the first timer to fire, which is cleared; never while
+    /// none is set. Cancel-safe: unfired timers keep running.
+    async fn fired(&mut self) -> Timer {
+        std::future::poll_fn(|cx| {
+            for timer in Timer::ALL {
+                let slot = &mut self.0[timer.index()];
+                if slot
+                    .as_mut()
+                    .is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
+                {
+                    *slot = None;
+                    return Poll::Ready(timer);
+                }
+            }
+            Poll::Pending
+        })
+        .await
+    }
 }
 
 impl Driver {
@@ -272,26 +301,7 @@ impl Driver {
                         Input::TransportClosed { transport: id, code, reason }
                     }
                 },
-                () = fired(&mut self.reconnect) => {
-                    self.reconnect = None;
-                    Input::TimerFired(Timer::Reconnect)
-                }
-                () = fired(&mut self.connect_timeout) => {
-                    self.connect_timeout = None;
-                    Input::TimerFired(Timer::ConnectTimeout)
-                }
-                () = fired(&mut self.refresh) => {
-                    self.refresh = None;
-                    Input::TimerFired(Timer::Refresh)
-                }
-                () = fired(&mut self.refresh_reply) => {
-                    self.refresh_reply = None;
-                    Input::TimerFired(Timer::RefreshReply)
-                }
-                () = fired(&mut self.server_ping) => {
-                    self.server_ping = None;
-                    Input::TimerFired(Timer::ServerPing)
-                }
+                timer = self.timers.fired() => Input::TimerFired(timer),
                 (fetch, result) = fetched(&mut self.fetching) => {
                     self.fetching = None;
                     Input::TokenFetched { fetch, result }
@@ -335,11 +345,8 @@ impl Driver {
                     });
                 }
             }
-            Action::SetTimer(timer, delay) => {
-                // sleep() clamps delays too large for an Instant instead of panicking.
-                *self.timer(timer) = Some(Box::pin(tokio::time::sleep(delay)));
-            }
-            Action::CancelTimer(timer) => *self.timer(timer) = None,
+            Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
+            Action::CancelTimer(timer) => self.timers.cancel(timer),
             Action::Emit(event) => self.shared.emit(&event),
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
@@ -359,16 +366,6 @@ impl Driver {
                     self.fetching = Some((id, fetching));
                 }
             }
-        }
-    }
-
-    fn timer(&mut self, timer: Timer) -> &mut Option<Pin<Box<Sleep>>> {
-        match timer {
-            Timer::Reconnect => &mut self.reconnect,
-            Timer::ConnectTimeout => &mut self.connect_timeout,
-            Timer::Refresh => &mut self.refresh,
-            Timer::RefreshReply => &mut self.refresh_reply,
-            Timer::ServerPing => &mut self.server_ping,
         }
     }
 }
@@ -401,14 +398,6 @@ async fn fetched(
 async fn received(transport: &mut Option<(TransportId, WebSocket)>) -> (TransportId, Inbound) {
     match transport {
         Some((id, websocket)) => (*id, websocket.recv().await),
-        None => std::future::pending().await,
-    }
-}
-
-/// Resolves when the timer fires; never without one.
-async fn fired(timer: &mut Option<Pin<Box<Sleep>>>) {
-    match timer {
-        Some(sleep) => sleep.await,
         None => std::future::pending().await,
     }
 }
@@ -518,6 +507,22 @@ mod tests {
         let printed = format!("{printed_builder} {client:?}");
 
         assert!(!printed.contains("secret-token"), "{printed}");
+    }
+
+    #[tokio::test]
+    async fn timers_fire_in_deadline_order_and_cancelled_ones_never() {
+        let mut timers = Timers::default();
+        timers.set(Timer::ServerPing, Duration::from_millis(60));
+        timers.set(Timer::Refresh, Duration::from_millis(20));
+        timers.set(Timer::Reconnect, Duration::from_millis(40));
+        timers.cancel(Timer::Reconnect);
+
+        let first = timers.fired().await;
+        let second = timers.fired().await;
+        let none_left = tokio::time::timeout(Duration::from_millis(100), timers.fired()).await;
+
+        assert_eq!((first, second), (Timer::Refresh, Timer::ServerPing));
+        assert!(none_left.is_err(), "{none_left:?}");
     }
 
     #[tokio::test]
