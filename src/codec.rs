@@ -1,10 +1,10 @@
 //! Encoding of the client protocol on the wire: the one place the machine
-//! goes through to encode commands and decode frames. Only JSON so far;
-//! Protobuf (Block 0 decision) becomes a second variant.
+//! goes through to encode commands and decode frames.
 
-use crate::json;
+use crate::config::Protocol;
 use crate::machine::FrameType;
 use crate::wire::{Command, Reply};
+use crate::{json, protobuf};
 
 /// A client protocol encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,6 +12,17 @@ pub(crate) enum Codec {
     /// JSON, newline-separated messages in text frames.
     #[default]
     Json,
+    /// Protobuf, length-delimited messages in binary frames.
+    Protobuf,
+}
+
+impl From<Protocol> for Codec {
+    fn from(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::Json => Self::Json,
+            Protocol::Protobuf => Self::Protobuf,
+        }
+    }
 }
 
 impl Codec {
@@ -19,6 +30,7 @@ impl Codec {
     pub(crate) fn encode(self, commands: &[Command]) -> Vec<u8> {
         match self {
             Self::Json => json::encode(commands),
+            Self::Protobuf => protobuf::encode(commands),
         }
     }
 
@@ -27,6 +39,7 @@ impl Codec {
     pub(crate) fn decode(self, frame: &[u8]) -> Option<Vec<Reply>> {
         match self {
             Self::Json => json::decode(frame).ok(),
+            Self::Protobuf => protobuf::decode(frame).ok(),
         }
     }
 
@@ -34,6 +47,7 @@ impl Codec {
     pub(crate) fn frame_type(self) -> FrameType {
         match self {
             Self::Json => FrameType::Text,
+            Self::Protobuf => FrameType::Binary,
         }
     }
 }
@@ -56,5 +70,20 @@ mod tests {
         assert_eq!(frame, b"{}");
         assert!(codec.decode(b"{}").is_some());
         assert!(codec.decode(b"not json").is_none());
+    }
+
+    #[test]
+    fn protobuf_frames_are_binary() {
+        let codec = Codec::from(Protocol::Protobuf);
+
+        let frame = codec.encode(&[Command {
+            id: 0,
+            method: Method::Pong,
+        }]);
+
+        assert_eq!(codec.frame_type(), FrameType::Binary);
+        assert_eq!(frame, [0]);
+        assert_eq!(codec.decode(&[0]).map(|replies| replies.len()), Some(1));
+        assert!(codec.decode(&[0xff]).is_none());
     }
 }

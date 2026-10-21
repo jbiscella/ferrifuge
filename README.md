@@ -39,14 +39,15 @@ Available now:
 - server pings: answered with pongs, and a connection whose pings stop is
   re-established;
 - an `error` event for every failed connection attempt;
-- websocket transport (`ws://` and `wss://`) with the JSON protocol.
+- websocket transport (`ws://` and `wss://`) with the JSON or the
+  Protobuf protocol.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
 | Subscriptions, publications, RPC | later blocks |
-| http_stream and sse transports, Protobuf encoding | later blocks |
+| http_stream and sse transports | later blocks |
 
 ## Usage
 
@@ -146,6 +147,7 @@ while the client keeps reconnecting.
 | `version` | crate version | Client version reported to the server |
 | `token` | empty | Connection token sent with the first connect |
 | `max_server_ping_delay` | 10 s | Wait past the server's ping interval before reconnecting; 0 disables |
+| `protocol` | `Protocol::Json` | Encoding of the client protocol: `Json` or `Protobuf` (binary frames, any payload bytes) |
 
 ### Cargo features
 

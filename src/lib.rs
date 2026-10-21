@@ -12,6 +12,7 @@ mod config;
 mod event;
 mod json;
 pub mod machine;
+mod protobuf;
 pub(crate) mod protocol;
 mod token;
 mod wire;
