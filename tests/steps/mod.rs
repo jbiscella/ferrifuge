@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use cucumber::World;
 use ferrifuge::{Client, ClientBuilder, ClientEvent, Config};
-use futures_util::{Stream, StreamExt};
+use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
 use crate::support::fake_server::FakeServer;
@@ -96,6 +96,16 @@ impl ClientWorld {
             .await
             .unwrap_or_else(|_| panic!("no event within {EVENT_TIMEOUT:?}"))
             .expect("event stream ended")
+    }
+
+    /// Every event already emitted and not yet consumed.
+    fn ready_events(&mut self) -> Vec<ClientEvent> {
+        let events = self.events.as_mut().expect("no client created yet");
+        let mut seen = Vec::new();
+        while let Some(Some(event)) = events.next().now_or_never() {
+            seen.push(event);
+        }
+        seen
     }
 
     /// Every event emitted during `period`.

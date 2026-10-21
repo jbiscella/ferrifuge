@@ -1,11 +1,13 @@
 //! Steps of Block 3: disconnect codes.
 
+use std::time::Duration;
+
 use cucumber::{given, then, when};
-use ferrifuge::ClientEvent;
+use ferrifuge::{ClientEvent, State};
 use serde_json::json;
 
-use super::ClientWorld;
 use super::connection::a_connected_client;
+use super::{ClientWorld, EVENT_TIMEOUT};
 use crate::support::proxy;
 
 #[given("a client connected to the fake server")]
@@ -16,11 +18,13 @@ async fn a_client_connected_to_the_fake_server(world: &mut ClientWorld) {
 #[given(regex = r"^the connect proxy answers with disconnect code (\d+)$")]
 fn proxy_answers_with_code(world: &mut ClientWorld, code: u32) {
     let reason = format!("proxy disconnect {code}");
-    world
+    let proxy = world
         .proxy
         .as_ref()
-        .expect("this step needs a connect proxy: tag the scenario @B")
-        .disconnect_next(code, &reason);
+        .expect("this step needs a connect proxy: tag the scenario @B");
+    proxy.disconnect_next(code, &reason);
+    // A retry stays pending, so its connecting state can be observed.
+    proxy.hold_next();
     world.sent_disconnect = Some((code, reason));
 }
 
@@ -65,21 +69,39 @@ fn fake_server_disconnects_with_code(world: &mut ClientWorld, code: u16) {
 /// Waits for the client's reaction to the disconnect the scenario sent.
 ///
 /// A code sent while connected moves the client to "connecting" or
-/// "disconnected" with that code. A reconnect code sent while the client
-/// is still connecting (e.g. by the connect proxy) causes no state change,
-/// as in centrifuge-js; it shows as the client connecting again on its
-/// next attempt, so "connected" counts as having stayed in "connecting".
+/// "disconnected" with that code. A code the connect proxy answers while the
+/// client is still connecting changes no state for a reconnect code, as in
+/// centrifuge-js: there the step waits for the client's retry, which the
+/// proxy holds, and checks the client's actual state at that point.
 #[then(expr = "the client goes to state {string}")]
 async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
     let (code, _) = world.sent_disconnect.clone().expect("a disconnect sent");
+    if world.proxy.is_some() && expected == "connecting" {
+        let retried = tokio::time::timeout(EVENT_TIMEOUT, async {
+            while world.proxy.as_ref().unwrap().requests() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(retried.is_ok(), "the client did not retry");
+        assert_eq!(world.client().state(), State::Connecting);
+        let events = world.ready_events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Disconnected { .. })),
+            "{events:?}"
+        );
+        return;
+    }
     loop {
         let event = world.next_event().await;
         let reached = match &event {
             ClientEvent::Connecting { code: got, .. } if *got == code => "connecting",
             ClientEvent::Disconnected { .. } => "disconnected",
-            ClientEvent::Connected { .. } => "connecting",
             // E.g. the "connecting" that connect() itself emits.
-            _ => continue,
+            ClientEvent::Connecting { .. } | ClientEvent::Error(_) => continue,
+            ClientEvent::Connected { .. } => panic!("expected {expected}, got {event:?}"),
         };
         assert_eq!(reached, expected, "{event:?}");
         world.state_event = Some(event);
