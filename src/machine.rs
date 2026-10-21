@@ -57,7 +57,9 @@ const REFRESH_RETRY_MAX: Duration = Duration::from_secs(10);
 const TOKEN_EXPIRED: u32 = 109;
 
 /// Something that happened, for the machine to react to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output redacts a fetched token.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Input {
     /// The application called `connect()`.
     Connect,
@@ -127,6 +129,45 @@ pub enum Action {
     /// report the answer with [`Input::TokenFetched`]. Only issued by a
     /// machine created with [`Machine::with_token_source`].
     FetchToken(FetchId),
+}
+
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect => f.write_str("Connect"),
+            Self::Disconnect => f.write_str("Disconnect"),
+            Self::TransportOpened(id) => f.debug_tuple("TransportOpened").field(id).finish(),
+            Self::TransportFailed { transport, message } => f
+                .debug_struct("TransportFailed")
+                .field("transport", transport)
+                .field("message", message)
+                .finish(),
+            Self::TransportClosed {
+                transport,
+                code,
+                reason,
+            } => f
+                .debug_struct("TransportClosed")
+                .field("transport", transport)
+                .field("code", code)
+                .field("reason", reason)
+                .finish(),
+            Self::Frame { transport, data } => f
+                .debug_struct("Frame")
+                .field("transport", transport)
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+            Self::TimerFired(timer) => f.debug_tuple("TimerFired").field(timer).finish(),
+            Self::TokenFetched { fetch, result } => f
+                .debug_struct("TokenFetched")
+                .field("fetch", fetch)
+                .field(
+                    "result",
+                    &result.as_ref().map(|token| Secret(token.clone())),
+                )
+                .finish(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Action {
@@ -253,7 +294,8 @@ impl Machine {
                 }
             }
             Input::TimerFired(Timer::Refresh) => {
-                if self.state == State::Connected && self.fetch.is_none() {
+                let in_flight = self.fetch.is_some() || self.refresh_command.is_some();
+                if self.state == State::Connected && !in_flight {
                     self.refresh();
                 }
             }
@@ -574,6 +616,9 @@ impl Machine {
         let Some(transport) = self.transport else {
             return;
         };
+        // The reply re-arms it; a timer armed meanwhile, e.g. by a reconnect
+        // while the token was being fetched, must not start another refresh.
+        self.actions.push(Action::CancelTimer(Timer::Refresh));
         let id = self.command_id();
         self.refresh_command = Some(id);
         let command = Command {
@@ -975,6 +1020,7 @@ mod tests {
         assert_eq!(
             sent,
             [
+                Action::CancelTimer(Timer::Refresh),
                 Action::Send {
                     transport,
                     frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec()
@@ -1055,6 +1101,58 @@ mod tests {
                 "Send {{ transport: {transport:?}, frame: <{} bytes> }}",
                 frame.len()
             )
+        );
+    }
+
+    #[test]
+    fn debug_output_of_inputs_never_shows_fetched_tokens() {
+        let input = Input::TokenFetched {
+            fetch: FetchId(0),
+            result: Ok("secret-token".into()),
+        };
+
+        let printed = format!("{input:?}");
+
+        assert!(!printed.contains("secret-token"), "{printed}");
+    }
+
+    #[test]
+    fn late_refresh_token_after_reconnect_replaces_the_new_refresh_timer() {
+        let (mut machine, transport, _) = connected_with_token(30);
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.handle(Input::TransportOpened(transport));
+        let reconnected = machine.handle(frame(
+            transport,
+            r#"{"id":2,"connect":{"client":"c2","expires":true,"ttl":30}}"#,
+        ));
+        assert!(refresh_timer(&reconnected).is_some());
+
+        let actions = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+
+        assert!(
+            matches!(
+                &actions[..],
+                [
+                    Action::CancelTimer(Timer::Refresh),
+                    Action::Send { .. },
+                    Action::SetTimer(Timer::RefreshReply, _)
+                ]
+            ),
+            "{actions:?}"
+        );
+        assert_eq!(
+            machine.handle(Input::TimerFired(Timer::Refresh)),
+            [],
+            "no second refresh while one is in flight"
         );
     }
 
