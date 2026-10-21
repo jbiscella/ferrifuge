@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–5 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–13 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -35,6 +35,11 @@ Markers used below:
 | Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
+| TLS crypto provider | Chosen at build time by cargo features: ring by default, `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode); the strongest enabled wins (`fips` > `aws-lc-rs` > ring) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring needs no C toolchain |
+| HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider` and `stream`, given the client's own TLS configuration | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
+| Publication payload type | Raw bytes (`Vec<u8>`): raw JSON text with the JSON protocol, any bytes with Protobuf | Every official SDK uses bytes (Go, Java, Swift, Dart) and so does tokio-centrifuge |
+| Protocol selection | A `Config` option, JSON by default, fixed when the client is created | Every SDK fixes it at creation (Go constructors, centrifuge-js builds); tokio-centrifuge uses a config enum |
+| Request/response API | `async fn` returning `Result` | Every SDK returns a result or an error (Go, Dart, Swift, tokio-centrifuge) |
 
 ### References
 
@@ -385,3 +390,392 @@ For "Token refreshed before expiry keeps the connection" the @A server closes ex
 Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes the server close a connection whose 3 s token was never refreshed at 4 s, with `3005 connection expired`.
 
 **Exceptions introduced:** 5a adds no scenario: the JSON codec is crate-private and its command encoding is not observable through the public API beyond what Blocks 1–4 already exercise; codec unit tests cover it.
+
+---
+
+## Block 6 — TLS crypto provider
+
+**Goal:** the cryptography used for `wss://` (and later HTTPS) is chosen at build time, so that a FedRAMP deployment can build with FIPS-validated cryptography and others need no C toolchain.
+
+**Dependencies:** Block 1 (websocket transport).
+
+**Out of scope:** client certificates; custom root certificates; HTTPS, which uses the same configuration once Block 8 adds it.
+
+**Decisions:** cargo features `aws-lc-rs` and `fips` (implies `aws-lc-rs`); without them the provider is ring. Features stay additive: when several are enabled the strongest wins (`fips` > `aws-lc-rs` > ring). Exactly one provider is linked in a build.
+
+`VERIFY:` the build requirements of aws-lc-rs and of its FIPS mode (C toolchain, CMake, Go) on the CI runners; and that a FIPS build reports FIPS mode at run time (aws-lc-rs API).
+
+Value clause: As an app developer deploying under FedRAMP, I want to build the client with FIPS-validated cryptography, so that its TLS connections meet the FIPS 140 requirement.
+
+**Structural acceptance:** the TLS configuration is built from the selected provider in one place; a build with each feature set links only that provider (`cargo tree`); CI builds and tests the default, `aws-lc-rs` and `fips` feature sets; a unit test per build reports the provider in use (and FIPS mode for `fips`).
+
+**Exceptions introduced:** no Gherkin scenario: the provider is a build configuration, not run-time behaviour; it is verified by the CI feature matrix and its unit tests.
+
+---
+
+## Block 7 — Protobuf encoding
+
+**Goal:** the client can use the Protobuf encoding of the client protocol instead of JSON.
+
+**Dependencies:** Block 5 (5c codec seam, frame type).
+
+**Out of scope:** Protobuf over http_stream and sse (Block 8 covers them with JSON); payload serialization (publication data stays bytes).
+
+**Decisions:** `Config::protocol`, an enum `Protocol { Json, Protobuf }`, default `Json` (Block 0). Over websocket the client requests the `centrifuge-protobuf` subprotocol (verified in centrifuge-js and centrifuge-go); several messages in one frame are varint length-delimited (`client.proto`).
+
+`VERIFY:` what Centrifugo v6 does when Protobuf is requested and its configuration does not allow it; encode the observed behaviour as a scenario before implementing.
+
+Value clause: As an app developer, I want to use the Protobuf encoding, so that I can send and receive binary payloads (centrifuge-js README: "if you want to send binary payloads").
+
+```gherkin
+Feature: Protobuf encoding
+
+  @A
+  Scenario: Connect with Protobuf
+    Given a new client configured with the Protobuf protocol
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected"
+
+  @D
+  Scenario: Frames are binary Protobuf
+    Given a client configured with the Protobuf protocol connected to the fake server
+    Then the fake server received the connect command as binary Protobuf
+
+  @D
+  Scenario: Ping answered in Protobuf
+    Given a client configured with the Protobuf protocol connected to the fake server that announces pong is expected
+    When the fake server sends a Protobuf ping
+    Then the client sends a Protobuf pong
+
+  @D
+  Scenario: Malformed Protobuf frame forces a reconnect
+    Given a client configured with the Protobuf protocol connected to the fake server
+    When the fake server sends a binary frame that is not valid Protobuf
+    Then the client emits "connecting" with code 1
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 8 — HTTP-streaming transports and fallback
+
+**Goal:** when websocket cannot connect, the client falls back to http_stream, then to sse (Block 0 order).
+
+**Dependencies:** Blocks 5 (5d transport kind), 6.
+
+**Out of scope:** sockjs, webtransport, unidirectional http_stream and sse (Block 0); Protobuf over these transports; browser-only shims.
+
+**Decisions** (documented in the centrifuge-js README unless noted):
+- the client takes a list of (transport, endpoint); a single endpoint string means websocket only;
+- transports are tried in order during the initial handshake only, until one succeeds; reconnects then use only that transport;
+- reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope.
+
+`VERIFY:` the bidirectional emulation protocol (stream request, `/emulation` command requests and their session and node fields) in centrifuge-js `transport_http_stream.ts` and `transport_sse.ts`; there is no other implementation to cross-check against. Centrifugo v6 defaults verified: `http_stream.enabled` and `sse.enabled` are false, the emulation handler prefix is `/emulation`.
+
+Value clause: As an app developer, I want the client to fall back from websocket to http_stream and then sse, so that it connects in networks where websocket is blocked.
+
+```gherkin
+Feature: Transport fallback
+
+  @A
+  Scenario: Fallback to http_stream when websocket is unreachable
+    Given a server with http_stream and sse enabled
+    And a client configured with an unreachable websocket endpoint and the server's http_stream and sse endpoints
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "http_stream"
+
+  @A
+  Scenario: Fallback to sse when websocket and http_stream are unreachable
+    Given a server with http_stream and sse enabled
+    And a client configured with unreachable websocket and http_stream endpoints and the server's sse endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "sse"
+
+  @A
+  Scenario: A transport that worked is kept on reconnect
+    Given a client connected over transport "http_stream"
+    When the server disconnects the client with a reconnect-advised code
+    Then the client emits "connecting" with that code and reason
+    And then the client emits "connected" over transport "http_stream"
+
+  @A
+  Scenario: Commands work over an emulated transport
+    Given a client connected over transport "sse" using a connection token with expiration
+    When 6 s elapse
+    Then the client stays "connected"
+
+  Scenario: Every transport unreachable
+    Given a client configured with unreachable websocket, http_stream and sse endpoints
+    When connect is called
+    Then the client state is "connecting"
+    And the client emits an "error" event for each failed transport attempt
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 9 — Client-side subscriptions
+
+**Goal:** subscriptions with the states `unsubscribed`, `subscribing` and `subscribed`, a client registry, publications, and automatic resubscribe after a reconnect (spec, "Subscription states", "Subscription management", "Listen to channel publications").
+
+**Dependencies:** Blocks 1–5.
+
+**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0).
+
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0).
+
+`VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape.
+
+Value clause: As an app developer, I want to subscribe to a channel and receive its publications, so that they keep arriving across reconnects without code of mine.
+
+```gherkin
+Feature: Client-side subscriptions
+
+  Scenario: New subscription starts unsubscribed
+    Given a new client
+    When a subscription to channel "news" is created
+    Then the subscription state is "unsubscribed"
+
+  @A
+  Scenario: Subscribe while connected
+    Given a connected client
+    When a subscription to channel "news" is created and subscribed
+    Then the subscription emits "subscribing"
+    And then the subscription emits "subscribed"
+
+  @A
+  Scenario: Subscribe before connect
+    Given a new client with a subscribed subscription to channel "news"
+    When connect is called
+    Then the subscription reaches state "subscribed"
+
+  @A
+  Scenario: Publication delivered
+    Given a client subscribed to channel "news"
+    When the server API publishes {"text":"hello"} to channel "news"
+    Then the subscription receives a publication with data {"text":"hello"}
+
+  @A
+  Scenario: Resubscribe after reconnect
+    Given a client subscribed to channel "news"
+    When the server disconnects the client with a reconnect-advised code
+    Then the subscription emits "subscribing"
+    And then the subscription emits "subscribed"
+
+  @A
+  Scenario: Unsubscribe stops publications
+    Given a client subscribed to channel "news"
+    When unsubscribe is called on the subscription
+    Then the subscription emits "unsubscribed" with code 0
+    And a publication to channel "news" is not received
+
+  Scenario: Duplicate subscription is refused
+    Given a new client with a subscription to channel "news"
+    When a second subscription to channel "news" is created
+    Then creating it fails
+
+  @B
+  Scenario: Permanent subscribe error
+    Given the subscribe proxy answers channel "news" with error code 403
+    When a subscription to channel "news" is subscribed on a connected client
+    Then the subscription emits "unsubscribed" with code 403
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 10 — Subscription tokens, unsubscribe codes, resubscribe backoff
+
+**Goal:** private channels stay authorized through subscription tokens, server unsubscribe codes are honoured, and resubscribes follow their own backoff (spec, "Subscription token", "Unsubscribe codes"; Block 2: "resubscribe backoff, later block, same rules with its own options").
+
+**Dependencies:** Blocks 5 (5b token component), 9.
+
+**Out of scope:** recovery (Block 11); connection tokens (Block 1).
+
+**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2.
+
+`VERIFY:` whether the server API `unsubscribe` accepts a code (if not, the code table runs on @D only, as decided); the client-side unsubscribed code for a denied token (centrifuge-js `unsubscribedCodes`).
+
+Value clause: As an app developer, I want subscription tokens refreshed and server unsubscribe codes honoured, so that private channels stay authorized only while my application allows it.
+
+```gherkin
+Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
+
+  @D
+  Scenario Outline: Server unsubscribe codes
+    Given a client subscribed to channel "news" on the fake server
+    When the fake server unsubscribes the subscription with code <code>
+    Then the subscription goes to state "<state>"
+
+    Examples:
+      | code | state        |
+      | 2000 | unsubscribed |
+      | 2499 | unsubscribed |
+      | 2500 | subscribing  |
+      | 2999 | subscribing  |
+
+  @A
+  Scenario: Subscription token refreshed before expiry keeps the subscription
+    Given a client subscribed to a private channel using a subscription token with expiration
+    When 6 s elapse
+    Then the subscription stays "subscribed"
+
+  @A
+  Scenario: Subscription token denied
+    Given a client subscribed to a private channel using a subscription token with expiration
+    When the subscription token callback signals "unauthorized" during refresh
+    Then the subscription emits "unsubscribed"
+
+  @E
+  Scenario: Resubscribe delays are bounded
+    Given a subscription with minResubscribeDelay 500 ms and maxResubscribeDelay 20000 ms
+    When 50 consecutive subscribe attempts fail with a temporary error
+    Then every computed delay is at most 20000 ms
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 11 — Recovery and getState
+
+**Goal:** missed publications are recovered on resubscribe, and with `getState` a failed recovery reloads the application's state (spec, "Subscription recovery state", "Subscription getState").
+
+**Dependencies:** Blocks 9, 10.
+
+**Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
+
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); unsubscribe code 2502 "state invalidated" clears the position and resubscribes (centrifuge-js; consistent with the spec's ranges).
+
+`VERIFY:` the Centrifugo v6 channel options for history and recovery, and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
+
+Value clause: As an app developer, I want missed publications recovered after a reconnect, or my state reloaded when recovery fails, so that my application sees no gap in a channel's stream.
+
+```gherkin
+Feature: Subscription recovery
+
+  @A
+  Scenario: Missed publications are recovered
+    Given a client subscribed to a channel with history and recovery
+    And the client is disconnected with a reconnect-advised code
+    When 2 publications are made to the channel while the client reconnects
+    Then the subscription emits "subscribed" with recovered true
+    And the subscription receives exactly those 2 publications in order
+
+  @A
+  Scenario: Recovery fails when history is gone
+    Given a client subscribed to a channel with history and recovery
+    And the channel history expires while the client is disconnected
+    When the client resubscribes
+    Then the subscription emits "subscribed" with recovered false
+
+  @A
+  Scenario: getState reloads state when recovery fails
+    Given a subscription with a getState callback to a channel with history and recovery
+    And the channel history expires while the client is disconnected
+    When the client resubscribes
+    Then the getState callback is called once
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 12 — Server-side subscriptions
+
+**Goal:** the client tracks subscriptions made by the server at connect and reports their events (spec, "Server-side subscriptions").
+
+**Dependencies:** Block 9.
+
+**Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
+
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec).
+
+`VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim).
+
+Value clause: As an app developer, I want publications of channels the server subscribed me to, so that server-managed subscriptions need no client code to keep.
+
+```gherkin
+Feature: Server-side subscriptions
+
+  @B
+  Scenario: Publications of a server-side subscription are delivered
+    Given the connect proxy subscribes the connection to channel "alerts"
+    And a connected client
+    When the server API publishes {"level":1} to channel "alerts"
+    Then the client receives a server-side publication on channel "alerts" with data {"level":1}
+
+  @B
+  Scenario: Server-side subscriptions survive a reconnect
+    Given the connect proxy subscribes the connection to channel "alerts"
+    And a connected client
+    When the server disconnects the client with a reconnect-advised code
+    Then the client emits a server-side "subscribed" event for channel "alerts"
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 13 — Client commands
+
+**Goal:** RPC, publish, send, history, presence and presence stats over the client's connection (spec, "Client methods", "Subscription methods", "RPC", "Channel history API", "Presence and presence stats API").
+
+**Dependencies:** Blocks 9, 12.
+
+**Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
+
+**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and fails at once on `disconnect()` (centrifuge-js `_methodCall`); a command without a reply fails with the timeout error (code 1).
+
+`VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixture.
+
+Value clause: As an app developer, I want to call RPC, publish, send, history and presence over the client's connection, so that request/response work needs no separate HTTP client.
+
+```gherkin
+Feature: Client commands
+
+  @B
+  Scenario: RPC returns the proxy's result
+    Given a connected client and an RPC proxy answering method "echo" with its input
+    When the client calls RPC "echo" with {"n":1}
+    Then the call returns {"n":1}
+
+  @A
+  Scenario: Publish reaches subscribers
+    Given a client subscribed to channel "news"
+    When the client publishes {"text":"hi"} to channel "news"
+    Then the subscription receives a publication with data {"text":"hi"}
+
+  @A
+  Scenario: History returns the last publications
+    Given a channel with history holding 3 publications
+    When a connected client requests the last 2 publications of the channel
+    Then it receives those 2 publications with their offsets
+
+  @B
+  Scenario: Temporary RPC error is reported as such
+    Given a connected client and an RPC proxy answering method "busy" with a temporary error
+    When the client calls RPC "busy"
+    Then the call fails with a temporary error
+
+  @D
+  Scenario: A call without a reply times out
+    Given a client connected to the fake server that never replies to commands
+    When the client calls RPC "slow"
+    Then the call fails with a timeout error within the configured timeout plus tolerance
+
+  @A
+  Scenario: A call made while connecting waits for the connection
+    Given a new client
+    When connect is called
+    And the client calls RPC "echo" before it is connected
+    Then the call completes once the client is connected
+```
+
+**Exceptions introduced:** none.
