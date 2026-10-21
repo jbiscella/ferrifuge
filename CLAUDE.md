@@ -401,7 +401,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 **Out of scope:** client certificates; custom root certificates; HTTPS, which uses the same configuration once Block 8 adds it.
 
-**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; a build without any provider feature fails to compile with a message naming the three features.
+**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
 
 `VERIFY:` the build requirements of aws-lc-rs and of its FIPS mode (C toolchain, CMake, Go) on the CI runners; and that a FIPS build reports FIPS mode at run time (aws-lc-rs API).
 
@@ -662,7 +662,28 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Given a subscription with minResubscribeDelay 500 ms and maxResubscribeDelay 20000 ms
     When 50 consecutive subscribe attempts fail with a temporary error
     Then every computed delay is at most 20000 ms
+
+  @E
+  Scenario: Resubscribe delay upper bound grows exponentially until capped
+    Given a subscription with minResubscribeDelay 500 ms and maxResubscribeDelay 20000 ms
+    When consecutive subscribe attempts fail with a temporary error
+    Then the upper bound of the delay for attempt n+1 is greater than for attempt n
+    And the upper bound stops growing once it reaches 20000 ms
+
+  @E
+  Scenario: Resubscribe delays are jittered
+    Given a subscription with fixed resubscribe backoff options
+    When the resubscribe delay for the same attempt number is computed 1000 times
+    Then the computed delays are not all equal
+
+  @E
+  Scenario: Resubscribe backoff options are configurable
+    Given a subscription with minResubscribeDelay 100 ms and maxResubscribeDelay 1000 ms
+    When 50 consecutive subscribe attempts fail with a temporary error
+    Then every computed delay is at most 1000 ms
 ```
+
+The resubscribe steps apply the same checks as Block 2's: each delay is at least the minimum and within its attempt's bound, the bound must reach the maximum exactly, and jitter must cover the whole range.
 
 **Exceptions introduced:** none.
 
@@ -676,7 +697,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
 
 **Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
-**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); unsubscribe code 2502 "state invalidated" clears the position and, when a token callback exists, the subscription token, so the resubscribe fetches a new one, then resubscribes (centrifuge-js `subscription.ts`; consistent with the spec's ranges).
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
 `VERIFY:` the Centrifugo v6 channel options for history and recovery, and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
 
@@ -720,6 +741,12 @@ Feature: Subscription recovery
     When the fake server unsubscribes the subscription with code 2502
     Then the subscription token callback is called again
     And the subscription resubscribes with the new token
+
+  @D
+  Scenario: State invalidation drops a fixed subscription token
+    Given a client subscribed to channel "news" on the fake server using a fixed subscription token
+    When the fake server unsubscribes the subscription with code 2502
+    Then the subscription resubscribes without a token and without a stream position
 ```
 
 **Exceptions introduced:** none.
@@ -734,9 +761,9 @@ Feature: Subscription recovery
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
-**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec).
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`).
 
-`VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim).
+`VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim), and the server API `subscribe` method for a live connection.
 
 Value clause: As an app developer, I want publications of channels the server subscribed me to, so that server-managed subscriptions need no client code to keep.
 
@@ -757,6 +784,21 @@ Feature: Server-side subscriptions
     When the server disconnects the client with a reconnect-advised code
     Then the client emits a server-side "subscribing" event for channel "alerts"
     And then the client emits a server-side "subscribed" event for channel "alerts"
+
+  @B
+  Scenario: Missed publications of a server-side subscription are recovered
+    Given the connect proxy subscribes the connection to channel "alerts" with history and recovery
+    And a connected client
+    And the client is disconnected with a reconnect-advised code
+    When 2 publications are made to channel "alerts" while the client reconnects
+    Then the client receives exactly those 2 server-side publications in order
+
+  @A
+  Scenario: A subscription added by the server after connect is tracked
+    Given a connected client
+    When the server API subscribes the client to channel "alerts"
+    Then the client emits a server-side "subscribed" event for channel "alerts"
+    And a publication to channel "alerts" is received as a server-side publication
 
   @B
   Scenario: A server-side subscription missing after reconnect is unsubscribed
@@ -811,6 +853,13 @@ Feature: Client commands
     Given a connected client and an RPC proxy answering method "busy" with a temporary error
     When the client calls RPC "busy"
     Then the call fails with a temporary error
+
+  @D
+  Scenario: Concurrent calls get their own replies
+    Given a client connected to the fake server that answers commands in reverse order
+    When the client calls RPC "first" and RPC "second" concurrently
+    Then the "first" call returns the reply to "first"
+    And the "second" call returns the reply to "second"
 
   @D
   Scenario: A call without a reply times out
