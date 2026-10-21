@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–4 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–5 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -331,3 +331,55 @@ Feature: Ping/pong
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 5 — SOLID refactorings
+
+**Goal:** apply the findings of the SOLID review of `src/` (solidifier skill, `conservative` rigor) so that later blocks (subscriptions, Protobuf, http_stream/sse, more commands) extend the code instead of editing it. Observable behaviour does not change.
+
+**Dependencies:** Blocks 1–4.
+
+**Out of scope:** the features the seams prepare for (Protobuf encoding, http_stream and sse, subscriptions): later blocks. Review finding #1 (one place per timer kind) is already done (PR #16).
+
+**Rules for every sub-increment:**
+- every scenario of Blocks 1–4 keeps passing unchanged;
+- no observable behaviour change; public API changes only where the sub-increment says so;
+- no abstraction without a second, decided use (a Block 0 decision or a later block); for a closed set, an enum rather than a trait.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Review finding | Structural acceptance |
+|---|---|---|---|
+| 5a | As a maintainer, I want each JSON command to set only its own request field, so that adding a command touches one place | #5, `json.rs` command encoding | `JsonCommand` derives `Default`; each command sets its id and its own field only; codec unit tests cover every command |
+| 5b | As a maintainer, I want connection token handling in its own component, so that subscription tokens can reuse it instead of duplicating it | #2, `machine.rs` token fields and methods | A crate-private token component owns the current and pending token, the token fetch, the refresh command and its timers' decisions; `Machine` delegates to it and keeps no token field of its own; scenario "Token refreshed before expiry keeps the connection" |
+| 5c | As a maintainer, I want the codec chosen in one place, so that Protobuf (Block 0 decision) is added as a second variant | #3, direct `json::` calls in `machine.rs` | A crate-private `Codec` enum (only `Json` until the Protobuf block) encodes commands and decodes frames; `machine.rs` calls no codec module directly; scenario "The client speaks JSON by default" |
+| 5d | As a maintainer, I want the transport kind to be data, so that http_stream and sse (Block 0 decision) are added as variants | #4, transport name constant in `machine.rs`, `WebSocket` hard-wired in the tokio driver | A `TransportKind` enum (only `WebSocket` until the transports block) names the transport in events and selects the driver's transport; `Action::OpenTransport` carries the kind (public API change); scenario "The connected event names the transport" |
+
+The scenarios below guard behaviour the refactorings move but no earlier scenario pins down. They pass before the refactoring; they must still pass after it.
+
+```gherkin
+Feature: SOLID refactorings
+
+  @A
+  Scenario: Token refreshed before expiry keeps the connection
+    Given a connected client using a connection token with expiration
+    When 6 s elapse
+    Then the client stays "connected"
+
+  @D
+  Scenario: The client speaks JSON by default
+    Given a client connected to the fake server
+    Then the fake server received the connect command as JSON
+
+  @A
+  Scenario: The connected event names the transport
+    Given a new client
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "websocket"
+```
+
+For "Token refreshed before expiry keeps the connection" the @A server closes expired connections after a short delay, so that a client which failed to refresh would be disconnected within the scenario. `VERIFY:` the Centrifugo v6 option for that delay (`client.expired_close_delay`, default 25 s) and its environment variable.
+
+**Exceptions introduced:** 5a adds no scenario: the JSON codec is crate-private and its command encoding is not observable through the public API beyond what Blocks 1–4 already exercise; codec unit tests cover it.
