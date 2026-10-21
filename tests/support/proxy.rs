@@ -26,9 +26,15 @@ pub(crate) struct ConnectProxy {
 #[derive(Default)]
 struct Answers {
     /// Answers for the next requests, in order; then connections are accepted.
-    programmed: VecDeque<Value>,
+    programmed: VecDeque<Answer>,
     /// Bodies of the requests received.
     requests: Vec<Value>,
+}
+
+enum Answer {
+    Respond(Value),
+    /// Leave the request unanswered for as long as the scenario runs.
+    Hold,
 }
 
 impl ConnectProxy {
@@ -68,7 +74,19 @@ impl ConnectProxy {
             .lock()
             .unwrap()
             .programmed
-            .push_back(json!({"disconnect": {"code": code, "reason": reason}}));
+            .push_back(Answer::Respond(
+                json!({"disconnect": {"code": code, "reason": reason}}),
+            ));
+    }
+
+    /// Leaves the next connection attempt unanswered, so the client stays
+    /// in its connecting state while a step looks at it.
+    pub(crate) fn hold_next(&self) {
+        self.state
+            .lock()
+            .unwrap()
+            .programmed
+            .push_back(Answer::Hold);
     }
 
     /// Number of connection attempts received so far.
@@ -92,12 +110,15 @@ async fn connect(
     State(state): State<Arc<Mutex<Answers>>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let mut answers = state.lock().unwrap();
-    answers.requests.push(request);
-    Json(
-        answers
-            .programmed
-            .pop_front()
-            .unwrap_or_else(|| json!({"result": {"user": USER}})),
-    )
+    let answer = {
+        let mut answers = state.lock().unwrap();
+        answers.requests.push(request);
+        answers.programmed.pop_front()
+    };
+    match answer {
+        Some(Answer::Respond(answer)) => Json(answer),
+        // Ends when the proxy is dropped with the scenario.
+        Some(Answer::Hold) => std::future::pending().await,
+        None => Json(json!({"result": {"user": USER}})),
+    }
 }

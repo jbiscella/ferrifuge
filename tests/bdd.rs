@@ -17,6 +17,7 @@ use cucumber::gherkin::{Feature, GherkinEnv};
 
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
+use support::fake_server::{Announce, FakeServer};
 use support::proxy::ConnectProxy;
 use support::relay::CountingRelay;
 use support::token::HMAC_SECRET;
@@ -36,6 +37,10 @@ const IMPLEMENTED: &[&str] = &[
     "Connection loss then terminal error on reconnect",
     // Block 1, sub-increment 1c.
     "Terminal condition while connected",
+    // Block 3.
+    "Application disconnect codes sent via server API",
+    "Protocol-range disconnect codes",
+    "Disconnect returned by the connect proxy",
 ];
 
 /// Server configuration of @A scenarios.
@@ -65,8 +70,16 @@ async fn main() {
                     world.server = Some(Centrifugo::start(&env).await);
                     world.proxy = Some(proxy);
                 }
-                if let Some(server) = &world.server {
-                    world.relay = Some(CountingRelay::start(server.address().to_owned()).await);
+                if scenario.tags.iter().any(|tag| tag == "D") {
+                    world.fake = Some(FakeServer::start(Announce::default()).await);
+                }
+                let target = match (&world.server, &world.fake) {
+                    (Some(server), _) => Some(server.address().to_owned()),
+                    (None, Some(fake)) => Some(fake.address()),
+                    (None, None) => None,
+                };
+                if let Some(target) = target {
+                    world.relay = Some(CountingRelay::start(target).await);
                 }
             })
         })
