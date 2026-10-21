@@ -42,6 +42,7 @@ pub(crate) struct FakeServer {
     port: u16,
     state: Arc<Mutex<State>>,
     server: JoinHandle<()>,
+    pinger: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl FakeServer {
@@ -70,6 +71,31 @@ impl FakeServer {
             port,
             state,
             server,
+            pinger: Mutex::new(None),
+        }
+    }
+
+    /// Sends a server ping (an empty reply) to the current connection every
+    /// `period`, until [`FakeServer::stop_pinging`].
+    pub(crate) fn ping_every(&self, period: std::time::Duration) {
+        let state = Arc::clone(&self.state);
+        let pinger = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            loop {
+                ticks.tick().await;
+                if let Some(current) = &state.lock().unwrap().current {
+                    let _ = current.send(Control::Send("{}".to_owned()));
+                }
+            }
+        });
+        if let Some(previous) = self.pinger.lock().unwrap().replace(pinger) {
+            previous.abort();
+        }
+    }
+
+    pub(crate) fn stop_pinging(&self) {
+        if let Some(pinger) = self.pinger.lock().unwrap().take() {
+            pinger.abort();
         }
     }
 
@@ -112,6 +138,7 @@ impl FakeServer {
 
 impl Drop for FakeServer {
     fn drop(&mut self) {
+        self.stop_pinging();
         self.server.abort();
     }
 }
