@@ -355,10 +355,16 @@ impl Machine {
     ///
     /// # Errors
     ///
-    /// A [`ErrorKind::Configuration`] error when `kinds` is empty, or when
-    /// it holds an HTTP transport and the protocol is Protobuf, which they
-    /// do not carry.
+    /// A [`ErrorKind::Configuration`] error when `kinds` is empty, when it
+    /// holds an HTTP transport and the protocol is Protobuf, which they do
+    /// not carry, or when the machine is not disconnected.
     pub fn with_transports(mut self, kinds: Vec<TransportKind>) -> Result<Self, ClientError> {
+        if self.state != State::Disconnected || self.transport.is_some() {
+            return Err(configuration_error(
+                "transports can only be set while disconnected",
+                None,
+            ));
+        }
         if kinds.is_empty() {
             return Err(configuration_error("no transport configured", None));
         }
@@ -1045,6 +1051,20 @@ mod tests {
                 }
             )),
             "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn transports_cannot_change_while_connecting() {
+        let mut machine = machine();
+        machine.handle(Input::Connect);
+
+        let result = machine.with_transports(vec![TransportKind::HttpStream]);
+
+        assert!(
+            matches!(&result, Err(error) if error.kind == ErrorKind::Configuration),
+            "{:?}",
+            result.err()
         );
     }
 

@@ -30,7 +30,9 @@ type Request = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 
 /// An open `http_stream` or sse connection.
 pub(crate) struct HttpTransport {
-    http: reqwest::Client,
+    /// Client for the emulation endpoint, whose scheme may differ from the
+    /// stream's when it is configured.
+    emulation_http: reqwest::Client,
     emulation_url: Url,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
     decoder: Decoder,
@@ -84,7 +86,7 @@ impl HttpTransport {
             })
             .boxed();
         Ok(Self {
-            http,
+            emulation_http: http_client(emulation_url.scheme() == "https")?,
             emulation_url,
             body,
             decoder: Decoder::new(sse, MAX_MESSAGE),
@@ -98,7 +100,7 @@ impl HttpTransport {
     /// ends the transport when [`HttpTransport::recv`] reports it.
     pub(crate) fn send(&mut self, frame: Vec<u8>) {
         let request = self
-            .http
+            .emulation_http
             .post(self.emulation_url.clone())
             .header(CONTENT_TYPE, JSON)
             .body(frame);
@@ -198,6 +200,8 @@ struct Decoder {
     line: Vec<u8>,
     /// Data lines of the sse event being received, newline-separated.
     data: Option<Vec<u8>>,
+    /// The last byte was a CR ending an sse line.
+    after_cr: bool,
 }
 
 impl Decoder {
@@ -217,14 +221,25 @@ impl Decoder {
     /// it are appended still.
     fn push(&mut self, chunk: &[u8], messages: &mut VecDeque<Vec<u8>>) -> Result<(), String> {
         for &byte in chunk {
-            if byte == b'\n' {
-                let mut line = std::mem::take(&mut self.line);
-                if line.last() == Some(&b'\r') {
-                    line.pop();
+            // The LF of a CRLF whose CR ended an sse line already.
+            let after_cr = std::mem::take(&mut self.after_cr);
+            match byte {
+                // An event stream may end lines with CR, LF or CRLF (WHATWG
+                // HTML, "Parsing an event stream").
+                b'\r' if self.sse => {
+                    let line = std::mem::take(&mut self.line);
+                    self.end_line(line, messages);
+                    self.after_cr = true;
                 }
-                self.end_line(line, messages);
-            } else {
-                self.line.push(byte);
+                b'\n' if after_cr => {}
+                b'\n' => {
+                    let mut line = std::mem::take(&mut self.line);
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    self.end_line(line, messages);
+                }
+                _ => self.line.push(byte),
             }
             let pending = self.line.len() + self.data.as_ref().map_or(0, Vec::len);
             if pending > self.limit {
@@ -329,6 +344,16 @@ mod tests {
         let messages = decode(true, &[b"\ndata: {\"id\"", b":1}\n", b"\r\ndata: {}\n\n"]);
 
         assert_eq!(messages, [r#"{"id":1}"#, "{}"]);
+    }
+
+    #[test]
+    fn sse_lines_may_end_with_cr_lf_or_crlf_across_chunks() {
+        let messages = decode(
+            true,
+            &[b"data: {\"a\":1}\r", b"\rdata: {}\r", b"\n\r\ndata: 2\n\n"],
+        );
+
+        assert_eq!(messages, [r#"{"a":1}"#, "{}", "2"]);
     }
 
     #[test]
