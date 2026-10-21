@@ -42,7 +42,9 @@ pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, DecodeError> {
         .collect()
 }
 
-#[derive(Serialize)]
+/// One field per request type; a command sets its own and leaves the
+/// others at their default, so adding a command touches one place.
+#[derive(Serialize, Default)]
 struct JsonCommand<'a> {
     #[serde(skip_serializing_if = "is_zero")]
     id: u32,
@@ -69,31 +71,29 @@ struct JsonConnectRequest<'a> {
 
 impl<'a> From<&'a Command> for JsonCommand<'a> {
     fn from(command: &'a Command) -> Self {
+        let mut json = Self {
+            id: command.id,
+            ..Self::default()
+        };
         match &command.method {
             Method::Connect(ConnectRequest {
                 token,
                 name,
                 version,
-            }) => Self {
-                id: command.id,
-                connect: Some(JsonConnectRequest {
+            }) => {
+                json.connect = Some(JsonConnectRequest {
                     token,
                     name,
                     version,
-                }),
-                refresh: None,
-            },
-            Method::Refresh(RefreshRequest { token }) => Self {
-                id: command.id,
-                connect: None,
-                refresh: Some(JsonRefreshRequest { token }),
-            },
-            Method::Pong => Self {
-                id: command.id,
-                connect: None,
-                refresh: None,
-            },
+                });
+            }
+            Method::Refresh(RefreshRequest { token }) => {
+                json.refresh = Some(JsonRefreshRequest { token });
+            }
+            // A pong is the empty command: no request field.
+            Method::Pong => {}
         }
+        json
     }
 }
 
