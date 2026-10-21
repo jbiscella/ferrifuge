@@ -543,6 +543,14 @@ Feature: Transport fallback
     Then the client state is "connecting"
     And the client emits an "error" event for each failed transport attempt
 
+  @A
+  Scenario: The fallback sequence is retried until a transport succeeds
+    Given a server with http_stream and sse enabled, whose http_stream endpoint is behind a relay that is down
+    And a client configured with an unreachable websocket endpoint, the relayed http_stream endpoint and an unreachable sse endpoint
+    When connect is called
+    And the relay comes up after every transport has failed once
+    Then the client emits "connected" over transport "http_stream"
+
   Scenario: Protobuf with an HTTP transport is rejected
     Given client options with the Protobuf protocol and an http_stream endpoint
     When the client is built
@@ -561,7 +569,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0).
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); `subscribe()` before `connect()` is allowed (spec); publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -650,6 +658,14 @@ Feature: Client-side subscriptions
     And the subscription reaches state "subscribed" again
     Then the subscribe proxy recorded data {"room":1} on both subscribe requests
 
+  @B
+  Scenario: Subscription data from a callback is renewed on resubscribe
+    Given a subscribe proxy recording requests
+    And a client subscribed to channel "news" with a data callback returning {"n":1} then {"n":2}
+    When the server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the subscribe proxy recorded data {"n":1} then {"n":2}
+
   Scenario: Subscriptions are found by channel and listed
     Given a new client with subscriptions to channels "news" and "sport"
     Then looking up channel "news" returns its subscription
@@ -695,7 +711,8 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
   Scenario Outline: Server unsubscribe codes
     Given a client subscribed to channel "news" on the fake server
     When the fake server unsubscribes the subscription with code <code>
-    Then the subscription goes to state "<state>"
+    Then the subscription emits "<state>" with code <code> and the reason sent
+    And the subscription state is "<state>"
 
     Examples:
       | code | state        |
@@ -731,6 +748,20 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When the server answers its sub_refresh with a temporary error
     Then the subscription emits an "error" event
     And the refresh is retried after 5 to 10 s
+
+  @E
+  Scenario: A permanent sub_refresh error unsubscribes
+    Given a subscribed subscription whose token expires
+    When the server answers its sub_refresh with a permanent error
+    Then the subscription emits "unsubscribed" with that error's code and message
+    And no further refresh is scheduled
+
+  @E
+  Scenario: An expiring fixed subscription token without a callback unsubscribes
+    Given a subscribed subscription with a fixed token that expires and no token callback
+    When the subscription refresh is due
+    Then the subscription emits an "error" event for the missing token callback
+    And then the subscription emits "unsubscribed"
 
   @A
   Scenario: Each subscription token callback receives its own channel
@@ -816,6 +847,7 @@ Feature: Subscription recovery
   @A
   Scenario: Missed publications are recovered
     Given a client subscribed to a channel with history and recovery
+    And the subscription has received 1 live publication
     And the client is disconnected with a reconnect-advised code
     When 2 publications are made to the channel while the client reconnects
     Then the subscription emits "subscribed" with was_recovering true and recovered true
@@ -908,6 +940,7 @@ Feature: Server-side subscriptions
   Scenario: Publications of a server-side subscription are delivered
     Given the connect proxy subscribes the connection to channel "alerts"
     And a connected client
+    Then the client emits a server-side "subscribed" event for channel "alerts"
     When the server API publishes {"level":1} to channel "alerts"
     Then the client receives a server-side publication on channel "alerts" with data {"level":1}
 
@@ -962,7 +995,7 @@ Feature: Server-side subscriptions
 
 **Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
 
-**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and fails at once on `disconnect()` (centrifuge-js `_methodCall`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
+**Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, and `disconnect()` fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`); a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout` (centrifuge-js `subscription.ts`); a command without a reply fails with the timeout error (code 1); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 
 `VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
@@ -994,6 +1027,12 @@ Feature: Client commands
     Given a channel with history holding 3 publications
     When a connected client requests the channel's history since the position of the first one
     Then it receives the 2 later publications and the stream's current position
+
+  @A
+  Scenario: History in reverse order
+    Given a channel with history holding 3 publications
+    When a connected client requests the last 2 publications of the channel in reverse order
+    Then it receives the third publication then the second
 
   @A
   Scenario: History with limit 0 returns only the stream position
@@ -1061,6 +1100,22 @@ Feature: Client commands
     And the client calls RPC "echo"
     When disconnect is called
     Then the call fails with a "disconnected" error
+
+  @D
+  Scenario: Disconnect fails a call already sent at once
+    Given a client connected to the fake server that never replies to commands
+    And the client calls RPC "slow"
+    And the fake server has received the RPC command
+    When disconnect is called
+    Then the call fails with a "disconnected" error before the configured timeout
+
+  @D
+  Scenario: A subscription command waits until the subscription is subscribed
+    Given a client connected to the fake server that answers subscribe commands after 1 s
+    When a subscription to channel "news" is subscribed
+    And its history is requested at once
+    Then the fake server receives the history command only after it answered the subscribe command
+    And the history call completes
 
   @D
   Scenario: Send delivers a message without a reply
