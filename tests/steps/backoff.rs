@@ -180,13 +180,16 @@ fn delays_not_all_equal(world: &mut ClientWorld) {
     let width = (high - low).div_ceil(JITTER_BUCKETS as u64);
     let mut buckets = [0usize; JITTER_BUCKETS];
     for delay in delays {
-        let offset = millis(*delay)
-            .checked_sub(low)
-            .unwrap_or_else(|| panic!("{delay:?} below the jitter range"));
-        let bucket = usize::try_from(offset / width).expect("small index");
-        *buckets
-            .get_mut(bucket)
-            .unwrap_or_else(|| panic!("{delay:?} above the jitter range")) += 1;
+        let delay = millis(*delay);
+        assert!(
+            (low..=high).contains(&delay),
+            "{delay} ms outside the jitter range {low}..={high} ms"
+        );
+        // The range is inclusive: its upper end belongs to the last bucket.
+        let bucket = usize::try_from((delay - low) / width)
+            .expect("small index")
+            .min(JITTER_BUCKETS - 1);
+        buckets[bucket] += 1;
     }
     assert!(
         buckets.iter().all(|count| *count > 0),
