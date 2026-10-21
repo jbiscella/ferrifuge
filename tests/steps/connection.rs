@@ -28,7 +28,7 @@ fn a_client_with_unreachable_endpoint(world: &mut ClientWorld) {
 }
 
 #[given("a connected client")]
-async fn a_connected_client(world: &mut ClientWorld) {
+pub(super) async fn a_connected_client(world: &mut ClientWorld) {
     let endpoint = world.server_endpoint();
     world.new_client(endpoint);
     world.client().connect();
@@ -87,6 +87,11 @@ async fn a_client_disconnected_explicitly(world: &mut ClientWorld) {
 
 #[when("connect is called")]
 fn connect_is_called(world: &mut ClientWorld) {
+    // Some scenarios (e.g. Block 3's proxy outline) create no client first.
+    if world.client.is_none() {
+        let endpoint = world.server_endpoint();
+        world.new_client(endpoint);
+    }
     world.client().connect();
 }
 

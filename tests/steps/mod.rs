@@ -11,9 +11,11 @@ use ferrifuge::{Client, ClientBuilder, ClientEvent, Config};
 use futures_util::{Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
+use crate::support::fake_server::FakeServer;
 use crate::support::proxy::ConnectProxy;
 use crate::support::relay::CountingRelay;
 
+mod codes;
 mod connection;
 mod token;
 
@@ -33,9 +35,11 @@ pub(crate) struct ClientWorld {
     pub(crate) server: Option<Centrifugo>,
     /// Started before @B scenarios; the server calls it on every connect.
     pub(crate) proxy: Option<ConnectProxy>,
+    /// Started before @D scenarios.
+    pub(crate) fake: Option<FakeServer>,
     /// Between the client and the server: counts transport connections.
     pub(crate) relay: Option<CountingRelay>,
-    client: Option<Client>,
+    pub(crate) client: Option<Client>,
     events: Option<Events>,
     /// Connection id from the last "connected" event.
     pub(crate) client_id: Option<String>,
@@ -43,6 +47,10 @@ pub(crate) struct ClientWorld {
     server_disconnect: Option<(u32, String)>,
     /// Code and reason the proxy was programmed to answer with.
     proxy_disconnect: Option<(u32, String)>,
+    /// Code and reason of the disconnect a Block 3 step made the server send.
+    pub(crate) sent_disconnect: Option<(u32, String)>,
+    /// The state event that answered it.
+    pub(crate) state_event: Option<ClientEvent>,
     /// When set, the client's token callback answers "unauthorized".
     pub(crate) token_denied: Arc<AtomicBool>,
 }
@@ -74,7 +82,7 @@ impl ClientWorld {
     pub(crate) fn server_endpoint(&self) -> String {
         self.relay
             .as_ref()
-            .expect("this step needs a server: tag the scenario @A or @B")
+            .expect("this step needs a server: tag the scenario @A, @B or @D")
             .websocket_url()
     }
 
