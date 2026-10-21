@@ -495,7 +495,7 @@ Feature: Protobuf encoding
 - reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope;
 - a client configured with the Protobuf protocol and an http_stream or sse endpoint is rejected when it is built, with a configuration error naming the combination, rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
-- an empty top-level push on these transports is a server ping (`client.proto`, `Push`): it proves the connection alive and is not answered;
+- server pings are the same empty `Reply` as over websocket, and are answered with a pong, sent through the emulation endpoint, when `ConnectResult.pong` is set (`client.proto`, `ConnectResult.pong`; centrifuge-js `_handleServerPing`; verified: Centrifugo v6.10.1 sets `pong` on these transports and disconnects an unanswered client with 3012 "no pong"). The unanswered empty `Push` ping of `client.proto` belongs to the unidirectional transports, out of scope (Block 0);
 - an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried;
 - within the first sequence the next transport is tried at once; once every transport has failed, the next sequence starts after the reconnect backoff delay (Block 2), as centrifuge-js counts only the first round as handshake;
 - a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`).
@@ -595,12 +595,11 @@ Feature: Transport fallback
       | sse         |
 
   @A
-  Scenario Outline: Server pings over an HTTP transport keep the connection
-    Given a server with http_stream and sse enabled and a ping interval of 1 s
+  Scenario Outline: Server pings over an HTTP transport are answered
+    Given a server with http_stream and sse enabled, a ping interval of 1 s and a pong timeout of 1 s
     And a client connected over transport "<transport>"
     When 4 s elapse
     Then the client stays "connected"
-    And the client sent no pong
 
     Examples:
       | transport   |
