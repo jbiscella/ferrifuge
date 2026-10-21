@@ -449,6 +449,12 @@ Feature: Protobuf encoding
     Then the client sends a Protobuf pong
 
   @D
+  Scenario: Every message of a multi-message Protobuf frame is handled
+    Given a client configured with the Protobuf protocol connected to the fake server that announces pong is expected
+    When the fake server sends two Protobuf pings in one frame
+    Then the client sends two Protobuf pongs
+
+  @D
   Scenario: Malformed Protobuf frame forces a reconnect
     Given a client configured with the Protobuf protocol connected to the fake server
     When the fake server sends a binary frame that is not valid Protobuf
@@ -623,7 +629,7 @@ Feature: Client-side subscriptions
 
 **Out of scope:** recovery (Block 11); connection tokens (Block 1).
 
-**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2.
+**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2, and the attempt counter resets when the subscription reaches `subscribed` (centrifuge-js); a failing subscription token callback or a temporary `sub_refresh` error emits an `error` event and retries the refresh after 5 to 10 s, as for connection tokens (centrifuge-js `subscription.ts`).
 
 `VERIFY:` whether the server API `unsubscribe` accepts a code (if not, the code table runs on @D only, as decided); the client-side unsubscribed code for a denied token (centrifuge-js `unsubscribedCodes`).
 
@@ -651,6 +657,26 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When 6 s elapse
     Then the subscription stays "subscribed"
 
+  @E
+  Scenario: A failing subscription token callback is retried
+    Given a subscribed subscription whose token expires and whose token callback fails once
+    When the subscription refresh is due
+    Then the subscription emits an "error" event
+    And the refresh is retried after 5 to 10 s
+
+  @E
+  Scenario: A temporary sub_refresh error is retried
+    Given a subscribed subscription whose token expires
+    When the server answers its sub_refresh with a temporary error
+    Then the subscription emits an "error" event
+    And the refresh is retried after 5 to 10 s
+
+  @A
+  Scenario: Each subscription token callback receives its own channel
+    Given a connected client with subscriptions to private channels "a" and "b" using one token callback
+    When both subscriptions are subscribed
+    Then the token callback was called once for channel "a" and once for channel "b"
+
   @A
   Scenario: Subscription token denied
     Given a client subscribed to a private channel using a subscription token with expiration
@@ -677,6 +703,14 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Then the computed delays are not all equal
 
   @E
+  Scenario: A successful subscribe resets the resubscribe backoff
+    Given a subscription with minResubscribeDelay 500 ms and maxResubscribeDelay 20000 ms
+    When 10 consecutive subscribe attempts fail with a temporary error
+    And the next subscribe attempt succeeds
+    And a later subscribe attempt fails with a temporary error
+    Then the delay after that failure is at most 1000 ms
+
+  @E
   Scenario: Resubscribe backoff options are configurable
     Given a subscription with minResubscribeDelay 100 ms and maxResubscribeDelay 1000 ms
     When 50 consecutive subscribe attempts fail with a temporary error
@@ -697,7 +731,7 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
-**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
 `VERIFY:` the Centrifugo v6 channel options for history and recovery, and how a test makes history expire; `getState` in centrifuge-js `163dcba`.
 
@@ -707,19 +741,42 @@ Value clause: As an app developer, I want missed publications recovered after a 
 Feature: Subscription recovery
 
   @A
+  Scenario: A first subscribe does not recover
+    Given a connected client
+    When a subscription to a channel with history and recovery is subscribed
+    Then the subscription emits "subscribed" with was_recovering false and recovered false
+
+  @A
   Scenario: Missed publications are recovered
     Given a client subscribed to a channel with history and recovery
     And the client is disconnected with a reconnect-advised code
     When 2 publications are made to the channel while the client reconnects
-    Then the subscription emits "subscribed" with recovered true
+    Then the subscription emits "subscribed" with was_recovering true and recovered true
     And the subscription receives exactly those 2 publications in order
+
+  @A
+  Scenario: Publications between unsubscribe and subscribe are recovered
+    Given a client subscribed to a channel with history and recovery
+    When unsubscribe is called on the subscription
+    And 2 publications are made to the channel
+    And subscribe is called on the subscription again
+    Then the subscription emits "subscribed" with was_recovering true and recovered true
+    And the subscription receives exactly those 2 publications in order
+
+  @A
+  Scenario: The since option recovers on the first subscribe
+    Given a channel with history and recovery holding 3 publications
+    And a subscription to the channel with the since option at the position of the first one
+    When the subscription is subscribed on a connected client
+    Then the subscription emits "subscribed" with was_recovering true and recovered true
+    And the subscription receives exactly the 2 later publications in order
 
   @A
   Scenario: Recovery fails when history is gone
     Given a client subscribed to a channel with history and recovery
     And the channel history expires while the client is disconnected
     When the client resubscribes
-    Then the subscription emits "subscribed" with recovered false
+    Then the subscription emits "subscribed" with was_recovering true and recovered false
 
   @A
   Scenario: getState provides the position of the initial subscribe
@@ -734,6 +791,14 @@ Feature: Subscription recovery
     And the channel history expires while the client is disconnected
     When the client resubscribes
     Then the getState callback is called a second time
+
+  @E
+  Scenario: A failing getState is retried before subscribing
+    Given a subscription with a getState callback that fails once
+    When the subscription is subscribed on a connected client
+    Then the subscription emits an "error" event
+    And getState is called again after the resubscribe backoff delay
+    And the subscribe command carries the stream position the second call returned
 
   @D
   Scenario: State invalidation fetches a new subscription token
@@ -800,6 +865,13 @@ Feature: Server-side subscriptions
     Then the client emits a server-side "subscribed" event for channel "alerts"
     And a publication to channel "alerts" is received as a server-side publication
 
+  @A
+  Scenario: A server-side subscription removed by the server is unsubscribed
+    Given a connected client
+    And the server API subscribes the client to channel "alerts"
+    When the server API unsubscribes the client from channel "alerts"
+    Then the client emits a server-side "unsubscribed" event for channel "alerts"
+
   @B
   Scenario: A server-side subscription missing after reconnect is unsubscribed
     Given the connect proxy subscribes the connection to channel "alerts"
@@ -853,6 +925,15 @@ Feature: Client commands
     Given a connected client and an RPC proxy answering method "busy" with a temporary error
     When the client calls RPC "busy"
     Then the call fails with a temporary error
+
+  @A
+  Scenario: Subscription-level commands use the subscription's channel
+    Given two clients subscribed to a channel with history and presence
+    When the first client's subscription publishes {"text":"hi"}
+    Then the second client's subscription receives a publication with data {"text":"hi"}
+    And the first client's subscription history ends with that publication
+    And the first client's subscription presence lists both clients
+    And the first client's subscription presence stats count 2 clients
 
   @D
   Scenario: Concurrent calls get their own replies
