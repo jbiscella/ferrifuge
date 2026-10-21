@@ -73,6 +73,8 @@ impl From<pb::Reply> for Reply {
                 ttl: connect.ttl,
                 ping: connect.ping,
                 pong: connect.pong,
+                session: connect.session,
+                node: connect.node,
             })
         } else if let Some(refresh) = reply.refresh {
             ReplyResult::Refresh(RefreshResult {
@@ -240,6 +242,8 @@ mod tests {
                         ttl: 30,
                         ping: 25,
                         pong: true,
+                        session: String::new(),
+                        node: String::new(),
                     }),
                 },
                 Reply {

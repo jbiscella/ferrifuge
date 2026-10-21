@@ -41,6 +41,8 @@ Available now:
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON or the
   Protobuf protocol;
+- http_stream and sse transports (`http://` and `https://`, JSON), tried
+  in order when websocket cannot connect;
 - the TLS crypto provider chosen at build time: ring, aws-lc-rs, or
   aws-lc-rs in FIPS mode.
 
@@ -49,7 +51,6 @@ Not yet available:
 | Planned | Where |
 |---|---|
 | Subscriptions, publications, RPC | later blocks |
-| http_stream and sse transports | later blocks |
 
 ## Usage
 
@@ -101,6 +102,28 @@ docker run --rm -p 8000:8000 \
 `disconnect()` change the state before they return. `events()` returns a
 `Stream` of the events emitted from then on; each call returns an independent
 stream. Dropping the client disconnects it.
+
+### Transport fallback
+
+To fall back to http_stream, then sse, where websocket is blocked, give the
+endpoints in the order to try them. They are tried on the first connection
+only, until one works; reconnects keep that one.
+
+```rust
+use ferrifuge::Client;
+use ferrifuge::machine::TransportKind;
+
+let client = Client::builder_with_transports([
+    (TransportKind::WebSocket, "wss://example.com/connection/websocket".to_owned()),
+    (TransportKind::HttpStream, "https://example.com/connection/http_stream".to_owned()),
+    (TransportKind::Sse, "https://example.com/connection/sse".to_owned()),
+])
+.build()?;
+```
+
+The server must enable them (`http_stream.enabled` and `sse.enabled` in
+Centrifugo). They carry JSON only: building a client with the Protobuf
+protocol and one of them fails with a configuration error.
 
 ### Connection tokens
 
@@ -155,7 +178,7 @@ while the client keeps reconnecting.
 
 | Feature | Default | Adds |
 |---|---|---|
-| `tokio` | yes | `Client`, the websocket transport, TLS through rustls with the platform's root certificates |
+| `tokio` | yes | `Client`, the websocket, http_stream and sse transports, TLS through rustls with the platform's root certificates |
 | `ring` | yes | ring as the TLS crypto provider; builds with a C compiler |
 | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |

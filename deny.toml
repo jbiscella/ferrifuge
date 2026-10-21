@@ -5,6 +5,16 @@
 [graph]
 # Dev-dependencies are checked too: they run in CI with network and Docker access.
 all-features = true
+# The platforms ferrifuge supports (CLAUDE.md, Block 8): crates used only
+# on others, e.g. wasm32 shims of the HTTP client, are not shipped.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
 
 [advisories]
 # RustSec advisory DB: vulnerabilities, unmaintained, unsound and yanked crates.

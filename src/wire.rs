@@ -72,6 +72,10 @@ pub(crate) struct ConnectResult {
     pub(crate) ttl: u32,
     pub(crate) ping: u32,
     pub(crate) pong: bool,
+    /// Session and node of an emulated connection, which emulation
+    /// requests must name; empty otherwise.
+    pub(crate) session: String,
+    pub(crate) node: String,
 }
 
 /// `RefreshResult` of `client.proto`.

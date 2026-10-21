@@ -42,6 +42,26 @@ pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, DecodeError> {
         .collect()
 }
 
+/// Body of a request to the emulation endpoint carrying `frame` for the
+/// emulated connection `session` on `node` (centrifuge-js
+/// `transport_http_stream.ts`, `send`). The commands travel as a JSON
+/// string: Centrifugo v6.10.1 rejects them embedded as JSON values.
+pub(crate) fn emulation_request(session: &str, node: &str, frame: &[u8]) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct EmulationRequest<'a> {
+        session: &'a str,
+        node: &'a str,
+        data: std::borrow::Cow<'a, str>,
+    }
+    serde_json::to_vec(&EmulationRequest {
+        session,
+        node,
+        // JSON frames are UTF-8: the client encodes them.
+        data: String::from_utf8_lossy(frame),
+    })
+    .expect("serializing plain structs to a Vec cannot fail")
+}
+
 /// One field per request type; a command sets its own and leaves the
 /// others at their default, so adding a command touches one place.
 #[derive(Serialize, Default)]
@@ -133,6 +153,8 @@ struct JsonConnectResult {
     ttl: u32,
     ping: u32,
     pong: bool,
+    session: String,
+    node: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -165,6 +187,8 @@ impl From<JsonReply> for Reply {
                 ttl: connect.ttl,
                 ping: connect.ping,
                 pong: connect.pong,
+                session: connect.session,
+                node: connect.node,
             })
         } else if let Some(refresh) = reply.refresh {
             ReplyResult::Refresh(RefreshResult {
@@ -231,7 +255,7 @@ mod tests {
 
     #[test]
     fn decodes_connect_reply() {
-        let frame = br#"{"id":1,"connect":{"client":"c1","version":"6.10.1","expires":true,"ttl":30,"ping":25,"pong":true,"session":"s"}}"#;
+        let frame = br#"{"id":1,"connect":{"client":"c1","version":"6.10.1","expires":true,"ttl":30,"ping":25,"pong":true,"session":"s","node":"n"}}"#;
 
         let replies = decode(frame).unwrap();
 
@@ -247,6 +271,8 @@ mod tests {
                     ttl: 30,
                     ping: 25,
                     pong: true,
+                    session: "s".into(),
+                    node: "n".into(),
                 }),
             }]
         );
@@ -334,6 +360,16 @@ mod tests {
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
         assert_eq!(replies[1].result, ReplyResult::Push(Push::Unsupported));
+    }
+
+    #[test]
+    fn emulation_request_carries_the_frame_as_a_string() {
+        let body = emulation_request("s1", "n1", b"{\"id\":2}\n{}");
+
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            r#"{"session":"s1","node":"n1","data":"{\"id\":2}\n{}"}"#
+        );
     }
 
     #[test]

@@ -18,10 +18,12 @@ use tokens::{
 
 use crate::backoff::{self, Backoff};
 use crate::codec::Codec;
+use crate::config::Protocol;
+use crate::json;
 use crate::token::Secret;
 use crate::wire::{
-    Command, ConnectRequest, ConnectResult, Error, Method, RefreshRequest, RefreshResult, Reply,
-    ReplyResult,
+    Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
+    RefreshResult, Reply, ReplyResult,
 };
 use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
 
@@ -172,6 +174,15 @@ pub enum Action {
         transport: TransportId,
         /// Which kind of transport to open.
         kind: TransportKind,
+        /// Index of the endpoint to open in the list given to
+        /// [`Machine::with_transports`]; 0 for the single websocket.
+        endpoint: usize,
+        /// For an emulated transport ([`TransportKind::is_emulated`]), the
+        /// encoded connect command, sent with the request opening the
+        /// stream: in the `http_stream` request body, in the sse
+        /// `cf_connect` query parameter. Later [`Action::Send`] frames are
+        /// bodies of requests to the emulation endpoint.
+        initial_frame: Option<Vec<u8>>,
     },
     /// Close the transport and report nothing more about it.
     CloseTransport(TransportId),
@@ -238,10 +249,22 @@ impl std::fmt::Debug for Input {
 impl std::fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OpenTransport { transport, kind } => f
+            Self::OpenTransport {
+                transport,
+                kind,
+                endpoint,
+                initial_frame,
+            } => f
                 .debug_struct("OpenTransport")
                 .field("transport", transport)
                 .field("kind", kind)
+                .field("endpoint", endpoint)
+                .field(
+                    "initial_frame",
+                    &initial_frame
+                        .as_ref()
+                        .map(|frame| format!("<{} bytes>", frame.len())),
+                )
                 .finish(),
             Self::CloseTransport(id) => f.debug_tuple("CloseTransport").field(id).finish(),
             Self::Send {
@@ -300,8 +323,20 @@ pub struct Machine {
     tokens: Tokens,
     /// Encoding of the client protocol.
     codec: Codec,
-    /// Transport to connect over.
-    transport_kind: TransportKind,
+    /// Transports to try, in order (Block 8).
+    transports: Vec<TransportKind>,
+    /// Index in `transports` of the one in use, or to try next.
+    transport_index: usize,
+    /// A connection was established over the transport at
+    /// `transport_index`: every reconnect uses it (centrifuge-js
+    /// `_transportWasOpen`).
+    transport_chosen: bool,
+    /// Every transport was tried once without one being chosen: later
+    /// attempts wait for the reconnect backoff (centrifuge-js
+    /// `_triedAllTransports`).
+    tried_all_transports: bool,
+    /// Session and node of the emulated connection, from its connect reply.
+    emulation: Option<(String, String)>,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -323,8 +358,22 @@ impl Machine {
     /// A [`ErrorKind::Configuration`] error when `kinds` is empty, or when
     /// it holds an HTTP transport and the protocol is Protobuf, which they
     /// do not carry.
-    pub fn with_transports(self, kinds: Vec<TransportKind>) -> Result<Self, ClientError> {
-        drop(kinds);
+    pub fn with_transports(mut self, kinds: Vec<TransportKind>) -> Result<Self, ClientError> {
+        if kinds.is_empty() {
+            return Err(configuration_error("no transport configured", None));
+        }
+        if self.config.protocol == Protocol::Protobuf
+            && let Some(kind) = kinds.iter().find(|kind| kind.is_emulated())
+        {
+            return Err(configuration_error(
+                &format!(
+                    "the Protobuf protocol cannot be used with the {} transport",
+                    kind.name()
+                ),
+                Some(*kind),
+            ));
+        }
+        self.transports = kinds;
         Ok(self)
     }
 
@@ -351,7 +400,11 @@ impl Machine {
             connect_command: None,
             tokens,
             codec,
-            transport_kind: TransportKind::WebSocket,
+            transports: vec![TransportKind::WebSocket],
+            transport_index: 0,
+            transport_chosen: false,
+            tried_all_transports: false,
+            emulation: None,
             pings: None,
             actions: Vec::new(),
         }
@@ -456,9 +509,18 @@ impl Machine {
         self.next_transport += 1;
         self.transport = Some(id);
         self.transport_open = false;
+        let kind = self.transport_kind();
+        // An emulated stream is opened by a request carrying the connect
+        // command (centrifuge-js `_initializeTransport`).
+        let initial_frame = kind.is_emulated().then(|| {
+            let command = self.connect_command();
+            self.codec.encode(&[command])
+        });
         self.actions.push(Action::OpenTransport {
             transport: id,
-            kind: self.transport_kind,
+            kind,
+            endpoint: self.transport_index,
+            initial_frame,
         });
         self.actions
             .push(Action::SetTimer(Timer::ConnectTimeout, self.config.timeout));
@@ -469,17 +531,34 @@ impl Machine {
             return;
         };
         self.transport_open = true;
+        if self.transport_kind().is_emulated() {
+            // The connect command went with the request; only its reply
+            // proves the transport (centrifuge-js `onOpen`).
+            return;
+        }
+        // An open websocket keeps its transport, even if the connect reply
+        // is slow (centrifuge-js `onOpen`).
+        self.transport_chosen = true;
+        let command = self.connect_command();
+        self.send(transport, &[command]);
+    }
+
+    /// A new connect command, now the one awaiting its reply.
+    fn connect_command(&mut self) -> Command {
         let id = self.command_id();
         self.connect_command = Some(id);
-        let command = Command {
+        Command {
             id,
             method: Method::Connect(ConnectRequest {
                 token: self.tokens.for_connect(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
             }),
-        };
-        self.send(transport, &[command]);
+        }
+    }
+
+    fn transport_kind(&self) -> TransportKind {
+        self.transports[self.transport_index]
     }
 
     /// The attempt failed before a connection was established.
@@ -488,7 +567,7 @@ impl Machine {
             kind: ErrorKind::Transport,
             code: codes::error::TRANSPORT_CLOSED,
             message,
-            transport: Some(self.transport_kind.name().to_owned()),
+            transport: Some(self.transport_kind().name().to_owned()),
         }));
         self.reconnect_after_transport_closed();
     }
@@ -534,13 +613,22 @@ impl Machine {
 
     fn reply(&mut self, reply: Reply) {
         if reply.id == 0 {
-            // An empty reply is a server ping (client.proto, Reply).
-            if self.state == State::Connected
-                && self.pings.is_some_and(|pings| pings.pong)
-                && reply.error.is_none()
-                && reply.result == ReplyResult::Empty
-            {
-                self.pong();
+            match reply.result {
+                // Transports without close frames, such as http_stream and
+                // sse, carry the server's disconnect as a push
+                // (centrifuge-js `_handleDisconnect`).
+                ReplyResult::Push(Push::Disconnect(Disconnect { code, reason })) => {
+                    self.disconnect(code, &reason, reconnect_advised(code));
+                }
+                // An empty reply is a server ping (client.proto, Reply).
+                ReplyResult::Empty
+                    if self.state == State::Connected
+                        && self.pings.is_some_and(|pings| pings.pong)
+                        && reply.error.is_none() =>
+                {
+                    self.pong();
+                }
+                _ => {}
             }
             return;
         }
@@ -569,6 +657,10 @@ impl Machine {
     fn connected(&mut self, result: &ConnectResult) {
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
+        self.transport_chosen = true;
+        if self.transport_kind().is_emulated() {
+            self.emulation = Some((result.session.clone(), result.node.clone()));
+        }
         self.backoff.reset();
         self.tokens.connected();
         if result.expires {
@@ -582,7 +674,7 @@ impl Machine {
         self.wait_server_ping();
         self.emit(ClientEvent::Connected {
             client_id: result.client.clone(),
-            transport: self.transport_kind.name().to_owned(),
+            transport: self.transport_kind().name().to_owned(),
         });
     }
 
@@ -613,8 +705,18 @@ impl Machine {
         }
         if let Some(transport) = self.transport.take() {
             self.actions.push(Action::CloseTransport(transport));
+            if reconnect && !self.transport_chosen {
+                // The attempt failed: the next one tries the next transport
+                // (centrifuge-js `_advanceTransportIndex`).
+                self.transport_index += 1;
+                if self.transport_index == self.transports.len() {
+                    self.transport_index = 0;
+                    self.tried_all_transports = true;
+                }
+            }
         }
         self.transport_open = false;
+        self.emulation = None;
         self.connect_command = None;
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
@@ -639,7 +741,13 @@ impl Machine {
             });
         }
         if reconnect {
-            let delay = self.backoff.next_delay(&mut self.rng);
+            // The first round over the transports is the handshake: each is
+            // tried at once (centrifuge-js `_scheduleReconnect`).
+            let delay = if self.transport_chosen || self.tried_all_transports {
+                self.backoff.next_delay(&mut self.rng)
+            } else {
+                Duration::ZERO
+            };
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
         }
     }
@@ -795,9 +903,13 @@ impl Machine {
     }
 
     fn send(&mut self, transport: TransportId, commands: &[Command]) {
+        let mut frame = self.codec.encode(commands);
+        if let Some((session, node)) = &self.emulation {
+            frame = json::emulation_request(session, node, &frame);
+        }
         self.actions.push(Action::Send {
             transport,
-            frame: self.codec.encode(commands),
+            frame,
             frame_type: self.codec.frame_type(),
         });
     }
@@ -821,6 +933,16 @@ impl Machine {
 /// Centrifuge and reconnect (`client.proto`, `Disconnect`; owner decision).
 fn reconnect_advised(code: u32) -> bool {
     !matches!(code, 3500..=3999 | 4500..=4999)
+}
+
+/// A [`ErrorKind::Configuration`] error about options that cannot work.
+fn configuration_error(message: &str, transport: Option<TransportKind>) -> ClientError {
+    ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: message.to_owned(),
+        transport: transport.map(|kind| kind.name().to_owned()),
+    }
 }
 
 #[cfg(test)]
@@ -887,6 +1009,30 @@ mod tests {
             transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
         }
         assert_eq!(machine.state(), State::Connecting);
+    }
+
+    #[test]
+    fn a_disconnect_push_disconnects_with_its_code() {
+        for (code, state) in [(4000, State::Connecting), (4500, State::Disconnected)] {
+            let (mut machine, transport) = awaiting_connect_reply();
+            machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+            let actions = machine.handle(frame(
+                transport,
+                &format!(r#"{{"push":{{"disconnect":{{"code":{code},"reason":"bye"}}}}}}"#),
+            ));
+
+            assert_eq!(machine.state(), state);
+            assert!(
+                events(&actions).iter().any(|event| matches!(
+                    event,
+                    ClientEvent::Connecting { code: got, reason }
+                        | ClientEvent::Disconnected { code: got, reason }
+                        if *got == code && reason == "bye"
+                )),
+                "{actions:?}"
+            );
+        }
     }
 
     #[test]
