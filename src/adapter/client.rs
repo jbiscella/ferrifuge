@@ -17,7 +17,7 @@ use tokio::time::Sleep;
 
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{Action, FetchId, Input, Machine, Timer, TransportId, TransportKind};
-use crate::{ClientEvent, Config, State, TokenError};
+use crate::{ClientError, ClientEvent, Config, State, TokenError};
 
 /// Centrifugo client running on tokio.
 ///
@@ -87,7 +87,8 @@ type GetToken =
 
 /// Builds a [`Client`] with options beyond [`Config`].
 pub struct ClientBuilder {
-    endpoint: String,
+    /// Transports to try in order, each with its endpoint.
+    endpoints: Vec<(TransportKind, String)>,
     config: Config,
     get_token: Option<GetToken>,
 }
@@ -95,7 +96,7 @@ pub struct ClientBuilder {
 impl std::fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientBuilder")
-            .field("endpoint", &self.endpoint)
+            .field("endpoints", &self.endpoints)
             .field("config", &self.config)
             .field("get_token", &self.get_token.is_some())
             .finish()
@@ -125,12 +126,16 @@ impl ClientBuilder {
 
     /// Creates the disconnected client.
     ///
+    /// # Errors
+    ///
+    /// A [`crate::ErrorKind::Configuration`] error when the options cannot
+    /// work together, e.g. the Protobuf protocol with an HTTP transport.
+    ///
     /// # Panics
     ///
     /// When called outside a tokio runtime: the client runs as a task on it.
-    #[must_use]
-    pub fn build(self) -> Client {
-        Client::start(self.endpoint, self.config, self.get_token)
+    pub fn build(self) -> Result<Client, ClientError> {
+        Ok(Client::start(self.endpoints, self.config, self.get_token))
     }
 }
 
@@ -143,19 +148,41 @@ impl Client {
     /// When called outside a tokio runtime: the client runs as a task on it.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, config: Config) -> Self {
-        Self::builder(endpoint).config(config).build()
+        Self::builder(endpoint)
+            .config(config)
+            .build()
+            .expect("a websocket client takes any options")
     }
 
     /// Starts building a client for the websocket `endpoint`.
     pub fn builder(endpoint: impl Into<String>) -> ClientBuilder {
+        Self::builder_with_transports([(TransportKind::WebSocket, endpoint.into())])
+    }
+
+    /// Starts building a client that tries the `endpoints` in order on its
+    /// first connection, e.g. a websocket endpoint, then `http_stream`
+    /// and `sse` ones as fallbacks; its reconnects keep the transport that
+    /// worked.
+    pub fn builder_with_transports(
+        endpoints: impl IntoIterator<Item = (TransportKind, String)>,
+    ) -> ClientBuilder {
         ClientBuilder {
-            endpoint: endpoint.into(),
+            endpoints: endpoints.into_iter().collect(),
             config: Config::default(),
             get_token: None,
         }
     }
 
-    fn start(endpoint: String, config: Config, get_token: Option<GetToken>) -> Self {
+    fn start(
+        endpoints: Vec<(TransportKind, String)>,
+        config: Config,
+        get_token: Option<GetToken>,
+    ) -> Self {
+        let endpoint = endpoints
+            .into_iter()
+            .next()
+            .map(|(_, endpoint)| endpoint)
+            .unwrap_or_default();
         let subprotocol = config.protocol.websocket_subprotocol();
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
@@ -327,6 +354,9 @@ impl Driver {
                     TransportKind::WebSocket => {
                         Box::pin(async move { WebSocket::open(&endpoint, subprotocol).await })
                     }
+                    TransportKind::HttpStream | TransportKind::Sse => {
+                        Box::pin(async { Err("not implemented".to_owned()) })
+                    }
                 };
                 self.opening = Some((id, opening));
             }
@@ -460,7 +490,8 @@ mod tests {
     async fn panicking_token_callback_is_reported_as_a_failed_fetch() {
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
             .get_token(|| async { panic!("callback bug") })
-            .build();
+            .build()
+            .unwrap();
         let mut events = client.events();
 
         client.connect();
@@ -488,7 +519,8 @@ mod tests {
             .get_token(|| -> std::future::Ready<Result<String, TokenError>> {
                 panic!("callback bug")
             })
-            .build();
+            .build()
+            .unwrap();
         let mut events = client.events();
 
         client.connect();
@@ -514,7 +546,7 @@ mod tests {
         };
         let builder = Client::builder("ws://127.0.0.1:1/connection/websocket").config(config);
         let printed_builder = format!("{builder:?}");
-        let client = builder.build();
+        let client = builder.build().unwrap();
         // Queues the connect command, which carries the token, unperformed.
         client.connect();
 

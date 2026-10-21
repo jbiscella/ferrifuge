@@ -98,6 +98,21 @@ impl Centrifugo {
         &self.address
     }
 
+    /// `http_stream` endpoint, `http://` or `https://`.
+    pub(crate) fn http_stream_url(&self) -> String {
+        format!("{}/connection/http_stream", self.http_base())
+    }
+
+    /// sse endpoint, `http://` or `https://`.
+    pub(crate) fn sse_url(&self) -> String {
+        format!("{}/connection/sse", self.http_base())
+    }
+
+    fn http_base(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}", self.address)
+    }
+
     pub(crate) fn websocket_url(&self) -> String {
         let scheme = if self.tls { "wss" } else { "ws" };
         format!("{scheme}://{}/connection/websocket", self.address)

@@ -119,7 +119,7 @@ let client = Client::builder("ws://localhost:8000/connection/websocket")
         // Ask your backend for a new token.
         fetch_token().await.map_err(|e| TokenError::Failed(e.to_string()))
     })
-    .build();
+    .build()?;
 ```
 
 When the server says the token expires, the client calls the callback before

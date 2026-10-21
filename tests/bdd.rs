@@ -68,6 +68,19 @@ const IMPLEMENTED: &[&str] = &[
     "Ping answered in Protobuf",
     "Every message of a multi-message Protobuf frame is handled",
     "Malformed Protobuf frame forces a reconnect",
+    // Block 8.
+    "Fallback to http_stream when websocket is unreachable",
+    "Fallback over HTTPS uses the build's TLS provider",
+    "Fallback to sse when websocket and http_stream are unreachable",
+    "A transport that worked is kept on reconnect",
+    "Commands work over an emulated transport",
+    "A failed emulation request makes the client reconnect",
+    "An HTTP stream that never answers the handshake falls back",
+    "Every transport unreachable",
+    "A failed fallback sequence is retried after the reconnect backoff",
+    "The fallback sequence is retried until a transport succeeds",
+    "Protobuf with an HTTP transport is rejected",
+    "Server pings over an HTTP transport are answered",
 ];
 
 /// Server configuration of @A scenarios.
@@ -80,6 +93,14 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // An expired, unrefreshed connection is closed within a scenario
     // (default 25 s).
     ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "1s"),
+    ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
+    ("CENTRIFUGO_SSE_ENABLED", "true"),
+];
+
+/// Server configuration added for @B scenarios, besides the proxy's.
+pub(crate) const SERVER_B: &[(&str, &str)] = &[
+    ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
+    ("CENTRIFUGO_SSE_ENABLED", "true"),
 ];
 
 /// Marks the runner process started by [`trust_test_ca`].
@@ -100,6 +121,7 @@ async fn main() {
                     let env: Vec<_> = env
                         .iter()
                         .map(|(name, value)| (*name, value.as_str()))
+                        .chain(SERVER_B.iter().copied())
                         .collect();
                     world.server = Some(Centrifugo::start(&env).await);
                     world.proxy = Some(proxy);

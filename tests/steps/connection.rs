@@ -1,10 +1,14 @@
 //! Steps of Block 1: client connection states.
 
 use cucumber::{given, then, when};
+use ferrifuge::machine::TransportKind;
 use ferrifuge::{ClientEvent, ErrorKind, State, codes};
 use serde_json::json;
 
-use super::{ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event};
+use super::{
+    ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event,
+    next_event_after_transport_errors,
+};
 use crate::support::proxy;
 use crate::support::relay::CountingRelay;
 
@@ -188,14 +192,42 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
         };
         assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
         assert_eq!(error.code, codes::error::TRANSPORT_CLOSED, "{error:?}");
-        assert_eq!(error.transport.as_deref(), Some("websocket"), "{error:?}");
     }
+    let transports = if world.transports.is_empty() {
+        vec![TransportKind::WebSocket]
+    } else {
+        world.transports.clone()
+    };
+    // Every configured transport was tried, and only those.
+    let reported: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Error(error) => error.transport.clone(),
+            _ => None,
+        })
+        .collect();
+    for transport in &transports {
+        assert!(
+            reported.iter().any(|name| name == transport.name()),
+            "no error for {}: {events:?}",
+            transport.name()
+        );
+    }
+    assert!(
+        reported
+            .iter()
+            .all(|name| transports.iter().any(|kind| kind.name() == name)),
+        "{events:?}"
+    );
     assert_eq!(world.client().state(), State::Connecting);
 }
 
 #[then(regex = r#"^(?:then )?the client emits "connected" over transport "(\w+)"$"#)]
 async fn the_client_emits_connected_over(world: &mut ClientWorld, expected: String) {
-    let event = expect_event(world, "connected").await;
+    // Failed attempts over other transports, or earlier ones over this one,
+    // may come first when the client falls back (Block 8).
+    let event = next_event_after_transport_errors(world).await;
+    assert_eq!(event.name(), "connected", "{event:?}");
     let ClientEvent::Connected { transport, .. } = &event else {
         unreachable!("expect_event checked the name");
     };
