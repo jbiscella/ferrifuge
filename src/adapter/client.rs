@@ -1,6 +1,6 @@
 //! Client driven by tokio.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -11,16 +11,18 @@ use std::time::Duration;
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
-use futures_util::FutureExt;
+use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::Notify;
 use tokio::time::Sleep;
 
 use super::http::HttpTransport;
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{
-    Action, FetchId, FrameType, Input, Machine, Timer, TransportId, TransportKind,
+    Action, FetchId, FrameType, Input, Machine, SubscriptionId, SubscriptionTimer, Timer,
+    TransportId, TransportKind,
 };
-use crate::{ClientError, ClientEvent, Config, State, TokenError};
+use crate::{ClientError, ClientEvent, Config, DataError, State, SubscriptionEvent, TokenError};
 
 /// Centrifugo client running on tokio.
 ///
@@ -38,11 +40,16 @@ impl std::fmt::Debug for Client {
     }
 }
 
-/// What the client handle and its driver task share.
+/// What the client handle, its subscriptions and its driver task share.
 #[derive(Debug)]
-struct Shared {
-    core: Mutex<Core>,
+pub(super) struct Shared {
+    pub(super) core: Mutex<Core>,
     subscribers: Mutex<Vec<events::UnboundedSender<ClientEvent>>>,
+    /// Listeners of each subscription's events.
+    pub(super) subscription_subscribers:
+        Mutex<HashMap<SubscriptionId, Vec<events::UnboundedSender<SubscriptionEvent>>>>,
+    /// Data callbacks of the subscriptions that have one.
+    pub(super) data_callbacks: Mutex<DataCallbacks>,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
@@ -56,17 +63,36 @@ struct Shared {
 /// queued: they go out while the lock is held, so a stream created after a
 /// call never receives that call's events.
 #[derive(Debug)]
-struct Core {
-    machine: Machine,
+pub(super) struct Core {
+    pub(super) machine: Machine,
     actions: VecDeque<Action>,
 }
 
+/// Async callback returning the data of a subscription's next subscribe
+/// command, given its channel.
+pub(super) type GetData = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DataError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Data callbacks by subscription; opaque in `Debug` output.
+#[derive(Default)]
+pub(super) struct DataCallbacks(pub(super) HashMap<SubscriptionId, GetData>);
+
+impl std::fmt::Debug for DataCallbacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
+}
+
 impl Shared {
-    fn apply(&self, input: Input) {
+    pub(super) fn apply(&self, input: Input) {
         let mut core = lock(&self.core);
         for action in core.machine.handle(input) {
             match action {
                 Action::Emit(event) => self.emit(&event),
+                Action::EmitSubscription(id, event) => self.emit_subscription(id, &event),
                 action => core.actions.push_back(action),
             }
         }
@@ -77,6 +103,12 @@ impl Shared {
     fn emit(&self, event: &ClientEvent) {
         lock(&self.subscribers)
             .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+    }
+
+    fn emit_subscription(&self, id: SubscriptionId, event: &SubscriptionEvent) {
+        if let Some(subscribers) = lock(&self.subscription_subscribers).get_mut(&id) {
+            subscribers.retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+        }
     }
 
     fn next_action(&self) -> Option<Action> {
@@ -210,6 +242,8 @@ impl Client {
                 actions: VecDeque::new(),
             }),
             subscribers: Mutex::new(Vec::new()),
+            subscription_subscribers: Mutex::new(HashMap::new()),
+            data_callbacks: Mutex::new(DataCallbacks::default()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
         });
@@ -227,9 +261,15 @@ impl Client {
             get_token,
             fetching: None,
             timers: Timers::default(),
+            subscription_timers: SubscriptionTimers::default(),
+            data_fetches: FuturesUnordered::new(),
         };
         tokio::spawn(driver.run());
         Ok(Self { shared })
+    }
+
+    pub(super) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
     }
 
     /// Current connection state.
@@ -266,7 +306,7 @@ impl Drop for Client {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // No code panics while holding these locks; recover rather than cascade.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -291,6 +331,45 @@ struct Driver {
     get_token: Option<GetToken>,
     fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
+    subscription_timers: SubscriptionTimers,
+    /// Subscription data callbacks running.
+    data_fetches: FuturesUnordered<DataFetching>,
+}
+
+type DataFetching = Pin<Box<dyn Future<Output = (FetchId, Result<Vec<u8>, DataError>)> + Send>>;
+
+/// The machine's subscription timers, by subscription and kind.
+#[derive(Default)]
+struct SubscriptionTimers(HashMap<(SubscriptionId, SubscriptionTimer), Pin<Box<Sleep>>>);
+
+impl SubscriptionTimers {
+    fn set(&mut self, id: SubscriptionId, timer: SubscriptionTimer, delay: Duration) {
+        self.0
+            .insert((id, timer), Box::pin(tokio::time::sleep(delay)));
+    }
+
+    fn cancel(&mut self, id: SubscriptionId, timer: SubscriptionTimer) {
+        self.0.remove(&(id, timer));
+    }
+
+    /// Resolves with the first timer to fire, which is removed; never while
+    /// none is set. Cancel-safe.
+    async fn fired(&mut self) -> (SubscriptionId, SubscriptionTimer) {
+        std::future::poll_fn(|cx| {
+            let fired = self
+                .0
+                .iter_mut()
+                .find_map(|(key, sleep)| sleep.as_mut().poll(cx).is_ready().then_some(*key));
+            match fired {
+                Some(key) => {
+                    self.0.remove(&key);
+                    Poll::Ready(key)
+                }
+                None => Poll::Pending,
+            }
+        })
+        .await
+    }
 }
 
 /// The machine's timers: one slot per [`Timer`] kind, so a new kind needs
@@ -358,6 +437,12 @@ impl Driver {
                     }
                 },
                 timer = self.timers.fired() => Input::TimerFired(timer),
+                (id, timer) = self.subscription_timers.fired() => {
+                    Input::SubscriptionTimerFired(id, timer)
+                }
+                Some((fetch, result)) = self.data_fetches.next(), if !self.data_fetches.is_empty() => {
+                    Input::SubscriptionDataFetched { fetch, result }
+                }
                 (fetch, result) = fetched(&mut self.fetching) => {
                     self.fetching = None;
                     Input::TokenFetched { fetch, result }
@@ -433,6 +518,18 @@ impl Driver {
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
             Action::Emit(event) => self.shared.emit(&event),
+            Action::EmitSubscription(id, event) => self.shared.emit_subscription(id, &event),
+            Action::SetSubscriptionTimer(id, timer, delay) => {
+                self.subscription_timers.set(id, timer, delay);
+            }
+            Action::CancelSubscriptionTimer(id, timer) => {
+                self.subscription_timers.cancel(id, timer);
+            }
+            Action::FetchSubscriptionData {
+                subscription,
+                channel,
+                fetch,
+            } => self.fetch_subscription_data(subscription, channel, fetch),
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
@@ -453,6 +550,34 @@ impl Driver {
             }
         }
     }
+}
+
+impl Driver {
+    fn fetch_subscription_data(&mut self, id: SubscriptionId, channel: String, fetch: FetchId) {
+        let callback = lock(&self.shared.data_callbacks).0.get(&id).cloned();
+        // The machine asks only for subscriptions with a callback.
+        let Some(get_data) = callback else {
+            return;
+        };
+        // A panicking callback fails this fetch, not the driver: whether it
+        // panics creating its future or polling it.
+        let fetching: DataFetching =
+            match std::panic::catch_unwind(AssertUnwindSafe(|| get_data(channel))) {
+                Ok(future) => Box::pin(async move {
+                    let result = AssertUnwindSafe(future).catch_unwind().await;
+                    (
+                        fetch,
+                        result.unwrap_or_else(|_| Err(data_callback_panicked())),
+                    )
+                }),
+                Err(_) => Box::pin(std::future::ready((fetch, Err(data_callback_panicked())))),
+            };
+        self.data_fetches.push(fetching);
+    }
+}
+
+fn data_callback_panicked() -> DataError {
+    DataError::Failed("subscription data callback panicked".to_owned())
 }
 
 fn callback_panicked() -> TokenError {

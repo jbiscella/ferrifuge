@@ -2,6 +2,8 @@
 
 mod client;
 mod http;
+mod subscription;
 mod transport;
 
 pub use client::{Client, ClientBuilder};
+pub use subscription::{Subscription, SubscriptionBuilder};

@@ -26,7 +26,10 @@ use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
     RefreshResult, Reply, ReplyResult,
 };
-use crate::{ClientError, ClientEvent, Config, ErrorKind, State, TokenError, codes};
+use crate::{
+    ClientError, ClientEvent, Config, DataError, DuplicateSubscription, ErrorKind, State,
+    SubscriptionEvent, SubscriptionState, TokenError, codes,
+};
 use transports::Transports;
 
 /// A transport the client can connect over. `#[non_exhaustive]` so that
@@ -73,6 +76,47 @@ pub struct TransportId(u64);
 /// machine has since abandoned are ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FetchId(u64);
+
+/// Identifies a subscription in the machine's registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubscriptionId(u64);
+
+/// Options of a subscription (spec, "Subscription common options").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubscriptionOptions {
+    /// Data sent with every subscribe command.
+    pub data: Option<Vec<u8>>,
+    /// The owner answers [`Action::FetchSubscriptionData`] before every
+    /// subscribe command, instead of sending `data`.
+    pub data_source: bool,
+}
+
+impl SubscriptionOptions {
+    /// Sends `data` with every subscribe command.
+    #[must_use]
+    pub fn data(mut self, data: Vec<u8>) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    /// Asks the owner for the data before every subscribe command.
+    #[must_use]
+    pub fn data_source(mut self) -> Self {
+        self.data_source = true;
+        self
+    }
+}
+
+/// Timers the machine sets for a subscription. At most one of each kind
+/// runs per subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubscriptionTimer {
+    /// Delay before the next subscribe attempt.
+    Resubscribe,
+    /// Deadline for the subscribe command to get its reply.
+    SubscribeReply,
+}
 
 /// Timers the machine sets. At most one of each kind runs at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -161,6 +205,21 @@ pub enum Input {
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
     },
+    /// The application called `subscribe()` on a subscription.
+    Subscribe(SubscriptionId),
+    /// The application called `unsubscribe()` on a subscription.
+    Unsubscribe(SubscriptionId),
+    /// The application removed a subscription from the registry.
+    RemoveSubscription(SubscriptionId),
+    /// A timer set by [`Action::SetSubscriptionTimer`] fired.
+    SubscriptionTimerFired(SubscriptionId, SubscriptionTimer),
+    /// The data callback answered a [`Action::FetchSubscriptionData`].
+    SubscriptionDataFetched {
+        /// The fetch answered.
+        fetch: FetchId,
+        /// The data, or why there is none.
+        result: Result<Vec<u8>, DataError>,
+    },
 }
 
 /// Something the owner of the machine must do.
@@ -207,6 +266,24 @@ pub enum Action {
     /// report the answer with [`Input::TokenFetched`]. Only issued by a
     /// machine created with [`Machine::with_token_source`].
     FetchToken(FetchId),
+    /// Start a subscription's timer, replacing a running one of the kind.
+    SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
+    /// Stop a subscription's timer if it runs.
+    CancelSubscriptionTimer(SubscriptionId, SubscriptionTimer),
+    /// Deliver an event to a subscription's listeners.
+    EmitSubscription(SubscriptionId, SubscriptionEvent),
+    /// Ask the subscription's data callback for the data of its next
+    /// subscribe command; report the answer with
+    /// [`Input::SubscriptionDataFetched`]. Only issued for subscriptions
+    /// with [`SubscriptionOptions::data_source`].
+    FetchSubscriptionData {
+        /// The subscription asking.
+        subscription: SubscriptionId,
+        /// Its channel, given to the callback.
+        channel: String,
+        /// Identifies the fetch in its answer.
+        fetch: FetchId,
+    },
 }
 
 impl std::fmt::Debug for Input {
@@ -242,6 +319,24 @@ impl std::fmt::Debug for Input {
                 .field(
                     "result",
                     &result.as_ref().map(|token| Secret(token.clone())),
+                )
+                .finish(),
+            Self::Subscribe(id) => f.debug_tuple("Subscribe").field(id).finish(),
+            Self::Unsubscribe(id) => f.debug_tuple("Unsubscribe").field(id).finish(),
+            Self::RemoveSubscription(id) => f.debug_tuple("RemoveSubscription").field(id).finish(),
+            Self::SubscriptionTimerFired(id, timer) => f
+                .debug_tuple("SubscriptionTimerFired")
+                .field(id)
+                .field(timer)
+                .finish(),
+            Self::SubscriptionDataFetched { fetch, result } => f
+                .debug_struct("SubscriptionDataFetched")
+                .field("fetch", fetch)
+                .field(
+                    "result",
+                    &result
+                        .as_ref()
+                        .map(|data| format!("<{} bytes>", data.len())),
                 )
                 .finish(),
         }
@@ -285,6 +380,32 @@ impl std::fmt::Debug for Action {
             Self::CancelTimer(timer) => f.debug_tuple("CancelTimer").field(timer).finish(),
             Self::Emit(event) => f.debug_tuple("Emit").field(event).finish(),
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
+            Self::SetSubscriptionTimer(id, timer, delay) => f
+                .debug_tuple("SetSubscriptionTimer")
+                .field(id)
+                .field(timer)
+                .field(delay)
+                .finish(),
+            Self::CancelSubscriptionTimer(id, timer) => f
+                .debug_tuple("CancelSubscriptionTimer")
+                .field(id)
+                .field(timer)
+                .finish(),
+            Self::EmitSubscription(id, event) => f
+                .debug_tuple("EmitSubscription")
+                .field(id)
+                .field(event)
+                .finish(),
+            Self::FetchSubscriptionData {
+                subscription,
+                channel,
+                fetch,
+            } => f
+                .debug_struct("FetchSubscriptionData")
+                .field("subscription", subscription)
+                .field("channel", channel)
+                .field("fetch", fetch)
+                .finish(),
         }
     }
 }
@@ -417,6 +538,40 @@ impl Machine {
         self.state
     }
 
+    /// Adds a subscription to `channel`, unsubscribed, to the registry.
+    ///
+    /// # Errors
+    ///
+    /// When the registry holds a subscription to `channel` already.
+    pub fn add_subscription(
+        &mut self,
+        channel: String,
+        options: SubscriptionOptions,
+    ) -> Result<SubscriptionId, DuplicateSubscription> {
+        drop((channel, options));
+        Ok(SubscriptionId(0))
+    }
+
+    /// State of a subscription in the registry.
+    #[must_use]
+    pub fn subscription_state(&self, id: SubscriptionId) -> Option<SubscriptionState> {
+        let _ = id;
+        Some(SubscriptionState::Unsubscribed)
+    }
+
+    /// The subscription to `channel` in the registry, if any.
+    #[must_use]
+    pub fn find_subscription(&self, channel: &str) -> Option<SubscriptionId> {
+        let _ = channel;
+        None
+    }
+
+    /// Every subscription in the registry, with its channel.
+    #[must_use]
+    pub fn subscriptions(&self) -> Vec<(SubscriptionId, String)> {
+        Vec::new()
+    }
+
     /// Reacts to `input`; the owner performs the returned actions in order.
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
         match input {
@@ -471,11 +626,18 @@ impl Machine {
                     self.token_fetched(purpose, result);
                 }
             }
-            // About a transport already abandoned.
+
+            // About a transport already abandoned; subscriptions are not
+            // implemented yet.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
-            | Input::Frame { .. } => {}
+            | Input::Frame { .. }
+            | Input::Subscribe(_)
+            | Input::Unsubscribe(_)
+            | Input::RemoveSubscription(_)
+            | Input::SubscriptionTimerFired(..)
+            | Input::SubscriptionDataFetched { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }

@@ -27,7 +27,7 @@ const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 
-fn kind(name: &str) -> TransportKind {
+pub(super) fn kind(name: &str) -> TransportKind {
     match name {
         "websocket" => TransportKind::WebSocket,
         "http_stream" => TransportKind::HttpStream,
@@ -36,14 +36,14 @@ fn kind(name: &str) -> TransportKind {
     }
 }
 
-fn server(world: &ClientWorld) -> &Centrifugo {
+pub(super) fn server(world: &ClientWorld) -> &Centrifugo {
     world
         .server
         .as_ref()
         .expect("this step needs a server: tag the scenario @A or @B")
 }
 
-fn server_url(server: &Centrifugo, kind: TransportKind) -> String {
+pub(super) fn server_url(server: &Centrifugo, kind: TransportKind) -> String {
     match kind {
         TransportKind::HttpStream => server.http_stream_url(),
         TransportKind::Sse => server.sse_url(),
@@ -54,7 +54,7 @@ fn server_url(server: &Centrifugo, kind: TransportKind) -> String {
 /// Creates the scenario's client for `endpoints`, tried in order. It
 /// connects to the server directly: emulation requests open connections of
 /// their own, which a counting relay would take for new transports.
-fn configure(world: &mut ClientWorld, endpoints: Vec<(TransportKind, String)>) {
+pub(super) fn configure(world: &mut ClientWorld, endpoints: Vec<(TransportKind, String)>) {
     world.transports = endpoints.iter().map(|(kind, _)| *kind).collect();
     let builder = Client::builder_with_transports(endpoints).config(world.client_config());
     world.build_client(builder);
@@ -62,7 +62,7 @@ fn configure(world: &mut ClientWorld, endpoints: Vec<(TransportKind, String)>) {
 
 /// Connects the scenario's client and waits until it is connected; failed
 /// attempts of a fallback may come first.
-async fn connect_and_wait(world: &mut ClientWorld) {
+pub(super) async fn connect_and_wait(world: &mut ClientWorld) {
     world.client().connect();
     expect_event(world, "connecting").await;
     match next_event_after_transport_errors(world).await {
