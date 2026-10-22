@@ -9,7 +9,7 @@ use support::centrifugo::{Centrifugo, TAG};
 use support::fake_server::{Announce, FakeServer};
 use support::http_proxy::HttpProxy;
 use support::protobuf;
-use support::proxy::ConnectProxy;
+use support::proxy::ProxyBackend;
 use support::relay::{CountingRelay, Mode};
 use support::tls;
 use support::token::{HMAC_SECRET, connection_token};
@@ -68,7 +68,7 @@ async fn server_api_reports_method_errors() {
 
 #[tokio::test]
 async fn connect_proxy_accepts_then_rejects_as_programmed() {
-    let proxy = ConnectProxy::start().await;
+    let proxy = ProxyBackend::start().await;
     let env = proxy.centrifugo_env();
     let env: Vec<_> = env
         .iter()
@@ -421,4 +421,94 @@ async fn fake_server_speaks_protobuf_when_asked() {
         panic!("{two_pings:?}");
     };
     assert_eq!(two_pings.as_ref(), [0, 0]);
+}
+
+/// Sends each command of `commands` over one websocket session and returns
+/// the text of the first reply to each.
+async fn raw_session(url: &str, commands: &[&str]) -> Vec<String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.expect("open");
+    let mut replies = Vec::new();
+    for command in commands {
+        ws.send(Message::text(*command)).await.expect("send");
+        let reply = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        replies.push(match reply {
+            Ok(Some(Ok(Message::Text(text)))) => text.to_string(),
+            Ok(other) => format!("{other:?}"),
+            Err(_) => "no reply".to_owned(),
+        });
+    }
+    replies
+}
+
+#[tokio::test]
+async fn proxy_backend_answers_subscribe_requests_as_programmed() {
+    let proxy = ProxyBackend::start().await;
+    let env = proxy.centrifugo_env();
+    let env: Vec<_> = env
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let server = Centrifugo::start(&env).await;
+    proxy.subscribe_error("closed", 403, "closed is closed");
+    proxy.subscribe_data("open", &json!({"welcome": true}));
+
+    let replies = raw_session(
+        &server.websocket_url(),
+        &[
+            r#"{"id":1,"connect":{}}"#,
+            r#"{"id":2,"subscribe":{"channel":"closed"}}"#,
+            r#"{"id":3,"subscribe":{"channel":"open","data":{"room":1}}}"#,
+        ],
+    )
+    .await;
+
+    assert!(
+        replies[1].contains(r#""error":{"code":403,"message":"closed is closed"}"#),
+        "{replies:?}"
+    );
+    assert!(
+        replies[2].contains(r#""subscribe":{"data":{"welcome":true}}"#),
+        "{replies:?}"
+    );
+    let requests = proxy.subscribe_requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[1]["data"], json!({"room": 1}), "{requests:?}");
+}
+
+#[tokio::test]
+async fn fake_server_answers_subscribe_and_unsubscribe() {
+    let fake = FakeServer::start(Announce::default()).await;
+    let url = format!("ws://{}/connection/websocket", fake.address());
+    fake.answer_next_subscribe_with(vec![json!({"data": {"n": 1}, "offset": 1})]);
+
+    let replies = raw_session(
+        &url,
+        &[
+            r#"{"id":1,"connect":{}}"#,
+            r#"{"id":2,"subscribe":{"channel":"a"}}"#,
+            r#"{"id":3,"subscribe":{"channel":"b"}}"#,
+            r#"{"id":4,"unsubscribe":{"channel":"b"}}"#,
+        ],
+    )
+    .await;
+    fake.ignore_next_subscribe();
+    let ignored = raw_session(
+        &url,
+        &[
+            r#"{"id":1,"connect":{}}"#,
+            r#"{"id":2,"subscribe":{"channel":"c"}}"#,
+        ],
+    )
+    .await;
+
+    assert!(
+        replies[1].contains(r#""publications":[{"data":{"n":1},"offset":1}]"#),
+        "{replies:?}"
+    );
+    assert_eq!(replies[2], r#"{"id":3,"subscribe":{}}"#);
+    assert_eq!(replies[3], r#"{"id":4,"unsubscribe":{}}"#);
+    assert_eq!(ignored[1], "no reply");
 }

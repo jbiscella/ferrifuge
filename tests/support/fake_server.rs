@@ -46,6 +46,10 @@ struct State {
     received: Vec<Value>,
     /// Every Protobuf command received from clients, in order.
     received_protobuf: Vec<protobuf::Command>,
+    /// Subscribe commands still to leave unanswered.
+    ignored_subscribes: usize,
+    /// Publications to include in the reply to the next subscribe.
+    next_subscribe_publications: Vec<Value>,
 }
 
 pub(crate) struct FakeServer {
@@ -175,6 +179,16 @@ impl FakeServer {
         self.state.lock().unwrap().received.clone()
     }
 
+    /// Leaves the next subscribe command unanswered.
+    pub(crate) fn ignore_next_subscribe(&self) {
+        self.state.lock().unwrap().ignored_subscribes += 1;
+    }
+
+    /// Includes `publications` in the reply to the next subscribe command.
+    pub(crate) fn answer_next_subscribe_with(&self, publications: Vec<Value>) {
+        self.state.lock().unwrap().next_subscribe_publications = publications;
+    }
+
     /// Every Protobuf command received from clients so far.
     pub(crate) fn received_protobuf(&self) -> Vec<protobuf::Command> {
         self.state.lock().unwrap().received_protobuf.clone()
@@ -277,6 +291,25 @@ impl Connection {
                         },
                     })
                     .to_string(),
+                ));
+            } else if message["subscribe"].is_object() {
+                let mut state = self.state.lock().unwrap();
+                if state.ignored_subscribes > 0 {
+                    state.ignored_subscribes -= 1;
+                } else {
+                    let publications = std::mem::take(&mut state.next_subscribe_publications);
+                    let result = if publications.is_empty() {
+                        json!({})
+                    } else {
+                        json!({"publications": publications})
+                    };
+                    replies.push(Message::text(
+                        json!({"id": message["id"], "subscribe": result}).to_string(),
+                    ));
+                }
+            } else if message["unsubscribe"].is_object() {
+                replies.push(Message::text(
+                    json!({"id": message["id"], "unsubscribe": {}}).to_string(),
                 ));
             }
             self.state.lock().unwrap().received.push(message);

@@ -21,7 +21,7 @@ use cucumber::gherkin::{Feature, GherkinEnv, Scenario};
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
 use support::fake_server::{Announce, FakeServer};
-use support::proxy::ConnectProxy;
+use support::proxy::ProxyBackend;
 use support::relay::CountingRelay;
 use support::tls;
 use support::token::HMAC_SECRET;
@@ -97,6 +97,18 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "1s"),
     ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
     ("CENTRIFUGO_SSE_ENABLED", "true"),
+    // Anonymous clients subscribe to channels without namespace, whose
+    // publications carry offsets (both options needed; verified, Block 9).
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_SUBSCRIBE_FOR_CLIENT",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_SUBSCRIBE_FOR_ANONYMOUS",
+        "true",
+    ),
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE", "10"),
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
 ];
 
 /// Server configuration added for @B scenarios, besides the proxy's.
@@ -129,7 +141,7 @@ async fn main() {
                 if scenario.tags.iter().any(|tag| tag == "A") {
                     world.server = Some(Centrifugo::start(SERVER_A).await);
                 } else if scenario.tags.iter().any(|tag| tag == "B") {
-                    let proxy = ConnectProxy::start().await;
+                    let proxy = ProxyBackend::start().await;
                     let env = proxy.centrifugo_env();
                     let env: Vec<_> = env
                         .iter()
