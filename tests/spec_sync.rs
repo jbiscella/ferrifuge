@@ -93,34 +93,45 @@ fn p_scenarios(claude_md: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Names of the scenarios tagged `@P` in one gherkin text. A scenario's tags
-/// may span several lines; tags of another element (a feature, a rule, an
-/// `Examples` table) do not carry over to the next scenario.
-fn p_scenarios_of(gherkin: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut tagged = false;
+/// Names of the scenarios tagged `@P` in one gherkin text, by Gherkin's
+/// rules: a scenario's tags may span several lines; a feature's or a rule's
+/// tags apply to every scenario under it; an `Examples` table's tags apply
+/// to the rows of its outline, so tag the outline.
+fn p_scenarios_of(gherkin: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let (mut feature, mut rule, mut pending) = (false, false, false);
+    let mut outline: Option<&str> = None;
     for line in gherkin.lines().map(str::trim) {
         if line.starts_with('@') {
-            tagged |= line.split_whitespace().any(|tag| tag == "@P");
-        } else if let Some(name) = line
-            .strip_prefix("Scenario:")
-            .or_else(|| line.strip_prefix("Scenario Outline:"))
-        {
-            if tagged {
-                names.push(name.trim().to_owned());
+            pending |= line.split_whitespace().any(|tag| tag == "@P");
+        } else if line.starts_with("Feature:") {
+            (feature, rule, outline) = (pending, false, None);
+            pending = false;
+        } else if line.starts_with("Rule:") {
+            (rule, outline) = (pending, None);
+            pending = false;
+        } else if line.starts_with("Background:") {
+            (outline, pending) = (None, false);
+        } else if line.starts_with("Examples:") || line.starts_with("Scenarios:") {
+            if let Some(name) = outline.filter(|_| pending) {
+                names.insert(name.to_owned());
             }
-            tagged = false;
-        } else if [
-            "Feature:",
-            "Rule:",
-            "Background:",
-            "Examples:",
-            "Scenarios:",
+            pending = false;
+        } else if let Some(name) = [
+            "Scenario Outline:",
+            "Scenario Template:",
+            "Scenario:",
+            "Example:",
         ]
         .iter()
-        .any(|keyword| line.starts_with(keyword))
+        .find_map(|keyword| line.strip_prefix(keyword))
         {
-            tagged = false;
+            let name = name.trim();
+            if feature || rule || pending {
+                names.insert(name.to_owned());
+            }
+            outline = Some(name);
+            pending = false;
         }
     }
     names
@@ -247,19 +258,21 @@ fn p_scenarios_match_their_harnesses() {
 }
 
 #[test]
-fn p_tags_are_read_across_tag_lines_of_their_scenario_only() {
+fn p_tags_follow_gherkin_tag_inheritance() {
     let gherkin = "\
-@P
 Feature: F
 
   @P
   @E
-  Scenario: P first
+  Scenario: Tags on two lines
     Given x
 
   @E
-  @P
-  Scenario Outline: P second
+  Scenario: Not P
+    Given x
+
+  @E
+  Scenario Outline: P on its examples
     Given <x>
 
     @P
@@ -267,12 +280,33 @@ Feature: F
       | x |
       | 1 |
 
-  @E
-  Scenario: Not P
+  @P
+  Rule: R
+
+    Scenario: Under a P rule
+      Given x
+
+  Rule: S
+
+    Scenario: Under another rule
+      Given x
+";
+    let inherited = "\
+@P
+Feature: G
+
+  Scenario: Under a P feature
     Given x
 ";
 
     let names = p_scenarios_of(gherkin);
+    let inherited = p_scenarios_of(inherited);
 
-    assert_eq!(names, ["P first", "P second"]);
+    assert_eq!(
+        names,
+        BTreeSet::from(
+            ["Tags on two lines", "P on its examples", "Under a P rule"].map(String::from)
+        )
+    );
+    assert_eq!(inherited, BTreeSet::from(["Under a P feature".to_owned()]));
 }
