@@ -86,21 +86,40 @@ fn spec_features(claude_md: &str) -> HashMap<String, String> {
 
 /// Names of the scenarios tagged `@P` in the gherkin blocks of `claude_md`.
 fn p_scenarios(claude_md: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for block in gherkin_blocks(claude_md) {
-        let mut tagged = false;
-        for line in block.lines().map(str::trim) {
-            if line.starts_with('@') {
-                tagged = line.split_whitespace().any(|tag| tag == "@P");
-            } else if let Some(name) = line
-                .strip_prefix("Scenario:")
-                .or_else(|| line.strip_prefix("Scenario Outline:"))
-            {
-                if tagged {
-                    names.insert(name.trim().to_owned());
-                }
-                tagged = false;
+    gherkin_blocks(claude_md)
+        .into_iter()
+        .flat_map(p_scenarios_of)
+        .collect()
+}
+
+/// Names of the scenarios tagged `@P` in one gherkin text. A scenario's tags
+/// may span several lines; tags of another element (a feature, a rule, an
+/// `Examples` table) do not carry over to the next scenario.
+fn p_scenarios_of(gherkin: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut tagged = false;
+    for line in gherkin.lines().map(str::trim) {
+        if line.starts_with('@') {
+            tagged |= line.split_whitespace().any(|tag| tag == "@P");
+        } else if let Some(name) = line
+            .strip_prefix("Scenario:")
+            .or_else(|| line.strip_prefix("Scenario Outline:"))
+        {
+            if tagged {
+                names.push(name.trim().to_owned());
             }
+            tagged = false;
+        } else if [
+            "Feature:",
+            "Rule:",
+            "Background:",
+            "Examples:",
+            "Scenarios:",
+        ]
+        .iter()
+        .any(|keyword| line.starts_with(keyword))
+        {
+            tagged = false;
         }
     }
     names
@@ -224,4 +243,35 @@ fn p_scenarios_match_their_harnesses() {
         unclaimed.is_empty(),
         "@P scenarios with no benchmark or simulation: {unclaimed:?}"
     );
+}
+
+#[test]
+fn p_tags_are_read_across_tag_lines_of_their_scenario_only() {
+    let gherkin = "\
+@P
+Feature: F
+
+  @P
+  @E
+  Scenario: P first
+    Given x
+
+  @E
+  @P
+  Scenario Outline: P second
+    Given <x>
+
+    @P
+    Examples:
+      | x |
+      | 1 |
+
+  @E
+  Scenario: Not P
+    Given x
+";
+
+    let names = p_scenarios_of(gherkin);
+
+    assert_eq!(names, ["P first", "P second"]);
 }
