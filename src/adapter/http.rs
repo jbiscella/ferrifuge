@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, FuturesUnordered};
@@ -34,6 +35,8 @@ pub(crate) struct HttpTransport {
     /// stream's when it is configured.
     emulation_http: reqwest::Client,
     emulation_url: Url,
+    /// Time allowed for an emulation request, as for a command's reply.
+    request_timeout: Duration,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
     decoder: Decoder,
     /// Messages decoded but not received yet.
@@ -52,6 +55,7 @@ impl HttpTransport {
         url: &str,
         initial_frame: Vec<u8>,
         emulation_endpoint: Option<&str>,
+        request_timeout: Duration,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
         let http = http_client(url.scheme() == "https")?;
@@ -77,6 +81,21 @@ impl HttpTransport {
         if !status.is_success() {
             return Err(format!("HTTP status {status}"));
         }
+        // What EventSource accepts (WHATWG HTML, "Server-sent events").
+        if sse {
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if status != reqwest::StatusCode::OK
+                || !content_type.trim_start().starts_with("text/event-stream")
+            {
+                return Err(format!(
+                    "not an event stream: HTTP status {status}, content type {content_type:?}"
+                ));
+            }
+        }
         let body = response
             .bytes_stream()
             .map(|chunk| {
@@ -88,6 +107,7 @@ impl HttpTransport {
         Ok(Self {
             emulation_http: http_client(emulation_url.scheme() == "https")?,
             emulation_url,
+            request_timeout,
             body,
             decoder: Decoder::new(sse, MAX_MESSAGE),
             frames: VecDeque::new(),
@@ -104,10 +124,11 @@ impl HttpTransport {
             .post(self.emulation_url.clone())
             .header(CONTENT_TYPE, JSON)
             .body(frame);
+        let timeout = self.request_timeout;
         self.requests.push(Box::pin(async move {
-            let response = request
-                .send()
+            let response = tokio::time::timeout(timeout, request.send())
                 .await
+                .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
                 .map_err(|e| format!("emulation request failed: {e}"))?;
             let status = response.status();
             // A server without the session's node (404) or failing (5xx)
@@ -282,7 +303,7 @@ impl Decoder {
             // (centrifuge-js `onmessage`, WHATWG "dispatch the event").
             let event = self.event.take();
             let data = self.data.take();
-            if event.is_none_or(|event| event == b"message") {
+            if event.is_none_or(|event| event.is_empty() || event == b"message") {
                 messages.extend(data);
             }
         } else if let Some(value) = line.strip_prefix(b"event:") {
@@ -304,6 +325,23 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Serves `response` to the first request; the URL of `path` on it.
+    async fn serve_once(response: &'static [u8], path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}{path}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // The request, sent in one go: answered after it is read.
+            let _ = socket.read(&mut [0; 4096]).await;
+            let _ = socket.write_all(response).await;
+        });
+        url
+    }
 
     fn decode(sse: bool, chunks: &[&[u8]]) -> Vec<String> {
         let mut decoder = Decoder::new(sse, MAX_MESSAGE);
@@ -342,6 +380,7 @@ mod tests {
             "http://127.0.0.1:1/connection/sse",
             connect,
             None,
+            TIMEOUT,
         )
         .await;
 
@@ -397,37 +436,50 @@ mod tests {
     fn only_sse_events_of_the_default_type_are_delivered() {
         let messages = decode(
             true,
-            &[b"event: notice\ndata: 1\n\nevent: message\ndata: 2\n\ndata: 3\n\n"],
+            &[b"event: notice\ndata: 1\n\nevent: message\ndata: 2\n\ndata: 3\n\nevent:\ndata: 4\n\n"],
         );
 
-        assert_eq!(messages, ["2", "3"]);
+        assert_eq!(messages, ["2", "3", "4"]);
     }
 
     #[tokio::test]
     async fn a_redirecting_endpoint_fails_the_attempt() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let url = serve_once(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/\r\ncontent-length: 0\r\n\r\n",
+            "/connection/http_stream",
+        )
+        .await;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!(
-            "http://{}/connection/http_stream",
-            listener.local_addr().unwrap()
-        );
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            // The request, sent in one go: answered after it is read.
-            let _ = socket.read(&mut [0; 4096]).await;
-            let _ = socket
-                .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/\r\ncontent-length: 0\r\n\r\n")
-                .await;
-        });
-
-        let result =
-            HttpTransport::open(TransportKind::HttpStream, &url, b"{}".to_vec(), None).await;
+        let result = HttpTransport::open(
+            TransportKind::HttpStream,
+            &url,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+        )
+        .await;
 
         let Err(message) = result else {
             panic!("followed the redirect");
         };
         assert!(message.contains("307"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn an_sse_response_that_is_not_an_event_stream_fails_the_attempt() {
+        let url = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+            "/connection/sse",
+        )
+        .await;
+
+        let result =
+            HttpTransport::open(TransportKind::Sse, &url, b"{}".to_vec(), None, TIMEOUT).await;
+
+        let Err(message) = result else {
+            panic!("accepted a JSON response as an event stream");
+        };
+        assert!(message.contains("not an event stream"), "{message}");
     }
 
     #[test]

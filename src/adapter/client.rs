@@ -197,6 +197,7 @@ impl Client {
             emulation_endpoint,
         } = builder;
         let subprotocol = config.protocol.websocket_subprotocol();
+        let request_timeout = config.timeout;
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
         } else {
@@ -219,6 +220,7 @@ impl Client {
                 .collect(),
             subprotocol,
             emulation_endpoint,
+            request_timeout,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
@@ -281,6 +283,8 @@ struct Driver {
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
     emulation_endpoint: Option<String>,
+    /// Time allowed for an emulation request (`Config::timeout`).
+    request_timeout: Duration,
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
@@ -381,12 +385,14 @@ impl Driver {
                     }),
                     TransportKind::HttpStream | TransportKind::Sse => {
                         let emulation = self.emulation_endpoint.clone();
+                        let request_timeout = self.request_timeout;
                         Box::pin(async move {
                             HttpTransport::open(
                                 kind,
                                 &url,
                                 initial_frame.unwrap_or_default(),
                                 emulation.as_deref(),
+                                request_timeout,
                             )
                             .await
                             .map(|http| Transport::Http(Box::new(http)))
