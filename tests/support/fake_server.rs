@@ -69,6 +69,9 @@ impl FakeServer {
         let shared = Arc::clone(&state);
         let server = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
+                // Replies go out at once rather than waiting on the
+                // client's delayed acknowledgement (Nagle's algorithm).
+                let _ = tcp.set_nodelay(true);
                 let mut protobuf = false;
                 // The callback's error type is tungstenite's, not ours.
                 #[allow(clippy::result_large_err)]
