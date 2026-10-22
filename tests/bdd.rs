@@ -11,10 +11,12 @@ mod support;
 
 use std::collections::HashSet;
 use std::process::{self, Command};
-use std::{env, fs};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+use std::{env, fs, thread};
 
 use cucumber::World;
-use cucumber::gherkin::{Feature, GherkinEnv};
+use cucumber::gherkin::{Feature, GherkinEnv, Scenario};
 
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
@@ -103,6 +105,15 @@ pub(crate) const SERVER_B: &[(&str, &str)] = &[
     ("CENTRIFUGO_SSE_ENABLED", "true"),
 ];
 
+/// A scenario still running after this long is reported as hung and fails
+/// the run: none takes a minute, and a hang would otherwise last until the
+/// CI job's timeout without naming the scenario (concurrent output is
+/// printed in order, once scenarios finish).
+const SCENARIO_LIMIT: Duration = Duration::from_secs(180);
+
+/// Scenarios running now, with when each started, for the watchdog.
+static RUNNING: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+
 /// Marks the runner process started by [`trust_test_ca`].
 const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 
@@ -110,9 +121,11 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 async fn main() {
     trust_test_ca();
     assert_implemented_scenarios_exist();
+    start_watchdog();
     ClientWorld::cucumber()
         .before(|_, _, scenario, world| {
             Box::pin(async move {
+                running().push((scenario_key(scenario), Instant::now()));
                 if scenario.tags.iter().any(|tag| tag == "A") {
                     world.server = Some(Centrifugo::start(SERVER_A).await);
                 } else if scenario.tags.iter().any(|tag| tag == "B") {
@@ -139,11 +152,51 @@ async fn main() {
                 }
             })
         })
+        .after(|_, _, scenario, _, _| {
+            Box::pin(async move {
+                let key = scenario_key(scenario);
+                let mut running = running();
+                if let Some(index) = running.iter().position(|(name, _)| *name == key) {
+                    running.remove(index);
+                }
+            })
+        })
         .fail_on_skipped()
         .filter_run_and_exit(FEATURES, |_, _, scenario| {
             IMPLEMENTED.contains(&scenario.name.as_str())
         })
         .await;
+}
+
+fn running() -> std::sync::MutexGuard<'static, Vec<(String, Instant)>> {
+    RUNNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Rows of an outline share its name and line: they are told apart only
+/// by being removed one at a time.
+fn scenario_key(scenario: &Scenario) -> String {
+    format!("{} (line {})", scenario.name, scenario.position.line)
+}
+
+/// Fails the run, naming the scenarios still running, once one of them
+/// runs past [`SCENARIO_LIMIT`].
+fn start_watchdog() {
+    thread::spawn(|| {
+        loop {
+            thread::sleep(Duration::from_secs(5));
+            let running = running();
+            if running
+                .iter()
+                .any(|(_, started)| started.elapsed() > SCENARIO_LIMIT)
+            {
+                eprintln!("Hung scenarios, running for more than {SCENARIO_LIMIT:?}:");
+                for (name, started) in running.iter() {
+                    eprintln!("  {name}: running for {:?}", started.elapsed());
+                }
+                process::exit(1);
+            }
+        }
+    });
 }
 
 /// Makes the client trust the test CA of the encrypted scenarios (Block 6).
