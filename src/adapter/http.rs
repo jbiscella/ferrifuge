@@ -309,28 +309,44 @@ impl Decoder {
             }
             return;
         }
-        // Event stream format: a blank line ends an event; of the fields,
-        // data and event matter (comments, id and retry carry nothing).
+        // Event stream format (WHATWG HTML, "Interpreting an event stream"):
+        // a blank line ends an event; a line starting with a colon is a
+        // comment; otherwise the field name ends at the first colon, and a
+        // line without one is a field with an empty value. Of the fields,
+        // data and event matter; id and retry carry nothing for the client.
         if line.is_empty() {
-            // Only events of the default type reach the reference transport
-            // (centrifuge-js `onmessage`, WHATWG "dispatch the event").
             let event = self.event.take();
             let data = self.data.take();
-            if event.is_none_or(|event| event.is_empty() || event == b"message") {
-                messages.extend(data);
+            // Only events of the default type, with data, reach the
+            // reference transport (centrifuge-js `onmessage`, WHATWG
+            // "dispatch the event").
+            if event.is_none_or(|event| event.is_empty() || event == b"message")
+                && let Some(data) = data.filter(|data| !data.is_empty())
+            {
+                messages.push_back(data);
             }
-        } else if let Some(value) = line.strip_prefix(b"event:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            self.event = Some(value.to_vec());
-        } else if let Some(value) = line.strip_prefix(b"data:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            match &mut self.data {
+            return;
+        }
+        if line.first() == Some(&b':') {
+            return;
+        }
+        let (field, value) = match line.iter().position(|&byte| byte == b':') {
+            Some(colon) => {
+                let value = &line[colon + 1..];
+                (&line[..colon], value.strip_prefix(b" ").unwrap_or(value))
+            }
+            None => (&line[..], &[][..]),
+        };
+        match field {
+            b"event" => self.event = Some(value.to_vec()),
+            b"data" => match &mut self.data {
                 Some(data) => {
                     data.push(b'\n');
                     data.extend_from_slice(value);
                 }
                 None => self.data = Some(value.to_vec()),
-            }
+            },
+            _ => {}
         }
     }
 }
@@ -532,6 +548,17 @@ mod tests {
             matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("503")),
             "{inbound:?}"
         );
+    }
+
+    #[test]
+    fn colonless_sse_fields_have_an_empty_value() {
+        let messages = decode(
+            true,
+            &[b"event: notice\nevent\ndata: 1\n\ndata\n\ndata\ndata: 2\n\n"],
+        );
+
+        // A bare event resets the type; bare data alone dispatches nothing.
+        assert_eq!(messages, ["1", "\n2"]);
     }
 
     #[test]
