@@ -7,8 +7,8 @@ use std::time::Duration;
 use serde_json::json;
 use support::centrifugo::{Centrifugo, TAG};
 use support::fake_server::{Announce, FakeServer};
-use support::protobuf;
 use support::http_proxy::HttpProxy;
+use support::protobuf;
 use support::proxy::ConnectProxy;
 use support::relay::{CountingRelay, Mode};
 use support::tls;
@@ -240,6 +240,85 @@ async fn fake_server_pings_periodically_until_stopped() {
     assert!(silence.is_err(), "no ping after stop_pinging: {silence:?}");
 }
 
+#[tokio::test]
+async fn relay_can_be_silent_down_or_forwarding() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let fake = FakeServer::start(Announce::default()).await;
+    let relay = CountingRelay::start_in(fake.address(), Mode::Silent).await;
+    let mut buffer = [0u8; 64];
+
+    let mut silent = TcpStream::connect(relay.address()).await.expect("connect");
+    silent
+        .write_all(b"GET / HTTP/1.1\r\n\r\n")
+        .await
+        .expect("write");
+    let silent_read =
+        tokio::time::timeout(Duration::from_millis(300), silent.read(&mut buffer)).await;
+    relay.set_mode(Mode::Down);
+    let mut down = TcpStream::connect(relay.address()).await.expect("connect");
+    let down_read = tokio::time::timeout(Duration::from_secs(2), down.read(&mut buffer)).await;
+    relay.set_mode(Mode::Forward);
+    let forwarded = raw_connect(&relay.websocket_url()).await;
+
+    assert!(
+        silent_read.is_err(),
+        "silent relay answered: {silent_read:?}"
+    );
+    assert!(
+        matches!(down_read, Ok(Ok(0) | Err(_))),
+        "down relay kept the connection: {down_read:?}"
+    );
+    assert!(forwarded.contains(r#""connect""#), "{forwarded}");
+    assert_eq!(relay.connections(), 3);
+}
+
+#[tokio::test]
+async fn http_proxy_streams_and_rejects_one_emulation_request() {
+    let server = Centrifugo::start(&[
+        (
+            "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
+            "true",
+        ),
+        ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
+    ])
+    .await;
+    let proxy = HttpProxy::start(server.address().to_owned()).await;
+    let http = reqwest::Client::new();
+    let emulation = format!("http://{}/emulation", proxy.address());
+
+    let mut stream = http
+        .post(format!("http://{}/connection/http_stream", proxy.address()))
+        .header("content-type", "application/json")
+        .body(r#"{"id":1,"connect":{}}"#)
+        .send()
+        .await
+        .expect("http_stream through the proxy");
+    let first = stream.chunk().await.expect("stream chunk").expect("data");
+    proxy.reject_next_emulation();
+    let rejected = http
+        .post(&emulation)
+        .body("{}")
+        .send()
+        .await
+        .expect("rejected");
+    let relayed = http
+        .post(&emulation)
+        .body("{}")
+        .send()
+        .await
+        .expect("relayed");
+
+    assert!(
+        String::from_utf8_lossy(&first).contains(r#""session""#),
+        "{first:?}"
+    );
+    assert_eq!(rejected.status(), 503);
+    assert!(proxy.rejected());
+    assert_ne!(relayed.status(), 503);
+}
+
 /// Opens a websocket asking for the Protobuf subprotocol and sends a
 /// connect command; the server's first reply, decoded.
 async fn raw_protobuf_connect(
@@ -342,83 +421,4 @@ async fn fake_server_speaks_protobuf_when_asked() {
         panic!("{two_pings:?}");
     };
     assert_eq!(two_pings.as_ref(), [0, 0]);
-}
-
-#[tokio::test]
-async fn relay_can_be_silent_down_or_forwarding() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    let fake = FakeServer::start(Announce::default()).await;
-    let relay = CountingRelay::start_in(fake.address(), Mode::Silent).await;
-    let mut buffer = [0u8; 64];
-
-    let mut silent = TcpStream::connect(relay.address()).await.expect("connect");
-    silent
-        .write_all(b"GET / HTTP/1.1\r\n\r\n")
-        .await
-        .expect("write");
-    let silent_read =
-        tokio::time::timeout(Duration::from_millis(300), silent.read(&mut buffer)).await;
-    relay.set_mode(Mode::Down);
-    let mut down = TcpStream::connect(relay.address()).await.expect("connect");
-    let down_read = tokio::time::timeout(Duration::from_secs(2), down.read(&mut buffer)).await;
-    relay.set_mode(Mode::Forward);
-    let forwarded = raw_connect(&relay.websocket_url()).await;
-
-    assert!(
-        silent_read.is_err(),
-        "silent relay answered: {silent_read:?}"
-    );
-    assert!(
-        matches!(down_read, Ok(Ok(0) | Err(_))),
-        "down relay kept the connection: {down_read:?}"
-    );
-    assert!(forwarded.contains(r#""connect""#), "{forwarded}");
-    assert_eq!(relay.connections(), 3);
-}
-
-#[tokio::test]
-async fn http_proxy_streams_and_rejects_one_emulation_request() {
-    let server = Centrifugo::start(&[
-        (
-            "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
-            "true",
-        ),
-        ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
-    ])
-    .await;
-    let proxy = HttpProxy::start(server.address().to_owned()).await;
-    let http = reqwest::Client::new();
-    let emulation = format!("http://{}/emulation", proxy.address());
-
-    let mut stream = http
-        .post(format!("http://{}/connection/http_stream", proxy.address()))
-        .header("content-type", "application/json")
-        .body(r#"{"id":1,"connect":{}}"#)
-        .send()
-        .await
-        .expect("http_stream through the proxy");
-    let first = stream.chunk().await.expect("stream chunk").expect("data");
-    proxy.reject_next_emulation();
-    let rejected = http
-        .post(&emulation)
-        .body("{}")
-        .send()
-        .await
-        .expect("rejected");
-    let relayed = http
-        .post(&emulation)
-        .body("{}")
-        .send()
-        .await
-        .expect("relayed");
-
-    assert!(
-        String::from_utf8_lossy(&first).contains(r#""session""#),
-        "{first:?}"
-    );
-    assert_eq!(rejected.status(), 503);
-    assert!(proxy.rejected());
-    assert_ne!(relayed.status(), 503);
 }
