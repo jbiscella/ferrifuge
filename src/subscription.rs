@@ -132,22 +132,29 @@ impl std::fmt::Display for DataError {
 
 impl std::error::Error for DataError {}
 
-/// A subscription to the channel exists already in the client's registry
-/// (spec: `newSubscription` can throw).
+/// Why a subscription could not be created.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicateSubscription {
-    /// The channel.
-    pub channel: String,
+#[non_exhaustive]
+pub enum SubscriptionError {
+    /// A subscription to the channel exists already in the client's registry
+    /// (spec: `newSubscription` can throw).
+    AlreadyExists {
+        /// The channel.
+        channel: String,
+    },
+    /// The client was dropped: it can no longer subscribe.
+    ClientClosed,
 }
 
-impl std::fmt::Display for DuplicateSubscription {
+impl std::fmt::Display for SubscriptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "a subscription to channel {} already exists",
-            self.channel
-        )
+        match self {
+            Self::AlreadyExists { channel } => {
+                write!(f, "a subscription to channel {channel} already exists")
+            }
+            Self::ClientClosed => f.write_str("the client was dropped"),
+        }
     }
 }
 
-impl std::error::Error for DuplicateSubscription {}
+impl std::error::Error for SubscriptionError {}

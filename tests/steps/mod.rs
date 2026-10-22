@@ -9,8 +9,8 @@ use std::time::Duration;
 use cucumber::World;
 use ferrifuge::machine::TransportKind;
 use ferrifuge::{
-    Client, ClientBuilder, ClientError, ClientEvent, Config, DuplicateSubscription, ErrorKind,
-    Protocol, Subscription, SubscriptionEvent,
+    Client, ClientBuilder, ClientError, ClientEvent, Config, ErrorKind, Protocol, Subscription,
+    SubscriptionError, SubscriptionEvent,
 };
 use futures_util::{FutureExt, Stream, StreamExt};
 
@@ -105,7 +105,7 @@ pub(crate) struct ClientWorld {
     /// Further subscriptions, by channel.
     pub(crate) named_subscriptions: Vec<Subscription>,
     /// Why creating a subscription failed.
-    pub(crate) duplicate: Option<DuplicateSubscription>,
+    pub(crate) duplicate: Option<SubscriptionError>,
     /// Channels the data callback was called with, in order.
     pub(crate) data_calls: Arc<std::sync::Mutex<Vec<String>>>,
     /// The publication a step looked at last.
