@@ -474,6 +474,9 @@ impl Machine {
         }
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
+        // A later subscribe() starts its retries over (centrifuge-js
+        // `_clearSubscribingState`).
+        sub.backoff.reset();
         let channel = sub.channel.clone();
         self.actions.push(Action::CancelSubscriptionTimer(
             id,
@@ -803,6 +806,58 @@ mod tests {
             )),
             "{actions:?}"
         );
+    }
+
+    #[test]
+    fn the_last_data_option_decides() {
+        let fixed = SubscriptionOptions::default()
+            .data_source()
+            .data(b"{}".to_vec());
+        let fetched = SubscriptionOptions::default()
+            .data(b"{}".to_vec())
+            .data_source();
+
+        assert_eq!(
+            (fixed.data.as_deref(), fixed.data_source),
+            (Some(&b"{}"[..]), false)
+        );
+        assert_eq!((fetched.data, fetched.data_source), (None, true));
+    }
+
+    #[test]
+    fn a_fresh_subscribe_retries_from_the_minimum_delay() {
+        let (mut machine, transport, id) = connected();
+        let busy = r#""error":{"code":100,"message":"busy","temporary":true}"#;
+        machine.handle(Input::Subscribe(id));
+        // Several failures grow the backoff.
+        let mut command = 2;
+        for _ in 0..6 {
+            machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+            machine.handle(Input::SubscriptionTimerFired(
+                id,
+                SubscriptionTimer::Resubscribe,
+            ));
+            command += 1;
+        }
+        // The subscribe in flight is abandoned; the fresh one waits for it
+        // to settle, then goes out as the next command.
+        machine.handle(Input::Unsubscribe(id));
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+        command += 1;
+
+        let retry = machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+
+        let delay = retry
+            .iter()
+            .find_map(|action| match action {
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => {
+                    Some(*delay)
+                }
+                _ => None,
+            })
+            .expect("a retry");
+        assert!(delay <= MIN_RESUBSCRIBE_DELAY * 2, "{delay:?}");
     }
 
     #[test]
