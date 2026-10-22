@@ -95,16 +95,20 @@ pub struct SubscriptionOptions {
 }
 
 impl SubscriptionOptions {
-    /// Sends `data` with every subscribe command.
+    /// Sends `data` with every subscribe command, instead of asking the
+    /// owner: the last of this and [`Self::data_source`] decides.
     #[must_use]
     pub fn data(mut self, data: Vec<u8>) -> Self {
         self.data = Some(data);
+        self.data_source = false;
         self
     }
 
-    /// Asks the owner for the data before every subscribe command.
+    /// Asks the owner for the data before every subscribe command, instead
+    /// of sending fixed data: the last of this and [`Self::data`] decides.
     #[must_use]
     pub fn data_source(mut self) -> Self {
+        self.data = None;
         self.data_source = true;
         self
     }

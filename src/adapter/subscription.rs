@@ -111,7 +111,6 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn data(mut self, data: impl Into<Vec<u8>>) -> Self {
         // The last of `data` and `get_data` set decides.
-        self.options.data_source = false;
         self.get_data = None;
         self.options = self.options.data(data.into());
         self
@@ -127,7 +126,6 @@ impl SubscriptionBuilder {
         F: Fn(String) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
     {
-        self.options.data = None;
         self.options = self.options.data_source();
         self.get_data = Some(Arc::new(move |channel| Box::pin(get_data(channel))));
         self
