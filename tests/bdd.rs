@@ -192,8 +192,12 @@ async fn main() {
                 }
             })
         })
-        .after(|_, _, scenario, _, _| {
+        .after(|_, _, scenario, _, world| {
             Box::pin(async move {
+                // Removed here, awaited, rather than by the world's drop.
+                if let Some(server) = world.and_then(|world| world.server.take()) {
+                    server.stop().await;
+                }
                 let key = scenario_key(scenario);
                 let mut running = running();
                 if let Some(index) = running.iter().position(|(name, _)| *name == key) {

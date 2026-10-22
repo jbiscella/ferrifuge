@@ -20,8 +20,11 @@ const PORT: u16 = 8000;
 const INTERNAL_PORT: u16 = 9000;
 
 pub(crate) struct Centrifugo {
-    // Dropping the handle stops and removes the container.
-    _container: ContainerAsync<GenericImage>,
+    /// Removed asynchronously by [`Centrifugo::stop`] or on drop: dropping
+    /// a testcontainers container instead blocks the thread until Docker
+    /// removed it (`block_in_place`), which stalls the cucumber runner and
+    /// every scenario it is running.
+    container: Option<ContainerAsync<GenericImage>>,
     /// `host:port` of the client endpoints.
     address: String,
     tls: bool,
@@ -85,10 +88,17 @@ impl Centrifugo {
             .expect("container API port");
         let api = ServerApi::new(&format!("http://{host}:{api_port}"));
         Self {
-            _container: container,
+            container: Some(container),
             address: format!("{host}:{port}"),
             tls: tls.is_some(),
             api,
+        }
+    }
+
+    /// Stops and removes the container.
+    pub(crate) async fn stop(mut self) {
+        if let Some(container) = self.container.take() {
+            let _ = container.rm().await;
         }
     }
 
@@ -162,6 +172,29 @@ impl ServerApi {
                 message: error["message"].as_str().unwrap_or_default().to_owned(),
             }),
             None => Ok(body.get_mut("result").map(Value::take).unwrap_or_default()),
+        }
+    }
+}
+
+impl Drop for Centrifugo {
+    /// Removes the container in the background, e.g. when a step replaces
+    /// the scenario's server; see [`Centrifugo::container`].
+    fn drop(&mut self) {
+        let Some(container) = self.container.take() else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime)
+                if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                runtime.spawn(async move {
+                    let _ = container.rm().await;
+                });
+            }
+            // On a current-thread runtime, e.g. #[tokio::test], spawned
+            // tasks die with the test: testcontainers removes it there
+            // without blocking the runtime, on a thread of its own.
+            _ => drop(container),
         }
     }
 }
