@@ -425,6 +425,15 @@ impl Machine {
     /// centrifuge-js `_subscribeError`: temporary errors are retried.
     fn subscribe_error(&mut self, id: SubscriptionId, error: &Error) {
         if error.code < 100 || error.temporary {
+            self.emit_subscription(
+                id,
+                SubscriptionEvent::Error(ClientError {
+                    kind: ErrorKind::Subscribe,
+                    code: error.code,
+                    message: error.message.clone(),
+                    transport: None,
+                }),
+            );
             self.schedule_resubscribe(id);
         } else {
             self.set_unsubscribed(id, error.code, &error.message, false);
@@ -762,6 +771,37 @@ mod tests {
         assert!(
             unsubscribed.contains(&Action::CancelSubscriptionData(fetch)),
             "{unsubscribed:?}"
+        );
+    }
+
+    #[test]
+    fn a_temporary_subscribe_error_is_reported_then_retried() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"id":2,"error":{"code":100,"message":"busy","temporary":true}}"#,
+        ));
+
+        assert!(
+            actions.contains(&Action::EmitSubscription(
+                id,
+                SubscriptionEvent::Error(ClientError {
+                    kind: ErrorKind::Subscribe,
+                    code: 100,
+                    message: "busy".into(),
+                    transport: None,
+                })
+            )),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+            )),
+            "{actions:?}"
         );
     }
 

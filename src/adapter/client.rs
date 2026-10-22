@@ -55,7 +55,7 @@ pub(super) struct Shared {
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
-    closed: AtomicBool,
+    pub(super) closed: AtomicBool,
 }
 
 /// The machine and its pending actions, locked together: API calls change
@@ -419,6 +419,10 @@ impl Driver {
                 self.perform(action).await;
             }
             if self.shared.closed.load(Ordering::Acquire) {
+                // Handles of subscriptions may outlive the client: end
+                // every event stream rather than leave it pending forever.
+                lock(&self.shared.subscribers).clear();
+                lock(&self.shared.subscription_subscribers).clear();
                 return;
             }
             let input = tokio::select! {

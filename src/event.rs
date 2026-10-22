@@ -102,4 +102,7 @@ pub enum ErrorKind {
     Configuration,
     /// A subscription data callback failed; the subscription retries.
     SubscriptionData,
+    /// The server answered a subscribe command with a temporary error; the
+    /// subscription retries.
+    Subscribe,
 }
