@@ -3,7 +3,7 @@
 //! relays requests and streams the responses, so `http_stream` and sse work
 //! through it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,6 +33,9 @@ struct ProxyState {
     rejected: AtomicBool,
     /// Delay for the next emulation request carrying an unsubscribe command.
     delay_next_unsubscribe: Mutex<Option<Duration>>,
+    /// Emulation requests carrying an unsubscribe command that the server
+    /// answered with success.
+    unsubscribes_relayed: AtomicUsize,
 }
 
 impl HttpProxy {
@@ -47,6 +50,7 @@ impl HttpProxy {
             reject_next_emulation: AtomicBool::new(false),
             rejected: AtomicBool::new(false),
             delay_next_unsubscribe: Mutex::new(None),
+            unsubscribes_relayed: AtomicUsize::new(0),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -73,6 +77,12 @@ impl HttpProxy {
     /// only after `delay`, so a later request can overtake it.
     pub(crate) fn delay_next_unsubscribe(&self, delay: Duration) {
         *self.state.delay_next_unsubscribe.lock().unwrap() = Some(delay);
+    }
+
+    /// How many emulation requests carrying an unsubscribe command the
+    /// server answered with success.
+    pub(crate) fn unsubscribes_relayed(&self) -> usize {
+        self.state.unsubscribes_relayed.load(Ordering::SeqCst)
     }
 
     /// Whether the programmed rejection happened.
@@ -102,11 +112,11 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    if parts.uri.path() == "/emulation"
+    let unsubscribe = parts.uri.path() == "/emulation"
         && body
             .windows(b"unsubscribe".len())
-            .any(|window| window == b"unsubscribe")
-    {
+            .any(|window| window == b"unsubscribe");
+    if unsubscribe {
         let delay = state.delay_next_unsubscribe.lock().unwrap().take();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -125,6 +135,9 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let Ok(response) = upstream.send().await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
+    if unsubscribe && response.status().is_success() {
+        state.unsubscribes_relayed.fetch_add(1, Ordering::SeqCst);
+    }
     let mut relayed = Response::builder().status(response.status());
     if let Some(value) = response.headers().get(CONTENT_TYPE) {
         relayed = relayed.header(CONTENT_TYPE, value);

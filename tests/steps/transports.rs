@@ -186,10 +186,16 @@ fn a_client_with_every_transport_unreachable(world: &mut ClientWorld) {
     configure(world, endpoints);
 }
 
+/// Through the scenario's HTTP proxy when an earlier step set one.
 #[given(regex = r#"^a client connected over transport "(\w+)"$"#)]
 async fn a_client_connected_over(world: &mut ClientWorld, transport: String) {
     let kind = kind(&transport);
-    let url = server_url(server(world), kind);
+    let url = match &world.http_proxy {
+        Some(proxy) if kind.is_emulated() => {
+            format!("http://{}/connection/{}", proxy.address(), kind.name())
+        }
+        _ => server_url(server(world), kind),
+    };
     configure(world, vec![(kind, url)]);
     connect_and_wait(world).await;
 }
