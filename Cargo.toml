@@ -92,3 +92,8 @@ harness = false
 name = "perf_alloc"
 harness = false
 required-features = ["tokio"]
+
+[[test]]
+name = "perf_footprint"
+harness = false
+required-features = ["tokio"]

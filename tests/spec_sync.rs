@@ -24,9 +24,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
-    "Idle footprint with ten subscriptions",
-    "Marginal cost of a subscription",
-    "Memory stays flat across reconnects",
     "An idle client wakes only for pings and refreshes",
     "Reconnects of a fleet are spread over the jitter window",
     "Token refreshes of a fleet are spread",
