@@ -23,6 +23,10 @@ const MAX_RESUBSCRIBE_DELAY: Duration = Duration::from_secs(20);
 #[derive(Debug, Default)]
 pub(super) struct Subscriptions {
     by_id: BTreeMap<SubscriptionId, Subscription>,
+    /// The subscription to each channel in `by_id`: lookups by channel,
+    /// publications among them, cost the same however many there are
+    /// (Block 14, "O(1) dispatch").
+    by_channel: HashMap<String, SubscriptionId>,
     next_id: u64,
     next_fetch: u64,
     /// Subscribe commands awaiting their reply: whose, and for which
@@ -82,6 +86,7 @@ impl Machine {
         let subscriptions = &mut self.subscriptions;
         let id = SubscriptionId(subscriptions.next_id);
         subscriptions.next_id += 1;
+        subscriptions.by_channel.insert(channel.clone(), id);
         subscriptions.by_id.insert(
             id,
             Subscription {
@@ -106,10 +111,7 @@ impl Machine {
     /// The subscription to `channel` in the registry, if any.
     #[must_use]
     pub fn find_subscription(&self, channel: &str) -> Option<SubscriptionId> {
-        self.subscriptions
-            .by_id
-            .iter()
-            .find_map(|(id, sub)| (sub.channel == channel).then_some(*id))
+        self.subscriptions.by_channel.get(channel).copied()
     }
 
     /// Every subscription in the registry, with its channel.
@@ -453,7 +455,9 @@ impl Machine {
     /// The subscription was removed from the registry: unsubscribed first.
     pub(super) fn remove_subscription(&mut self, id: SubscriptionId) {
         self.unsubscribe(id);
-        self.subscriptions.by_id.remove(&id);
+        if let Some(sub) = self.subscriptions.by_id.remove(&id) {
+            self.subscriptions.by_channel.remove(&sub.channel);
+        }
     }
 
     /// Moves a subscription to unsubscribed; with `send`, a server-side
@@ -496,8 +500,12 @@ impl Machine {
 
     /// A publication pushed for `channel`.
     pub(super) fn publication(&mut self, channel: &str, publication: Publication) {
-        let subscribed = self.subscriptions.by_id.iter().find_map(|(id, sub)| {
-            (sub.channel == channel && sub.state == SubscriptionState::Subscribed).then_some(*id)
+        // Only a subscribed handle receives publications (Block 9).
+        let subscribed = self.find_subscription(channel).filter(|id| {
+            self.subscriptions
+                .by_id
+                .get(id)
+                .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
         });
         if let Some(id) = subscribed {
             self.emit_subscription(id, SubscriptionEvent::Publication(publication));
