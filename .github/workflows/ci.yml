@@ -187,6 +187,13 @@ jobs:
       - name: Gates on the benchmark counts
         run: cargo test --test perf_gates -- --ignored
 
+      # Gates, and reports the measured values in the job summary.
+      - name: Allocations per publication
+        run: |
+          set -o pipefail
+          FERRIFUGE_PERF=1 cargo test --release --test perf_alloc | tee perf_alloc.txt
+          { echo '### Allocations per publication'; grep '^@P report' perf_alloc.txt; } >> "$GITHUB_STEP_SUMMARY"
+
   msrv:
     runs-on: ubuntu-latest
     steps:
