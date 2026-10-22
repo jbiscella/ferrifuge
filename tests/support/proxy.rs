@@ -91,6 +91,13 @@ impl ProxyBackend {
                 "CENTRIFUGO_CHANNEL_PROXY_SUBSCRIBE_ENDPOINT",
                 format!("http://{HOST_GATEWAY}:{}/subscribe", self.port),
             ),
+            // Well above the slowest programmed answer (`subscribe_delay`,
+            // 1 s): at the 1 s default the server gives up first, and the
+            // subscribe fails instead of succeeding late.
+            (
+                "CENTRIFUGO_CHANNEL_PROXY_SUBSCRIBE_TIMEOUT",
+                "5s".to_owned(),
+            ),
         ]
     }
 
