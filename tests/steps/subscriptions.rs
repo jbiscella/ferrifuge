@@ -316,6 +316,30 @@ async fn unsubscribed_with_code_and_reason(world: &mut ClientWorld, code: u32, r
     );
 }
 
+/// Waits until the server has no subscriber to `channel` left (server API
+/// `channels`): the client's unsubscribe reached it. The subscription drops
+/// publications once unsubscribed, so its events alone cannot show that.
+async fn assert_no_server_subscriber(world: &ClientWorld, channel: &str) {
+    let gone = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let result = server(world)
+                .api()
+                .call("channels", json!({"pattern": channel}))
+                .await
+                .expect("server API channels");
+            if result["channels"].get(channel).is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        gone.is_ok(),
+        "the server still has a subscriber to {channel}"
+    );
+}
+
 /// Publishes `{"late":true}` and checks the subscription receives nothing.
 async fn assert_no_publication(world: &mut ClientWorld) {
     publish(world, CHANNEL, r#"{"late":true}"#, None).await;
@@ -332,6 +356,7 @@ async fn assert_no_publication(world: &mut ClientWorld) {
 
 #[then(regex = r#"^a publication to channel "news" is not received$"#)]
 async fn a_publication_is_not_received(world: &mut ClientWorld) {
+    assert_no_server_subscriber(world, CHANNEL).await;
     assert_no_publication(world).await;
 }
 
@@ -342,6 +367,16 @@ async fn a_late_publication_is_not_received(world: &mut ClientWorld) {
     // The proxy answers the subscribe after 1 s; the deferred unsubscribe
     // follows its reply.
     tokio::time::sleep(Duration::from_secs(1) + TOLERANCE).await;
+    // The client undoes only a subscription the server made: an unsubscribe
+    // relayed shows the subscribe was answered with success, and the race
+    // happened.
+    let relayed = world
+        .http_proxy
+        .as_ref()
+        .expect("the slow subscribe proxy step sets an HTTP proxy")
+        .unsubscribes_relayed();
+    assert_eq!(relayed, 1, "unsubscribe commands the server accepted");
+    assert_no_server_subscriber(world, CHANNEL).await;
     assert_no_publication(world).await;
 }
 
@@ -400,9 +435,12 @@ fn the_subscribe_proxy_answers_with_data(world: &mut ClientWorld, channel: Strin
     proxy(world).subscribe_data(&channel, &data);
 }
 
+/// The client then connects through an HTTP proxy, which records the
+/// unsubscribe commands the server accepts.
 #[given("a server with http_stream enabled and a subscribe proxy that answers after 1 s")]
-fn a_slow_subscribe_proxy(world: &mut ClientWorld) {
+async fn a_slow_subscribe_proxy(world: &mut ClientWorld) {
     proxy(world).subscribe_delay(CHANNEL, Duration::from_secs(1));
+    world.http_proxy = Some(HttpProxy::start(server(world).address().to_owned()).await);
 }
 
 /// The proxy records every subscribe request.
