@@ -118,6 +118,8 @@ pub enum SubscriptionTimer {
     Resubscribe,
     /// Deadline for the subscribe command to get its reply.
     SubscribeReply,
+    /// Deadline for an unsubscribe command to get its reply.
+    UnsubscribeReply,
 }
 
 /// Timers the machine sets. At most one of each kind runs at a time.

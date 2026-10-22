@@ -281,6 +281,7 @@ struct JsonRefreshResult {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JsonSubscribeResult {
+    #[serde(deserialize_with = "present")]
     data: Option<Box<RawValue>>,
     publications: Vec<JsonPublication>,
 }
@@ -319,6 +320,7 @@ struct JsonDisconnect {
 
 #[derive(Deserialize)]
 struct JsonPublication {
+    #[serde(default, deserialize_with = "present")]
     data: Option<Box<RawValue>>,
     #[serde(default)]
     offset: u64,
@@ -353,8 +355,19 @@ struct JsonClientInfo {
     client: String,
     #[serde(default)]
     user: String,
+    #[serde(default, deserialize_with = "present")]
     conn_info: Option<Box<RawValue>>,
+    #[serde(default, deserialize_with = "present")]
     chan_info: Option<Box<RawValue>>,
+}
+
+/// A field that is present, whatever its value: an explicit `null` is data
+/// too (`Option` alone would take it for absent).
+fn present<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -580,6 +593,16 @@ mod tests {
         assert_eq!(info.conn_info.as_deref(), Some(&br#"{"i": 1}"#[..]));
         assert_eq!(info.chan_info, None);
         assert_eq!(replies[2].result, ReplyResult::Unsubscribe);
+    }
+
+    #[test]
+    fn explicit_null_data_is_kept() {
+        let replies = decode(br#"{"push":{"channel":"c","pub":{"data":null}}}"#).unwrap();
+
+        let ReplyResult::Push(Push::Publication { publication, .. }) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert_eq!(publication.data, b"null");
     }
 
     #[test]
