@@ -1735,6 +1735,8 @@ Feature: Client commands
   - p99 added latency ≤ 1 ms at 1000 msg/s;
   - idle CPU < 0.1% of a core.
 
+Value clause: As an app developer shipping Ferrifuge to large fleets of end-user devices, I want each client to cost almost nothing at rest and a constant amount per message, and a fleet of clients to spread its reconnects and token refreshes, so that devices stay unburdened and the Centrifugo cluster never receives synchronised reconnect or refresh waves.
+
 ```gherkin
 Feature: Footprint, performance and fleet behaviour
 
