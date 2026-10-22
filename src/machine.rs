@@ -288,6 +288,9 @@ pub enum Action {
         /// Identifies the fetch in its answer.
         fetch: FetchId,
     },
+    /// Stop a [`Action::FetchSubscriptionData`] still running: its answer
+    /// is no longer wanted.
+    CancelSubscriptionData(FetchId),
 }
 
 impl std::fmt::Debug for Input {
@@ -409,6 +412,10 @@ impl std::fmt::Debug for Action {
                 .field("subscription", subscription)
                 .field("channel", channel)
                 .field("fetch", fetch)
+                .finish(),
+            Self::CancelSubscriptionData(fetch) => f
+                .debug_tuple("CancelSubscriptionData")
+                .field(fetch)
                 .finish(),
         }
     }

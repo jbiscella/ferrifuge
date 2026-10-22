@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
+use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::Notify;
@@ -263,6 +264,7 @@ impl Client {
             timers: Timers::default(),
             subscription_timers: SubscriptionTimers::default(),
             data_fetches: FuturesUnordered::new(),
+            data_fetch_aborts: HashMap::new(),
         };
         tokio::spawn(driver.run());
         Ok(Self { shared })
@@ -332,11 +334,14 @@ struct Driver {
     fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
     subscription_timers: SubscriptionTimers,
-    /// Subscription data callbacks running.
+    /// Subscription data callbacks running; an aborted one yields `None`.
     data_fetches: FuturesUnordered<DataFetching>,
+    /// Handles to abort the callbacks running, by fetch.
+    data_fetch_aborts: HashMap<FetchId, AbortHandle>,
 }
 
-type DataFetching = Pin<Box<dyn Future<Output = (FetchId, Result<Vec<u8>, DataError>)> + Send>>;
+type DataFetching =
+    Pin<Box<dyn Future<Output = Option<(FetchId, Result<Vec<u8>, DataError>)>> + Send>>;
 
 /// The machine's subscription timers, by subscription and kind.
 #[derive(Default)]
@@ -440,7 +445,12 @@ impl Driver {
                 (id, timer) = self.subscription_timers.fired() => {
                     Input::SubscriptionTimerFired(id, timer)
                 }
-                Some((fetch, result)) = self.data_fetches.next(), if !self.data_fetches.is_empty() => {
+                Some(fetched) = self.data_fetches.next(), if !self.data_fetches.is_empty() => {
+                    // Aborted: the machine no longer wants it.
+                    let Some((fetch, result)) = fetched else {
+                        continue;
+                    };
+                    self.data_fetch_aborts.remove(&fetch);
                     Input::SubscriptionDataFetched { fetch, result }
                 }
                 (fetch, result) = fetched(&mut self.fetching) => {
@@ -530,6 +540,11 @@ impl Driver {
                 channel,
                 fetch,
             } => self.fetch_subscription_data(subscription, channel, fetch),
+            Action::CancelSubscriptionData(fetch) => {
+                if let Some(abort) = self.data_fetch_aborts.remove(&fetch) {
+                    abort.abort();
+                }
+            }
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
@@ -561,7 +576,7 @@ impl Driver {
         };
         // A panicking callback fails this fetch, not the driver: whether it
         // panics creating its future or polling it.
-        let fetching: DataFetching =
+        let fetching: Pin<Box<dyn Future<Output = _> + Send>> =
             match std::panic::catch_unwind(AssertUnwindSafe(|| get_data(channel))) {
                 Ok(future) => Box::pin(async move {
                     let result = AssertUnwindSafe(future).catch_unwind().await;
@@ -572,7 +587,9 @@ impl Driver {
                 }),
                 Err(_) => Box::pin(std::future::ready((fetch, Err(data_callback_panicked())))),
             };
-        self.data_fetches.push(fetching);
+        let (fetching, abort) = future::abortable(fetching);
+        self.data_fetch_aborts.insert(fetch, abort);
+        self.data_fetches.push(Box::pin(fetching.map(Result::ok)));
     }
 }
 

@@ -56,10 +56,17 @@ impl Subscription {
     /// Events from now on. Each call returns an independent stream.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + 'static {
         let (sender, receiver) = events::unbounded();
-        lock(&self.shared.subscription_subscribers)
-            .entry(self.id)
-            .or_default()
-            .push(sender);
+        // Checked against the registry under the core lock: removal leaves
+        // the registry first, then ends the streams, so a removed
+        // subscription's stream ends at once instead of leaking a sender.
+        let core = lock(&self.shared.core);
+        if core.machine.subscription_state(self.id).is_some() {
+            lock(&self.shared.subscription_subscribers)
+                .entry(self.id)
+                .or_default()
+                .push(sender);
+        }
+        drop(core);
         receiver
     }
 
@@ -240,6 +247,8 @@ mod tests {
         );
         assert_eq!(events.next().await, None);
         assert_eq!(client.get_subscription("news"), None);
+        // A stream asked for afterwards ends at once.
+        assert_eq!(subscription.events().next().await, None);
     }
 
     #[tokio::test(flavor = "current_thread")]
