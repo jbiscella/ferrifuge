@@ -131,8 +131,12 @@ impl HttpTransport {
             let status = response.status();
             // A server without the session's node (404) or failing (5xx)
             // cannot answer the command; other statuses reject only it
-            // (centrifuge-js `send`).
-            if status == reqwest::StatusCode::NOT_FOUND || status.is_server_error() {
+            // (centrifuge-js `send`). A redirect is not followed (see
+            // `http_client`), so its command never arrived either.
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status.is_server_error()
+                || status.is_redirection()
+            {
                 Err(format!("emulation request failed: HTTP status {status}"))
             } else {
                 Ok(())
@@ -451,6 +455,39 @@ mod tests {
         assert!(!is_event_stream("text/event-streaming"));
         assert!(!is_event_stream("application/json"));
         assert!(!is_event_stream(""));
+    }
+
+    #[tokio::test]
+    async fn a_redirected_emulation_request_ends_the_transport() {
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        let redirecting = serve_once(
+            b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/emulation\r\ncontent-length: 0\r\n\r\n",
+            "/emulation",
+            Duration::ZERO,
+        )
+        .await;
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            Some(&redirecting),
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        transport.send(b"{}".to_vec());
+
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv()).await;
+
+        assert!(
+            matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("307")),
+            "{inbound:?}"
+        );
     }
 
     #[tokio::test]
