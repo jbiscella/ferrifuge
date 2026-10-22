@@ -98,7 +98,11 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
         let event = world.next_event().await;
         let reached = match &event {
             ClientEvent::Connecting { code: got, .. } if *got == code => "connecting",
-            ClientEvent::Disconnected { .. } => "disconnected",
+            // The final state: it must carry the code sent.
+            ClientEvent::Disconnected { code: got, .. } => {
+                assert_eq!(*got, code, "{event:?}");
+                "disconnected"
+            }
             // E.g. the "connecting" that connect() itself emits.
             ClientEvent::Connecting { .. } | ClientEvent::Error(_) => continue,
             ClientEvent::Connected { .. } => panic!("expected {expected}, got {event:?}"),
