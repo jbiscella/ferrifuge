@@ -27,7 +27,6 @@ const P_NOT_YET_MEASURED: &[&str] = &[
     "Idle footprint with ten subscriptions",
     "Marginal cost of a subscription",
     "Allocations per publication do not depend on the number of subscriptions",
-    "Dispatch cost does not depend on the number of subscriptions",
     "Memory stays flat across reconnects",
     "An idle client wakes only for pings and refreshes",
     "Reconnects of a fleet are spread over the jitter window",

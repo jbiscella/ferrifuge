@@ -1,5 +1,5 @@
 //! Instruction counts of dispatching one publication (Block 14, `@P`), with
-//! gungraun on Valgrind.
+//! gungraun on Valgrind. `tests/perf_gates.rs` gates on them.
 
 // The gungraun macros generate undocumented items.
 #![allow(missing_docs)]

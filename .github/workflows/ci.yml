@@ -184,6 +184,9 @@ jobs:
       - name: Benchmarks
         run: cargo bench --bench dispatch -- --save-summary=json
 
+      - name: Gates on the benchmark counts
+        run: cargo test --test perf_gates -- --ignored
+
   msrv:
     runs-on: ubuntu-latest
     steps:
