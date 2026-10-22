@@ -1021,6 +1021,13 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Then the token callback is called before the data callback
     And the subscribe command carries both the token and the data
 
+  @E
+  Scenario: A subscription that has a token calls the data callback without the token callback
+    Given a subscription to a private channel with an initial token, a token callback and a data callback
+    When the subscription is subscribed on a connected client
+    Then the token callback is not called
+    And the subscribe command carries the initial token and the data
+
   @A
   Scenario: Each subscription token callback receives its own channel
     Given a connected client with subscriptions to private channels "a" and "b" using one token callback
