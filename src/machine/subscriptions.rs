@@ -11,7 +11,7 @@ use crate::wire::{
     Command, Error, Method, Reply, ReplyResult, SubscribeRequest, UnsubscribeRequest,
 };
 use crate::{
-    ClientError, DataError, DuplicateSubscription, ErrorKind, Publication, State, Subscribed,
+    ClientError, DataError, ErrorKind, Publication, State, Subscribed, SubscriptionError,
     SubscriptionEvent, SubscriptionState, codes,
 };
 
@@ -75,9 +75,9 @@ impl Machine {
         &mut self,
         channel: String,
         options: SubscriptionOptions,
-    ) -> Result<SubscriptionId, DuplicateSubscription> {
+    ) -> Result<SubscriptionId, SubscriptionError> {
         if self.find_subscription(&channel).is_some() {
-            return Err(DuplicateSubscription { channel });
+            return Err(SubscriptionError::AlreadyExists { channel });
         }
         let subscriptions = &mut self.subscriptions;
         let id = SubscriptionId(subscriptions.next_id);

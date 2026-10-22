@@ -374,7 +374,12 @@ fn a_second_subscription_is_created(world: &mut ClientWorld, channel: String) {
 #[then("creating it fails")]
 fn creating_it_fails(world: &mut ClientWorld) {
     let duplicate = world.duplicate.as_ref().expect("creating it succeeded");
-    assert_eq!(duplicate.channel, CHANNEL);
+    assert_eq!(
+        duplicate,
+        &ferrifuge::SubscriptionError::AlreadyExists {
+            channel: CHANNEL.to_owned()
+        }
+    );
 }
 
 #[given(

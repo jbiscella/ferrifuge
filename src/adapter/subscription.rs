@@ -9,7 +9,7 @@ use futures_core::Stream;
 
 use super::client::{Client, GetData, Shared, lock};
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
-use crate::{DataError, DuplicateSubscription, SubscriptionEvent, SubscriptionState};
+use crate::{DataError, SubscriptionError, SubscriptionEvent, SubscriptionState};
 
 /// A subscription to a channel, in its client's registry. Clones are
 /// handles to the same subscription.
@@ -138,10 +138,15 @@ impl SubscriptionBuilder {
     /// # Errors
     ///
     /// When the registry holds a subscription to the channel already.
-    pub fn build(self) -> Result<Subscription, DuplicateSubscription> {
+    pub fn build(self) -> Result<Subscription, SubscriptionError> {
         // Registered with its callback under the core lock: no other thread
         // can find and subscribe it before the callback is there.
         let mut core = lock(&self.shared.core);
+        // After shutdown nothing could ever subscribe it, and a callback
+        // registered now would outlive the driver's cleanup.
+        if self.shared.closed.load(Ordering::Acquire) {
+            return Err(SubscriptionError::ClientClosed);
+        }
         let id = core
             .machine
             .add_subscription(self.channel.clone(), self.options)?;
@@ -176,7 +181,7 @@ impl Client {
     pub fn new_subscription(
         &self,
         channel: impl Into<String>,
-    ) -> Result<Subscription, DuplicateSubscription> {
+    ) -> Result<Subscription, SubscriptionError> {
         self.subscription_builder(channel).build()
     }
 
@@ -310,6 +315,22 @@ mod tests {
             ),
             before
         );
+    }
+
+    #[tokio::test]
+    async fn a_builder_outliving_its_client_builds_nothing() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let builder = client
+            .subscription_builder("news")
+            .get_data(|_| async { Ok(Vec::new()) });
+        let shared = Arc::clone(client.shared());
+        drop(client);
+
+        let built = builder.build();
+
+        assert_eq!(built, Err(SubscriptionError::ClientClosed));
+        assert!(lock(&shared.data_callbacks).0.is_empty());
+        assert_eq!(lock(&shared.core).machine.find_subscription("news"), None);
     }
 
     #[test]
