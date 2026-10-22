@@ -96,6 +96,25 @@ impl Shared {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
+        self.handle(&mut core, input);
+        drop(core);
+        self.actions_queued.notify_one();
+    }
+
+    /// The client's final disconnect, closing it in the same locked
+    /// section: an API call either runs before and is shut down with the
+    /// rest, or after and sees the client closed.
+    fn shut_down(&self) {
+        let mut core = lock(&self.core);
+        if !self.closed.load(Ordering::Acquire) {
+            self.handle(&mut core, Input::Disconnect);
+            self.closed.store(true, Ordering::Release);
+        }
+        drop(core);
+        self.actions_queued.notify_one();
+    }
+
+    fn handle(&self, core: &mut Core, input: Input) {
         for action in core.machine.handle(input) {
             match action {
                 Action::Emit(event) => self.emit(&event),
@@ -103,8 +122,6 @@ impl Shared {
                 action => core.actions.push_back(action),
             }
         }
-        drop(core);
-        self.actions_queued.notify_one();
     }
 
     fn emit(&self, event: &ClientEvent) {
@@ -308,9 +325,7 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        self.shared.apply(Input::Disconnect);
-        self.shared.closed.store(true, Ordering::Release);
-        self.shared.actions_queued.notify_one();
+        self.shared.shut_down();
     }
 }
 
