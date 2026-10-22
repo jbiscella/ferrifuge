@@ -207,9 +207,10 @@ async fn main() {
         })
         .fail_on_skipped()
         .filter_run_and_exit(FEATURES, |_, _, scenario| {
-            // @P scenarios run outside cucumber (Block 0, "Test layers").
-            IMPLEMENTED.contains(&scenario.name.as_str())
-                && !scenario.tags.iter().any(|tag| tag == "P")
+            // @P runs outside cucumber (Block 0, "Test layers"); a scenario
+            // also tagged with a cucumber layer runs in that layer.
+            let p_only = !scenario.tags.is_empty() && scenario.tags.iter().all(|tag| tag == "P");
+            IMPLEMENTED.contains(&scenario.name.as_str()) && !p_only
         })
         .await;
 }
