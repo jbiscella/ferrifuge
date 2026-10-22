@@ -207,7 +207,9 @@ async fn main() {
         })
         .fail_on_skipped()
         .filter_run_and_exit(FEATURES, |_, _, scenario| {
+            // @P scenarios run outside cucumber (Block 0, "Test layers").
             IMPLEMENTED.contains(&scenario.name.as_str())
+                && !scenario.tags.iter().any(|tag| tag == "P")
         })
         .await;
 }

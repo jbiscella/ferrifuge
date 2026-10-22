@@ -69,8 +69,11 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | @B | @A plus an HTTP proxy backend owned by the test (connect/subscribe/publish/rpc/refresh/sub_refresh proxy) | Server responses the test must control: custom errors with `temporary` flag, custom disconnects, delayed replies, inspecting connect request fields |
 | @D | Scripted fake server speaking the client protocol | Server behaviour Centrifugo cannot be made to produce: unsubscribe push codes, missing pings, malformed/unexpected frames, frame-level assertions |
 | @E | Unit tests with a controlled clock, no network | Timing: backoff and jitter bounds, refresh retry delays |
+| @P | Benchmark, allocation-counting and simulation harness, outside cucumber | Footprint, per-message cost and fleet behaviour. Deterministic metrics (instruction counts, allocation counts, live bytes, simulated time) gate CI; wall-clock metrics are measured and reported, never gating |
 
 A scenario tagged with several layers must pass in each of them.
+
+Cucumber skips `@P` scenarios. A test fails if a `@P` scenario name in `CLAUDE.md` has no matching benchmark or simulation, or if a benchmark claims a scenario name that does not exist.
 
 **Exceptions introduced:** none.
 
@@ -1693,3 +1696,120 @@ Feature: Client commands
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 14 — Footprint, performance and fleet behaviour
+
+**Goal:**
+- a client costs almost nothing at rest;
+- each message costs a constant amount, whatever the number of subscriptions;
+- memory stays flat over time;
+- a fleet of clients spreads its reconnects and token refreshes instead of synchronising them.
+
+**Dependencies:** Blocks 2, 4, 5, 9. Subscription-token refresh jitter applies once Block 10 is implemented.
+
+**Out of scope:**
+- HTTP proxy (CONNECT) support;
+- sleep/resume behaviour;
+- server load testing (the server side has its own tooling);
+- the event-buffer policy for slow consumers, pending the owner's decision on review item D1;
+- per-platform behaviour beyond running the existing suites on Windows and macOS.
+
+**Decisions:**
+- **O(1) dispatch.** A publication is dispatched to its subscription by a lookup keyed by channel. Its cost does not depend on the number of subscriptions. This replaces the linear scan in `src/machine/subscriptions.rs` (`publication`), and must keep Block 9's rule that only a `Subscribed` handle receives publications.
+- **Token refresh jitter.** A token refresh is scheduled at a uniformly random point between ttl − min(20% of ttl, 60 s) and ttl − min(10% of ttl, 30 s).
+  - This replaces the deterministic margin of Block 5.
+  - It diverges from centrifuge-js on purpose: refreshes of tokens issued at the same instant must not happen at the same instant across a fleet.
+  - It applies to connection tokens now, and to subscription tokens in Block 10.
+- **Reconnect jitter window.** A new client option, named idiomatically, with default 0. When a connected client loses its connection and reconnect is advised, the first reconnect attempt first waits a uniformly random delay in [0, window]. The Block 2 backoff then applies to the following attempts.
+  - With 0 the behaviour is unchanged, and the Block 2 scenarios keep passing.
+  - The option does not apply to the first `connect()`, nor to an explicit `disconnect()` followed by `connect()`.
+- **Measurement conventions.**
+  - Footprint is measured over a plain websocket to the fake server, with live bytes counted by a counting global allocator in the harness. No runtime dependency is added for this.
+  - Instruction counts are measured with gungraun (successor of iai-callgrind; Linux with Valgrind).
+  - Wall-clock is measured with criterion, locally and in a non-gating CI job.
+  - Verify crate versions on crates.io before adding them.
+- **Wall-clock reference targets**, reported only, never gating:
+  - decode + dispatch ≤ 10 µs per 1 KiB publication;
+  - p99 added latency ≤ 1 ms at 1000 msg/s;
+  - idle CPU < 0.1% of a core.
+
+```gherkin
+Feature: Footprint, performance and fleet behaviour
+
+  @P
+  Scenario: Idle footprint with ten subscriptions
+    Given a client connected to the fake server with 10 subscribed channels
+    When the client is idle
+    Then the live heap attributable to the client is at most 1 MiB
+
+  @P
+  Scenario: Marginal cost of a subscription
+    Given a client connected to the fake server
+    When 1000 more channels are subscribed
+    Then the live heap grows by at most 2 KiB per subscription
+
+  @P
+  Scenario Outline: Allocations per publication do not depend on the number of subscriptions
+    Given a client connected to the fake server with <count> subscribed channels
+    When 10000 publications of 1 KiB are delivered to one of them
+    Then each publication costs at most 3 allocations
+
+    Examples:
+      | count |
+      | 1     |
+      | 100   |
+      | 10000 |
+
+  @P
+  Scenario: Dispatch cost does not depend on the number of subscriptions
+    Given dispatch benchmarks with 1 and with 10000 subscribed channels
+    When one publication is dispatched in each
+    Then the instruction count with 10000 channels is at most 1.1 times the count with 1
+
+  @P
+  Scenario: Memory stays flat across reconnects
+    Given a client connected to the fake server with 10 subscribed channels
+    When the fake server forces 10000 reconnect cycles
+    Then the live heap after the last cycle is within 1% of the live heap after the first
+
+  @P
+  Scenario: An idle client wakes only for pings and refreshes
+    Given a client with 10 subscribed channels and an expiring connection token, driven by a controlled clock
+    And the server pings every 25 s
+    When 10 minutes of simulated time elapse without publications
+    Then the only timers set are for ping detection and token refresh
+    And no timer fires more often than once per ping interval
+
+  @P
+  Scenario: Reconnects of a fleet are spread over the jitter window
+    Given 100000 simulated clients with a reconnect jitter window of 100 s, driven by a controlled clock
+    When all of them lose their connection at the same instant with a reconnect-advised code
+    Then no second of the window holds more than 2% of the first reconnect attempts
+
+  @P
+  Scenario: Token refreshes of a fleet are spread
+    Given 100000 simulated clients whose connection tokens have the same ttl and were issued at the same instant
+    When their refreshes come due
+    Then the refreshes span at least 10% of the ttl
+    And no interval of 1% of the ttl holds more than twice the average share
+
+  @E
+  Scenario: Without a jitter window the first reconnect follows the backoff
+    Given a client with a reconnect jitter window of 0
+    When the connection is lost with a reconnect-advised code
+    Then the first reconnect delay is within the Block 2 bound for attempt 0
+
+  @E
+  Scenario: The jitter window does not delay the first connect
+    Given a client with a reconnect jitter window of 100 s
+    When connect is called
+    Then the first connect attempt is made without the jitter delay
+
+  @P
+  Scenario: Wall-clock cost per publication is reported
+    Given a client connected to the fake server with 10 subscribed channels
+    When publications of 1 KiB are delivered at 1000 per second
+    Then decode and dispatch time per publication and p99 delivery latency are reported
+```
