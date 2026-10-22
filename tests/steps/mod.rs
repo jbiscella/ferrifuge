@@ -14,7 +14,7 @@ use futures_util::{FutureExt, Stream, StreamExt};
 use crate::support::centrifugo::Centrifugo;
 use crate::support::fake_server::{Announce, FakeServer};
 use crate::support::http_proxy::HttpProxy;
-use crate::support::proxy::ConnectProxy;
+use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
 mod backoff;
@@ -41,7 +41,7 @@ pub(crate) struct ClientWorld {
     /// Started before @A and @B scenarios.
     pub(crate) server: Option<Centrifugo>,
     /// Started before @B scenarios; the server calls it on every connect.
-    pub(crate) proxy: Option<ConnectProxy>,
+    pub(crate) proxy: Option<ProxyBackend>,
     /// Started before @D scenarios.
     pub(crate) fake: Option<FakeServer>,
     /// Between the client and the server: counts transport connections.

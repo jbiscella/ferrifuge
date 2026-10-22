@@ -1,9 +1,11 @@
-//! Connect proxy backend for @B scenarios: an HTTP server that Centrifugo
-//! calls on every connection attempt, answering what the scenario programmed.
+//! Proxy backend for @B scenarios: an HTTP server that Centrifugo calls on
+//! every connection attempt and every subscription to a channel without
+//! namespace, answering what the scenario programmed.
 //! Reference: <https://centrifugal.dev/docs/server/proxy>.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -17,7 +19,7 @@ use super::centrifugo::HOST_GATEWAY;
 /// User the proxy assigns to accepted connections.
 pub(crate) const USER: &str = "proxy-user";
 
-pub(crate) struct ConnectProxy {
+pub(crate) struct ProxyBackend {
     port: u16,
     state: Arc<Mutex<Answers>>,
     server: JoinHandle<()>,
@@ -25,10 +27,24 @@ pub(crate) struct ConnectProxy {
 
 #[derive(Default)]
 struct Answers {
-    /// Answers for the next requests, in order; then connections are accepted.
+    /// Answers for the next connect requests, in order; then connections
+    /// are accepted.
     programmed: VecDeque<Answer>,
-    /// Bodies of the requests received.
+    /// Bodies of the connect requests received.
     requests: Vec<Value>,
+    /// How subscribe requests are answered, by channel; others succeed.
+    subscribe: HashMap<String, SubscribeAnswer>,
+    /// Bodies of the subscribe requests received.
+    subscribe_requests: Vec<Value>,
+}
+
+/// A programmed answer to the subscribe requests for a channel.
+#[derive(Clone, Default)]
+struct SubscribeAnswer {
+    /// The `result` or `error` object, when not an empty result.
+    body: Option<Value>,
+    /// Delay before answering.
+    delay: Duration,
 }
 
 enum Answer {
@@ -37,7 +53,7 @@ enum Answer {
     Hold,
 }
 
-impl ConnectProxy {
+impl ProxyBackend {
     /// Starts the proxy on a free port of every interface: the Centrifugo
     /// container reaches the host through the Docker host gateway.
     pub(crate) async fn start() -> Self {
@@ -46,6 +62,7 @@ impl ConnectProxy {
         let state = Arc::new(Mutex::new(Answers::default()));
         let app = axum::Router::new()
             .route("/connect", post(connect))
+            .route("/subscribe", post(subscribe))
             .with_state(Arc::clone(&state));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("proxy server");
@@ -57,7 +74,8 @@ impl ConnectProxy {
         }
     }
 
-    /// Centrifugo settings enabling this proxy for connections.
+    /// Centrifugo settings enabling this proxy for connections and for
+    /// subscriptions to channels without namespace.
     pub(crate) fn centrifugo_env(&self) -> Vec<(&'static str, String)> {
         vec![
             ("CENTRIFUGO_CLIENT_PROXY_CONNECT_ENABLED", "true".to_owned()),
@@ -65,7 +83,44 @@ impl ConnectProxy {
                 "CENTRIFUGO_CLIENT_PROXY_CONNECT_ENDPOINT",
                 format!("http://{HOST_GATEWAY}:{}/connect", self.port),
             ),
+            (
+                "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_SUBSCRIBE_PROXY_ENABLED",
+                "true".to_owned(),
+            ),
+            (
+                "CENTRIFUGO_CHANNEL_PROXY_SUBSCRIBE_ENDPOINT",
+                format!("http://{HOST_GATEWAY}:{}/subscribe", self.port),
+            ),
         ]
+    }
+
+    /// Answers subscribe requests for `channel` with this error.
+    pub(crate) fn subscribe_error(&self, channel: &str, code: u32, message: &str) {
+        self.program_subscribe(channel, |answer| {
+            answer.body = Some(json!({"error": {"code": code, "message": message}}));
+        });
+    }
+
+    /// Answers subscribe requests for `channel` with this data.
+    pub(crate) fn subscribe_data(&self, channel: &str, data: &Value) {
+        self.program_subscribe(channel, |answer| {
+            answer.body = Some(json!({"result": {"data": data}}));
+        });
+    }
+
+    /// Answers subscribe requests for `channel` after `delay`.
+    pub(crate) fn subscribe_delay(&self, channel: &str, delay: Duration) {
+        self.program_subscribe(channel, |answer| answer.delay = delay);
+    }
+
+    /// Bodies of the subscribe requests received so far.
+    pub(crate) fn subscribe_requests(&self) -> Vec<Value> {
+        self.state.lock().unwrap().subscribe_requests.clone()
+    }
+
+    fn program_subscribe(&self, channel: &str, program: impl FnOnce(&mut SubscribeAnswer)) {
+        let mut state = self.state.lock().unwrap();
+        program(state.subscribe.entry(channel.to_owned()).or_default());
     }
 
     /// Answers the next connection attempt with a disconnect.
@@ -100,7 +155,7 @@ impl ConnectProxy {
     }
 }
 
-impl Drop for ConnectProxy {
+impl Drop for ProxyBackend {
     fn drop(&mut self) {
         self.server.abort();
     }
@@ -121,4 +176,18 @@ async fn connect(
         Some(Answer::Hold) => std::future::pending().await,
         None => Json(json!({"result": {"user": USER}})),
     }
+}
+
+async fn subscribe(
+    State(state): State<Arc<Mutex<Answers>>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let answer = {
+        let mut answers = state.lock().unwrap();
+        let channel = request["channel"].as_str().unwrap_or_default().to_owned();
+        answers.subscribe_requests.push(request);
+        answers.subscribe.get(&channel).cloned().unwrap_or_default()
+    };
+    tokio::time::sleep(answer.delay).await;
+    Json(answer.body.unwrap_or_else(|| json!({"result": {}})))
 }

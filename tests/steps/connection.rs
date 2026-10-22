@@ -163,7 +163,7 @@ async fn the_client_reaches_state(world: &mut ClientWorld, expected: String) {
 #[then("no further connect attempt is made")]
 async fn no_further_connect_attempt(world: &mut ClientWorld) {
     let connections = world.relay.as_ref().map(CountingRelay::connections);
-    let attempts = world.proxy.as_ref().map(proxy::ConnectProxy::requests);
+    let attempts = world.proxy.as_ref().map(proxy::ProxyBackend::requests);
     let events = world.events_during(QUIET_PERIOD).await;
 
     assert!(events.is_empty(), "unexpected events: {events:?}");
@@ -173,7 +173,7 @@ async fn no_further_connect_attempt(world: &mut ClientWorld) {
         "the client opened another connection"
     );
     assert_eq!(
-        world.proxy.as_ref().map(proxy::ConnectProxy::requests),
+        world.proxy.as_ref().map(proxy::ProxyBackend::requests),
         attempts,
         "connect attempts reached the proxy"
     );

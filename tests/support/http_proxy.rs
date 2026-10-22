@@ -1,9 +1,11 @@
 //! Reverse proxy in front of the test server's HTTP endpoints, for @B
-//! scenarios that need an emulation request to fail. It relays requests and
-//! streams the responses, so `http_stream` and sse work through it.
+//! scenarios that need an emulation request to fail or to be late. It
+//! relays requests and streams the responses, so `http_stream` and sse work
+//! through it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -29,6 +31,8 @@ struct ProxyState {
     reject_next_emulation: AtomicBool,
     /// Set once a programmed rejection was answered.
     rejected: AtomicBool,
+    /// Delay for the next emulation request carrying an unsubscribe command.
+    delay_next_unsubscribe: Mutex<Option<Duration>>,
 }
 
 impl HttpProxy {
@@ -42,6 +46,7 @@ impl HttpProxy {
             http: reqwest::Client::new(),
             reject_next_emulation: AtomicBool::new(false),
             rejected: AtomicBool::new(false),
+            delay_next_unsubscribe: Mutex::new(None),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -62,6 +67,12 @@ impl HttpProxy {
         self.state
             .reject_next_emulation
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Relays the next emulation request carrying an unsubscribe command
+    /// only after `delay`, so a later request can overtake it.
+    pub(crate) fn delay_next_unsubscribe(&self, delay: Duration) {
+        *self.state.delay_next_unsubscribe.lock().unwrap() = Some(delay);
     }
 
     /// Whether the programmed rejection happened.
@@ -91,6 +102,16 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    if parts.uri.path() == "/emulation"
+        && body
+            .windows(b"unsubscribe".len())
+            .any(|window| window == b"unsubscribe")
+    {
+        let delay = state.delay_next_unsubscribe.lock().unwrap().take();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+    }
     let path = parts.uri.path_and_query().map_or("/", |path| path.as_str());
     let mut upstream = state
         .http
