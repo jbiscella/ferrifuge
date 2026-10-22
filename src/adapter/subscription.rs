@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
@@ -60,7 +61,9 @@ impl Subscription {
         // the registry first, then ends the streams, so a removed
         // subscription's stream ends at once instead of leaking a sender.
         let core = lock(&self.shared.core);
-        if core.machine.subscription_state(self.id).is_some() {
+        if core.machine.subscription_state(self.id).is_some()
+            && !self.shared.closed.load(Ordering::Acquire)
+        {
             lock(&self.shared.subscription_subscribers)
                 .entry(self.id)
                 .or_default()
@@ -107,6 +110,9 @@ impl SubscriptionBuilder {
     /// protocol, any bytes with Protobuf.
     #[must_use]
     pub fn data(mut self, data: impl Into<Vec<u8>>) -> Self {
+        // The last of `data` and `get_data` set decides.
+        self.options.data_source = false;
+        self.get_data = None;
         self.options = self.options.data(data.into());
         self
     }
@@ -121,6 +127,7 @@ impl SubscriptionBuilder {
         F: Fn(String) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
     {
+        self.options.data = None;
         self.options = self.options.data_source();
         self.get_data = Some(Arc::new(move |channel| Box::pin(get_data(channel))));
         self
@@ -249,6 +256,50 @@ mod tests {
         assert_eq!(client.get_subscription("news"), None);
         // A stream asked for afterwards ends at once.
         assert_eq!(subscription.events().next().await, None);
+    }
+
+    #[tokio::test]
+    async fn streams_end_when_the_client_is_dropped() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let subscription = client.new_subscription("news").unwrap();
+        let mut events = subscription.events();
+        let mut client_events = client.events();
+
+        drop(client);
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while events.next().await.is_some() {}
+            while client_events.next().await.is_some() {}
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "streams still open after the client was dropped"
+        );
+        assert_eq!(subscription.events().next().await, None);
+    }
+
+    #[test]
+    fn the_last_data_setting_decides() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let client = Client::new(UNREACHABLE, Config::default());
+
+        let bytes_last = client
+            .subscription_builder("a")
+            .get_data(|_| async { Ok(Vec::new()) })
+            .data(b"{}".to_vec());
+        let callback_last = client
+            .subscription_builder("b")
+            .data(b"{}".to_vec())
+            .get_data(|_| async { Ok(Vec::new()) });
+
+        assert!(!bytes_last.options.data_source && bytes_last.get_data.is_none());
+        assert_eq!(bytes_last.options.data.as_deref(), Some(&b"{}"[..]));
+        assert!(callback_last.options.data_source && callback_last.get_data.is_some());
+        assert_eq!(callback_last.options.data, None);
     }
 
     #[tokio::test(flavor = "current_thread")]

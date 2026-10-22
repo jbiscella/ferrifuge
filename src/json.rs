@@ -201,7 +201,11 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                         .collect(),
                 }));
             }
-            "unsubscribe" => result = Some(ReplyResult::Unsubscribe),
+            "unsubscribe" => {
+                // An object, even empty: `null` or a scalar is no result.
+                field::<JsonUnsubscribeResult>(&value)?;
+                result = Some(ReplyResult::Unsubscribe);
+            }
             "push" => result = Some(ReplyResult::Push(field::<JsonPush>(&value)?.into())),
             _ => unknown = true,
         }
@@ -285,6 +289,9 @@ struct JsonSubscribeResult {
     data: Option<Box<RawValue>>,
     publications: Vec<JsonPublication>,
 }
+
+#[derive(Deserialize)]
+struct JsonUnsubscribeResult {}
 
 #[derive(Deserialize)]
 struct JsonPush {
@@ -593,6 +600,16 @@ mod tests {
         assert_eq!(info.conn_info.as_deref(), Some(&br#"{"i": 1}"#[..]));
         assert_eq!(info.chan_info, None);
         assert_eq!(replies[2].result, ReplyResult::Unsubscribe);
+    }
+
+    #[test]
+    fn an_unsubscribe_result_must_be_an_object() {
+        assert!(decode(br#"{"id":3,"unsubscribe":null}"#).is_err());
+        assert!(decode(br#"{"id":3,"unsubscribe":1}"#).is_err());
+        assert_eq!(
+            decode(br#"{"id":3,"unsubscribe":{}}"#).unwrap()[0].result,
+            ReplyResult::Unsubscribe
+        );
     }
 
     #[test]
