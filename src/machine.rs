@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+mod subscriptions;
 mod tokens;
 mod transports;
 
@@ -27,9 +28,10 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, DuplicateSubscription, ErrorKind, State,
-    SubscriptionEvent, SubscriptionState, TokenError, codes,
+    ClientError, ClientEvent, Config, DataError, ErrorKind, State, SubscriptionEvent, TokenError,
+    codes,
 };
+use subscriptions::Subscriptions;
 use transports::Transports;
 
 /// A transport the client can connect over. `#[non_exhaustive]` so that
@@ -450,6 +452,8 @@ pub struct Machine {
     transports: Transports,
     /// Session and node of the emulated connection, from its connect reply.
     emulation: Option<(String, String)>,
+    /// Client-side subscriptions (Block 9).
+    subscriptions: Subscriptions,
     /// The connection is emulated and only its stream is proven: the backoff
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
@@ -526,6 +530,7 @@ impl Machine {
             codec,
             transports: Transports::new(vec![TransportKind::WebSocket]),
             emulation: None,
+            subscriptions: Subscriptions::default(),
             backoff_reset_pending: false,
             pings: None,
             actions: Vec::new(),
@@ -536,40 +541,6 @@ impl Machine {
     #[must_use]
     pub fn state(&self) -> State {
         self.state
-    }
-
-    /// Adds a subscription to `channel`, unsubscribed, to the registry.
-    ///
-    /// # Errors
-    ///
-    /// When the registry holds a subscription to `channel` already.
-    pub fn add_subscription(
-        &mut self,
-        channel: String,
-        options: SubscriptionOptions,
-    ) -> Result<SubscriptionId, DuplicateSubscription> {
-        drop((channel, options));
-        Ok(SubscriptionId(0))
-    }
-
-    /// State of a subscription in the registry.
-    #[must_use]
-    pub fn subscription_state(&self, id: SubscriptionId) -> Option<SubscriptionState> {
-        let _ = id;
-        Some(SubscriptionState::Unsubscribed)
-    }
-
-    /// The subscription to `channel` in the registry, if any.
-    #[must_use]
-    pub fn find_subscription(&self, channel: &str) -> Option<SubscriptionId> {
-        let _ = channel;
-        None
-    }
-
-    /// Every subscription in the registry, with its channel.
-    #[must_use]
-    pub fn subscriptions(&self) -> Vec<(SubscriptionId, String)> {
-        Vec::new()
     }
 
     /// Reacts to `input`; the owner performs the returned actions in order.
@@ -627,17 +598,18 @@ impl Machine {
                 }
             }
 
-            // About a transport already abandoned; subscriptions are not
-            // implemented yet.
+            Input::Subscribe(id) => self.subscribe(id),
+            Input::Unsubscribe(id) => self.unsubscribe(id),
+            Input::RemoveSubscription(id) => self.remove_subscription(id),
+            Input::SubscriptionTimerFired(id, timer) => self.subscription_timer_fired(id, timer),
+            Input::SubscriptionDataFetched { fetch, result } => {
+                self.subscription_data_fetched(fetch, result);
+            }
+            // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
-            | Input::Frame { .. }
-            | Input::Subscribe(_)
-            | Input::Unsubscribe(_)
-            | Input::RemoveSubscription(_)
-            | Input::SubscriptionTimerFired(..)
-            | Input::SubscriptionDataFetched { .. } => {}
+            | Input::Frame { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }
@@ -788,6 +760,10 @@ impl Machine {
                 ReplyResult::Push(Push::Disconnect(Disconnect { code, reason })) => {
                     self.disconnect(code, &reason, reconnect_advised(code));
                 }
+                ReplyResult::Push(Push::Publication {
+                    channel,
+                    publication,
+                }) => self.publication(&channel, publication),
                 // An empty reply is a server ping (client.proto, Reply).
                 ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
                     // A ping proves the connection usable (centrifuge-js
@@ -799,6 +775,10 @@ impl Machine {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.subscriptions.owns_command(reply.id) {
+            self.subscription_command_reply(reply);
             return;
         }
         if self.state == State::Connected && self.tokens.take_refresh_reply(reply.id) {
@@ -852,6 +832,7 @@ impl Machine {
             client_id: result.client.clone(),
             transport: self.transport_kind().name().to_owned(),
         });
+        self.subscriptions_connected();
     }
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
@@ -897,6 +878,7 @@ impl Machine {
         for timer in Timer::ALL {
             self.actions.push(Action::CancelTimer(timer));
         }
+        self.subscriptions_disconnected();
         self.pings = None;
 
         let state = if reconnect {

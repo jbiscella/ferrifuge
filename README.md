@@ -44,13 +44,16 @@ Available now:
 - http_stream and sse transports (`http://` and `https://`, JSON), tried
   in order when websocket cannot connect;
 - the TLS crypto provider chosen at build time: ring, aws-lc-rs, or
-  aws-lc-rs in FIPS mode.
+  aws-lc-rs in FIPS mode;
+- client-side subscriptions: states and events, publications delivered
+  with their exact bytes, resubscribe after reconnects, subscription data.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| Subscriptions, publications, RPC | later blocks |
+| Subscription tokens, recovery, server-side subscriptions | later blocks |
+| RPC, publish, history, presence | later blocks |
 
 ## Usage
 
@@ -102,6 +105,31 @@ docker run --rm -p 8000:8000 \
 `disconnect()` change the state before they return. `events()` returns a
 `Stream` of the events emitted from then on; each call returns an independent
 stream. Dropping the client disconnects it.
+
+### Subscriptions
+
+```rust
+use ferrifuge::SubscriptionEvent;
+use futures_util::StreamExt;
+
+let subscription = client.new_subscription("news")?;
+let mut events = subscription.events();
+subscription.subscribe();
+
+while let Some(event) = events.next().await {
+    if let SubscriptionEvent::Publication(publication) = event {
+        // JSON text with the JSON protocol, any bytes with Protobuf.
+        println!("{}", String::from_utf8_lossy(&publication.data));
+    }
+}
+```
+
+`subscribe()` works before `connect()`: the subscription subscribes once
+the client is connected, and again after every reconnect. The registry
+refuses a second subscription to a channel; `get_subscription`,
+`subscriptions` and `remove_subscription` manage it.
+`subscription_builder(channel)` sets data sent with every subscribe, or a
+`get_data` callback giving it each time.
 
 ### Transport fallback
 

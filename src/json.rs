@@ -4,12 +4,16 @@
 //! are separated by a newline; empty fields are omitted on encode and
 //! default on decode.
 
+use std::collections::{BTreeMap, HashMap};
+
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult,
+    RefreshResult, Reply, ReplyResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
 };
+use crate::{ClientInfo, Publication};
 
 /// A frame that is not valid JSON client protocol.
 #[derive(Debug)]
@@ -37,8 +41,8 @@ pub(crate) fn encode(commands: &[Command]) -> Vec<u8> {
 /// Decodes every reply in a frame.
 pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, DecodeError> {
     serde_json::Deserializer::from_slice(frame)
-        .into_iter::<JsonReply>()
-        .map(|reply| reply.map(Reply::from).map_err(DecodeError))
+        .into_iter::<BTreeMap<String, Box<RawValue>>>()
+        .map(|fields| reply(fields.map_err(DecodeError)?))
         .collect()
 }
 
@@ -72,6 +76,10 @@ struct JsonCommand<'a> {
     connect: Option<JsonConnectRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh: Option<JsonRefreshRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscribe: Option<JsonSubscribeRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsubscribe: Option<JsonUnsubscribeRequest<'a>>,
 }
 
 #[derive(Serialize)]
@@ -87,6 +95,34 @@ struct JsonConnectRequest<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     version: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonSubscribeRequest<'a> {
+    channel: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<JsonData<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonUnsubscribeRequest<'a> {
+    channel: &'a str,
+}
+
+/// Application data, embedded as the JSON it is. Bytes that are not JSON
+/// travel as a JSON string of their text instead of breaking the frame.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum JsonData<'a> {
+    Raw(&'a RawValue),
+    Text(std::borrow::Cow<'a, str>),
+}
+
+impl<'a> JsonData<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        serde_json::from_slice(data)
+            .map_or_else(|_| Self::Text(String::from_utf8_lossy(data)), Self::Raw)
+    }
 }
 
 impl<'a> From<&'a Command> for JsonCommand<'a> {
@@ -110,6 +146,15 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
             Method::Refresh(RefreshRequest { token }) => {
                 json.refresh = Some(JsonRefreshRequest { token });
             }
+            Method::Subscribe(SubscribeRequest { channel, data }) => {
+                json.subscribe = Some(JsonSubscribeRequest {
+                    channel,
+                    data: data.as_deref().map(JsonData::new),
+                });
+            }
+            Method::Unsubscribe(UnsubscribeRequest { channel }) => {
+                json.unsubscribe = Some(JsonUnsubscribeRequest { channel });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -122,16 +167,60 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-#[derive(Deserialize)]
-struct JsonReply {
-    #[serde(default)]
-    id: u32,
-    error: Option<JsonError>,
-    connect: Option<JsonConnectResult>,
-    refresh: Option<JsonRefreshResult>,
-    push: Option<JsonPush>,
-    #[serde(flatten)]
-    other: serde_json::Map<String, serde_json::Value>,
+/// Decodes one reply from its top-level fields, kept as raw JSON so that
+/// application data reaches the application byte for byte.
+fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> {
+    let mut id = 0;
+    let mut error = None;
+    let mut result = None;
+    let mut unknown = false;
+    for (name, value) in fields {
+        match name.as_str() {
+            "id" => id = field(&value)?,
+            "error" => error = Some(field::<JsonError>(&value)?.into()),
+            "connect" => {
+                result = Some(ReplyResult::Connect(
+                    field::<JsonConnectResult>(&value)?.into(),
+                ));
+            }
+            "refresh" => {
+                let refresh: JsonRefreshResult = field(&value)?;
+                result = Some(ReplyResult::Refresh(RefreshResult {
+                    expires: refresh.expires,
+                    ttl: refresh.ttl,
+                }));
+            }
+            "subscribe" => {
+                let subscribe: JsonSubscribeResult = field(&value)?;
+                result = Some(ReplyResult::Subscribe(SubscribeResult {
+                    data: subscribe.data.as_deref().map(raw_bytes),
+                    publications: subscribe
+                        .publications
+                        .into_iter()
+                        .map(Publication::from)
+                        .collect(),
+                }));
+            }
+            "unsubscribe" => result = Some(ReplyResult::Unsubscribe),
+            "push" => result = Some(ReplyResult::Push(field::<JsonPush>(&value)?.into())),
+            _ => unknown = true,
+        }
+    }
+    let result = result.unwrap_or(if unknown {
+        // A result of a method the client does not implement yet.
+        ReplyResult::Unsupported
+    } else {
+        ReplyResult::Empty
+    });
+    Ok(Reply { id, error, result })
+}
+
+fn field<'a, T: Deserialize<'a>>(value: &'a RawValue) -> Result<T, DecodeError> {
+    serde_json::from_str(value.get()).map_err(DecodeError)
+}
+
+fn raw_bytes(value: &RawValue) -> Vec<u8> {
+    value.get().as_bytes().to_vec()
 }
 
 #[derive(Deserialize)]
@@ -142,6 +231,16 @@ struct JsonError {
     message: String,
     #[serde(default)]
     temporary: bool,
+}
+
+impl From<JsonError> for Error {
+    fn from(error: JsonError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            temporary: error.temporary,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -157,6 +256,21 @@ struct JsonConnectResult {
     node: String,
 }
 
+impl From<JsonConnectResult> for ConnectResult {
+    fn from(connect: JsonConnectResult) -> Self {
+        Self {
+            client: connect.client,
+            version: connect.version,
+            expires: connect.expires,
+            ttl: connect.ttl,
+            ping: connect.ping,
+            pong: connect.pong,
+            session: connect.session,
+            node: connect.node,
+        }
+    }
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JsonRefreshResult {
@@ -164,9 +278,35 @@ struct JsonRefreshResult {
     ttl: u32,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct JsonSubscribeResult {
+    data: Option<Box<RawValue>>,
+    publications: Vec<JsonPublication>,
+}
+
 #[derive(Deserialize)]
 struct JsonPush {
+    #[serde(default)]
+    channel: String,
+    #[serde(rename = "pub")]
+    publication: Option<JsonPublication>,
     disconnect: Option<JsonDisconnect>,
+}
+
+impl From<JsonPush> for Push {
+    fn from(push: JsonPush) -> Self {
+        if let Some(publication) = push.publication {
+            Self::Publication {
+                channel: push.channel,
+                publication: publication.into(),
+            }
+        } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
+            Self::Disconnect(Disconnect { code, reason })
+        } else {
+            Self::Unsupported
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -177,46 +317,44 @@ struct JsonDisconnect {
     reason: String,
 }
 
-impl From<JsonReply> for Reply {
-    fn from(reply: JsonReply) -> Self {
-        let result = if let Some(connect) = reply.connect {
-            ReplyResult::Connect(ConnectResult {
-                client: connect.client,
-                version: connect.version,
-                expires: connect.expires,
-                ttl: connect.ttl,
-                ping: connect.ping,
-                pong: connect.pong,
-                session: connect.session,
-                node: connect.node,
-            })
-        } else if let Some(refresh) = reply.refresh {
-            ReplyResult::Refresh(RefreshResult {
-                expires: refresh.expires,
-                ttl: refresh.ttl,
-            })
-        } else if let Some(push) = reply.push {
-            ReplyResult::Push(match push.disconnect {
-                Some(JsonDisconnect { code, reason }) => {
-                    Push::Disconnect(Disconnect { code, reason })
-                }
-                None => Push::Unsupported,
-            })
-        } else if reply.other.is_empty() {
-            ReplyResult::Empty
-        } else {
-            ReplyResult::Unsupported
-        };
+#[derive(Deserialize)]
+struct JsonPublication {
+    data: Option<Box<RawValue>>,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    tags: HashMap<String, String>,
+    info: Option<JsonClientInfo>,
+}
+
+impl From<JsonPublication> for Publication {
+    fn from(publication: JsonPublication) -> Self {
         Self {
-            id: reply.id,
-            error: reply.error.map(|e| Error {
-                code: e.code,
-                message: e.message,
-                temporary: e.temporary,
+            data: publication
+                .data
+                .as_deref()
+                .map(raw_bytes)
+                .unwrap_or_default(),
+            offset: (publication.offset > 0).then_some(publication.offset),
+            tags: publication.tags,
+            info: publication.info.map(|info| ClientInfo {
+                client: info.client,
+                user: info.user,
+                conn_info: info.conn_info.as_deref().map(raw_bytes),
+                chan_info: info.chan_info.as_deref().map(raw_bytes),
             }),
-            result,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct JsonClientInfo {
+    #[serde(default)]
+    client: String,
+    #[serde(default)]
+    user: String,
+    conn_info: Option<Box<RawValue>>,
+    chan_info: Option<Box<RawValue>>,
 }
 
 #[cfg(test)]
@@ -355,7 +493,7 @@ mod tests {
     #[test]
     fn unknown_results_and_pushes_are_unsupported_not_errors() {
         let replies =
-            decode(b"{\"id\":5,\"rpc\":{\"data\":{}}}\n{\"push\":{\"channel\":\"c\",\"pub\":{}}}")
+            decode(b"{\"id\":5,\"rpc\":{\"data\":{}}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}")
                 .unwrap();
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
@@ -370,6 +508,78 @@ mod tests {
             String::from_utf8(body).unwrap(),
             r#"{"session":"s1","node":"n1","data":"{\"id\":2}\n{}"}"#
         );
+    }
+
+    #[test]
+    fn encodes_subscribe_with_its_data_embedded_and_unsubscribe() {
+        let subscribe = |data: &[u8]| Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                data: Some(data.to_vec()),
+            }),
+        };
+
+        let frame = encode(&[
+            subscribe(br#"{"room": 1}"#),
+            subscribe(b"not json"),
+            Command {
+                id: 3,
+                method: Method::Unsubscribe(UnsubscribeRequest {
+                    channel: "news".into(),
+                }),
+            },
+        ]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            concat!(
+                r#"{"id":2,"subscribe":{"channel":"news","data":{"room": 1}}}"#,
+                "\n",
+                r#"{"id":2,"subscribe":{"channel":"news","data":"not json"}}"#,
+                "\n",
+                r#"{"id":3,"unsubscribe":{"channel":"news"}}"#,
+            )
+        );
+    }
+
+    #[test]
+    fn decodes_publications_with_their_exact_data() {
+        let frame = concat!(
+            r#"{"id":2,"subscribe":{"data":{"b": 1.0,  "a":2},"publications":[{"data":{"x":1},"offset":4}],"epoch":"e"}}"#,
+            "\n",
+            r#"{"push":{"channel":"news","pub":{"data":{"b": 1.0,  "a":2},"offset":5,"tags":{"k":"v"},"info":{"client":"c","user":"u","conn_info":{"i": 1}}}}}"#,
+            "\n",
+            r#"{"id":3,"unsubscribe":{}}"#,
+        );
+
+        let replies = decode(frame.as_bytes()).unwrap();
+
+        let ReplyResult::Subscribe(subscribe) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert_eq!(
+            subscribe.data.as_deref(),
+            Some(&br#"{"b": 1.0,  "a":2}"#[..])
+        );
+        assert_eq!(subscribe.publications[0].data, br#"{"x":1}"#);
+        assert_eq!(subscribe.publications[0].offset, Some(4));
+        let ReplyResult::Push(Push::Publication {
+            channel,
+            publication,
+        }) = &replies[1].result
+        else {
+            panic!("{:?}", replies[1]);
+        };
+        assert_eq!(channel, "news");
+        assert_eq!(publication.data, br#"{"b": 1.0,  "a":2}"#);
+        assert_eq!(publication.offset, Some(5));
+        assert_eq!(publication.tags.get("k").map(String::as_str), Some("v"));
+        let info = publication.info.as_ref().unwrap();
+        assert_eq!((info.client.as_str(), info.user.as_str()), ("c", "u"));
+        assert_eq!(info.conn_info.as_deref(), Some(&br#"{"i": 1}"#[..]));
+        assert_eq!(info.chan_info, None);
+        assert_eq!(replies[2].result, ReplyResult::Unsubscribe);
     }
 
     #[test]
