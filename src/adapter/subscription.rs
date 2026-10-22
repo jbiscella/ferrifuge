@@ -125,12 +125,16 @@ impl SubscriptionBuilder {
     ///
     /// When the registry holds a subscription to the channel already.
     pub fn build(self) -> Result<Subscription, DuplicateSubscription> {
-        let id = lock(&self.shared.core)
+        // Registered with its callback under the core lock: no other thread
+        // can find and subscribe it before the callback is there.
+        let mut core = lock(&self.shared.core);
+        let id = core
             .machine
             .add_subscription(self.channel.clone(), self.options)?;
         if let Some(get_data) = self.get_data {
             lock(&self.shared.data_callbacks).0.insert(id, get_data);
         }
+        drop(core);
         Ok(Subscription {
             shared: self.shared,
             id,
@@ -190,12 +194,64 @@ impl Client {
     }
 
     /// Unsubscribes `subscription` and removes it from the registry; a new
-    /// subscription to its channel can then be created.
+    /// subscription to its channel can then be created. Its event streams
+    /// end after the final "unsubscribed". A subscription of another client
+    /// is left alone.
     pub fn remove_subscription(&self, subscription: &Subscription) {
+        if !Arc::ptr_eq(&subscription.shared, self.shared()) {
+            return;
+        }
         self.shared()
             .apply(Input::RemoveSubscription(subscription.id));
         lock(&self.shared().data_callbacks)
             .0
             .remove(&subscription.id);
+        // The final events were delivered by the call above.
+        lock(&self.shared().subscription_subscribers).remove(&subscription.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+
+    use super::*;
+    use crate::Config;
+
+    const UNREACHABLE: &str = "ws://127.0.0.1:1/connection/websocket";
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_ends_the_event_streams_after_the_last_event() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let subscription = client.new_subscription("news").unwrap();
+        let mut events = subscription.events();
+        subscription.subscribe();
+
+        client.remove_subscription(&subscription);
+
+        assert_eq!(
+            events.next().await.map(|event| event.name()),
+            Some("subscribing")
+        );
+        assert_eq!(
+            events.next().await.map(|event| event.name()),
+            Some("unsubscribed")
+        );
+        assert_eq!(events.next().await, None);
+        assert_eq!(client.get_subscription("news"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_subscription_of_another_client_is_not_removed() {
+        let first = Client::new(UNREACHABLE, Config::default());
+        let second = Client::new(UNREACHABLE, Config::default());
+        let mine = first.new_subscription("a").unwrap();
+        let theirs = second.new_subscription("b").unwrap();
+
+        first.remove_subscription(&theirs);
+
+        assert_eq!(first.get_subscription("a"), Some(mine));
+        assert_eq!(second.get_subscription("b"), Some(theirs));
     }
 }

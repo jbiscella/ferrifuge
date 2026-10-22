@@ -14,6 +14,9 @@ pub mod connecting {
     /// A subscribe command got no reply in time: the server-side
     /// subscription state is unknown, so the client reconnects.
     pub const SUBSCRIBE_TIMEOUT: u32 = 3;
+    /// An unsubscribe command failed or got no reply in time: the
+    /// server-side subscription state is unknown, so the client reconnects.
+    pub const UNSUBSCRIBE_ERROR: u32 = 4;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].

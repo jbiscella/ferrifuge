@@ -28,8 +28,9 @@ pub(super) struct Subscriptions {
     /// Subscribe commands awaiting their reply: whose, and for which
     /// channel, as the subscription may be gone when the reply arrives.
     subscribes: HashMap<u32, (SubscriptionId, String)>,
-    /// Unsubscribe commands awaiting their reply, with their channel.
-    unsubscribes: HashMap<u32, String>,
+    /// Unsubscribe commands awaiting their reply: whose, and for which
+    /// channel.
+    unsubscribes: HashMap<u32, (SubscriptionId, String)>,
 }
 
 #[derive(Debug)]
@@ -41,7 +42,7 @@ struct Subscription {
     subscribe_command: Option<u32>,
     /// The data fetch awaiting its answer.
     fetch: Option<FetchId>,
-    /// Waiting for an unsubscribe of its channel to be settled before
+    /// Waiting for a command for its channel to be settled before
     /// subscribing, so the server cannot apply them out of order.
     waiting: bool,
     backoff: Backoff,
@@ -53,8 +54,14 @@ impl Subscriptions {
         self.subscribes.contains_key(&id) || self.unsubscribes.contains_key(&id)
     }
 
-    fn unsubscribing(&self, channel: &str) -> bool {
-        self.unsubscribes.values().any(|pending| pending == channel)
+    /// Whether a subscribe or unsubscribe command for `channel` awaits its
+    /// reply: on emulated transports, whose commands are separate requests,
+    /// a new command for the channel could overtake it.
+    fn channel_busy(&self, channel: &str) -> bool {
+        self.subscribes
+            .values()
+            .chain(self.unsubscribes.values())
+            .any(|(_, pending)| pending == channel)
     }
 }
 
@@ -137,11 +144,11 @@ impl Machine {
     }
 
     /// Subscribes a subscription in the subscribing state over the current
-    /// connection: after its data, and after a pending unsubscribe of its
-    /// channel is settled.
+    /// connection: after its data, and after commands for its channel in
+    /// flight, e.g. the unsubscribe of a removed subscription or a subscribe
+    /// abandoned by `unsubscribe()`, are settled.
     fn start_subscribe(&mut self, id: SubscriptionId) {
         let subscriptions = &mut self.subscriptions;
-        let unsubscribing = |channel: &str| subscriptions.unsubscribing(channel);
         let Some(sub) = subscriptions.by_id.get(&id) else {
             return;
         };
@@ -151,7 +158,7 @@ impl Machine {
         {
             return;
         }
-        if unsubscribing(&sub.channel) {
+        if subscriptions.channel_busy(&sub.channel) {
             self.subscriptions
                 .by_id
                 .get_mut(&id)
@@ -207,14 +214,14 @@ impl Machine {
         ));
     }
 
-    fn send_unsubscribe(&mut self, channel: String) {
+    fn send_unsubscribe(&mut self, id: SubscriptionId, channel: String) {
         let Some(transport) = self.transport.filter(|_| self.state == State::Connected) else {
             return;
         };
         let command_id = self.command_id();
         self.subscriptions
             .unsubscribes
-            .insert(command_id, channel.clone());
+            .insert(command_id, (id, channel.clone()));
         self.send(
             transport,
             &[Command {
@@ -222,6 +229,32 @@ impl Machine {
                 method: Method::Unsubscribe(UnsubscribeRequest { channel }),
             }],
         );
+        self.actions.push(Action::SetSubscriptionTimer(
+            id,
+            SubscriptionTimer::UnsubscribeReply,
+            self.config.timeout,
+        ));
+    }
+
+    /// Lets the subscriptions waiting on `channel` subscribe once no command
+    /// for it is in flight.
+    fn wake_waiting(&mut self, channel: &str) {
+        if self.subscriptions.channel_busy(channel) {
+            return;
+        }
+        let waiting: Vec<_> = self
+            .subscriptions
+            .by_id
+            .iter_mut()
+            .filter(|(_, sub)| sub.waiting && sub.channel == channel)
+            .map(|(id, sub)| {
+                sub.waiting = false;
+                *id
+            })
+            .collect();
+        for id in waiting {
+            self.start_subscribe(id);
+        }
     }
 
     /// The data callback answered.
@@ -285,20 +318,30 @@ impl Machine {
                     self.start_subscribe(id);
                 }
             }
+            // The server-side state is unknown: start over (centrifuge-js
+            // `connectingCodes.subscribeTimeout`, `unsubscribeError`).
             SubscriptionTimer::SubscribeReply => {
                 let pending = self
                     .subscriptions
-                    .by_id
-                    .get(&id)
-                    .is_some_and(|sub| sub.subscribe_command.is_some());
+                    .subscribes
+                    .values()
+                    .any(|(of, _)| *of == id);
                 if pending {
-                    // The server-side state is unknown: start over
-                    // (centrifuge-js `connectingCodes.subscribeTimeout`).
                     self.disconnect(
                         codes::connecting::SUBSCRIBE_TIMEOUT,
                         "subscribe timeout",
                         true,
                     );
+                }
+            }
+            SubscriptionTimer::UnsubscribeReply => {
+                let pending = self
+                    .subscriptions
+                    .unsubscribes
+                    .values()
+                    .any(|(of, _)| *of == id);
+                if pending {
+                    self.unsubscribe_error();
                 }
             }
         }
@@ -307,26 +350,26 @@ impl Machine {
     /// Handles the reply to a subscribe or unsubscribe command
     /// ([`Subscriptions::owns_command`]).
     pub(super) fn subscription_command_reply(&mut self, reply: Reply) {
-        if let Some(channel) = self.subscriptions.unsubscribes.remove(&reply.id) {
-            // Subscriptions to the channel that waited for it can go on.
-            let waiting: Vec<_> = self
-                .subscriptions
-                .by_id
-                .iter_mut()
-                .filter(|(_, sub)| sub.waiting && sub.channel == channel)
-                .map(|(id, sub)| {
-                    sub.waiting = false;
-                    *id
-                })
-                .collect();
-            for id in waiting {
-                self.start_subscribe(id);
+        if let Some((id, channel)) = self.subscriptions.unsubscribes.remove(&reply.id) {
+            self.actions.push(Action::CancelSubscriptionTimer(
+                id,
+                SubscriptionTimer::UnsubscribeReply,
+            ));
+            if reply.error.is_some() {
+                self.unsubscribe_error();
+                return;
             }
+            // Subscriptions to the channel that waited for it can go on.
+            self.wake_waiting(&channel);
             return;
         }
         let Some((id, channel)) = self.subscriptions.subscribes.remove(&reply.id) else {
             return;
         };
+        self.actions.push(Action::CancelSubscriptionTimer(
+            id,
+            SubscriptionTimer::SubscribeReply,
+        ));
         let current = self
             .subscriptions
             .by_id
@@ -334,16 +377,15 @@ impl Machine {
             .is_some_and(|sub| sub.subscribe_command == Some(reply.id));
         if !current {
             // Unsubscribed or removed while in flight: undo a subscription
-            // the server made, so none outlives the handle.
+            // the server made, so none outlives the handle; subscriptions
+            // to the channel wait for that too.
             if reply.error.is_none() {
-                self.send_unsubscribe(channel);
+                self.send_unsubscribe(id, channel);
+            } else {
+                self.wake_waiting(&channel);
             }
             return;
         }
-        self.actions.push(Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-        ));
         let sub = self
             .subscriptions
             .by_id
@@ -366,6 +408,17 @@ impl Machine {
             // A reply to subscribe without its result breaks the protocol.
             (None, _) => self.reconnect_after_transport_closed(),
         }
+    }
+
+    /// An unsubscribe failed or got no reply: the server-side state is
+    /// unknown, so the client reconnects (centrifuge-js `_unsubscribe`,
+    /// `connectingCodes.unsubscribeError`).
+    fn unsubscribe_error(&mut self) {
+        self.disconnect(
+            codes::connecting::UNSUBSCRIBE_ERROR,
+            "unsubscribe error",
+            true,
+        );
     }
 
     /// centrifuge-js `_subscribeError`: temporary errors are retried.
@@ -403,21 +456,19 @@ impl Machine {
             return;
         }
         let was_subscribed = sub.state == SubscriptionState::Subscribed;
-        // A subscribe in flight stays in `subscribes`: its reply undoes it.
+        // A subscribe in flight stays in `subscribes`, with its reply
+        // deadline: its reply undoes it, its timeout starts over.
         sub.subscribe_command = None;
         sub.fetch = None;
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
         let channel = sub.channel.clone();
-        for timer in [
+        self.actions.push(Action::CancelSubscriptionTimer(
+            id,
             SubscriptionTimer::Resubscribe,
-            SubscriptionTimer::SubscribeReply,
-        ] {
-            self.actions
-                .push(Action::CancelSubscriptionTimer(id, timer));
-        }
+        ));
         if send && was_subscribed {
-            self.send_unsubscribe(channel);
+            self.send_unsubscribe(id, channel);
         }
         self.emit_subscription(
             id,
@@ -456,17 +507,33 @@ impl Machine {
     /// and subscribed subscriptions subscribe again on the next connection
     /// (spec, "Subscription states").
     pub(super) fn subscriptions_disconnected(&mut self) {
-        self.subscriptions.subscribes.clear();
-        self.subscriptions.unsubscribes.clear();
+        for (id, _) in self
+            .subscriptions
+            .subscribes
+            .drain()
+            .map(|(_, pending)| pending)
+        {
+            self.actions.push(Action::CancelSubscriptionTimer(
+                id,
+                SubscriptionTimer::SubscribeReply,
+            ));
+        }
+        for (id, _) in self
+            .subscriptions
+            .unsubscribes
+            .drain()
+            .map(|(_, pending)| pending)
+        {
+            self.actions.push(Action::CancelSubscriptionTimer(
+                id,
+                SubscriptionTimer::UnsubscribeReply,
+            ));
+        }
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;
             sub.fetch = None;
             sub.waiting = false;
-            self.actions.push(Action::CancelSubscriptionTimer(
-                *id,
-                SubscriptionTimer::SubscribeReply,
-            ));
             if sub.state == SubscriptionState::Subscribed {
                 sub.state = SubscriptionState::Subscribing;
                 resubscribing.push(*id);
@@ -567,6 +634,92 @@ mod tests {
         ));
 
         assert_eq!(sent(&after_reply), Vec::<String>::new());
+    }
+
+    fn reconnect_code(actions: &[Action]) -> Option<u32> {
+        actions.iter().find_map(|action| match action {
+            Action::Emit(crate::ClientEvent::Connecting { code, .. }) => Some(*code),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_abandoned_subscribe_keeps_its_reply_deadline() {
+        let (mut machine, _, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+        let timed_out = machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::SubscribeReply,
+        ));
+
+        assert!(
+            !unsubscribed.iter().any(|action| matches!(
+                action,
+                Action::CancelSubscriptionTimer(_, SubscriptionTimer::SubscribeReply)
+            )),
+            "{unsubscribed:?}"
+        );
+        assert_eq!(
+            reconnect_code(&timed_out),
+            Some(codes::connecting::SUBSCRIBE_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn an_unanswered_or_failed_unsubscribe_reconnects() {
+        for answer in [
+            None,
+            Some(r#"{"id":3,"error":{"code":100,"message":"internal"}}"#),
+        ] {
+            let (mut machine, transport, id) = connected();
+            machine.handle(Input::Subscribe(id));
+            machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+            let unsubscribe = machine.handle(Input::Unsubscribe(id));
+
+            let outcome = match answer {
+                None => machine.handle(Input::SubscriptionTimerFired(
+                    id,
+                    SubscriptionTimer::UnsubscribeReply,
+                )),
+                Some(error) => machine.handle(reply(transport, error)),
+            };
+
+            assert!(
+                unsubscribe.iter().any(|action| matches!(
+                    action,
+                    Action::SetSubscriptionTimer(_, SubscriptionTimer::UnsubscribeReply, _)
+                )),
+                "{unsubscribe:?}"
+            );
+            assert_eq!(
+                reconnect_code(&outcome),
+                Some(codes::connecting::UNSUBSCRIBE_ERROR),
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resubscribe_waits_for_an_abandoned_subscribe_and_its_undoing() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Unsubscribe(id));
+
+        let again = machine.handle(Input::Subscribe(id));
+        let abandoned_reply = machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let undone = machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+        assert_eq!(sent(&again), Vec::<String>::new());
+        assert_eq!(
+            sent(&abandoned_reply),
+            [r#"{"id":3,"unsubscribe":{"channel":"news"}}"#]
+        );
+        assert_eq!(
+            sent(&undone),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
     }
 
     #[test]
