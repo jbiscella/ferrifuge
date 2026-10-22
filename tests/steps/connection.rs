@@ -6,7 +6,7 @@ use ferrifuge::{ClientEvent, ErrorKind, State, codes};
 use serde_json::json;
 
 use super::{
-    ClientWorld, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event,
+    ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, UNREACHABLE_ENDPOINT, expect_event,
     next_event_after_transport_errors,
 };
 use crate::support::proxy;
@@ -145,9 +145,19 @@ async fn the_client_emits_with_code_and_reason(
 
 #[then(expr = "the client reaches state {string}")]
 async fn the_client_reaches_state(world: &mut ClientWorld, expected: String) {
-    while world.client().state().as_str() != expected {
-        world.next_event().await;
-    }
+    // Bounded as a whole: a reconnecting client keeps emitting events.
+    let reached = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while world.client().state().as_str() != expected {
+            world.next_event().await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "state {:?} not reached within {EVENT_TIMEOUT:?}: {:?}",
+        expected,
+        world.client().state()
+    );
 }
 
 #[then("no further connect attempt is made")]
