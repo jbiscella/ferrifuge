@@ -623,6 +623,8 @@ Feature: Transport fallback
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
+Verified (Centrifugo v6.10.1, raw websocket client and server API, while implementing Block 9): anonymous subscribe to a channel without namespace needs both `channel.without_namespace.allow_subscribe_for_client` and `allow_subscribe_for_anonymous` (the latter alone answers error 103 "permission denied"); `history_size` and `history_ttl` give publications an offset; the server API `publish` takes `channel`, `data` (JSON) or `b64data` (binary) and `tags`, and the client receives `{"push":{"channel":...,"pub":{"data":...,"offset":...,"tags":...,"epoch":...}}}` with `data` byte for byte as published; binary `b64data` reaches a JSON client as raw non-UTF-8 bytes in the frame, so binary payloads are for Protobuf clients only.
+
 Value clause: As an app developer, I want to subscribe to a channel and receive its publications, so that they keep arriving across reconnects without code of mine.
 
 ```gherkin
