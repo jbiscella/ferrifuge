@@ -259,9 +259,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_end_when_the_client_is_dropped() {
+    async fn streams_end_and_callbacks_go_when_the_client_is_dropped() {
         let client = Client::new(UNREACHABLE, Config::default());
-        let subscription = client.new_subscription("news").unwrap();
+        let subscription = client
+            .subscription_builder("news")
+            .get_data(|_| async { Ok(Vec::new()) })
+            .build()
+            .unwrap();
         let mut events = subscription.events();
         let mut client_events = client.events();
 
@@ -277,6 +281,7 @@ mod tests {
             "streams still open after the client was dropped"
         );
         assert_eq!(subscription.events().next().await, None);
+        assert!(lock(&subscription.shared.data_callbacks).0.is_empty());
     }
 
     #[test]
