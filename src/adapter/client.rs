@@ -420,9 +420,11 @@ impl Driver {
             }
             if self.shared.closed.load(Ordering::Acquire) {
                 // Handles of subscriptions may outlive the client: end
-                // every event stream rather than leave it pending forever.
+                // every event stream rather than leave it pending forever,
+                // and release the data callbacks nothing can call anymore.
                 lock(&self.shared.subscribers).clear();
                 lock(&self.shared.subscription_subscribers).clear();
+                lock(&self.shared.data_callbacks).0.clear();
                 return;
             }
             let input = tokio::select! {
