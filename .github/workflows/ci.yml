@@ -160,6 +160,30 @@ jobs:
           fi
           cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_FLOOR"
 
+  # Deterministic @P metrics of Block 14: instruction counts, with gungraun
+  # on Valgrind.
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      # The runner must match the gungraun library version in Cargo.lock.
+      - name: Install gungraun-runner
+        run: |
+          version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "gungraun") | .version')
+          cargo install gungraun-runner --locked --version "$version"
+
+      - name: Benchmarks
+        run: cargo bench --bench dispatch -- --save-summary=json
+
   msrv:
     runs-on: ubuntu-latest
     steps:
