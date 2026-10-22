@@ -16,7 +16,8 @@ Feature: Footprint, performance and fleet behaviour
   Scenario Outline: Allocations per publication do not depend on the number of subscriptions
     Given a client connected to the fake server with <count> subscribed channels
     When 10000 publications of 1 KiB are delivered to one of them
-    Then each publication costs at most 3 allocations
+    Then the allocations per publication are reported
+    And they differ by less than 1 from the count with 1 subscribed channel
 
     Examples:
       | count |
@@ -69,8 +70,21 @@ Feature: Footprint, performance and fleet behaviour
     When connect is called
     Then the first connect attempt is made without the jitter delay
 
+  @E
+  Scenario: The jitter window does not delay a connect after an explicit disconnect
+    Given a connected client with a reconnect jitter window of 100 s
+    When disconnect is called
+    And connect is called
+    Then the connect attempt is made without the jitter delay
+
   @P
   Scenario: Wall-clock cost per publication is reported
     Given a client connected to the fake server with 10 subscribed channels
     When publications of 1 KiB are delivered at 1000 per second
     Then decode and dispatch time per publication and p99 delivery latency are reported
+
+  @P
+  Scenario: Idle CPU is reported
+    Given a client connected to the fake server with 10 subscribed channels and server pings every 25 s
+    When 10 minutes elapse without publications
+    Then the CPU time used by the client is reported

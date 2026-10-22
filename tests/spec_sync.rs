@@ -33,6 +33,7 @@ const P_NOT_YET_MEASURED: &[&str] = &[
     "Reconnects of a fleet are spread over the jitter window",
     "Token refreshes of a fleet are spread",
     "Wall-clock cost per publication is reported",
+    "Idle CPU is reported",
 ];
 
 /// How a benchmark or simulation claims a `@P` scenario: a line of its own
