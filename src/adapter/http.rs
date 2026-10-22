@@ -88,9 +88,7 @@ impl HttpTransport {
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            if status != reqwest::StatusCode::OK
-                || !content_type.trim_start().starts_with("text/event-stream")
-            {
+            if status != reqwest::StatusCode::OK || !is_event_stream(content_type) {
                 return Err(format!(
                     "not an event stream: HTTP status {status}, content type {content_type:?}"
                 ));
@@ -167,12 +165,23 @@ impl HttpTransport {
                         };
                     }
                 },
-                Some(Err(reason)) = self.requests.next(), if !self.requests.is_empty() => {
-                    return Inbound::Closed { code: None, reason };
+                // Irrefutable: a refutable pattern would disable this branch
+                // after a success until the stream yields (tokio `select!`).
+                Some(result) = self.requests.next(), if !self.requests.is_empty() => {
+                    if let Err(reason) = result {
+                        return Inbound::Closed { code: None, reason };
+                    }
                 }
             }
         }
     }
+}
+
+/// Whether `content_type` is the event-stream media type, whatever its case
+/// and parameters.
+fn is_event_stream(content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or_default().trim();
+    essence.eq_ignore_ascii_case("text/event-stream")
 }
 
 /// Where emulation requests go: `configured`, absolute, or `/emulation` on
@@ -328,8 +337,9 @@ mod tests {
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
-    /// Serves `response` to the first request; the URL of `path` on it.
-    async fn serve_once(response: &'static [u8], path: &str) -> String {
+    /// Serves `response`, after `delay`, to the first request, then keeps
+    /// the connection open; the URL of `path` on it.
+    async fn serve_once(response: &'static [u8], path: &str, delay: Duration) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -338,7 +348,9 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             // The request, sent in one go: answered after it is read.
             let _ = socket.read(&mut [0; 4096]).await;
+            tokio::time::sleep(delay).await;
             let _ = socket.write_all(response).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
         });
         url
     }
@@ -433,6 +445,59 @@ mod tests {
     }
 
     #[test]
+    fn the_sse_media_type_is_compared_without_case_or_parameters() {
+        assert!(is_event_stream("text/event-stream"));
+        assert!(is_event_stream(" Text/Event-Stream ; charset=utf-8"));
+        assert!(!is_event_stream("text/event-streaming"));
+        assert!(!is_event_stream("application/json"));
+        assert!(!is_event_stream(""));
+    }
+
+    #[tokio::test]
+    async fn a_failed_emulation_request_after_a_successful_one_ends_the_transport() {
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        let ok = serve_once(
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+            "/emulation",
+            Duration::ZERO,
+        )
+        .await;
+        // Answers after the successful one.
+        let failing = serve_once(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+            "/emulation",
+            Duration::from_millis(500),
+        )
+        .await;
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        transport.emulation_url = Url::parse(&ok).unwrap();
+        transport.send(b"{}".to_vec());
+        transport.emulation_url = Url::parse(&failing).unwrap();
+        transport.send(b"{}".to_vec());
+
+        // The stream stays silent: only the failed request can end it.
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv()).await;
+
+        assert!(
+            matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("503")),
+            "{inbound:?}"
+        );
+    }
+
+    #[test]
     fn only_sse_events_of_the_default_type_are_delivered() {
         let messages = decode(
             true,
@@ -447,6 +512,7 @@ mod tests {
         let url = serve_once(
             b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/\r\ncontent-length: 0\r\n\r\n",
             "/connection/http_stream",
+            Duration::ZERO,
         )
         .await;
 
@@ -470,6 +536,7 @@ mod tests {
         let url = serve_once(
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
             "/connection/sse",
+            Duration::ZERO,
         )
         .await;
 
