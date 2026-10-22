@@ -974,8 +974,8 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Given a subscription with a fixed token and no token callback
     When the subscription is subscribed on a connected client
     And the server answers its subscribe command with error 109
-    Then the subscription emits an "error" event for the missing token callback
-    And then the subscription emits "unsubscribed" with code 1
+    Then the subscription emits a configuration "error" event with code 12
+    And then the subscription emits "unsubscribed" with code 1 and reason "unauthorized"
     And no resubscribe is scheduled
     And no unsubscribe command is sent
 
@@ -984,7 +984,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Given a subscription to a private channel whose token callback is set
     When the subscription is subscribed on a connected client
     And the server answers its subscribe command with error 109
-    Then the subscription emits an "error" event
+    Then the subscription emits an "error" event of kind "subscribe"
     And the subscription token callback is called again after the resubscribe delay
     And the new subscribe command carries the new token
 
@@ -1002,6 +1002,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When the subscription token callback returns an empty token during refresh
     Then the subscription emits "unsubscribed" with code 1
     And no further refresh is scheduled
+    And no sub_refresh command is sent
 
   @E
   Scenario Outline: The data callback runs only after a subscription token is obtained
@@ -1013,6 +1014,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
       | outcome                      |
       | signals "unauthorized"       |
       | fails with a temporary error |
+      | returns an empty token       |
 
   @E
   Scenario: The subscription token is fetched before the data callback runs
