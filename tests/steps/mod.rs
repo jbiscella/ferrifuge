@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use cucumber::World;
 use ferrifuge::machine::TransportKind;
-use ferrifuge::{Client, ClientBuilder, ClientError, ClientEvent, Config, ErrorKind, Protocol};
+use ferrifuge::{
+    Client, ClientBuilder, ClientError, ClientEvent, Config, DuplicateSubscription, ErrorKind,
+    Protocol, Subscription, SubscriptionEvent,
+};
 use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::support::centrifugo::Centrifugo;
@@ -22,6 +25,7 @@ mod codes;
 mod connection;
 mod ping;
 mod protobuf;
+mod subscriptions;
 mod tls;
 mod token;
 mod transports;
@@ -91,7 +95,32 @@ pub(crate) struct ClientWorld {
     /// Transports opened by an @E scenario's machine, each with the reconnect
     /// delay it waited for (zero when opened at once).
     pub(crate) opened: Vec<(TransportKind, Duration)>,
+    /// The scenario's subscription, and its events.
+    pub(crate) subscription: Option<Subscription>,
+    subscription_events: Option<SubscriptionEvents>,
+    /// A second subscription to the same channel, created after the first
+    /// was removed, and its events.
+    pub(crate) new_subscription: Option<Subscription>,
+    new_subscription_events: Option<SubscriptionEvents>,
+    /// Further subscriptions, by channel.
+    pub(crate) named_subscriptions: Vec<Subscription>,
+    /// Why creating a subscription failed.
+    pub(crate) duplicate: Option<DuplicateSubscription>,
+    /// Channels the data callback was called with, in order.
+    pub(crate) data_calls: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The publication a step looked at last.
+    pub(crate) last_publication: Option<ferrifuge::Publication>,
+    /// Raw data a fake server pushed in a publication.
+    pub(crate) last_raw_data: Option<Vec<u8>>,
+    /// Offset the server API reported for the last publication.
+    pub(crate) published_offset: Option<u64>,
+    /// When the unsubscribe the HTTP proxy delays was requested.
+    pub(crate) unsubscribed_at: Option<std::time::Instant>,
+    /// The sans-IO core of an @E subscription scenario.
+    pub(crate) subscription_machine: Option<subscriptions::MachineRun>,
 }
+
+type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
 
 impl fmt::Debug for ClientWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,6 +177,58 @@ impl ClientWorld {
             .websocket_url()
     }
 
+    /// Makes `subscription` the scenario's, recording its events.
+    pub(crate) fn track_subscription(&mut self, subscription: Subscription) {
+        self.subscription_events = Some(Box::pin(subscription.events()));
+        self.subscription = Some(subscription);
+    }
+
+    /// Makes `subscription` the scenario's new one, recording its events.
+    pub(crate) fn track_new_subscription(&mut self, subscription: Subscription) {
+        self.new_subscription_events = Some(Box::pin(subscription.events()));
+        self.new_subscription = Some(subscription);
+    }
+
+    pub(crate) fn subscription(&self) -> &Subscription {
+        self.subscription
+            .as_ref()
+            .expect("no subscription created yet")
+    }
+
+    /// The next event of the scenario's subscription (or, with `new`, of the
+    /// new one), within [`EVENT_TIMEOUT`].
+    pub(crate) async fn next_subscription_event(&mut self, new: bool) -> SubscriptionEvent {
+        let events = if new {
+            self.new_subscription_events.as_mut()
+        } else {
+            self.subscription_events.as_mut()
+        }
+        .expect("no subscription created yet");
+        tokio::time::timeout(EVENT_TIMEOUT, events.next())
+            .await
+            .unwrap_or_else(|_| panic!("no subscription event within {EVENT_TIMEOUT:?}"))
+            .expect("subscription event stream ended")
+    }
+
+    /// Subscription events arriving within `period`.
+    pub(crate) async fn subscription_events_during(
+        &mut self,
+        period: Duration,
+    ) -> Vec<SubscriptionEvent> {
+        let events = self
+            .subscription_events
+            .as_mut()
+            .expect("no subscription created yet");
+        let mut seen = Vec::new();
+        let _ = tokio::time::timeout(period, async {
+            while let Some(event) = events.next().await {
+                seen.push(event);
+            }
+        })
+        .await;
+        seen
+    }
+
     pub(crate) fn client(&self) -> &Client {
         self.client.as_ref().expect("no client created yet")
     }
@@ -188,7 +269,6 @@ impl ClientWorld {
     }
 }
 
-/// Waits for the next event and checks its name.
 /// The next event that is not a transport error, within [`EVENT_TIMEOUT`]:
 /// failed attempts, e.g. of a fallback, may come first, and keep coming
 /// while the client retries.
@@ -205,6 +285,7 @@ pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -
     .unwrap_or_else(|_| panic!("only transport errors for {EVENT_TIMEOUT:?}"))
 }
 
+/// Waits for the next event and checks its name.
 async fn expect_event(world: &mut ClientWorld, expected: &str) -> ClientEvent {
     let event = world.next_event().await;
     assert_eq!(event.name(), expected, "{event:?}");

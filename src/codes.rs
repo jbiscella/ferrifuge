@@ -11,6 +11,9 @@ pub mod connecting {
     pub const TRANSPORT_CLOSED: u32 = 1;
     /// No data, not even a ping, arrived from the server in time.
     pub const NO_PING: u32 = 2;
+    /// A subscribe command got no reply in time: the server-side
+    /// subscription state is unknown, so the client reconnects.
+    pub const SUBSCRIBE_TIMEOUT: u32 = 3;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].
@@ -19,6 +22,23 @@ pub mod disconnected {
     pub const DISCONNECT_CALLED: u32 = 0;
     /// The token callback denied access, or an expiring token could not be
     /// refreshed for lack of a callback.
+    pub const UNAUTHORIZED: u32 = 1;
+}
+
+/// Codes of [`crate::SubscriptionEvent::Subscribing`].
+pub mod subscribing {
+    /// `subscribe()` was called.
+    pub const SUBSCRIBE_CALLED: u32 = 0;
+    /// The connection closed; the subscription resubscribes on the next.
+    pub const TRANSPORT_CLOSED: u32 = 1;
+}
+
+/// Codes of [`crate::SubscriptionEvent::Unsubscribed`], besides server error
+/// codes.
+pub mod unsubscribed {
+    /// `unsubscribe()` was called, or the subscription was removed.
+    pub const UNSUBSCRIBE_CALLED: u32 = 0;
+    /// A callback denied access.
     pub const UNAUTHORIZED: u32 = 1;
 }
 

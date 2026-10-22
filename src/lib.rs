@@ -14,11 +14,16 @@ mod json;
 pub mod machine;
 mod protobuf;
 pub(crate) mod protocol;
+mod subscription;
 mod token;
 mod wire;
 
 #[cfg(feature = "tokio")]
-pub use adapter::{Client, ClientBuilder};
+pub use adapter::{Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, State};
+pub use subscription::{
+    ClientInfo, DataError, DuplicateSubscription, Publication, Subscribed, SubscriptionEvent,
+    SubscriptionState,
+};
 pub use token::TokenError;

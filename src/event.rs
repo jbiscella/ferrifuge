@@ -100,4 +100,6 @@ pub enum ErrorKind {
     /// The client options cannot work, e.g. a token expires without a
     /// token callback to refresh it.
     Configuration,
+    /// A subscription data callback failed; the subscription retries.
+    SubscriptionData,
 }
