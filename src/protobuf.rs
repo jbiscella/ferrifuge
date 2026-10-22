@@ -9,8 +9,9 @@ use prost::Message as _;
 use crate::protocol as pb;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult,
+    RefreshResult, Reply, ReplyResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
 };
+use crate::{ClientInfo, Publication};
 
 /// Encodes commands into one frame.
 pub(crate) fn encode(commands: &[Command]) -> Vec<u8> {
@@ -56,6 +57,18 @@ impl From<&Command> for pb::Command {
                     token: token.clone(),
                 });
             }
+            Method::Subscribe(SubscribeRequest { channel, data }) => {
+                pb.subscribe = Some(pb::SubscribeRequest {
+                    channel: channel.clone(),
+                    data: data.clone().unwrap_or_default(),
+                    ..pb::SubscribeRequest::default()
+                });
+            }
+            Method::Unsubscribe(UnsubscribeRequest { channel }) => {
+                pb.unsubscribe = Some(pb::UnsubscribeRequest {
+                    channel: channel.clone(),
+                });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -81,12 +94,27 @@ impl From<pb::Reply> for Reply {
                 expires: refresh.expires,
                 ttl: refresh.ttl,
             })
+        } else if let Some(subscribe) = reply.subscribe {
+            ReplyResult::Subscribe(SubscribeResult {
+                data: (!subscribe.data.is_empty()).then_some(subscribe.data),
+                publications: subscribe
+                    .publications
+                    .into_iter()
+                    .map(Publication::from)
+                    .collect(),
+            })
+        } else if reply.unsubscribe.is_some() {
+            ReplyResult::Unsubscribe
         } else if let Some(push) = reply.push {
-            ReplyResult::Push(match push.disconnect {
-                Some(pb::Disconnect { code, reason, .. }) => {
-                    Push::Disconnect(Disconnect { code, reason })
+            ReplyResult::Push(if let Some(publication) = push.r#pub {
+                Push::Publication {
+                    channel: push.channel,
+                    publication: publication.into(),
                 }
-                None => Push::Unsupported,
+            } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
+                Push::Disconnect(Disconnect { code, reason })
+            } else {
+                Push::Unsupported
             })
         } else if has_other_result(&reply) {
             ReplyResult::Unsupported
@@ -108,15 +136,29 @@ impl From<pb::Reply> for Reply {
 /// Whether the reply carries a result of a method the client does not
 /// implement yet.
 fn has_other_result(reply: &pb::Reply) -> bool {
-    reply.subscribe.is_some()
-        || reply.unsubscribe.is_some()
-        || reply.publish.is_some()
+    reply.publish.is_some()
         || reply.presence.is_some()
         || reply.presence_stats.is_some()
         || reply.history.is_some()
         || reply.ping.is_some()
         || reply.rpc.is_some()
         || reply.sub_refresh.is_some()
+}
+
+impl From<pb::Publication> for Publication {
+    fn from(publication: pb::Publication) -> Self {
+        Self {
+            data: publication.data,
+            offset: (publication.offset > 0).then_some(publication.offset),
+            tags: publication.tags,
+            info: publication.info.map(|info| ClientInfo {
+                client: info.client,
+                user: info.user,
+                conn_info: (!info.conn_info.is_empty()).then_some(info.conn_info),
+                chan_info: (!info.chan_info.is_empty()).then_some(info.chan_info),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -291,7 +333,7 @@ mod tests {
             pb::Reply {
                 push: Some(pb::Push {
                     channel: "c".into(),
-                    r#pub: Some(pb::Publication::default()),
+                    join: Some(pb::Join::default()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -302,6 +344,63 @@ mod tests {
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
         assert_eq!(replies[1].result, ReplyResult::Push(Push::Unsupported));
+    }
+
+    #[test]
+    fn encodes_subscribe_and_decodes_its_result_and_publications() {
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                data: Some(vec![0xff, 0x00]),
+            }),
+        }]);
+        let reply_frame = frame_of(&[
+            pb::Reply {
+                id: 2,
+                subscribe: Some(pb::SubscribeResult {
+                    data: vec![1],
+                    publications: vec![pb::Publication {
+                        data: vec![0xff, 0x00, 0xfe],
+                        offset: 3,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    r#pub: Some(pb::Publication {
+                        data: vec![0xfe],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ]);
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+        let replies = decode(&reply_frame).unwrap();
+
+        let subscribe = command.subscribe.unwrap();
+        assert_eq!(
+            (subscribe.channel.as_str(), subscribe.data),
+            ("news", vec![0xff, 0x00])
+        );
+        let ReplyResult::Subscribe(result) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert_eq!(result.data, Some(vec![1]));
+        assert_eq!(result.publications[0].data, [0xff, 0x00, 0xfe]);
+        assert_eq!(result.publications[0].offset, Some(3));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Publication { channel, publication })
+                if channel == "news" && publication.data == [0xfe] && publication.offset.is_none()
+        ));
     }
 
     #[test]

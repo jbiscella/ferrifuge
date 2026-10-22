@@ -168,9 +168,18 @@ async fn the_subscription_emits(world: &mut ClientWorld, expected: String) {
     expect_subscription_event(world, &expected, false).await;
 }
 
-#[then(regex = r#"^the subscription reaches state "subscribed"(?: again| on it)?$"#)]
+#[then(regex = r#"^the subscription reaches state "subscribed"(?: on it)?$"#)]
 async fn the_subscription_reaches_subscribed(world: &mut ClientWorld) {
     reach_subscribed(world, false).await;
+}
+
+/// After the server disconnected the client: the subscription goes back to
+/// subscribing first, which the step waits for, so it cannot pass on the
+/// state from before the disconnect.
+#[when(r#"the subscription reaches state "subscribed" again"#)]
+async fn the_subscription_is_subscribed_again(world: &mut ClientWorld) {
+    expect_subscription_event(world, "subscribing", false).await;
+    expect_subscription_event(world, "subscribed", false).await;
 }
 
 #[given(regex = r#"^a client subscribed to channel "news"(?: with history)?$"#)]
