@@ -15,7 +15,7 @@ fn instructions(bench: &str) -> u64 {
         PathBuf::from,
     );
     let path = target
-        .join("gungraun/ferrifuge/dispatch/publications")
+        .join("gungraun/ferrifuge/dispatch/harness/publications")
         .join(format!("dispatch.{bench}"))
         .join("summary.json");
     let text = fs::read_to_string(&path)
@@ -32,6 +32,9 @@ fn instructions(bench: &str) -> u64 {
 fn dispatch_cost_does_not_depend_on_the_number_of_subscriptions() {
     let one = instructions("one_channel");
     let many = instructions("ten_thousand_channels");
+    // No count means the benchmark measured nothing, e.g. a misnamed
+    // function; it would pass the bound below.
+    assert!(one > 0 && many > 0, "nothing measured: {one} and {many}");
 
     // At most 1.1 times, in integers.
     assert!(
