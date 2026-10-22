@@ -843,7 +843,7 @@ Feature: Client-side subscriptions
 
 **Out of scope:** recovery (Block 11); connection tokens (Block 1).
 
-**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2, and the attempt counter resets when the subscription reaches `subscribed` (centrifuge-js); a subscribe answered with error 109 (token expired) drops the token and resubscribes, so the callback supplies a new one (centrifuge-js `_subscribeError`); a failing subscription token callback or a temporary `sub_refresh` error emits an `error` event and retries the refresh after 5 to 10 s, as for connection tokens (centrifuge-js `subscription.ts`); a `sub_refresh` without a reply within `Config::timeout` fails with the timeout error (code 1), which, as any error code below 100, is retried like a temporary one (centrifuge-js `_refreshError`); a token callback that signals "unauthorized", on the first fetch as on a refresh, unsubscribes with code 1 "unauthorized", sends no subscribe command and schedules no retry (centrifuge-js `_failUnauthorized`); `unsubscribe()` and removal cancel a scheduled resubscribe and a scheduled refresh retry, so no subscribe command, token callback or `sub_refresh` follows them (centrifuge-js `_setUnsubscribed`).
+**Decisions:** each subscription owns a token component (5b); the subscription token callback receives the channel (centrifuge-js `SubscriptionTokenContext`); expiring tokens are refreshed with `sub_refresh`; server unsubscribe codes from 2500 resubscribe, below 2500 unsubscribe (spec); resubscribe backoff defaults 500 ms and 20000 ms (centrifuge-js), same formula as Block 2, and the attempt counter resets when the subscription reaches `subscribed` (centrifuge-js); a subscribe answered with error 109 (token expired) drops the token and resubscribes, so the callback supplies a new one (centrifuge-js `_subscribeError`); a failing subscription token callback or a temporary `sub_refresh` error emits an `error` event and retries the refresh after 5 to 10 s, as for connection tokens (centrifuge-js `subscription.ts`); a `sub_refresh` without a reply within `Config::timeout` fails with the timeout error (code 1), which, as any error code below 100, is retried like a temporary one (centrifuge-js `_refreshError`); a token callback that signals "unauthorized", on the first fetch as on a refresh, unsubscribes with code 1 "unauthorized", sends no subscribe command and schedules no retry (centrifuge-js `_failUnauthorized`); `unsubscribe()` and removal cancel a scheduled resubscribe and a scheduled refresh retry, so no subscribe command, token callback or `sub_refresh` follows them (centrifuge-js `_setUnsubscribed`); a subscribe answered with error 109 while a token callback is set emits an `error` event (type subscribe) when the client is connected, then resubscribes after the resubscribe backoff, as any temporary subscribe error (centrifuge-js `_subscribeError`); a subscribe answered with error 109 without a token callback emits an `error` event (type configuration, code 12 "subscription token expired but no getToken function set") and unsubscribes with code 1 "unauthorized", with no unsubscribe command and no retry (centrifuge-js `_subscribeError`); a token callback returning an empty token, on the first fetch as on a refresh, is handled as "unauthorized" (centrifuge-js `_handleTokenResponse`, `_refresh`; as Block 5 for connection tokens); when both a token callback and a `get_data` callback are set, the token is fetched first and `get_data` is called only once a token is obtained, so a denied or failed token fetch calls no `get_data` for that attempt (centrifuge-js `_handleTokenResponse`, `_handleTokenError`).
 
 Verified (2026-10-22): the server API `unsubscribe` accepts no code (centrifugo `api.proto` `UnsubscribeRequest`, `api.go` `Executor.Unsubscribe`), so the server unsubscribe code table runs on @D only; a denied subscription token unsubscribes with code 1 "unauthorized", on first fetch and on refresh (centrifuge-js `codes.ts` `unsubscribedCodes.unauthorized`, `subscription.ts` `_failUnauthorized`).
 
@@ -968,6 +968,57 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When the subscription refresh is due
     Then the subscription emits an "error" event for the missing token callback
     And then the subscription emits "unsubscribed"
+
+  @E
+  Scenario: A subscribe rejected for an expired token without a callback unsubscribes
+    Given a subscription with a fixed token and no token callback
+    When the subscription is subscribed on a connected client
+    And the server answers its subscribe command with error 109
+    Then the subscription emits an "error" event for the missing token callback
+    And then the subscription emits "unsubscribed" with code 1
+    And no resubscribe is scheduled
+
+  @E
+  Scenario: A subscribe rejected for an expired token fetches a new one after the backoff
+    Given a subscription to a private channel whose token callback is set
+    When the subscription is subscribed on a connected client
+    And the server answers its subscribe command with error 109
+    Then the subscription emits an "error" event
+    And the subscription token callback is called again after the resubscribe delay
+    And the new subscribe command carries the new token
+
+  @E
+  Scenario: An empty subscription token before the first subscribe unsubscribes
+    Given a subscription to a private channel without an initial token whose token callback returns an empty token
+    When the subscription is subscribed on a connected client
+    Then the subscription emits "unsubscribed" with code 1
+    And no subscribe command is sent
+    And no resubscribe is scheduled
+
+  @E
+  Scenario: An empty subscription token on refresh unsubscribes
+    Given a subscribed subscription whose token expires
+    When the subscription token callback returns an empty token during refresh
+    Then the subscription emits "unsubscribed" with code 1
+    And no further refresh is scheduled
+
+  @E
+  Scenario Outline: The data callback runs only after a subscription token is obtained
+    Given a subscription to a private channel with a data callback whose token callback <outcome>
+    When the subscription is subscribed on a connected client
+    Then the data callback is not called for that attempt
+
+    Examples:
+      | outcome                      |
+      | signals "unauthorized"       |
+      | fails with a temporary error |
+
+  @E
+  Scenario: The subscription token is fetched before the data callback runs
+    Given a subscription to a private channel without an initial token, with a token callback and a data callback
+    When the subscription is subscribed on a connected client
+    Then the token callback is called before the data callback
+    And the subscribe command carries both the token and the data
 
   @A
   Scenario: Each subscription token callback receives its own channel
