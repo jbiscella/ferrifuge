@@ -355,7 +355,8 @@ impl Machine {
                 id,
                 SubscriptionTimer::UnsubscribeReply,
             ));
-            if reply.error.is_some() {
+            // Without its result the server-side state is unknown too.
+            if reply.error.is_some() || reply.result != ReplyResult::Unsubscribe {
                 self.unsubscribe_error();
                 return;
             }
@@ -459,7 +460,9 @@ impl Machine {
         // A subscribe in flight stays in `subscribes`, with its reply
         // deadline: its reply undoes it, its timeout starts over.
         sub.subscribe_command = None;
-        sub.fetch = None;
+        if let Some(fetch) = sub.fetch.take() {
+            self.actions.push(Action::CancelSubscriptionData(fetch));
+        }
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
         let channel = sub.channel.clone();
@@ -532,7 +535,9 @@ impl Machine {
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;
-            sub.fetch = None;
+            if let Some(fetch) = sub.fetch.take() {
+                self.actions.push(Action::CancelSubscriptionData(fetch));
+            }
             sub.waiting = false;
             if sub.state == SubscriptionState::Subscribed {
                 sub.state = SubscriptionState::Subscribing;
@@ -719,6 +724,44 @@ mod tests {
         assert_eq!(
             sent(&undone),
             [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
+    fn an_unsubscribe_reply_without_its_result_reconnects() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        machine.handle(Input::Unsubscribe(id));
+
+        let outcome = machine.handle(reply(transport, r#"{"id":3}"#));
+
+        assert_eq!(
+            reconnect_code(&outcome),
+            Some(codes::connecting::UNSUBSCRIBE_ERROR)
+        );
+    }
+
+    #[test]
+    fn unsubscribing_cancels_a_pending_data_fetch() {
+        let mut machine = connected().0;
+        let id = machine
+            .add_subscription("data".into(), SubscriptionOptions::default().data_source())
+            .unwrap();
+        let fetch = machine
+            .handle(Input::Subscribe(id))
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionData { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .unwrap();
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+
+        assert!(
+            unsubscribed.contains(&Action::CancelSubscriptionData(fetch)),
+            "{unsubscribed:?}"
         );
     }
 
