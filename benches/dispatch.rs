@@ -59,18 +59,24 @@ fn subscribed(count: usize) -> (Machine, Input) {
     (machine, frame(transport, &publication))
 }
 
-#[library_benchmark]
-#[bench::one_channel(setup = subscribed, args = (1))]
-#[bench::ten_thousand_channels(setup = subscribed, args = (10_000))]
-fn dispatch((mut machine, publication): (Machine, Input)) -> Vec<Action> {
-    let actions = machine.handle(black_box(publication));
+/// Drops the machine and the actions outside the measurement: dropping the
+/// subscriptions would otherwise count, and grow with their number.
+fn teardown((machine, actions): (Machine, Vec<Action>)) {
     assert!(
         actions
             .iter()
             .any(|action| matches!(action, Action::EmitSubscription(..))),
         "the publication was not dispatched"
     );
-    black_box(actions)
+    drop((machine, actions));
+}
+
+#[library_benchmark]
+#[bench::one_channel(setup = subscribed, args = (1), teardown = teardown)]
+#[bench::ten_thousand_channels(setup = subscribed, args = (10_000), teardown = teardown)]
+fn dispatch((mut machine, publication): (Machine, Input)) -> (Machine, Vec<Action>) {
+    let actions = machine.handle(black_box(publication));
+    black_box((machine, actions))
 }
 
 library_benchmark_group!(name = publications, benchmarks = [dispatch]);
