@@ -66,7 +66,7 @@ pub(super) struct Shared {
 #[derive(Debug)]
 pub(super) struct Core {
     pub(super) machine: Machine,
-    actions: VecDeque<Action>,
+    pub(super) actions: VecDeque<Action>,
 }
 
 /// Async callback returning the data of a subscription's next subscribe
@@ -90,6 +90,12 @@ impl std::fmt::Debug for DataCallbacks {
 impl Shared {
     pub(super) fn apply(&self, input: Input) {
         let mut core = lock(&self.core);
+        // The driver has stopped (the client was dropped, after its final
+        // disconnect): actions would pile up with nothing to perform them,
+        // e.g. from a subscription handle that outlived the client.
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
         for action in core.machine.handle(input) {
             match action {
                 Action::Emit(event) => self.emit(&event),

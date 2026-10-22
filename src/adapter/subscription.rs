@@ -284,6 +284,34 @@ mod tests {
         assert!(lock(&subscription.shared.data_callbacks).0.is_empty());
     }
 
+    #[tokio::test]
+    async fn calls_after_the_client_is_dropped_change_nothing() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let subscription = client.new_subscription("news").unwrap();
+        drop(client);
+        let before = {
+            let core = lock(&subscription.shared.core);
+            (
+                core.machine.subscription_state(subscription.id),
+                core.actions.len(),
+            )
+        };
+
+        for _ in 0..10 {
+            subscription.subscribe();
+            subscription.unsubscribe();
+        }
+
+        let core = lock(&subscription.shared.core);
+        assert_eq!(
+            (
+                core.machine.subscription_state(subscription.id),
+                core.actions.len()
+            ),
+            before
+        );
+    }
+
     #[test]
     fn the_last_data_setting_decides() {
         let runtime = tokio::runtime::Builder::new_current_thread()
