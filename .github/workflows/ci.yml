@@ -200,6 +200,32 @@ jobs:
           FERRIFUGE_PERF=1 cargo test --release --test perf_footprint | tee perf_footprint.txt
           { echo '### Memory footprint'; grep '^@P report' perf_footprint.txt; } >> "$GITHUB_STEP_SUMMARY"
 
+  # Wall-clock figures of Block 14 (@P): measured and reported, never
+  # gating, since they depend on the runner.
+  wall-clock:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Decode and dispatch time
+        run: |
+          set -o pipefail
+          cargo bench --bench wallclock | tee wallclock.txt
+          { echo '### Decode and dispatch time'; echo '```'; grep -A1 '^decode and dispatch' wallclock.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Ten minutes of the run are the idle period.
+      - name: Delivery latency and idle CPU
+        run: |
+          set -o pipefail
+          FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock | tee perf_wallclock.txt
+          { echo '### Delivery latency and idle CPU'; grep '^@P report' perf_wallclock.txt; } >> "$GITHUB_STEP_SUMMARY"
+
   msrv:
     runs-on: ubuntu-latest
     steps:

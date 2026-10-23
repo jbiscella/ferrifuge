@@ -64,6 +64,7 @@ ferrifuge = { path = ".", default-features = false, features = ["test-util"] }
 aws-lc-rs = { version = "1.18.2", default-features = false }
 axum = "0.8.9"
 base64 = "0.23.1"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 cucumber = "0.23"
 dhat = "0.3.3"
 gungraun = "0.20.0"
@@ -111,3 +112,12 @@ required-features = ["tokio"]
 [[test]]
 name = "perf_sim"
 required-features = ["test-util"]
+
+[[bench]]
+name = "wallclock"
+harness = false
+
+[[test]]
+name = "perf_wallclock"
+harness = false
+required-features = ["tokio"]
