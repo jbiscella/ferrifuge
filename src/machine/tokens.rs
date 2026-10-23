@@ -159,17 +159,17 @@ impl Tokens {
     }
 }
 
-/// When to start refreshing a connection that expires in `ttl_seconds`.
+/// When to start refreshing a connection that expires in `ttl_seconds`: at
+/// a uniformly random millisecond between 80% and 90% of the ttl, both
+/// included (Block 14, "Token refresh jitter").
 ///
 /// `client.proto` (`ConnectResult.expires`) requires the refresh to be sent
 /// before the ttl elapses, so it starts early enough for the token callback
-/// and the round trip: a margin of 10% of the ttl, at most 30 s. centrifuge-js
-/// waits for the full ttl; the proto takes precedence (see CLAUDE.md).
-pub(super) fn refresh_delay(ttl_seconds: u32) -> Duration {
-    const MAX_MARGIN: Duration = Duration::from_secs(30);
-    let ttl = Duration::from_secs(ttl_seconds.into());
-    // Cannot underflow: the margin is at most a tenth of the ttl.
-    ttl.saturating_sub((ttl / 10).min(MAX_MARGIN))
+/// and the round trip. The randomness keeps a fleet whose tokens were issued
+/// at once from refreshing at once; centrifuge-js waits for the full ttl.
+pub(super) fn refresh_delay(ttl_seconds: u32, rng: &mut fastrand::Rng) -> Duration {
+    let ttl_ms = u64::from(ttl_seconds) * 1000;
+    Duration::from_millis(rng.u64(ttl_ms * 8 / 10..=ttl_ms * 9 / 10))
 }
 
 #[cfg(test)]
