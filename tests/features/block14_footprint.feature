@@ -55,7 +55,7 @@ Feature: Footprint, performance and fleet behaviour
   Scenario: Token refreshes of a fleet are spread
     Given 100000 simulated clients whose connection tokens have the same ttl and were issued at the same instant
     When their refreshes come due
-    Then the refreshes span at least 10% of the ttl
+    Then the refreshes span at least 9.9% of the ttl
     And no interval of 1% of the ttl holds more than twice the average share
 
   @E

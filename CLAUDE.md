@@ -977,7 +977,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Given a subscription with a fixed token and no token callback
     When the subscription is subscribed on a connected client
     And the server answers its subscribe command with error 109
-    Then the subscription emits a configuration "error" event with code 12
+    Then the subscription emits a configuration "error" event with code 12 and message "subscription token expired but no getToken function set"
     And then the subscription emits "unsubscribed" with code 1 and reason "unauthorized"
     And no resubscribe is scheduled
     And no unsubscribe command is sent
@@ -988,6 +988,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     When the subscription is subscribed on a connected client
     And the server answers its subscribe command with error 109
     Then the subscription emits an "error" event of kind "subscribe"
+    And no unsubscribe command is sent
     And the subscription token callback is called again after the resubscribe delay
     And the new subscribe command carries the new token
 
@@ -995,7 +996,7 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
   Scenario: An empty subscription token before the first subscribe unsubscribes
     Given a subscription to a private channel without an initial token whose token callback returns an empty token
     When the subscription is subscribed on a connected client
-    Then the subscription emits "unsubscribed" with code 1
+    Then the subscription emits "unsubscribed" with code 1 and reason "unauthorized"
     And no subscribe command is sent
     And no resubscribe is scheduled
 
@@ -1003,7 +1004,8 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
   Scenario: An empty subscription token on refresh unsubscribes
     Given a subscribed subscription whose token expires
     When the subscription token callback returns an empty token during refresh
-    Then the subscription emits "unsubscribed" with code 1
+    Then the subscription emits "unsubscribed" with code 1 and reason "unauthorized"
+    And an unsubscribe command is sent
     And no further refresh is scheduled
     And no sub_refresh command is sent
 
@@ -1796,7 +1798,7 @@ Feature: Footprint, performance and fleet behaviour
   Scenario: Token refreshes of a fleet are spread
     Given 100000 simulated clients whose connection tokens have the same ttl and were issued at the same instant
     When their refreshes come due
-    Then the refreshes span at least 10% of the ttl
+    Then the refreshes span at least 9.9% of the ttl
     And no interval of 1% of the ttl holds more than twice the average share
 
   @E

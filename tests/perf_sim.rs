@@ -275,7 +275,9 @@ fn token_refreshes_of_a_fleet_are_spread() {
         "@P report: refreshes from {first:?} to {last:?} of a {ttl:?} ttl ({:.2}% of it)",
         span.as_secs_f64() * 100.0 / ttl.as_secs_f64()
     );
-    assert!(span * 10 >= ttl, "a span of {span:?}");
+    // At least 9.9%: a finite sample of [80%, 90%] reaches the full 10% only
+    // when it draws both ends.
+    assert!(span * 1000 >= ttl * 99, "a span of {span:?}");
     // Intervals of 1% of the ttl over the span, the last one closed.
     let interval = ttl / 100;
     let intervals = usize::try_from(span.as_nanos().div_ceil(interval.as_nanos()))
