@@ -165,6 +165,16 @@ impl From<pb::Publication> for Publication {
 mod tests {
     use super::*;
 
+    /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
+    /// Random inputs under `cargo test`; coverage-guided with
+    /// `cargo bolero test protobuf::tests::fuzz_decode --engine libfuzzer`.
+    #[test]
+    fn fuzz_decode() {
+        bolero::check!().for_each(|frame: &[u8]| {
+            let _ = decode(frame);
+        });
+    }
+
     fn frame_of(replies: &[pb::Reply]) -> Vec<u8> {
         let mut frame = Vec::new();
         for reply in replies {

@@ -273,6 +273,38 @@ jobs:
       - name: cargo semver-checks
         run: cargo semver-checks --default-features --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before }}"
 
+  # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
+  # 30 s per target on every change, longer in the nightly fuzz workflow.
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-bolero
+        run: cargo install cargo-bolero --locked --version 0.13.5
+
+      - name: Fuzz each decoder
+        run: |
+          for target in json::tests::fuzz_decode protobuf::tests::fuzz_decode \
+              adapter::http::tests::fuzz_http_stream_decoder adapter::http::tests::fuzz_sse_decoder; do
+            cargo bolero test --toolchain nightly "$target" -T 30s
+          done
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: src/**/__fuzz__/**/crashes
+          if-no-files-found: ignore
+
   msrv:
     runs-on: ubuntu-latest
     steps:

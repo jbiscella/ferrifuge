@@ -375,6 +375,53 @@ mod tests {
         url
     }
 
+    /// Messages and outcome of decoding `body` split at `cuts`, with a
+    /// small limit so that the error path is reached too.
+    fn decode_chunked(sse: bool, body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), String>) {
+        let mut decoder = Decoder::new(sse, 256);
+        let mut messages = VecDeque::new();
+        let mut rest = body;
+        for cut in cuts {
+            let (chunk, after) = rest.split_at(usize::from(*cut).min(rest.len()));
+            rest = after;
+            if let Err(error) = decoder.push(chunk, &mut messages) {
+                return (messages.into(), Err(error));
+            }
+        }
+        // Whatever the cuts left, however long.
+        let result = decoder.push(rest, &mut messages);
+        (messages.into(), result)
+    }
+
+    /// Fuzz target (Block 14e): any body, split anywhere, decodes to the
+    /// same messages and outcome as in one chunk, and never panics.
+    /// Coverage-guided with `cargo bolero test
+    /// adapter::http::tests::fuzz_http_stream_decoder --engine libfuzzer`.
+    #[test]
+    fn fuzz_http_stream_decoder() {
+        bolero::check!()
+            .with_type::<(Vec<u8>, Vec<u16>)>()
+            .for_each(|(body, cuts)| {
+                assert_eq!(
+                    decode_chunked(false, body, cuts),
+                    decode_chunked(false, body, &[])
+                );
+            });
+    }
+
+    /// As [`fuzz_http_stream_decoder`], for sse.
+    #[test]
+    fn fuzz_sse_decoder() {
+        bolero::check!()
+            .with_type::<(Vec<u8>, Vec<u16>)>()
+            .for_each(|(body, cuts)| {
+                assert_eq!(
+                    decode_chunked(true, body, cuts),
+                    decode_chunked(true, body, &[])
+                );
+            });
+    }
+
     fn decode(sse: bool, chunks: &[&[u8]]) -> Vec<String> {
         let mut decoder = Decoder::new(sse, MAX_MESSAGE);
         let mut messages = VecDeque::new();
