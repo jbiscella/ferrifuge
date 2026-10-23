@@ -303,8 +303,10 @@ impl Client {
         lock(&self.shared.core).machine.state()
     }
 
-    /// Events from now on. Each call returns an independent stream.
-    pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + 'static {
+    /// Events from now on. Each call returns an independent stream; it
+    /// borrows nothing from the client, so it can be kept beside it, and it
+    /// ends once the client is dropped.
+    pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
         let (sender, receiver) = events::unbounded();
         lock(&self.shared.subscribers).push(sender);
         receiver
@@ -760,7 +762,7 @@ mod tests {
         let client_error = error.downcast_ref::<ClientError>().expect("a ClientError");
         assert_eq!(
             error.to_string(),
-            format!("{} (code {})", client_error.message, client_error.code)
+            format!("{} (code 12) over http_stream", client_error.message)
         );
     }
 

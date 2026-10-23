@@ -54,8 +54,10 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
-    /// Events from now on. Each call returns an independent stream.
-    pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + 'static {
+    /// Events from now on. Each call returns an independent stream; it
+    /// borrows nothing from the subscription, so it can be kept beside it,
+    /// and it ends once the subscription is removed or its client dropped.
+    pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + use<> {
         let (sender, receiver) = events::unbounded();
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then ends the streams, so a removed
