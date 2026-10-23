@@ -519,7 +519,14 @@ impl Machine {
     }
 
     /// Seeds the random source of the reconnect, jitter and refresh delays,
-    /// so that a simulation or a test is reproducible.
+    /// so that a simulation or a test is reproducible. Only with the
+    /// `test-util` feature, which the crate enables for its own tests and
+    /// benchmarks.
+    ///
+    /// The random sequence a seed gives is not stable across versions.
+    /// Production code must never pass the same seed to more than one
+    /// client: their delays would coincide, defeating the jitter.
+    #[cfg(feature = "test-util")]
     #[must_use]
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rng = fastrand::Rng::with_seed(seed);
