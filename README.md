@@ -266,7 +266,13 @@ FERRIFUGE_PERF=1 cargo test --release --test perf_alloc     # allocations per pu
 FERRIFUGE_PERF=1 cargo test --release --test perf_footprint # memory footprint
 cargo bench --bench dispatch -- --save-summary=json         # instruction counts
 cargo test --test perf_gates -- --ignored                   # gates on those counts
+cargo bench --bench wallclock                               # decode and dispatch time
+FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock # latency, then 10 min idle CPU
 ```
+
+Wall-clock figures depend on the machine: they are reported, never gating.
+`FERRIFUGE_PERF_IDLE_SECS` shortens the idle period of `perf_wallclock`,
+which reads CPU time from Linux's `/proc`.
 
 The allocation and footprint measurements count with
 [dhat](https://crates.io/crates/dhat) and are slow, so they run only with
@@ -281,7 +287,8 @@ CI runs rustfmt, clippy (pedantic, warnings denied) with and without default
 features, rustdoc, the tests with a 70% line-coverage floor, an MSRV build
 and cargo-deny. It also builds and tests with the aws-lc-rs and fips
 providers, and runs the performance tests above, writing their measurements
-to the job summary. cargo-deny also runs daily.
+to the job summary; the wall-clock ones run in a job that never fails the
+build. cargo-deny also runs daily.
 
 ## License
 
