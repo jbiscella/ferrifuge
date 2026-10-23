@@ -237,6 +237,30 @@ mod tests {
 
     const UNREACHABLE: &str = "ws://127.0.0.1:1/connection/websocket";
 
+    /// The stream borrows nothing: an application can keep it next to its
+    /// subscription, returned together or in one struct.
+    fn subscription_with_events(
+        client: &Client,
+    ) -> (Subscription, impl Stream<Item = SubscriptionEvent> + Unpin) {
+        let subscription = client.new_subscription("news").unwrap();
+        let events = subscription.events();
+        (subscription, events)
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_event_stream_does_not_borrow_its_subscription() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let (subscription, mut events) = subscription_with_events(&client);
+
+        subscription.subscribe();
+
+        assert_eq!(
+            events.next().await.map(|event| event.name()),
+            Some("subscribing")
+        );
+    }
+
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn removing_ends_the_event_streams_after_the_last_event() {
