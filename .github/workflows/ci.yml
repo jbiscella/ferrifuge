@@ -226,6 +226,51 @@ jobs:
           FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock | tee perf_wallclock.txt
           { echo '### Delivery latency and idle CPU'; grep '^@P report' perf_wallclock.txt; } >> "$GITHUB_STEP_SUMMARY"
 
+  # The unit, @E and @D layers on Windows and macOS (Block 14e). @A and @B
+  # need Docker, so they run on Linux only.
+  portability:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Scenarios without a server
+        run: cargo test --test bdd -- --tags "not @A and not @B and not @P"
+
+      - name: Spec sync and simulations
+        run: cargo test --test spec_sync --test perf_sim
+
+  # The public API against the base branch (Block 14e): a breaking change
+  # needs a version bump (0.x: the minor version).
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: cargo semver-checks
+        run: cargo semver-checks --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before }}"
+
   msrv:
     runs-on: ubuntu-latest
     steps:
