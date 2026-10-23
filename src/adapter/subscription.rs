@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use futures_channel::mpsc as events;
 use futures_core::Stream;
@@ -130,6 +131,20 @@ impl SubscriptionBuilder {
     {
         self.options = self.options.data_source();
         self.get_data = Some(Arc::new(move |channel| Box::pin(get_data(channel))));
+        self
+    }
+
+    /// Sets the lower bound of the resubscribe delay. Default 500 ms.
+    #[must_use]
+    pub fn min_resubscribe_delay(mut self, delay: Duration) -> Self {
+        self.options = self.options.min_resubscribe_delay(delay);
+        self
+    }
+
+    /// Sets the upper bound of the resubscribe delay. Default 20 s.
+    #[must_use]
+    pub fn max_resubscribe_delay(mut self, delay: Duration) -> Self {
+        self.options = self.options.max_resubscribe_delay(delay);
         self
     }
 
