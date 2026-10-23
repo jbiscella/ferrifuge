@@ -716,6 +716,54 @@ mod tests {
         assert_eq!(after_disconnect, State::Disconnected);
     }
 
+    /// The stream borrows nothing: an application can keep it next to its
+    /// client, returned together or in one struct.
+    fn client_with_events() -> (Client, impl Stream<Item = ClientEvent> + Unpin) {
+        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+        let events = client.events();
+        (client, events)
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_event_stream_does_not_borrow_its_client() {
+        let (client, mut events) = client_with_events();
+
+        client.connect();
+        let first = tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("an event");
+
+        assert!(
+            matches!(first, Some(ClientEvent::Connecting { .. })),
+            "{first:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_build_error_is_a_standard_error() {
+        fn build() -> Result<Client, Box<dyn std::error::Error>> {
+            let client = Client::builder_with_transports([(
+                TransportKind::HttpStream,
+                "http://127.0.0.1:1/connection/http_stream".to_owned(),
+            )])
+            .config(Config {
+                protocol: crate::Protocol::Protobuf,
+                ..Config::default()
+            })
+            .build()?;
+            Ok(client)
+        }
+
+        let error = build().expect_err("Protobuf over http_stream is refused");
+
+        let client_error = error.downcast_ref::<ClientError>().expect("a ClientError");
+        assert_eq!(
+            error.to_string(),
+            format!("{} (code {})", client_error.message, client_error.code)
+        );
+    }
+
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn events_stream_starts_after_events_already_emitted() {
