@@ -518,6 +518,14 @@ impl Machine {
         Ok(self)
     }
 
+    /// Seeds the random source of the reconnect, jitter and refresh delays,
+    /// so that a simulation or a test is reproducible.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.rng = fastrand::Rng::with_seed(seed);
+        self
+    }
+
     /// Creates a disconnected machine whose owner answers
     /// [`Action::FetchToken`] from the application's token callback.
     #[must_use]

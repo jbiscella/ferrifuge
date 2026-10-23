@@ -206,6 +206,7 @@ while the client keeps reconnecting.
 | `token` | empty | Connection token sent with the first connect |
 | `max_server_ping_delay` | 10 s | Wait past the server's ping interval before reconnecting; 0 disables |
 | `protocol` | `Protocol::Json` | Encoding of the client protocol: `Json` or `Protobuf` (binary frames, any payload bytes) |
+| `reconnect_jitter_window` | 0 | Upper bound of a random delay added to the first reconnect after losing a connection, so that many clients disconnected at once do not reconnect at once |
 
 ### Cargo features
 
