@@ -129,3 +129,8 @@ inherits = "dev"
 opt-level = 3
 incremental = false
 codegen-units = 1
+
+[[test]]
+name = "interop"
+harness = false
+required-features = ["tokio"]

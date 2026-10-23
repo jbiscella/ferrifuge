@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "centrifuge-js side of ferrifuge's interop test (tests/interop.rs)",
+  "dependencies": {
+    "centrifuge": "5.7.4"
+  }
+}

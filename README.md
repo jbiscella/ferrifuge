@@ -281,6 +281,21 @@ version of `gungraun` in `Cargo.lock`
 (`cargo install gungraun-runner --version <version>`). Under
 `cargo test --all-targets` both are skipped.
 
+### Interop, fuzzing and semver
+
+```sh
+npm ci --prefix tests/interop --ignore-scripts          # centrifuge-js, pinned
+FERRIFUGE_INTEROP=1 cargo test --test interop             # centrifuge-js publishes, ferrifuge receives
+cargo bolero test --toolchain nightly json::tests::fuzz_decode -T 30s   # one fuzz target
+cargo semver-checks --default-features --baseline-rev main               # public API changes
+```
+
+The interop test needs Docker and Node. The fuzz targets (`fuzz_*` tests
+next to the JSON, Protobuf, http_stream and sse decoders) run on random
+inputs under `cargo test`, and coverage-guided with
+[cargo-bolero](https://crates.io/crates/cargo-bolero) and a nightly
+toolchain. A breaking change to the public API needs a version bump.
+
 ### Continuous integration
 
 CI runs rustfmt, clippy (pedantic, warnings denied) with and without default
@@ -288,7 +303,9 @@ features, rustdoc, the tests with a 70% line-coverage floor, an MSRV build
 and cargo-deny. It also builds and tests with the aws-lc-rs and fips
 providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
-build. cargo-deny also runs daily.
+build. It runs the unit tests and the scenarios that need no server on
+Windows and macOS, the interop test, each fuzz target for 30 s (20 min
+nightly) and the semver check. cargo-deny also runs daily.
 
 ## License
 

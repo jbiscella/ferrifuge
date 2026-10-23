@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # Fuzzing corpora and crashes of cargo-bolero, next to the targets
 **/__fuzz__/
+
+# npm dependencies of the interop test
+tests/interop/node_modules/

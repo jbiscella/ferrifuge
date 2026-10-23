@@ -305,6 +305,32 @@ jobs:
           path: src/**/__fuzz__/**/crashes
           if-no-files-found: ignore
 
+  # centrifuge-js publishes and Ferrifuge receives, over JSON and Protobuf
+  # (Block 14e); the other direction needs Ferrifuge's publish (Block 13).
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Pull Centrifugo image
+        run: docker pull centrifugo/centrifugo:v6.10.1
+
+      # centrifuge-js, pinned with its integrity hash in package-lock.json.
+      - name: Install centrifuge-js
+        run: npm ci --prefix tests/interop --ignore-scripts
+
+      - name: Interop test
+        run: FERRIFUGE_INTEROP=1 cargo test --test interop
+
   msrv:
     runs-on: ubuntu-latest
     steps:
