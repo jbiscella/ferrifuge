@@ -166,6 +166,13 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 const RUNNER_STACK: usize = 8 << 20;
 
 fn main() {
+    // `cargo test <filter>` passes a libtest filter to every test target,
+    // e.g. when cargo-bolero runs one fuzz target; cucumber takes options
+    // only, so a leading positional argument means another target's tests.
+    if env::args().nth(1).is_some_and(|arg| !arg.starts_with('-')) {
+        println!("bdd skipped: a test filter is for libtest targets");
+        return;
+    }
     trust_test_ca();
     assert_implemented_scenarios_exist();
     start_watchdog();
