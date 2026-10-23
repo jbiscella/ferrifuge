@@ -881,6 +881,7 @@ impl Machine {
         if self.state == State::Disconnected {
             return;
         }
+        let was_connected = self.state == State::Connected;
         if let Some(transport) = self.transport.take() {
             self.actions.push(Action::CloseTransport(transport));
             if reconnect {
@@ -919,13 +920,28 @@ impl Machine {
         if reconnect {
             // The first round over the transports is the handshake: each is
             // tried at once (centrifuge-js `_scheduleReconnect`).
-            let delay = if self.transports.in_first_round() {
+            let mut delay = if self.transports.in_first_round() {
                 Duration::ZERO
             } else {
                 self.backoff.next_delay(&mut self.rng)
             };
+            if was_connected {
+                delay += self.reconnect_jitter();
+            }
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
         }
+    }
+
+    /// A random delay added to the first reconnect after a lost connection,
+    /// so that a fleet disconnected at once does not reconnect at once
+    /// (Block 14, "Reconnect jitter window"); none with a zero window.
+    fn reconnect_jitter(&mut self) -> Duration {
+        let window =
+            u64::try_from(self.config.reconnect_jitter_window.as_millis()).unwrap_or(u64::MAX);
+        if window == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_millis(self.rng.u64(0..=window))
     }
 
     fn fetch_token(&mut self, purpose: FetchPurpose) {
@@ -1045,8 +1061,8 @@ impl Machine {
     }
 
     fn set_refresh_timer(&mut self, ttl_seconds: u32) {
-        self.actions
-            .push(Action::SetTimer(Timer::Refresh, refresh_delay(ttl_seconds)));
+        let delay = refresh_delay(ttl_seconds, &mut self.rng);
+        self.actions.push(Action::SetTimer(Timer::Refresh, delay));
     }
 
     /// centrifuge-js `_waitServerPing`: (re)arms the deadline for data from a
@@ -1523,30 +1539,33 @@ mod tests {
     }
 
     #[test]
-    fn refresh_starts_before_the_ttl_with_a_capped_margin() {
-        let delays: Vec<_> = [0, 1, 3, 30, 300, 3600]
-            .into_iter()
-            .map(|ttl| (ttl, refresh_delay(ttl)))
-            .collect();
+    fn refresh_falls_between_80_and_90_percent_of_the_ttl() {
+        let mut rng = fastrand::Rng::with_seed(7);
+        for ttl in [0, 1, 3, 30, 300, 3600] {
+            let delays: Vec<_> = (0..1000).map(|_| refresh_delay(ttl, &mut rng)).collect();
 
-        assert_eq!(
-            delays,
-            [
-                (0, Duration::ZERO),
-                (1, Duration::from_millis(900)),
-                (3, Duration::from_millis(2700)),
-                (30, Duration::from_secs(27)),
-                (300, Duration::from_secs(270)),
-                (3600, Duration::from_secs(3570)),
-            ]
-        );
+            let ttl = Duration::from_secs(ttl.into());
+            assert!(
+                delays
+                    .iter()
+                    .all(|delay| *delay >= ttl * 8 / 10 && *delay <= ttl * 9 / 10),
+                "{ttl:?}: {delays:?}"
+            );
+            if !ttl.is_zero() {
+                assert!(delays.iter().any(|delay| *delay != delays[0]), "{ttl:?}");
+            }
+        }
     }
 
     #[test]
     fn expiring_connection_arms_the_refresh_timer_before_its_ttl() {
         let (_, _, actions) = connected_with_token(30);
 
-        assert_eq!(refresh_timer(&actions), Some(Duration::from_secs(27)));
+        let delay = refresh_timer(&actions).expect("a refresh timer");
+        assert!(
+            delay >= Duration::from_secs(24) && delay <= Duration::from_secs(27),
+            "{delay:?}"
+        );
     }
 
     #[test]
@@ -1575,7 +1594,11 @@ mod tests {
                 Action::SetTimer(Timer::RefreshReply, Config::default().timeout)
             ]
         );
-        assert_eq!(refresh_timer(&rearmed), Some(Duration::from_secs(54)));
+        let delay = refresh_timer(&rearmed).expect("a refresh timer");
+        assert!(
+            delay >= Duration::from_secs(48) && delay <= Duration::from_secs(54),
+            "{delay:?}"
+        );
     }
 
     #[test]
