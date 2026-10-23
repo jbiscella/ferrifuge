@@ -81,6 +81,18 @@ pub struct ClientError {
     pub transport: Option<String>,
 }
 
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (code {})", self.message, self.code)?;
+        if let Some(transport) = &self.transport {
+            write!(f, " over {transport}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ClientError {}
+
 /// Origin of a [`ClientError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {

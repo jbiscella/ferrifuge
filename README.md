@@ -104,7 +104,10 @@ docker run --rm -p 8000:8000 \
 `Client::new` must be called inside a tokio runtime. `connect()` and
 `disconnect()` change the state before they return. `events()` returns a
 `Stream` of the events emitted from then on; each call returns an independent
-stream. Dropping the client disconnects it.
+stream. A stream borrows nothing from the client, so it can be kept beside
+it, e.g. in the same struct. Dropping the client disconnects it and ends its
+streams. A builder that cannot work returns a `ClientError`, which
+implements `std::error::Error`.
 
 ### Subscriptions
 
