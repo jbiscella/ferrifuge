@@ -32,6 +32,14 @@ const P_CLAIM: &str = "// @P scenario: ";
 /// Directories searched for `@P` claims.
 const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
+/// A text file, with Windows line endings (a checkout with
+/// `core.autocrlf`) read as Unix ones.
+fn read(path: &Path) -> String {
+    fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        .replace("\r\n", "\n")
+}
+
 fn normalize(text: &str) -> String {
     text.lines()
         .map(str::trim_end)
@@ -152,7 +160,7 @@ fn p_claims(root: &Path) -> Vec<(String, PathBuf)> {
         if path.ends_with("spec_sync.rs") {
             continue;
         }
-        for line in fs::read_to_string(&path).unwrap().lines() {
+        for line in read(&path).lines() {
             if let Some(name) = line.trim().strip_prefix(P_CLAIM) {
                 claims.push((name.trim().to_owned(), path.clone()));
             }
@@ -164,7 +172,7 @@ fn p_claims(root: &Path) -> Vec<(String, PathBuf)> {
 #[test]
 fn feature_files_match_claude_md() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let spec = spec_features(&fs::read_to_string(root.join("CLAUDE.md")).unwrap());
+    let spec = spec_features(&read(&root.join("CLAUDE.md")));
     let mut files = HashSet::new();
 
     for entry in fs::read_dir(root.join("tests/features")).unwrap() {
@@ -172,7 +180,7 @@ fn feature_files_match_claude_md() {
         if path.extension().is_none_or(|ext| ext != "feature") {
             continue;
         }
-        let text = fs::read_to_string(&path).unwrap();
+        let text = read(&path);
         let name = feature_name(&text)
             .unwrap_or_else(|| panic!("{} has no Feature: line", path.display()));
         let expected = spec
@@ -215,7 +223,7 @@ fn feature_files_match_claude_md() {
 #[test]
 fn p_scenarios_match_their_harnesses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let spec = p_scenarios(&fs::read_to_string(root.join("CLAUDE.md")).unwrap());
+    let spec = p_scenarios(&read(&root.join("CLAUDE.md")));
 
     let mut claimed = HashSet::new();
     for (name, path) in p_claims(root) {
