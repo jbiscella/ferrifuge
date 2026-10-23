@@ -5,6 +5,7 @@
 //! the public [`Publication`] type, filled as they are delivered.
 
 use crate::Publication;
+use crate::token::Secret;
 
 /// A command sent by the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub(crate) enum Method {
     Refresh(RefreshRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
+    // Sent once subscription tokens are refreshed (Block 10b); `expect`
+    // fails then, so the attribute goes with it.
+    #[cfg_attr(not(test), expect(dead_code))]
+    SubRefresh(SubRefreshRequest),
     /// The empty command answering a server ping; sent with id 0.
     Pong,
 }
@@ -43,6 +48,8 @@ pub(crate) struct RefreshRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeRequest {
     pub(crate) channel: String,
+    /// Subscription token; empty for none.
+    pub(crate) token: Secret,
     /// Raw JSON with the JSON protocol, any bytes with Protobuf.
     pub(crate) data: Option<Vec<u8>>,
 }
@@ -51,6 +58,13 @@ pub(crate) struct SubscribeRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UnsubscribeRequest {
     pub(crate) channel: String,
+}
+
+/// `SubRefreshRequest` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubRefreshRequest {
+    pub(crate) channel: String,
+    pub(crate) token: Secret,
 }
 
 /// A reply or push received from the server.
@@ -69,6 +83,8 @@ pub(crate) enum ReplyResult {
     Refresh(RefreshResult),
     Subscribe(SubscribeResult),
     Unsubscribe,
+    /// `SubRefreshResult`, which has the fields of a `RefreshResult`.
+    SubRefresh(RefreshResult),
     Push(Push),
     /// An empty reply: a server ping, or a reply carrying only an error.
     Empty,
@@ -109,6 +125,9 @@ pub(crate) struct RefreshResult {
 /// `SubscribeResult` of `client.proto`, for the fields implemented so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeResult {
+    /// The subscription token expires, in `ttl` seconds.
+    pub(crate) expires: bool,
+    pub(crate) ttl: u32,
     pub(crate) data: Option<Vec<u8>>,
     pub(crate) publications: Vec<Publication>,
 }
@@ -120,6 +139,12 @@ pub(crate) enum Push {
     Publication {
         channel: String,
         publication: Publication,
+    },
+    /// The server unsubscribed the client from `channel` (`Unsubscribe`).
+    Unsubscribe {
+        channel: String,
+        code: u32,
+        reason: String,
     },
     Unsupported,
 }

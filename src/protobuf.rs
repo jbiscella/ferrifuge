@@ -9,7 +9,8 @@ use prost::Message as _;
 use crate::protocol as pb;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    RefreshResult, Reply, ReplyResult, SubRefreshRequest, SubscribeRequest, SubscribeResult,
+    UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -57,9 +58,14 @@ impl From<&Command> for pb::Command {
                     token: token.clone(),
                 });
             }
-            Method::Subscribe(SubscribeRequest { channel, data }) => {
+            Method::Subscribe(SubscribeRequest {
+                channel,
+                token,
+                data,
+            }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
                     channel: channel.clone(),
+                    token: token.0.clone(),
                     data: data.clone().unwrap_or_default(),
                     ..pb::SubscribeRequest::default()
                 });
@@ -67,6 +73,13 @@ impl From<&Command> for pb::Command {
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
                 pb.unsubscribe = Some(pb::UnsubscribeRequest {
                     channel: channel.clone(),
+                });
+            }
+            Method::SubRefresh(SubRefreshRequest { channel, token }) => {
+                pb.sub_refresh = Some(pb::SubRefreshRequest {
+                    channel: channel.clone(),
+                    token: token.0.clone(),
+                    ..pb::SubRefreshRequest::default()
                 });
             }
             // A pong is the empty command: no request field.
@@ -96,6 +109,8 @@ impl From<pb::Reply> for Reply {
             })
         } else if let Some(subscribe) = reply.subscribe {
             ReplyResult::Subscribe(SubscribeResult {
+                expires: subscribe.expires,
+                ttl: subscribe.ttl,
                 data: (!subscribe.data.is_empty()).then_some(subscribe.data),
                 publications: subscribe
                     .publications
@@ -105,6 +120,11 @@ impl From<pb::Reply> for Reply {
             })
         } else if reply.unsubscribe.is_some() {
             ReplyResult::Unsubscribe
+        } else if let Some(refresh) = reply.sub_refresh {
+            ReplyResult::SubRefresh(RefreshResult {
+                expires: refresh.expires,
+                ttl: refresh.ttl,
+            })
         } else if let Some(push) = reply.push {
             ReplyResult::Push(if let Some(publication) = push.r#pub {
                 Push::Publication {
@@ -113,6 +133,12 @@ impl From<pb::Reply> for Reply {
                 }
             } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
                 Push::Disconnect(Disconnect { code, reason })
+            } else if let Some(pb::Unsubscribe { code, reason, .. }) = push.unsubscribe {
+                Push::Unsubscribe {
+                    channel: push.channel,
+                    code,
+                    reason,
+                }
             } else {
                 Push::Unsupported
             })
@@ -142,7 +168,6 @@ fn has_other_result(reply: &pb::Reply) -> bool {
         || reply.history.is_some()
         || reply.ping.is_some()
         || reply.rpc.is_some()
-        || reply.sub_refresh.is_some()
 }
 
 impl From<pb::Publication> for Publication {
@@ -164,6 +189,7 @@ impl From<pb::Publication> for Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token::Secret;
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -363,6 +389,7 @@ mod tests {
             method: Method::Subscribe(SubscribeRequest {
                 channel: "news".into(),
                 data: Some(vec![0xff, 0x00]),
+                ..SubscribeRequest::default()
             }),
         }]);
         let reply_frame = frame_of(&[
@@ -411,6 +438,90 @@ mod tests {
             ReplyResult::Push(Push::Publication { channel, publication })
                 if channel == "news" && publication.data == [0xfe] && publication.offset.is_none()
         ));
+    }
+
+    #[test]
+    fn encodes_a_subscribe_token_and_sub_refresh_and_decodes_their_results() {
+        let frame = encode(&[
+            Command {
+                id: 2,
+                method: Method::Subscribe(SubscribeRequest {
+                    channel: "news".into(),
+                    token: Secret("t1".into()),
+                    data: None,
+                }),
+            },
+            Command {
+                id: 3,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "news".into(),
+                    token: Secret("t2".into()),
+                }),
+            },
+        ]);
+        let reply_frame = frame_of(&[
+            pb::Reply {
+                id: 2,
+                subscribe: Some(pb::SubscribeResult {
+                    expires: true,
+                    ttl: 60,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                id: 3,
+                sub_refresh: Some(pb::SubRefreshResult {
+                    expires: true,
+                    ttl: 30,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    unsubscribe: Some(pb::Unsubscribe {
+                        code: 2500,
+                        reason: "resubscribe".into(),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ]);
+
+        let mut commands = frame.as_slice();
+        let subscribe = pb::Command::decode_length_delimited(&mut commands).unwrap();
+        let sub_refresh = pb::Command::decode_length_delimited(&mut commands).unwrap();
+        let replies = decode(&reply_frame).unwrap();
+
+        assert_eq!(subscribe.subscribe.unwrap().token, "t1");
+        let sub_refresh = sub_refresh.sub_refresh.unwrap();
+        assert_eq!(
+            (sub_refresh.channel.as_str(), sub_refresh.token.as_str()),
+            ("news", "t2")
+        );
+        assert!(
+            matches!(&replies[0].result, ReplyResult::Subscribe(result) if result.expires && result.ttl == 60),
+            "{:?}",
+            replies[0]
+        );
+        assert_eq!(
+            replies[1].result,
+            ReplyResult::SubRefresh(RefreshResult {
+                expires: true,
+                ttl: 30
+            })
+        );
+        assert_eq!(
+            replies[2].result,
+            ReplyResult::Push(Push::Unsubscribe {
+                channel: "news".into(),
+                code: 2500,
+                reason: "resubscribe".into()
+            })
+        );
     }
 
     #[test]

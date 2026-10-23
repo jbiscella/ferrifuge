@@ -11,7 +11,8 @@ use serde_json::value::RawValue;
 
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    RefreshResult, Reply, ReplyResult, SubRefreshRequest, SubscribeRequest, SubscribeResult,
+    UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -80,6 +81,8 @@ struct JsonCommand<'a> {
     subscribe: Option<JsonSubscribeRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unsubscribe: Option<JsonUnsubscribeRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub_refresh: Option<JsonSubRefreshRequest<'a>>,
 }
 
 #[derive(Serialize)]
@@ -100,6 +103,8 @@ struct JsonConnectRequest<'a> {
 #[derive(Serialize)]
 struct JsonSubscribeRequest<'a> {
     channel: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    token: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<JsonData<'a>>,
 }
@@ -107,6 +112,12 @@ struct JsonSubscribeRequest<'a> {
 #[derive(Serialize)]
 struct JsonUnsubscribeRequest<'a> {
     channel: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonSubRefreshRequest<'a> {
+    channel: &'a str,
+    token: &'a str,
 }
 
 /// Application data, embedded as the JSON it is. Bytes that are not JSON
@@ -146,14 +157,25 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
             Method::Refresh(RefreshRequest { token }) => {
                 json.refresh = Some(JsonRefreshRequest { token });
             }
-            Method::Subscribe(SubscribeRequest { channel, data }) => {
+            Method::Subscribe(SubscribeRequest {
+                channel,
+                token,
+                data,
+            }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
                     channel,
+                    token: &token.0,
                     data: data.as_deref().map(JsonData::new),
                 });
             }
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
                 json.unsubscribe = Some(JsonUnsubscribeRequest { channel });
+            }
+            Method::SubRefresh(SubRefreshRequest { channel, token }) => {
+                json.sub_refresh = Some(JsonSubRefreshRequest {
+                    channel,
+                    token: &token.0,
+                });
             }
             // A pong is the empty command: no request field.
             Method::Pong => {}
@@ -193,6 +215,8 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
             "subscribe" => {
                 let subscribe: JsonSubscribeResult = field(&value)?;
                 result = Some(ReplyResult::Subscribe(SubscribeResult {
+                    expires: subscribe.expires,
+                    ttl: subscribe.ttl,
                     data: subscribe.data.as_deref().map(raw_bytes),
                     publications: subscribe
                         .publications
@@ -205,6 +229,13 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                 // An object, even empty: `null` or a scalar is no result.
                 field::<JsonUnsubscribeResult>(&value)?;
                 result = Some(ReplyResult::Unsubscribe);
+            }
+            "sub_refresh" => {
+                let refresh: JsonRefreshResult = field(&value)?;
+                result = Some(ReplyResult::SubRefresh(RefreshResult {
+                    expires: refresh.expires,
+                    ttl: refresh.ttl,
+                }));
             }
             "push" => result = Some(ReplyResult::Push(field::<JsonPush>(&value)?.into())),
             _ => unknown = true,
@@ -285,6 +316,8 @@ struct JsonRefreshResult {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JsonSubscribeResult {
+    expires: bool,
+    ttl: u32,
     #[serde(deserialize_with = "present")]
     data: Option<Box<RawValue>>,
     publications: Vec<JsonPublication>,
@@ -300,6 +333,7 @@ struct JsonPush {
     #[serde(rename = "pub")]
     publication: Option<JsonPublication>,
     disconnect: Option<JsonDisconnect>,
+    unsubscribe: Option<JsonDisconnect>,
 }
 
 impl From<JsonPush> for Push {
@@ -311,6 +345,13 @@ impl From<JsonPush> for Push {
             }
         } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
             Self::Disconnect(Disconnect { code, reason })
+        } else if let Some(JsonDisconnect { code, reason }) = push.unsubscribe {
+            // `Unsubscribe` has the code and reason fields of `Disconnect`.
+            Self::Unsubscribe {
+                channel: push.channel,
+                code,
+                reason,
+            }
         } else {
             Self::Unsupported
         }
@@ -380,6 +421,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token::Secret;
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -547,6 +589,7 @@ mod tests {
             method: Method::Subscribe(SubscribeRequest {
                 channel: "news".into(),
                 data: Some(data.to_vec()),
+                ..SubscribeRequest::default()
             }),
         };
 
@@ -570,6 +613,70 @@ mod tests {
                 "\n",
                 r#"{"id":3,"unsubscribe":{"channel":"news"}}"#,
             )
+        );
+    }
+
+    #[test]
+    fn encodes_a_subscribe_token_and_sub_refresh() {
+        let frame = encode(&[
+            Command {
+                id: 2,
+                method: Method::Subscribe(SubscribeRequest {
+                    channel: "news".into(),
+                    token: Secret("t1".into()),
+                    data: None,
+                }),
+            },
+            Command {
+                id: 3,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "news".into(),
+                    token: Secret("t2".into()),
+                }),
+            },
+        ]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            concat!(
+                r#"{"id":2,"subscribe":{"channel":"news","token":"t1"}}"#,
+                "\n",
+                r#"{"id":3,"sub_refresh":{"channel":"news","token":"t2"}}"#,
+            )
+        );
+    }
+
+    #[test]
+    fn decodes_subscribe_expiry_sub_refresh_and_unsubscribe_push() {
+        let frame = concat!(
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+            "\n",
+            r#"{"id":3,"sub_refresh":{"expires":true,"ttl":30}}"#,
+            "\n",
+            r#"{"push":{"channel":"news","unsubscribe":{"code":2500,"reason":"resubscribe"}}}"#,
+        );
+
+        let replies = decode(frame.as_bytes()).unwrap();
+
+        assert!(
+            matches!(&replies[0].result, ReplyResult::Subscribe(result) if result.expires && result.ttl == 60),
+            "{:?}",
+            replies[0]
+        );
+        assert_eq!(
+            replies[1].result,
+            ReplyResult::SubRefresh(RefreshResult {
+                expires: true,
+                ttl: 30
+            })
+        );
+        assert_eq!(
+            replies[2].result,
+            ReplyResult::Push(Push::Unsubscribe {
+                channel: "news".into(),
+                code: 2500,
+                reason: "resubscribe".into()
+            })
         );
     }
 
