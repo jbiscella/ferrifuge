@@ -268,8 +268,10 @@ jobs:
         with:
           tool: cargo-semver-checks
 
+      # Default features: the public API. Without the flag the check also
+      # enables test-util, whose hooks are not part of it.
       - name: cargo semver-checks
-        run: cargo semver-checks --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before }}"
+        run: cargo semver-checks --default-features --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before }}"
 
   msrv:
     runs-on: ubuntu-latest
