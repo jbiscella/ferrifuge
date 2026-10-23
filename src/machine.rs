@@ -84,7 +84,7 @@ pub struct FetchId(u64);
 pub struct SubscriptionId(u64);
 
 /// Options of a subscription (spec, "Subscription common options").
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
     /// Data sent with every subscribe command.
@@ -92,6 +92,23 @@ pub struct SubscriptionOptions {
     /// The owner answers [`Action::FetchSubscriptionData`] before every
     /// subscribe command, instead of sending `data`.
     pub data_source: bool,
+    /// Lower bound of the resubscribe delay. Default 500 ms (centrifuge-js
+    /// `minResubscribeDelay`).
+    pub min_resubscribe_delay: Duration,
+    /// Upper bound of the resubscribe delay. Default 20 s (centrifuge-js
+    /// `maxResubscribeDelay`).
+    pub max_resubscribe_delay: Duration,
+}
+
+impl Default for SubscriptionOptions {
+    fn default() -> Self {
+        Self {
+            data: None,
+            data_source: false,
+            min_resubscribe_delay: Duration::from_millis(500),
+            max_resubscribe_delay: Duration::from_secs(20),
+        }
+    }
 }
 
 impl SubscriptionOptions {
@@ -110,6 +127,20 @@ impl SubscriptionOptions {
     pub fn data_source(mut self) -> Self {
         self.data = None;
         self.data_source = true;
+        self
+    }
+
+    /// Sets the lower bound of the resubscribe delay.
+    #[must_use]
+    pub fn min_resubscribe_delay(mut self, delay: Duration) -> Self {
+        self.min_resubscribe_delay = delay;
+        self
+    }
+
+    /// Sets the upper bound of the resubscribe delay.
+    #[must_use]
+    pub fn max_resubscribe_delay(mut self, delay: Duration) -> Self {
+        self.max_resubscribe_delay = delay;
         self
     }
 }
