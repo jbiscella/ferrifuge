@@ -192,7 +192,24 @@ async fn no_further_connect_attempt(world: &mut ClientWorld) {
 
 #[then(r#"the client emits an "error" event for each failed transport attempt"#)]
 async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
-    let mut events = world.events_during(QUIET_PERIOD).await;
+    let transports = if world.transports.is_empty() {
+        vec![TransportKind::WebSocket]
+    } else {
+        world.transports.clone()
+    };
+    // Waits for the attempts rather than for a fixed time: an unreachable
+    // port is refused at once on Linux and macOS, after about 2 s of
+    // retries on Windows. Each attempt fails within EVENT_TIMEOUT.
+    let wanted = transports.len().max(2);
+    let mut events = world.ready_events();
+    while events
+        .iter()
+        .filter(|event| matches!(event, ClientEvent::Error(_)))
+        .count()
+        < wanted
+    {
+        events.push(world.next_event().await);
+    }
     // The "connecting" that connect() itself emits (see "Successful connect").
     if let Some(ClientEvent::Connecting { code, .. }) = events.first()
         && *code == codes::connecting::CONNECT_CALLED
@@ -211,11 +228,6 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
         assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
         assert_eq!(error.code, codes::error::TRANSPORT_CLOSED, "{error:?}");
     }
-    let transports = if world.transports.is_empty() {
-        vec![TransportKind::WebSocket]
-    } else {
-        world.transports.clone()
-    };
     // Every configured transport was tried, and only those.
     let reported: Vec<_> = events
         .iter()
