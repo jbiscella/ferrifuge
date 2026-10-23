@@ -27,6 +27,11 @@ pub struct Config {
     /// Encoding of the client protocol, fixed for the client's lifetime.
     /// Default JSON.
     pub protocol: Protocol,
+    /// Upper bound of a random delay added to the first reconnect after a
+    /// connected client loses its connection, so that a fleet disconnected
+    /// at once does not reconnect at once (Block 14). Not applied to
+    /// `connect()`. Default 0: no added delay.
+    pub reconnect_jitter_window: Duration,
 }
 
 /// Encoding of the client protocol (`client.proto`).
@@ -63,6 +68,7 @@ impl Default for Config {
             token: String::new(),
             max_server_ping_delay: Duration::from_secs(10),
             protocol: Protocol::Json,
+            reconnect_jitter_window: Duration::ZERO,
         }
     }
 }
@@ -84,6 +90,7 @@ impl std::fmt::Debug for Config {
             .field("token", &Token(&self.token))
             .field("max_server_ping_delay", &self.max_server_ping_delay)
             .field("protocol", &self.protocol)
+            .field("reconnect_jitter_window", &self.reconnect_jitter_window)
             .finish()
     }
 }
