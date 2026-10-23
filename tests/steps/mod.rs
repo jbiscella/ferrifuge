@@ -23,6 +23,7 @@ use crate::support::relay::CountingRelay;
 mod backoff;
 mod codes;
 mod connection;
+mod jitter;
 mod ping;
 mod protobuf;
 mod subscriptions;
@@ -118,6 +119,8 @@ pub(crate) struct ClientWorld {
     pub(crate) unsubscribed_at: Option<std::time::Instant>,
     /// The sans-IO core of an @E subscription scenario.
     pub(crate) subscription_machine: Option<subscriptions::MachineRun>,
+    /// The sans-IO core of an @E reconnect jitter scenario.
+    pub(crate) jitter: Option<jitter::JitterRun>,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;

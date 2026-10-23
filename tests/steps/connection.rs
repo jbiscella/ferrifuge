@@ -91,6 +91,10 @@ async fn a_client_disconnected_explicitly(world: &mut ClientWorld) {
 
 #[when("connect is called")]
 fn connect_is_called(world: &mut ClientWorld) {
+    if super::jitter::drives_a_machine(world) {
+        super::jitter::connect(world);
+        return;
+    }
     // Some scenarios (e.g. Block 3's proxy outline) create no client first.
     if world.client.is_none() {
         let endpoint = world.server_endpoint();
@@ -101,6 +105,10 @@ fn connect_is_called(world: &mut ClientWorld) {
 
 #[when("disconnect is called")]
 fn disconnect_is_called(world: &mut ClientWorld) {
+    if super::jitter::drives_a_machine(world) {
+        super::jitter::disconnect(world);
+        return;
+    }
     world.client().disconnect();
 }
 

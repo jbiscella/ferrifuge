@@ -111,6 +111,9 @@ const IMPLEMENTED: &[&str] = &[
     "Messages after a disconnect in the same frame are discarded",
     "Removing a subscription unsubscribes it first",
     "Binary publication delivered over Protobuf",
+    "Without a jitter window the first reconnect follows the backoff",
+    "The jitter window does not delay the first connect",
+    "The jitter window does not delay a connect after an explicit disconnect",
 ];
 
 /// Server configuration of @A scenarios.

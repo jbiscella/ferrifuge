@@ -2,6 +2,8 @@
 //! no network, no real time, deterministic.
 
 // @P scenario: An idle client wakes only for pings and refreshes
+// @P scenario: Reconnects of a fleet are spread over the jitter window
+// @P scenario: Token refreshes of a fleet are spread
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -34,9 +36,11 @@ struct Simulation {
 }
 
 impl Simulation {
-    fn new(config: Config, token_ttl: u32, ping: u32) -> Self {
+    /// A machine seeded with `seed`, whose server gives tokens `token_ttl`
+    /// seconds and pings every `ping` seconds (0 for no pings).
+    fn new(config: Config, seed: u64, token_ttl: u32, ping: u32) -> Self {
         Self {
-            machine: Machine::with_token_source(config),
+            machine: Machine::with_token_source(config).with_seed(seed),
             now: Duration::ZERO,
             transport: None,
             timers: [None; Timer::COUNT],
@@ -154,7 +158,7 @@ impl Simulation {
 #[test]
 fn an_idle_client_wakes_only_for_pings_and_refreshes() {
     const PING: u32 = 25;
-    let mut simulation = Simulation::new(Config::default(), 60, PING);
+    let mut simulation = Simulation::new(Config::default(), 1, 60, PING);
     simulation.handle(Input::Connect);
     let mut subscriptions = Vec::new();
     for index in 0..10 {
@@ -203,4 +207,90 @@ fn an_idle_client_wakes_only_for_pings_and_refreshes() {
             simulation.fired
         );
     }
+}
+
+/// Clients in a simulated fleet, each seeded differently.
+const FLEET: u64 = 100_000;
+
+/// When `timer` of a connected client of the fleet fires, after `then`.
+fn fleet_delays(
+    config: &Config,
+    token_ttl: u32,
+    then: impl Fn(&mut Simulation),
+    timer: Timer,
+) -> Vec<Duration> {
+    (0..FLEET)
+        .map(|seed| {
+            let mut simulation = Simulation::new(config.clone(), seed, token_ttl, 0);
+            simulation.handle(Input::Connect);
+            assert_eq!(simulation.machine.state(), State::Connected);
+            then(&mut simulation);
+            simulation.timers[timer.index()]
+                .expect("the timer is set")
+                .saturating_sub(simulation.now)
+        })
+        .collect()
+}
+
+#[test]
+fn reconnects_of_a_fleet_are_spread_over_the_jitter_window() {
+    const WINDOW: Duration = Duration::from_secs(100);
+    let config = Config {
+        reconnect_jitter_window: WINDOW,
+        ..Config::default()
+    };
+
+    // A disconnect code from the server that advises reconnecting (Block 3).
+    let lose_connection = |simulation: &mut Simulation| {
+        let transport = simulation.transport.expect("an open transport");
+        simulation.handle(Input::TransportClosed {
+            transport,
+            code: Some(3000),
+            reason: "lost".to_owned(),
+        });
+    };
+    let delays = fleet_delays(&config, 60, lose_connection, Timer::Reconnect);
+
+    // The window plus the Block 2 delay of attempt 0, at most 1 s.
+    let mut per_second = vec![0_u64; usize::try_from(WINDOW.as_secs()).unwrap() + 2];
+    for delay in &delays {
+        per_second[usize::try_from(delay.as_secs()).unwrap()] += 1;
+    }
+    let busiest = per_second.iter().copied().max().unwrap_or_default();
+    println!("@P report: busiest second of the window: {busiest} of {FLEET} first reconnects");
+    assert!(busiest * 50 <= FLEET, "{per_second:?}");
+}
+
+#[test]
+fn token_refreshes_of_a_fleet_are_spread() {
+    const TTL: u32 = 60;
+    let ttl = Duration::from_secs(TTL.into());
+
+    let delays = fleet_delays(&Config::default(), TTL, |_| {}, Timer::Refresh);
+
+    let first = delays.iter().min().copied().unwrap_or_default();
+    let last = delays.iter().max().copied().unwrap_or_default();
+    let span = last.saturating_sub(first);
+    println!(
+        "@P report: refreshes from {first:?} to {last:?} of a {ttl:?} ttl ({:.2}% of it)",
+        span.as_secs_f64() * 100.0 / ttl.as_secs_f64()
+    );
+    assert!(span * 10 >= ttl, "a span of {span:?}");
+    // Intervals of 1% of the ttl over the span, the last one closed.
+    let interval = ttl / 100;
+    let intervals = usize::try_from(span.as_nanos().div_ceil(interval.as_nanos()))
+        .unwrap()
+        .max(1);
+    let mut counts = vec![0_u64; intervals];
+    for delay in &delays {
+        let index =
+            usize::try_from(delay.saturating_sub(first).as_nanos() / interval.as_nanos()).unwrap();
+        counts[index.min(intervals - 1)] += 1;
+    }
+    let busiest = counts.iter().copied().max().unwrap_or_default();
+    // At most twice the average share: busiest / FLEET <= 2 / intervals.
+    assert!(
+        busiest * intervals as u64 <= 2 * FLEET,
+        "{counts:?} over {intervals} intervals"
+    );
 }

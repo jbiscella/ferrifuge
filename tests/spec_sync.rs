@@ -24,8 +24,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
-    "Reconnects of a fleet are spread over the jitter window",
-    "Token refreshes of a fleet are spread",
     "Wall-clock cost per publication is reported",
     "Idle CPU is reported",
 ];
