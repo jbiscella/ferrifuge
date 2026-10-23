@@ -250,9 +250,34 @@ Each file in `tests/features/` is a verbatim copy of one of them, and a test
 fails if the two drift apart. `tests/bdd.rs` lists the scenarios that are
 implemented so far.
 
+### Performance tests
+
+Scenarios tagged `@P` (Block 14) run outside cucumber, each claimed by a
+benchmark, measurement or simulation that names it, and a test fails if one
+has none:
+
+```sh
+cargo test --test perf_sim                                 # simulated clock, runs with the tests
+FERRIFUGE_PERF=1 cargo test --release --test perf_alloc     # allocations per publication
+FERRIFUGE_PERF=1 cargo test --release --test perf_footprint # memory footprint
+cargo bench --bench dispatch -- --save-summary=json         # instruction counts
+cargo test --test perf_gates -- --ignored                   # gates on those counts
+```
+
+The allocation and footprint measurements count with
+[dhat](https://crates.io/crates/dhat) and are slow, so they run only with
+`FERRIFUGE_PERF=1`. The benchmark needs Valgrind and `gungraun-runner` at the
+version of `gungraun` in `Cargo.lock`
+(`cargo install gungraun-runner --version <version>`). Under
+`cargo test --all-targets` both are skipped.
+
+### Continuous integration
+
 CI runs rustfmt, clippy (pedantic, warnings denied) with and without default
 features, rustdoc, the tests with a 70% line-coverage floor, an MSRV build
-and cargo-deny. cargo-deny also runs daily.
+and cargo-deny. It also builds and tests with the aws-lc-rs and fips
+providers, and runs the performance tests above, writing their measurements
+to the job summary. cargo-deny also runs daily.
 
 ## License
 
