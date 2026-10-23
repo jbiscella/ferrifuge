@@ -381,6 +381,16 @@ where
 mod tests {
     use super::*;
 
+    /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
+    /// Random inputs under `cargo test`; coverage-guided with
+    /// `cargo bolero test json::tests::fuzz_decode --engine libfuzzer`.
+    #[test]
+    fn fuzz_decode() {
+        bolero::check!().for_each(|frame: &[u8]| {
+            let _ = decode(frame);
+        });
+    }
+
     fn connect_command(id: u32, token: &str) -> Command {
         Command {
             id,
