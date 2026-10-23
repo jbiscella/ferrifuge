@@ -160,11 +160,33 @@ static RUNNING: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
 /// Marks the runner process started by [`trust_test_ca`].
 const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 
-#[tokio::main]
-async fn main() {
+/// Stack of the thread running the scenarios: Windows gives the main
+/// thread 1 MiB, too little for the runner's futures in a debug build,
+/// where Linux gives 8 MiB.
+const RUNNER_STACK: usize = 8 << 20;
+
+fn main() {
     trust_test_ca();
     assert_implemented_scenarios_exist();
     start_watchdog();
+    let runner = thread::Builder::new()
+        .name("scenarios".to_owned())
+        .stack_size(RUNNER_STACK)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(run_scenarios());
+        })
+        .expect("start the scenario runner");
+    // The runner exits the process when done; it returns only by panicking.
+    if runner.join().is_err() {
+        process::exit(101);
+    }
+}
+
+async fn run_scenarios() {
     ClientWorld::cucumber()
         .before(|_, _, scenario, world| {
             Box::pin(async move {
