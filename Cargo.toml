@@ -105,3 +105,9 @@ required-features = ["tokio"]
 name = "perf_footprint"
 harness = false
 required-features = ["tokio"]
+
+# Uses Machine::with_seed. The dev-dependency enabling test-util has no
+# version, so a packaged crate drops it; this target then skips.
+[[test]]
+name = "perf_sim"
+required-features = ["test-util"]
