@@ -206,7 +206,11 @@ impl Machine {
             transport,
             &[Command {
                 id: command_id,
-                method: Method::Subscribe(SubscribeRequest { channel, data }),
+                method: Method::Subscribe(SubscribeRequest {
+                    channel,
+                    data,
+                    ..SubscribeRequest::default()
+                }),
             }],
         );
         self.actions.push(Action::SetSubscriptionTimer(
