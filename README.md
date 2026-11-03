@@ -267,7 +267,7 @@ FERRIFUGE_PERF=1 cargo test --release --test perf_footprint # memory footprint
 cargo bench --bench dispatch -- --save-summary=json         # instruction counts
 cargo test --test perf_gates -- --ignored                   # gates on those counts
 cargo bench --bench wallclock                               # decode and dispatch time
-FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock # latency, then 10 min idle CPU
+FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock # latency, then 2 min idle CPU
 ```
 
 Wall-clock figures depend on the machine: they are reported, never gating.
@@ -304,8 +304,11 @@ and cargo-deny. It also builds and tests with the aws-lc-rs and fips
 providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
 build. It runs the unit tests and the scenarios that need no server on
-Windows and macOS, the interop test, each fuzz target for 30 s (20 min
-nightly) and the semver check. cargo-deny also runs daily.
+Windows and macOS, the interop test, each fuzz target for 30 s (10 min
+weekly) and the semver check. To save Actions minutes, the perf,
+wall-clock, Windows/macOS and fuzz jobs run on merges to `main` and on
+demand (`workflow_dispatch`), not on every pull request push. cargo-deny
+also runs daily.
 
 ## License
 

@@ -6,7 +6,7 @@
 //!
 //! Runs only with `FERRIFUGE_PERF=1`, as the non-gating CI job does:
 //! `FERRIFUGE_PERF=1 cargo test --release --test perf_wallclock`. The idle
-//! period is 10 minutes; `FERRIFUGE_PERF_IDLE_SECS` shortens it locally.
+//! period is 2 minutes; `FERRIFUGE_PERF_IDLE_SECS` changes it.
 
 // @P scenario: Wall-clock cost per publication is reported
 // @P scenario: Idle CPU is reported
@@ -26,7 +26,7 @@ use support::perf_server::{self, ChildServer};
 const RUN: &str = "FERRIFUGE_PERF";
 /// Overrides the idle period, in seconds.
 const IDLE_SECS: &str = "FERRIFUGE_PERF_IDLE_SECS";
-const IDLE: Duration = Duration::from_secs(10 * 60);
+const IDLE: Duration = Duration::from_secs(2 * 60);
 const PUBLICATIONS: usize = 10_000;
 const PER_SECOND: u32 = 1000;
 /// The server's ping interval in the idle scenario, in seconds.

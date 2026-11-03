@@ -1,10 +1,10 @@
 name: fuzz
 
-# Longer coverage-guided fuzzing of the decoders (Block 14e); CI runs each
-# target for 30 s on every change.
+# Longer coverage-guided fuzzing of the decoders (Block 14e), weekly; CI
+# runs each target for 30 s on every merge to main.
 on:
   schedule:
-    - cron: "41 3 * * *"
+    - cron: "41 3 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -34,8 +34,8 @@ jobs:
       - name: Install cargo-bolero
         run: cargo install cargo-bolero --locked --version 0.13.5
 
-      - name: Fuzz for 20 minutes
-        run: cargo bolero test --toolchain nightly "${{ matrix.target }}" -T 20m
+      - name: Fuzz for 10 minutes
+        run: cargo bolero test --toolchain nightly "${{ matrix.target }}" -T 10m
 
       - name: Upload crashing inputs
         if: failure()

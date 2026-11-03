@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Runs the merge-only jobs on any branch, on demand.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -163,6 +165,8 @@ jobs:
   # Deterministic @P metrics of Block 14: instruction counts, with gungraun
   # on Valgrind.
   perf:
+    # Heavy: on merges to main and on demand, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -176,16 +180,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y valgrind
 
       # The runner must match the gungraun library version in Cargo.lock.
+      - name: gungraun version
+        id: gungraun
+        run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "gungraun") | .version')" >> "$GITHUB_OUTPUT"
+
+      # A prebuilt binary rather than compiling it (about 2 min).
       - name: Install gungraun-runner
-        run: |
-          version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "gungraun") | .version')
-          cargo install gungraun-runner --locked --version "$version"
+        uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@${{ steps.gungraun.outputs.version }}
 
       - name: Benchmarks
         run: cargo bench --bench dispatch -- --save-summary=json
 
+      # Release, as the benchmark: the debug build would compile every
+      # dependency again (about 2 min).
       - name: Gates on the benchmark counts
-        run: cargo test --test perf_gates -- --ignored
+        run: cargo test --release --test perf_gates -- --ignored
 
       # Gates, and reports the measured values in the job summary.
       - name: Allocations per publication
@@ -203,6 +214,8 @@ jobs:
   # Wall-clock figures of Block 14 (@P): measured and reported, never
   # gating, since they depend on the runner.
   wall-clock:
+    # Heavy: on merges to main and on demand, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 30
@@ -219,7 +232,7 @@ jobs:
           cargo bench --bench wallclock | tee wallclock.txt
           { echo '### Decode and dispatch time'; echo '```'; grep -A1 '^decode and dispatch' wallclock.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-      # Ten minutes of the run are the idle period.
+      # Two minutes of the run are the idle period.
       - name: Delivery latency and idle CPU
         run: |
           set -o pipefail
@@ -229,6 +242,8 @@ jobs:
   # The unit, @E and @D layers on Windows and macOS (Block 14e). @A and @B
   # need Docker, so they run on Linux only.
   portability:
+    # Heavy: on merges to main and on demand, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -271,11 +286,13 @@ jobs:
       # Default features: the public API. Without the flag the check also
       # enables test-util, whose hooks are not part of it.
       - name: cargo semver-checks
-        run: cargo semver-checks --default-features --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before }}"
+        run: cargo semver-checks --default-features --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.
   fuzz:
+    # Heavy: on merges to main and on demand, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
