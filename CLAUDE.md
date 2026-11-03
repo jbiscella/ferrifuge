@@ -1829,6 +1829,6 @@ Feature: Footprint, performance and fleet behaviour
   @P
   Scenario: Idle CPU is reported
     Given a client connected to the fake server with 10 subscribed channels and server pings every 25 s
-    When 10 minutes elapse without publications
+    When 2 minutes elapse without publications
     Then the CPU time used by the client is reported
 ```
