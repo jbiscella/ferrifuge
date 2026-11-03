@@ -702,8 +702,14 @@ async fn a_client_subscribed_on_the_fake_server(world: &mut ClientWorld) {
     a_client_subscribed(world).await;
 }
 
+/// From code 2500 the subscription subscribes again: the fake server leaves
+/// that subscribe unanswered, so the subscribing state can be observed; a
+/// later step answers it.
 #[when(regex = r"^the fake server unsubscribes the subscription with code (\d+)$")]
 fn the_fake_server_unsubscribes(world: &mut ClientWorld, code: u32) {
+    if code >= 2500 {
+        world.fake().ignore_next_subscribe();
+    }
     let reason = format!("fake server unsubscribe {code}");
     let push =
         json!({"push": {"channel": CHANNEL, "unsubscribe": {"code": code, "reason": reason}}});
@@ -727,14 +733,27 @@ async fn emits_with_the_code_and_reason_sent(world: &mut ClientWorld, state: Str
     r#"then the subscription emits "subscribed" after the fake server answers the new subscribe command"#
 )]
 async fn subscribed_again_after_the_new_subscribe(world: &mut ClientWorld) {
-    expect_subscription_event(world, "subscribed", false).await;
-    let subscribes = world
+    let new_subscribe = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let subscribes: Vec<_> = world
+                .fake()
+                .received()
+                .into_iter()
+                .filter(|message| message["subscribe"].is_object())
+                .collect();
+            if let [_, new] = subscribes.as_slice() {
+                return new["id"].clone();
+            }
+            assert!(subscribes.len() < 2, "{subscribes:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a new subscribe command");
+    world
         .fake()
-        .received()
-        .iter()
-        .filter(|message| message["subscribe"].is_object())
-        .count();
-    assert_eq!(subscribes, 2, "subscribe commands the fake server received");
+        .send(&json!({"id": new_subscribe, "subscribe": {}}).to_string());
+    expect_subscription_event(world, "subscribed", false).await;
 }
 
 #[when(

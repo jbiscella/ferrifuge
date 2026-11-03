@@ -3,7 +3,6 @@
 //! to them. Behaviour follows centrifuge-js `subscription.ts`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
 
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
 use crate::backoff::Backoff;
@@ -14,11 +13,6 @@ use crate::{
     ClientError, DataError, ErrorKind, Publication, State, Subscribed, SubscriptionError,
     SubscriptionEvent, SubscriptionState, codes,
 };
-
-/// Resubscribe backoff bounds (centrifuge-js `minResubscribeDelay`,
-/// `maxResubscribeDelay` defaults).
-const MIN_RESUBSCRIBE_DELAY: Duration = Duration::from_millis(500);
-const MAX_RESUBSCRIBE_DELAY: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Default)]
 pub(super) struct Subscriptions {
@@ -87,6 +81,7 @@ impl Machine {
         let id = SubscriptionId(subscriptions.next_id);
         subscriptions.next_id += 1;
         subscriptions.by_channel.insert(channel.clone(), id);
+        let backoff = Backoff::new(options.min_resubscribe_delay, options.max_resubscribe_delay);
         subscriptions.by_id.insert(
             id,
             Subscription {
@@ -96,7 +91,7 @@ impl Machine {
                 subscribe_command: None,
                 fetch: None,
                 waiting: false,
-                backoff: Backoff::new(MIN_RESUBSCRIBE_DELAY, MAX_RESUBSCRIBE_DELAY),
+                backoff,
             },
         );
         Ok(id)
@@ -502,6 +497,38 @@ impl Machine {
         );
     }
 
+    /// The server unsubscribed the client from `channel` (spec, "Unsubscribe
+    /// codes"; centrifuge-js `_handleUnsubscribe`): from code 2500 the
+    /// subscription subscribes again at once, below it unsubscribes, with
+    /// the server's code and reason; the server already dropped it, so no
+    /// unsubscribe command is sent. A push for a subscription not subscribed
+    /// ends an earlier one, e.g. one that `unsubscribe()` ended, and changes
+    /// nothing.
+    pub(super) fn server_unsubscribe(&mut self, channel: &str, code: u32, reason: &str) {
+        let Some(id) = self.find_subscription(channel).filter(|id| {
+            self.subscriptions
+                .by_id
+                .get(id)
+                .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
+        }) else {
+            return;
+        };
+        if code < 2500 {
+            self.set_unsubscribed(id, code, reason, false);
+            return;
+        }
+        let sub = self.subscriptions.by_id.get_mut(&id).expect("found above");
+        sub.state = SubscriptionState::Subscribing;
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Subscribing {
+                code,
+                reason: reason.to_owned(),
+            },
+        );
+        self.start_subscribe(id);
+    }
+
     /// A publication pushed for `channel`.
     pub(super) fn publication(&mut self, channel: &str, publication: Publication) {
         // Only a subscribed handle receives publications (Block 9).
@@ -663,6 +690,46 @@ mod tests {
         ));
 
         assert_eq!(sent(&after_reply), Vec::<String>::new());
+    }
+
+    fn unsubscribe_push(code: u32) -> String {
+        format!(r#"{{"push":{{"channel":"news","unsubscribe":{{"code":{code},"reason":"r"}}}}}}"#)
+    }
+
+    #[test]
+    fn a_server_unsubscribe_below_2500_sends_no_unsubscribe_command() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        let actions = machine.handle(reply(transport, &unsubscribe_push(2000)));
+
+        // The server dropped the subscription already.
+        assert_eq!(sent(&actions), Vec::<String>::new());
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Unsubscribed)
+        );
+    }
+
+    #[test]
+    fn a_server_unsubscribe_for_a_subscription_not_subscribed_changes_nothing() {
+        for code in [2000, 2500] {
+            let (mut machine, transport, id) = connected();
+            machine.handle(Input::Subscribe(id));
+            machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+            machine.handle(Input::Unsubscribe(id));
+            machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+            // E.g. the push of the subscription unsubscribe() just ended.
+            let actions = machine.handle(reply(transport, &unsubscribe_push(code)));
+
+            assert_eq!(actions, [], "code {code}");
+            assert_eq!(
+                machine.subscription_state(id),
+                Some(SubscriptionState::Unsubscribed)
+            );
+        }
     }
 
     fn reconnect_code(actions: &[Action]) -> Option<u32> {
@@ -869,7 +936,10 @@ mod tests {
                 _ => None,
             })
             .expect("a retry");
-        assert!(delay <= MIN_RESUBSCRIBE_DELAY * 2, "{delay:?}");
+        assert!(
+            delay <= SubscriptionOptions::default().min_resubscribe_delay * 2,
+            "{delay:?}"
+        );
     }
 
     #[test]
