@@ -702,6 +702,41 @@ async fn a_client_subscribed_on_the_fake_server(world: &mut ClientWorld) {
     a_client_subscribed(world).await;
 }
 
+#[when(regex = r"^the fake server unsubscribes the subscription with code (\d+)$")]
+fn the_fake_server_unsubscribes(world: &mut ClientWorld, code: u32) {
+    let reason = format!("fake server unsubscribe {code}");
+    let push =
+        json!({"push": {"channel": CHANNEL, "unsubscribe": {"code": code, "reason": reason}}});
+    world.fake().send(&push.to_string());
+    world.sent_unsubscribe = Some((code, reason));
+}
+
+#[then(regex = r#"^the subscription emits "(\w+)" with code (\d+) and the reason sent$"#)]
+async fn emits_with_the_code_and_reason_sent(world: &mut ClientWorld, state: String, code: u32) {
+    let (_, reason) = world.sent_unsubscribe.clone().expect("an unsubscribe sent");
+    let event = expect_subscription_event(world, &state, false).await;
+    let expected = match state.as_str() {
+        "unsubscribed" => SubscriptionEvent::Unsubscribed { code, reason },
+        "subscribing" => SubscriptionEvent::Subscribing { code, reason },
+        other => panic!("no {other} event carries a code"),
+    };
+    assert_eq!(event, expected);
+}
+
+#[then(
+    r#"then the subscription emits "subscribed" after the fake server answers the new subscribe command"#
+)]
+async fn subscribed_again_after_the_new_subscribe(world: &mut ClientWorld) {
+    expect_subscription_event(world, "subscribed", false).await;
+    let subscribes = world
+        .fake()
+        .received()
+        .iter()
+        .filter(|message| message["subscribe"].is_object())
+        .count();
+    assert_eq!(subscribes, 2, "subscribe commands the fake server received");
+}
+
 #[when(
     regex = r#"^a subscription to channel "(\w+)" is subscribed and the fake server answers with 1 initial publication$"#
 )]

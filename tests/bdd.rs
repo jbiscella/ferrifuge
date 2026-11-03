@@ -114,6 +114,13 @@ const IMPLEMENTED: &[&str] = &[
     "Without a jitter window the first reconnect follows the backoff",
     "The jitter window does not delay the first connect",
     "The jitter window does not delay a connect after an explicit disconnect",
+    "Server unsubscribe codes",
+    "After a resubscribe-advised unsubscribe the subscription is subscribed again",
+    "Resubscribe delays are bounded",
+    "Resubscribe delay upper bound grows exponentially until capped",
+    "Resubscribe delays are jittered",
+    "A successful subscribe resets the resubscribe backoff",
+    "Resubscribe backoff options are configurable",
 ];
 
 /// Server configuration of @A scenarios.

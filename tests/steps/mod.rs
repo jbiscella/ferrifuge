@@ -61,10 +61,16 @@ pub(crate) struct ClientWorld {
     proxy_disconnect: Option<(u32, String)>,
     /// Code and reason of the disconnect a Block 3 step made the server send.
     pub(crate) sent_disconnect: Option<(u32, String)>,
+    /// Code and reason of the unsubscribe push the fake server sent.
+    pub(crate) sent_unsubscribe: Option<(u32, String)>,
+    /// The machine of an @E resubscribe scenario that spans several steps.
+    pub(crate) resubscribe_run: Option<backoff::ResubscribeRun>,
+    /// The resubscribe delay a step read last.
+    pub(crate) last_delay: Option<Duration>,
     /// The state event that answered it.
     pub(crate) state_event: Option<ClientEvent>,
     /// Backoff options of an @E scenario.
-    pub(crate) backoff_config: Option<Config>,
+    pub(crate) backoff: Option<backoff::UnderTest>,
     /// Delays computed by an @E scenario.
     pub(crate) computed_delays: Vec<Duration>,
     /// Whether `computed_delays` holds one delay per consecutive attempt.

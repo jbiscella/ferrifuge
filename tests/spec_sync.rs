@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
 const NOT_YET_IMPLEMENTED: &[&str] = &[
-    "Subscription tokens, unsubscribe codes and resubscribe backoff",
     "Subscription recovery",
     "Server-side subscriptions",
     "Client commands",
