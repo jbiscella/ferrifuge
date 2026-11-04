@@ -195,10 +195,10 @@ impl Machine {
         self.subscriptions.sub_refreshes.insert(command_id, id);
         self.send(
             transport,
-            &[Command {
+            Command {
                 id: command_id,
                 method: Method::SubRefresh(SubRefreshRequest { channel, token }),
-            }],
+            },
         );
         self.actions.push(Action::SetSubscriptionTimer(
             id,
