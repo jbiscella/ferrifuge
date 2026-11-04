@@ -610,7 +610,10 @@ impl Driver {
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
-                    self.stale_fetching = self.fetching.take();
+                    // A stale callback stays until a running one replaces it.
+                    if let Some(running) = self.fetching.take() {
+                        self.stale_fetching = Some(running);
+                    }
                     self.fetching = Some((id, guarded(|| get_token(), callback_panicked)));
                 }
             }
