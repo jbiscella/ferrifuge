@@ -14,8 +14,8 @@ use crate::wire::{
     Command, Error, Method, Reply, ReplyResult, SubscribeRequest, UnsubscribeRequest,
 };
 use crate::{
-    ClientError, DataError, ErrorKind, Publication, State, Subscribed, SubscriptionError,
-    SubscriptionEvent, SubscriptionState, codes,
+    ClientError, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
+    SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
 };
 
 #[derive(Debug, Default)]
@@ -53,9 +53,33 @@ struct Subscription {
     /// Its subscription token, the fetch of a new one and the refresh
     /// command in flight (Block 5's token component).
     tokens: Tokens,
+    /// Position in the channel's stream: of the last publication received,
+    /// or given by the subscribe reply or the `since` option. Kept across
+    /// `unsubscribe()` and disconnects (spec, "Subscription recovery
+    /// state").
+    position: Option<StreamPosition>,
+    /// The next subscribe asks to recover from `position`: the channel was
+    /// recoverable, or `since` gave a position (centrifuge-js `_recover`).
+    recover: bool,
 }
 
 impl Subscription {
+    /// Moves the stream position to a publication's, as received live or
+    /// recovered (centrifuge-js `_handlePublication`); a changed epoch
+    /// comes with it (`client.proto`, `Publication.epoch`).
+    fn advance(&mut self, offset: Option<u64>, epoch: &str) {
+        if offset.is_none() && epoch.is_empty() {
+            return;
+        }
+        let position = self.position.get_or_insert_default();
+        if let Some(offset) = offset {
+            position.offset = offset;
+        }
+        if !epoch.is_empty() {
+            epoch.clone_into(&mut position.epoch);
+        }
+    }
+
     /// Whether it has subscription token timers or fetches to clean up.
     fn uses_token(&self) -> bool {
         self.tokens.has_source() || self.tokens.has_token()
@@ -101,6 +125,9 @@ impl Machine {
         subscriptions.by_channel.insert(channel.clone(), id);
         let backoff = Backoff::new(options.min_resubscribe_delay, options.max_resubscribe_delay);
         let tokens = Tokens::new(options.token.clone(), options.token_source);
+        // `since` starts recovery on the first subscribe (spec).
+        let position = options.since.clone();
+        let recover = position.is_some();
         subscriptions.by_id.insert(
             id,
             Subscription {
@@ -112,6 +139,8 @@ impl Machine {
                 waiting: false,
                 backoff,
                 tokens,
+                position,
+                recover,
             },
         );
         Ok(id)
@@ -231,6 +260,8 @@ impl Machine {
         sub.subscribe_command = Some(command_id);
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
+        let recover_from = sub.position.clone().filter(|_| sub.recover);
+        let (positioned, recoverable) = (sub.options.positioned, sub.options.recoverable);
         self.subscriptions
             .subscribes
             .insert(command_id, (id, channel.clone()));
@@ -242,7 +273,11 @@ impl Machine {
                     channel,
                     token,
                     data,
-                    ..SubscribeRequest::default()
+                    recover: recover_from.is_some(),
+                    offset: recover_from.as_ref().map_or(0, |at| at.offset),
+                    epoch: recover_from.map(|at| at.epoch).unwrap_or_default(),
+                    positioned,
+                    recoverable,
                 }),
             }],
         );
@@ -444,6 +479,21 @@ impl Machine {
                 sub.state = SubscriptionState::Subscribed;
                 sub.backoff.reset();
                 sub.tokens.connected();
+                // The server decides: a recoverable reply gives the position
+                // to recover from next; any other reply ends recovery, so a
+                // channel that does not recover is never asked to
+                // (centrifuge-js `_setSubscribed`).
+                let reported = (result.positioned || result.recoverable).then(|| StreamPosition {
+                    offset: result.offset,
+                    epoch: result.epoch.clone(),
+                });
+                sub.recover = result.recoverable;
+                if result.recoverable {
+                    sub.position = Some(StreamPosition {
+                        offset: result.offset,
+                        epoch: result.epoch,
+                    });
+                }
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
                 }
@@ -451,10 +501,19 @@ impl Machine {
                     id,
                     SubscriptionEvent::Subscribed(Subscribed {
                         data: result.data,
-                        ..Subscribed::default()
+                        positioned: result.positioned,
+                        recoverable: result.recoverable,
+                        was_recovering: result.was_recovering,
+                        recovered: result.recovered,
+                        stream_position: reported,
                     }),
                 );
+                // Recovered publications, or initial ones, follow it and
+                // move the position.
                 for publication in result.publications {
+                    if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                        sub.advance(publication.offset, "");
+                    }
                     self.emit_subscription(id, SubscriptionEvent::Publication(publication));
                 }
             }
@@ -590,8 +649,9 @@ impl Machine {
         self.start_subscribe(id);
     }
 
-    /// A publication pushed for `channel`.
-    pub(super) fn publication(&mut self, channel: &str, publication: Publication) {
+    /// A publication pushed for `channel`, with the stream's new epoch if
+    /// it changed.
+    pub(super) fn publication(&mut self, channel: &str, publication: Publication, epoch: &str) {
         // Only a subscribed handle receives publications (Block 9).
         let subscribed = self.find_subscription(channel).filter(|id| {
             self.subscriptions
@@ -600,6 +660,9 @@ impl Machine {
                 .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
         });
         if let Some(id) = subscribed {
+            if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                sub.advance(publication.offset, epoch);
+            }
             self.emit_subscription(id, SubscriptionEvent::Publication(publication));
         }
     }

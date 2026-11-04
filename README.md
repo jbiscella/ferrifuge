@@ -48,13 +48,16 @@ Available now:
 - client-side subscriptions: states and events, publications delivered
   with their exact bytes, resubscribe after reconnects, subscription data;
 - subscription tokens, refreshed through a callback before they expire;
-  server unsubscribe codes; a configurable resubscribe backoff.
+  server unsubscribe codes; a configurable resubscribe backoff;
+- recovery of the publications a subscription missed while disconnected
+  or unsubscribed, and the `since`, `positioned` and `recoverable` options.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| Recovery, server-side subscriptions | later blocks |
+| `getState`, state invalidation (codes 2502, 3014) | Block 11 |
+| Server-side subscriptions | later blocks |
 | RPC, publish, history, presence | later blocks |
 
 ## Usage
@@ -162,6 +165,38 @@ refreshed with `sub_refresh`. Return `TokenError::Unauthorized` (or an
 empty token) to unsubscribe for good, with code 1; other errors are
 reported as `error` events and retried. With a `get_data` callback too, the
 token comes first.
+
+On a channel that keeps a history and allows recovery, a subscription
+recovers the publications it missed while disconnected or unsubscribed:
+they are delivered after its `subscribed` event, which says whether the
+recovery succeeded. Ask for recovery on channels that allow it without
+forcing it, and resume from a position saved earlier:
+
+```rust
+use ferrifuge::{StreamPosition, SubscriptionEvent};
+use futures_util::StreamExt;
+
+let subscription = client
+    .subscription_builder("news")
+    .recoverable(true)
+    .since(StreamPosition { offset: saved.offset, epoch: saved.epoch })
+    .build()?;
+let mut events = subscription.events();
+subscription.subscribe();
+
+while let Some(event) = events.next().await {
+    match event {
+        SubscriptionEvent::Subscribed(subscribed) if subscribed.was_recovering && !subscribed.recovered => {
+            // Publications were lost: reload the application's state.
+        }
+        SubscriptionEvent::Publication(publication) => {
+            // Save `publication.offset` (and the epoch of the stream
+            // position in `subscribed`) to resume from later.
+        }
+        _ => {}
+    }
+}
+```
 
 ### Transport fallback
 
