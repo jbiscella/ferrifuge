@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &["Server-side subscriptions", "Client commands"];
+const NOT_YET_IMPLEMENTED: &[&str] = &["Client commands"];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
