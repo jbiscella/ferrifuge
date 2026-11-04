@@ -107,6 +107,16 @@ struct JsonSubscribeRequest<'a> {
     token: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<JsonData<'a>>,
+    #[serde(skip_serializing_if = "is_false")]
+    recover: bool,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    epoch: &'a str,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    offset: u64,
+    #[serde(skip_serializing_if = "is_false")]
+    positioned: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    recoverable: bool,
 }
 
 #[derive(Serialize)]
@@ -161,11 +171,21 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 channel,
                 token,
                 data,
+                recover,
+                epoch,
+                offset,
+                positioned,
+                recoverable,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
                     channel,
                     token: &token.0,
                     data: data.as_deref().map(JsonData::new),
+                    recover: *recover,
+                    epoch,
+                    offset: *offset,
+                    positioned: *positioned,
+                    recoverable: *recoverable,
                 });
             }
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
@@ -187,6 +207,16 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
 #[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Decodes one reply from its top-level fields, kept as raw JSON so that
@@ -223,6 +253,12 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                         .into_iter()
                         .map(Publication::from)
                         .collect(),
+                    positioned: subscribe.positioned,
+                    recoverable: subscribe.recoverable,
+                    epoch: subscribe.epoch,
+                    offset: subscribe.offset,
+                    was_recovering: subscribe.was_recovering,
+                    recovered: subscribe.recovered,
                 }));
             }
             "unsubscribe" => {
@@ -313,6 +349,7 @@ struct JsonRefreshResult {
     ttl: u32,
 }
 
+#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeResult.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JsonSubscribeResult {
@@ -321,6 +358,12 @@ struct JsonSubscribeResult {
     #[serde(deserialize_with = "present")]
     data: Option<Box<RawValue>>,
     publications: Vec<JsonPublication>,
+    positioned: bool,
+    recoverable: bool,
+    epoch: String,
+    offset: u64,
+    was_recovering: bool,
+    recovered: bool,
 }
 
 #[derive(Deserialize)]
@@ -338,10 +381,12 @@ struct JsonPush {
 
 impl From<JsonPush> for Push {
     fn from(push: JsonPush) -> Self {
-        if let Some(publication) = push.publication {
+        if let Some(mut publication) = push.publication {
+            let epoch = std::mem::take(&mut publication.epoch);
             Self::Publication {
                 channel: push.channel,
                 publication: publication.into(),
+                epoch,
             }
         } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
             Self::Disconnect(Disconnect { code, reason })
@@ -375,6 +420,8 @@ struct JsonPublication {
     #[serde(default)]
     tags: HashMap<String, String>,
     info: Option<JsonClientInfo>,
+    #[serde(default)]
+    epoch: String,
 }
 
 impl From<JsonPublication> for Publication {
@@ -624,7 +671,7 @@ mod tests {
                 method: Method::Subscribe(SubscribeRequest {
                     channel: "news".into(),
                     token: Secret("t1".into()),
-                    data: None,
+                    ..SubscribeRequest::default()
                 }),
             },
             Command {
@@ -704,6 +751,7 @@ mod tests {
         let ReplyResult::Push(Push::Publication {
             channel,
             publication,
+            ..
         }) = &replies[1].result
         else {
             panic!("{:?}", replies[1]);
@@ -717,6 +765,49 @@ mod tests {
         assert_eq!(info.conn_info.as_deref(), Some(&br#"{"i": 1}"#[..]));
         assert_eq!(info.chan_info, None);
         assert_eq!(replies[2].result, ReplyResult::Unsubscribe);
+    }
+
+    #[test]
+    fn encodes_a_recovering_subscribe_and_decodes_its_position_and_epoch() {
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                recover: true,
+                epoch: "e1".into(),
+                offset: 7,
+                positioned: true,
+                recoverable: true,
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let replies = decode(
+            concat!(
+                r#"{"id":2,"subscribe":{"recoverable":true,"positioned":true,"epoch":"e1","offset":7,"#,
+                r#""was_recovering":true,"recovered":true,"publications":[{"data":{},"offset":8}]}}"#,
+                "\n",
+                r#"{"push":{"channel":"news","pub":{"data":{},"offset":1,"epoch":"e2"}}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":2,"subscribe":{"channel":"news","recover":true,"epoch":"e1","offset":7,"positioned":true,"recoverable":true}}"#
+        );
+        let ReplyResult::Subscribe(result) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert!(result.recoverable && result.positioned);
+        assert!(result.was_recovering && result.recovered);
+        assert_eq!((result.epoch.as_str(), result.offset), ("e1", 7));
+        assert_eq!(result.publications[0].offset, Some(8));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Publication { epoch, publication, .. })
+                if epoch == "e2" && publication.offset == Some(1)
+        ));
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub use adapter::{Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, State};
 pub use subscription::{
-    ClientInfo, DataError, Publication, Subscribed, SubscriptionError, SubscriptionEvent,
-    SubscriptionState,
+    ClientInfo, DataError, Publication, StreamPosition, Subscribed, SubscriptionError,
+    SubscriptionEvent, SubscriptionState,
 };
 pub use token::TokenError;

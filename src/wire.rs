@@ -49,6 +49,13 @@ pub(crate) struct SubscribeRequest {
     pub(crate) token: Secret,
     /// Raw JSON with the JSON protocol, any bytes with Protobuf.
     pub(crate) data: Option<Vec<u8>>,
+    /// Asks to recover the publications after `epoch` and `offset`.
+    pub(crate) recover: bool,
+    pub(crate) epoch: String,
+    pub(crate) offset: u64,
+    /// Ask for these capabilities on a channel that does not force them.
+    pub(crate) positioned: bool,
+    pub(crate) recoverable: bool,
 }
 
 /// `UnsubscribeRequest` of `client.proto`.
@@ -120,13 +127,26 @@ pub(crate) struct RefreshResult {
 }
 
 /// `SubscribeResult` of `client.proto`, for the fields implemented so far.
+#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeResult.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeResult {
     /// The subscription token expires, in `ttl` seconds.
     pub(crate) expires: bool,
     pub(crate) ttl: u32,
     pub(crate) data: Option<Vec<u8>>,
+    /// Recovered publications, or initial ones of a subscribe that does not
+    /// recover.
     pub(crate) publications: Vec<Publication>,
+    /// The capabilities the server granted.
+    pub(crate) positioned: bool,
+    pub(crate) recoverable: bool,
+    /// The stream's epoch, and its offset: the top of the stream, or after a
+    /// recovery the position its publications advance from.
+    pub(crate) epoch: String,
+    pub(crate) offset: u64,
+    /// The server attempted a recovery, and whether it recovered everything.
+    pub(crate) was_recovering: bool,
+    pub(crate) recovered: bool,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.
@@ -136,6 +156,8 @@ pub(crate) enum Push {
     Publication {
         channel: String,
         publication: Publication,
+        /// The stream's new epoch, when it changed; empty otherwise.
+        epoch: String,
     },
     /// The server unsubscribed the client from `channel` (`Unsubscribe`).
     Unsubscribe {

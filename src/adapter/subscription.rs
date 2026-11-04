@@ -10,7 +10,9 @@ use futures_core::Stream;
 
 use super::client::{Callbacks, Client, GetData, GetSubscriptionToken, Shared, lock};
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
-use crate::{DataError, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError};
+use crate::{
+    DataError, StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
+};
 
 /// A subscription to a channel, in its client's registry. Clones are
 /// handles to the same subscription.
@@ -148,6 +150,30 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn max_resubscribe_delay(mut self, delay: Duration) -> Self {
         self.options = self.options.max_resubscribe_delay(delay);
+        self
+    }
+
+    /// Recovers the publications missed since `position` on the first
+    /// subscribe, e.g. a position saved by an earlier run of the app.
+    #[must_use]
+    pub fn since(mut self, position: StreamPosition) -> Self {
+        self.options = self.options.since(position);
+        self
+    }
+
+    /// Asks the server to keep a stream position for the subscription, on a
+    /// channel that allows it but does not force it.
+    #[must_use]
+    pub fn positioned(mut self, positioned: bool) -> Self {
+        self.options = self.options.positioned(positioned);
+        self
+    }
+
+    /// Asks the server to make missed publications recoverable, on a
+    /// channel that allows it but does not force it.
+    #[must_use]
+    pub fn recoverable(mut self, recoverable: bool) -> Self {
+        self.options = self.options.recoverable(recoverable);
         self
     }
 
