@@ -19,7 +19,7 @@ Markers used below:
 | Decision | Choice | Reason |
 |---|---|---|
 | Build vs reuse existing crates (tokio-centrifuge, centrifuge-client) | Build from scratch | Owner's choice |
-| Project purpose (owner decision, 2026-11-04) | Production use on large fleets of end-user devices; not a personal or learning project. Production readiness is an explicit goal. The official centrifugal/centrifuge-rust (experimental, created 2026-10-26) is a benchmark to compare against, not the production reference; Ferrifuge stays built from scratch | Reconsidered once centrifuge-rust appeared; the build-from-scratch decision above stands |
+| Project purpose (owner decision, 2026-11-04) | Production use on large fleets of end-user devices; not a personal or learning project. Production readiness is an explicit goal. The official centrifugal/centrifuge-rust (created 2026-10-26; "Experimental" per its GitHub repository description, not its README) is a benchmark to compare against, not the production reference; Ferrifuge stays built from scratch | Reconsidered once centrifuge-rust appeared; the build-from-scratch decision above stands |
 | Behavioural oracle | Centrifugo Client SDK spec | All official SDKs follow it |
 | Implementation reference | centrifuge-js | Widest feature set |
 | Wire contract | `client.proto` of centrifugal/protocol | Source of truth for frames |
