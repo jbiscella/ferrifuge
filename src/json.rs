@@ -425,6 +425,8 @@ struct JsonPush {
     publication: Option<JsonPublication>,
     disconnect: Option<JsonDisconnect>,
     unsubscribe: Option<JsonDisconnect>,
+    // `Subscribe` has a subset of the fields of `SubscribeResult`.
+    subscribe: Option<JsonSubscribeResult>,
 }
 
 impl From<JsonPush> for Push {
@@ -436,6 +438,11 @@ impl From<JsonPush> for Push {
             }
         } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
             Self::Disconnect(Disconnect { code, reason })
+        } else if let Some(subscribe) = push.subscribe {
+            Self::Subscribe {
+                channel: push.channel,
+                result: subscribe.into(),
+            }
         } else if let Some(JsonDisconnect { code, reason }) = push.unsubscribe {
             // `Unsubscribe` has the code and reason fields of `Disconnect`.
             Self::Unsubscribe {
@@ -556,6 +563,22 @@ mod tests {
         let text = String::from_utf8(frame).unwrap();
         assert_eq!(text.lines().count(), 2, "{text}");
         assert!(text.lines().nth(1).unwrap().contains(r#""token":"t2""#));
+    }
+
+    #[test]
+    fn decodes_a_subscribe_push() {
+        let replies = decode(
+            br#"{"push":{"channel":"alerts","subscribe":{"recoverable":true,"positioned":true,"epoch":"e","offset":3,"data":{"tier":"gold"}}}}"#,
+        )
+        .unwrap();
+
+        let ReplyResult::Push(Push::Subscribe { channel, result }) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!(channel, "alerts");
+        assert!(result.recoverable && result.positioned);
+        assert_eq!((result.epoch.as_str(), result.offset), ("e", 3));
+        assert_eq!(result.data.as_deref(), Some(&br#"{"tier":"gold"}"#[..]));
     }
 
     #[test]
