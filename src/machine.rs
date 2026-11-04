@@ -2259,6 +2259,16 @@ mod tests {
     }
 
     #[test]
+    fn blank_frames_do_not_rearm_the_ping_deadline() {
+        let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
+
+        // E.g. keep-alive newlines written by an intermediary.
+        let actions = machine.handle(frame(transport, "\n"));
+
+        assert_eq!(server_ping_timer(&actions), None, "{actions:?}");
+    }
+
+    #[test]
     fn missing_ping_reconnects_with_no_ping_code() {
         let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
 
