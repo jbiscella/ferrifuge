@@ -110,6 +110,38 @@ async fn connect_proxy_grants_server_side_subscriptions_as_programmed() {
 }
 
 #[tokio::test]
+async fn connect_proxy_grants_recoverable_server_side_subscriptions() {
+    let proxy = ProxyBackend::start().await;
+    let mut env: Vec<_> = proxy
+        .centrifugo_env()
+        .iter()
+        .map(|(name, value)| (*name, value.clone()))
+        .collect();
+    // As SERVER_B in bdd.rs.
+    env.push((
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE",
+        "10".into(),
+    ));
+    env.push((
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL",
+        "300s".into(),
+    ));
+    let env: Vec<_> = env
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let server = Centrifugo::start(&env).await;
+
+    proxy.grant_recoverable(&["alerts"]);
+    let granted = raw_connect(&server.websocket_url()).await;
+
+    assert!(
+        granted.contains(r#""subs":{"alerts":{"recoverable":true"#),
+        "{granted}"
+    );
+}
+
+#[tokio::test]
 async fn fake_server_grants_server_side_subscriptions_as_programmed() {
     let server = FakeServer::start(Announce::default()).await;
     let url = format!("ws://{}/connection/websocket", server.address());

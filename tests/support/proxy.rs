@@ -38,8 +38,9 @@ struct Answers {
     subscribe_requests: Vec<Value>,
     /// When each of them arrived.
     subscribe_times: Vec<Instant>,
-    /// Channels an accepted connection is subscribed to on the server side.
-    granted: Vec<String>,
+    /// Channels an accepted connection is subscribed to on the server side,
+    /// each with whether it is recoverable.
+    granted: Vec<(String, bool)>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -153,7 +154,17 @@ impl ProxyBackend {
     /// Subscribes the connections accepted from now on to `channels` on
     /// the server side (connect result `channels`); none for an empty list.
     pub(crate) fn grant(&self, channels: &[&str]) {
-        self.state.lock().unwrap().granted = channels.iter().map(|&c| c.to_owned()).collect();
+        self.state.lock().unwrap().granted =
+            channels.iter().map(|&c| (c.to_owned(), false)).collect();
+    }
+
+    /// As [`ProxyBackend::grant`], the subscriptions recoverable: the
+    /// connect result's `subs` force recovery on each channel, which needs
+    /// the channel's history (`SERVER_B` keeps one for channels without a
+    /// namespace).
+    pub(crate) fn grant_recoverable(&self, channels: &[&str]) {
+        self.state.lock().unwrap().granted =
+            channels.iter().map(|&c| (c.to_owned(), true)).collect();
     }
 
     /// Leaves the next connection attempt unanswered, so the client stays
@@ -196,7 +207,24 @@ async fn connect(
         Some(Answer::Respond(answer)) => Json(answer),
         // Ends when the proxy is dropped with the scenario.
         Some(Answer::Hold) => std::future::pending().await,
-        None => Json(json!({"result": {"user": USER, "channels": granted}})),
+        None => {
+            let channels: Vec<_> = granted
+                .iter()
+                .filter(|(_, recoverable)| !recoverable)
+                .map(|(channel, _)| channel.clone())
+                .collect();
+            let subs: serde_json::Map<_, _> = granted
+                .iter()
+                .filter(|(_, recoverable)| *recoverable)
+                .map(|(channel, _)| {
+                    (
+                        channel.clone(),
+                        json!({"override": {"force_recovery": {"value": true}}}),
+                    )
+                })
+                .collect();
+            Json(json!({"result": {"user": USER, "channels": channels, "subs": subs}}))
+        }
     }
 }
 

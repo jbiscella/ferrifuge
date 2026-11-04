@@ -58,6 +58,9 @@ struct State {
     /// Server-side subscriptions of the JSON connect replies (`subs`), by
     /// channel; none when empty.
     server_subscriptions: serde_json::Map<String, Value>,
+    /// Server-side subscriptions of the next connect replies only, in
+    /// order, before [`State::server_subscriptions`] applies again.
+    next_server_subscriptions: VecDeque<serde_json::Map<String, Value>>,
 }
 
 pub(crate) struct FakeServer {
@@ -220,6 +223,19 @@ impl FakeServer {
         self.state.lock().unwrap().server_subscriptions = subs;
     }
 
+    /// Grants `subs` in the next JSON connect reply only; later ones grant
+    /// what [`FakeServer::grant_server_subscriptions`] set.
+    pub(crate) fn grant_server_subscriptions_next(&self, subs: Value) {
+        let Value::Object(subs) = subs else {
+            panic!("subs are an object by channel: {subs}");
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .next_server_subscriptions
+            .push_back(subs);
+    }
+
     pub(crate) fn received_protobuf(&self) -> Vec<protobuf::Command> {
         self.state.lock().unwrap().received_protobuf.clone()
     }
@@ -310,7 +326,14 @@ impl Connection {
             };
             if message["connect"].is_object() {
                 let client = self.next_client();
-                let subs = self.state.lock().unwrap().server_subscriptions.clone();
+                let subs = {
+                    let mut state = self.state.lock().unwrap();
+                    let default = state.server_subscriptions.clone();
+                    state
+                        .next_server_subscriptions
+                        .pop_front()
+                        .unwrap_or(default)
+                };
                 replies.push(Message::text(
                     json!({
                         "id": message["id"],
