@@ -659,6 +659,10 @@ struct Pings {
     pong: bool,
 }
 
+/// Disconnect code by which the server invalidates the connection's state
+/// (centrifuge-js `disconnectedCodes.stateInvalidated`).
+const STATE_INVALIDATED: u32 = 3014;
+
 /// The client connection state machine.
 #[derive(Debug)]
 pub struct Machine {
@@ -1112,6 +1116,14 @@ impl Machine {
     /// connecting (`reconnect`) or disconnected. An event is emitted only on
     /// an actual state change.
     fn disconnect(&mut self, code: u32, reason: &str, reconnect: bool) {
+        // "State invalidated" (Block 11): the connection token, a fixed one
+        // too, and every stream position are dropped, whether a push or a
+        // close frame carries the code (centrifuge-js `_disconnect`, which
+        // keeps a token without a callback, and sentinel positions).
+        if code == STATE_INVALIDATED {
+            self.tokens.invalidate();
+            self.forget_stream_positions();
+        }
         if self.state == State::Disconnected {
             return;
         }

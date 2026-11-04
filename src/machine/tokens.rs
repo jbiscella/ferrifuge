@@ -156,7 +156,6 @@ impl Tokens {
     /// codes 2502 and 3014): the token is dropped, so the next connect or
     /// subscribe fetches a new one when there is a source, and carries none
     /// otherwise.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) fn invalidate(&mut self) {
         self.current = Secret::default();
         self.refresh_required = false;

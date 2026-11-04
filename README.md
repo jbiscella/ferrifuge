@@ -52,13 +52,14 @@ Available now:
 - recovery of the publications a subscription missed while disconnected
   or unsubscribed, and the `since`, `positioned` and `recoverable` options;
 - a `get_state` callback reloading the application's state when there is
-  no position to recover from, or a recovery fails.
+  no position to recover from, or a recovery fails;
+- the server's "state invalidated" codes: tokens and stream positions are
+  dropped before subscribing or connecting again.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| State invalidation (codes 2502, 3014) | Block 11 |
 | Server-side subscriptions | later blocks |
 | RPC, publish, history, presence | later blocks |
 
@@ -233,6 +234,13 @@ let subscription = client
     })
     .build()?;
 ```
+
+When the server invalidates a subscription's state (unsubscribe code 2502),
+the subscription drops its token and its stream position before subscribing
+again: the token callback gives a new token, and `get_state` reloads the
+state. When it invalidates the connection's state (disconnect code 3014), the
+client drops its connection token, a fixed one too, and the stream position of
+every subscription before reconnecting.
 
 ### Transport fallback
 
