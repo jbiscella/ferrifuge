@@ -55,6 +55,12 @@ pub mod error {
     pub const CONNECT_TOKEN: u32 = 5;
     /// The token callback failed while getting a token to refresh with.
     pub const REFRESH_TOKEN: u32 = 6;
+    /// A subscription token callback failed while getting a token to
+    /// subscribe with (centrifuge-js `subscriptionSubscribeToken`).
+    pub const SUBSCRIPTION_SUBSCRIBE_TOKEN: u32 = 8;
+    /// A subscription token callback failed while getting a token to
+    /// refresh with (centrifuge-js `subscriptionRefreshToken`).
+    pub const SUBSCRIPTION_REFRESH_TOKEN: u32 = 9;
     /// The client is misconfigured, e.g. a token expires without a callback.
     pub const BAD_CONFIGURATION: u32 = 12;
 }

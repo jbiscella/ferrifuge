@@ -78,11 +78,33 @@ impl Tokens {
         self.source
     }
 
+    /// Whether a token is held.
+    pub(super) fn has_token(&self) -> bool {
+        !self.current.0.is_empty()
+    }
+
     pub(super) fn start_fetch(&mut self, purpose: FetchPurpose) -> FetchId {
         let id = FetchId(self.next_fetch);
         self.next_fetch += 1;
-        self.fetch = Some((id, purpose));
+        self.begin_fetch(id, purpose);
         id
+    }
+
+    /// Records fetch `id`, numbered by the owner: subscriptions number
+    /// their fetches from one counter, as the adapter routes answers by id.
+    pub(super) fn begin_fetch(&mut self, id: FetchId, purpose: FetchPurpose) {
+        self.fetch = Some((id, purpose));
+    }
+
+    /// The pending fetch, if any.
+    pub(super) fn pending_fetch(&self) -> Option<(FetchId, FetchPurpose)> {
+        self.fetch
+    }
+
+    /// Drops the pending fetch and refresh command, keeping the token.
+    pub(super) fn abandon(&mut self) -> Option<FetchId> {
+        self.refresh_command = None;
+        self.fetch.take().map(|(id, _)| id)
     }
 
     /// Whether a fetch or a refresh command is pending.

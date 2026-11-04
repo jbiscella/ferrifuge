@@ -2,10 +2,14 @@
 //! subscription's state and commands in flight, and how the machine reacts
 //! to them. Behaviour follows centrifuge-js `subscription.ts`.
 
+mod token_flow;
+
 use std::collections::{BTreeMap, HashMap};
 
+use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
 use crate::backoff::Backoff;
+use crate::token::Secret;
 use crate::wire::{
     Command, Error, Method, Reply, ReplyResult, SubscribeRequest, UnsubscribeRequest,
 };
@@ -29,6 +33,8 @@ pub(super) struct Subscriptions {
     /// Unsubscribe commands awaiting their reply: whose, and for which
     /// channel.
     unsubscribes: HashMap<u32, (SubscriptionId, String)>,
+    /// `sub_refresh` commands awaiting their reply, and whose.
+    sub_refreshes: HashMap<u32, SubscriptionId>,
 }
 
 #[derive(Debug)]
@@ -44,12 +50,24 @@ struct Subscription {
     /// subscribing, so the server cannot apply them out of order.
     waiting: bool,
     backoff: Backoff,
+    /// Its subscription token, the fetch of a new one and the refresh
+    /// command in flight (Block 5's token component).
+    tokens: Tokens,
+}
+
+impl Subscription {
+    /// Whether it has subscription token timers or fetches to clean up.
+    fn uses_token(&self) -> bool {
+        self.tokens.has_source() || self.tokens.has_token()
+    }
 }
 
 impl Subscriptions {
     /// Whether `id` is the id of a subscribe or unsubscribe command.
     pub(super) fn owns_command(&self, id: u32) -> bool {
-        self.subscribes.contains_key(&id) || self.unsubscribes.contains_key(&id)
+        self.subscribes.contains_key(&id)
+            || self.unsubscribes.contains_key(&id)
+            || self.sub_refreshes.contains_key(&id)
     }
 
     /// Whether a subscribe or unsubscribe command for `channel` awaits its
@@ -82,6 +100,7 @@ impl Machine {
         subscriptions.next_id += 1;
         subscriptions.by_channel.insert(channel.clone(), id);
         let backoff = Backoff::new(options.min_resubscribe_delay, options.max_resubscribe_delay);
+        let tokens = Tokens::new(options.token.clone(), options.token_source);
         subscriptions.by_id.insert(
             id,
             Subscription {
@@ -92,6 +111,7 @@ impl Machine {
                 fetch: None,
                 waiting: false,
                 backoff,
+                tokens,
             },
         );
         Ok(id)
@@ -152,6 +172,7 @@ impl Machine {
         if sub.state != SubscriptionState::Subscribing
             || sub.subscribe_command.is_some()
             || sub.fetch.is_some()
+            || sub.tokens.pending_fetch().is_some()
         {
             return;
         }
@@ -163,6 +184,21 @@ impl Machine {
                 .waiting = true;
             return;
         }
+        // Without a token but with a callback, the token comes first, then
+        // the data callback (centrifuge-js `_canSubscribeWithoutGettingToken`).
+        if sub.tokens.before_connect() == BeforeConnect::Fetch {
+            self.fetch_subscription_token(id, FetchPurpose::Connect);
+            return;
+        }
+        self.continue_subscribe(id);
+    }
+
+    /// Subscribes once a token, if one is needed, is at hand: after the
+    /// data callback, if any.
+    fn continue_subscribe(&mut self, id: SubscriptionId) {
+        let Some(sub) = self.subscriptions.by_id.get(&id) else {
+            return;
+        };
         if sub.options.data_source {
             let fetch = FetchId(self.subscriptions.next_fetch);
             self.subscriptions.next_fetch += 1;
@@ -194,6 +230,7 @@ impl Machine {
         };
         sub.subscribe_command = Some(command_id);
         let channel = sub.channel.clone();
+        let token = Secret(sub.tokens.for_connect());
         self.subscriptions
             .subscribes
             .insert(command_id, (id, channel.clone()));
@@ -203,8 +240,8 @@ impl Machine {
                 id: command_id,
                 method: Method::Subscribe(SubscribeRequest {
                     channel,
+                    token,
                     data,
-                    ..SubscribeRequest::default()
                 }),
             }],
         );
@@ -335,8 +372,8 @@ impl Machine {
                     );
                 }
             }
-            // Set once subscription tokens are refreshed (Block 10b).
-            SubscriptionTimer::Refresh | SubscriptionTimer::RefreshReply => {}
+            SubscriptionTimer::Refresh => self.subscription_refresh_due(id),
+            SubscriptionTimer::RefreshReply => self.subscription_refresh_timed_out(id),
             SubscriptionTimer::UnsubscribeReply => {
                 let pending = self
                     .subscriptions
@@ -353,6 +390,10 @@ impl Machine {
     /// Handles the reply to a subscribe or unsubscribe command
     /// ([`Subscriptions::owns_command`]).
     pub(super) fn subscription_command_reply(&mut self, reply: Reply) {
+        if let Some(id) = self.subscriptions.sub_refreshes.remove(&reply.id) {
+            self.sub_refresh_reply(id, reply);
+            return;
+        }
         if let Some((id, channel)) = self.subscriptions.unsubscribes.remove(&reply.id) {
             self.actions.push(Action::CancelSubscriptionTimer(
                 id,
@@ -401,6 +442,10 @@ impl Machine {
             (None, ReplyResult::Subscribe(result)) => {
                 sub.state = SubscriptionState::Subscribed;
                 sub.backoff.reset();
+                sub.tokens.connected();
+                if result.expires {
+                    self.schedule_subscription_refresh(id, result.ttl);
+                }
                 self.emit_subscription(
                     id,
                     SubscriptionEvent::Subscribed(Subscribed { data: result.data }),
@@ -427,6 +472,9 @@ impl Machine {
 
     /// centrifuge-js `_subscribeError`: temporary errors are retried.
     fn subscribe_error(&mut self, id: SubscriptionId, error: &Error) {
+        if self.subscribe_token_expired(id, error) {
+            return;
+        }
         if error.code < 100 || error.temporary {
             self.emit_subscription(
                 id,
@@ -487,6 +535,18 @@ impl Machine {
             id,
             SubscriptionTimer::Resubscribe,
         ));
+        // A token being fetched, a refresh scheduled or in flight end too
+        // (centrifuge-js `_setUnsubscribed`).
+        if sub.uses_token() {
+            if let Some(fetch) = sub.tokens.abandon() {
+                self.actions.push(Action::CancelSubscriptionToken(fetch));
+            }
+            for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
+                self.actions
+                    .push(Action::CancelSubscriptionTimer(id, timer));
+            }
+            self.subscriptions.sub_refreshes.retain(|_, of| *of != id);
+        }
         if send && was_subscribed {
             self.send_unsubscribe(id, channel);
         }
@@ -585,11 +645,23 @@ impl Machine {
                 SubscriptionTimer::UnsubscribeReply,
             ));
         }
+        self.subscriptions.sub_refreshes.clear();
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;
             if let Some(fetch) = sub.fetch.take() {
                 self.actions.push(Action::CancelSubscriptionData(fetch));
+            }
+            // The token is kept for the resubscribe; its refresh starts
+            // again from the new subscribe reply.
+            if sub.uses_token() {
+                if let Some(fetch) = sub.tokens.abandon() {
+                    self.actions.push(Action::CancelSubscriptionToken(fetch));
+                }
+                for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
+                    self.actions
+                        .push(Action::CancelSubscriptionTimer(*id, timer));
+                }
             }
             sub.waiting = false;
             if sub.state == SubscriptionState::Subscribed {

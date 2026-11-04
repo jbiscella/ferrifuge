@@ -46,13 +46,15 @@ Available now:
 - the TLS crypto provider chosen at build time: ring, aws-lc-rs, or
   aws-lc-rs in FIPS mode;
 - client-side subscriptions: states and events, publications delivered
-  with their exact bytes, resubscribe after reconnects, subscription data.
+  with their exact bytes, resubscribe after reconnects, subscription data;
+- subscription tokens, refreshed through a callback before they expire;
+  server unsubscribe codes; a configurable resubscribe backoff.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| Subscription tokens, recovery, server-side subscriptions | later blocks |
+| Recovery, server-side subscriptions | later blocks |
 | RPC, publish, history, presence | later blocks |
 
 ## Usage
@@ -132,7 +134,34 @@ the client is connected, and again after every reconnect. The registry
 refuses a second subscription to a channel; `get_subscription`,
 `subscriptions` and `remove_subscription` manage it.
 `subscription_builder(channel)` sets data sent with every subscribe, or a
-`get_data` callback giving it each time.
+`get_data` callback giving it each time, and the bounds of the resubscribe
+backoff (`min_resubscribe_delay`, 500 ms, and `max_resubscribe_delay`,
+20 s). When the server unsubscribes the client, a code from 2500 makes the
+subscription subscribe again, a lower one ends it.
+
+For channels that need a subscription token, give an initial token, a
+callback, or both:
+
+```rust
+use ferrifuge::TokenError;
+
+let subscription = client
+    .subscription_builder("private:news")
+    .get_token(|channel| async move {
+        // Ask your backend for a token for `channel`.
+        fetch_subscription_token(&channel)
+            .await
+            .map_err(|e| TokenError::Failed(e.to_string()))
+    })
+    .build()?;
+```
+
+The callback is called before subscribing without a token, after the
+server rejects one as expired, and before it expires: the token is then
+refreshed with `sub_refresh`. Return `TokenError::Unauthorized` (or an
+empty token) to unsubscribe for good, with code 1; other errors are
+reported as `error` events and retried. With a `get_data` callback too, the
+token comes first.
 
 ### Transport fallback
 
