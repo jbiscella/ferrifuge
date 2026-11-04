@@ -3,8 +3,9 @@
 //! Only scenarios listed in [`IMPLEMENTED`] run: feature files are verbatim
 //! copies of CLAUDE.md and also hold scenarios of later sub-increments.
 //! Select a test layer with cucumber's tag filter, e.g.
-//! `cargo test --test bdd -- --tags @A`. Scenarios with undefined steps fail
-//! the run rather than being skipped.
+//! `cargo test --test bdd -- --tags @A`, or scenarios by name with `--name`:
+//! both narrow that list, never widen it. Scenarios with undefined steps
+//! fail the run rather than being skipped.
 
 mod steps;
 mod support;
@@ -15,8 +16,9 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use cucumber::World;
-use cucumber::gherkin::{Feature, GherkinEnv, Scenario};
+use cucumber::gherkin::{Feature, GherkinEnv, Rule, Scenario};
+use cucumber::tag::Ext as _;
+use cucumber::{World, cli};
 
 use steps::ClientWorld;
 use support::centrifugo::Centrifugo;
@@ -227,7 +229,28 @@ fn main() {
 }
 
 async fn run_scenarios() {
+    // cucumber's `--tags` and `--name` replace the filter given to
+    // `filter_run` instead of narrowing it, so they are taken out and
+    // applied in it.
+    let mut cli = cli::Opts::<_, _, _, cli::Empty>::parsed();
+    let name_filter = cli.re_filter.take();
+    let tags_filter = cli.tags_filter.take();
+    let selected = move |feature: &Feature, rule: Option<&Rule>, scenario: &Scenario| {
+        name_filter
+            .as_ref()
+            .is_none_or(|name| name.is_match(&scenario.name))
+            && tags_filter.as_ref().is_none_or(|tags| {
+                tags.eval(
+                    feature
+                        .tags
+                        .iter()
+                        .chain(rule.iter().flat_map(|rule| &rule.tags))
+                        .chain(&scenario.tags),
+                )
+            })
+    };
     ClientWorld::cucumber()
+        .with_cli(cli)
         .before(|_, _, scenario, world| {
             Box::pin(async move {
                 running().push((scenario_key(scenario), Instant::now()));
@@ -271,11 +294,13 @@ async fn run_scenarios() {
             })
         })
         .fail_on_skipped()
-        .filter_run_and_exit(FEATURES, |_, _, scenario| {
+        .filter_run_and_exit(FEATURES, move |feature, rule, scenario| {
             // @P runs outside cucumber (Block 0, "Test layers"); a scenario
             // also tagged with a cucumber layer runs in that layer.
             let p_only = !scenario.tags.is_empty() && scenario.tags.iter().all(|tag| tag == "P");
-            IMPLEMENTED.contains(&scenario.name.as_str()) && !p_only
+            IMPLEMENTED.contains(&scenario.name.as_str())
+                && !p_only
+                && selected(feature, rule, scenario)
         })
         .await;
 }
