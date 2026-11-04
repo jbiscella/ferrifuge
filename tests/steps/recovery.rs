@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::SubscriptionOptions;
-use ferrifuge::{StateError, StreamPosition, Subscribed, SubscriptionEvent, SubscriptionState};
+use ferrifuge::{
+    ClientEvent, StateError, StreamPosition, Subscribed, SubscriptionEvent, SubscriptionState,
+};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
@@ -30,8 +32,8 @@ const CHANNEL: &str = "news";
 const RECONNECT_CODE: u32 = 4000;
 const RECONNECT_CLOSE: u16 = 3001;
 /// Stream position of the fake server's recoverable channel.
-const FAKE_EPOCH: &str = "fake-epoch";
-const FAKE_OFFSET: u64 = 3;
+pub(super) const FAKE_EPOCH: &str = "fake-epoch";
+pub(super) const FAKE_OFFSET: u64 = 3;
 /// Epoch of a stream that started again.
 const NEW_EPOCH: &str = "new-epoch";
 /// How long a step waits for a publication that must not arrive.
@@ -48,7 +50,10 @@ pub(crate) struct Recovery {
     position: Option<StreamPosition>,
     /// Subscribe commands the fake server had received before the step
     /// making the client resubscribe.
-    subscribes_before: usize,
+    pub(super) subscribes_before: usize,
+    /// Connect commands the fake server had received when the scenario
+    /// last disconnected the client.
+    pub(super) connects_before: usize,
     /// When the getState callback of the scenario's client was called.
     state_calls: Arc<Mutex<Vec<Instant>>>,
     /// The position it answers with.
@@ -65,6 +70,7 @@ impl Default for Recovery {
             expected: Vec::new(),
             position: None,
             subscribes_before: 0,
+            connects_before: 0,
             state_calls: Arc::default(),
             state_answer: Arc::default(),
             state_gate: Arc::new(Semaphore::new(0)),
@@ -72,7 +78,7 @@ impl Default for Recovery {
     }
 }
 
-fn position(offset: u64, epoch: &str) -> StreamPosition {
+pub(super) fn position(offset: u64, epoch: &str) -> StreamPosition {
     StreamPosition {
         offset,
         epoch: epoch.to_owned(),
@@ -103,7 +109,7 @@ async fn publish(world: &mut ClientWorld, count: usize) {
 
 /// Disconnects the client with a reconnect code while the relay refuses
 /// connections: the client stays away until [`let_the_client_back`].
-async fn disconnect_and_hold(world: &mut ClientWorld) {
+pub(super) async fn disconnect_and_hold(world: &mut ClientWorld) {
     world.relay.as_ref().expect("a relay").set_mode(Mode::Down);
     let client_id = world.client_id.clone().expect("a connected client");
     // Connections accepted by the proxy belong to its user.
@@ -124,10 +130,20 @@ async fn disconnect_and_hold(world: &mut ClientWorld) {
         )
         .await
         .expect("server API disconnect");
-    expect_subscription_event(world, "subscribing", false).await;
+    // The old connection is gone before the scenario publishes, so nothing
+    // arrives live: a client-side subscription says so, else the client.
+    if world.subscription.is_some() {
+        expect_subscription_event(world, "subscribing", false).await;
+    } else {
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            while !matches!(world.next_event().await, ClientEvent::Connecting { .. }) {}
+        })
+        .await
+        .expect("the client reconnecting in time");
+    }
 }
 
-fn let_the_client_back(world: &ClientWorld) {
+pub(super) fn let_the_client_back(world: &ClientWorld) {
     world
         .relay
         .as_ref()
@@ -186,7 +202,7 @@ fn subscribes(world: &ClientWorld) -> Vec<Value> {
 
 /// The fake server's subscribe request number `index` (from 0), once
 /// received.
-async fn subscribe_request(world: &ClientWorld, index: usize) -> Value {
+pub(super) async fn subscribe_request(world: &ClientWorld, index: usize) -> Value {
     tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             if let Some(subscribe) = subscribes(world).get(index) {
@@ -216,6 +232,29 @@ async fn assert_next_subscribe_recovers(world: &ClientWorld) {
     );
 }
 
+/// Notes how many subscribe and connect commands the fake server received
+/// before the scenario disconnects the client, so that later steps find the
+/// next ones.
+pub(super) fn note_commands_before_disconnect(world: &mut ClientWorld) {
+    world.recovery.subscribes_before = subscribes(world).len();
+    world.recovery.connects_before = connects(world).len();
+}
+
+/// The fake server's connect command number `index` (from 0), once it
+/// arrives within [`EVENT_TIMEOUT`].
+pub(super) async fn connect_request(world: &ClientWorld, index: usize) -> Value {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            if let Some(connect) = connects(world).get(index) {
+                return connect.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no connect command number {index} within {EVENT_TIMEOUT:?}"))
+}
+
 /// A subscribe result granting recovery, with a stream position.
 fn recoverable_result(at: &StreamPosition) -> Value {
     json!({"recoverable": true, "positioned": true, "epoch": at.epoch, "offset": at.offset})
@@ -223,7 +262,7 @@ fn recoverable_result(at: &StreamPosition) -> Value {
 
 /// Subscribes to the fake server's channel, which its reply makes
 /// recoverable at a stream position.
-async fn subscribed_to_the_recoverable_fake_channel(world: &mut ClientWorld) {
+pub(super) async fn subscribed_to_the_recoverable_fake_channel(world: &mut ClientWorld) {
     let at = position(FAKE_OFFSET, FAKE_EPOCH);
     world
         .fake()
@@ -236,8 +275,8 @@ async fn subscribed_to_the_recoverable_fake_channel(world: &mut ClientWorld) {
 
 /// Makes the fake server close the connection with a reconnect code,
 /// noting how many subscribe commands came before.
-fn fake_server_disconnects(world: &mut ClientWorld) {
-    world.recovery.subscribes_before = subscribes(world).len();
+pub(super) fn fake_server_disconnects(world: &mut ClientWorld) {
+    note_commands_before_disconnect(world);
     world
         .fake()
         .close(RECONNECT_CLOSE, "reconnect advised by the test");
@@ -805,7 +844,7 @@ async fn a_client_with_a_fixed_connection_token(world: &mut ClientWorld) {
 }
 
 /// Connect commands the fake server has received.
-fn connects(world: &ClientWorld) -> Vec<Value> {
+pub(super) fn connects(world: &ClientWorld) -> Vec<Value> {
     world
         .fake()
         .received()

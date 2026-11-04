@@ -163,8 +163,8 @@ const IMPLEMENTED: &[&str] = &[
     "The since option takes precedence over getState on the first subscribe",
     "A failing getState is retried before subscribing",
     // Block 11c: state invalidation. "Connection state invalidation clears
-    // the token and invalidates every position" needs Block 12's server-side
-    // subscriptions (owner decision); unit tests cover its client side.
+    // the token and invalidates every position" is with Block 12c, which
+    // brings its server-side positions (owner decision).
     "State invalidation fetches a new subscription token",
     "Connection state invalidation drops a fixed connection token",
     "State invalidation drops a fixed subscription token",
@@ -179,6 +179,15 @@ const IMPLEMENTED: &[&str] = &[
     "A subscription added by the server after connect is tracked",
     "A server-side subscription removed by the server is unsubscribed",
     "Server-side subscribed events carry the server's data",
+    // Block 12c: positions and recovery, and Block 11's 3014 scenario.
+    "Missed publications of a server-side subscription are recovered",
+    "Server-side subscriptions survive an explicit disconnect and connect",
+    "A subscription added by a push is recovered after reconnect",
+    "A server-side subscription missing after reconnect is forgotten",
+    "A pushed server-side subscription's position is used for recovery",
+    "Recovered server-side publications advance the stored position",
+    "A server-side unsubscribe carries its code and reason and forgets the subscription",
+    "Connection state invalidation clears the token and invalidates every position",
 ];
 
 /// Server configuration of @A scenarios.

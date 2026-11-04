@@ -57,6 +57,7 @@ async fn server_api_disconnects_with_code(world: &mut ClientWorld, code: u32) {
 
 #[when(regex = r"^the fake server disconnects the client with code (\d+)$")]
 fn fake_server_disconnects_with_code(world: &mut ClientWorld, code: u16) {
+    super::recovery::note_commands_before_disconnect(world);
     let reason = format!("fake server disconnect {code}");
     world
         .fake
