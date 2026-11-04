@@ -116,6 +116,25 @@ impl Machine {
         );
     }
 
+    /// Ends the token work of subscription `id`: a token being fetched, a
+    /// refresh scheduled or a `sub_refresh` in flight. The token is kept.
+    pub(super) fn end_token_refresh(&mut self, id: SubscriptionId) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        if !sub.uses_token() {
+            return;
+        }
+        if let Some(fetch) = sub.tokens.abandon() {
+            self.actions.push(Action::CancelSubscriptionToken(fetch));
+        }
+        for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
+            self.actions
+                .push(Action::CancelSubscriptionTimer(id, timer));
+        }
+        self.subscriptions.sub_refreshes.retain(|_, of| *of != id);
+    }
+
     /// Schedules the refresh of a token expiring in `ttl` seconds.
     pub(super) fn schedule_subscription_refresh(&mut self, id: SubscriptionId, ttl: u32) {
         let delay = refresh_delay(ttl, &mut self.rng);

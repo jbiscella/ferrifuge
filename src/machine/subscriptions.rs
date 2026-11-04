@@ -537,16 +537,7 @@ impl Machine {
         ));
         // A token being fetched, a refresh scheduled or in flight end too
         // (centrifuge-js `_setUnsubscribed`).
-        if sub.uses_token() {
-            if let Some(fetch) = sub.tokens.abandon() {
-                self.actions.push(Action::CancelSubscriptionToken(fetch));
-            }
-            for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
-                self.actions
-                    .push(Action::CancelSubscriptionTimer(id, timer));
-            }
-            self.subscriptions.sub_refreshes.retain(|_, of| *of != id);
-        }
+        self.end_token_refresh(id);
         if send && was_subscribed {
             self.send_unsubscribe(id, channel);
         }
@@ -581,6 +572,10 @@ impl Machine {
         }
         let sub = self.subscriptions.by_id.get_mut(&id).expect("found above");
         sub.state = SubscriptionState::Subscribing;
+        // A refresh of the dropped subscription's token would hold the
+        // subscribe back, or report a timeout while subscribing; the new
+        // subscribe reply schedules the next one.
+        self.end_token_refresh(id);
         self.emit_subscription(
             id,
             SubscriptionEvent::Subscribing {
@@ -693,6 +688,11 @@ mod tests {
 
     /// A machine connected over a transport, with a subscription to "news".
     fn connected() -> (Machine, TransportId, SubscriptionId) {
+        connected_with(SubscriptionOptions::default())
+    }
+
+    /// As [`connected`], the subscription having `options`.
+    fn connected_with(options: SubscriptionOptions) -> (Machine, TransportId, SubscriptionId) {
         let mut machine = Machine::new(Config::default());
         let transport = machine
             .handle(Input::Connect)
@@ -707,9 +707,7 @@ mod tests {
             transport,
             data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
         });
-        let id = machine
-            .add_subscription("news".into(), SubscriptionOptions::default())
-            .unwrap();
+        let id = machine.add_subscription("news".into(), options).unwrap();
         (machine, transport, id)
     }
 
@@ -784,6 +782,83 @@ mod tests {
             machine.subscription_state(id),
             Some(SubscriptionState::Unsubscribed)
         );
+    }
+
+    /// A subscription to "news" with token "t" and a token callback,
+    /// subscribed with a token expiring in 60 s, whose refresh is due: the
+    /// token callback is asked, with the returned fetch.
+    fn refresh_fetching() -> (Machine, TransportId, SubscriptionId, FetchId) {
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t".into())
+                .token_source(),
+        );
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        let fetch = machine
+            .handle(Input::SubscriptionTimerFired(
+                id,
+                SubscriptionTimer::Refresh,
+            ))
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionToken { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .unwrap();
+        (machine, transport, id, fetch)
+    }
+
+    #[test]
+    fn a_resubscribe_advised_during_a_token_refresh_fetch_subscribes_at_once() {
+        let (mut machine, transport, _, fetch) = refresh_fetching();
+
+        let actions = machine.handle(reply(transport, &unsubscribe_push(2500)));
+        let late = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("late".into()),
+        });
+
+        assert!(actions.contains(&Action::CancelSubscriptionToken(fetch)));
+        assert_eq!(
+            sent(&actions),
+            [r#"{"id":3,"subscribe":{"channel":"news","token":"t"}}"#]
+        );
+        // The abandoned refresh sends no sub_refresh.
+        assert_eq!(sent(&late), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_resubscribe_advised_during_a_sub_refresh_ends_it() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        let refresh = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+
+        let actions = machine.handle(reply(transport, &unsubscribe_push(2500)));
+        let timed_out = machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::RefreshReply,
+        ));
+
+        assert_eq!(
+            sent(&refresh),
+            [r#"{"id":3,"sub_refresh":{"channel":"news","token":"u"}}"#]
+        );
+        assert!(actions.contains(&Action::CancelSubscriptionTimer(
+            id,
+            SubscriptionTimer::RefreshReply
+        )));
+        assert_eq!(
+            sent(&actions),
+            [r#"{"id":4,"subscribe":{"channel":"news","token":"u"}}"#]
+        );
+        // No timeout error, no retry for the refresh the push ended.
+        assert_eq!(timed_out, Vec::new());
     }
 
     #[test]
