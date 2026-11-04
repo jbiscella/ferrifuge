@@ -951,9 +951,8 @@ impl Machine {
             // proves the transport (centrifuge-js `onOpen`).
             return;
         }
-        // An open websocket keeps its transport, even if the connect reply
-        // is slow (centrifuge-js `onOpen`).
-        self.transports.choose();
+        // Open is not enough to keep a websocket: a server answer is (see
+        // `server_answered`), so one that never answers falls back.
         let command = self.connect_command();
         self.send(transport, command);
     }
@@ -991,7 +990,10 @@ impl Machine {
     fn transport_closed(&mut self, code: Option<u16>, reason: &str) {
         match code.map(u32::from) {
             // Codes from 3000 are disconnect codes set by the server.
-            Some(code) if code >= 3000 => self.disconnect(code, reason, reconnect_advised(code)),
+            Some(code) if code >= 3000 => {
+                self.server_answered();
+                self.disconnect(code, reason, reconnect_advised(code));
+            }
             _ if self.state == State::Connecting && !self.transport_open => {
                 self.transport_failed("transport closed".to_owned());
             }
@@ -1039,6 +1041,7 @@ impl Machine {
                 // sse, carry the server's disconnect as a push
                 // (centrifuge-js `_handleDisconnect`).
                 ReplyResult::Push(Push::Disconnect(Disconnect { code, reason })) => {
+                    self.server_answered();
                     self.disconnect(code, &reason, reconnect_advised(code));
                 }
                 ReplyResult::Push(Push::Publication {
@@ -1175,8 +1178,22 @@ impl Machine {
         self.server_subscriptions_connected(std::mem::take(&mut result.subs));
     }
 
+    /// The server answered on the websocket being tried: an error reply to
+    /// the connect, a `Disconnect` push or a close code from 3000 (the
+    /// connect reply chooses it too, in `connected`). The websocket is kept
+    /// then, and only then: one that opens but never answers falls back
+    /// (Block 8; owner decision Q8, brief C3; the answers centrifuge-js keeps
+    /// a transport on, brief C2). Emulated transports are kept on their
+    /// connect reply only, pending C2.
+    fn server_answered(&mut self) {
+        if !self.transport_kind().is_emulated() {
+            self.transports.choose();
+        }
+    }
+
     /// centrifuge-js `_connectError`: temporary errors are retried.
     fn connect_error(&mut self, error: &Error) {
+        self.server_answered();
         if error.code == TOKEN_EXPIRED {
             self.tokens.connect_token_expired();
         }
@@ -1611,6 +1628,60 @@ mod tests {
                 _ => None,
             })
             .expect("a reconnect")
+    }
+
+    // Brief C3: a server answer keeps the websocket being tried (the
+    // answers centrifuge-js keeps a transport on, brief C2); without one,
+    // the scenarios show it falls back.
+    #[test]
+    fn a_websocket_the_server_answered_is_kept_for_the_next_attempt() {
+        type Answer = fn(TransportId) -> Input;
+        let answers: [(&str, Answer); 3] = [
+            ("an error reply", |transport| {
+                frame(
+                    transport,
+                    r#"{"id":1,"error":{"code":100,"message":"busy","temporary":true}}"#,
+                )
+            }),
+            ("a close code from 3000", |transport| {
+                Input::TransportClosed {
+                    transport,
+                    code: Some(3001),
+                    reason: "shutdown".into(),
+                }
+            }),
+            ("a disconnect push", |transport| {
+                frame(
+                    transport,
+                    r#"{"push":{"disconnect":{"code":3001,"reason":"shutdown"}}}"#,
+                )
+            }),
+        ];
+        for (name, answer) in answers {
+            let mut machine = Machine::new(Config::default())
+                .with_transports(vec![TransportKind::WebSocket, TransportKind::HttpStream])
+                .unwrap();
+            let transport = opened_transport(&machine.handle(Input::Connect));
+            machine.handle(Input::TransportOpened(transport));
+
+            let mut actions = machine.handle(answer(transport));
+            if !actions
+                .iter()
+                .any(|action| matches!(action, Action::OpenTransport { .. }))
+            {
+                actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+            }
+
+            let kind = actions.iter().find_map(|action| match action {
+                Action::OpenTransport { kind, .. } => Some(*kind),
+                _ => None,
+            });
+            assert_eq!(
+                kind,
+                Some(TransportKind::WebSocket),
+                "after {name}: {actions:?}"
+            );
+        }
     }
 
     #[test]
