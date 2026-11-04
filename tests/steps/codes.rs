@@ -103,9 +103,10 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
                 assert_eq!(*got, code, "{event:?}");
                 "disconnected"
             }
-            // E.g. the "connecting" that connect() itself emits.
-            ClientEvent::Connecting { .. } | ClientEvent::Error(_) => continue,
             ClientEvent::Connected { .. } => panic!("expected {expected}, got {event:?}"),
+            // E.g. the "connecting" that connect() itself emits, errors,
+            // server-side subscription events and events added later.
+            _ => continue,
         };
         assert_eq!(reached, expected, "{event:?}");
         world.state_event = Some(event);
