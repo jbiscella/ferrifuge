@@ -45,6 +45,7 @@ pub(crate) fn serve_if_child() -> bool {
         let server = FakeServer::start(Announce {
             ping,
             pong: ping > 0,
+            ..Announce::default()
         })
         .await;
         if ping > 0 {

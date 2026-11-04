@@ -28,6 +28,9 @@ pub(crate) struct Announce {
     pub(crate) ping: u32,
     /// Whether the server expects pongs.
     pub(crate) pong: bool,
+    /// Lifetime of the connection in seconds, after which the client must
+    /// refresh its token; 0 for a connection that does not expire.
+    pub(crate) ttl: u32,
 }
 
 /// An instruction for the current connection.
@@ -303,6 +306,8 @@ impl Connection {
                             "version": "fake",
                             "ping": self.announce.ping,
                             "pong": self.announce.pong,
+                            "expires": self.announce.ttl > 0,
+                            "ttl": self.announce.ttl,
                         },
                     })
                     .to_string(),
@@ -343,6 +348,8 @@ impl Connection {
                         version: "fake".to_owned(),
                         ping: self.announce.ping,
                         pong: self.announce.pong,
+                        expires: self.announce.ttl > 0,
+                        ttl: self.announce.ttl,
                         ..Default::default()
                     }),
                     ..Default::default()
