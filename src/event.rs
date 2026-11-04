@@ -1,5 +1,7 @@
 //! Client state and the events reporting its changes.
 
+use crate::{Publication, Subscribed};
+
 /// Connection state of a client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum State {
@@ -24,8 +26,10 @@ impl State {
     }
 }
 
-/// Something that happened to a client.
+/// Something that happened to a client. `#[non_exhaustive]`: later blocks
+/// add events.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClientEvent {
     /// The client moved to [`State::Connecting`].
     Connecting {
@@ -53,6 +57,52 @@ pub enum ClientEvent {
     /// An error that does not change the state, e.g. a failed connection
     /// attempt while the client keeps reconnecting.
     Error(ClientError),
+    /// Something happened to the server-side subscription to `channel`: one
+    /// the server made, which the client tracks but does not control (spec,
+    /// "Server-side subscriptions").
+    ServerSubscription {
+        /// The channel subscribed by the server.
+        channel: String,
+        /// What happened.
+        event: ServerSubscriptionEvent,
+    },
+}
+
+/// Something that happened to a server-side subscription, as for a
+/// client-side one (spec, "Server-side subscriptions").
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServerSubscriptionEvent {
+    /// The connection was lost or `disconnect()` was called: the
+    /// subscription stays in the registry and is restored on the next
+    /// connection.
+    Subscribing,
+    /// The server subscribed the connection, at connect or later.
+    Subscribed(Subscribed),
+    /// The server ended the subscription, which leaves the registry: a code
+    /// of the server's `Unsubscribe` push, or
+    /// [`crate::codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
+    Unsubscribed {
+        /// Why: a server unsubscribe code or a client-side one.
+        code: u32,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// A publication in the channel.
+    Publication(Publication),
+}
+
+impl ServerSubscriptionEvent {
+    /// Name of the event as used by the Client SDK spec.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Subscribing => "subscribing",
+            Self::Subscribed(_) => "subscribed",
+            Self::Unsubscribed { .. } => "unsubscribed",
+            Self::Publication(_) => "publication",
+        }
+    }
 }
 
 impl ClientEvent {
@@ -64,6 +114,7 @@ impl ClientEvent {
             Self::Connected { .. } => "connected",
             Self::Disconnected { .. } => "disconnected",
             Self::Error(_) => "error",
+            Self::ServerSubscription { event, .. } => event.name(),
         }
     }
 }

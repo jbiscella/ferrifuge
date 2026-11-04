@@ -51,6 +51,10 @@ pub mod unsubscribed {
     /// (an emulation request answered with HTTP 413); retrying it would fail
     /// the same way. 3, as the disconnect code of the same cause.
     pub const MESSAGE_SIZE_LIMIT: u32 = 3;
+    /// A server-side subscription the server did not subscribe again after
+    /// a reconnect (absent from the connect reply's `subs`, which carries no
+    /// code for it).
+    pub const NOT_GRANTED_ON_RECONNECT: u32 = 4;
 }
 
 /// Codes of [`crate::ClientError`].

@@ -93,6 +93,8 @@ async fn main() -> Result<(), ferrifuge::ClientError> {
                 break;
             }
             ClientEvent::Error(error) => eprintln!("error: {}", error.message),
+            // Server-side subscription events, and events added later.
+            _ => {}
         }
     }
     Ok(())
