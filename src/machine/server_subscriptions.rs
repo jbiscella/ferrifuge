@@ -56,31 +56,7 @@ impl Machine {
             .cloned()
             .collect();
         for (channel, result) in subs {
-            self.server_subscriptions
-                .by_channel
-                .insert(channel.clone(), ServerSubscription { subscribed: true });
-            let stream_position =
-                (result.positioned || result.recoverable).then(|| StreamPosition {
-                    offset: result.offset,
-                    epoch: result.epoch.clone(),
-                });
-            self.emit_server_subscription(
-                &channel,
-                ServerSubscriptionEvent::Subscribed(Subscribed {
-                    data: result.data,
-                    positioned: result.positioned,
-                    recoverable: result.recoverable,
-                    was_recovering: result.was_recovering,
-                    recovered: result.recovered,
-                    stream_position,
-                }),
-            );
-            for publication in result.publications {
-                self.emit_server_subscription(
-                    &channel,
-                    ServerSubscriptionEvent::Publication(publication),
-                );
-            }
+            self.subscribe_server_side(&channel, result);
         }
         for channel in gone {
             self.server_subscriptions.by_channel.remove(&channel);
@@ -90,6 +66,68 @@ impl Machine {
                     code: codes::unsubscribed::NOT_GRANTED_ON_RECONNECT,
                     reason: NOT_GRANTED_REASON.to_owned(),
                 },
+            );
+        }
+    }
+
+    /// The server subscribed the connection to `channel` during the
+    /// connection (`Subscribe` push; spec, "Server-side subscriptions").
+    pub(super) fn server_subscription_pushed(&mut self, channel: &str, result: SubscribeResult) {
+        self.subscribe_server_side(channel, result);
+    }
+
+    /// The server ended the server-side subscription to `channel`
+    /// (`Unsubscribe` push, which no subscribed client-side subscription
+    /// took): it leaves the registry, with the push's code and reason
+    /// (Block 12; centrifuge-js `_handleUnsubscribe` passes only the
+    /// channel).
+    pub(super) fn server_subscription_unsubscribed(
+        &mut self,
+        channel: &str,
+        code: u32,
+        reason: &str,
+    ) {
+        if self
+            .server_subscriptions
+            .by_channel
+            .remove(channel)
+            .is_some()
+        {
+            self.emit_server_subscription(
+                channel,
+                ServerSubscriptionEvent::Unsubscribed {
+                    code,
+                    reason: reason.to_owned(),
+                },
+            );
+        }
+    }
+
+    /// Registers `channel` as subscribed and emits its `subscribed` event,
+    /// then its initial or recovered publications.
+    fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) {
+        self.server_subscriptions
+            .by_channel
+            .insert(channel.to_owned(), ServerSubscription { subscribed: true });
+        let stream_position = (result.positioned || result.recoverable).then(|| StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch.clone(),
+        });
+        self.emit_server_subscription(
+            channel,
+            ServerSubscriptionEvent::Subscribed(Subscribed {
+                data: result.data,
+                positioned: result.positioned,
+                recoverable: result.recoverable,
+                was_recovering: result.was_recovering,
+                recovered: result.recovered,
+                stream_position,
+            }),
+        );
+        for publication in result.publications {
+            self.emit_server_subscription(
+                channel,
+                ServerSubscriptionEvent::Publication(publication),
             );
         }
     }
@@ -185,6 +223,33 @@ mod tests {
         let names: Vec<_> = events(&actions).iter().map(|event| event.name()).collect();
         assert_eq!(names, ["connected", "subscribed", "publication"]);
         assert_eq!(machine.server_subscriptions(), ["alerts"]);
+    }
+
+    #[test]
+    fn an_unsubscribe_push_ends_a_server_side_subscription_with_its_code_and_reason() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        machine.handle(reply(
+            transport,
+            r#"{"push":{"channel":"alerts","subscribe":{}}}"#,
+        ));
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"push":{"channel":"alerts","unsubscribe":{"code":2000,"reason":"alerts closed"}}}"#,
+        ));
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::ServerSubscription {
+                channel: "alerts".into(),
+                event: ServerSubscriptionEvent::Unsubscribed {
+                    code: 2000,
+                    reason: "alerts closed".into(),
+                },
+            }]
+        );
+        assert_eq!(machine.server_subscriptions(), Vec::<String>::new());
     }
 
     #[test]
