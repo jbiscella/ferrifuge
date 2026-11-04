@@ -13,7 +13,8 @@ use ferrifuge::machine::{
     Action, Input, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer, TransportId,
 };
 use ferrifuge::{
-    ClientEvent, DataError, Protocol, Publication, SubscriptionEvent, SubscriptionState, TokenError,
+    ClientEvent, DataError, Protocol, Publication, StateError, StreamPosition, SubscriptionEvent,
+    SubscriptionState, TokenError,
 };
 use serde_json::{Value, json};
 
@@ -882,11 +883,13 @@ pub(crate) struct MachineRun {
     pub(crate) actions: Vec<Action>,
     answers: VecDeque<Result<Vec<u8>, DataError>>,
     pub(crate) token_answers: VecDeque<Result<String, TokenError>>,
+    /// Answers of the getState callback, in order.
+    pub(crate) state_answers: VecDeque<Result<StreamPosition, StateError>>,
     /// Data callback calls answered so far.
     pub(crate) fetches: usize,
     /// Channels the token callback was called with, in order.
     pub(crate) token_calls: Vec<String>,
-    /// Callback calls in order: "token" or "data".
+    /// Callback calls in order: "token", "data" or "state".
     pub(crate) calls: Vec<&'static str>,
     /// Delay of the resubscribe timer before the latest fetch, if any.
     pub(crate) delay_before_fetch: Option<Duration>,
@@ -927,6 +930,7 @@ impl MachineRun {
             actions: Vec::new(),
             answers: answers.into(),
             token_answers: token_answers.into(),
+            state_answers: VecDeque::new(),
             fetches: 0,
             token_calls: Vec::new(),
             calls: Vec::new(),
@@ -968,8 +972,19 @@ impl MachineRun {
                             });
                         }
                     }
+                    Action::FetchSubscriptionState { fetch, .. } => {
+                        self.calls.push("state");
+                        if let Some(result) = self.state_answers.pop_front() {
+                            pending.push_back(Input::SubscriptionStateFetched {
+                                fetch: *fetch,
+                                result,
+                            });
+                        }
+                    }
                     Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay)
-                        if !self.answers.is_empty() || !self.token_answers.is_empty() =>
+                        if !self.answers.is_empty()
+                            || !self.token_answers.is_empty()
+                            || !self.state_answers.is_empty() =>
                     {
                         self.delay_before_fetch = Some(*delay);
                         pending.push_back(Input::SubscriptionTimerFired(

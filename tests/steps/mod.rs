@@ -107,6 +107,9 @@ pub(crate) struct ClientWorld {
     /// The scenario's subscription, and its events.
     pub(crate) subscription: Option<Subscription>,
     subscription_events: Option<SubscriptionEvents>,
+    /// Events of the scenario's subscription a step looked at and put
+    /// back, for the next step to see first.
+    pub(crate) put_back: std::collections::VecDeque<SubscriptionEvent>,
     /// A second subscription to the same channel, created after the first
     /// was removed, and its events.
     pub(crate) new_subscription: Option<Subscription>,
@@ -213,6 +216,9 @@ impl ClientWorld {
     /// The next event of the scenario's subscription (or, with `new`, of the
     /// new one), within [`EVENT_TIMEOUT`].
     pub(crate) async fn next_subscription_event(&mut self, new: bool) -> SubscriptionEvent {
+        if !new && let Some(event) = self.put_back.pop_front() {
+            return event;
+        }
         let events = if new {
             self.new_subscription_events.as_mut()
         } else {

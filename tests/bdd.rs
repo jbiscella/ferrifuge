@@ -157,6 +157,11 @@ const IMPLEMENTED: &[&str] = &[
     "The since option recovers on the first subscribe",
     "Recovery fails when history is gone",
     "A failed recovery's reply replaces the stored position",
+    // Block 11b: getState.
+    "getState provides the position of the initial subscribe",
+    "getState reloads state when recovery fails",
+    "The since option takes precedence over getState on the first subscribe",
+    "A failing getState is retried before subscribing",
 ];
 
 /// Server configuration of @A scenarios.
@@ -198,6 +203,12 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
 pub(crate) const SERVER_B: &[(&str, &str)] = &[
     ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
     ("CENTRIFUGO_SSE_ENABLED", "true"),
+    // Channels of the `rec` namespace keep a history and are recoverable
+    // (Block 11); the subscribe proxy sees them too.
+    (
+        "CENTRIFUGO_CHANNEL_NAMESPACES",
+        r#"[{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"subscribe_proxy_enabled":true}]"#,
+    ),
 ];
 
 /// A scenario still running after this long is reported as hung and fails
