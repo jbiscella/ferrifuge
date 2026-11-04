@@ -841,7 +841,9 @@ impl Machine {
                 }
             }
             Input::TokenFetched { fetch, result } => {
-                if let Some(purpose) = self.tokens.take_fetch(fetch) {
+                if self.tokens.take_stale_fetch(fetch) {
+                    self.stale_token_fetched(&result);
+                } else if let Some(purpose) = self.tokens.take_fetch(fetch) {
                     self.token_fetched(purpose, result);
                 }
             }
@@ -1217,6 +1219,18 @@ impl Machine {
         self.unauthorized();
     }
 
+    /// The answer to a refresh fetch of a connection that is gone: a denial
+    /// still disconnects (spec: the client "will be disconnected"), a token
+    /// is not used (owner decision, 2026-11-04; centrifuge-js `_refresh`),
+    /// a failure is dropped. The new connection refreshes on its own.
+    fn stale_token_fetched(&mut self, result: &Result<String, TokenError>) {
+        if matches!(result, Ok(token) if token.is_empty())
+            || matches!(result, Err(TokenError::Unauthorized))
+        {
+            self.unauthorized();
+        }
+    }
+
     fn token_fetched(&mut self, purpose: FetchPurpose, result: Result<String, TokenError>) {
         match result {
             // An empty token denies access too, as in centrifuge-js.
@@ -1230,8 +1244,6 @@ impl Machine {
                             self.open_transport();
                         }
                     }
-                    // While reconnecting, the new token is kept for the next
-                    // attempt; once connected again, it is sent.
                     FetchPurpose::Refresh if self.state == State::Connected => self.send_refresh(),
                     FetchPurpose::Refresh => {}
                 }
