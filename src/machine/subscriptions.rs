@@ -71,12 +71,27 @@ struct Subscription {
 /// (`client.proto`, `Unsubscribe`).
 const STATE_INVALIDATED: u32 = 2502;
 
+/// Epoch no stream has: not empty, which means "any epoch" to the server
+/// (centrifuge-js `_invalidateState`).
+const UNMATCHABLE_EPOCH: &str = "_";
+
 impl Subscription {
     /// Drops the stream position: the next subscribe recovers nothing, or
     /// loads the state through getState first.
     fn forget_position(&mut self) {
         self.position = None;
         self.recover = false;
+    }
+
+    /// Replaces a stream position with one the server can never match, so
+    /// that the next recovery fails and the app is told (centrifuge-js
+    /// `_invalidateState`). Without a position there is nothing to replace:
+    /// getState, when set, still runs first.
+    fn invalidate_position(&mut self) {
+        if let Some(position) = &mut self.position {
+            position.offset = 0;
+            UNMATCHABLE_EPOCH.clone_into(&mut position.epoch);
+        }
     }
 
     /// Moves the stream position to a publication's, as received live or
@@ -700,19 +715,20 @@ impl Machine {
         }
     }
 
-    /// "State invalidated" (disconnect code 3014): every subscription drops
-    /// its stream position and its token, a fixed one too, after ending the
-    /// token's refresh, as for code 2502: once dropped, a fixed token no
-    /// longer tells the teardown that a refresh may be scheduled. A token
-    /// callback gives the resubscribe a new token, without one it carries
-    /// none (Block 11, owner decision; centrifuge-js `_invalidateState`
-    /// keeps a fixed token).
+    /// "State invalidated" (disconnect code 3014): every subscription keeps
+    /// a stream position the server can never match, so that its next
+    /// recovery fails, and drops its token, a fixed one too, after ending
+    /// the token's refresh, as for code 2502: once dropped, a fixed token
+    /// no longer tells the teardown that a refresh may be scheduled. A
+    /// token callback gives the resubscribe a new token, without one it
+    /// carries none (Block 11, owner decisions; centrifuge-js
+    /// `_invalidateState` keeps a fixed token).
     pub(super) fn invalidate_subscriptions(&mut self) {
         let ids: Vec<SubscriptionId> = self.subscriptions.by_id.keys().copied().collect();
         for id in ids {
             self.end_token_refresh(id);
             if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                sub.forget_position();
+                sub.invalidate_position();
                 sub.tokens.invalidate();
             }
         }

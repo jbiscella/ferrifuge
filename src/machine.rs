@@ -1116,11 +1116,11 @@ impl Machine {
     /// connecting (`reconnect`) or disconnected. An event is emitted only on
     /// an actual state change.
     fn disconnect(&mut self, code: u32, reason: &str, reconnect: bool) {
-        // "State invalidated" (Block 11): the connection token, a fixed one
-        // too, every stream position and the subscription tokens a callback
-        // renews are dropped, whether a push or a close frame carries the
-        // code (centrifuge-js `_disconnect`, which keeps a connection token
-        // without a callback, and sentinel positions).
+        // "State invalidated" (Block 11): the connection token and every
+        // subscription token, fixed ones too, are dropped and every stream
+        // position is made unmatchable, whether a push or a close frame
+        // carries the code (centrifuge-js `_disconnect`, which keeps fixed
+        // tokens).
         if code == STATE_INVALIDATED {
             self.tokens.invalidate();
             self.invalidate_subscriptions();
