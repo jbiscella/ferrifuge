@@ -175,6 +175,18 @@ impl From<pb::Reply> for Reply {
                 }
             } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
                 Push::Disconnect(Disconnect { code, reason })
+            } else if let Some(subscribe) = push.subscribe {
+                Push::Subscribe {
+                    channel: push.channel,
+                    result: SubscribeResult {
+                        recoverable: subscribe.recoverable,
+                        epoch: subscribe.epoch,
+                        offset: subscribe.offset,
+                        positioned: subscribe.positioned,
+                        data: (!subscribe.data.is_empty()).then_some(subscribe.data),
+                        ..SubscribeResult::default()
+                    },
+                }
             } else if let Some(pb::Unsubscribe { code, reason, .. }) = push.unsubscribe {
                 Push::Unsubscribe {
                     channel: push.channel,
@@ -299,6 +311,34 @@ mod tests {
 
         // A zero length prefix and no message bytes.
         assert_eq!(frame, [0]);
+    }
+
+    #[test]
+    fn decodes_a_subscribe_push() {
+        let frame = frame_of(&[pb::Reply {
+            push: Some(pb::Push {
+                channel: "alerts".into(),
+                subscribe: Some(pb::Subscribe {
+                    recoverable: true,
+                    epoch: "e".into(),
+                    offset: 3,
+                    positioned: true,
+                    data: b"\xff".to_vec(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+
+        let replies = decode(&frame).unwrap();
+
+        let ReplyResult::Push(Push::Subscribe { channel, result }) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!(channel, "alerts");
+        assert!(result.recoverable && result.positioned);
+        assert_eq!((result.epoch.as_str(), result.offset), ("e", 3));
+        assert_eq!(result.data.as_deref(), Some(&b"\xff"[..]));
     }
 
     #[test]

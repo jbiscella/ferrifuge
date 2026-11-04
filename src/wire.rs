@@ -168,6 +168,14 @@ pub(crate) enum Push {
         channel: String,
         publication: Publication,
     },
+    /// The server subscribed the connection to `channel` during the
+    /// connection (`Subscribe`): a server-side subscription. Its `result`
+    /// has the fields of `client.proto`'s `Subscribe`, the others at their
+    /// defaults.
+    Subscribe {
+        channel: String,
+        result: SubscribeResult,
+    },
     /// The server unsubscribed the client from `channel` (`Unsubscribe`).
     Unsubscribe {
         channel: String,
