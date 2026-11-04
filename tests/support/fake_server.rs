@@ -326,6 +326,15 @@ impl Connection {
                 replies.push(Message::text(
                     json!({"id": message["id"], "unsubscribe": {}}).to_string(),
                 ));
+            } else if message["refresh"].is_object() {
+                // The connection lives another ttl, so the client refreshes again.
+                replies.push(Message::text(
+                    json!({
+                        "id": message["id"],
+                        "refresh": {"expires": self.announce.ttl > 0, "ttl": self.announce.ttl},
+                    })
+                    .to_string(),
+                ));
             }
             self.state.lock().unwrap().received.push(message);
         }
