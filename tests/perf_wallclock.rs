@@ -56,7 +56,7 @@ fn main() {
 
 /// A client connected to `server` with channels `ch0` to `ch9` subscribed.
 async fn subscribed_client(server: &ChildServer) -> (Client, Vec<Subscription>) {
-    let client = Client::new(server.websocket_url(), Config::default());
+    let client = Client::new(server.websocket_url(), Config::default()).expect("a valid endpoint");
     let mut events = client.events();
     client.connect();
     loop {

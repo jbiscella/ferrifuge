@@ -24,8 +24,8 @@ use crate::machine::{
     TransportId, TransportKind,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, State, StateError, StreamPosition,
-    SubscriptionEvent, TokenError,
+    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError, StreamPosition,
+    SubscriptionEvent, TokenError, codes,
 };
 
 /// Centrifugo client running on tokio.
@@ -240,15 +240,16 @@ impl Client {
     /// Creates a disconnected client for the websocket `endpoint`, e.g.
     /// `ws://localhost:8000/connection/websocket`.
     ///
+    /// # Errors
+    ///
+    /// As [`ClientBuilder::build`], e.g. for an empty endpoint or an
+    /// `http://` one.
+    ///
     /// # Panics
     ///
     /// When called outside a tokio runtime: the client runs as a task on it.
-    #[must_use]
-    pub fn new(endpoint: impl Into<String>, config: Config) -> Self {
-        Self::builder(endpoint)
-            .config(config)
-            .build()
-            .expect("a websocket client takes any options")
+    pub fn new(endpoint: impl Into<String>, config: Config) -> Result<Self, ClientError> {
+        Self::builder(endpoint).config(config).build()
     }
 
     /// Starts building a client for the websocket `endpoint`.
@@ -278,6 +279,9 @@ impl Client {
             get_token,
             emulation_endpoint,
         } = builder;
+        for (kind, endpoint) in &endpoints {
+            check_endpoint(*kind, endpoint)?;
+        }
         let subprotocol = config.protocol.websocket_subprotocol();
         let request_timeout = config.timeout;
         let machine = if get_token.is_some() {
@@ -801,6 +805,31 @@ async fn opened(
     }
 }
 
+/// Refuses an endpoint the transport cannot use: an empty one, or an
+/// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
+/// `http(s)://` is right for `http_stream` and sse (owner decision,
+/// 2026-11-04). The message leaves the endpoint out: it may carry a token.
+fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
+    let endpoint = endpoint.trim();
+    let http = endpoint.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    });
+    let message = if endpoint.is_empty() {
+        format!("no endpoint given for the {} transport", kind.name())
+    } else if kind == TransportKind::WebSocket && http {
+        "the websocket transport needs a ws:// or wss:// endpoint, not http:// or https://"
+            .to_owned()
+    } else {
+        return Ok(());
+    };
+    Err(ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message,
+        transport: Some(kind.name().to_owned()),
+    })
+}
+
 /// Resolves with the token callback's answer; never without a fetch.
 async fn fetched(
     fetching: &mut Option<(FetchId, Fetching)>,
@@ -832,7 +861,8 @@ mod tests {
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn state_changes_as_soon_as_connect_and_disconnect_return() {
-        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
 
         client.connect();
         let after_connect = client.state();
@@ -846,7 +876,8 @@ mod tests {
     /// The stream borrows nothing: an application can keep it next to its
     /// client, returned together or in one struct.
     fn client_with_events() -> (Client, impl Stream<Item = ClientEvent> + Unpin) {
-        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let events = client.events();
         (client, events)
     }
@@ -887,6 +918,16 @@ mod tests {
                 "{endpoint:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn client_new_returns_an_endpoint_error_instead_of_panicking() {
+        let created = Client::new("", Config::default());
+
+        assert!(
+            matches!(&created, Err(error) if error.kind == crate::ErrorKind::Configuration),
+            "{created:?}"
+        );
     }
 
     #[tokio::test]
@@ -933,7 +974,8 @@ mod tests {
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn events_stream_starts_after_events_already_emitted() {
-        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
 
         client.connect();
         let mut events = client.events();
@@ -1044,7 +1086,7 @@ mod tests {
         with_callback: impl FnOnce(SubscriptionBuilder) -> SubscriptionBuilder,
     ) -> (Vec<String>, State, usize) {
         let (endpoint, connects) = answering_server().await;
-        let client = Client::new(endpoint, Config::default());
+        let client = Client::new(endpoint, Config::default()).unwrap();
         let subscription = with_callback(
             client
                 .subscription_builder("news")
@@ -1196,7 +1238,8 @@ mod tests {
                 timeout: Duration::MAX,
                 ..Config::default()
             },
-        );
+        )
+        .unwrap();
         let mut events = client.events();
         let mut next = async || {
             tokio::time::timeout(Duration::from_secs(5), events.next())
