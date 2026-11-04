@@ -278,6 +278,7 @@ impl Machine {
                     epoch: recover_from.map(|at| at.epoch).unwrap_or_default(),
                     positioned,
                     recoverable,
+                    ..SubscribeRequest::default()
                 }),
             }],
         );

@@ -56,7 +56,14 @@ pub(crate) struct SubscribeRequest {
     /// Ask for these capabilities on a channel that does not force them.
     pub(crate) positioned: bool,
     pub(crate) recoverable: bool,
+    /// Bits of `SubscribeRequest.flag`, e.g. [`REJECT_UNRECOVERED`].
+    pub(crate) flag: i64,
 }
+
+/// Fail a subscribe whose recovery is not possible with error 112 instead
+/// of succeeding unrecovered (`client.proto`, `SubscribeRequest.flag`).
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) const REJECT_UNRECOVERED: i64 = 1 << 1;
 
 /// `UnsubscribeRequest` of `client.proto`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

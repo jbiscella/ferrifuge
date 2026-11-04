@@ -117,6 +117,8 @@ struct JsonSubscribeRequest<'a> {
     positioned: bool,
     #[serde(skip_serializing_if = "is_false")]
     recoverable: bool,
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    flag: i64,
 }
 
 #[derive(Serialize)]
@@ -176,6 +178,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 offset,
                 positioned,
                 recoverable,
+                flag,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
                     channel,
@@ -186,6 +189,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     offset: *offset,
                     positioned: *positioned,
                     recoverable: *recoverable,
+                    flag: *flag,
                 });
             }
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
@@ -211,6 +215,11 @@ fn is_zero(n: &u32) -> bool {
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
 fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+fn is_zero_i64(n: &i64) -> bool {
     *n == 0
 }
 
@@ -468,6 +477,7 @@ where
 mod tests {
     use super::*;
     use crate::token::Secret;
+    use crate::wire::REJECT_UNRECOVERED;
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -777,6 +787,7 @@ mod tests {
                 offset: 7,
                 positioned: true,
                 recoverable: true,
+                flag: REJECT_UNRECOVERED,
                 ..SubscribeRequest::default()
             }),
         }]);
@@ -793,7 +804,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(frame).unwrap(),
-            r#"{"id":2,"subscribe":{"channel":"news","recover":true,"epoch":"e1","offset":7,"positioned":true,"recoverable":true}}"#
+            r#"{"id":2,"subscribe":{"channel":"news","recover":true,"epoch":"e1","offset":7,"positioned":true,"recoverable":true,"flag":2}}"#
         );
         let ReplyResult::Subscribe(result) = &replies[0].result else {
             panic!("{:?}", replies[0]);
