@@ -239,8 +239,9 @@ When the server invalidates a subscription's state (unsubscribe code 2502),
 the subscription drops its token and its stream position before subscribing
 again: the token callback gives a new token, and `get_state` reloads the
 state. When it invalidates the connection's state (disconnect code 3014), the
-client drops its connection token, a fixed one too, and the stream position of
-every subscription before reconnecting.
+client drops its connection token, a fixed one too, the stream position of
+every subscription, and the token of every subscription that has a token
+callback, before reconnecting.
 
 ### Transport fallback
 
