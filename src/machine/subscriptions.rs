@@ -777,7 +777,7 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::Config;
-    use crate::machine::{Input, TransportId};
+    use crate::machine::{Input, Timer, TransportId};
 
     /// A machine connected over a transport, with a subscription to "news".
     fn connected() -> (Machine, TransportId, SubscriptionId) {
@@ -787,21 +787,85 @@ mod tests {
     /// As [`connected`], the subscription having `options`.
     fn connected_with(options: SubscriptionOptions) -> (Machine, TransportId, SubscriptionId) {
         let mut machine = Machine::new(Config::default());
-        let transport = machine
-            .handle(Input::Connect)
-            .iter()
-            .find_map(|action| match action {
-                Action::OpenTransport { transport, .. } => Some(*transport),
-                _ => None,
-            })
-            .unwrap();
+        let transport = connect(&mut machine, Input::Connect, 1);
+        let id = machine.add_subscription("news".into(), options).unwrap();
+        (machine, transport, id)
+    }
+
+    /// Feeds `input`, which opens a transport, and answers connect command
+    /// `command`: the transport.
+    fn connect(machine: &mut Machine, input: Input, command: u32) -> TransportId {
+        let transport = opened(&machine.handle(input)).expect("a transport to open");
         machine.handle(Input::TransportOpened(transport));
         machine.handle(Input::Frame {
             transport,
-            data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
+            data: format!(r#"{{"id":{command},"connect":{{"client":"c"}}}}"#).into_bytes(),
         });
-        let id = machine.add_subscription("news".into(), options).unwrap();
-        (machine, transport, id)
+        transport
+    }
+
+    fn opened(actions: &[Action]) -> Option<TransportId> {
+        actions.iter().find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+    }
+
+    /// The server closes `transport` with `code`: the actions of the
+    /// reconnect attempt that follows.
+    fn closed_then_reconnecting(
+        machine: &mut Machine,
+        transport: TransportId,
+        code: u16,
+    ) -> Vec<Action> {
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(code),
+            reason: "closed by the test".into(),
+        });
+        machine.handle(Input::TimerFired(Timer::Reconnect))
+    }
+
+    // Block 11c: the client-side half of "Connection state invalidation
+    // clears the token and every position", whose scenario passes with
+    // Block 12 (owner decision).
+    #[test]
+    fn a_state_invalidated_disconnect_fetches_a_new_connection_token_first() {
+        let mut machine = Machine::with_token_source(Config {
+            token: "t".into(),
+            ..Config::default()
+        });
+        let transport = connect(&mut machine, Input::Connect, 1);
+
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+
+        assert!(
+            reconnecting
+                .iter()
+                .any(|action| matches!(action, Action::FetchToken(_))),
+            "{reconnecting:?}"
+        );
+        assert_eq!(opened(&reconnecting), None, "{reconnecting:?}");
+    }
+
+    #[test]
+    fn a_state_invalidated_disconnect_drops_the_stream_positions() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":5}}"#,
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
     }
 
     /// Frames sent among `actions`, as text.
