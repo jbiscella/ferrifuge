@@ -953,8 +953,7 @@ impl Machine {
                 ReplyResult::Push(Push::Publication {
                     channel,
                     publication,
-                    epoch,
-                }) => self.publication(&channel, publication, &epoch),
+                }) => self.publication(&channel, publication),
                 ReplyResult::Push(Push::Unsubscribe {
                     channel,
                     code,

@@ -127,6 +127,10 @@ pub struct Publication {
     pub tags: HashMap<String, String>,
     /// The client that published it, when a client did.
     pub info: Option<ClientInfo>,
+    /// The stream's new epoch, when this publication starts a new stream
+    /// (`client.proto`, `Publication.epoch`): a position saved to resume
+    /// from later is then this offset with this epoch.
+    pub epoch: Option<String>,
 }
 
 /// A client connection, as the server describes it (`client.proto`,

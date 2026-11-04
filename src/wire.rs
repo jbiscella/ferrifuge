@@ -156,8 +156,6 @@ pub(crate) enum Push {
     Publication {
         channel: String,
         publication: Publication,
-        /// The stream's new epoch, when it changed; empty otherwise.
-        epoch: String,
     },
     /// The server unsubscribed the client from `channel` (`Unsubscribe`).
     Unsubscribe {
