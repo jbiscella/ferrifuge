@@ -417,7 +417,11 @@ async fn a_publication_with_a_new_epoch(world: &mut ClientWorld) {
     world.fake().send(&push.to_string());
     // Applications see it too, to save positions they can resume from.
     let publication = next_publication(world, false).await;
-    assert_eq!(publication.epoch.as_deref(), Some(NEW_EPOCH), "{publication:?}");
+    assert_eq!(
+        publication.epoch.as_deref(),
+        Some(NEW_EPOCH),
+        "{publication:?}"
+    );
 }
 
 #[given("the client recovered 2 publications after a reconnect")]
