@@ -808,11 +808,13 @@ async fn received(transport: &mut Option<(TransportId, Transport)>) -> (Transpor
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use futures_util::StreamExt;
 
     use super::*;
+    use crate::adapter::SubscriptionBuilder;
 
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
@@ -944,6 +946,161 @@ mod tests {
             matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
             "{error:?}"
         );
+    }
+
+    /// A websocket server answering every connect and subscribe command:
+    /// its endpoint, and the number of connect commands it got.
+    async fn answering_server() -> (String, Arc<AtomicUsize>) {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let connects = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&connects);
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                let counted = Arc::clone(&counted);
+                tokio::spawn(async move {
+                    while let Some(Ok(Message::Text(frame))) = ws.next().await {
+                        for line in frame.as_str().lines() {
+                            let command: serde_json::Value = serde_json::from_str(line).unwrap();
+                            let id = &command["id"];
+                            let reply = if command.get("connect").is_some() {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                                format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#)
+                            } else if command.get("subscribe").is_some() {
+                                format!(r#"{{"id":{id},"subscribe":{{}}}}"#)
+                            } else {
+                                continue;
+                            };
+                            ws.send(Message::text(reply)).await.unwrap();
+                        }
+                    }
+                });
+            }
+        });
+        (endpoint, connects)
+    }
+
+    /// Subscribes a subscription to "news", set up by `with_callback` and
+    /// retried at once, on a client connecting to an answering server: its
+    /// events up to "subscribed", by name, an error with its message; then
+    /// the client state and the connect commands the server got.
+    async fn subscribed_with(
+        with_callback: impl FnOnce(SubscriptionBuilder) -> SubscriptionBuilder,
+    ) -> (Vec<String>, State, usize) {
+        let (endpoint, connects) = answering_server().await;
+        let client = Client::new(endpoint, Config::default());
+        let subscription = with_callback(
+            client
+                .subscription_builder("news")
+                .min_resubscribe_delay(Duration::from_millis(10))
+                .max_resubscribe_delay(Duration::from_millis(50)),
+        )
+        .build()
+        .unwrap();
+        let mut events = subscription.events();
+
+        subscription.subscribe();
+        client.connect();
+        let mut seen = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("an event")
+                .expect("an open stream");
+            seen.push(match &event {
+                SubscriptionEvent::Error(error) => format!("error: {}", error.message),
+                event => event.name().to_owned(),
+            });
+            if matches!(event, SubscriptionEvent::Subscribed(_)) {
+                break;
+            }
+        }
+        (seen, client.state(), connects.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_panicking_subscription_token_callback_is_retried() {
+        let calls = AtomicUsize::new(0);
+
+        let (events, state, connects) = subscribed_with(|builder| {
+            builder.get_token(move |_| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    assert!(!first, "callback bug");
+                    Ok("t".to_owned())
+                }
+            })
+        })
+        .await;
+
+        assert_eq!(
+            events,
+            [
+                "subscribing",
+                "error: subscription token callback panicked",
+                "subscribed"
+            ]
+        );
+        assert_eq!((state, connects), (State::Connected, 1));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_subscription_data_callback_is_retried() {
+        let calls = AtomicUsize::new(0);
+
+        let (events, state, connects) = subscribed_with(|builder| {
+            builder.get_data(move |_| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    assert!(!first, "callback bug");
+                    Ok(b"{}".to_vec())
+                }
+            })
+        })
+        .await;
+
+        assert_eq!(
+            events,
+            [
+                "subscribing",
+                "error: subscription data callback panicked",
+                "subscribed"
+            ]
+        );
+        assert_eq!((state, connects), (State::Connected, 1));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_get_state_callback_is_retried() {
+        let calls = AtomicUsize::new(0);
+
+        let (events, state, connects) = subscribed_with(|builder| {
+            builder.get_state(move |_| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    assert!(!first, "callback bug");
+                    Ok(StreamPosition {
+                        offset: 0,
+                        epoch: "e".into(),
+                    })
+                }
+            })
+        })
+        .await;
+
+        assert_eq!(
+            events,
+            [
+                "subscribing",
+                "error: subscription getState callback panicked",
+                "subscribed"
+            ]
+        );
+        assert_eq!((state, connects), (State::Connected, 1));
     }
 
     #[tokio::test(flavor = "current_thread")]
