@@ -58,11 +58,26 @@ impl From<&Command> for pb::Command {
                 token,
                 name,
                 version,
+                subs,
             }) => {
                 pb.connect = Some(pb::ConnectRequest {
                     token: token.clone(),
                     name: name.clone(),
                     version: version.clone(),
+                    subs: subs
+                        .iter()
+                        .map(|(channel, sub)| {
+                            (
+                                channel.clone(),
+                                pb::SubscribeRequest {
+                                    recover: sub.recover,
+                                    epoch: sub.epoch.clone(),
+                                    offset: sub.offset,
+                                    ..pb::SubscribeRequest::default()
+                                },
+                            )
+                        })
+                        .collect(),
                     ..pb::ConnectRequest::default()
                 });
             }
@@ -274,6 +289,16 @@ mod tests {
                     token: "t".into(),
                     name: "ferrifuge".into(),
                     version: "0.1.0".into(),
+                    subs: [(
+                        "alerts".to_owned(),
+                        SubscribeRequest {
+                            recover: true,
+                            epoch: "e".into(),
+                            offset: 5,
+                            ..SubscribeRequest::default()
+                        },
+                    )]
+                    .into(),
                 }),
             },
             Command {
@@ -298,6 +323,9 @@ mod tests {
             ),
             ("t", "ferrifuge", "0.1.0")
         );
+        let alerts = &connect.subs["alerts"];
+        assert!(alerts.recover);
+        assert_eq!((alerts.epoch.as_str(), alerts.offset), ("e", 5));
         assert_eq!(second.id, 2);
         assert_eq!(second.refresh.unwrap().token, "t2");
     }

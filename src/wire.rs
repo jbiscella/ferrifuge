@@ -35,6 +35,9 @@ pub(crate) struct ConnectRequest {
     pub(crate) token: String,
     pub(crate) name: String,
     pub(crate) version: String,
+    /// Server-side subscriptions to recover, by channel: only `recover`,
+    /// `epoch` and `offset` are set (`client.proto`, `ConnectRequest.subs`).
+    pub(crate) subs: BTreeMap<String, SubscribeRequest>,
 }
 
 /// `RefreshRequest` of `client.proto`.

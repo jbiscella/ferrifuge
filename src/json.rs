@@ -125,6 +125,20 @@ struct JsonConnectRequest<'a> {
     name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     version: &'a str,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    subs: BTreeMap<&'a str, JsonConnectSub<'a>>,
+}
+
+/// An entry of `ConnectRequest.subs`: where to recover a server-side
+/// subscription from.
+#[derive(Serialize)]
+struct JsonConnectSub<'a> {
+    #[serde(skip_serializing_if = "is_false")]
+    recover: bool,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    epoch: &'a str,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    offset: u64,
 }
 
 #[derive(Serialize)]
@@ -186,11 +200,25 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 token,
                 name,
                 version,
+                subs,
             }) => {
                 json.connect = Some(JsonConnectRequest {
                     token,
                     name,
                     version,
+                    subs: subs
+                        .iter()
+                        .map(|(channel, sub)| {
+                            (
+                                channel.as_str(),
+                                JsonConnectSub {
+                                    recover: sub.recover,
+                                    epoch: &sub.epoch,
+                                    offset: sub.offset,
+                                },
+                            )
+                        })
+                        .collect(),
                 });
             }
             Method::Refresh(RefreshRequest { token }) => {
@@ -542,8 +570,33 @@ mod tests {
                 token: token.to_owned(),
                 name: "ferrifuge".to_owned(),
                 version: "0.1.0".to_owned(),
+                subs: BTreeMap::new(),
             }),
         }
+    }
+
+    #[test]
+    fn encodes_the_server_side_subscriptions_to_recover_in_a_connect_command() {
+        let mut command = connect_command(1, "");
+        let Method::Connect(connect) = &mut command.method else {
+            unreachable!("a connect command");
+        };
+        connect.subs.insert(
+            "alerts".into(),
+            SubscribeRequest {
+                recover: true,
+                epoch: "e".into(),
+                offset: 5,
+                ..SubscribeRequest::default()
+            },
+        );
+
+        let frame = encode(&[command]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":1,"connect":{"name":"ferrifuge","version":"0.1.0","subs":{"alerts":{"recover":true,"epoch":"e","offset":5}}}}"#
+        );
     }
 
     #[test]

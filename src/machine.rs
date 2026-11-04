@@ -968,6 +968,7 @@ impl Machine {
                 token: self.tokens.for_connect(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
+                subs: std::collections::BTreeMap::new(),
             }),
         }
     }
