@@ -1117,12 +1117,13 @@ impl Machine {
     /// an actual state change.
     fn disconnect(&mut self, code: u32, reason: &str, reconnect: bool) {
         // "State invalidated" (Block 11): the connection token, a fixed one
-        // too, and every stream position are dropped, whether a push or a
-        // close frame carries the code (centrifuge-js `_disconnect`, which
-        // keeps a token without a callback, and sentinel positions).
+        // too, every stream position and the subscription tokens a callback
+        // renews are dropped, whether a push or a close frame carries the
+        // code (centrifuge-js `_disconnect`, which keeps a connection token
+        // without a callback, and sentinel positions).
         if code == STATE_INVALIDATED {
             self.tokens.invalidate();
-            self.forget_stream_positions();
+            self.invalidate_subscriptions();
         }
         if self.state == State::Disconnected {
             return;
