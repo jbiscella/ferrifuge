@@ -95,8 +95,7 @@ fn client_side_subscribes(world: &mut ClientWorld) {
 
 #[then(regex = r#"^(?:then )?the client emits a server-side "(\w+)" event for channel "(\w+)"$"#)]
 async fn emits_server_side_event(world: &mut ClientWorld, name: String, channel: String) {
-    let event = next_server_side_event(world, &channel).await;
-    assert_eq!(event.name(), name, "{event:?}");
+    next_server_side_event(world, &channel, |event| event.name() == name).await;
 }
 
 #[then(
@@ -213,27 +212,34 @@ fn push_publication(world: &ClientWorld, channel: &str, data: &Value) {
         .send(&json!({"push": {"channel": channel, "pub": {"data": data}}}).to_string());
 }
 
-/// The next event of the server-side subscription to `channel`, within
-/// [`EVENT_TIMEOUT`]; other events are skipped.
-async fn next_server_side_event(world: &mut ClientWorld, channel: &str) -> ServerSubscriptionEvent {
+/// The next event of the server-side subscription to `channel` that is
+/// `wanted`, within [`EVENT_TIMEOUT`]. Earlier events are skipped: e.g. the
+/// `subscribed` emitted at connect, which a shared connect step leaves.
+async fn next_server_side_event(
+    world: &mut ClientWorld,
+    channel: &str,
+    wanted: impl Fn(&ServerSubscriptionEvent) -> bool,
+) -> ServerSubscriptionEvent {
     tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             if let ClientEvent::ServerSubscription { channel: of, event } = world.next_event().await
                 && of == channel
+                && wanted(&event)
             {
                 return event;
             }
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("no server-side event for {channel} within {EVENT_TIMEOUT:?}"))
+    .unwrap_or_else(|_| panic!("no such server-side event for {channel} within {EVENT_TIMEOUT:?}"))
 }
 
 async fn expect_server_side_publication(world: &mut ClientWorld, channel: &str, data: &str) {
-    match next_server_side_event(world, channel).await {
-        ServerSubscriptionEvent::Publication(publication) => {
-            assert!(has_json_data(&publication, data), "{publication:?}");
-        }
-        other => panic!("expected a server-side publication, got {other:?}"),
+    let is_publication =
+        |event: &ServerSubscriptionEvent| matches!(event, ServerSubscriptionEvent::Publication(_));
+    if let ServerSubscriptionEvent::Publication(publication) =
+        next_server_side_event(world, channel, is_publication).await
+    {
+        assert!(has_json_data(&publication, data), "{publication:?}");
     }
 }

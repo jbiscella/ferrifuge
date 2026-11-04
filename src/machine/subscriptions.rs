@@ -817,6 +817,8 @@ impl Machine {
                 sub.advance(&publication);
             }
             self.emit_subscription(id, SubscriptionEvent::Publication(publication));
+        } else {
+            self.server_publication(channel, publication);
         }
     }
 
