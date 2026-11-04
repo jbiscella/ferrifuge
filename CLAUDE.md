@@ -1099,7 +1099,19 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 `VERIFY:` the Centrifugo v6 channel options for history and recovery (including allowing client-requested positioning and recovery), and how a test makes history expire; `getState` in centrifuge-js `163dcba`; that Centrifugo v6.10.1 honours the "reject unrecovered" subscribe flag with error 112 (if not, "getState reloads state when recovery fails" moves to @D).
 
+Verified (Centrifugo v6.10.1, raw websocket client and server API, 2026-11-04): a namespace with `allow_positioning` and `allow_recovery` grants the client's `positioned` and `recoverable` hints (asking for `recoverable` also grants `positioned`), and `force_recovery` makes a channel recoverable without them; recovering from a known offset returns the missed publications with `recovered` true and the `offset` recovered from; a wrong epoch, or a history emptied by a short `history_ttl` or by the server API `history_remove` (both keep the epoch and offset), returns `was_recovering` true without `recovered`; with the "reject unrecovered" flag (`1 << 1`) those subscribes are answered with error 112 "unrecoverable position", so "getState reloads state when recovery fails" stays @B; the subscribe proxy request carries no stream position (centrifugo `proxy.proto`, `SubscribeRequest`); centrifuge-js 63ed73e implements getState (`subscription.ts` `_getState`, flag `rejectUnrecovered`, error 112). On unsubscribe code 2502 and disconnect code 3014 centrifuge-js keeps a sentinel position (epoch `_`) so that the next recovery fails; this block drops the position instead, as `client.proto` requires.
+
 Value clause: As an app developer, I want missed publications recovered after a reconnect, or my state reloaded when recovery fails, so that my application sees no gap in a channel's stream.
+
+**Sub-increments** (owner decision, 2026-11-04; one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 11a | As an app developer, I want missed publications recovered after a reconnect, an unsubscribe or a disconnect, so that my app sees no gap in a channel's stream | "A first subscribe does not recover" to "Recovery fails when history is gone", and "A failed recovery's reply replaces the stored position" |
+| 11b | As an app developer, I want my state reloaded through getState when recovery fails, so that a lost stream never leaves my app with stale data | "getState provides the position of the initial subscribe", "getState reloads state when recovery fails", "The since option takes precedence over getState on the first subscribe", "A failing getState is retried before subscribing" |
+| 11c | As an app developer, I want a server's "state invalidated" to drop tokens and positions, so that my app resubscribes from fresh state | "State invalidation fetches a new subscription token", "Connection state invalidation clears the token and every position", "Connection state invalidation drops a fixed connection token", "State invalidation drops a fixed subscription token" |
+
+**Owner decision (2026-11-04):** "Connection state invalidation clears the token and every position" needs server-side subscriptions (Block 12). 11c implements disconnect code 3014 for the connection token and client-side positions; the scenario passes once Block 12 adds server-side positions, and Block 12's PR adds it to the implemented scenarios.
 
 ```gherkin
 Feature: Subscription recovery
