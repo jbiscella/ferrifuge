@@ -79,7 +79,7 @@ async fn subscriber(
         protocol,
         ..Config::default()
     };
-    let client = Client::new(server.websocket_url(), config);
+    let client = Client::new(server.websocket_url(), config).expect("a valid endpoint");
     let mut events = client.events();
     client.connect();
     loop {

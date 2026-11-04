@@ -79,8 +79,8 @@ use ferrifuge::{Client, ClientEvent, Config};
 use futures_util::StreamExt;
 
 #[tokio::main]
-async fn main() {
-    let client = Client::new("ws://localhost:8000/connection/websocket", Config::default());
+async fn main() -> Result<(), ferrifuge::ClientError> {
+    let client = Client::new("ws://localhost:8000/connection/websocket", Config::default())?;
     let mut events = client.events();
     client.connect();
 
@@ -95,6 +95,7 @@ async fn main() {
             ClientEvent::Error(error) => eprintln!("error: {}", error.message),
         }
     }
+    Ok(())
 }
 ```
 

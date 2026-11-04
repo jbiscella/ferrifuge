@@ -63,7 +63,7 @@ fn live_bytes() -> usize {
 
 /// A client connected to `server`.
 async fn connected(server: &ChildServer, config: Config) -> Client {
-    let client = Client::new(server.websocket_url(), config);
+    let client = Client::new(server.websocket_url(), config).expect("a valid endpoint");
     let mut events = client.events();
     client.connect();
     wait_connected(&mut events).await;

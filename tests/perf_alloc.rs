@@ -64,7 +64,8 @@ fn allocations_per_publication(channels: usize) -> f64 {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let client = Client::new(server.websocket_url(), Config::default());
+        let client =
+            Client::new(server.websocket_url(), Config::default()).expect("a valid endpoint");
         let mut client_events = client.events();
         client.connect();
         while !matches!(

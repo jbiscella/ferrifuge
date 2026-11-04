@@ -352,7 +352,7 @@ mod tests {
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn an_event_stream_does_not_borrow_its_subscription() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let (subscription, mut events) = subscription_with_events(&client);
 
         subscription.subscribe();
@@ -366,7 +366,7 @@ mod tests {
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn removing_ends_the_event_streams_after_the_last_event() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let subscription = client.new_subscription("news").unwrap();
         let mut events = subscription.events();
         subscription.subscribe();
@@ -389,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn streams_end_and_callbacks_go_when_the_client_is_dropped() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let subscription = client
             .subscription_builder("news")
             .get_data(|_| async { Ok(Vec::new()) })
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn calls_after_the_client_is_dropped_change_nothing() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let subscription = client.new_subscription("news").unwrap();
         drop(client);
         let before = {
@@ -443,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_builder_outliving_its_client_builds_nothing() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let builder = client
             .subscription_builder("news")
             .get_data(|_| async { Ok(Vec::new()) });
@@ -459,7 +459,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn debug_output_never_shows_subscription_tokens() {
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
         let builder = client
             .subscription_builder("news")
             .token("sub-secret")
@@ -478,7 +478,7 @@ mod tests {
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        let client = Client::new(UNREACHABLE, Config::default());
+        let client = Client::new(UNREACHABLE, Config::default()).unwrap();
 
         let bytes_last = client
             .subscription_builder("a")
@@ -497,8 +497,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_subscription_of_another_client_is_not_removed() {
-        let first = Client::new(UNREACHABLE, Config::default());
-        let second = Client::new(UNREACHABLE, Config::default());
+        let first = Client::new(UNREACHABLE, Config::default()).unwrap();
+        let second = Client::new(UNREACHABLE, Config::default()).unwrap();
         let mine = first.new_subscription("a").unwrap();
         let theirs = second.new_subscription("b").unwrap();
 
