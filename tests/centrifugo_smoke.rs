@@ -142,6 +142,31 @@ async fn connect_proxy_grants_recoverable_server_side_subscriptions() {
 }
 
 #[tokio::test]
+async fn a_connect_the_proxy_holds_stays_unanswered_past_the_client_timeout() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let proxy = ProxyBackend::start().await;
+    let env = proxy.centrifugo_env();
+    let env: Vec<_> = env
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let server = Centrifugo::start(&env).await;
+    proxy.hold_next();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(server.websocket_url())
+        .await
+        .expect("open");
+    ws.send(Message::text(r#"{"id":1,"connect":{}}"#))
+        .await
+        .expect("send connect");
+    let answer = tokio::time::timeout(Duration::from_secs(6), ws.next()).await;
+
+    assert!(answer.is_err(), "the server answered: {answer:?}");
+}
+
+#[tokio::test]
 async fn fake_server_grants_server_side_subscriptions_as_programmed() {
     let server = FakeServer::start(Announce::default()).await;
     let url = format!("ws://{}/connection/websocket", server.address());
