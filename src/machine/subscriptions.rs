@@ -884,6 +884,33 @@ mod tests {
     }
 
     #[test]
+    fn a_state_invalidated_disconnect_fetches_new_subscription_tokens() {
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t1".into())
+                .token_source(),
+        );
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let resubscribing =
+            machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        // The callback gives a new token before the subscribe command.
+        assert!(
+            resubscribing.iter().any(|action| matches!(
+                action,
+                Action::FetchSubscriptionToken { subscription, .. } if *subscription == id
+            )),
+            "{resubscribing:?}"
+        );
+        assert_eq!(sent(&resubscribing), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_state_invalidated_disconnect_drops_the_stream_positions() {
         let (mut machine, transport, id) = connected();
         machine.handle(Input::Subscribe(id));
