@@ -937,6 +937,35 @@ mod tests {
     }
 
     #[test]
+    fn a_state_invalidated_disconnect_cancels_the_refresh_of_a_fixed_token() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token("t1".into()));
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+
+        let closed = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3014),
+            reason: "closed by the test".into(),
+        });
+
+        // A refresh left scheduled would unsubscribe the subscription,
+        // which resubscribes without a token, once it fires.
+        for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
+            assert!(
+                closed.iter().any(|action| matches!(
+                    action,
+                    Action::CancelSubscriptionTimer(of, t) if *of == id && *t == timer
+                )),
+                "{timer:?} not cancelled: {closed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_state_invalidated_disconnect_drops_the_stream_positions() {
         let (mut machine, transport, id) = connected();
         machine.handle(Input::Subscribe(id));
