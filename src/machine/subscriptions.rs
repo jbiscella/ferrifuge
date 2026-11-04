@@ -836,9 +836,11 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::Config;
     use crate::machine::{Input, Timer, TransportId};
+    use crate::{Config, TokenError};
 
     /// A machine connected over a transport, with a subscription to "news".
     fn connected() -> (Machine, TransportId, SubscriptionId) {
@@ -1662,6 +1664,140 @@ mod tests {
         assert_eq!(
             machine.subscription_state(id),
             Some(SubscriptionState::Subscribed)
+        );
+    }
+
+    fn resubscribe_delay(actions: &[Action]) -> Option<Duration> {
+        actions.iter().find_map(|action| match action {
+            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => Some(*delay),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_subscribe_in_flight_when_the_transport_closes_is_sent_again_without_backoff() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        let closed = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3000),
+            reason: "closed by the test".into(),
+        });
+        let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)))
+            .expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let reconnected = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        assert_eq!(resubscribe_delay(&closed), None, "{closed:?}");
+        assert_eq!(
+            sent(&reconnected),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
+    fn subscribe_while_subscribing_keeps_the_resubscribe_backoff() {
+        let mut machine = Machine::with_rng(Config::default(), false, fastrand::Rng::with_seed(7));
+        let transport = connect(&mut machine, Input::Connect, 1);
+        let id = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        let busy = r#""error":{"code":100,"message":"busy","temporary":true}"#;
+        machine.handle(Input::Subscribe(id));
+        // Several failures grow the backoff.
+        let mut command = 2;
+        for _ in 0..6 {
+            machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+            machine.handle(Input::SubscriptionTimerFired(
+                id,
+                SubscriptionTimer::Resubscribe,
+            ));
+            command += 1;
+        }
+        machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+        command += 1;
+
+        let again = machine.handle(Input::Subscribe(id));
+        machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Resubscribe,
+        ));
+        let retry = machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
+
+        assert_eq!(again, []);
+        let delay = resubscribe_delay(&retry).expect("a retry");
+        // A fresh backoff would be at most twice the minimum.
+        assert!(
+            delay > SubscriptionOptions::default().min_resubscribe_delay * 2,
+            "{delay:?}"
+        );
+    }
+
+    fn subscription_token_fetch(actions: &[Action]) -> FetchId {
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionToken { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .expect("a subscription token fetch")
+    }
+
+    #[test]
+    fn the_token_of_an_outdated_subscribe_sends_nothing() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().token_source());
+        let outdated = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        // A new subscribe while the token loads: a new fetch.
+        machine.handle(Input::Unsubscribe(id));
+        let current = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+
+        let late = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: outdated,
+            result: Ok("old".into()),
+        });
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: current,
+            result: Ok("new".into()),
+        });
+
+        assert_eq!(sent(&late), Vec::<String>::new());
+        assert_eq!(
+            sent(&answered),
+            [r#"{"id":2,"subscribe":{"channel":"news","token":"new"}}"#]
+        );
+    }
+
+    #[test]
+    fn a_refresh_failing_after_a_reconnect_leaves_the_new_refresh_alone() {
+        let (mut machine, transport, id, outdated) = refresh_fetching();
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        machine.handle(reply(
+            transport,
+            r#"{"id":4,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        let current = subscription_token_fetch(&machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Refresh,
+        )));
+
+        let failed = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: outdated,
+            result: Err(TokenError::Failed("token unavailable".into())),
+        });
+        let refreshed = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: current,
+            result: Ok("u".into()),
+        });
+
+        // No error, no retry: the refresh in progress is the new one.
+        assert_eq!(failed, []);
+        assert_eq!(
+            sent(&refreshed),
+            [r#"{"id":5,"sub_refresh":{"channel":"news","token":"u"}}"#]
         );
     }
 }
