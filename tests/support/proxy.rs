@@ -38,6 +38,8 @@ struct Answers {
     subscribe_requests: Vec<Value>,
     /// When each of them arrived.
     subscribe_times: Vec<Instant>,
+    /// Channels an accepted connection is subscribed to on the server side.
+    granted: Vec<String>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -148,6 +150,12 @@ impl ProxyBackend {
             ));
     }
 
+    /// Subscribes the connections accepted from now on to `channels` on
+    /// the server side (connect result `channels`); none for an empty list.
+    pub(crate) fn grant(&self, channels: &[&str]) {
+        self.state.lock().unwrap().granted = channels.iter().map(|&c| c.to_owned()).collect();
+    }
+
     /// Leaves the next connection attempt unanswered, so the client stays
     /// in its connecting state while a step looks at it.
     pub(crate) fn hold_next(&self) {
@@ -179,16 +187,16 @@ async fn connect(
     State(state): State<Arc<Mutex<Answers>>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let answer = {
+    let (answer, granted) = {
         let mut answers = state.lock().unwrap();
         answers.requests.push(request);
-        answers.programmed.pop_front()
+        (answers.programmed.pop_front(), answers.granted.clone())
     };
     match answer {
         Some(Answer::Respond(answer)) => Json(answer),
         // Ends when the proxy is dropped with the scenario.
         Some(Answer::Hold) => std::future::pending().await,
-        None => Json(json!({"result": {"user": USER}})),
+        None => Json(json!({"result": {"user": USER, "channels": granted}})),
     }
 }
 
