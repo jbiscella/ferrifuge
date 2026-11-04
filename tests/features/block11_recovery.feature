@@ -144,7 +144,7 @@ Feature: Subscription recovery
     And a server-side subscription to channel "alerts" with a stream position from the connect reply
     When the fake server disconnects the client with code 3014
     Then the connection token callback is called before the next connect
-    And the next connect command carries no position for "alerts"
+    And the next connect command asks to recover "alerts" from offset 0 and epoch "_"
     And the next subscribe command for "news" asks to recover from offset 0 and epoch "_"
 
   @D
