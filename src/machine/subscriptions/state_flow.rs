@@ -91,8 +91,7 @@ impl Machine {
         if error.code != UNRECOVERABLE_POSITION || !sub.options.state_source {
             return false;
         }
-        sub.position = None;
-        sub.recover = false;
+        sub.forget_position();
         self.schedule_resubscribe(id);
         true
     }

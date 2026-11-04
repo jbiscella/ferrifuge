@@ -67,7 +67,18 @@ struct Subscription {
     recover: bool,
 }
 
+/// Unsubscribe code by which the server invalidates a subscription's state
+/// (`client.proto`, `Unsubscribe`).
+const STATE_INVALIDATED: u32 = 2502;
+
 impl Subscription {
+    /// Drops the stream position: the next subscribe recovers nothing, or
+    /// loads the state through getState first.
+    fn forget_position(&mut self) {
+        self.position = None;
+        self.recover = false;
+    }
+
     /// Moves the stream position to a publication's, as received live or
     /// recovered (centrifuge-js `_handlePublication`); a changed epoch
     /// comes with it (`client.proto`, `Publication.epoch`).
@@ -663,6 +674,9 @@ impl Machine {
         // subscribe back, or report a timeout while subscribing; the new
         // subscribe reply schedules the next one.
         self.end_token_refresh(id);
+        if code == STATE_INVALIDATED {
+            self.invalidate_subscription_state(id);
+        }
         self.emit_subscription(
             id,
             SubscriptionEvent::Subscribing {
@@ -671,6 +685,27 @@ impl Machine {
             },
         );
         self.start_subscribe(id);
+    }
+
+    /// "State invalidated" (unsubscribe code 2502): the subscription drops
+    /// its token and its stream position before subscribing again, so the
+    /// token callback, if any, gives a new token, and getState, if any,
+    /// reloads the state (`client.proto`, `Unsubscribe`: "client must drop
+    /// its subscription token and any state accumulated"). centrifuge-js
+    /// keeps a token without a callback, and a sentinel position.
+    fn invalidate_subscription_state(&mut self, id: SubscriptionId) {
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            sub.tokens.invalidate();
+            sub.forget_position();
+        }
+    }
+
+    /// "State invalidated" (disconnect code 3014): every subscription drops
+    /// its stream position (Block 11).
+    pub(super) fn forget_stream_positions(&mut self) {
+        for sub in self.subscriptions.by_id.values_mut() {
+            sub.forget_position();
+        }
     }
 
     /// A publication pushed for `channel`.
