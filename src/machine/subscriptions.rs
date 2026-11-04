@@ -54,6 +54,10 @@ struct Subscription {
     /// subscribing, so the server cannot apply them out of order.
     waiting: bool,
     backoff: Backoff,
+    /// A resubscribe is scheduled after a failed subscribe: a new
+    /// connection leaves the subscription to it (centrifuge-js
+    /// `_resubscribeTimeout`).
+    resubscribe_pending: bool,
     /// Its subscription token, the fetch of a new one and the refresh
     /// command in flight (Block 5's token component).
     tokens: Tokens,
@@ -169,6 +173,7 @@ impl Machine {
                 state_fetch: None,
                 waiting: false,
                 backoff,
+                resubscribe_pending: false,
                 tokens,
                 position,
                 recover,
@@ -421,6 +426,7 @@ impl Machine {
             return;
         };
         let delay = sub.backoff.next_delay(&mut self.rng);
+        sub.resubscribe_pending = true;
         self.actions.push(Action::SetSubscriptionTimer(
             id,
             SubscriptionTimer::Resubscribe,
@@ -435,6 +441,10 @@ impl Machine {
     ) {
         match timer {
             SubscriptionTimer::Resubscribe => {
+                if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                    sub.resubscribe_pending = false;
+                }
+                // Not connected: the next connection subscribes it.
                 if self.state == State::Connected {
                     self.start_subscribe(id);
                 }
@@ -643,6 +653,7 @@ impl Machine {
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
         sub.backoff.reset();
+        sub.resubscribe_pending = false;
         let channel = sub.channel.clone();
         self.actions.push(Action::CancelSubscriptionTimer(
             id,
@@ -757,7 +768,12 @@ impl Machine {
             .subscriptions
             .by_id
             .iter()
-            .filter(|(_, sub)| sub.state == SubscriptionState::Subscribing)
+            // A subscribe that failed is retried after its backoff, also
+            // across a reconnect (owner decision, 2026-11-04;
+            // centrifuge-js `_sendSubscribeCommands`).
+            .filter(|(_, sub)| {
+                sub.state == SubscriptionState::Subscribing && !sub.resubscribe_pending
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in subscribing {
