@@ -415,7 +415,9 @@ async fn a_publication_with_a_new_epoch(world: &mut ClientWorld) {
     world.recovery.position = Some(position(1, NEW_EPOCH));
     let push = json!({"push": {"channel": CHANNEL, "pub": {"data": {"n": 1}, "offset": 1, "epoch": NEW_EPOCH}}});
     world.fake().send(&push.to_string());
-    next_publication(world, false).await;
+    // Applications see it too, to save positions they can resume from.
+    let publication = next_publication(world, false).await;
+    assert_eq!(publication.epoch.as_deref(), Some(NEW_EPOCH), "{publication:?}");
 }
 
 #[given("the client recovered 2 publications after a reconnect")]

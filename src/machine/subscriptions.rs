@@ -67,15 +67,15 @@ impl Subscription {
     /// Moves the stream position to a publication's, as received live or
     /// recovered (centrifuge-js `_handlePublication`); a changed epoch
     /// comes with it (`client.proto`, `Publication.epoch`).
-    fn advance(&mut self, offset: Option<u64>, epoch: &str) {
-        if offset.is_none() && epoch.is_empty() {
+    fn advance(&mut self, publication: &Publication) {
+        if publication.offset.is_none() && publication.epoch.is_none() {
             return;
         }
         let position = self.position.get_or_insert_default();
-        if let Some(offset) = offset {
+        if let Some(offset) = publication.offset {
             position.offset = offset;
         }
-        if !epoch.is_empty() {
+        if let Some(epoch) = &publication.epoch {
             epoch.clone_into(&mut position.epoch);
         }
     }
@@ -512,7 +512,7 @@ impl Machine {
                 // move the position.
                 for publication in result.publications {
                     if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                        sub.advance(publication.offset, "");
+                        sub.advance(&publication);
                     }
                     self.emit_subscription(id, SubscriptionEvent::Publication(publication));
                 }
@@ -649,9 +649,8 @@ impl Machine {
         self.start_subscribe(id);
     }
 
-    /// A publication pushed for `channel`, with the stream's new epoch if
-    /// it changed.
-    pub(super) fn publication(&mut self, channel: &str, publication: Publication, epoch: &str) {
+    /// A publication pushed for `channel`.
+    pub(super) fn publication(&mut self, channel: &str, publication: Publication) {
         // Only a subscribed handle receives publications (Block 9).
         let subscribed = self.find_subscription(channel).filter(|id| {
             self.subscriptions
@@ -661,7 +660,7 @@ impl Machine {
         });
         if let Some(id) = subscribed {
             if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                sub.advance(publication.offset, epoch);
+                sub.advance(&publication);
             }
             self.emit_subscription(id, SubscriptionEvent::Publication(publication));
         }

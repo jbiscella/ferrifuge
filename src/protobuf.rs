@@ -142,12 +142,10 @@ impl From<pb::Reply> for Reply {
                 ttl: refresh.ttl,
             })
         } else if let Some(push) = reply.push {
-            ReplyResult::Push(if let Some(mut publication) = push.r#pub {
-                let epoch = std::mem::take(&mut publication.epoch);
+            ReplyResult::Push(if let Some(publication) = push.r#pub {
                 Push::Publication {
                     channel: push.channel,
                     publication: publication.into(),
-                    epoch,
                 }
             } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
                 Push::Disconnect(Disconnect { code, reason })
@@ -200,6 +198,7 @@ impl From<pb::Publication> for Publication {
                 conn_info: (!info.conn_info.is_empty()).then_some(info.conn_info),
                 chan_info: (!info.chan_info.is_empty()).then_some(info.chan_info),
             }),
+            epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
         }
     }
 }
@@ -453,8 +452,8 @@ mod tests {
         assert_eq!(result.publications[0].offset, Some(3));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Publication { channel, publication, epoch })
-                if channel == "news" && publication.data == [0xfe] && publication.offset.is_none() && epoch.is_empty()
+            ReplyResult::Push(Push::Publication { channel, publication })
+                if channel == "news" && publication.data == [0xfe] && publication.offset.is_none() && publication.epoch.is_none()
         ));
     }
 
@@ -521,8 +520,8 @@ mod tests {
         assert_eq!(result.publications[0].offset, Some(8));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Publication { epoch, publication, .. })
-                if epoch == "e2" && publication.offset == Some(1)
+            ReplyResult::Push(Push::Publication { publication, .. })
+                if publication.epoch.as_deref() == Some("e2") && publication.offset == Some(1)
         ));
     }
 

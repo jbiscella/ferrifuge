@@ -170,28 +170,40 @@ On a channel that keeps a history and allows recovery, a subscription
 recovers the publications it missed while disconnected or unsubscribed:
 they are delivered after its `subscribed` event, which says whether the
 recovery succeeded. Ask for recovery on channels that allow it without
-forcing it, and resume from a position saved earlier:
+forcing it, and resume from a position saved earlier (`saved`, a
+`StreamPosition`):
 
 ```rust
-use ferrifuge::{StreamPosition, SubscriptionEvent};
+use ferrifuge::SubscriptionEvent;
 use futures_util::StreamExt;
 
 let subscription = client
     .subscription_builder("news")
     .recoverable(true)
-    .since(StreamPosition { offset: saved.offset, epoch: saved.epoch })
+    .since(saved.clone())
     .build()?;
 let mut events = subscription.events();
 subscription.subscribe();
 
 while let Some(event) = events.next().await {
     match event {
-        SubscriptionEvent::Subscribed(subscribed) if subscribed.was_recovering && !subscribed.recovered => {
-            // Publications were lost: reload the application's state.
+        SubscriptionEvent::Subscribed(subscribed) => {
+            if subscribed.was_recovering && !subscribed.recovered {
+                // Publications were lost: reload the application's state.
+            }
+            if let Some(position) = subscribed.stream_position {
+                saved = position;
+            }
         }
         SubscriptionEvent::Publication(publication) => {
-            // Save `publication.offset` (and the epoch of the stream
-            // position in `subscribed`) to resume from later.
+            // Keep the position to resume from: a publication moves the
+            // offset, and the epoch when it starts a new stream.
+            if let Some(offset) = publication.offset {
+                saved.offset = offset;
+            }
+            if let Some(epoch) = publication.epoch {
+                saved.epoch = epoch;
+            }
         }
         _ => {}
     }

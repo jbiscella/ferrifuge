@@ -381,12 +381,10 @@ struct JsonPush {
 
 impl From<JsonPush> for Push {
     fn from(push: JsonPush) -> Self {
-        if let Some(mut publication) = push.publication {
-            let epoch = std::mem::take(&mut publication.epoch);
+        if let Some(publication) = push.publication {
             Self::Publication {
                 channel: push.channel,
                 publication: publication.into(),
-                epoch,
             }
         } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
             Self::Disconnect(Disconnect { code, reason })
@@ -440,6 +438,7 @@ impl From<JsonPublication> for Publication {
                 conn_info: info.conn_info.as_deref().map(raw_bytes),
                 chan_info: info.chan_info.as_deref().map(raw_bytes),
             }),
+            epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
         }
     }
 }
@@ -805,8 +804,8 @@ mod tests {
         assert_eq!(result.publications[0].offset, Some(8));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Publication { epoch, publication, .. })
-                if epoch == "e2" && publication.offset == Some(1)
+            ReplyResult::Push(Push::Publication { publication, .. })
+                if publication.epoch.as_deref() == Some("e2") && publication.offset == Some(1)
         ));
     }
 
