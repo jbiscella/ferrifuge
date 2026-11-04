@@ -968,7 +968,7 @@ impl Machine {
                 token: self.tokens.for_connect(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
-                subs: std::collections::BTreeMap::new(),
+                subs: self.server_subscriptions_to_recover(),
             }),
         }
     }
@@ -1205,6 +1205,7 @@ impl Machine {
         if code == STATE_INVALIDATED {
             self.tokens.invalidate();
             self.invalidate_subscriptions();
+            self.invalidate_server_subscriptions();
         }
         if self.state == State::Disconnected {
             return;

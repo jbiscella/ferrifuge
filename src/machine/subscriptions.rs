@@ -81,7 +81,7 @@ pub(super) const MESSAGE_SIZE_LIMIT_REASON: &str = "message size limit exceeded"
 
 /// Epoch no stream has: not empty, which means "any epoch" to the server
 /// (centrifuge-js `_invalidateState`).
-const UNMATCHABLE_EPOCH: &str = "_";
+pub(super) const UNMATCHABLE_EPOCH: &str = "_";
 
 impl Subscription {
     /// Drops the stream position: the next subscribe recovers nothing, or
