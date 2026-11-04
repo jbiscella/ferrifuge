@@ -280,22 +280,7 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
             }
             "subscribe" => {
                 let subscribe: JsonSubscribeResult = field(&value)?;
-                result = Some(ReplyResult::Subscribe(SubscribeResult {
-                    expires: subscribe.expires,
-                    ttl: subscribe.ttl,
-                    data: subscribe.data.as_deref().map(raw_bytes),
-                    publications: subscribe
-                        .publications
-                        .into_iter()
-                        .map(Publication::from)
-                        .collect(),
-                    positioned: subscribe.positioned,
-                    recoverable: subscribe.recoverable,
-                    epoch: subscribe.epoch,
-                    offset: subscribe.offset,
-                    was_recovering: subscribe.was_recovering,
-                    recovered: subscribe.recovered,
-                }));
+                result = Some(ReplyResult::Subscribe(subscribe.into()));
             }
             "unsubscribe" => {
                 // An object, even empty: `null` or a scalar is no result.
@@ -361,6 +346,7 @@ struct JsonConnectResult {
     pong: bool,
     session: String,
     node: String,
+    subs: BTreeMap<String, JsonSubscribeResult>,
 }
 
 impl From<JsonConnectResult> for ConnectResult {
@@ -374,6 +360,11 @@ impl From<JsonConnectResult> for ConnectResult {
             pong: connect.pong,
             session: connect.session,
             node: connect.node,
+            subs: connect
+                .subs
+                .into_iter()
+                .map(|(channel, result)| (channel, result.into()))
+                .collect(),
         }
     }
 }
@@ -400,6 +391,27 @@ struct JsonSubscribeResult {
     offset: u64,
     was_recovering: bool,
     recovered: bool,
+}
+
+impl From<JsonSubscribeResult> for SubscribeResult {
+    fn from(subscribe: JsonSubscribeResult) -> Self {
+        Self {
+            expires: subscribe.expires,
+            ttl: subscribe.ttl,
+            data: subscribe.data.as_deref().map(raw_bytes),
+            publications: subscribe
+                .publications
+                .into_iter()
+                .map(Publication::from)
+                .collect(),
+            positioned: subscribe.positioned,
+            recoverable: subscribe.recoverable,
+            epoch: subscribe.epoch,
+            offset: subscribe.offset,
+            was_recovering: subscribe.was_recovering,
+            recovered: subscribe.recovered,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -547,6 +559,28 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_server_side_subscriptions_of_a_connect_reply() {
+        let replies = decode(
+            concat!(
+                r#"{"id":1,"connect":{"client":"c","subs":{"#,
+                r#""b":{"recoverable":true,"epoch":"e","offset":2,"publications":[{"data":{},"offset":2}]},"#,
+                r#""a":{"data":{"x":1}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let ReplyResult::Connect(result) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        let channels: Vec<_> = result.subs.keys().map(String::as_str).collect();
+        assert_eq!(channels, ["a", "b"]);
+        assert_eq!(result.subs["a"].data.as_deref(), Some(&br#"{"x":1}"#[..]));
+        assert!(result.subs["b"].recoverable);
+        assert_eq!(result.subs["b"].publications.len(), 1);
+    }
+
+    #[test]
     fn decodes_connect_reply() {
         let frame = br#"{"id":1,"connect":{"client":"c1","version":"6.10.1","expires":true,"ttl":30,"ping":25,"pong":true,"session":"s","node":"n"}}"#;
 
@@ -566,6 +600,7 @@ mod tests {
                     pong: true,
                     session: "s".into(),
                     node: "n".into(),
+                    subs: BTreeMap::new(),
                 }),
             }]
         );

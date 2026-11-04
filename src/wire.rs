@@ -4,6 +4,8 @@
 //! translate between these types and bytes on the wire. Publications use
 //! the public [`Publication`] type, filled as they are delivered.
 
+use std::collections::BTreeMap;
+
 use crate::Publication;
 use crate::token::Secret;
 
@@ -123,6 +125,9 @@ pub(crate) struct ConnectResult {
     /// requests must name; empty otherwise.
     pub(crate) session: String,
     pub(crate) node: String,
+    /// The server-side subscriptions of the connection, by channel, in
+    /// channel order.
+    pub(crate) subs: BTreeMap<String, SubscribeResult>,
 }
 
 /// `RefreshResult` of `client.proto`.
