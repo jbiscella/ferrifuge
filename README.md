@@ -56,14 +56,13 @@ Available now:
 - the server's "state invalidated" codes: tokens and stream positions are
   dropped before subscribing or connecting again;
 - server-side subscriptions, granted at connect or added and removed by the
-  server later, with their events and publications (recovery across
-  reconnects comes next).
+  server later, with their events and publications, and recovery of the
+  publications they missed across reconnects and `disconnect()`/`connect()`.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| Recovery of server-side subscriptions | Block 12c |
 | RPC, publish, history, presence | later blocks |
 
 ## Usage
@@ -281,6 +280,13 @@ while let Some(event) = events.next().await {
 `client.server_subscriptions()` lists their channels: a snapshot, which the
 events may already have overtaken. A subscription the server no longer grants
 after a reconnect ends with code 4 (`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`).
+
+A subscription the server makes recoverable keeps its stream position, which
+every publication delivered moves; each connect asks to recover from it, so the
+publications missed while disconnected arrive after its `subscribed` event,
+which reports `was_recovering` and `recovered`. On "state invalidated" (3014)
+the position becomes unmatchable, so the recovery fails and `subscribed`
+reports `recovered` false, as for client-side subscriptions.
 
 ### Transport fallback
 
