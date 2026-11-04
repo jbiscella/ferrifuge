@@ -10,7 +10,8 @@ use std::time::Duration;
 use super::FetchId;
 use crate::token::Secret;
 
-/// centrifuge-js `_getRefreshRetryDelay`: 5 to 10 s.
+/// Retry delay of a failed connection token refresh: centrifuge-js
+/// `centrifuge.ts` `_getRefreshRetryDelay`, 5 to 10 s.
 pub(super) const REFRESH_RETRY_MIN: Duration = Duration::from_secs(5);
 pub(super) const REFRESH_RETRY_MAX: Duration = Duration::from_secs(10);
 /// Server error code of an expired token.
