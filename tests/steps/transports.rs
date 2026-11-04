@@ -302,6 +302,74 @@ async fn the_relay_comes_up(world: &mut ClientWorld) {
         .set_mode(Mode::Forward);
 }
 
+#[given("the connect proxy will leave the next connect unanswered")]
+fn proxy_leaves_next_connect_unanswered(world: &mut ClientWorld) {
+    world
+        .proxy
+        .as_ref()
+        .expect("this step needs a connect proxy: tag the scenario @B")
+        .hold_next();
+}
+
+#[given("a client configured with the server's websocket and http_stream endpoints")]
+fn a_client_with_websocket_and_http_stream(world: &mut ClientWorld) {
+    let server = server(world);
+    let endpoints = vec![
+        (TransportKind::WebSocket, server.websocket_url()),
+        (TransportKind::HttpStream, server.http_stream_url()),
+    ];
+    configure(world, endpoints);
+}
+
+#[given("a client configured with websocket and http_stream endpoints")]
+fn a_machine_with_websocket_and_http_stream(world: &mut ClientWorld) {
+    world.transports = vec![TransportKind::WebSocket, TransportKind::HttpStream];
+}
+
+/// Drives the sans-IO core: the websocket opens, its connect reply never
+/// comes, and the connect timeout fires; records the transports opened.
+#[when("the websocket opens and no connect reply arrives within the configured timeout")]
+fn websocket_opens_without_reply(world: &mut ClientWorld) {
+    let mut machine = Machine::new(test_config())
+        .with_transports(world.transports.clone())
+        .expect("valid transports");
+    let mut actions = machine.handle(Input::Connect);
+    while world.opened.len() < 2 {
+        let open = actions.iter().find_map(|action| match action {
+            Action::OpenTransport {
+                transport, kind, ..
+            } => Some((*transport, *kind)),
+            _ => None,
+        });
+        if let Some((transport, kind)) = open {
+            world.opened.push((kind, Duration::ZERO));
+            if world.opened.len() == 1 {
+                machine.handle(Input::TransportOpened(transport));
+                actions = machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+            }
+        } else if actions
+            .iter()
+            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _)))
+        {
+            actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        } else {
+            panic!("no further attempt after {:?}: {actions:?}", world.opened);
+        }
+    }
+}
+
+#[then("the next attempt opens the http_stream transport")]
+fn next_attempt_opens_http_stream(world: &mut ClientWorld) {
+    assert_eq!(
+        world
+            .opened
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<Vec<_>>(),
+        [TransportKind::WebSocket, TransportKind::HttpStream],
+    );
+}
+
 #[given("a client configured with websocket, http_stream and sse endpoints")]
 fn a_machine_with_three_transports(world: &mut ClientWorld) {
     world.transports = vec![
