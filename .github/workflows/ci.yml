@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its running CI; runs on main are
+# never cancelled, so quick merges do not cut its heavy jobs short.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
