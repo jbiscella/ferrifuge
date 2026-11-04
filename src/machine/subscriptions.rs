@@ -1405,6 +1405,32 @@ mod tests {
         assert_eq!(sent(&late), Vec::<String>::new());
     }
 
+    // Owner decision, 2026-11-04 (centrifuge-js `_sendSubscribeCommands`).
+    #[test]
+    fn a_reconnect_keeps_a_pending_resubscribe_backoff() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"error":{"code":100,"message":"busy","temporary":true}}"#,
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let reconnected = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let retried = machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Resubscribe,
+        ));
+
+        assert_eq!(sent(&reconnected), Vec::<String>::new());
+        assert_eq!(
+            sent(&retried),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
     #[test]
     fn a_temporary_subscribe_error_is_reported_then_retried() {
         let (mut machine, transport, id) = connected();
