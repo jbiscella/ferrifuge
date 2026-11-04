@@ -1508,4 +1508,160 @@ mod tests {
             [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
         );
     }
+
+    #[test]
+    fn unsubscribe_right_after_connect_then_subscribe_subscribes() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Disconnect);
+        let transport_again = opened(&machine.handle(Input::Connect)).unwrap();
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+        machine.handle(Input::TransportOpened(transport_again));
+        let reconnected = machine.handle(reply(
+            transport_again,
+            r#"{"id":3,"connect":{"client":"c"}}"#,
+        ));
+        let again = machine.handle(Input::Subscribe(id));
+
+        assert_ne!(transport_again, transport);
+        assert!(
+            unsubscribed.contains(&Action::EmitSubscription(
+                id,
+                SubscriptionEvent::Unsubscribed {
+                    code: codes::unsubscribed::UNSUBSCRIBE_CALLED,
+                    reason: "unsubscribe called".into(),
+                }
+            )),
+            "{unsubscribed:?}"
+        );
+        assert_eq!(sent(&reconnected), Vec::<String>::new());
+        // The subscribe the disconnect abandoned holds nothing back.
+        assert_eq!(sent(&again), [r#"{"id":4,"subscribe":{"channel":"news"}}"#]);
+    }
+
+    #[test]
+    fn unsubscribe_between_the_connect_command_and_its_reply_then_subscribe_subscribes() {
+        let mut machine = Machine::new(Config::default());
+        let id = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::Subscribe(id));
+        let transport = opened(&machine.handle(Input::Connect)).unwrap();
+        let connect = machine.handle(Input::TransportOpened(transport));
+
+        machine.handle(Input::Unsubscribe(id));
+        let connected = machine.handle(reply(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        let again = machine.handle(Input::Subscribe(id));
+
+        assert_eq!(sent(&connect).len(), 1, "{connect:?}");
+        assert_eq!(sent(&connected), Vec::<String>::new());
+        assert_eq!(sent(&again), [r#"{"id":2,"subscribe":{"channel":"news"}}"#]);
+    }
+
+    #[test]
+    fn a_second_unsubscribe_changes_nothing() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let first = machine.handle(Input::Unsubscribe(id));
+
+        let second = machine.handle(Input::Unsubscribe(id));
+        let again = machine.handle(Input::Subscribe(id));
+        let settled = machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+        assert_eq!(
+            sent(&first),
+            [r#"{"id":3,"unsubscribe":{"channel":"news"}}"#]
+        );
+        assert_eq!(second, []);
+        // The subscribe still waits for the first unsubscribe.
+        assert_eq!(sent(&again), Vec::<String>::new());
+        assert_eq!(
+            sent(&settled),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
+    fn removing_a_removed_subscription_keeps_the_newer_one_of_its_channel() {
+        let (mut machine, transport, old) = connected();
+        machine.handle(Input::RemoveSubscription(old));
+        let next = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::Subscribe(next));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        let removed_again = machine.handle(Input::RemoveSubscription(old));
+
+        assert_eq!(removed_again, []);
+        assert_eq!(machine.find_subscription("news"), Some(next));
+        assert_eq!(
+            machine.subscription_state(next),
+            Some(SubscriptionState::Subscribed)
+        );
+    }
+
+    #[test]
+    fn subscribe_on_a_removed_subscription_does_nothing() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        machine.handle(Input::RemoveSubscription(id));
+        machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+        let subscribed = machine.handle(Input::Subscribe(id));
+
+        assert_eq!(subscribed, []);
+        assert_eq!(machine.subscription_state(id), None);
+    }
+
+    #[test]
+    fn subscriptions_removed_in_a_row_wait_for_one_unsubscribe() {
+        let (mut machine, transport, first) = connected();
+        machine.handle(Input::Subscribe(first));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        machine.handle(Input::RemoveSubscription(first));
+        // E.g. a component mounted and unmounted again while the
+        // unsubscribe is pending.
+        let second = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::Subscribe(second));
+        let second_removed = machine.handle(Input::RemoveSubscription(second));
+        let third = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+
+        let waiting = machine.handle(Input::Subscribe(third));
+        let settled = machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+        // The second never reached the server: nothing to undo.
+        assert_eq!(sent(&second_removed), Vec::<String>::new());
+        assert_eq!(sent(&waiting), Vec::<String>::new());
+        assert_eq!(
+            sent(&settled),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
+    fn an_unsubscribe_push_without_a_channel_is_ignored() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"push":{"unsubscribe":{"code":2000,"reason":"r"}}}"#,
+        ));
+
+        assert_eq!(actions, []);
+        assert_eq!(machine.state(), State::Connected);
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Subscribed)
+        );
+    }
 }
