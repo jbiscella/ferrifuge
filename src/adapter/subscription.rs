@@ -316,7 +316,12 @@ impl Client {
 
     /// The channels of the server-side subscriptions the server made for
     /// this client, in channel order (spec, "Server-side subscriptions").
-    /// Their events come as [`crate::ClientEvent::ServerSubscription`].
+    ///
+    /// A snapshot: events already emitted, or about to be, may have
+    /// overtaken it, so the [`crate::ClientEvent::ServerSubscription`]
+    /// events are the authority on changes. A Ferrifuge addition: neither
+    /// centrifuge-js nor centrifugal/centrifuge-rust (`docs/api.md`)
+    /// exposes the server-side registry.
     #[must_use]
     pub fn server_subscriptions(&self) -> Vec<String> {
         lock(&self.shared().core).machine.server_subscriptions()
