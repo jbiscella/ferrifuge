@@ -335,6 +335,8 @@ impl Machine {
                     );
                 }
             }
+            // Set once subscription tokens are refreshed (Block 10b).
+            SubscriptionTimer::Refresh | SubscriptionTimer::RefreshReply => {}
             SubscriptionTimer::UnsubscribeReply => {
                 let pending = self
                     .subscriptions

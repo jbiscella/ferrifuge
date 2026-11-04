@@ -8,9 +8,9 @@ use std::time::Duration;
 use futures_channel::mpsc as events;
 use futures_core::Stream;
 
-use super::client::{Client, GetData, Shared, lock};
+use super::client::{Callbacks, Client, GetData, GetSubscriptionToken, Shared, lock};
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
-use crate::{DataError, SubscriptionError, SubscriptionEvent, SubscriptionState};
+use crate::{DataError, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError};
 
 /// A subscription to a channel, in its client's registry. Clones are
 /// handles to the same subscription.
@@ -96,14 +96,17 @@ pub struct SubscriptionBuilder {
     channel: String,
     options: SubscriptionOptions,
     get_data: Option<GetData>,
+    get_token: Option<GetSubscriptionToken>,
 }
 
+/// The options' `Debug` output redacts the token.
 impl std::fmt::Debug for SubscriptionBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubscriptionBuilder")
             .field("channel", &self.channel)
             .field("options", &self.options)
             .field("get_data", &self.get_data.is_some())
+            .field("get_token", &self.get_token.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -148,6 +151,31 @@ impl SubscriptionBuilder {
         self
     }
 
+    /// Sends `token`, a subscription token (JWT) for the channel, with the
+    /// first subscribe command. With [`Self::get_token`] too, the callback
+    /// is asked once it expires.
+    #[must_use]
+    pub fn token(mut self, token: impl Into<String>) -> Self {
+        self.options = self.options.token(token.into());
+        self
+    }
+
+    /// Sets a callback giving a new subscription token, called with the
+    /// channel when one is needed: before the first subscribe without a
+    /// token, after the server rejects one as expired, and before it
+    /// expires. Return [`TokenError::Unauthorized`] (or an empty token) to
+    /// unsubscribe for good, or [`TokenError::Failed`] to retry later.
+    #[must_use]
+    pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
+    {
+        self.options = self.options.token_source();
+        self.get_token = Some(Arc::new(move |channel| Box::pin(get_token(channel))));
+        self
+    }
+
     /// Adds the subscription, unsubscribed, to the client's registry.
     ///
     /// # Errors
@@ -165,8 +193,14 @@ impl SubscriptionBuilder {
         let id = core
             .machine
             .add_subscription(self.channel.clone(), self.options)?;
-        if let Some(get_data) = self.get_data {
-            lock(&self.shared.data_callbacks).0.insert(id, get_data);
+        if self.get_data.is_some() || self.get_token.is_some() {
+            lock(&self.shared.callbacks).0.insert(
+                id,
+                Callbacks {
+                    get_data: self.get_data,
+                    get_token: self.get_token,
+                },
+            );
         }
         drop(core);
         Ok(Subscription {
@@ -185,6 +219,7 @@ impl Client {
             channel: channel.into(),
             options: SubscriptionOptions::default(),
             get_data: None,
+            get_token: None,
         }
     }
 
@@ -237,9 +272,7 @@ impl Client {
         }
         self.shared()
             .apply(Input::RemoveSubscription(subscription.id));
-        lock(&self.shared().data_callbacks)
-            .0
-            .remove(&subscription.id);
+        lock(&self.shared().callbacks).0.remove(&subscription.id);
         // The final events were delivered by the call above.
         lock(&self.shared().subscription_subscribers).remove(&subscription.id);
     }
@@ -325,7 +358,7 @@ mod tests {
             "streams still open after the client was dropped"
         );
         assert_eq!(subscription.events().next().await, None);
-        assert!(lock(&subscription.shared.data_callbacks).0.is_empty());
+        assert!(lock(&subscription.shared.callbacks).0.is_empty());
     }
 
     #[tokio::test]
@@ -368,8 +401,23 @@ mod tests {
         let built = builder.build();
 
         assert_eq!(built, Err(SubscriptionError::ClientClosed));
-        assert!(lock(&shared.data_callbacks).0.is_empty());
+        assert!(lock(&shared.callbacks).0.is_empty());
         assert_eq!(lock(&shared.core).machine.find_subscription("news"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn debug_output_never_shows_subscription_tokens() {
+        let client = Client::new(UNREACHABLE, Config::default());
+        let builder = client
+            .subscription_builder("news")
+            .token("sub-secret")
+            .get_token(|_| async { Ok("sub-fetched".to_owned()) });
+        let printed_builder = format!("{builder:?}");
+        let subscription = builder.build().unwrap();
+
+        let printed = format!("{printed_builder} {subscription:?} {client:?}");
+
+        assert!(!printed.contains("sub-secret"), "{printed}");
     }
 
     #[test]

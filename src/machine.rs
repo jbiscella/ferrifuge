@@ -84,7 +84,9 @@ pub struct FetchId(u64);
 pub struct SubscriptionId(u64);
 
 /// Options of a subscription (spec, "Subscription common options").
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output redacts the token.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
     /// Data sent with every subscribe command.
@@ -98,6 +100,31 @@ pub struct SubscriptionOptions {
     /// Upper bound of the resubscribe delay. Default 20 s (centrifuge-js
     /// `maxResubscribeDelay`).
     pub max_resubscribe_delay: Duration,
+    /// Subscription token (JWT) sent with the first subscribe command.
+    /// Empty for none.
+    pub token: String,
+    /// The owner answers [`Action::FetchSubscriptionToken`] when a
+    /// subscription token is needed (centrifuge-js `getToken`).
+    pub token_source: bool,
+}
+
+impl std::fmt::Debug for SubscriptionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscriptionOptions")
+            .field(
+                "data",
+                &self
+                    .data
+                    .as_ref()
+                    .map(|data| format!("<{} bytes>", data.len())),
+            )
+            .field("data_source", &self.data_source)
+            .field("min_resubscribe_delay", &self.min_resubscribe_delay)
+            .field("max_resubscribe_delay", &self.max_resubscribe_delay)
+            .field("token", &Secret(self.token.clone()))
+            .field("token_source", &self.token_source)
+            .finish()
+    }
 }
 
 impl Default for SubscriptionOptions {
@@ -107,6 +134,8 @@ impl Default for SubscriptionOptions {
             data_source: false,
             min_resubscribe_delay: Duration::from_millis(500),
             max_resubscribe_delay: Duration::from_secs(20),
+            token: String::new(),
+            token_source: false,
         }
     }
 }
@@ -143,6 +172,21 @@ impl SubscriptionOptions {
         self.max_resubscribe_delay = delay;
         self
     }
+
+    /// Sends `token` with the first subscribe command.
+    #[must_use]
+    pub fn token(mut self, token: String) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// Asks the owner for a token when one is needed: when there is none,
+    /// when it expired, or before it expires.
+    #[must_use]
+    pub fn token_source(mut self) -> Self {
+        self.token_source = true;
+        self
+    }
 }
 
 /// Timers the machine sets for a subscription. At most one of each kind
@@ -155,6 +199,10 @@ pub enum SubscriptionTimer {
     SubscribeReply,
     /// Deadline for an unsubscribe command to get its reply.
     UnsubscribeReply,
+    /// When the subscription token must be refreshed.
+    Refresh,
+    /// Deadline for the `sub_refresh` command to get its reply.
+    RefreshReply,
 }
 
 /// Timers the machine sets. At most one of each kind runs at a time.
@@ -259,6 +307,14 @@ pub enum Input {
         /// The data, or why there is none.
         result: Result<Vec<u8>, DataError>,
     },
+    /// The subscription token callback answered a
+    /// [`Action::FetchSubscriptionToken`].
+    SubscriptionTokenFetched {
+        /// The fetch answered.
+        fetch: FetchId,
+        /// The new token, or why there is none.
+        result: Result<String, TokenError>,
+    },
 }
 
 /// Something the owner of the machine must do.
@@ -326,6 +382,20 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionData`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionData(FetchId),
+    /// Ask the subscription's token callback for a new subscription token;
+    /// report the answer with [`Input::SubscriptionTokenFetched`]. Only
+    /// issued for subscriptions with [`SubscriptionOptions::token_source`].
+    FetchSubscriptionToken {
+        /// The subscription asking.
+        subscription: SubscriptionId,
+        /// Its channel, given to the callback.
+        channel: String,
+        /// Identifies the fetch in its answer.
+        fetch: FetchId,
+    },
+    /// Stop a [`Action::FetchSubscriptionToken`] still running: its answer
+    /// is no longer wanted.
+    CancelSubscriptionToken(FetchId),
 }
 
 impl std::fmt::Debug for Input {
@@ -379,6 +449,14 @@ impl std::fmt::Debug for Input {
                     &result
                         .as_ref()
                         .map(|data| format!("<{} bytes>", data.len())),
+                )
+                .finish(),
+            Self::SubscriptionTokenFetched { fetch, result } => f
+                .debug_struct("SubscriptionTokenFetched")
+                .field("fetch", fetch)
+                .field(
+                    "result",
+                    &result.as_ref().map(|token| Secret(token.clone())),
                 )
                 .finish(),
         }
@@ -450,6 +528,20 @@ impl std::fmt::Debug for Action {
                 .finish(),
             Self::CancelSubscriptionData(fetch) => f
                 .debug_tuple("CancelSubscriptionData")
+                .field(fetch)
+                .finish(),
+            Self::FetchSubscriptionToken {
+                subscription,
+                channel,
+                fetch,
+            } => f
+                .debug_struct("FetchSubscriptionToken")
+                .field("subscription", subscription)
+                .field("channel", channel)
+                .field("fetch", fetch)
+                .finish(),
+            Self::CancelSubscriptionToken(fetch) => f
+                .debug_tuple("CancelSubscriptionToken")
                 .field(fetch)
                 .finish(),
         }
@@ -664,11 +756,13 @@ impl Machine {
             Input::SubscriptionDataFetched { fetch, result } => {
                 self.subscription_data_fetched(fetch, result);
             }
-            // About a transport already abandoned.
+            // About a transport already abandoned; subscription tokens are
+            // handled from Block 10b's green step.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
-            | Input::Frame { .. } => {}
+            | Input::Frame { .. }
+            | Input::SubscriptionTokenFetched { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }
@@ -1715,6 +1809,26 @@ mod tests {
                 frame.len()
             )
         );
+    }
+
+    #[test]
+    fn debug_output_never_shows_subscription_tokens() {
+        let mut machine = Machine::new(Config::default());
+        let options = SubscriptionOptions::default()
+            .token("sub-secret".into())
+            .token_source();
+        machine
+            .add_subscription("news".into(), options.clone())
+            .unwrap();
+        let fetched = Input::SubscriptionTokenFetched {
+            fetch: FetchId(0),
+            result: Ok("sub-fetched".into()),
+        };
+
+        let printed = format!("{options:?} {machine:?} {fetched:?}");
+
+        assert!(!printed.contains("sub-secret"), "{printed}");
+        assert!(!printed.contains("sub-fetched"), "{printed}");
     }
 
     #[test]
