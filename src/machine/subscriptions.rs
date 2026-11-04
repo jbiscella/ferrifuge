@@ -701,17 +701,20 @@ impl Machine {
     }
 
     /// "State invalidated" (disconnect code 3014): every subscription drops
-    /// its stream position and its token, a fixed one too, after ending a
-    /// fetch of it in flight; a token callback gives the resubscribe a new
-    /// token, without one it carries none (Block 11, owner decision;
-    /// centrifuge-js `_invalidateState` keeps a fixed token).
+    /// its stream position and its token, a fixed one too, after ending the
+    /// token's refresh, as for code 2502: once dropped, a fixed token no
+    /// longer tells the teardown that a refresh may be scheduled. A token
+    /// callback gives the resubscribe a new token, without one it carries
+    /// none (Block 11, owner decision; centrifuge-js `_invalidateState`
+    /// keeps a fixed token).
     pub(super) fn invalidate_subscriptions(&mut self) {
-        for sub in self.subscriptions.by_id.values_mut() {
-            sub.forget_position();
-            if let Some(fetch) = sub.tokens.abandon() {
-                self.actions.push(Action::CancelSubscriptionToken(fetch));
+        let ids: Vec<SubscriptionId> = self.subscriptions.by_id.keys().copied().collect();
+        for id in ids {
+            self.end_token_refresh(id);
+            if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                sub.forget_position();
+                sub.tokens.invalidate();
             }
-            sub.tokens.invalidate();
         }
     }
 
