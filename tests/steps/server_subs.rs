@@ -17,7 +17,7 @@ use super::recovery::{
     FAKE_EPOCH, FAKE_OFFSET, connect_request, disconnect_and_hold, fake_server_disconnects,
     let_the_client_back, position, subscribe_request, subscribed_to_the_recoverable_fake_channel,
 };
-use super::subscriptions::{create, has_json_data};
+use super::subscriptions::{create, expect_subscription_event, has_json_data};
 use super::transports::{configure, connect_and_wait, kind, server, server_url};
 use super::{ClientWorld, EVENT_TIMEOUT, expect_event};
 
@@ -512,6 +512,11 @@ async fn server_side_subscription_from_the_connect_reply(world: &mut ClientWorld
     }));
     fake_server_disconnects(world);
     next_server_side_event(world, &channel, |event| event.name() == "subscribed").await;
+    // The client-side resubscribe of this reconnect must be received and
+    // answered before a later step counts the subscribe commands: else it
+    // can arrive late and pass for the next one (seen on macOS).
+    expect_subscription_event(world, "subscribing", false).await;
+    expect_subscription_event(world, "subscribed", false).await;
 }
 
 #[then("the connection token callback is called before the next connect")]
