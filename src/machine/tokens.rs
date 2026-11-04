@@ -46,6 +46,9 @@ pub(super) struct Tokens {
     /// The server rejected the token as expired: get a new one first.
     refresh_required: bool,
     fetch: Option<(FetchId, FetchPurpose)>,
+    /// A refresh fetch of a connection that is gone, still awaited for a
+    /// denial (the last one, if several reconnects followed each other).
+    stale_fetch: Option<FetchId>,
     next_fetch: u64,
     /// Id of the refresh command awaiting its reply.
     refresh_command: Option<u32>,
@@ -59,6 +62,7 @@ impl Tokens {
             source,
             refresh_required: false,
             fetch: None,
+            stale_fetch: None,
             next_fetch: 0,
             refresh_command: None,
         }
@@ -113,6 +117,12 @@ impl Tokens {
         self.fetch.is_some() || self.refresh_command.is_some()
     }
 
+    /// Whether `fetch` is the refresh of a connection that is gone, which
+    /// it no longer is afterwards.
+    pub(super) fn take_stale_fetch(&mut self, fetch: FetchId) -> bool {
+        self.stale_fetch.take_if(|stale| *stale == fetch).is_some()
+    }
+
     /// The purpose of `fetch` if it is the pending one, which it no longer
     /// is afterwards; `None` for a fetch abandoned meanwhile.
     pub(super) fn take_fetch(&mut self, fetch: FetchId) -> Option<FetchPurpose> {
@@ -161,6 +171,7 @@ impl Tokens {
         self.current = Secret::default();
         self.refresh_required = false;
         self.fetch = None;
+        self.stale_fetch = None;
     }
 
     /// The token for refresh command `id`, which is now the pending one.
@@ -183,12 +194,16 @@ impl Tokens {
         self.refresh_command.take().is_some()
     }
 
-    /// The connection is torn down. A refresh fetch outlives a reconnect:
-    /// the application's answer, in particular a denial, must still apply.
+    /// The connection is torn down. A refresh fetch outlives a reconnect,
+    /// as a stale one: its denial still applies, its token is not used
+    /// (centrifuge-js `_refresh`), and the next connection refreshes on its
+    /// own schedule.
     pub(super) fn teardown(&mut self, reconnect: bool) {
         self.refresh_command = None;
-        if !(reconnect && matches!(self.fetch, Some((_, FetchPurpose::Refresh)))) {
-            self.fetch = None;
+        match self.fetch.take() {
+            Some((id, FetchPurpose::Refresh)) if reconnect => self.stale_fetch = Some(id),
+            _ if !reconnect => self.stale_fetch = None,
+            _ => {}
         }
     }
 }
