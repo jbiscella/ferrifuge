@@ -4,11 +4,11 @@
 //! `_handleTokenResponse`, `_handleTokenError`, `_refresh`,
 //! `_refreshResponse`, `_refreshError`, `_subscribeError`), except where
 //! CLAUDE.md decides otherwise: the refresh starts at 80–90% of the ttl
-//! (Block 14) and a failed refresh is retried after 5 to 10 s (Block 10).
+//! (Block 14).
 
-use super::super::tokens::{
-    FetchPurpose, REFRESH_RETRY_MAX, REFRESH_RETRY_MIN, TOKEN_EXPIRED, refresh_delay,
-};
+use std::time::Duration;
+
+use super::super::tokens::{FetchPurpose, TOKEN_EXPIRED, refresh_delay};
 use super::super::{Action, FetchId, Machine, SubscriptionId, SubscriptionTimer};
 use crate::backoff;
 use crate::token::Secret;
@@ -16,6 +16,12 @@ use crate::wire::{Command, Error, Method, RefreshResult, Reply, ReplyResult, Sub
 use crate::{
     ClientError, ErrorKind, State, SubscriptionEvent, SubscriptionState, TokenError, codes,
 };
+
+/// Retry delay of a failed subscription token refresh: centrifuge-js
+/// `subscription.ts` `_getRefreshRetryDelay`, 10 to 20 s, twice the delay
+/// for connection tokens.
+const REFRESH_RETRY_MIN: Duration = Duration::from_secs(10);
+const REFRESH_RETRY_MAX: Duration = Duration::from_secs(20);
 
 impl Machine {
     /// Asks the owner for a subscription token.
