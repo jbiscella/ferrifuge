@@ -88,6 +88,10 @@ impl ProxyBackend {
                 "CENTRIFUGO_CLIENT_PROXY_CONNECT_ENDPOINT",
                 format!("http://{HOST_GATEWAY}:{}/connect", self.port),
             ),
+            // Above the client's connect timeout (5 s): a connect the proxy
+            // holds stays unanswered until the client gives up, rather than
+            // the server answering it with an error first (brief C3).
+            ("CENTRIFUGO_CLIENT_PROXY_CONNECT_TIMEOUT", "15s".to_owned()),
             (
                 "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_SUBSCRIBE_PROXY_ENABLED",
                 "true".to_owned(),
