@@ -225,6 +225,48 @@ mod tests {
         assert_eq!(machine.server_subscriptions(), ["alerts"]);
     }
 
+    // Client-side precedence applies to Unsubscribe pushes and publications
+    // only: a Subscribe push always makes a server-side subscription
+    // (centrifuge-js 63ed73e `_handleSubscribe`, centrifuge.ts:2630-2638).
+    #[test]
+    fn a_subscribe_push_registers_the_channel_even_when_a_client_side_subscription_is_subscribed() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        let id = machine
+            .add_subscription(
+                "alerts".into(),
+                crate::machine::SubscriptionOptions::default(),
+            )
+            .unwrap();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(crate::SubscriptionState::Subscribed)
+        );
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"push":{"channel":"alerts","subscribe":{"data":{"tier":"gold"}}}}"#,
+        ));
+
+        assert!(
+            events(&actions).iter().any(|event| matches!(
+                event,
+                ClientEvent::ServerSubscription {
+                    channel,
+                    event: ServerSubscriptionEvent::Subscribed(subscribed),
+                } if channel == "alerts" && subscribed.data.as_deref() == Some(&br#"{"tier":"gold"}"#[..])
+            )),
+            "{actions:?}"
+        );
+        assert_eq!(machine.server_subscriptions(), ["alerts"]);
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(crate::SubscriptionState::Subscribed)
+        );
+    }
+
     #[test]
     fn an_unsubscribe_push_ends_a_server_side_subscription_with_its_code_and_reason() {
         let (mut machine, transport) = opened();
