@@ -179,6 +179,83 @@ fn registry_lists(world: &mut ClientWorld, channel: String) {
     assert!(channels.contains(&channel), "{channels:?}");
 }
 
+#[given(
+    regex = r#"^the fake server grants a server-side subscription to channel "(\w+)" with data (\{.*\}) at connect$"#
+)]
+fn fake_grants_with_data(world: &mut ClientWorld, channel: String, data: String) {
+    let data: Value = serde_json::from_str(&data).expect("JSON data");
+    world
+        .fake()
+        .grant_server_subscriptions(json!({ channel: {"data": data} }));
+}
+
+#[given(regex = r#"^the server API subscribes the client to channel "(\w+)"$"#)]
+#[when(regex = r#"^the server API subscribes the client to channel "(\w+)"$"#)]
+async fn server_api_subscribes(world: &mut ClientWorld, channel: String) {
+    server_api(world, "subscribe", &channel).await;
+}
+
+#[when(regex = r#"^the server API unsubscribes the client from channel "(\w+)"$"#)]
+async fn server_api_unsubscribes(world: &mut ClientWorld, channel: String) {
+    server_api(world, "unsubscribe", &channel).await;
+}
+
+#[when(
+    regex = r#"^the fake server pushes a server-side subscription to channel "(\w+)" with data (\{.*\})$"#
+)]
+fn fake_pushes_subscription(world: &mut ClientWorld, channel: String, data: String) {
+    let data: Value = serde_json::from_str(&data).expect("JSON data");
+    world
+        .fake()
+        .send(&json!({"push": {"channel": channel, "subscribe": {"data": data}}}).to_string());
+}
+
+#[then(
+    regex = r#"^(?:then )?the client emits a server-side "subscribed" event for channel "(\w+)" with data (\{.*\})$"#
+)]
+async fn emits_subscribed_with_data(world: &mut ClientWorld, channel: String, data: String) {
+    let event = next_server_side_event(world, &channel, |event| event.name() == "subscribed").await;
+    let ServerSubscriptionEvent::Subscribed(subscribed) = &event else {
+        unreachable!("only a subscribed event is wanted");
+    };
+    let got = subscribed
+        .data
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
+    assert_eq!(got, serde_json::from_str::<Value>(&data).ok(), "{event:?}");
+}
+
+#[then(regex = r#"^a publication to channel "(\w+)" is received as a server-side publication$"#)]
+async fn publication_received_server_side(world: &mut ClientWorld, channel: String) {
+    let data = json!({"via": "server API"});
+    server(world)
+        .api()
+        .call("publish", json!({"channel": channel, "data": data}))
+        .await
+        .expect("server API publish");
+    expect_server_side_publication(world, &channel, &data.to_string()).await;
+}
+
+/// Calls the server API `method` (`subscribe` or `unsubscribe`) for the
+/// scenario's connection and `channel`.
+async fn server_api(world: &ClientWorld, method: &str, channel: &str) {
+    // Connections accepted by the proxy belong to its user, others are anonymous.
+    let user = if world.proxy.is_some() {
+        crate::support::proxy::USER
+    } else {
+        ""
+    };
+    let client_id = world.client_id.clone().expect("a connected client");
+    server(world)
+        .api()
+        .call(
+            method,
+            json!({"user": user, "client": client_id, "channel": channel}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("server API {method}: {error:?}"));
+}
+
 fn proxy(world: &ClientWorld) -> &crate::support::proxy::ProxyBackend {
     world
         .proxy

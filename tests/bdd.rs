@@ -175,6 +175,10 @@ const IMPLEMENTED: &[&str] = &[
     "Server-side subscriptions granted at connect over an emulated transport",
     "Initial publications of a server-side subscription granted at connect are delivered",
     "A server-side subscription missing after reconnect is unsubscribed",
+    // Block 12b: subscriptions the server adds or removes later.
+    "A subscription added by the server after connect is tracked",
+    "A server-side subscription removed by the server is unsubscribed",
+    "Server-side subscribed events carry the server's data",
 ];
 
 /// Server configuration of @A scenarios.
