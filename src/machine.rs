@@ -1132,13 +1132,13 @@ impl Machine {
         self.connect_command = None;
         match (reply.error, reply.result) {
             (Some(error), _) => self.connect_error(&error),
-            (None, ReplyResult::Connect(result)) => self.connected(&result),
+            (None, ReplyResult::Connect(result)) => self.connected(result),
             // A reply to connect without its result breaks the protocol.
             (None, _) => self.reconnect_after_transport_closed(),
         }
     }
 
-    fn connected(&mut self, result: &ConnectResult) {
+    fn connected(&mut self, mut result: ConnectResult) {
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
         self.transports.choose();
@@ -1164,10 +1164,11 @@ impl Machine {
         });
         self.wait_server_ping();
         self.emit(ClientEvent::Connected {
-            client_id: result.client.clone(),
+            client_id: std::mem::take(&mut result.client),
             transport: self.transport_kind().name().to_owned(),
         });
         self.subscriptions_connected();
+        self.server_subscriptions_connected(std::mem::take(&mut result.subs));
     }
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
@@ -1224,6 +1225,7 @@ impl Machine {
             self.actions.push(Action::CancelTimer(timer));
         }
         self.subscriptions_disconnected();
+        self.server_subscriptions_disconnected();
         self.pings = None;
 
         let state = if reconnect {

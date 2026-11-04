@@ -3,15 +3,27 @@
 //! reports through [`crate::ClientEvent::ServerSubscription`], but does not
 //! control (spec, "Server-side subscriptions").
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
-use super::Machine;
+use super::{Action, Machine};
+use crate::wire::SubscribeResult;
+use crate::{ClientEvent, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed, codes};
 
-/// The registry of server-side subscriptions: their channels, until they
-/// carry stream positions (12c).
+/// Reason of [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
+const NOT_GRANTED_REASON: &str = "not subscribed by the server after reconnect";
+
+/// The registry of server-side subscriptions, by channel.
 #[derive(Debug, Default)]
 pub(super) struct ServerSubscriptions {
-    channels: BTreeSet<String>,
+    by_channel: BTreeMap<String, ServerSubscription>,
+}
+
+/// A server-side subscription in the registry.
+#[derive(Debug)]
+struct ServerSubscription {
+    /// Subscribed on the current connection; losing it makes the
+    /// subscription subscribing until the next connection.
+    subscribed: bool,
 }
 
 impl Machine {
@@ -19,6 +31,196 @@ impl Machine {
     /// channel order.
     #[must_use]
     pub fn server_subscriptions(&self) -> Vec<String> {
-        self.server_subscriptions.channels.iter().cloned().collect()
+        self.server_subscriptions
+            .by_channel
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The connect reply granted `subs`, after the client's `connected`
+    /// event (centrifuge-js `_connectResponse`): each is subscribed, its
+    /// initial or recovered publications following its `subscribed` event
+    /// whether or not it recovers (Block 12); one of the registry the reply
+    /// leaves out ends with [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`]
+    /// and leaves the registry (centrifuge-js `_processServerSubs`).
+    pub(super) fn server_subscriptions_connected(
+        &mut self,
+        subs: BTreeMap<String, SubscribeResult>,
+    ) {
+        let gone: Vec<String> = self
+            .server_subscriptions
+            .by_channel
+            .keys()
+            .filter(|channel| !subs.contains_key(*channel))
+            .cloned()
+            .collect();
+        for (channel, result) in subs {
+            self.server_subscriptions
+                .by_channel
+                .insert(channel.clone(), ServerSubscription { subscribed: true });
+            let stream_position =
+                (result.positioned || result.recoverable).then(|| StreamPosition {
+                    offset: result.offset,
+                    epoch: result.epoch.clone(),
+                });
+            self.emit_server_subscription(
+                &channel,
+                ServerSubscriptionEvent::Subscribed(Subscribed {
+                    data: result.data,
+                    positioned: result.positioned,
+                    recoverable: result.recoverable,
+                    was_recovering: result.was_recovering,
+                    recovered: result.recovered,
+                    stream_position,
+                }),
+            );
+            for publication in result.publications {
+                self.emit_server_subscription(
+                    &channel,
+                    ServerSubscriptionEvent::Publication(publication),
+                );
+            }
+        }
+        for channel in gone {
+            self.server_subscriptions.by_channel.remove(&channel);
+            self.emit_server_subscription(
+                &channel,
+                ServerSubscriptionEvent::Unsubscribed {
+                    code: codes::unsubscribed::NOT_GRANTED_ON_RECONNECT,
+                    reason: NOT_GRANTED_REASON.to_owned(),
+                },
+            );
+        }
+    }
+
+    /// The connection is lost or `disconnect()` was called: the server-side
+    /// subscriptions stay in the registry, subscribing until the next
+    /// connection (spec, "Server-side subscriptions").
+    pub(super) fn server_subscriptions_disconnected(&mut self) {
+        let mut subscribing = Vec::new();
+        for (channel, sub) in &mut self.server_subscriptions.by_channel {
+            if std::mem::take(&mut sub.subscribed) {
+                subscribing.push(channel.clone());
+            }
+        }
+        for channel in subscribing {
+            self.emit_server_subscription(&channel, ServerSubscriptionEvent::Subscribing);
+        }
+    }
+
+    /// A publication pushed for `channel` that no subscribed client-side
+    /// subscription takes: the server-side subscription's, if subscribed
+    /// (Block 12; centrifuge-js `_getSubForPush`).
+    pub(super) fn server_publication(&mut self, channel: &str, publication: Publication) {
+        let subscribed = self
+            .server_subscriptions
+            .by_channel
+            .get(channel)
+            .is_some_and(|sub| sub.subscribed);
+        if subscribed {
+            self.emit_server_subscription(
+                channel,
+                ServerSubscriptionEvent::Publication(publication),
+            );
+        }
+    }
+
+    fn emit_server_subscription(&mut self, channel: &str, event: ServerSubscriptionEvent) {
+        self.actions
+            .push(Action::Emit(ClientEvent::ServerSubscription {
+                channel: channel.to_owned(),
+                event,
+            }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use crate::machine::{Input, Timer, TransportId};
+
+    /// A machine over a websocket that opened; the connect command is 1.
+    fn opened() -> (Machine, TransportId) {
+        let mut machine = Machine::new(Config::default());
+        let transport = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        (machine, transport)
+    }
+
+    fn reply(transport: TransportId, json: &str) -> Input {
+        Input::Frame {
+            transport,
+            data: json.as_bytes().to_vec(),
+        }
+    }
+
+    fn events(actions: &[Action]) -> Vec<&ClientEvent> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Emit(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn server_side_subscriptions_follow_the_connected_event() {
+        let (mut machine, transport) = opened();
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{"publications":[{"data":{},"offset":1}]}}}}"#,
+        ));
+
+        let names: Vec<_> = events(&actions).iter().map(|event| event.name()).collect();
+        assert_eq!(names, ["connected", "subscribed", "publication"]);
+        assert_eq!(machine.server_subscriptions(), ["alerts"]);
+    }
+
+    #[test]
+    fn a_subscription_a_reconnect_no_longer_grants_ends_with_code_4() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{}}}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3000),
+            reason: "reconnect".into(),
+        });
+        let transport = machine
+            .handle(Input::TimerFired(Timer::Reconnect))
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let actions = machine.handle(reply(transport, r#"{"id":2,"connect":{"client":"c"}}"#));
+
+        assert!(
+            events(&actions).contains(&&ClientEvent::ServerSubscription {
+                channel: "alerts".into(),
+                event: ServerSubscriptionEvent::Unsubscribed {
+                    code: codes::unsubscribed::NOT_GRANTED_ON_RECONNECT,
+                    reason: "not subscribed by the server after reconnect".into(),
+                },
+            }),
+            "{actions:?}"
+        );
+        assert_eq!(machine.server_subscriptions(), Vec::<String>::new());
     }
 }
