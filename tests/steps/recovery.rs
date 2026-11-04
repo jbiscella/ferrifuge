@@ -3,18 +3,22 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
-use ferrifuge::{StreamPosition, Subscribed, SubscriptionEvent};
+use ferrifuge::machine::SubscriptionOptions;
+use ferrifuge::{StateError, StreamPosition, Subscribed, SubscriptionEvent, SubscriptionState};
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 
 use super::connection::a_connected_client;
 use super::subscriptions::{
-    create, expect_subscription_event, has_json_data, next_publication, subscribe,
+    MachineRun, create, expect_subscription_event, has_json_data, next_publication, subscribe,
 };
 use super::transports::server;
 use super::{ClientWorld, EVENT_TIMEOUT};
+use crate::support::proxy;
 use crate::support::relay::Mode;
 
 /// Channel of the @A server's `rec` namespace: history and forced recovery.
@@ -34,7 +38,7 @@ const NEW_EPOCH: &str = "new-epoch";
 const NO_PUBLICATION_PERIOD: Duration = Duration::from_millis(500);
 
 /// What the recovery steps of a scenario keep.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Recovery {
     /// Publications made through the server API: data and position.
     published: Vec<(String, StreamPosition)>,
@@ -45,6 +49,27 @@ pub(crate) struct Recovery {
     /// Subscribe commands the fake server had received before the step
     /// making the client resubscribe.
     subscribes_before: usize,
+    /// When the getState callback of the scenario's client was called.
+    state_calls: Arc<Mutex<Vec<Instant>>>,
+    /// The position it answers with.
+    state_answer: Arc<Mutex<Option<StreamPosition>>>,
+    /// Permits to answer: a call waits for one, so a step can look at the
+    /// subscription while getState is running.
+    state_gate: Arc<Semaphore>,
+}
+
+impl Default for Recovery {
+    fn default() -> Self {
+        Self {
+            published: Vec::new(),
+            expected: Vec::new(),
+            position: None,
+            subscribes_before: 0,
+            state_calls: Arc::default(),
+            state_answer: Arc::default(),
+            state_gate: Arc::new(Semaphore::new(0)),
+        }
+    }
 }
 
 fn position(offset: u64, epoch: &str) -> StreamPosition {
@@ -81,12 +106,18 @@ async fn publish(world: &mut ClientWorld, count: usize) {
 async fn disconnect_and_hold(world: &mut ClientWorld) {
     world.relay.as_ref().expect("a relay").set_mode(Mode::Down);
     let client_id = world.client_id.clone().expect("a connected client");
+    // Connections accepted by the proxy belong to its user.
+    let user = if world.proxy.is_some() {
+        proxy::USER
+    } else {
+        ""
+    };
     server(world)
         .api()
         .call(
             "disconnect",
             json!({
-                "user": "",
+                "user": user,
                 "client": client_id,
                 "disconnect": {"code": RECONNECT_CODE, "reason": "reconnect advised by the test"},
             }),
@@ -457,4 +488,231 @@ async fn a_failed_recovery(world: &mut ClientWorld) {
         subscribed.was_recovering && !subscribed.recovered,
         "{subscribed:?}"
     );
+}
+
+/// The top of the recoverable channel's stream.
+async fn stream_top(world: &ClientWorld) -> StreamPosition {
+    let result = server(world)
+        .api()
+        .call("history", json!({"channel": RECOVERABLE, "limit": 0}))
+        .await
+        .expect("history");
+    position(
+        result["offset"].as_u64().unwrap_or_default(),
+        result["epoch"].as_str().expect("an epoch"),
+    )
+}
+
+/// Makes the scenario's subscription to the recoverable channel, with a
+/// getState callback answering `state_answer` once a permit lets it.
+fn a_subscription_with_get_state(world: &mut ClientWorld) {
+    let recovery = &world.recovery;
+    let (calls, answer, gate) = (
+        Arc::clone(&recovery.state_calls),
+        Arc::clone(&recovery.state_answer),
+        Arc::clone(&recovery.state_gate),
+    );
+    let subscription = world
+        .client()
+        .subscription_builder(RECOVERABLE)
+        .get_state(move |_channel| {
+            let (calls, answer, gate) =
+                (Arc::clone(&calls), Arc::clone(&answer), Arc::clone(&gate));
+            async move {
+                calls.lock().unwrap().push(Instant::now());
+                gate.acquire().await.expect("the gate stays open").forget();
+                let answer = answer.lock().unwrap().clone();
+                answer.ok_or_else(|| StateError("no position to answer".to_owned()))
+            }
+        })
+        .build()
+        .expect("no subscription to the channel yet");
+    world.track_subscription(subscription);
+}
+
+fn state_calls(world: &ClientWorld) -> Vec<Instant> {
+    world.recovery.state_calls.lock().unwrap().clone()
+}
+
+/// Lets the getState callback answer `at` once.
+fn answer_state_with(world: &ClientWorld, at: StreamPosition) {
+    *world.recovery.state_answer.lock().unwrap() = Some(at);
+    world.recovery.state_gate.add_permits(1);
+}
+
+#[given("a subscription with a getState callback to a channel with history and recovery")]
+async fn a_get_state_subscription_to_a_channel_with_publications(world: &mut ClientWorld) {
+    publish(world, 3).await;
+    // getState gives the position of the first: the later ones are
+    // recovered.
+    world.recovery.expected.remove(0);
+    let first = world.recovery.published[0].1.clone();
+    answer_state_with(world, first);
+    let endpoint = world.server_endpoint();
+    world.new_client(endpoint);
+    a_subscription_with_get_state(world);
+}
+
+#[then("the getState callback is called once before the subscribe command")]
+async fn get_state_called_before_the_subscribe(world: &mut ClientWorld) {
+    let proxy = world
+        .proxy
+        .as_ref()
+        .expect("a subscribe proxy: tag the scenario @B");
+    let first_subscribe = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let requests = proxy.subscribe_requests();
+            if let Some(index) = requests
+                .iter()
+                .position(|request| request["channel"] == RECOVERABLE)
+            {
+                return proxy.subscribe_times()[index];
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a subscribe request within the timeout");
+    let calls = state_calls(world);
+    assert_eq!(calls.len(), 1, "getState calls: {calls:?}");
+    assert!(calls[0] < first_subscribe, "getState after the subscribe");
+}
+
+/// The subscribe carried the position getState gave: Centrifugo recovered
+/// from it, which needs that offset and epoch (the subscribe proxy does not
+/// see positions; verified, Block 11).
+#[then("the subscribe command carries the stream position getState returned")]
+async fn the_subscribe_carries_the_get_state_position(world: &mut ClientWorld) {
+    let subscribed = next_subscribed(world).await;
+    assert!(
+        subscribed.was_recovering && subscribed.recovered,
+        "{subscribed:?}"
+    );
+    receive_exactly_the_expected(world).await;
+}
+
+#[given("a client subscribed with a getState callback to a channel with history and recovery")]
+async fn a_client_subscribed_with_get_state(world: &mut ClientWorld) {
+    a_connected_client(world).await;
+    let top = stream_top(world).await;
+    answer_state_with(world, top);
+    a_subscription_with_get_state(world);
+    subscribe(world).await;
+    expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[then("the getState callback is called a second time")]
+async fn get_state_called_again(world: &mut ClientWorld) {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        while state_calls(world).len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("getState calls: {:?}", state_calls(world)));
+}
+
+/// getState is still running: it waits for a permit.
+#[then(r#"until then the subscription stays "subscribing" and receives no publication"#)]
+async fn subscribing_until_then(world: &mut ClientWorld) {
+    let events = world
+        .subscription_events_during(Duration::from_millis(100))
+        .await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Subscribed(_) | SubscriptionEvent::Publication(_)
+        )),
+        "{events:?}"
+    );
+    assert_eq!(world.subscription().state(), SubscriptionState::Subscribing);
+}
+
+/// getState answers the stream's top: a recovery from it succeeds, which
+/// it could not from the position the history lost.
+#[then("the next subscribe command carries the stream position it returned")]
+async fn the_next_subscribe_carries_the_new_position(world: &mut ClientWorld) {
+    let top = stream_top(world).await;
+    answer_state_with(world, top);
+    let subscribed = next_subscribed(world).await;
+    assert!(
+        subscribed.was_recovering && subscribed.recovered,
+        "{subscribed:?}"
+    );
+    // The next step looks at it too.
+    world
+        .put_back
+        .push_front(SubscriptionEvent::Subscribed(subscribed));
+}
+
+#[given("a subscription with the since option and a getState callback")]
+fn a_machine_with_since_and_get_state(world: &mut ClientWorld) {
+    let options = SubscriptionOptions::default()
+        .since(position(5, "since-epoch"))
+        .state_source();
+    let mut run = MachineRun::with(options, Vec::new(), Vec::new());
+    run.state_answers.push_back(Ok(position(9, "state-epoch")));
+    world.subscription_machine = Some(run);
+}
+
+#[then("the getState callback is not called")]
+fn get_state_not_called(world: &mut ClientWorld) {
+    let run = world.subscription_machine.as_ref().expect("@E machine");
+    assert!(!run.calls.contains(&"state"), "{:?}", run.actions);
+}
+
+/// The first subscribe command of an @E machine asks to recover from `at`.
+fn first_subscribe_recovers_from(run: &MachineRun, at: &StreamPosition) -> Value {
+    let subscribe = run
+        .requests("subscribe", 0)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no subscribe command: {:?}", run.actions));
+    assert_eq!(subscribe["recover"], true, "{subscribe}");
+    assert_eq!(
+        (
+            subscribe["epoch"].as_str().unwrap_or_default(),
+            subscribe["offset"].as_u64().unwrap_or_default(),
+        ),
+        (at.epoch.as_str(), at.offset),
+        "{subscribe}"
+    );
+    subscribe
+}
+
+#[then("the subscribe command asks to recover from the since position")]
+fn the_subscribe_recovers_from_since(world: &mut ClientWorld) {
+    let run = world.subscription_machine.as_ref().expect("@E machine");
+    first_subscribe_recovers_from(run, &position(5, "since-epoch"));
+}
+
+#[given("a subscription with a getState callback that fails once")]
+fn a_machine_with_get_state_failing_once(world: &mut ClientWorld) {
+    let options = SubscriptionOptions::default().state_source();
+    let mut run = MachineRun::with(options, Vec::new(), Vec::new());
+    run.state_answers.extend([
+        Err(StateError("backend down".to_owned())),
+        Ok(position(9, "state-epoch")),
+    ]);
+    world.subscription_machine = Some(run);
+}
+
+#[then("getState is called again after the resubscribe backoff delay")]
+fn get_state_called_again_after_the_backoff(world: &mut ClientWorld) {
+    let run = world.subscription_machine.as_ref().expect("@E machine");
+    let calls = run.calls.iter().filter(|call| **call == "state").count();
+    assert_eq!(calls, 2, "{:?}", run.actions);
+    let delay = run.delay_before_fetch.expect("a resubscribe delay");
+    // The resubscribe backoff defaults to centrifuge-js's: from 500 ms.
+    assert!(delay >= Duration::from_millis(500), "{delay:?}");
+}
+
+#[then("the subscribe command carries the stream position the second call returned")]
+fn the_subscribe_carries_the_second_position(world: &mut ClientWorld) {
+    let run = world.subscription_machine.as_ref().expect("@E machine");
+    let subscribe = first_subscribe_recovers_from(run, &position(9, "state-epoch"));
+    // With getState, a recovery that fails is rejected rather than
+    // answered unrecovered (client.proto, SubscribeRequest.flag).
+    assert_eq!(subscribe["flag"], 2, "{subscribe}");
+    assert_eq!(run.requests("subscribe", 0).len(), 1, "{:?}", run.actions);
 }

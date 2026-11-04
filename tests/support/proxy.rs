@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
@@ -36,6 +36,8 @@ struct Answers {
     subscribe: HashMap<String, SubscribeAnswer>,
     /// Bodies of the subscribe requests received.
     subscribe_requests: Vec<Value>,
+    /// When each of them arrived.
+    subscribe_times: Vec<Instant>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -125,6 +127,11 @@ impl ProxyBackend {
         self.state.lock().unwrap().subscribe_requests.clone()
     }
 
+    /// When each subscribe request received so far arrived.
+    pub(crate) fn subscribe_times(&self) -> Vec<Instant> {
+        self.state.lock().unwrap().subscribe_times.clone()
+    }
+
     fn program_subscribe(&self, channel: &str, program: impl FnOnce(&mut SubscribeAnswer)) {
         let mut state = self.state.lock().unwrap();
         program(state.subscribe.entry(channel.to_owned()).or_default());
@@ -193,6 +200,7 @@ async fn subscribe(
         let mut answers = state.lock().unwrap();
         let channel = request["channel"].as_str().unwrap_or_default().to_owned();
         answers.subscribe_requests.push(request);
+        answers.subscribe_times.push(Instant::now());
         answers.subscribe.get(&channel).cloned().unwrap_or_default()
     };
     tokio::time::sleep(answer.delay).await;
