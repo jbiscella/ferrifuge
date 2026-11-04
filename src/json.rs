@@ -82,6 +82,18 @@ pub(crate) fn emulation_request(session: &str, node: &str, frame: &[u8]) -> Vec<
     .expect("serializing plain structs to a Vec cannot fail")
 }
 
+/// The frame an [`emulation_request`] body carries; `None` for a body that
+/// is not one.
+pub(crate) fn emulation_frame(body: &[u8]) -> Option<Vec<u8>> {
+    #[derive(Deserialize)]
+    struct EmulationRequest {
+        data: String,
+    }
+    serde_json::from_slice::<EmulationRequest>(body)
+        .ok()
+        .map(|request| request.data.into_bytes())
+}
+
 /// One field per request type; a command sets its own and leaves the
 /// others at their default, so adding a command touches one place.
 #[derive(Serialize, Default)]
@@ -641,6 +653,14 @@ mod tests {
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
         assert_eq!(replies[1].result, ReplyResult::Push(Push::Unsupported));
+    }
+
+    #[test]
+    fn the_frame_of_an_emulation_request_is_read_back() {
+        let body = emulation_request("s1", "n1", b"{\"id\":2}\n{}");
+
+        assert_eq!(emulation_frame(&body), Some(b"{\"id\":2}\n{}".to_vec()));
+        assert_eq!(emulation_frame(b"{\"id\":2}"), None);
     }
 
     #[test]

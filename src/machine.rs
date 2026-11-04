@@ -1066,6 +1066,17 @@ impl Machine {
     /// 2026-11-04). It proves nothing about the connection, so the backoff
     /// is not reset.
     fn send_rejected(&mut self, frame: &[u8]) {
+        // Over an emulated transport the commands are inside the request.
+        let unwrapped;
+        let frame = if self.emulation.is_some() {
+            let Some(inner) = json::emulation_frame(frame) else {
+                return;
+            };
+            unwrapped = inner;
+            &unwrapped
+        } else {
+            frame
+        };
         for id in self.codec.command_ids(frame) {
             if id == 0 {
                 continue;
