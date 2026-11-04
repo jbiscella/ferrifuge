@@ -80,6 +80,9 @@ const IMPLEMENTED: &[&str] = &[
     "Commands work over an emulated transport",
     "A failed emulation request makes the client reconnect",
     "An HTTP stream that never answers the handshake falls back",
+    // Brief C3: an opened websocket is chosen only when the server answers.
+    "A websocket that never answers the handshake falls back",
+    "An opened websocket without a connect reply falls back",
     "Every transport unreachable",
     "A failed fallback sequence is retried after the reconnect backoff",
     "The fallback sequence is retried until a transport succeeds",
