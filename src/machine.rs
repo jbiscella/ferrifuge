@@ -2063,6 +2063,35 @@ mod tests {
         assert_eq!(late, [], "the late token is not sent");
     }
 
+    // Owner decision, 2026-11-04: a refresh refused as too large would be
+    // refused again, so the client stops.
+    #[test]
+    fn a_refresh_rejected_as_too_large_disconnects() {
+        let (mut machine, transport, _) = connected_with_token(30);
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let refreshing = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+        let Some(Action::Send { frame, .. }) = refreshing
+            .iter()
+            .find(|action| matches!(action, Action::Send { .. }))
+        else {
+            panic!("{refreshing:?}");
+        };
+
+        let rejected = machine.handle(Input::SendRejected {
+            transport,
+            frame: frame.clone(),
+        });
+
+        assert_eq!(machine.state(), State::Disconnected, "{rejected:?}");
+        assert!(events(&rejected).contains(&&ClientEvent::Disconnected {
+            code: codes::disconnected::MESSAGE_SIZE_LIMIT,
+            reason: "message size limit exceeded".into()
+        }));
+    }
+
     #[test]
     fn late_refresh_token_while_reconnecting_is_not_used_for_the_connect() {
         let (mut machine, transport, _) = connected_with_token(30);

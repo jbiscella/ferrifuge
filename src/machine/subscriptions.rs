@@ -1092,6 +1092,17 @@ mod tests {
         );
     }
 
+    /// The one frame sent among `actions`, as the action carries it.
+    fn frame_sent(actions: &[Action]) -> Vec<u8> {
+        let mut frames = actions.iter().filter_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        });
+        let frame = frames.next().expect("a frame sent");
+        assert!(frames.next().is_none(), "{actions:?}");
+        frame
+    }
+
     /// Frames sent among `actions`, as text.
     fn sent(actions: &[Action]) -> Vec<String> {
         actions
@@ -1422,45 +1433,69 @@ mod tests {
     }
 
     // Owner decision, 2026-11-04: an emulation request answered with HTTP
-    // 413 fails its commands at once, keeping the transport.
+    // 413 ends its commands at once, keeping the transport; a subscribe
+    // would be refused again, so it is not retried.
     #[test]
-    fn a_rejected_subscribe_fails_at_once_and_is_retried_after_the_backoff() {
+    fn a_subscribe_rejected_as_too_large_unsubscribes_without_retry() {
         let (mut machine, transport, id) = connected();
         let subscribing = machine.handle(Input::Subscribe(id));
-        let Some(Action::Send { frame, .. }) = subscribing
-            .iter()
-            .find(|action| matches!(action, Action::Send { .. }))
-        else {
-            panic!("{subscribing:?}");
-        };
 
         let rejected = machine.handle(Input::SendRejected {
             transport,
-            frame: frame.clone(),
+            frame: frame_sent(&subscribing),
         });
 
         assert!(
-            rejected.iter().any(|action| matches!(
-                action,
-                Action::EmitSubscription(of, SubscriptionEvent::Error(error))
-                    if *of == id && error.code == codes::error::TRANSPORT_WRITE
+            rejected.contains(&Action::EmitSubscription(
+                id,
+                SubscriptionEvent::Unsubscribed {
+                    code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                    reason: "message size limit exceeded".into(),
+                }
             )),
             "{rejected:?}"
         );
         assert!(
-            rejected.iter().any(|action| matches!(
+            !rejected.iter().any(|action| matches!(
                 action,
                 Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+                    | Action::CloseTransport(_)
             )),
             "{rejected:?}"
         );
+        // The server never got the subscribe: nothing to unsubscribe.
+        assert_eq!(sent(&rejected), Vec::<String>::new());
+        assert_eq!(machine.state(), State::Connected);
+    }
+
+    #[test]
+    fn a_sub_refresh_rejected_as_too_large_unsubscribes() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        let refreshing = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+
+        let rejected = machine.handle(Input::SendRejected {
+            transport,
+            frame: frame_sent(&refreshing),
+        });
+
         assert!(
-            !rejected
-                .iter()
-                .any(|action| matches!(action, Action::CloseTransport(_))),
+            rejected.contains(&Action::EmitSubscription(
+                id,
+                SubscriptionEvent::Unsubscribed {
+                    code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                    reason: "message size limit exceeded".into(),
+                }
+            )),
             "{rejected:?}"
         );
-        assert_eq!(machine.state(), State::Connected);
+        // The server holds the subscription: it is ended there too.
+        assert_eq!(
+            sent(&rejected),
+            [r#"{"id":4,"unsubscribe":{"channel":"news"}}"#]
+        );
     }
 
     // Over http_stream and sse the commands travel inside an emulation
@@ -1496,8 +1531,8 @@ mod tests {
         assert!(
             rejected.iter().any(|action| matches!(
                 action,
-                Action::EmitSubscription(of, SubscriptionEvent::Error(error))
-                    if *of == id && error.code == codes::error::TRANSPORT_WRITE
+                Action::EmitSubscription(of, SubscriptionEvent::Unsubscribed { code, .. })
+                    if *of == id && *code == codes::unsubscribed::MESSAGE_SIZE_LIMIT
             )),
             "{rejected:?}"
         );
