@@ -597,6 +597,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_rejected_emulation_request_keeps_the_transport() {
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        // E.g. a body too large: only this command is rejected.
+        let rejecting = serve_once(
+            b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\n\r\n",
+            "/emulation",
+            Duration::ZERO,
+        )
+        .await;
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            Some(&rejecting),
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        transport.send(b"{}".to_vec());
+
+        let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv()).await;
+
+        assert!(inbound.is_err(), "{inbound:?}");
+    }
+
+    #[tokio::test]
+    async fn closing_the_transport_aborts_its_emulation_requests() {
+        use tokio::io::AsyncReadExt;
+
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        // Reads the request, never answers it, and reports the connection
+        // closed by the client.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hung = format!("http://{}/emulation", listener.local_addr().unwrap());
+        let (aborted, request_aborted) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            while socket.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+            let _ = aborted.send(());
+        });
+        // Longer than the test: only the close can end the request.
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            Some(&hung),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        transport.send(b"{}".to_vec());
+        // Lets the request reach the server.
+        let _ = tokio::time::timeout(Duration::from_millis(300), transport.recv()).await;
+
+        // How the driver closes an HTTP transport.
+        drop(transport);
+
+        let closed = tokio::time::timeout(TIMEOUT, request_aborted).await;
+        assert!(matches!(closed, Ok(Ok(()))), "{closed:?}");
+    }
+
     #[test]
     fn colonless_sse_fields_have_an_empty_value() {
         let messages = decode(
