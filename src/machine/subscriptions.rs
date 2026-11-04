@@ -920,6 +920,25 @@ mod tests {
     }
 
     #[test]
+    fn a_state_invalidated_disconnect_drops_a_fixed_subscription_token() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token("t1".into()));
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        // No callback gives a new token: the resubscribe carries none.
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
     fn a_state_invalidated_disconnect_drops_the_stream_positions() {
         let (mut machine, transport, id) = connected();
         machine.handle(Input::Subscribe(id));
