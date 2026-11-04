@@ -27,6 +27,7 @@ mod jitter;
 mod ping;
 mod protobuf;
 mod recovery;
+mod server_subs;
 mod sub_tokens;
 mod subscriptions;
 mod tls;
@@ -136,6 +137,8 @@ pub(crate) struct ClientWorld {
     pub(crate) jitter: Option<jitter::JitterRun>,
     /// Publications and positions of a Block 11 scenario.
     pub(crate) recovery: recovery::Recovery,
+    /// Expected publications of a Block 12 scenario.
+    pub(crate) server_side: server_subs::ServerSide,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;

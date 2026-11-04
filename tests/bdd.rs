@@ -168,6 +168,13 @@ const IMPLEMENTED: &[&str] = &[
     "State invalidation fetches a new subscription token",
     "Connection state invalidation drops a fixed connection token",
     "State invalidation drops a fixed subscription token",
+    // Block 12a: server-side subscriptions granted at connect.
+    "Publications of a server-side subscription are delivered",
+    "Server-side subscriptions survive a reconnect",
+    "Client-side and server-side subscriptions to one channel stay separate",
+    "Server-side subscriptions granted at connect over an emulated transport",
+    "Initial publications of a server-side subscription granted at connect are delivered",
+    "A server-side subscription missing after reconnect is unsubscribed",
 ];
 
 /// Server configuration of @A scenarios.
