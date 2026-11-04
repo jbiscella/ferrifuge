@@ -19,6 +19,7 @@ Markers used below:
 | Decision | Choice | Reason |
 |---|---|---|
 | Build vs reuse existing crates (tokio-centrifuge, centrifuge-client) | Build from scratch | Owner's choice |
+| Project purpose (owner decision, 2026-11-04) | Production use on large fleets of end-user devices; not a personal or learning project. Production readiness is an explicit goal. The official centrifugal/centrifuge-rust (experimental, created 2026-10-26) is a benchmark to compare against, not the production reference; Ferrifuge stays built from scratch | Reconsidered once centrifuge-rust appeared; the build-from-scratch decision above stands |
 | Behavioural oracle | Centrifugo Client SDK spec | All official SDKs follow it |
 | Implementation reference | centrifuge-js | Widest feature set |
 | Wire contract | `client.proto` of centrifugal/protocol | Source of truth for frames |
@@ -58,6 +59,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 - sockjs, webtransport transports
 - map subscriptions, shared poll subscriptions (experimental)
 - client publish debouncing (Centrifugo PRO)
+- channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it
 - browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims
 - `closed` state
 
@@ -499,7 +501,7 @@ Feature: Protobuf encoding
 - a client configured with the Protobuf protocol and an http_stream or sse endpoint is rejected when it is built, with a configuration error naming the combination, rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
 - server pings are the same empty `Reply` as over websocket, and are answered with a pong, sent through the emulation endpoint, when `ConnectResult.pong` is set (`client.proto`, `ConnectResult.pong`; centrifuge-js `_handleServerPing`; verified: Centrifugo v6.10.1 sets `pong` on these transports and disconnects an unanswered client with 3012 "no pong"). The unanswered empty `Push` ping of `client.proto` belongs to the unidirectional transports, out of scope (Block 0);
-- an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried;
+- an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried (owner decision, 2026-11-04, kept although centrifuge-js 63ed73e keeps an opened websocket: Ferrifuge targets corporate networks, where a middlebox may accept the upgrade and then forward nothing, and never falling back would leave the client stuck; the fallback applies only before the first success, so a transport that worked once is still kept);
 - within the first sequence the next transport is tried at once; once every transport has failed, the next sequence starts after the reconnect backoff delay (Block 2), as centrifuge-js counts only the first round as handshake;
 - a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`);
 - an emulation request answered with HTTP 413 keeps the transport and ends only the commands it carried, at once; none is retried automatically with the same payload (owner decision, 2026-11-04; diverges from centrifuge-js 63ed73e, which leaves the command to its reply timeout, `transport_http_stream.ts:199-205`): a call the application awaits (publish, RPC, history, presence, presence stats, send) fails with error code 10 "transport write error" (centrifuge-js `errorCodes.transportWriteError`); a subscribe or a sub_refresh moves the subscription to `unsubscribed` with code 3 "message size limit exceeded", sending an unsubscribe command when the server holds the subscription (after a sub_refresh); a connection refresh disconnects the client with code 3 "message size limit exceeded", the code and reason review item C4 proposes for websocket close code 1009 (centrifuge-js `disconnectedCodes.messageSizeLimit`); an unsubscribe fails as any unsubscribe error, so the client reconnects with code 4 (Block 9);
@@ -1456,7 +1458,9 @@ Feature: Server-side subscriptions
 
 **Dependencies:** Blocks 9, 12.
 
-**Out of scope:** publish debouncing (Block 0); batching several calls into one frame.
+**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, planned as its own block after this one (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API).
+
+**To decide while planning this block (owner decision, 2026-11-04):** join and leave pushes and the `join_leave` subscription option (spec, "ask server to push Join/Leave"; out of scope in Block 9).
 
 **Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, also on a client whose `connect()` was never called, and entering `disconnected`, by `disconnect()` or a terminal condition (terminal disconnect code, denied token), fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`, which rejects them whenever it does not reconnect); losing the transport fails calls already sent at once with "connection closed" (centrifuge-js error code 11), since their replies can no longer arrive; a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout`, made while it is `unsubscribed` fails at once with "subscription unsubscribed" (centrifuge-js error code 7) and sends nothing, and a waiting call fails the same way when the subscription becomes `unsubscribed` (centrifuge-js `_methodCall`, `_setUnsubscribed`); a command without a reply fails with the timeout error (code 1); a call that times out while waiting for the connection is dropped and never sent, since its command is built only once the connection is there (centrifuge-js `_methodCall`); a command error keeps the protocol error's code, message and `temporary` flag (`client.proto`, `Error`); RPC data is bytes both ways, like publication data (Block 0; `client.proto`, `RPCRequest.data`, `RPCResult.data`); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 
@@ -1714,6 +1718,14 @@ Feature: Client commands
 **Exceptions introduced:** none.
 
 ---
+
+## Planned after Block 13 (owner decisions, 2026-11-04)
+
+Each becomes a block with its value clause and scenarios when its turn comes; the owner sets the order.
+
+- **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js).
+- **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome.
+- **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice.
 
 ## Block 14 — Footprint, performance and fleet behaviour
 
