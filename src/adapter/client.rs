@@ -49,8 +49,8 @@ pub(super) struct Shared {
     /// Listeners of each subscription's events.
     pub(super) subscription_subscribers:
         Mutex<HashMap<SubscriptionId, Vec<events::UnboundedSender<SubscriptionEvent>>>>,
-    /// Data callbacks of the subscriptions that have one.
-    pub(super) data_callbacks: Mutex<DataCallbacks>,
+    /// Data and token callbacks of the subscriptions that have them.
+    pub(super) callbacks: Mutex<SubscriptionCallbacks>,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
@@ -77,11 +77,25 @@ pub(super) type GetData = Arc<
         + Sync,
 >;
 
-/// Data callbacks by subscription; opaque in `Debug` output.
-#[derive(Default)]
-pub(super) struct DataCallbacks(pub(super) HashMap<SubscriptionId, GetData>);
+/// Async callback returning a new subscription token, given the channel.
+pub(super) type GetSubscriptionToken = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>
+        + Send
+        + Sync,
+>;
 
-impl std::fmt::Debug for DataCallbacks {
+/// The callbacks of a subscription.
+#[derive(Clone, Default)]
+pub(super) struct Callbacks {
+    pub(super) get_data: Option<GetData>,
+    pub(super) get_token: Option<GetSubscriptionToken>,
+}
+
+/// Callbacks by subscription; opaque in `Debug` output.
+#[derive(Default)]
+pub(super) struct SubscriptionCallbacks(pub(super) HashMap<SubscriptionId, Callbacks>);
+
+impl std::fmt::Debug for SubscriptionCallbacks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.0.keys()).finish()
     }
@@ -267,7 +281,7 @@ impl Client {
             }),
             subscribers: Mutex::new(Vec::new()),
             subscription_subscribers: Mutex::new(HashMap::new()),
-            data_callbacks: Mutex::new(DataCallbacks::default()),
+            callbacks: Mutex::new(SubscriptionCallbacks::default()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
         });
@@ -286,8 +300,8 @@ impl Client {
             fetching: None,
             timers: Timers::default(),
             subscription_timers: SubscriptionTimers::default(),
-            data_fetches: FuturesUnordered::new(),
-            data_fetch_aborts: HashMap::new(),
+            subscription_fetches: FuturesUnordered::new(),
+            subscription_fetch_aborts: HashMap::new(),
         };
         tokio::spawn(driver.run());
         Ok(Self { shared })
@@ -357,14 +371,14 @@ struct Driver {
     fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
     subscription_timers: SubscriptionTimers,
-    /// Subscription data callbacks running; an aborted one yields `None`.
-    data_fetches: FuturesUnordered<DataFetching>,
+    /// Subscription data and token callbacks running, each yielding the
+    /// input answering it; an aborted one yields `None`.
+    subscription_fetches: FuturesUnordered<SubscriptionFetching>,
     /// Handles to abort the callbacks running, by fetch.
-    data_fetch_aborts: HashMap<FetchId, AbortHandle>,
+    subscription_fetch_aborts: HashMap<FetchId, AbortHandle>,
 }
 
-type DataFetching =
-    Pin<Box<dyn Future<Output = Option<(FetchId, Result<Vec<u8>, DataError>)>> + Send>>;
+type SubscriptionFetching = Pin<Box<dyn Future<Output = Option<(FetchId, Input)>> + Send>>;
 
 /// The machine's subscription timers, by subscription and kind.
 #[derive(Default)]
@@ -447,7 +461,7 @@ impl Driver {
                 // and release the data callbacks nothing can call anymore.
                 lock(&self.shared.subscribers).clear();
                 lock(&self.shared.subscription_subscribers).clear();
-                lock(&self.shared.data_callbacks).0.clear();
+                lock(&self.shared.callbacks).0.clear();
                 return;
             }
             let input = tokio::select! {
@@ -474,13 +488,15 @@ impl Driver {
                 (id, timer) = self.subscription_timers.fired() => {
                     Input::SubscriptionTimerFired(id, timer)
                 }
-                Some(fetched) = self.data_fetches.next(), if !self.data_fetches.is_empty() => {
+                Some(fetched) = self.subscription_fetches.next(),
+                    if !self.subscription_fetches.is_empty() =>
+                {
                     // Aborted: the machine no longer wants it.
-                    let Some((fetch, result)) = fetched else {
+                    let Some((fetch, input)) = fetched else {
                         continue;
                     };
-                    self.data_fetch_aborts.remove(&fetch);
-                    Input::SubscriptionDataFetched { fetch, result }
+                    self.subscription_fetch_aborts.remove(&fetch);
+                    input
                 }
                 (fetch, result) = fetched(&mut self.fetching) => {
                     self.fetching = None;
@@ -569,27 +585,20 @@ impl Driver {
                 channel,
                 fetch,
             } => self.fetch_subscription_data(subscription, channel, fetch),
-            Action::CancelSubscriptionData(fetch) => {
-                if let Some(abort) = self.data_fetch_aborts.remove(&fetch) {
+            Action::FetchSubscriptionToken {
+                subscription,
+                channel,
+                fetch,
+            } => self.fetch_subscription_token(subscription, channel, fetch),
+            Action::CancelSubscriptionData(fetch) | Action::CancelSubscriptionToken(fetch) => {
+                if let Some(abort) = self.subscription_fetch_aborts.remove(&fetch) {
                     abort.abort();
                 }
             }
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
-                    // A panicking callback fails this fetch, not the driver:
-                    // whether it panics creating its future or polling it.
-                    let fetching: Fetching =
-                        match std::panic::catch_unwind(AssertUnwindSafe(|| get_token())) {
-                            Ok(future) => Box::pin(async move {
-                                AssertUnwindSafe(future)
-                                    .catch_unwind()
-                                    .await
-                                    .unwrap_or_else(|_| Err(callback_panicked()))
-                            }),
-                            Err(_) => Box::pin(std::future::ready(Err(callback_panicked()))),
-                        };
-                    self.fetching = Some((id, fetching));
+                    self.fetching = Some((id, guarded(|| get_token(), callback_panicked)));
                 }
             }
         }
@@ -598,28 +607,75 @@ impl Driver {
 
 impl Driver {
     fn fetch_subscription_data(&mut self, id: SubscriptionId, channel: String, fetch: FetchId) {
-        let callback = lock(&self.shared.data_callbacks).0.get(&id).cloned();
+        let callback = lock(&self.shared.callbacks)
+            .0
+            .get(&id)
+            .and_then(|callbacks| callbacks.get_data.clone());
         // The machine asks only for subscriptions with a callback.
         let Some(get_data) = callback else {
             return;
         };
-        // A panicking callback fails this fetch, not the driver: whether it
-        // panics creating its future or polling it.
-        let fetching: Pin<Box<dyn Future<Output = _> + Send>> =
-            match std::panic::catch_unwind(AssertUnwindSafe(|| get_data(channel))) {
-                Ok(future) => Box::pin(async move {
-                    let result = AssertUnwindSafe(future).catch_unwind().await;
-                    (
-                        fetch,
-                        result.unwrap_or_else(|_| Err(data_callback_panicked())),
-                    )
-                }),
-                Err(_) => Box::pin(std::future::ready((fetch, Err(data_callback_panicked())))),
-            };
-        let (fetching, abort) = future::abortable(fetching);
-        self.data_fetch_aborts.insert(fetch, abort);
-        self.data_fetches.push(Box::pin(fetching.map(Result::ok)));
+        let fetching = guarded(|| get_data(channel), data_callback_panicked);
+        self.start_fetch(fetch, async move {
+            Input::SubscriptionDataFetched {
+                fetch,
+                result: fetching.await,
+            }
+        });
     }
+
+    fn fetch_subscription_token(&mut self, id: SubscriptionId, channel: String, fetch: FetchId) {
+        let callback = lock(&self.shared.callbacks)
+            .0
+            .get(&id)
+            .and_then(|callbacks| callbacks.get_token.clone());
+        // The machine asks only for subscriptions with a callback.
+        let Some(get_token) = callback else {
+            return;
+        };
+        let fetching = guarded(|| get_token(channel), token_callback_panicked);
+        self.start_fetch(fetch, async move {
+            Input::SubscriptionTokenFetched {
+                fetch,
+                result: fetching.await,
+            }
+        });
+    }
+
+    /// Runs a subscription callback, abortable by its fetch.
+    fn start_fetch(
+        &mut self,
+        fetch: FetchId,
+        answer: impl Future<Output = Input> + Send + 'static,
+    ) {
+        let (fetching, abort) = future::abortable(answer);
+        self.subscription_fetch_aborts.insert(fetch, abort);
+        self.subscription_fetches.push(Box::pin(
+            fetching.map(move |input| input.ok().map(|input| (fetch, input))),
+        ));
+    }
+}
+
+/// The future of a callback, which fails with `panicked()` rather than
+/// panicking the driver: whether the callback panics creating its future
+/// or polling it.
+fn guarded<T: Send + 'static, E: Send + 'static>(
+    callback: impl FnOnce() -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
+    panicked: fn() -> E,
+) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>> {
+    match std::panic::catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(future) => Box::pin(async move {
+            AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(panicked()))
+        }),
+        Err(_) => Box::pin(std::future::ready(Err(panicked()))),
+    }
+}
+
+fn token_callback_panicked() -> TokenError {
+    TokenError::Failed("subscription token callback panicked".to_owned())
 }
 
 fn data_callback_panicked() -> DataError {
