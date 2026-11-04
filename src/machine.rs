@@ -852,10 +852,11 @@ impl Machine {
             Input::SubscriptionTokenFetched { fetch, result } => {
                 self.subscription_token_fetched(fetch, result);
             }
-            // About a transport already abandoned, or a state fetch, which
-            // is not asked yet.
-            Input::SubscriptionStateFetched { .. }
-            | Input::TransportOpened(_)
+            Input::SubscriptionStateFetched { fetch, result } => {
+                self.subscription_state_fetched(fetch, result);
+            }
+            // About a transport already abandoned.
+            Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::Frame { .. } => {}
