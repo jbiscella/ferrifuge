@@ -855,7 +855,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::machine::{Input, Timer, TransportId};
+    use crate::machine::{Input, Timer, TransportId, TransportKind};
     use crate::{Config, StateError, TokenError};
 
     /// A machine connected over a transport, with a subscription to "news".
@@ -1461,6 +1461,46 @@ mod tests {
             "{rejected:?}"
         );
         assert_eq!(machine.state(), State::Connected);
+    }
+
+    // Over http_stream and sse the commands travel inside an emulation
+    // request, as the frame the transport reports rejected.
+    #[test]
+    fn a_subscribe_rejected_over_an_emulated_transport_fails_at_once() {
+        let mut machine = Machine::new(Config::default())
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","session":"s","node":"n"}}"#,
+        ));
+        let id = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        let subscribing = machine.handle(Input::Subscribe(id));
+        let Some(Action::Send { frame, .. }) = subscribing
+            .iter()
+            .find(|action| matches!(action, Action::Send { .. }))
+        else {
+            panic!("{subscribing:?}");
+        };
+        assert!(frame.starts_with(br#"{"session":"s""#), "{frame:?}");
+
+        let rejected = machine.handle(Input::SendRejected {
+            transport,
+            frame: frame.clone(),
+        });
+
+        assert!(
+            rejected.iter().any(|action| matches!(
+                action,
+                Action::EmitSubscription(of, SubscriptionEvent::Error(error))
+                    if *of == id && error.code == codes::error::TRANSPORT_WRITE
+            )),
+            "{rejected:?}"
+        );
     }
 
     // Owner decision, 2026-11-04 (centrifuge-js `_sendSubscribeCommands`).
