@@ -867,6 +867,45 @@ mod tests {
         );
     }
 
+    // Owner decision, 2026-11-04: no construction path accepts these.
+    #[tokio::test]
+    async fn an_empty_or_http_websocket_endpoint_is_refused() {
+        for endpoint in [
+            "",
+            "http://127.0.0.1:1/connection/websocket",
+            "HTTPS://example.com/ws",
+        ] {
+            let built = Client::builder(endpoint).build();
+
+            let Err(error) = built else {
+                panic!("{endpoint:?} was accepted");
+            };
+            assert_eq!(error.kind, crate::ErrorKind::Configuration, "{endpoint:?}");
+            assert_eq!(
+                error.transport.as_deref(),
+                Some("websocket"),
+                "{endpoint:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_endpoints_stay_valid_for_http_stream_and_sse() {
+        let built = Client::builder_with_transports([
+            (
+                TransportKind::HttpStream,
+                "http://127.0.0.1:1/connection/http_stream".to_owned(),
+            ),
+            (
+                TransportKind::Sse,
+                "https://127.0.0.1:1/connection/sse".to_owned(),
+            ),
+        ])
+        .build();
+
+        assert!(built.is_ok(), "{built:?}");
+    }
+
     #[tokio::test]
     async fn a_build_error_is_a_standard_error() {
         fn build() -> Result<Client, Box<dyn std::error::Error>> {
