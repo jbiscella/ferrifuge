@@ -840,7 +840,7 @@ mod tests {
 
     use super::*;
     use crate::machine::{Input, Timer, TransportId};
-    use crate::{Config, TokenError};
+    use crate::{Config, StateError, TokenError};
 
     /// A machine connected over a transport, with a subscription to "news".
     fn connected() -> (Machine, TransportId, SubscriptionId) {
@@ -1798,6 +1798,205 @@ mod tests {
         assert_eq!(
             sent(&refreshed),
             [r#"{"id":5,"sub_refresh":{"channel":"news","token":"u"}}"#]
+        );
+    }
+
+    fn state_fetch(actions: &[Action]) -> Option<FetchId> {
+        actions.iter().find_map(|action| match action {
+            Action::FetchSubscriptionState { fetch, .. } => Some(*fetch),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn get_state_is_not_called_after_a_successful_recovery() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().state_source());
+        let fetch = state_fetch(&machine.handle(Input::Subscribe(id))).unwrap();
+        machine.handle(Input::SubscriptionStateFetched {
+            fetch,
+            result: Ok(StreamPosition {
+                offset: 1,
+                epoch: "e".into(),
+            }),
+        });
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":1}}"#,
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let recovered = machine.handle(reply(
+            transport,
+            r#"{"id":4,"subscribe":{"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e","offset":1}}"#,
+        ));
+
+        assert_eq!(
+            sent(&resubscribed),
+            [
+                r#"{"id":4,"subscribe":{"channel":"news","recover":true,"epoch":"e","offset":1,"flag":2}}"#
+            ]
+        );
+        assert_eq!(state_fetch(&recovered), None, "{recovered:?}");
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Subscribed)
+        );
+    }
+
+    #[test]
+    fn a_get_state_that_always_fails_keeps_retrying_without_unsubscribing() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().state_source());
+        let mut fetch = state_fetch(&machine.handle(Input::Subscribe(id))).unwrap();
+
+        for attempt in 0..3 {
+            let failed = machine.handle(Input::SubscriptionStateFetched {
+                fetch,
+                result: Err(StateError("always fails".into())),
+            });
+            let retried = machine.handle(Input::SubscriptionTimerFired(
+                id,
+                SubscriptionTimer::Resubscribe,
+            ));
+
+            assert!(
+                resubscribe_delay(&failed).is_some(),
+                "{attempt}: {failed:?}"
+            );
+            fetch = state_fetch(&retried).expect("getState called again");
+        }
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Subscribing)
+        );
+    }
+
+    #[test]
+    fn a_subscribe_reply_without_recoverable_stops_recovery() {
+        let since = StreamPosition {
+            offset: 1,
+            epoch: "e".into(),
+        };
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().since(since));
+        let first = machine.handle(Input::Subscribe(id));
+        // Positioned, not recoverable: nothing to recover from next time.
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"positioned":true,"epoch":"e","offset":1}}"#,
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        assert_eq!(
+            sent(&first),
+            [r#"{"id":2,"subscribe":{"channel":"news","recover":true,"epoch":"e","offset":1}}"#]
+        );
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    /// A Protobuf frame holding `reply`, received over `transport`.
+    fn protobuf_reply(transport: TransportId, reply: &crate::protocol::Reply) -> Input {
+        use prost::Message as _;
+
+        Input::Frame {
+            transport,
+            data: reply.encode_length_delimited_to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_protobuf_publication_without_an_offset_keeps_the_stored_position() {
+        use crate::protocol as pb;
+        use prost::Message as _;
+
+        let mut machine = Machine::new(Config {
+            protocol: crate::Protocol::Protobuf,
+            ..Config::default()
+        });
+        let connected = pb::Reply {
+            connect: Some(pb::ConnectResult {
+                client: "c".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let transport = opened(&machine.handle(Input::Connect)).unwrap();
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(protobuf_reply(
+            transport,
+            &pb::Reply {
+                id: 1,
+                ..connected.clone()
+            },
+        ));
+        let id = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(protobuf_reply(
+            transport,
+            &pb::Reply {
+                id: 2,
+                subscribe: Some(pb::SubscribeResult {
+                    recoverable: true,
+                    epoch: "e".into(),
+                    offset: 5,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+        // Published without history: Protobuf decodes the missing offset
+        // as 0.
+        machine.handle(protobuf_reply(
+            transport,
+            &pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    r#pub: Some(pb::Publication {
+                        data: vec![1],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let resubscribed =
+            machine.handle(protobuf_reply(transport, &pb::Reply { id: 3, ..connected }));
+
+        let subscribe = resubscribed
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { frame, .. } => {
+                    pb::Command::decode_length_delimited(frame.as_slice())
+                        .unwrap()
+                        .subscribe
+                }
+                _ => None,
+            })
+            .expect("a subscribe command");
+        assert_eq!(
+            (
+                subscribe.recover,
+                subscribe.epoch.as_str(),
+                subscribe.offset
+            ),
+            (true, "e", 5)
         );
     }
 }
