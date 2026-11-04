@@ -114,6 +114,27 @@ impl From<&Command> for pb::Command {
     }
 }
 
+impl From<pb::SubscribeResult> for SubscribeResult {
+    fn from(subscribe: pb::SubscribeResult) -> Self {
+        Self {
+            expires: subscribe.expires,
+            ttl: subscribe.ttl,
+            data: (!subscribe.data.is_empty()).then_some(subscribe.data),
+            publications: subscribe
+                .publications
+                .into_iter()
+                .map(Publication::from)
+                .collect(),
+            positioned: subscribe.positioned,
+            recoverable: subscribe.recoverable,
+            epoch: subscribe.epoch,
+            offset: subscribe.offset,
+            was_recovering: subscribe.was_recovering,
+            recovered: subscribe.recovered,
+        }
+    }
+}
+
 impl From<pb::Reply> for Reply {
     fn from(reply: pb::Reply) -> Self {
         let result = if let Some(connect) = reply.connect {
@@ -126,6 +147,11 @@ impl From<pb::Reply> for Reply {
                 pong: connect.pong,
                 session: connect.session,
                 node: connect.node,
+                subs: connect
+                    .subs
+                    .into_iter()
+                    .map(|(channel, result)| (channel, result.into()))
+                    .collect(),
             })
         } else if let Some(refresh) = reply.refresh {
             ReplyResult::Refresh(RefreshResult {
@@ -133,22 +159,7 @@ impl From<pb::Reply> for Reply {
                 ttl: refresh.ttl,
             })
         } else if let Some(subscribe) = reply.subscribe {
-            ReplyResult::Subscribe(SubscribeResult {
-                expires: subscribe.expires,
-                ttl: subscribe.ttl,
-                data: (!subscribe.data.is_empty()).then_some(subscribe.data),
-                publications: subscribe
-                    .publications
-                    .into_iter()
-                    .map(Publication::from)
-                    .collect(),
-                positioned: subscribe.positioned,
-                recoverable: subscribe.recoverable,
-                epoch: subscribe.epoch,
-                offset: subscribe.offset,
-                was_recovering: subscribe.was_recovering,
-                recovered: subscribe.recovered,
-            })
+            ReplyResult::Subscribe(subscribe.into())
         } else if reply.unsubscribe.is_some() {
             ReplyResult::Unsubscribe
         } else if let Some(refresh) = reply.sub_refresh {
@@ -291,6 +302,39 @@ mod tests {
     }
 
     #[test]
+    fn decodes_the_server_side_subscriptions_of_a_connect_reply() {
+        let frame = frame_of(&[pb::Reply {
+            id: 1,
+            connect: Some(pb::ConnectResult {
+                client: "c".into(),
+                subs: [(
+                    "alerts".to_owned(),
+                    pb::SubscribeResult {
+                        recoverable: true,
+                        epoch: "e".into(),
+                        offset: 2,
+                        data: b"\xff".to_vec(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+
+        let replies = decode(&frame).unwrap();
+
+        let ReplyResult::Connect(result) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        let alerts = &result.subs["alerts"];
+        assert!(alerts.recoverable);
+        assert_eq!((alerts.epoch.as_str(), alerts.offset), ("e", 2));
+        assert_eq!(alerts.data.as_deref(), Some(&b"\xff"[..]));
+    }
+
+    #[test]
     fn decodes_results_errors_pushes_and_pings() {
         let frame = frame_of(&[
             pb::Reply {
@@ -355,6 +399,7 @@ mod tests {
                         pong: true,
                         session: String::new(),
                         node: String::new(),
+                        subs: std::collections::BTreeMap::new(),
                     }),
                 },
                 Reply {
