@@ -152,6 +152,16 @@ impl Tokens {
         self.refresh_required = false;
     }
 
+    /// The server invalidated the state the token belongs to (`client.proto`
+    /// codes 2502 and 3014): the token is dropped, so the next connect or
+    /// subscribe fetches a new one when there is a source, and carries none
+    /// otherwise.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) fn invalidate(&mut self) {
+        self.current = Secret::default();
+        self.refresh_required = false;
+    }
+
     /// The token for refresh command `id`, which is now the pending one.
     pub(super) fn for_refresh(&mut self, id: u32) -> String {
         self.refresh_command = Some(id);
@@ -198,6 +208,19 @@ pub(super) fn refresh_delay(ttl_seconds: u32, rng: &mut fastrand::Rng) -> Durati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_invalidated_token_is_fetched_again_or_dropped() {
+        let mut with_source = Tokens::new("t".into(), true);
+        let mut fixed = Tokens::new("t".into(), false);
+
+        with_source.invalidate();
+        fixed.invalidate();
+
+        assert_eq!(with_source.before_connect(), BeforeConnect::Fetch);
+        assert_eq!(fixed.before_connect(), BeforeConnect::Ready);
+        assert_eq!(fixed.for_connect(), "");
+    }
 
     #[test]
     fn before_connect_needs_a_fetch_only_without_token_or_after_expiry() {
