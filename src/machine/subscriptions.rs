@@ -746,6 +746,9 @@ impl Machine {
                 .get(id)
                 .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
         }) else {
+            // No subscribed client-side subscription: the server-side one,
+            // if any, as for publications.
+            self.server_subscription_unsubscribed(channel, code, reason);
             return;
         };
         if code < 2500 {

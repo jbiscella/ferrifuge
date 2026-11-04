@@ -1049,6 +1049,9 @@ impl Machine {
                     code,
                     reason,
                 }) => self.server_unsubscribe(&channel, code, &reason),
+                ReplyResult::Push(Push::Subscribe { channel, result }) => {
+                    self.server_subscription_pushed(&channel, result);
+                }
                 // An empty reply is a server ping (client.proto, Reply).
                 ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
                     // A ping proves the connection usable (centrifuge-js
