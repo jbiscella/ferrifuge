@@ -310,6 +310,7 @@ impl Client {
             transport: None,
             get_token,
             fetching: None,
+            stale_fetching: None,
             timers: Timers::default(),
             subscription_timers: SubscriptionTimers::default(),
             subscription_fetches: FuturesUnordered::new(),
@@ -381,6 +382,10 @@ struct Driver {
     transport: Option<(TransportId, Transport)>,
     get_token: Option<GetToken>,
     fetching: Option<(FetchId, Fetching)>,
+    /// The callback a newer one replaced, still polled: when it was a
+    /// refresh of a connection that is gone, its denial must still reach
+    /// the machine, which ignores any other answer of it.
+    stale_fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
     subscription_timers: SubscriptionTimers,
     /// Subscription data and token callbacks running, each yielding the
@@ -514,6 +519,10 @@ impl Driver {
                     self.fetching = None;
                     Input::TokenFetched { fetch, result }
                 }
+                (fetch, result) = fetched(&mut self.stale_fetching) => {
+                    self.stale_fetching = None;
+                    Input::TokenFetched { fetch, result }
+                }
             };
             self.shared.apply(input);
         }
@@ -601,6 +610,7 @@ impl Driver {
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
+                    self.stale_fetching = self.fetching.take();
                     self.fetching = Some((id, guarded(|| get_token(), callback_panicked)));
                 }
             }
