@@ -1421,6 +1421,48 @@ mod tests {
         assert_eq!(sent(&late), Vec::<String>::new());
     }
 
+    // Owner decision, 2026-11-04: an emulation request answered with HTTP
+    // 413 fails its commands at once, keeping the transport.
+    #[test]
+    fn a_rejected_subscribe_fails_at_once_and_is_retried_after_the_backoff() {
+        let (mut machine, transport, id) = connected();
+        let subscribing = machine.handle(Input::Subscribe(id));
+        let Some(Action::Send { frame, .. }) = subscribing
+            .iter()
+            .find(|action| matches!(action, Action::Send { .. }))
+        else {
+            panic!("{subscribing:?}");
+        };
+
+        let rejected = machine.handle(Input::SendRejected {
+            transport,
+            frame: frame.clone(),
+        });
+
+        assert!(
+            rejected.iter().any(|action| matches!(
+                action,
+                Action::EmitSubscription(of, SubscriptionEvent::Error(error))
+                    if *of == id && error.code == codes::error::TRANSPORT_WRITE
+            )),
+            "{rejected:?}"
+        );
+        assert!(
+            rejected.iter().any(|action| matches!(
+                action,
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+            )),
+            "{rejected:?}"
+        );
+        assert!(
+            !rejected
+                .iter()
+                .any(|action| matches!(action, Action::CloseTransport(_))),
+            "{rejected:?}"
+        );
+        assert_eq!(machine.state(), State::Connected);
+    }
+
     // Owner decision, 2026-11-04 (centrifuge-js `_sendSubscribeCommands`).
     #[test]
     fn a_reconnect_keeps_a_pending_resubscribe_backoff() {
