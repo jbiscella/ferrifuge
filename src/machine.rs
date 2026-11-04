@@ -1953,10 +1953,13 @@ mod tests {
         assert!(!printed.contains("secret-token"), "{printed}");
     }
 
+    // A refresh token fetched for a connection that is gone is not used
+    // (owner decision, 2026-11-04; centrifuge-js `_refresh`); a denial
+    // still disconnects (see the test above).
     #[test]
-    fn late_refresh_token_after_reconnect_replaces_the_new_refresh_timer() {
+    fn late_refresh_token_after_reconnect_is_discarded() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let stale = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
         machine.handle(Input::TransportClosed {
             transport,
             code: None,
@@ -1964,33 +1967,58 @@ mod tests {
         });
         let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
         machine.handle(Input::TransportOpened(transport));
-        let reconnected = machine.handle(frame(
+        machine.handle(frame(
             transport,
             r#"{"id":2,"connect":{"client":"c2","expires":true,"ttl":30}}"#,
         ));
-        assert!(refresh_timer(&reconnected).is_some());
 
-        let actions = machine.handle(Input::TokenFetched {
+        // The new connection refreshes on its own schedule, without waiting
+        // for the fetch of the old one.
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let refreshed = machine.handle(Input::TokenFetched {
             fetch,
+            result: Ok("t2".into()),
+        });
+        let late = machine.handle(Input::TokenFetched {
+            fetch: stale,
             result: Ok("t1".into()),
         });
 
         assert!(
-            matches!(
-                &actions[..],
-                [
-                    Action::CancelTimer(Timer::Refresh),
-                    Action::Send { .. },
-                    Action::SetTimer(Timer::RefreshReply, _)
-                ]
-            ),
-            "{actions:?}"
+            refreshed.iter().any(|action| matches!(
+                action,
+                Action::Send { frame, .. } if frame == br#"{"id":3,"refresh":{"token":"t2"}}"#
+            )),
+            "{refreshed:?}"
         );
-        assert_eq!(
-            machine.handle(Input::TimerFired(Timer::Refresh)),
-            [],
-            "no second refresh while one is in flight"
-        );
+        assert_eq!(late, [], "the late token is not sent");
+    }
+
+    #[test]
+    fn late_refresh_token_while_reconnecting_is_not_used_for_the_connect() {
+        let (mut machine, transport, _) = connected_with_token(30);
+        let stale = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        machine.handle(Input::TokenFetched {
+            fetch: stale,
+            result: Ok("t1".into()),
+        });
+
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let connecting = machine.handle(Input::TransportOpened(transport));
+
+        let Some(Action::Send { frame, .. }) = connecting
+            .iter()
+            .find(|action| matches!(action, Action::Send { .. }))
+        else {
+            panic!("{connecting:?}");
+        };
+        let frame = String::from_utf8(frame.clone()).unwrap();
+        assert!(frame.contains(r#""token":"t0""#), "{frame}");
     }
 
     #[test]
