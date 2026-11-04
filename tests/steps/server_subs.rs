@@ -502,9 +502,14 @@ async fn client_side_subscription_with_a_position(world: &mut ClientWorld) {
     regex = r#"^a server-side subscription to channel "(\w+)" with a stream position from the connect reply$"#
 )]
 async fn server_side_subscription_from_the_connect_reply(world: &mut ClientWorld, channel: String) {
-    // The client is connected already: a reconnect brings the reply.
+    // The client is connected already: a reconnect brings the reply. The
+    // client-side subscription resubscribes then, answered recoverable at
+    // the same position, so that it keeps one.
     let subs = recoverable_subs(world, &channel);
     world.fake().grant_server_subscriptions(subs);
+    world.fake().answer_a_subscribe_with(json!({
+        "recoverable": true, "positioned": true, "epoch": FAKE_EPOCH, "offset": FAKE_OFFSET,
+    }));
     fake_server_disconnects(world);
     next_server_side_event(world, &channel, |event| event.name() == "subscribed").await;
 }

@@ -5,8 +5,9 @@
 
 use std::collections::BTreeMap;
 
+use super::subscriptions::UNMATCHABLE_EPOCH;
 use super::{Action, Machine};
-use crate::wire::SubscribeResult;
+use crate::wire::{SubscribeRequest, SubscribeResult};
 use crate::{ClientEvent, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed, codes};
 
 /// Reason of [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
@@ -24,6 +25,26 @@ struct ServerSubscription {
     /// Subscribed on the current connection; losing it makes the
     /// subscription subscribing until the next connection.
     subscribed: bool,
+    /// Position in the channel's stream to recover from on the next
+    /// connect, when the server made the subscription recoverable: from the
+    /// connect reply or the `Subscribe` push, then of every publication
+    /// delivered (centrifuge-js `_handleSubscribe`, `_handlePublication`).
+    position: Option<StreamPosition>,
+}
+
+impl ServerSubscription {
+    /// Moves the position to `publication`'s, when there is one to keep.
+    fn advance(&mut self, publication: &Publication) {
+        let Some(position) = &mut self.position else {
+            return;
+        };
+        if let Some(offset) = publication.offset {
+            position.offset = offset;
+        }
+        if let Some(epoch) = &publication.epoch {
+            epoch.clone_into(&mut position.epoch);
+        }
+    }
 }
 
 impl Machine {
@@ -106,9 +127,18 @@ impl Machine {
     /// Registers `channel` as subscribed and emits its `subscribed` event,
     /// then its initial or recovered publications.
     fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) {
-        self.server_subscriptions
-            .by_channel
-            .insert(channel.to_owned(), ServerSubscription { subscribed: true });
+        self.server_subscriptions.by_channel.insert(
+            channel.to_owned(),
+            ServerSubscription {
+                subscribed: true,
+                // A recoverable subscription's position: the stream's, or
+                // after a recovery the one it recovers from.
+                position: result.recoverable.then(|| StreamPosition {
+                    offset: result.offset,
+                    epoch: result.epoch.clone(),
+                }),
+            },
+        );
         let stream_position = (result.positioned || result.recoverable).then(|| StreamPosition {
             offset: result.offset,
             epoch: result.epoch.clone(),
@@ -124,11 +154,49 @@ impl Machine {
                 stream_position,
             }),
         );
+        // Initial or recovered publications follow it and move the position.
         for publication in result.publications {
+            if let Some(sub) = self.server_subscriptions.by_channel.get_mut(channel) {
+                sub.advance(&publication);
+            }
             self.emit_server_subscription(
                 channel,
                 ServerSubscriptionEvent::Publication(publication),
             );
+        }
+    }
+
+    /// The server-side subscriptions the next connect asks to recover, from
+    /// their positions (`client.proto`, `ConnectRequest.subs`).
+    pub(super) fn server_subscriptions_to_recover(&self) -> BTreeMap<String, SubscribeRequest> {
+        self.server_subscriptions
+            .by_channel
+            .iter()
+            .filter_map(|(channel, sub)| {
+                let position = sub.position.as_ref()?;
+                Some((
+                    channel.clone(),
+                    SubscribeRequest {
+                        recover: true,
+                        epoch: position.epoch.clone(),
+                        offset: position.offset,
+                        ..SubscribeRequest::default()
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// "State invalidated" (disconnect code 3014): a server-side
+    /// subscription with a position keeps one the server can never match, so
+    /// its recovery at the next connect fails and its `subscribed` event says
+    /// so (owner decision, 2026-11-04; centrifuge-js `_disconnect`).
+    pub(super) fn invalidate_server_subscriptions(&mut self) {
+        for sub in self.server_subscriptions.by_channel.values_mut() {
+            if let Some(position) = &mut sub.position {
+                position.offset = 0;
+                UNMATCHABLE_EPOCH.clone_into(&mut position.epoch);
+            }
         }
     }
 
@@ -151,17 +219,16 @@ impl Machine {
     /// subscription takes: the server-side subscription's, if subscribed
     /// (Block 12; centrifuge-js `_getSubForPush`).
     pub(super) fn server_publication(&mut self, channel: &str, publication: Publication) {
-        let subscribed = self
+        let Some(sub) = self
             .server_subscriptions
             .by_channel
-            .get(channel)
-            .is_some_and(|sub| sub.subscribed);
-        if subscribed {
-            self.emit_server_subscription(
-                channel,
-                ServerSubscriptionEvent::Publication(publication),
-            );
-        }
+            .get_mut(channel)
+            .filter(|sub| sub.subscribed)
+        else {
+            return;
+        };
+        sub.advance(&publication);
+        self.emit_server_subscription(channel, ServerSubscriptionEvent::Publication(publication));
     }
 
     fn emit_server_subscription(&mut self, channel: &str, event: ServerSubscriptionEvent) {
