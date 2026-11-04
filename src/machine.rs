@@ -1060,10 +1060,13 @@ impl Machine {
         self.command_reply(reply);
     }
 
-    /// The server refused a frame without closing the transport (HTTP 413
-    /// on an emulation request): each of its commands fails at once, as if
-    /// the server had answered it with a temporary error (owner decision,
-    /// 2026-11-04). It proves nothing about the connection, so the backoff
+    /// The server refused a frame as too large without closing the
+    /// transport (HTTP 413 on an emulation request): each of its commands
+    /// ends at once, and none is retried with the same payload (owner
+    /// decision, 2026-11-04). A subscribe or `sub_refresh` unsubscribes, a
+    /// refresh disconnects the client, any other command fails as if the
+    /// server had answered it with a temporary error (an unsubscribe then
+    /// reconnects). It proves nothing about the connection, so the backoff
     /// is not reset.
     fn send_rejected(&mut self, frame: &[u8]) {
         // Over an emulated transport the commands are inside the request.
@@ -1078,8 +1081,17 @@ impl Machine {
             frame
         };
         for id in self.codec.command_ids(frame) {
-            if id == 0 {
+            if id == 0 || self.subscription_command_too_large(id) {
                 continue;
+            }
+            if self.state == State::Connected && self.tokens.take_refresh_reply(id) {
+                self.actions.push(Action::CancelTimer(Timer::RefreshReply));
+                self.disconnect(
+                    codes::disconnected::MESSAGE_SIZE_LIMIT,
+                    subscriptions::MESSAGE_SIZE_LIMIT_REASON,
+                    false,
+                );
+                return;
             }
             self.command_reply(Reply {
                 id,
