@@ -2,6 +2,7 @@
 //! subscription's state and commands in flight, and how the machine reacts
 //! to them. Behaviour follows centrifuge-js `subscription.ts`.
 
+mod state_flow;
 mod token_flow;
 
 use std::collections::{BTreeMap, HashMap};
@@ -11,7 +12,8 @@ use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, Subsc
 use crate::backoff::Backoff;
 use crate::token::Secret;
 use crate::wire::{
-    Command, Error, Method, Reply, ReplyResult, SubscribeRequest, UnsubscribeRequest,
+    Command, Error, Method, REJECT_UNRECOVERED, Reply, ReplyResult, SubscribeRequest,
+    UnsubscribeRequest,
 };
 use crate::{
     ClientError, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
@@ -46,6 +48,8 @@ struct Subscription {
     subscribe_command: Option<u32>,
     /// The data fetch awaiting its answer.
     fetch: Option<FetchId>,
+    /// The getState fetch awaiting its answer.
+    state_fetch: Option<FetchId>,
     /// Waiting for a command for its channel to be settled before
     /// subscribing, so the server cannot apply them out of order.
     waiting: bool,
@@ -136,6 +140,7 @@ impl Machine {
                 state: SubscriptionState::Unsubscribed,
                 subscribe_command: None,
                 fetch: None,
+                state_fetch: None,
                 waiting: false,
                 backoff,
                 tokens,
@@ -201,6 +206,7 @@ impl Machine {
         if sub.state != SubscriptionState::Subscribing
             || sub.subscribe_command.is_some()
             || sub.fetch.is_some()
+            || sub.state_fetch.is_some()
             || sub.tokens.pending_fetch().is_some()
         {
             return;
@@ -213,6 +219,13 @@ impl Machine {
                 .waiting = true;
             return;
         }
+        // Without a position, getState loads the state first (centrifuge-js
+        // `_subscribe`).
+        if self.needs_state(id) {
+            self.fetch_subscription_state(id);
+            return;
+        }
+        let sub = self.subscriptions.by_id.get(&id).expect("checked above");
         // Without a token but with a callback, the token comes first, then
         // the data callback (centrifuge-js `_canSubscribeWithoutGettingToken`).
         if sub.tokens.before_connect() == BeforeConnect::Fetch {
@@ -262,6 +275,13 @@ impl Machine {
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
         let (positioned, recoverable) = (sub.options.positioned, sub.options.recoverable);
+        // With getState, a failed recovery reloads the state rather than
+        // succeeding with publications missing.
+        let flag = if sub.options.state_source {
+            REJECT_UNRECOVERED
+        } else {
+            0
+        };
         self.subscriptions
             .subscribes
             .insert(command_id, (id, channel.clone()));
@@ -278,7 +298,7 @@ impl Machine {
                     epoch: recover_from.map(|at| at.epoch).unwrap_or_default(),
                     positioned,
                     recoverable,
-                    ..SubscribeRequest::default()
+                    flag,
                 }),
             }],
         );
@@ -536,7 +556,7 @@ impl Machine {
 
     /// centrifuge-js `_subscribeError`: temporary errors are retried.
     fn subscribe_error(&mut self, id: SubscriptionId, error: &Error) {
-        if self.subscribe_token_expired(id, error) {
+        if self.subscribe_token_expired(id, error) || self.recovery_rejected(id, error) {
             return;
         }
         if error.code < 100 || error.temporary {
@@ -588,6 +608,9 @@ impl Machine {
         sub.subscribe_command = None;
         if let Some(fetch) = sub.fetch.take() {
             self.actions.push(Action::CancelSubscriptionData(fetch));
+        }
+        if let Some(fetch) = sub.state_fetch.take() {
+            self.actions.push(Action::CancelSubscriptionState(fetch));
         }
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
@@ -713,6 +736,9 @@ impl Machine {
             sub.subscribe_command = None;
             if let Some(fetch) = sub.fetch.take() {
                 self.actions.push(Action::CancelSubscriptionData(fetch));
+            }
+            if let Some(fetch) = sub.state_fetch.take() {
+                self.actions.push(Action::CancelSubscriptionState(fetch));
             }
             // The token is kept for the resubscribe; its refresh starts
             // again from the new subscribe reply.
@@ -1070,6 +1096,41 @@ mod tests {
             unsubscribed.contains(&Action::CancelSubscriptionData(fetch)),
             "{unsubscribed:?}"
         );
+    }
+
+    #[test]
+    fn unsubscribing_cancels_a_pending_get_state_and_ignores_its_answer() {
+        let mut machine = connected().0;
+        let id = machine
+            .add_subscription(
+                "state".into(),
+                SubscriptionOptions::default().state_source(),
+            )
+            .unwrap();
+        let fetch = machine
+            .handle(Input::Subscribe(id))
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionState { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .unwrap();
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+        let late = machine.handle(Input::SubscriptionStateFetched {
+            fetch,
+            result: Ok(StreamPosition {
+                offset: 1,
+                epoch: "e".into(),
+            }),
+        });
+
+        assert!(
+            unsubscribed.contains(&Action::CancelSubscriptionState(fetch)),
+            "{unsubscribed:?}"
+        );
+        // No subscribe follows an answer no longer wanted.
+        assert_eq!(sent(&late), Vec::<String>::new());
     }
 
     #[test]

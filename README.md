@@ -50,13 +50,15 @@ Available now:
 - subscription tokens, refreshed through a callback before they expire;
   server unsubscribe codes; a configurable resubscribe backoff;
 - recovery of the publications a subscription missed while disconnected
-  or unsubscribed, and the `since`, `positioned` and `recoverable` options.
+  or unsubscribed, and the `since`, `positioned` and `recoverable` options;
+- a `get_state` callback reloading the application's state when there is
+  no position to recover from, or a recovery fails.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| `getState`, state invalidation (codes 2502, 3014) | Block 11 |
+| State invalidation (codes 2502, 3014) | Block 11 |
 | Server-side subscriptions | later blocks |
 | RPC, publish, history, presence | later blocks |
 
@@ -208,6 +210,28 @@ while let Some(event) = events.next().await {
         _ => {}
     }
 }
+```
+
+When the application keeps its own state, a `get_state` callback loads it
+and returns the stream position it was read at. It is called before the
+first subscribe without `since`, and again when a recovery fails: the
+subscription then stays subscribing, with no publication, until the state is
+reloaded, and continues from the new position. A failed load is reported as
+an `error` event and retried after the resubscribe backoff.
+
+```rust
+use ferrifuge::StateError;
+
+let subscription = client
+    .subscription_builder("news")
+    .get_state(|channel| async move {
+        // Read the stream position first, then the state: publications made
+        // meanwhile are then recovered rather than missed.
+        let position = stream_position(&channel).await;
+        load_state(&channel).await.map_err(|e| StateError(e.to_string()))?;
+        Ok(position)
+    })
+    .build()?;
 ```
 
 ### Transport fallback

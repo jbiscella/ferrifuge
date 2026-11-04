@@ -62,7 +62,6 @@ pub(crate) struct SubscribeRequest {
 
 /// Fail a subscribe whose recovery is not possible with error 112 instead
 /// of succeeding unrecovered (`client.proto`, `SubscribeRequest.flag`).
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) const REJECT_UNRECOVERED: i64 = 1 << 1;
 
 /// `UnsubscribeRequest` of `client.proto`.
