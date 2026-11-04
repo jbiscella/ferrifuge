@@ -27,7 +27,14 @@ const JSON: &str = "application/json";
 const MAX_MESSAGE: usize = 64 << 20;
 
 /// An emulation request in flight; its failure ends the transport.
-type Request = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+type Request = Pin<Box<dyn Future<Output = Result<Sent, String>> + Send>>;
+
+/// How the server took an emulation request it answered.
+enum Sent {
+    Accepted,
+    /// Rejected with HTTP 413, with the frame it carried.
+    Rejected(Vec<u8>),
+}
 
 /// An open `http_stream` or sse connection.
 pub(crate) struct HttpTransport {
@@ -117,6 +124,8 @@ impl HttpTransport {
     /// Sends `frame`, the body of an emulation request. A request that fails
     /// ends the transport when [`HttpTransport::recv`] reports it.
     pub(crate) fn send(&mut self, frame: Vec<u8>) {
+        // Kept to name the commands of a rejected request.
+        let sent = frame.clone();
         let request = self
             .emulation_http
             .post(self.emulation_url.clone())
@@ -138,8 +147,11 @@ impl HttpTransport {
                 || status.is_redirection()
             {
                 Err(format!("emulation request failed: HTTP status {status}"))
+            } else if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                // Its commands fail at once (owner decision, 2026-11-04).
+                Ok(Sent::Rejected(sent))
             } else {
-                Ok(())
+                Ok(Sent::Accepted)
             }
         }));
     }
@@ -172,8 +184,10 @@ impl HttpTransport {
                 // Irrefutable: a refutable pattern would disable this branch
                 // after a success until the stream yields (tokio `select!`).
                 Some(result) = self.requests.next(), if !self.requests.is_empty() => {
-                    if let Err(reason) = result {
-                        return Inbound::Closed { code: None, reason };
+                    match result {
+                        Err(reason) => return Inbound::Closed { code: None, reason },
+                        Ok(Sent::Rejected(frame)) => return Inbound::Rejected(frame),
+                        Ok(Sent::Accepted) => {}
                     }
                 }
             }
@@ -621,11 +635,12 @@ mod tests {
         )
         .await
         .unwrap();
-        transport.send(b"{}".to_vec());
+        transport.send(br#"{"id":2}"#.to_vec());
 
         let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv()).await;
 
-        assert!(inbound.is_err(), "{inbound:?}");
+        // Reported with its frame, not as the end of the transport.
+        assert_eq!(inbound, Ok(Inbound::Rejected(br#"{"id":2}"#.to_vec())));
     }
 
     #[tokio::test]

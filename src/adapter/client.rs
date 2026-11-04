@@ -500,6 +500,7 @@ impl Driver {
                 }
                 (id, inbound) = received(&mut self.transport) => match inbound {
                     Inbound::Frame(data) => Input::Frame { transport: id, data },
+                    Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Closed { code, reason } => {
                         self.transport = None;
                         Input::TransportClosed { transport: id, code, reason }
