@@ -26,6 +26,7 @@ mod connection;
 mod jitter;
 mod ping;
 mod protobuf;
+mod sub_tokens;
 mod subscriptions;
 mod tls;
 mod token;
@@ -115,6 +116,8 @@ pub(crate) struct ClientWorld {
     pub(crate) duplicate: Option<SubscriptionError>,
     /// Channels the data callback was called with, in order.
     pub(crate) data_calls: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Channels the subscription token callback was called with, in order.
+    pub(crate) token_calls: Arc<std::sync::Mutex<Vec<String>>>,
     /// The publication a step looked at last.
     pub(crate) last_publication: Option<ferrifuge::Publication>,
     /// Raw data a fake server pushed in a publication.
