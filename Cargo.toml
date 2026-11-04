@@ -82,6 +82,10 @@ name = "centrifugo_smoke"
 required-features = ["tokio"]
 
 [[test]]
+name = "adapter_tokens"
+required-features = ["tokio"]
+
+[[test]]
 name = "bdd"
 harness = false
 required-features = ["tokio"]
