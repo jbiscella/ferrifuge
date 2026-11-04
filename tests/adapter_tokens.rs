@@ -13,7 +13,7 @@ use support::fake_server::{Announce, FakeServer};
 use tokio::sync::oneshot;
 
 /// A refresh callback still running when its connection is replaced keeps
-/// running after the new connection starts its own refresh: its denial
+/// running while the new connection refreshes, more than once: its denial
 /// disconnects the client.
 #[tokio::test]
 async fn a_late_refresh_denial_disconnects_after_the_new_connection_refreshed() {
@@ -63,7 +63,9 @@ async fn a_late_refresh_denial_disconnects_after_the_new_connection_refreshed() 
         matches!(event, ClientEvent::Connected { .. })
     })
     .await;
-    wait_until(|| calls.load(Ordering::SeqCst) == 2).await;
+    // Two refreshes of the new connection: the second fetch starts when no
+    // other one is running.
+    wait_until(|| calls.load(Ordering::SeqCst) == 3).await;
     // Fails when the old callback was dropped: nothing then denies.
     let _ = deny.send(());
 
