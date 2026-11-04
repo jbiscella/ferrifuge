@@ -322,7 +322,7 @@ impl Machine {
             .insert(command_id, (id, channel.clone()));
         self.send(
             transport,
-            &[Command {
+            Command {
                 id: command_id,
                 method: Method::Subscribe(SubscribeRequest {
                     channel,
@@ -335,7 +335,7 @@ impl Machine {
                     recoverable,
                     flag,
                 }),
-            }],
+            },
         );
         self.actions.push(Action::SetSubscriptionTimer(
             id,
@@ -354,10 +354,10 @@ impl Machine {
             .insert(command_id, (id, channel.clone()));
         self.send(
             transport,
-            &[Command {
+            Command {
                 id: command_id,
                 method: Method::Unsubscribe(UnsubscribeRequest { channel }),
-            }],
+            },
         );
         self.actions.push(Action::SetSubscriptionTimer(
             id,
@@ -1576,6 +1576,47 @@ mod tests {
             sent(&rejected),
             [r#"{"id":4,"unsubscribe":{"channel":"news"}}"#]
         );
+    }
+
+    // A request the server refuses as too large (HTTP 413) concerns its
+    // one command only, so ending that command is right (owner condition on
+    // the 413 rule, 2026-11-04).
+    #[test]
+    fn every_emulation_request_carries_one_command() {
+        let mut machine = Machine::new(Config::default())
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        for channel in ["a", "b", "c"] {
+            let id = machine
+                .add_subscription(channel.into(), SubscriptionOptions::default())
+                .unwrap();
+            machine.handle(Input::Subscribe(id));
+        }
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+
+        let connected = machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","session":"s","node":"n"}}"#,
+        ));
+
+        let requests: Vec<_> = connected
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 3, "{connected:?}");
+        for request in requests {
+            let frame = crate::json::emulation_frame(request).expect("an emulation request");
+            assert_eq!(
+                crate::codec::Codec::Json.command_ids(&frame).len(),
+                1,
+                "{}",
+                String::from_utf8_lossy(&frame)
+            );
+        }
     }
 
     // Over http_stream and sse the commands travel inside an emulation

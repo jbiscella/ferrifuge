@@ -950,7 +950,7 @@ impl Machine {
         // is slow (centrifuge-js `onOpen`).
         self.transports.choose();
         let command = self.connect_command();
-        self.send(transport, &[command]);
+        self.send(transport, command);
     }
 
     /// A new connect command, now the one awaiting its reply.
@@ -1357,7 +1357,7 @@ impl Machine {
                 token: self.tokens.for_refresh(id),
             }),
         };
-        self.send(transport, &[command]);
+        self.send(transport, command);
         self.actions
             .push(Action::SetTimer(Timer::RefreshReply, self.config.timeout));
     }
@@ -1415,10 +1415,10 @@ impl Machine {
         };
         self.send(
             transport,
-            &[Command {
+            Command {
                 id: 0,
                 method: Method::Pong,
-            }],
+            },
         );
     }
 
@@ -1428,8 +1428,11 @@ impl Machine {
         }
     }
 
-    fn send(&mut self, transport: TransportId, commands: &[Command]) {
-        let mut frame = self.codec.encode(commands);
+    /// Sends `command` alone in its frame: over an emulated transport each
+    /// command then has its own request, so a request the server refuses
+    /// (HTTP 413) concerns that command only (see `send_rejected`).
+    fn send(&mut self, transport: TransportId, command: Command) {
+        let mut frame = self.codec.encode(&[command]);
         if let Some((session, node)) = &self.emulation {
             frame = json::emulation_request(session, node, &frame);
         }
