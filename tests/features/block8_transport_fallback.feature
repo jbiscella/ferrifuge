@@ -56,6 +56,19 @@ Feature: Transport fallback
     When connect is called
     Then within the configured timeout plus tolerance the client emits "connected" over transport "sse"
 
+  @B
+  Scenario: A websocket that never answers the handshake falls back
+    Given the connect proxy will leave the next connect unanswered
+    And a client configured with the server's websocket and http_stream endpoints
+    When connect is called
+    Then within the configured timeout plus tolerance the client emits "connected" over transport "http_stream"
+
+  @E
+  Scenario: An opened websocket without a connect reply falls back
+    Given a client configured with websocket and http_stream endpoints
+    When the websocket opens and no connect reply arrives within the configured timeout
+    Then the next attempt opens the http_stream transport
+
   Scenario: Every transport unreachable
     Given a client configured with unreachable websocket, http_stream and sse endpoints
     When connect is called
