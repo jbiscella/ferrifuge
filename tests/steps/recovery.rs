@@ -716,3 +716,123 @@ fn the_subscribe_carries_the_second_position(world: &mut ClientWorld) {
     assert_eq!(subscribe["flag"], 2, "{subscribe}");
     assert_eq!(run.requests("subscribe", 0).len(), 1, "{:?}", run.actions);
 }
+
+/// Subscribes to the fake server's recoverable channel with `builder`'s
+/// options: the subscription has a stream position.
+async fn subscribed_on_the_fake_server_with(
+    world: &mut ClientWorld,
+    builder: ferrifuge::SubscriptionBuilder,
+) {
+    let at = position(FAKE_OFFSET, FAKE_EPOCH);
+    world
+        .fake()
+        .answer_a_subscribe_with(recoverable_result(&at));
+    let subscription = builder.build().expect("no subscription to the channel yet");
+    world.track_subscription(subscription);
+    subscribe(world).await;
+    expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[given(r#"a client subscribed to channel "news" on the fake server using a subscription token callback"#)]
+async fn subscribed_with_a_token_callback(world: &mut ClientWorld) {
+    a_connected_client(world).await;
+    let calls = Arc::clone(&world.token_calls);
+    let builder = world
+        .client()
+        .subscription_builder(CHANNEL)
+        .get_token(move |channel| {
+            let calls = Arc::clone(&calls);
+            async move {
+                let mut calls = calls.lock().unwrap();
+                calls.push(channel);
+                Ok(format!("t{}", calls.len()))
+            }
+        });
+    subscribed_on_the_fake_server_with(world, builder).await;
+}
+
+#[given(
+    r#"a client subscribed to channel "news" on the fake server using a fixed subscription token"#
+)]
+async fn subscribed_with_a_fixed_token(world: &mut ClientWorld) {
+    a_connected_client(world).await;
+    let builder = world
+        .client()
+        .subscription_builder(CHANNEL)
+        .token("fixed-subscription-token");
+    subscribed_on_the_fake_server_with(world, builder).await;
+}
+
+/// The subscribe command after the first, which the unsubscribe push made
+/// the client send.
+async fn the_resubscribe(world: &ClientWorld) -> Value {
+    let first = subscribe_request(world, 0).await;
+    assert!(first["recover"].is_null(), "{first}");
+    subscribe_request(world, 1).await
+}
+
+fn assert_no_position(subscribe: &Value) {
+    for field in ["recover", "epoch", "offset"] {
+        assert!(subscribe[field].is_null(), "{subscribe}");
+    }
+}
+
+#[then("the subscription resubscribes with the new token and without a stream position")]
+async fn resubscribes_with_the_new_token_without_position(world: &mut ClientWorld) {
+    let subscribe = the_resubscribe(world).await;
+    assert_eq!(subscribe["token"], "t2", "{subscribe}");
+    assert_no_position(&subscribe);
+}
+
+#[then("the subscription resubscribes without a token and without a stream position")]
+async fn resubscribes_without_token_or_position(world: &mut ClientWorld) {
+    let subscribe = the_resubscribe(world).await;
+    assert!(subscribe["token"].is_null(), "{subscribe}");
+    assert_no_position(&subscribe);
+}
+
+#[given(
+    "a client using a fixed connection token and no token callback, connected to the fake server"
+)]
+async fn a_client_with_a_fixed_connection_token(world: &mut ClientWorld) {
+    let endpoint = world.server_endpoint();
+    let mut config = world.client_config();
+    "fixed-connection-token".clone_into(&mut config.token);
+    world.build_client(ferrifuge::Client::builder(endpoint).config(config));
+    world.client().connect();
+    super::expect_event(world, "connecting").await;
+    super::expect_event(world, "connected").await;
+}
+
+/// Connect commands the fake server has received.
+fn connects(world: &ClientWorld) -> Vec<Value> {
+    world
+        .fake()
+        .received()
+        .into_iter()
+        .filter_map(|message| {
+            let connect = &message["connect"];
+            connect.is_object().then(|| connect.clone())
+        })
+        .collect()
+}
+
+#[then("the next connect command carries no token")]
+async fn the_next_connect_carries_no_token(world: &mut ClientWorld) {
+    let connects = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let connects = connects(world);
+            if connects.len() >= 2 {
+                return connects;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a second connect command within the timeout");
+    assert_eq!(
+        connects[0]["token"], "fixed-connection-token",
+        "{connects:?}"
+    );
+    assert!(connects[1]["token"].is_null(), "{connects:?}");
+}

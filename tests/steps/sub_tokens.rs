@@ -349,7 +349,19 @@ fn subscribe_carries_the_second_token(world: &mut ClientWorld) {
 }
 
 #[then("the subscription token callback is called again")]
-fn token_callback_called_again(world: &mut ClientWorld) {
+async fn token_callback_called_again(world: &mut ClientWorld) {
+    // A real client in @D scenarios (Block 11c).
+    if world.subscription_machine.is_none() {
+        let calls = std::sync::Arc::clone(&world.token_calls);
+        let called_again = tokio::time::timeout(super::EVENT_TIMEOUT, async {
+            while calls.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(called_again.is_ok(), "calls: {:?}", calls.lock().unwrap());
+        return;
+    }
     let run = run(world);
     assert_eq!(run.token_calls.len(), 2, "{:?}", run.actions);
 }
