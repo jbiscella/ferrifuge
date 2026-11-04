@@ -90,6 +90,39 @@ async fn connect_proxy_accepts_then_rejects_as_programmed() {
     );
 }
 
+#[tokio::test]
+async fn connect_proxy_grants_server_side_subscriptions_as_programmed() {
+    let proxy = ProxyBackend::start().await;
+    let env = proxy.centrifugo_env();
+    let env: Vec<_> = env
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let server = Centrifugo::start(&env).await;
+
+    proxy.grant(&["alerts"]);
+    let granted = raw_connect(&server.websocket_url()).await;
+    proxy.grant(&[]);
+    let none = raw_connect(&server.websocket_url()).await;
+
+    assert!(granted.contains(r#""subs":{"alerts":"#), "{granted}");
+    assert!(!none.contains(r#""subs""#), "{none}");
+}
+
+#[tokio::test]
+async fn fake_server_grants_server_side_subscriptions_as_programmed() {
+    let server = FakeServer::start(Announce::default()).await;
+    let url = format!("ws://{}/connection/websocket", server.address());
+
+    server.grant_server_subscriptions(json!({"alerts": {"data": {"tier": "gold"}}}));
+    let granted = raw_connect(&url).await;
+
+    assert!(
+        granted.contains(r#""subs":{"alerts":{"data":{"tier":"gold"}}}"#),
+        "{granted}"
+    );
+}
+
 /// Sends a connect command over a raw websocket; returns the first text
 /// frame, or the close code and reason.
 async fn raw_connect(url: &str) -> String {
