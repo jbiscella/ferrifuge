@@ -155,10 +155,12 @@ impl Tokens {
     /// The server invalidated the state the token belongs to (`client.proto`
     /// codes 2502 and 3014): the token is dropped, so the next connect or
     /// subscribe fetches a new one when there is a source, and carries none
-    /// otherwise.
+    /// otherwise. A fetch in flight was asked for the invalidated state: its
+    /// answer, even a refresh's that would outlive a reconnect, is ignored.
     pub(super) fn invalidate(&mut self) {
         self.current = Secret::default();
         self.refresh_required = false;
+        self.fetch = None;
     }
 
     /// The token for refresh command `id`, which is now the pending one.

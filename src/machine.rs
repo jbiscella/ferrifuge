@@ -2163,6 +2163,37 @@ mod tests {
     }
 
     #[test]
+    fn a_state_invalidated_disconnect_abandons_a_refresh_fetch() {
+        let mut machine = token_machine("t");
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
+        ));
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3014),
+            reason: "state invalidated".into(),
+        });
+
+        // An answer for the invalidated state, before the reconnect.
+        machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("stale".into()),
+        });
+        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+
+        assert!(
+            reconnecting
+                .iter()
+                .any(|action| matches!(action, Action::FetchToken(_))),
+            "{reconnecting:?}"
+        );
+    }
+
+    #[test]
     fn token_fetched_after_disconnect_is_ignored() {
         let mut machine = token_machine("");
         let fetch = fetch_requested(&machine.handle(Input::Connect));
