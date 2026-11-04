@@ -28,6 +28,9 @@ pub(crate) enum Inbound {
     Frame(Vec<u8>),
     /// The connection ended; `code` is absent when no close frame was received.
     Closed { code: Option<u16>, reason: String },
+    /// An emulation request carrying this frame was rejected with HTTP 413:
+    /// only its commands failed, the transport stays open.
+    Rejected(Vec<u8>),
 }
 
 impl WebSocket {

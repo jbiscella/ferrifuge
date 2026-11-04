@@ -334,6 +334,15 @@ pub enum Input {
         /// Encoded replies.
         data: Vec<u8>,
     },
+    /// The server refused a frame sent with [`Action::Send`] without closing
+    /// the transport (an emulation request answered with HTTP 413): its
+    /// commands failed.
+    SendRejected {
+        /// The transport the frame was sent on.
+        transport: TransportId,
+        /// The frame, as the action carried it.
+        frame: Vec<u8>,
+    },
     /// A timer set by [`Action::SetTimer`] fired.
     TimerFired(Timer),
     /// The token callback answered a [`Action::FetchToken`].
@@ -497,6 +506,12 @@ impl std::fmt::Debug for Input {
                 .debug_struct("Frame")
                 .field("transport", transport)
                 .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+            // The frame may carry a token: only its length is shown.
+            Self::SendRejected { transport, frame } => f
+                .debug_struct("SendRejected")
+                .field("transport", transport)
+                .field("frame", &format_args!("<{} bytes>", frame.len()))
                 .finish(),
             Self::TimerFired(timer) => f.debug_tuple("TimerFired").field(timer).finish(),
             Self::TokenFetched { fetch, result } => f
@@ -861,11 +876,13 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            // About a transport already abandoned.
+            // About a transport already abandoned; a rejected frame is not
+            // handled yet.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
-            | Input::Frame { .. } => {}
+            | Input::Frame { .. }
+            | Input::SendRejected { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }
