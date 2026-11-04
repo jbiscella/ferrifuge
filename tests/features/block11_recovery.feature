@@ -138,7 +138,7 @@ Feature: Subscription recovery
     And the subscription resubscribes with the new token and without a stream position
 
   @D
-  Scenario: Connection state invalidation clears the token and every position
+  Scenario: Connection state invalidation clears the token and invalidates every position
     Given a client using a connection token callback, connected to the fake server
     And a client-side subscription to channel "news" with a stream position
     And a server-side subscription to channel "alerts" with a stream position from the connect reply

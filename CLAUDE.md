@@ -1109,9 +1109,9 @@ Value clause: As an app developer, I want missed publications recovered after a 
 |---|---|---|
 | 11a | As an app developer, I want missed publications recovered after a reconnect, an unsubscribe or a disconnect, so that my app sees no gap in a channel's stream | "A first subscribe does not recover" to "Recovery fails when history is gone", and "A failed recovery's reply replaces the stored position" |
 | 11b | As an app developer, I want my state reloaded through getState when recovery fails, so that a lost stream never leaves my app with stale data | "getState provides the position of the initial subscribe", "getState reloads state when recovery fails", "The since option takes precedence over getState on the first subscribe", "A failing getState is retried before subscribing" |
-| 11c | As an app developer, I want a server's "state invalidated" to drop tokens and positions, so that my app resubscribes from fresh state | "State invalidation fetches a new subscription token", "Connection state invalidation clears the token and every position", "Connection state invalidation drops a fixed connection token", "State invalidation drops a fixed subscription token" |
+| 11c | As an app developer, I want a server's "state invalidated" to drop tokens and positions, so that my app resubscribes from fresh state | "State invalidation fetches a new subscription token", "Connection state invalidation clears the token and invalidates every position", "Connection state invalidation drops a fixed connection token", "State invalidation drops a fixed subscription token" |
 
-**Owner decision (2026-11-04):** "Connection state invalidation clears the token and every position" needs server-side subscriptions (Block 12). 11c implements disconnect code 3014 for the connection token and client-side positions, and covers that half with unit tests on the sans-IO core: the connection token callback is called before the next connect, and the next subscribe of a client-side subscription asks to recover from the sentinel position (offset 0, epoch "_"). The scenario passes once Block 12 adds server-side positions, and Block 12's PR adds it to the implemented scenarios.
+**Owner decision (2026-11-04):** "Connection state invalidation clears the token and invalidates every position" needs server-side subscriptions (Block 12). 11c implements disconnect code 3014 for the connection token and client-side positions, and covers that half with unit tests on the sans-IO core: the connection token callback is called before the next connect, and the next subscribe of a client-side subscription asks to recover from the sentinel position (offset 0, epoch "_"). The scenario passes once Block 12 adds server-side positions, and Block 12's PR adds it to the implemented scenarios.
 
 ```gherkin
 Feature: Subscription recovery
@@ -1254,7 +1254,7 @@ Feature: Subscription recovery
     And the subscription resubscribes with the new token and without a stream position
 
   @D
-  Scenario: Connection state invalidation clears the token and every position
+  Scenario: Connection state invalidation clears the token and invalidates every position
     Given a client using a connection token callback, connected to the fake server
     And a client-side subscription to channel "news" with a stream position
     And a server-side subscription to channel "alerts" with a stream position from the connect reply

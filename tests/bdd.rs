@@ -163,7 +163,7 @@ const IMPLEMENTED: &[&str] = &[
     "The since option takes precedence over getState on the first subscribe",
     "A failing getState is retried before subscribing",
     // Block 11c: state invalidation. "Connection state invalidation clears
-    // the token and every position" needs Block 12's server-side
+    // the token and invalidates every position" needs Block 12's server-side
     // subscriptions (owner decision); unit tests cover its client side.
     "State invalidation fetches a new subscription token",
     "Connection state invalidation drops a fixed connection token",
