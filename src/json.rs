@@ -39,6 +39,21 @@ pub(crate) fn encode(commands: &[Command]) -> Vec<u8> {
     frame
 }
 
+/// Ids of the commands of `frame`, one this client encoded; 0 for a
+/// command without one.
+pub(crate) fn command_ids(frame: &[u8]) -> Vec<u32> {
+    #[derive(Deserialize)]
+    struct Id {
+        #[serde(default)]
+        id: u32,
+    }
+    frame
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Id>(line).ok())
+        .map(|command| command.id)
+        .collect()
+}
+
 /// Decodes every reply in a frame.
 pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, DecodeError> {
     serde_json::Deserializer::from_slice(frame)

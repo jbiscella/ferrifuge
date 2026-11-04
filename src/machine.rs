@@ -825,6 +825,9 @@ impl Machine {
                 reason,
             } if self.is_current(transport) => self.transport_closed(code, &reason),
             Input::Frame { transport, data } if self.is_current(transport) => self.frame(&data),
+            Input::SendRejected { transport, frame } if self.is_current(transport) => {
+                self.send_rejected(&frame);
+            }
             Input::TimerFired(Timer::Reconnect) => {
                 if self.state == State::Connecting && self.transport.is_none() {
                     self.start_attempt();
@@ -876,8 +879,7 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            // About a transport already abandoned; a rejected frame is not
-            // handled yet.
+            // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
@@ -1055,6 +1057,33 @@ impl Machine {
             }
             return;
         }
+        self.command_reply(reply);
+    }
+
+    /// The server refused a frame without closing the transport (HTTP 413
+    /// on an emulation request): each of its commands fails at once, as if
+    /// the server had answered it with a temporary error (owner decision,
+    /// 2026-11-04). It proves nothing about the connection, so the backoff
+    /// is not reset.
+    fn send_rejected(&mut self, frame: &[u8]) {
+        for id in self.codec.command_ids(frame) {
+            if id == 0 {
+                continue;
+            }
+            self.command_reply(Reply {
+                id,
+                error: Some(Error {
+                    code: codes::error::TRANSPORT_WRITE,
+                    message: "request rejected by the server (HTTP 413)".to_owned(),
+                    temporary: true,
+                }),
+                result: ReplyResult::Empty,
+            });
+        }
+    }
+
+    /// The reply to command `reply.id`, or its failure.
+    fn command_reply(&mut self, reply: Reply) {
         if self.subscriptions.owns_command(reply.id) {
             self.subscription_command_reply(reply);
             return;

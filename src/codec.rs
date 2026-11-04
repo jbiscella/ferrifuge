@@ -43,6 +43,14 @@ impl Codec {
         }
     }
 
+    /// Ids of the commands of `frame`, one [`Codec::encode`] made.
+    pub(crate) fn command_ids(self, frame: &[u8]) -> Vec<u32> {
+        match self {
+            Self::Json => json::command_ids(frame),
+            Self::Protobuf => protobuf::command_ids(frame),
+        }
+    }
+
     /// How this encoding's frames travel on a websocket.
     pub(crate) fn frame_type(self) -> FrameType {
         match self {
@@ -55,7 +63,23 @@ impl Codec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::Method;
+    use crate::wire::{Method, UnsubscribeRequest};
+
+    #[test]
+    fn the_command_ids_of_a_frame_are_read_back_in_both_encodings() {
+        let commands = [2, 3].map(|id| Command {
+            id,
+            method: Method::Unsubscribe(UnsubscribeRequest {
+                channel: "news".into(),
+            }),
+        });
+
+        for codec in [Codec::Json, Codec::Protobuf] {
+            let frame = codec.encode(&commands);
+
+            assert_eq!(codec.command_ids(&frame), [2, 3], "{codec:?}");
+        }
+    }
 
     #[test]
     fn json_frames_are_text() {

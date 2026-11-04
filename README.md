@@ -115,8 +115,10 @@ docker run --rm -p 8000:8000 \
 `Stream` of the events emitted from then on; each call returns an independent
 stream. A stream borrows nothing from the client, so it can be kept beside
 it, e.g. in the same struct. Dropping the client disconnects it and ends its
-streams. A builder that cannot work returns a `ClientError`, which
-implements `std::error::Error`.
+streams. `Client::new` and a builder that cannot work return a
+`ClientError`, which implements `std::error::Error`: for instance an empty
+endpoint, or an `http://` or `https://` one for websocket, which needs
+`ws://` or `wss://` (`http(s)://` is right for http_stream and sse).
 
 ### Subscriptions
 
