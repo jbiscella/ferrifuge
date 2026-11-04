@@ -47,7 +47,7 @@ pub mod unsubscribed {
     pub const UNSUBSCRIBE_CALLED: u32 = 0;
     /// A callback denied access.
     pub const UNAUTHORIZED: u32 = 1;
-    /// The server refused a subscribe or sub_refresh command as too large
+    /// The server refused a subscribe or `sub_refresh` command as too large
     /// (an emulation request answered with HTTP 413); retrying it would fail
     /// the same way. 3, as the disconnect code of the same cause.
     pub const MESSAGE_SIZE_LIMIT: u32 = 3;

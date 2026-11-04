@@ -75,6 +75,10 @@ struct Subscription {
 /// (`client.proto`, `Unsubscribe`).
 const STATE_INVALIDATED: u32 = 2502;
 
+/// Reason of the code 3 of an unsubscribe or disconnect: the server refused
+/// a command as too large.
+pub(super) const MESSAGE_SIZE_LIMIT_REASON: &str = "message size limit exceeded";
+
 /// Epoch no stream has: not empty, which means "any epoch" to the server
 /// (centrifuge-js `_invalidateState`).
 const UNMATCHABLE_EPOCH: &str = "_";
@@ -482,6 +486,60 @@ impl Machine {
 
     /// Handles the reply to a subscribe or unsubscribe command
     /// ([`Subscriptions::owns_command`]).
+    /// The server refused command `command` as too large (an emulation
+    /// request answered with HTTP 413). A subscribe or `sub_refresh` would be
+    /// refused again, so it is not retried: its subscription goes to
+    /// unsubscribed with [`codes::unsubscribed::MESSAGE_SIZE_LIMIT`],
+    /// after an unsubscribe command when the server holds the subscription
+    /// (owner decision, 2026-11-04). Whether `command` was one of them.
+    pub(in crate::machine) fn subscription_command_too_large(&mut self, command: u32) -> bool {
+        if let Some(id) = self.subscriptions.sub_refreshes.remove(&command) {
+            self.actions.push(Action::CancelSubscriptionTimer(
+                id,
+                SubscriptionTimer::RefreshReply,
+            ));
+            let current = self.subscriptions.by_id.get_mut(&id).is_some_and(|sub| {
+                sub.tokens.take_refresh_reply(command) && sub.state == SubscriptionState::Subscribed
+            });
+            if current {
+                self.set_unsubscribed(
+                    id,
+                    codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                    MESSAGE_SIZE_LIMIT_REASON,
+                    true,
+                );
+            }
+            return true;
+        }
+        let Some((id, channel)) = self.subscriptions.subscribes.remove(&command) else {
+            return false;
+        };
+        self.actions.push(Action::CancelSubscriptionTimer(
+            id,
+            SubscriptionTimer::SubscribeReply,
+        ));
+        let current = self
+            .subscriptions
+            .by_id
+            .get_mut(&id)
+            .filter(|sub| sub.subscribe_command == Some(command));
+        match current {
+            // Never subscribed on the server: nothing to unsubscribe.
+            Some(sub) => {
+                sub.subscribe_command = None;
+                self.set_unsubscribed(
+                    id,
+                    codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                    MESSAGE_SIZE_LIMIT_REASON,
+                    false,
+                );
+            }
+            // Unsubscribed or removed while in flight: the channel is free.
+            None => self.wake_waiting(&channel),
+        }
+        true
+    }
+
     pub(super) fn subscription_command_reply(&mut self, reply: Reply) {
         if let Some(id) = self.subscriptions.sub_refreshes.remove(&reply.id) {
             self.sub_refresh_reply(id, reply);
@@ -1466,6 +1524,28 @@ mod tests {
         // The server never got the subscribe: nothing to unsubscribe.
         assert_eq!(sent(&rejected), Vec::<String>::new());
         assert_eq!(machine.state(), State::Connected);
+    }
+
+    #[test]
+    fn an_unsubscribe_rejected_as_too_large_reconnects_as_any_unsubscribe_error() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let unsubscribing = machine.handle(Input::Unsubscribe(id));
+
+        let rejected = machine.handle(Input::SendRejected {
+            transport,
+            frame: frame_sent(&unsubscribing),
+        });
+
+        assert!(
+            rejected.iter().any(|action| matches!(
+                action,
+                Action::Emit(crate::ClientEvent::Connecting { code, .. })
+                    if *code == codes::connecting::UNSUBSCRIBE_ERROR
+            )),
+            "{rejected:?}"
+        );
     }
 
     #[test]
