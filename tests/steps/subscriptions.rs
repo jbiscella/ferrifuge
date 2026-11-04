@@ -42,12 +42,12 @@ fn hex_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Whether `publication` carries `expected` JSON, whatever its layout.
-fn has_json_data(publication: &Publication, expected: &str) -> bool {
+pub(super) fn has_json_data(publication: &Publication, expected: &str) -> bool {
     serde_json::from_slice::<Value>(&publication.data).ok()
         == serde_json::from_str::<Value>(expected).ok()
 }
 
-fn create(world: &mut ClientWorld, channel: &str) {
+pub(super) fn create(world: &mut ClientWorld, channel: &str) {
     let subscription = world
         .client()
         .new_subscription(channel)
@@ -57,12 +57,12 @@ fn create(world: &mut ClientWorld, channel: &str) {
 
 /// Subscribes the scenario's subscription and consumes the "subscribing"
 /// event `subscribe()` emits at once, so later steps see the server's answer.
-async fn subscribe(world: &mut ClientWorld) {
+pub(super) async fn subscribe(world: &mut ClientWorld) {
     world.subscription().subscribe();
     expect_subscription_event(world, "subscribing", false).await;
 }
 
-async fn expect_subscription_event(
+pub(super) async fn expect_subscription_event(
     world: &mut ClientWorld,
     expected: &str,
     new: bool,
@@ -93,7 +93,7 @@ async fn reach_subscribed(world: &mut ClientWorld, new: bool) {
     );
 }
 
-async fn next_publication(world: &mut ClientWorld, new: bool) -> Publication {
+pub(super) async fn next_publication(world: &mut ClientWorld, new: bool) -> Publication {
     loop {
         if let SubscriptionEvent::Publication(publication) =
             world.next_subscription_event(new).await
@@ -777,7 +777,7 @@ async fn subscribed_again_after_the_new_subscribe(world: &mut ClientWorld) {
 async fn subscribed_with_an_initial_publication(world: &mut ClientWorld, channel: String) {
     world
         .fake()
-        .answer_next_subscribe_with(vec![json!({"data": {"initial": 1}, "offset": 1})]);
+        .answer_next_subscribe_with(&[json!({"data": {"initial": 1}, "offset": 1})]);
     create(world, &channel);
     subscribe(world).await;
 }
@@ -1117,7 +1117,15 @@ fn a_data_callback_denying_access(world: &mut ClientWorld) {
 }
 
 #[when("the subscription is subscribed on a connected client")]
-fn subscribed_on_a_connected_machine(world: &mut ClientWorld) {
+async fn subscribed_on_a_connected_machine(world: &mut ClientWorld) {
+    // A real client in @A scenarios, e.g. one subscribing with `since`.
+    if world.subscription_machine.is_none() {
+        world.client().connect();
+        super::expect_event(world, "connecting").await;
+        super::expect_event(world, "connected").await;
+        subscribe(world).await;
+        return;
+    }
     let run = world.subscription_machine.as_mut().expect("@E machine");
     run.connect();
     let subscription = run.subscription;

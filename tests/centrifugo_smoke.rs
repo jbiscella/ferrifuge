@@ -482,7 +482,7 @@ async fn proxy_backend_answers_subscribe_requests_as_programmed() {
 async fn fake_server_answers_subscribe_and_unsubscribe() {
     let fake = FakeServer::start(Announce::default()).await;
     let url = format!("ws://{}/connection/websocket", fake.address());
-    fake.answer_next_subscribe_with(vec![json!({"data": {"n": 1}, "offset": 1})]);
+    fake.answer_next_subscribe_with(&[json!({"data": {"n": 1}, "offset": 1})]);
 
     let replies = raw_session(
         &url,

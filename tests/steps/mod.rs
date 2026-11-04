@@ -26,6 +26,7 @@ mod connection;
 mod jitter;
 mod ping;
 mod protobuf;
+mod recovery;
 mod sub_tokens;
 mod subscriptions;
 mod tls;
@@ -130,6 +131,8 @@ pub(crate) struct ClientWorld {
     pub(crate) subscription_machine: Option<subscriptions::MachineRun>,
     /// The sans-IO core of an @E reconnect jitter scenario.
     pub(crate) jitter: Option<jitter::JitterRun>,
+    /// Publications and positions of a Block 11 scenario.
+    pub(crate) recovery: recovery::Recovery,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
