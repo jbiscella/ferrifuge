@@ -4,6 +4,7 @@
 //! ways a real Centrifugo cannot be made to, e.g. arbitrary close codes.
 //! Prior art: `fakeserver_test.go` in centrifuge-go.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
@@ -48,8 +49,9 @@ struct State {
     received_protobuf: Vec<protobuf::Command>,
     /// Subscribe commands still to leave unanswered.
     ignored_subscribes: usize,
-    /// Publications to include in the reply to the next subscribe.
-    next_subscribe_publications: Vec<Value>,
+    /// Results of the replies to the next subscribe commands, in order;
+    /// an empty result once none is left.
+    subscribe_results: VecDeque<Value>,
 }
 
 pub(crate) struct FakeServer {
@@ -188,8 +190,18 @@ impl FakeServer {
     }
 
     /// Includes `publications` in the reply to the next subscribe command.
-    pub(crate) fn answer_next_subscribe_with(&self, publications: Vec<Value>) {
-        self.state.lock().unwrap().next_subscribe_publications = publications;
+    pub(crate) fn answer_next_subscribe_with(&self, publications: &[Value]) {
+        self.answer_a_subscribe_with(json!({"publications": publications}));
+    }
+
+    /// Answers a later subscribe command with `result`: the first one not
+    /// given a result yet.
+    pub(crate) fn answer_a_subscribe_with(&self, result: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .subscribe_results
+            .push_back(result);
     }
 
     /// Every Protobuf command received from clients so far.
@@ -300,12 +312,7 @@ impl Connection {
                 if state.ignored_subscribes > 0 {
                     state.ignored_subscribes -= 1;
                 } else {
-                    let publications = std::mem::take(&mut state.next_subscribe_publications);
-                    let result = if publications.is_empty() {
-                        json!({})
-                    } else {
-                        json!({"publications": publications})
-                    };
+                    let result = state.subscribe_results.pop_front().unwrap_or(json!({}));
                     replies.push(Message::text(
                         json!({"id": message["id"], "subscribe": result}).to_string(),
                     ));

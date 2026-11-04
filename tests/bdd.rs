@@ -144,6 +144,19 @@ const IMPLEMENTED: &[&str] = &[
     "A subscription that has a token calls the data callback without the token callback",
     "Each subscription token callback receives its own channel",
     "Subscription token denied",
+    // Block 11a: stream positions and recovery.
+    "A first subscribe does not recover",
+    "Positioned and recoverable options are requested",
+    "The subscribed event reports the granted capabilities",
+    "The first subscribe reply's position is used for recovery",
+    "A changed epoch on a live publication is used for recovery",
+    "Recovered publications advance the stored position",
+    "Missed publications are recovered",
+    "Publications between unsubscribe and subscribe are recovered",
+    "Publications made while explicitly disconnected are recovered",
+    "The since option recovers on the first subscribe",
+    "Recovery fails when history is gone",
+    "A failed recovery's reply replaces the stored position",
 ];
 
 /// Server configuration of @A scenarios.
@@ -172,8 +185,12 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
     // Channels of the `private` namespace need a subscription token
     // (Block 10); an expired, unrefreshed one is ended after 1 s past the
-    // server's periodic check (default 25 s).
-    ("CENTRIFUGO_CHANNEL_NAMESPACES", r#"[{"name":"private"}]"#),
+    // server's periodic check (default 25 s). Those of the `rec` namespace
+    // keep a history and are recoverable (Block 11).
+    (
+        "CENTRIFUGO_CHANNEL_NAMESPACES",
+        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
+    ),
     ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
 ];
 
