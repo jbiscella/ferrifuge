@@ -121,6 +121,27 @@ const IMPLEMENTED: &[&str] = &[
     "Resubscribe delays are jittered",
     "A successful subscribe resets the resubscribe backoff",
     "Resubscribe backoff options are configurable",
+    "Subscription token refreshed before expiry keeps the subscription",
+    "A failing first subscription token fetch is retried before subscribing",
+    "Subscribe error 109 fetches a new token and resubscribes",
+    "A failing subscription token callback is retried",
+    "A temporary sub_refresh error is retried",
+    "A sub_refresh without a reply is retried",
+    "A subscription token denied before the first subscribe unsubscribes",
+    "Ending a subscription during the resubscribe backoff cancels the retry",
+    "Ending a subscription during the refresh retry delay cancels the refresh",
+    "A refresh reply without expiry stops refreshing",
+    "A permanent sub_refresh error unsubscribes",
+    "An expiring fixed subscription token without a callback unsubscribes",
+    "A subscribe rejected for an expired token without a callback unsubscribes",
+    "A subscribe rejected for an expired token fetches a new one after the backoff",
+    "An empty subscription token before the first subscribe unsubscribes",
+    "An empty subscription token on refresh unsubscribes",
+    "The data callback runs only after a subscription token is obtained",
+    "The subscription token is fetched before the data callback runs",
+    "A subscription that has a token calls the data callback without the token callback",
+    "Each subscription token callback receives its own channel",
+    "Subscription token denied",
 ];
 
 /// Server configuration of @A scenarios.
@@ -147,6 +168,11 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     ),
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE", "10"),
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
+    // Channels of the `private` namespace need a subscription token
+    // (Block 10); an expired, unrefreshed one is ended after 1 s past the
+    // server's periodic check (default 25 s).
+    ("CENTRIFUGO_CHANNEL_NAMESPACES", r#"[{"name":"private"}]"#),
+    ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
 ];
 
 /// Server configuration added for @B scenarios, besides the proxy's.

@@ -1,4 +1,5 @@
-//! Connection tokens (HS256 JWT) accepted by the test server.
+//! Connection and subscription tokens (HS256 JWT) accepted by the test
+//! server.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,13 +14,26 @@ pub(crate) const HMAC_SECRET: &str = "test-hmac-secret";
 
 /// A token for `user` that expires `lifetime` from now.
 pub(crate) fn connection_token(user: &str, lifetime: Duration) -> String {
-    let expires = SystemTime::now()
+    signed(&json!({"sub": user, "exp": expires_in(lifetime)}))
+}
+
+/// A subscription token for `user` and `channel` that expires `lifetime`
+/// from now (Centrifugo verifies it with the connection token key).
+pub(crate) fn subscription_token(user: &str, channel: &str, lifetime: Duration) -> String {
+    signed(&json!({"sub": user, "channel": channel, "exp": expires_in(lifetime)}))
+}
+
+fn expires_in(lifetime: Duration) -> u64 {
+    SystemTime::now()
         .checked_add(lifetime)
         .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
         .expect("expiry after the epoch")
-        .as_secs();
+        .as_secs()
+}
+
+fn signed(claims: &serde_json::Value) -> String {
     let header = URL_SAFE_NO_PAD.encode(json!({"alg": "HS256", "typ": "JWT"}).to_string());
-    let claims = URL_SAFE_NO_PAD.encode(json!({"sub": user, "exp": expires}).to_string());
+    let claims = URL_SAFE_NO_PAD.encode(claims.to_string());
     let signed = format!("{header}.{claims}");
     let mut mac =
         Hmac::<Sha256>::new_from_slice(HMAC_SECRET.as_bytes()).expect("any key size is valid");

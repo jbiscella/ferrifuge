@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use cucumber::{given, then, when};
 use ferrifuge::machine::{
-    Action, Input, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer,
+    Action, Input, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer, TransportId,
 };
 use ferrifuge::{
-    ClientEvent, DataError, Protocol, Publication, SubscriptionEvent, SubscriptionState,
+    ClientEvent, DataError, Protocol, Publication, SubscriptionEvent, SubscriptionState, TokenError,
 };
 use serde_json::{Value, json};
 
@@ -165,6 +165,14 @@ fn the_subscription_state_is(world: &mut ClientWorld, expected: String) {
 
 #[then(regex = r#"^(?:then )?the subscription emits "(\w+)"$"#)]
 async fn the_subscription_emits(world: &mut ClientWorld, expected: String) {
+    if let Some(run) = &world.subscription_machine {
+        assert!(
+            run.events().iter().any(|event| event.name() == expected),
+            "{:?}",
+            run.actions
+        );
+        return;
+    }
     expect_subscription_event(world, &expected, false).await;
 }
 
@@ -308,6 +316,11 @@ async fn the_subscription_emits_unsubscribed_with_code(world: &mut ClientWorld, 
 
 #[then(regex = r#"^the subscription emits "unsubscribed" with code (\d+) and reason "(.*)"$"#)]
 async fn unsubscribed_with_code_and_reason(world: &mut ClientWorld, code: u32, reason: String) {
+    if let Some(run) = &world.subscription_machine {
+        let expected = SubscriptionEvent::Unsubscribed { code, reason };
+        assert!(run.events().contains(&&expected), "{:?}", run.actions);
+        return;
+    }
     let event = expect_subscription_event(world, "unsubscribed", false).await;
     assert_eq!(
         event,
@@ -854,48 +867,87 @@ async fn no_publication_from_that_frame(world: &mut ClientWorld) {
     );
 }
 
-/// The sans-IO core of an @E scenario, connected, with one subscription
-/// whose data callback is answered from `answers`.
+/// The sans-IO core of an @E scenario with one subscription, connected by
+/// a step. It answers the data and token callbacks from scripted answers,
+/// and the server's subscribe and `sub_refresh` replies from scripted
+/// reply fields; a command without one stays unanswered. Timers other than
+/// an answered resubscribe are fired by steps.
 pub(crate) struct MachineRun {
     machine: Machine,
-    subscription: SubscriptionId,
+    pub(crate) subscription: SubscriptionId,
+    transport: Option<TransportId>,
     /// Every action the machine returned, in order.
     pub(crate) actions: Vec<Action>,
     answers: VecDeque<Result<Vec<u8>, DataError>>,
+    pub(crate) token_answers: VecDeque<Result<String, TokenError>>,
     /// Data callback calls answered so far.
     pub(crate) fetches: usize,
+    /// Channels the token callback was called with, in order.
+    pub(crate) token_calls: Vec<String>,
+    /// Callback calls in order: "token" or "data".
+    pub(crate) calls: Vec<&'static str>,
     /// Delay of the resubscribe timer before the latest fetch, if any.
     pub(crate) delay_before_fetch: Option<Duration>,
+    /// Reply fields for the next subscribe commands, e.g. `"subscribe":{}`.
+    pub(crate) subscribe_answers: VecDeque<String>,
+    /// Reply fields for the next `sub_refresh` commands.
+    pub(crate) sub_refresh_answers: VecDeque<String>,
+    /// Unanswered subscribe and `sub_refresh` commands, by id.
+    pending_subscribe: Option<u64>,
+    pending_sub_refresh: Option<u64>,
+    /// Index into `actions` from which a later step looks.
+    pub(crate) mark: usize,
 }
 
 impl MachineRun {
+    /// A subscription with a data callback answered from `answers`.
     fn new(answers: Vec<Result<Vec<u8>, DataError>>) -> Self {
+        Self::with(
+            SubscriptionOptions::default().data_source(),
+            answers,
+            Vec::new(),
+        )
+    }
+
+    pub(crate) fn with(
+        options: SubscriptionOptions,
+        answers: Vec<Result<Vec<u8>, DataError>>,
+        token_answers: Vec<Result<String, TokenError>>,
+    ) -> Self {
         let mut machine = Machine::new(test_config());
         let subscription = machine
-            .add_subscription(
-                CHANNEL.to_owned(),
-                SubscriptionOptions::default().data_source(),
-            )
+            .add_subscription(CHANNEL.to_owned(), options)
             .expect("no subscription yet");
         Self {
             machine,
             subscription,
+            transport: None,
             actions: Vec::new(),
             answers: answers.into(),
+            token_answers: token_answers.into(),
             fetches: 0,
+            token_calls: Vec::new(),
+            calls: Vec::new(),
             delay_before_fetch: None,
+            subscribe_answers: VecDeque::new(),
+            sub_refresh_answers: VecDeque::new(),
+            pending_subscribe: None,
+            pending_sub_refresh: None,
+            mark: 0,
         }
     }
 
-    /// Feeds `input`, then answers data fetches and fires resubscribe timers
-    /// until the machine waits on something else.
-    fn handle(&mut self, input: Input) {
+    /// Feeds `input`, then answers callbacks and commands and fires
+    /// resubscribe timers while answers remain, until the machine waits on
+    /// something else.
+    pub(crate) fn handle(&mut self, input: Input) {
         let mut pending = VecDeque::from([input]);
         while let Some(input) = pending.pop_front() {
             let actions = self.machine.handle(input);
             for action in &actions {
                 match action {
                     Action::FetchSubscriptionData { fetch, .. } => {
+                        self.calls.push("data");
                         if let Some(result) = self.answers.pop_front() {
                             self.fetches += 1;
                             pending.push_back(Input::SubscriptionDataFetched {
@@ -904,14 +956,40 @@ impl MachineRun {
                             });
                         }
                     }
+                    Action::FetchSubscriptionToken { channel, fetch, .. } => {
+                        self.calls.push("token");
+                        self.token_calls.push(channel.clone());
+                        if let Some(result) = self.token_answers.pop_front() {
+                            pending.push_back(Input::SubscriptionTokenFetched {
+                                fetch: *fetch,
+                                result,
+                            });
+                        }
+                    }
                     Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay)
-                        if !self.answers.is_empty() =>
+                        if !self.answers.is_empty() || !self.token_answers.is_empty() =>
                     {
                         self.delay_before_fetch = Some(*delay);
                         pending.push_back(Input::SubscriptionTimerFired(
                             *id,
                             SubscriptionTimer::Resubscribe,
                         ));
+                    }
+                    Action::Send { frame, .. } => {
+                        for command in commands(frame) {
+                            let id = command["id"].as_u64().unwrap_or_default();
+                            if command.get("subscribe").is_some() {
+                                match self.subscribe_answers.pop_front() {
+                                    Some(fields) => pending.push_back(self.reply(id, &fields)),
+                                    None => self.pending_subscribe = Some(id),
+                                }
+                            } else if command.get("sub_refresh").is_some() {
+                                match self.sub_refresh_answers.pop_front() {
+                                    Some(fields) => pending.push_back(self.reply(id, &fields)),
+                                    None => self.pending_sub_refresh = Some(id),
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -920,8 +998,34 @@ impl MachineRun {
         }
     }
 
+    fn reply(&self, id: u64, fields: &str) -> Input {
+        Input::Frame {
+            transport: self.transport.expect("connected"),
+            data: format!("{{\"id\":{id},{fields}}}").into_bytes(),
+        }
+    }
+
+    /// Answers the unanswered subscribe command with `fields`.
+    pub(crate) fn answer_subscribe(&mut self, fields: &str) {
+        let id = self
+            .pending_subscribe
+            .take()
+            .expect("a subscribe command in flight");
+        let reply = self.reply(id, fields);
+        self.handle(reply);
+    }
+
+    pub(crate) fn subscribing(&self) -> bool {
+        self.pending_subscribe.is_some()
+    }
+
+    pub(crate) fn fire(&mut self, timer: SubscriptionTimer) {
+        let subscription = self.subscription;
+        self.handle(Input::SubscriptionTimerFired(subscription, timer));
+    }
+
     /// Connects the machine over a transport answering connect at once.
-    fn connect(&mut self) {
+    pub(crate) fn connect(&mut self) {
         let actions = self.machine.handle(Input::Connect);
         let transport = actions
             .iter()
@@ -930,12 +1034,17 @@ impl MachineRun {
                 _ => None,
             })
             .expect("a transport to open");
+        self.transport = Some(transport);
         self.machine.handle(Input::TransportOpened(transport));
         self.machine.handle(Input::Frame {
             transport,
             data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
         });
         assert_eq!(self.machine.state(), ferrifuge::State::Connected);
+    }
+
+    pub(crate) fn state(&self) -> Option<SubscriptionState> {
+        self.machine.subscription_state(self.subscription)
     }
 
     pub(crate) fn events(&self) -> Vec<&SubscriptionEvent> {
@@ -958,6 +1067,38 @@ impl MachineRun {
             })
             .collect()
     }
+
+    /// The `method` requests sent from action `from` on, in order.
+    pub(crate) fn requests(&self, method: &str, from: usize) -> Vec<Value> {
+        self.actions[from..]
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(commands(frame)),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|command| command.get(method).cloned())
+            .collect()
+    }
+
+    /// Delays of the `kind` timers set from action `from` on, in order.
+    pub(crate) fn timers(&self, kind: SubscriptionTimer, from: usize) -> Vec<Duration> {
+        self.actions[from..]
+            .iter()
+            .filter_map(|action| match action {
+                Action::SetSubscriptionTimer(_, timer, delay) if *timer == kind => Some(*delay),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The commands of a JSON frame.
+fn commands(frame: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(frame)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a JSON command"))
+        .collect()
 }
 
 #[given("a subscription whose data callback fails once")]
