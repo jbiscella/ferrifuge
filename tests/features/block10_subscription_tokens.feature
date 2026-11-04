@@ -41,21 +41,21 @@ Feature: Subscription tokens, unsubscribe codes and resubscribe backoff
     Given a subscribed subscription whose token expires and whose token callback fails once
     When the subscription refresh is due
     Then the subscription emits an "error" event
-    And the refresh is retried after 5 to 10 s
+    And the refresh is retried after 10 to 20 s
 
   @E
   Scenario: A temporary sub_refresh error is retried
     Given a subscribed subscription whose token expires
     When the server answers its sub_refresh with a temporary error
     Then the subscription emits an "error" event
-    And the refresh is retried after 5 to 10 s
+    And the refresh is retried after 10 to 20 s
 
   @E
   Scenario: A sub_refresh without a reply is retried
     Given a subscribed subscription whose token expires
     When the server never answers its sub_refresh
     Then after the configured timeout the subscription emits an "error" event with the timeout code
-    And the subscription token callback is called again after 5 to 10 s
+    And the subscription token callback is called again after 10 to 20 s
     And a new sub_refresh carrying the new token is sent
 
   @E
