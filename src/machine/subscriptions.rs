@@ -888,8 +888,8 @@ mod tests {
     }
 
     // Block 11c: the client-side half of "Connection state invalidation
-    // clears the token and every position", whose scenario passes with
-    // Block 12 (owner decision).
+    // clears the token and invalidates every position", whose scenario
+    // passes with Block 12 (owner decision).
     #[test]
     fn a_state_invalidated_disconnect_fetches_a_new_connection_token_first() {
         let mut machine = Machine::with_token_source(Config {
