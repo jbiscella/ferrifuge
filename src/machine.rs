@@ -756,13 +756,14 @@ impl Machine {
             Input::SubscriptionDataFetched { fetch, result } => {
                 self.subscription_data_fetched(fetch, result);
             }
-            // About a transport already abandoned; subscription tokens are
-            // handled from Block 10b's green step.
+            Input::SubscriptionTokenFetched { fetch, result } => {
+                self.subscription_token_fetched(fetch, result);
+            }
+            // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
-            | Input::Frame { .. }
-            | Input::SubscriptionTokenFetched { .. } => {}
+            | Input::Frame { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }

@@ -22,9 +22,6 @@ pub(crate) enum Method {
     Refresh(RefreshRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
-    // Sent once subscription tokens are refreshed (Block 10b); `expect`
-    // fails then, so the attribute goes with it.
-    #[cfg_attr(not(test), expect(dead_code))]
     SubRefresh(SubRefreshRequest),
     /// The empty command answering a server ping; sent with id 0.
     Pong,

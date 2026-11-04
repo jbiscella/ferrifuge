@@ -314,7 +314,9 @@ async fn the_subscription_emits_unsubscribed_with_code(world: &mut ClientWorld, 
     );
 }
 
-#[then(regex = r#"^the subscription emits "unsubscribed" with code (\d+) and reason "(.*)"$"#)]
+#[then(
+    regex = r#"^(?:then )?the subscription emits "unsubscribed" with code (\d+) and reason "(.*)"$"#
+)]
 async fn unsubscribed_with_code_and_reason(world: &mut ClientWorld, code: u32, reason: String) {
     if let Some(run) = &world.subscription_machine {
         let expected = SubscriptionEvent::Unsubscribed { code, reason };

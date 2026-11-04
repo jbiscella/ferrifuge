@@ -117,4 +117,13 @@ pub enum ErrorKind {
     /// The server answered a subscribe command with a temporary error; the
     /// subscription retries.
     Subscribe,
+    /// A subscription token callback failed while getting a token to
+    /// subscribe with; the subscription retries.
+    SubscribeToken,
+    /// A subscription token callback failed while getting a token to
+    /// refresh with; the refresh is retried.
+    SubscriptionRefreshToken,
+    /// The server answered a `sub_refresh` command with a temporary error,
+    /// or not in time; the refresh is retried.
+    SubscriptionRefresh,
 }
