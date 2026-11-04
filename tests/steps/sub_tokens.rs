@@ -586,10 +586,14 @@ async fn subscribed_with_an_expiring_token(world: &mut ClientWorld) {
         .expect("no subscription yet");
     world.track_subscription(subscription);
     world.subscription().subscribe();
+    // Up to the "subscribed" event itself, not the state: a subscription
+    // that is already subscribed when its state is first read would leave
+    // its events to the next steps.
     let subscribed = tokio::time::timeout(EVENT_TIMEOUT, async {
-        while world.subscription().state() != SubscriptionState::Subscribed {
-            world.next_subscription_event(false).await;
-        }
+        while !matches!(
+            world.next_subscription_event(false).await,
+            SubscriptionEvent::Subscribed(_)
+        ) {}
     })
     .await;
     assert!(subscribed.is_ok(), "{:?}", world.subscription());
