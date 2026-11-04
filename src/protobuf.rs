@@ -26,6 +26,19 @@ pub(crate) fn encode(commands: &[Command]) -> Vec<u8> {
 }
 
 /// Decodes every reply in a frame.
+/// Ids of the commands of `frame`, one this client encoded; 0 for a
+/// command without one.
+pub(crate) fn command_ids(mut frame: &[u8]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    while let Ok(command) = pb::Command::decode_length_delimited(&mut frame) {
+        ids.push(command.id);
+        if frame.is_empty() {
+            break;
+        }
+    }
+    ids
+}
+
 pub(crate) fn decode(mut frame: &[u8]) -> Result<Vec<Reply>, prost::DecodeError> {
     let mut replies = Vec::new();
     while !frame.is_empty() {
