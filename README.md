@@ -54,13 +54,16 @@ Available now:
 - a `get_state` callback reloading the application's state when there is
   no position to recover from, or a recovery fails;
 - the server's "state invalidated" codes: tokens and stream positions are
-  dropped before subscribing or connecting again.
+  dropped before subscribing or connecting again;
+- server-side subscriptions, granted at connect or added and removed by the
+  server later, with their events and publications (recovery across
+  reconnects comes next).
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| Server-side subscriptions | later blocks |
+| Recovery of server-side subscriptions | Block 12c |
 | RPC, publish, history, presence | later blocks |
 
 ## Usage
@@ -250,6 +253,34 @@ one, the connect or subscribe carries no token. A subscription that has a
 stream position keeps it with the epoch `_`, so its next recovery fails and you
 are told: with `get_state` your state is reloaded; without it, the `subscribed`
 event reports `was_recovering` true and `recovered` false.
+
+### Server-side subscriptions
+
+Subscriptions the server makes for the connection (at connect, or later
+through its API) need no code of yours: the client tracks them and reports
+them as `ClientEvent::ServerSubscription { channel, event }`, where `event`
+is `Subscribing`, `Subscribed`, `Unsubscribed { code, reason }` or
+`Publication`. A publication goes to a client-side subscription to the
+channel when that one is subscribed, else to the server-side one.
+
+```rust
+use ferrifuge::{ClientEvent, ServerSubscriptionEvent};
+
+while let Some(event) = events.next().await {
+    if let ClientEvent::ServerSubscription { channel, event } = event {
+        match event {
+            ServerSubscriptionEvent::Publication(publication) => {
+                println!("{channel}: {} bytes", publication.data.len());
+            }
+            other => println!("{channel}: {}", other.name()),
+        }
+    }
+}
+```
+
+`client.server_subscriptions()` lists their channels: a snapshot, which the
+events may already have overtaken. A subscription the server no longer grants
+after a reconnect ends with code 4 (`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`).
 
 ### Transport fallback
 
