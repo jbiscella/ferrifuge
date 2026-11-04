@@ -314,6 +314,14 @@ impl Client {
             .collect()
     }
 
+    /// The channels of the server-side subscriptions the server made for
+    /// this client, in channel order (spec, "Server-side subscriptions").
+    /// Their events come as [`crate::ClientEvent::ServerSubscription`].
+    #[must_use]
+    pub fn server_subscriptions(&self) -> Vec<String> {
+        lock(&self.shared().core).machine.server_subscriptions()
+    }
+
     /// Unsubscribes `subscription` and removes it from the registry; a new
     /// subscription to its channel can then be created. Its event streams
     /// end after the final "unsubscribed". A subscription of another client

@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+mod server_subscriptions;
 mod subscriptions;
 mod tokens;
 mod transports;
@@ -31,6 +32,7 @@ use crate::{
     ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError, StreamPosition,
     SubscriptionEvent, TokenError, codes,
 };
+use server_subscriptions::ServerSubscriptions;
 use subscriptions::Subscriptions;
 use transports::Transports;
 
@@ -702,6 +704,8 @@ pub struct Machine {
     emulation: Option<(String, String)>,
     /// Client-side subscriptions (Block 9).
     subscriptions: Subscriptions,
+    /// Server-side subscriptions (Block 12).
+    server_subscriptions: ServerSubscriptions,
     /// The connection is emulated and only its stream is proven: the backoff
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
@@ -794,6 +798,7 @@ impl Machine {
             transports: Transports::new(vec![TransportKind::WebSocket]),
             emulation: None,
             subscriptions: Subscriptions::default(),
+            server_subscriptions: ServerSubscriptions::default(),
             backoff_reset_pending: false,
             pings: None,
             actions: Vec::new(),
