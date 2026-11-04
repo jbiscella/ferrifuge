@@ -67,6 +67,7 @@ impl From<&Command> for pb::Command {
                 offset,
                 positioned,
                 recoverable,
+                flag,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
                     channel: channel.clone(),
@@ -77,6 +78,7 @@ impl From<&Command> for pb::Command {
                     offset: *offset,
                     positioned: *positioned,
                     recoverable: *recoverable,
+                    flag: *flag,
                     ..pb::SubscribeRequest::default()
                 });
             }
@@ -207,6 +209,7 @@ impl From<pb::Publication> for Publication {
 mod tests {
     use super::*;
     use crate::token::Secret;
+    use crate::wire::REJECT_UNRECOVERED;
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -468,6 +471,7 @@ mod tests {
                 offset: 7,
                 positioned: true,
                 recoverable: true,
+                flag: REJECT_UNRECOVERED,
                 ..SubscribeRequest::default()
             }),
         }]);
@@ -510,6 +514,7 @@ mod tests {
         let replies = decode(&reply_frame).unwrap();
 
         assert!(subscribe.recover && subscribe.positioned && subscribe.recoverable);
+        assert_eq!(subscribe.flag, REJECT_UNRECOVERED);
         assert_eq!((subscribe.epoch.as_str(), subscribe.offset), ("e1", 7));
         let ReplyResult::Subscribe(result) = &replies[0].result else {
             panic!("{:?}", replies[0]);

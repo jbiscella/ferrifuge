@@ -8,10 +8,11 @@ use std::time::Duration;
 use futures_channel::mpsc as events;
 use futures_core::Stream;
 
-use super::client::{Callbacks, Client, GetData, GetSubscriptionToken, Shared, lock};
+use super::client::{Callbacks, Client, GetData, GetState, GetSubscriptionToken, Shared, lock};
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
-    DataError, StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
+    DataError, StateError, StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState,
+    TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
@@ -99,6 +100,7 @@ pub struct SubscriptionBuilder {
     options: SubscriptionOptions,
     get_data: Option<GetData>,
     get_token: Option<GetSubscriptionToken>,
+    get_state: Option<GetState>,
 }
 
 /// The options' `Debug` output redacts the token.
@@ -109,6 +111,7 @@ impl std::fmt::Debug for SubscriptionBuilder {
             .field("options", &self.options)
             .field("get_data", &self.get_data.is_some())
             .field("get_token", &self.get_token.is_some())
+            .field("get_state", &self.get_state.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -202,6 +205,27 @@ impl SubscriptionBuilder {
         self
     }
 
+    /// Sets a callback loading the application's state for the channel and
+    /// returning the stream position it was loaded at (spec, "Subscription
+    /// getState"). It is called with the channel before the first subscribe
+    /// without [`Self::since`], and again when a recovery fails: the
+    /// subscription then stays subscribing, with no publication, until the
+    /// state is reloaded and the subscribe from its position succeeds.
+    /// Return [`StateError`] to retry after the resubscribe backoff.
+    ///
+    /// Read the stream position before the state, so that publications made
+    /// meanwhile are recovered rather than missed.
+    #[must_use]
+    pub fn get_state<F, Fut>(mut self, get_state: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<StreamPosition, StateError>> + Send + 'static,
+    {
+        self.options = self.options.state_source();
+        self.get_state = Some(Arc::new(move |channel| Box::pin(get_state(channel))));
+        self
+    }
+
     /// Adds the subscription, unsubscribed, to the client's registry.
     ///
     /// # Errors
@@ -219,12 +243,13 @@ impl SubscriptionBuilder {
         let id = core
             .machine
             .add_subscription(self.channel.clone(), self.options)?;
-        if self.get_data.is_some() || self.get_token.is_some() {
+        if self.get_data.is_some() || self.get_token.is_some() || self.get_state.is_some() {
             lock(&self.shared.callbacks).0.insert(
                 id,
                 Callbacks {
-                    get_data: self.get_data,
-                    get_token: self.get_token,
+                    data: self.get_data,
+                    token: self.get_token,
+                    state: self.get_state,
                 },
             );
         }
@@ -246,6 +271,7 @@ impl Client {
             options: SubscriptionOptions::default(),
             get_data: None,
             get_token: None,
+            get_state: None,
         }
     }
 

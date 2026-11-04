@@ -28,7 +28,7 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StreamPosition,
+    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError, StreamPosition,
     SubscriptionEvent, TokenError, codes,
 };
 use subscriptions::Subscriptions;
@@ -109,6 +109,11 @@ pub struct SubscriptionOptions {
     pub token_source: bool,
     /// Position to recover from on the first subscribe (spec, `since`).
     pub since: Option<StreamPosition>,
+    /// The owner answers [`Action::FetchSubscriptionState`] when the
+    /// subscription has no stream position: before the first subscribe
+    /// without `since`, and after a recovery failed (spec, "Subscription
+    /// getState").
+    pub state_source: bool,
     /// Asks for a positioned subscription on a channel that allows it but
     /// does not force it (spec, `positioned`).
     pub positioned: bool,
@@ -133,6 +138,7 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("token", &Secret(self.token.clone()))
             .field("token_source", &self.token_source)
             .field("since", &self.since)
+            .field("state_source", &self.state_source)
             .field("positioned", &self.positioned)
             .field("recoverable", &self.recoverable)
             .finish()
@@ -149,6 +155,7 @@ impl Default for SubscriptionOptions {
             token: String::new(),
             token_source: false,
             since: None,
+            state_source: false,
             positioned: false,
             recoverable: false,
         }
@@ -207,6 +214,14 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn since(mut self, position: StreamPosition) -> Self {
         self.since = Some(position);
+        self
+    }
+
+    /// Asks the owner for the application's state and its stream position
+    /// when the subscription has none (centrifuge-js `getState`).
+    #[must_use]
+    pub fn state_source(mut self) -> Self {
+        self.state_source = true;
         self
     }
 
@@ -351,6 +366,14 @@ pub enum Input {
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
     },
+    /// The getState callback answered a [`Action::FetchSubscriptionState`].
+    SubscriptionStateFetched {
+        /// The fetch answered.
+        fetch: FetchId,
+        /// The stream position of the state the application loaded, or why
+        /// it could not load it.
+        result: Result<StreamPosition, StateError>,
+    },
 }
 
 /// Something the owner of the machine must do.
@@ -432,6 +455,21 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionToken`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionToken(FetchId),
+    /// Ask the subscription's getState callback to load the application's
+    /// state and give its stream position; report the answer with
+    /// [`Input::SubscriptionStateFetched`]. Only issued for subscriptions
+    /// with [`SubscriptionOptions::state_source`].
+    FetchSubscriptionState {
+        /// The subscription asking.
+        subscription: SubscriptionId,
+        /// Its channel, given to the callback.
+        channel: String,
+        /// Identifies the fetch in its answer.
+        fetch: FetchId,
+    },
+    /// Stop a [`Action::FetchSubscriptionState`] still running: its answer
+    /// is no longer wanted.
+    CancelSubscriptionState(FetchId),
 }
 
 impl std::fmt::Debug for Input {
@@ -494,6 +532,11 @@ impl std::fmt::Debug for Input {
                     "result",
                     &result.as_ref().map(|token| Secret(token.clone())),
                 )
+                .finish(),
+            Self::SubscriptionStateFetched { fetch, result } => f
+                .debug_struct("SubscriptionStateFetched")
+                .field("fetch", fetch)
+                .field("result", result)
                 .finish(),
         }
     }
@@ -578,6 +621,20 @@ impl std::fmt::Debug for Action {
                 .finish(),
             Self::CancelSubscriptionToken(fetch) => f
                 .debug_tuple("CancelSubscriptionToken")
+                .field(fetch)
+                .finish(),
+            Self::FetchSubscriptionState {
+                subscription,
+                channel,
+                fetch,
+            } => f
+                .debug_struct("FetchSubscriptionState")
+                .field("subscription", subscription)
+                .field("channel", channel)
+                .field("fetch", fetch)
+                .finish(),
+            Self::CancelSubscriptionState(fetch) => f
+                .debug_tuple("CancelSubscriptionState")
                 .field(fetch)
                 .finish(),
         }
@@ -795,8 +852,10 @@ impl Machine {
             Input::SubscriptionTokenFetched { fetch, result } => {
                 self.subscription_token_fetched(fetch, result);
             }
-            // About a transport already abandoned.
-            Input::TransportOpened(_)
+            // About a transport already abandoned, or a state fetch, which
+            // is not asked yet.
+            Input::SubscriptionStateFetched { .. }
+            | Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::Frame { .. } => {}

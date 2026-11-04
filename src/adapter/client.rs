@@ -23,7 +23,10 @@ use crate::machine::{
     Action, FetchId, FrameType, Input, Machine, SubscriptionId, SubscriptionTimer, Timer,
     TransportId, TransportKind,
 };
-use crate::{ClientError, ClientEvent, Config, DataError, State, SubscriptionEvent, TokenError};
+use crate::{
+    ClientError, ClientEvent, Config, DataError, State, StateError, StreamPosition,
+    SubscriptionEvent, TokenError,
+};
 
 /// Centrifugo client running on tokio.
 ///
@@ -84,11 +87,20 @@ pub(super) type GetSubscriptionToken = Arc<
         + Sync,
 >;
 
+/// Async callback loading the application's state for a channel, giving
+/// the stream position it was loaded at.
+pub(super) type GetState = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<StreamPosition, StateError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// The callbacks of a subscription.
 #[derive(Clone, Default)]
 pub(super) struct Callbacks {
-    pub(super) get_data: Option<GetData>,
-    pub(super) get_token: Option<GetSubscriptionToken>,
+    pub(super) data: Option<GetData>,
+    pub(super) token: Option<GetSubscriptionToken>,
+    pub(super) state: Option<GetState>,
 }
 
 /// Callbacks by subscription; opaque in `Debug` output.
@@ -580,21 +592,12 @@ impl Driver {
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.subscription_timers.cancel(id, timer);
             }
-            Action::FetchSubscriptionData {
-                subscription,
-                channel,
-                fetch,
-            } => self.fetch_subscription_data(subscription, channel, fetch),
-            Action::FetchSubscriptionToken {
-                subscription,
-                channel,
-                fetch,
-            } => self.fetch_subscription_token(subscription, channel, fetch),
-            Action::CancelSubscriptionData(fetch) | Action::CancelSubscriptionToken(fetch) => {
-                if let Some(abort) = self.subscription_fetch_aborts.remove(&fetch) {
-                    abort.abort();
-                }
-            }
+            action @ (Action::FetchSubscriptionData { .. }
+            | Action::FetchSubscriptionToken { .. }
+            | Action::FetchSubscriptionState { .. }
+            | Action::CancelSubscriptionData(_)
+            | Action::CancelSubscriptionToken(_)
+            | Action::CancelSubscriptionState(_)) => self.subscription_callback(action),
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
@@ -606,11 +609,40 @@ impl Driver {
 }
 
 impl Driver {
+    /// Runs or cancels a subscription callback.
+    fn subscription_callback(&mut self, action: Action) {
+        match action {
+            Action::FetchSubscriptionData {
+                subscription,
+                channel,
+                fetch,
+            } => self.fetch_subscription_data(subscription, channel, fetch),
+            Action::FetchSubscriptionToken {
+                subscription,
+                channel,
+                fetch,
+            } => self.fetch_subscription_token(subscription, channel, fetch),
+            Action::FetchSubscriptionState {
+                subscription,
+                channel,
+                fetch,
+            } => self.fetch_subscription_state(subscription, channel, fetch),
+            Action::CancelSubscriptionData(fetch)
+            | Action::CancelSubscriptionToken(fetch)
+            | Action::CancelSubscriptionState(fetch) => {
+                if let Some(abort) = self.subscription_fetch_aborts.remove(&fetch) {
+                    abort.abort();
+                }
+            }
+            _ => unreachable!("not a subscription callback action: {action:?}"),
+        }
+    }
+
     fn fetch_subscription_data(&mut self, id: SubscriptionId, channel: String, fetch: FetchId) {
         let callback = lock(&self.shared.callbacks)
             .0
             .get(&id)
-            .and_then(|callbacks| callbacks.get_data.clone());
+            .and_then(|callbacks| callbacks.data.clone());
         // The machine asks only for subscriptions with a callback.
         let Some(get_data) = callback else {
             return;
@@ -628,7 +660,7 @@ impl Driver {
         let callback = lock(&self.shared.callbacks)
             .0
             .get(&id)
-            .and_then(|callbacks| callbacks.get_token.clone());
+            .and_then(|callbacks| callbacks.token.clone());
         // The machine asks only for subscriptions with a callback.
         let Some(get_token) = callback else {
             return;
@@ -636,6 +668,24 @@ impl Driver {
         let fetching = guarded(|| get_token(channel), token_callback_panicked);
         self.start_fetch(fetch, async move {
             Input::SubscriptionTokenFetched {
+                fetch,
+                result: fetching.await,
+            }
+        });
+    }
+
+    fn fetch_subscription_state(&mut self, id: SubscriptionId, channel: String, fetch: FetchId) {
+        let callback = lock(&self.shared.callbacks)
+            .0
+            .get(&id)
+            .and_then(|callbacks| callbacks.state.clone());
+        // The machine asks only for subscriptions with a callback.
+        let Some(get_state) = callback else {
+            return;
+        };
+        let fetching = guarded(|| get_state(channel), state_callback_panicked);
+        self.start_fetch(fetch, async move {
+            Input::SubscriptionStateFetched {
                 fetch,
                 result: fetching.await,
             }
@@ -680,6 +730,10 @@ fn token_callback_panicked() -> TokenError {
 
 fn data_callback_panicked() -> DataError {
     DataError::Failed("subscription data callback panicked".to_owned())
+}
+
+fn state_callback_panicked() -> StateError {
+    StateError("subscription getState callback panicked".to_owned())
 }
 
 fn callback_panicked() -> TokenError {

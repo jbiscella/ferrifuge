@@ -169,6 +169,20 @@ impl std::fmt::Display for DataError {
 
 impl std::error::Error for DataError {}
 
+/// Why a subscription getState callback could not load the application's
+/// state: the subscription emits an `error` event and retries after the
+/// resubscribe backoff (centrifuge-js `getState`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateError(pub String);
+
+impl std::fmt::Display for StateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "subscription getState callback failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for StateError {}
+
 /// Why a subscription could not be created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

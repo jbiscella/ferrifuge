@@ -63,4 +63,7 @@ pub mod error {
     pub const SUBSCRIPTION_REFRESH_TOKEN: u32 = 9;
     /// The client is misconfigured, e.g. a token expires without a callback.
     pub const BAD_CONFIGURATION: u32 = 12;
+    /// The subscription getState callback failed (centrifuge-js
+    /// `subscriptionGetState`).
+    pub const SUBSCRIPTION_GET_STATE: u32 = 13;
 }
