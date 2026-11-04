@@ -220,6 +220,11 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
 pub(crate) const SERVER_B: &[(&str, &str)] = &[
     ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
     ("CENTRIFUGO_SSE_ENABLED", "true"),
+    // A history for channels without namespace, so that server-side
+    // subscriptions granted recoverable can recover (Block 12c). It gives
+    // publications offsets; client-side subscriptions stay unrecoverable.
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE", "10"),
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
     // Channels of the `rec` namespace keep a history and are recoverable
     // (Block 11); the subscribe proxy sees them too.
     (
