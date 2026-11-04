@@ -61,6 +61,10 @@ pub mod error {
     /// A subscription token callback failed while getting a token to
     /// refresh with (centrifuge-js `subscriptionRefreshToken`).
     pub const SUBSCRIPTION_REFRESH_TOKEN: u32 = 9;
+    /// The server refused a request carrying the command without closing
+    /// the transport: an emulation request answered with HTTP 413
+    /// (centrifuge-js `transportWriteError`).
+    pub const TRANSPORT_WRITE: u32 = 10;
     /// The client is misconfigured, e.g. a token expires without a callback.
     pub const BAD_CONFIGURATION: u32 = 12;
     /// The subscription getState callback failed (centrifuge-js
