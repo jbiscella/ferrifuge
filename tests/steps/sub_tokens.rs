@@ -362,15 +362,15 @@ fn resubscribes_with_the_new_token(world: &mut ClientWorld) {
     assert_eq!(token_of(&subscribes[1]), "t2", "{subscribes:?}");
 }
 
-#[then("the refresh is retried after 5 to 10 s")]
-fn refresh_retried_after_5_to_10_s(world: &mut ClientWorld) {
+#[then("the refresh is retried after 10 to 20 s")]
+fn refresh_retried_after_10_to_20_s(world: &mut ClientWorld) {
     let run = run(world);
     let delay = *run
         .timers(SubscriptionTimer::Refresh, run.mark)
         .last()
         .unwrap_or_else(|| panic!("no refresh retry: {:?}", run.actions));
     assert!(
-        (Duration::from_secs(5)..=Duration::from_secs(10)).contains(&delay),
+        (Duration::from_secs(10)..=Duration::from_secs(20)).contains(&delay),
         "{delay:?}"
     );
 }
@@ -395,9 +395,9 @@ fn refresh_times_out(world: &mut ClientWorld) {
     assert_eq!(errors, [codes::error::TIMEOUT], "{:?}", run.actions);
 }
 
-#[then("the subscription token callback is called again after 5 to 10 s")]
-fn token_callback_called_again_after_5_to_10_s(world: &mut ClientWorld) {
-    refresh_retried_after_5_to_10_s(world);
+#[then("the subscription token callback is called again after 10 to 20 s")]
+fn token_callback_called_again_after_10_to_20_s(world: &mut ClientWorld) {
+    refresh_retried_after_10_to_20_s(world);
     let run = run(world);
     let calls = run.token_calls.len();
     run.fire(SubscriptionTimer::Refresh);
