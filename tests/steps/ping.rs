@@ -27,6 +27,7 @@ pub(super) async fn connected_announcing_pong(world: &mut ClientWorld, expected:
         .restart_fake(Announce {
             ping: QUIET_PING_INTERVAL,
             pong: expected == "expected",
+            ..Announce::default()
         })
         .await;
     a_connected_client(world).await;
@@ -43,6 +44,7 @@ async fn connected_announcing_ping_interval(world: &mut ClientWorld, seconds: u3
         .restart_fake(Announce {
             ping: seconds,
             pong: true,
+            ..Announce::default()
         })
         .await;
     a_connected_client(world).await;

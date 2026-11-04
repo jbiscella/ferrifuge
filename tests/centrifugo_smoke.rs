@@ -167,6 +167,7 @@ async fn fake_server_replies_to_connect_records_frames_and_closes_with_any_code(
     let server = FakeServer::start(Announce {
         ping: 25,
         pong: true,
+        ..Announce::default()
     })
     .await;
     let url = format!("ws://{}/connection/websocket", server.address());
@@ -213,6 +214,7 @@ async fn fake_server_pings_periodically_until_stopped() {
     let server = FakeServer::start(Announce {
         ping: 1,
         pong: true,
+        ..Announce::default()
     })
     .await;
     let url = format!("ws://{}/connection/websocket", server.address());
@@ -393,6 +395,7 @@ async fn fake_server_speaks_protobuf_when_asked() {
     let fake = FakeServer::start(Announce {
         ping: 25,
         pong: true,
+        ..Announce::default()
     })
     .await;
 
