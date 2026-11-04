@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn a_state_invalidated_disconnect_drops_the_stream_positions() {
+    fn a_state_invalidated_disconnect_keeps_a_sentinel_position() {
         let (mut machine, transport, id) = connected();
         machine.handle(Input::Subscribe(id));
         machine.handle(reply(
@@ -982,9 +982,79 @@ mod tests {
         machine.handle(Input::TransportOpened(transport));
         let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
+        // The server can never match epoch "_": the recovery fails and the
+        // subscribed event tells the app (offset 0 is not encoded).
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news","recover":true,"epoch":"_"}}"#]
+        );
+    }
+
+    #[test]
+    fn a_state_invalidated_disconnect_gives_no_position_to_a_subscription_without_one() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
         assert_eq!(
             sent(&resubscribed),
             [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
+    }
+
+    #[test]
+    fn a_state_invalidated_disconnect_reloads_the_state_after_the_rejected_recovery() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().state_source());
+        let fetch = machine
+            .handle(Input::Subscribe(id))
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionState { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .unwrap();
+        machine.handle(Input::SubscriptionStateFetched {
+            fetch,
+            result: Ok(StreamPosition {
+                offset: 1,
+                epoch: "e".into(),
+            }),
+        });
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":1}}"#,
+        ));
+        let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
+        let transport = opened(&reconnecting).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        machine.handle(reply(
+            transport,
+            r#"{"id":4,"error":{"code":112,"message":"unrecoverable position"}}"#,
+        ));
+        let retried = machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Resubscribe,
+        ));
+
+        // The resubscribe tries the sentinel first; its rejection (error
+        // 112) leads to getState, as any failed recovery.
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news","recover":true,"epoch":"_","flag":2}}"#]
+        );
+        assert!(
+            retried
+                .iter()
+                .any(|action| matches!(action, Action::FetchSubscriptionState { .. })),
+            "{retried:?}"
         );
     }
 
