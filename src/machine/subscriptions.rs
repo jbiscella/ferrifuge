@@ -242,6 +242,7 @@ impl Machine {
                     channel,
                     token,
                     data,
+                    ..SubscribeRequest::default()
                 }),
             }],
         );
@@ -448,7 +449,10 @@ impl Machine {
                 }
                 self.emit_subscription(
                     id,
-                    SubscriptionEvent::Subscribed(Subscribed { data: result.data }),
+                    SubscriptionEvent::Subscribed(Subscribed {
+                        data: result.data,
+                        ..Subscribed::default()
+                    }),
                 );
                 for publication in result.publications {
                     self.emit_subscription(id, SubscriptionEvent::Publication(publication));

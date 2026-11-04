@@ -28,8 +28,8 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, ErrorKind, State, SubscriptionEvent, TokenError,
-    codes,
+    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StreamPosition,
+    SubscriptionEvent, TokenError, codes,
 };
 use subscriptions::Subscriptions;
 use transports::Transports;
@@ -86,6 +86,7 @@ pub struct SubscriptionId(u64);
 /// Options of a subscription (spec, "Subscription common options").
 ///
 /// Its `Debug` output redacts the token.
+#[allow(clippy::struct_excessive_bools)] // Independent options of the spec.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
@@ -106,6 +107,14 @@ pub struct SubscriptionOptions {
     /// The owner answers [`Action::FetchSubscriptionToken`] when a
     /// subscription token is needed (centrifuge-js `getToken`).
     pub token_source: bool,
+    /// Position to recover from on the first subscribe (spec, `since`).
+    pub since: Option<StreamPosition>,
+    /// Asks for a positioned subscription on a channel that allows it but
+    /// does not force it (spec, `positioned`).
+    pub positioned: bool,
+    /// Asks for a recoverable subscription on a channel that allows it but
+    /// does not force it (spec, `recoverable`).
+    pub recoverable: bool,
 }
 
 impl std::fmt::Debug for SubscriptionOptions {
@@ -123,6 +132,9 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("max_resubscribe_delay", &self.max_resubscribe_delay)
             .field("token", &Secret(self.token.clone()))
             .field("token_source", &self.token_source)
+            .field("since", &self.since)
+            .field("positioned", &self.positioned)
+            .field("recoverable", &self.recoverable)
             .finish()
     }
 }
@@ -136,6 +148,9 @@ impl Default for SubscriptionOptions {
             max_resubscribe_delay: Duration::from_secs(20),
             token: String::new(),
             token_source: false,
+            since: None,
+            positioned: false,
+            recoverable: false,
         }
     }
 }
@@ -185,6 +200,27 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn token_source(mut self) -> Self {
         self.token_source = true;
+        self
+    }
+
+    /// Recovers the publications after `position` on the first subscribe.
+    #[must_use]
+    pub fn since(mut self, position: StreamPosition) -> Self {
+        self.since = Some(position);
+        self
+    }
+
+    /// Asks for a positioned subscription.
+    #[must_use]
+    pub fn positioned(mut self, positioned: bool) -> Self {
+        self.positioned = positioned;
+        self
+    }
+
+    /// Asks for a recoverable subscription.
+    #[must_use]
+    pub fn recoverable(mut self, recoverable: bool) -> Self {
+        self.recoverable = recoverable;
         self
     }
 }
@@ -917,6 +953,7 @@ impl Machine {
                 ReplyResult::Push(Push::Publication {
                     channel,
                     publication,
+                    epoch: _,
                 }) => self.publication(&channel, publication),
                 ReplyResult::Push(Push::Unsubscribe {
                     channel,

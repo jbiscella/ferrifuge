@@ -72,13 +72,46 @@ impl SubscriptionEvent {
     }
 }
 
-/// Details of a [`SubscriptionEvent::Subscribed`].
+/// Details of a [`SubscriptionEvent::Subscribed`] (spec, "Subscription
+/// recovery state"; centrifuge-js `SubscribedContext`).
+#[allow(clippy::struct_excessive_bools)] // The flags of the spec's subscribed context.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subscribed {
     /// Data the server attached to the subscription, if any
     /// (`SubscribeResult.data`).
     pub data: Option<Vec<u8>>,
+    /// The server keeps a stream position for the subscription: the
+    /// channel forces it, or the [`positioned`] option asked for it and the
+    /// channel allows it.
+    ///
+    /// [`positioned`]: crate::machine::SubscriptionOptions::positioned
+    pub positioned: bool,
+    /// Publications missed while not subscribed can be recovered: the
+    /// channel forces it, or the [`recoverable`] option asked for it and the
+    /// channel allows it.
+    ///
+    /// [`recoverable`]: crate::machine::SubscriptionOptions::recoverable
+    pub recoverable: bool,
+    /// The subscribe asked to recover missed publications.
+    pub was_recovering: bool,
+    /// All missed publications were recovered; they are delivered after
+    /// this event. When a recovery fails, publications may be missing.
+    pub recovered: bool,
+    /// The stream position, when the subscription is positioned or
+    /// recoverable: the top of the stream, or after a recovery the position
+    /// the recovered publications follow.
+    pub stream_position: Option<StreamPosition>,
+}
+
+/// A position in a channel's stream (spec, "Subscription recovery state").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct StreamPosition {
+    /// Offset of a publication in the stream; 0 before the first one.
+    pub offset: u64,
+    /// Epoch of the stream. A stream that is lost, e.g. when its history
+    /// expired, starts again with a new epoch.
+    pub epoch: String,
 }
 
 /// A publication of a channel (`client.proto`, `Publication`).

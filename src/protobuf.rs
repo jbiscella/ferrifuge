@@ -62,11 +62,21 @@ impl From<&Command> for pb::Command {
                 channel,
                 token,
                 data,
+                recover,
+                epoch,
+                offset,
+                positioned,
+                recoverable,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
                     channel: channel.clone(),
                     token: token.0.clone(),
                     data: data.clone().unwrap_or_default(),
+                    recover: *recover,
+                    epoch: epoch.clone(),
+                    offset: *offset,
+                    positioned: *positioned,
+                    recoverable: *recoverable,
                     ..pb::SubscribeRequest::default()
                 });
             }
@@ -117,6 +127,12 @@ impl From<pb::Reply> for Reply {
                     .into_iter()
                     .map(Publication::from)
                     .collect(),
+                positioned: subscribe.positioned,
+                recoverable: subscribe.recoverable,
+                epoch: subscribe.epoch,
+                offset: subscribe.offset,
+                was_recovering: subscribe.was_recovering,
+                recovered: subscribe.recovered,
             })
         } else if reply.unsubscribe.is_some() {
             ReplyResult::Unsubscribe
@@ -126,10 +142,12 @@ impl From<pb::Reply> for Reply {
                 ttl: refresh.ttl,
             })
         } else if let Some(push) = reply.push {
-            ReplyResult::Push(if let Some(publication) = push.r#pub {
+            ReplyResult::Push(if let Some(mut publication) = push.r#pub {
+                let epoch = std::mem::take(&mut publication.epoch);
                 Push::Publication {
                     channel: push.channel,
                     publication: publication.into(),
+                    epoch,
                 }
             } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
                 Push::Disconnect(Disconnect { code, reason })
@@ -435,8 +453,76 @@ mod tests {
         assert_eq!(result.publications[0].offset, Some(3));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Publication { channel, publication })
-                if channel == "news" && publication.data == [0xfe] && publication.offset.is_none()
+            ReplyResult::Push(Push::Publication { channel, publication, epoch })
+                if channel == "news" && publication.data == [0xfe] && publication.offset.is_none() && epoch.is_empty()
+        ));
+    }
+
+    #[test]
+    fn encodes_a_recovering_subscribe_and_decodes_its_position_and_epoch() {
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                recover: true,
+                epoch: "e1".into(),
+                offset: 7,
+                positioned: true,
+                recoverable: true,
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let reply_frame = frame_of(&[
+            pb::Reply {
+                id: 2,
+                subscribe: Some(pb::SubscribeResult {
+                    recoverable: true,
+                    positioned: true,
+                    epoch: "e1".into(),
+                    offset: 7,
+                    was_recovering: true,
+                    recovered: true,
+                    publications: vec![pb::Publication {
+                        offset: 8,
+                        ..pb::Publication::default()
+                    }],
+                    ..pb::SubscribeResult::default()
+                }),
+                ..pb::Reply::default()
+            },
+            pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    r#pub: Some(pb::Publication {
+                        offset: 1,
+                        epoch: "e2".into(),
+                        ..pb::Publication::default()
+                    }),
+                    ..pb::Push::default()
+                }),
+                ..pb::Reply::default()
+            },
+        ]);
+
+        let subscribe = pb::Command::decode_length_delimited(frame.as_slice())
+            .unwrap()
+            .subscribe
+            .unwrap();
+        let replies = decode(&reply_frame).unwrap();
+
+        assert!(subscribe.recover && subscribe.positioned && subscribe.recoverable);
+        assert_eq!((subscribe.epoch.as_str(), subscribe.offset), ("e1", 7));
+        let ReplyResult::Subscribe(result) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert!(result.recoverable && result.positioned);
+        assert!(result.was_recovering && result.recovered);
+        assert_eq!((result.epoch.as_str(), result.offset), ("e1", 7));
+        assert_eq!(result.publications[0].offset, Some(8));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Publication { epoch, publication, .. })
+                if epoch == "e2" && publication.offset == Some(1)
         ));
     }
 
@@ -448,7 +534,7 @@ mod tests {
                 method: Method::Subscribe(SubscribeRequest {
                     channel: "news".into(),
                     token: Secret("t1".into()),
-                    data: None,
+                    ..SubscribeRequest::default()
                 }),
             },
             Command {
