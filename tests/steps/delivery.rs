@@ -928,8 +928,18 @@ fn received_a_refresh(world: &mut ClientWorld) {
             .received()
             .iter()
             .any(|command| command["refresh"].is_object()),
-        "{:?}",
-        world.fake().received()
+        "commands received: {:?}; client {:?}, read-ahead {:?}",
+        world
+            .fake()
+            .received()
+            .iter()
+            .map(|command| command
+                .as_object()
+                .and_then(|command| command.keys().find(|key| *key != "id").cloned())
+                .unwrap_or_else(|| "pong".to_owned()))
+            .collect::<Vec<_>>(),
+        world.client().state(),
+        world.client().read_ahead()
     );
 }
 

@@ -649,7 +649,7 @@ impl Driver {
                         Err(message) => Input::TransportFailed { transport: id, message },
                     }
                 }
-                (id, inbound) = received(&mut self.transport), if reading => match inbound {
+                (id, inbound) = received(&mut self.transport, reading) => match inbound {
                     Inbound::Frame(data) => Input::Frame { transport: id, data },
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Closed { code, reason } => {
@@ -932,11 +932,12 @@ impl Transport {
         }
     }
 
-    /// Cancel-safe.
-    async fn recv(&mut self) -> Inbound {
+    /// Cancel-safe. Without `reading`, only writes, as Block 15's full
+    /// read-ahead requires.
+    async fn recv(&mut self, reading: bool) -> Inbound {
         match self {
-            Self::WebSocket(websocket) => websocket.recv().await,
-            Self::Http(http) => http.recv().await,
+            Self::WebSocket(websocket) => websocket.recv(reading).await,
+            Self::Http(http) => http.recv(reading).await,
         }
     }
 
@@ -1010,9 +1011,12 @@ async fn fetched(
 }
 
 /// Resolves with the next inbound message; never without a transport.
-async fn received(transport: &mut Option<(TransportId, Transport)>) -> (TransportId, Inbound) {
+async fn received(
+    transport: &mut Option<(TransportId, Transport)>,
+    reading: bool,
+) -> (TransportId, Inbound) {
     match transport {
-        Some((id, transport)) => (*id, transport.recv().await),
+        Some((id, transport)) => (*id, transport.recv(reading).await),
         None => std::future::pending().await,
     }
 }

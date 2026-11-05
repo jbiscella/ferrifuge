@@ -158,16 +158,20 @@ impl HttpTransport {
 
     /// The next message from the server, or the end of the transport: the
     /// stream ended or failed, or an emulation request failed. Cancel-safe.
-    pub(crate) async fn recv(&mut self) -> Inbound {
+    pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
         loop {
-            if let Some(frame) = self.frames.pop_front() {
-                return Inbound::Frame(frame);
-            }
-            if let Some(reason) = self.failed.take() {
-                return Inbound::Closed { code: None, reason };
+            if reading {
+                if let Some(frame) = self.frames.pop_front() {
+                    return Inbound::Frame(frame);
+                }
+                if let Some(reason) = self.failed.take() {
+                    return Inbound::Closed { code: None, reason };
+                }
             }
             tokio::select! {
-                chunk = self.body.next() => match chunk {
+                // Not reading, the stream waits: a full read-ahead stops the
+                // reading, never the emulation requests (Block 15).
+                chunk = self.body.next(), if reading => match chunk {
                     Some(Ok(chunk)) => {
                         if let Err(reason) = self.decoder.push(&chunk, &mut self.frames) {
                             self.failed = Some(reason);
@@ -190,6 +194,7 @@ impl HttpTransport {
                         Ok(Sent::Accepted) => {}
                     }
                 }
+                else => std::future::pending::<()>().await,
             }
         }
     }
@@ -559,7 +564,7 @@ mod tests {
         .unwrap();
         transport.send(b"{}".to_vec());
 
-        let inbound = tokio::time::timeout(TIMEOUT, transport.recv()).await;
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
         assert!(
             matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("307")),
@@ -603,7 +608,7 @@ mod tests {
         transport.send(b"{}".to_vec());
 
         // The stream stays silent: only the failed request can end it.
-        let inbound = tokio::time::timeout(TIMEOUT, transport.recv()).await;
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
         assert!(
             matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("503")),
@@ -637,7 +642,7 @@ mod tests {
         .unwrap();
         transport.send(br#"{"id":2}"#.to_vec());
 
-        let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv()).await;
+        let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv(true)).await;
 
         // Reported with its frame, not as the end of the transport.
         assert_eq!(inbound, Ok(Inbound::Rejected(br#"{"id":2}"#.to_vec())));
@@ -676,7 +681,7 @@ mod tests {
         .unwrap();
         transport.send(b"{}".to_vec());
         // Lets the request reach the server.
-        let _ = tokio::time::timeout(Duration::from_millis(300), transport.recv()).await;
+        let _ = tokio::time::timeout(Duration::from_millis(300), transport.recv(true)).await;
 
         // How the driver closes an HTTP transport.
         drop(transport);
