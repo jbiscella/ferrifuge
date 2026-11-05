@@ -202,6 +202,31 @@ fn a_client_with_every_transport_unreachable(world: &mut ClientWorld) {
     configure(world, endpoints);
 }
 
+/// The websocket is a counting relay that is down, so the scenario can tell
+/// whether the client went back to it.
+#[given(
+    r#"a client configured with an unreachable websocket endpoint behind a counting relay, then the server's http_stream and sse endpoints, connected over transport "http_stream""#
+)]
+async fn a_client_after_an_unreachable_websocket(world: &mut ClientWorld) {
+    let address = server(world).address().to_owned();
+    let websocket = CountingRelay::start_in(address, Mode::Down).await;
+    let endpoints = vec![
+        (TransportKind::WebSocket, websocket.websocket_url()),
+        (TransportKind::HttpStream, server(world).http_stream_url()),
+        (TransportKind::Sse, server(world).sse_url()),
+    ];
+    configure(world, endpoints);
+    connect_and_wait(world).await;
+    let attempts = websocket.connections();
+    world.websocket_relay = Some((websocket, attempts));
+}
+
+#[then("the client made no connection attempt to the websocket endpoint after the disconnect")]
+fn no_websocket_attempt(world: &mut ClientWorld) {
+    let (relay, before) = world.websocket_relay.as_ref().expect("the websocket relay");
+    assert_eq!(relay.connections(), *before);
+}
+
 /// Through the scenario's HTTP proxy when an earlier step set one.
 #[given(regex = r#"^a client connected over transport "(\w+)"$"#)]
 async fn a_client_connected_over(world: &mut ClientWorld, transport: String) {
