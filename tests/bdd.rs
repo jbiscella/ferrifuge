@@ -83,6 +83,8 @@ const IMPLEMENTED: &[&str] = &[
     // Brief C3: an opened websocket is chosen only when the server answers.
     "A websocket that never answers the handshake falls back",
     "An opened websocket without a connect reply falls back",
+    "A websocket write the server never reads closes the transport",
+    "A stalled websocket write does not delay disconnect",
     "Every transport unreachable",
     "A failed fallback sequence is retried after the reconnect backoff",
     "The fallback sequence is retried until a transport succeeds",
