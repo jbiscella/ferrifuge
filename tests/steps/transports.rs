@@ -526,6 +526,11 @@ async fn the_fake_server_stops_reading(world: &mut ClientWorld) {
     assert!(subscribed.is_ok(), "{:?}", world.named_subscriptions);
     world.stalled_writes = ferrifuge::stalled_websocket_writes();
     world.fake().stop_reading();
+    world
+        .relay
+        .as_ref()
+        .expect("the fake server's relay")
+        .stop_reading();
 }
 
 /// Waits for a websocket write to stall, which the client's write deadline
@@ -541,9 +546,17 @@ async fn the_client_sends_more_than_can_be_buffered(world: &mut ClientWorld) {
         }
     })
     .await;
+    let large_tokens = world.token_calls.lock().unwrap().len() - STALLING_CHANNELS.len();
+    let states: Vec<_> = world
+        .named_subscriptions
+        .iter()
+        .map(ferrifuge::Subscription::state)
+        .collect();
     assert!(
         stalled.is_ok(),
-        "no websocket write stalled within {limit:?}"
+        "no websocket write stalled within {limit:?}: {large_tokens} large tokens fetched, \
+         subscriptions {states:?}, client {:?}",
+        world.client().state()
     );
 }
 
