@@ -1924,7 +1924,7 @@ Feature: Footprint, performance and fleet behaviour
 - **Errors past 256.** When a stream holds 256 events not taken, further `error` events for it are dropped, on the client's stream and on subscription streams alike: they change no state, and they are the only events a timer can add without bound (one per failed connection or subscribe attempt). Events caused by application calls are not bounded by the client: an application that cycles `connect()` and `disconnect()` without reading its stream grows it (documented).
 - **Channels without recovery.** There a slow consumer can lose publications, as with any disconnect; this is documented, with no further signal.
 - **Head-of-line.** The read-ahead belongs to the connection, so one stream not read pauses every subscription of that client (centrifuge-rust §9.2).
-- **Version 0.6.0:** `Config` gains the two read-ahead fields, a second `events()` call ends the earlier stream, and the sans-IO core gains a delivery acknowledgement in its public `machine` API.
+- **Versions 0.6.0 and 0.7.0:** 0.6.0 (15a) for the delivery acknowledgement in the public `machine` API and a second `events()` call ending the earlier stream; 0.7.0 (15b) for the two read-ahead fields of `Config`, since the semver check compares each pull request with its base and 0.6.0 is unreleased (as 12a went from 0.4.0 to 0.5.0).
 
 Value clause: As an app developer on a device with limited memory, I want the client to hold the server back instead of buffering without limit when my code reads its events slowly, and to deliver each publication exactly once across reconnects, so that a slow or stalled consumer neither exhausts memory nor loses data on recoverable channels.
 
