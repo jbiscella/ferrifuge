@@ -32,7 +32,7 @@ Markers used below:
 | Protobuf codegen | prost, `client.proto` vendored at a pinned upstream commit, protoc from `protoc-bin-vendored` | No system protoc needed |
 | Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD | Split only when a second crate is justified |
 | Core design | Sans-IO: the core is a state machine turning inputs (API calls, frames, transport open/close, timer fired) into actions (open/close transport, send, set timer, emit event); the `tokio` adapter performs the actions | Runtime-agnostic without async traits; @E tests drive the clock directly |
-| Events API | `client.events()` returns a `futures::Stream` of a `ClientEvent` enum; `client.state()` returns the current state | Idiomatic async Rust, runtime-neutral |
+| Events API | `client.events()` returns a `futures::Stream` of a `ClientEvent` enum, one active stream per client, delivered by hand-off with a bounded read-ahead (Block 15); `client.state()` returns the current state | Idiomatic async Rust, runtime-neutral |
 | Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only; the OpenSSL license is allowed globally (owner decision: needed by aws-lc, no on/off variant to maintain) | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
@@ -303,7 +303,7 @@ Feature: Disconnect codes
 
 **Out of scope:** client-initiated pings.
 
-Rule (spec): the client answers server PINGs with PONGs; if no PING arrives within ping interval + `maxServerPingDelay`, the connection is considered broken and re-established. Default `maxServerPingDelay` (centrifuge-js): 10000 ms.
+Rule (spec): the client answers server PINGs with PONGs; if no PING arrives within ping interval + `maxServerPingDelay`, the connection is considered broken and re-established. Default `maxServerPingDelay` (centrifuge-js): 10000 ms. While the application holds events, pings are still answered when read, and the no-ping deadline pauses only while a full read-ahead stops reading (Block 15).
 
 `VERIFY:` where the ping interval and the "pong expected" flag are communicated (connect reply fields in `client.proto`).
 
@@ -657,7 +657,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes; map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches; tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one.
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -1130,7 +1130,7 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
-**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); the server decides, so the `subscribed` event reports the granted `positioned` and `recoverable` and the stream position (`epoch`, `offset`) from `SubscribeResult` (centrifuge-js); the stored position follows every publication delivered, live or recovered, including a changed `epoch` (`client.proto`, `Publication.epoch`); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); when `since` is also set, `since` provides the first position and getState is not called until a recovery fails (centrifuge-js calls getState only without a position); with getState the subscribe command sets the "reject unrecovered" flag, so a failed recovery is answered with error 112 instead of a `recovered = false` result, and the client drops the position and resubscribes after the resubscribe backoff, calling getState first: the subscription stays `subscribing`, with no `subscribed` event, no publication and no released subscription call, until that subscribe succeeds (`client.proto`, `SubscribeRequest.flag`; centrifuge-js `subscriptionFlags.rejectUnrecovered`); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) reconnects; on 3014 a server-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_"), so its recovery at the next connect fails and its subscribed event reports was_recovering true and recovered false (owner decision, 2026-11-04; centrifuge-js 63ed73e centrifuge.ts _disconnect); on 3014 a client-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_") instead of dropping it, so the next recovery fails and the app is told: with getState, error 112 leads to a reload; without getState, `subscribed` reports `was_recovering` true and `recovered` false (owner decision, 2026-11-04; centrifuge-js 63ed73e `_invalidateState`; `client.proto` does not define 3014); on 3014 the client clears the connection token and the token of every client-side subscription, unconditionally; before the next connect or resubscribe a new token is fetched only where a token callback exists, otherwise the command carries no token (owner decision, 2026-11-04; centrifuge-js 63ed73e clears them only when getToken is set, `centrifuge.ts` `_disconnect`, `subscription.ts` `_invalidateState`; `client.proto` does not define 3014); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
+**Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); the server decides, so the `subscribed` event reports the granted `positioned` and `recoverable` and the stream position (`epoch`, `offset`) from `SubscribeResult` (centrifuge-js); the stored position follows every publication delivered (taken from the application's stream, Block 15), live or recovered, including a changed `epoch` (`client.proto`, `Publication.epoch`); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); when `since` is also set, `since` provides the first position and getState is not called until a recovery fails (centrifuge-js calls getState only without a position); with getState the subscribe command sets the "reject unrecovered" flag, so a failed recovery is answered with error 112 instead of a `recovered = false` result, and the client drops the position and resubscribes after the resubscribe backoff, calling getState first: the subscription stays `subscribing`, with no `subscribed` event, no publication and no released subscription call, until that subscribe succeeds (`client.proto`, `SubscribeRequest.flag`; centrifuge-js `subscriptionFlags.rejectUnrecovered`); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) reconnects; on 3014 a server-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_"), so its recovery at the next connect fails and its subscribed event reports was_recovering true and recovered false (owner decision, 2026-11-04; centrifuge-js 63ed73e centrifuge.ts _disconnect); on 3014 a client-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_") instead of dropping it, so the next recovery fails and the app is told: with getState, error 112 leads to a reload; without getState, `subscribed` reports `was_recovering` true and `recovered` false (owner decision, 2026-11-04; centrifuge-js 63ed73e `_invalidateState`; `client.proto` does not define 3014); on 3014 the client clears the connection token and the token of every client-side subscription, unconditionally; before the next connect or resubscribe a new token is fetched only where a token callback exists, otherwise the command carries no token (owner decision, 2026-11-04; centrifuge-js 63ed73e clears them only when getToken is set, `centrifuge.ts` `_disconnect`, `subscription.ts` `_invalidateState`; `client.proto` does not define 3014); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
 `VERIFY:` the Centrifugo v6 channel options for history and recovery (including allowing client-requested positioning and recovery), and how a test makes history expire; `getState` in centrifuge-js `163dcba`; that Centrifugo v6.10.1 honours the "reject unrecovered" subscribe flag with error 112 (if not, "getState reloads state when recovery fails" moves to @D).
 
@@ -1323,7 +1323,7 @@ Feature: Subscription recovery
 
 **Out of scope:** client control over them (the spec gives none); top-level publish, history and presence (Block 13).
 
-**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`), and the same context as client-side ones: granted `positioned` and `recoverable`, `was_recovering`, `recovered` and the stream position (centrifuge-js `ServerSubscribedContext`); a channel can have both a client-side and a server-side subscription, kept apart, with a pushed publication routed to the server-side one unless the client-side one is subscribed (centrifuge-js `_getSubForPush`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`); that position comes from the `ConnectResult.subs` entry or the `Subscribe` push that added the subscription, and follows every server-side publication delivered, live or recovered (centrifuge-js `_handleSubscribe`, `_handlePublication`); publications in a `ConnectResult.subs` entry are delivered after its `subscribed` event whether or not it recovers, as for client-side subscribe replies (Block 9; `client.proto` puts no condition on `SubscribeResult.publications`, while centrifuge-js delivers them only when recovered: not ported); a subscription absent from a reconnect's `ConnectResult.subs`, or removed by an `Unsubscribe` push, emits `unsubscribed` once and is removed from the registry with its position (centrifuge-js `_processServerSubs`, `_handleUnsubscribe`); the server-side `unsubscribed` event carries the code and reason of the `Unsubscribe` push (`client.proto`; centrifuge-js passes only the channel: extended, as the proto carries them); a server-side subscription absent from a reconnect's `ConnectResult.subs` emits `unsubscribed` with client-side code 4 "not subscribed by the server after reconnect" (`client.proto` sends no code for it; centrifuge-js passes only the channel).
+**Decisions:** server-side subscriptions live in a registry separate from client-side ones and emit their own events (spec); their `subscribed` events carry the data the server attached, at connect (`SubscribeResult.data` in `ConnectResult.subs`) and in a `Subscribe` push (`Subscribe.data`), and the same context as client-side ones: granted `positioned` and `recoverable`, `was_recovering`, `recovered` and the stream position (centrifuge-js `ServerSubscribedContext`); a channel can have both a client-side and a server-side subscription, kept apart, with a pushed publication routed to the server-side one unless the client-side one is subscribed (centrifuge-js `_getSubForPush`); the registry and its positions survive an explicit `disconnect()`, so a later `connect()` restores and recovers them, as for client-side subscriptions; those granted at connect arrive in `ConnectResult.subs`, those added later in a `Subscribe` push, and both are tracked (`client.proto`); on reconnect the connect command carries each recoverable server-side subscription's position in `ConnectRequest.subs`, so missed publications are recovered (`client.proto`); that position comes from the `ConnectResult.subs` entry or the `Subscribe` push that added the subscription, and follows every server-side publication delivered (taken from the application's stream, Block 15), live or recovered (centrifuge-js `_handleSubscribe`, `_handlePublication`); publications in a `ConnectResult.subs` entry are delivered after its `subscribed` event whether or not it recovers, as for client-side subscribe replies (Block 9; `client.proto` puts no condition on `SubscribeResult.publications`, while centrifuge-js delivers them only when recovered: not ported); a subscription absent from a reconnect's `ConnectResult.subs`, or removed by an `Unsubscribe` push, emits `unsubscribed` once and is removed from the registry with its position (centrifuge-js `_processServerSubs`, `_handleUnsubscribe`); the server-side `unsubscribed` event carries the code and reason of the `Unsubscribe` push (`client.proto`; centrifuge-js passes only the channel: extended, as the proto carries them); a server-side subscription absent from a reconnect's `ConnectResult.subs` emits `unsubscribed` with client-side code 4 "not subscribed by the server after reconnect" (`client.proto` sends no code for it; centrifuge-js passes only the channel).
 
 `VERIFY:` how a test makes Centrifugo v6 subscribe a connection on the server side (connect proxy result `channels`, or token `channels` claim), and the server API `subscribe` method for a live connection.
 
@@ -1782,7 +1782,7 @@ Each becomes a block with its value clause and scenarios when its turn comes; th
 - HTTP proxy (CONNECT) support;
 - sleep/resume behaviour;
 - server load testing (the server side has its own tooling);
-- the event-buffer policy for slow consumers, pending the owner's decision on review item D1;
+- the event-buffer policy for slow consumers (Block 15);
 - per-platform behaviour beyond running the existing suites on Windows and macOS.
 
 **Decisions:**
@@ -1898,4 +1898,208 @@ Feature: Footprint, performance and fleet behaviour
     Given a client connected to the fake server with 10 subscribed channels and server pings every 25 s
     When 2 minutes elapse without publications
     Then the CPU time used by the client is reported
+```
+
+## Block 15 — Event delivery and backpressure
+
+**Goal:** a publication counts as delivered only when the application takes it from its stream, and an application that reads slowly holds the server back instead of growing the client's memory (review item C6/D1; owner decision, 2026-11-05, option 5, modelled on centrifuge-rust `docs/spec.md` §9.2 and §9.4).
+
+**Dependencies:** Blocks 4, 8, 9, 11, 12, 14.
+
+**Out of scope:**
+- a callback-style handler API: ferrifuge has streams only;
+- a read-ahead scenario over the HTTP streaming transports: the fake server speaks websocket only, so unit tests cover them;
+- the size bound of the write queue (Block 13);
+- whether call replies resolve when read, ahead of held events (Block 13; centrifuge-rust §9.3).
+
+**Decisions** (owner decision, 2026-11-05: option 5, with hand-off delivery, a bounded read-ahead, one active stream per object, and timers and pings running while reading is paused; the remaining points decided through the review the owner delegated them to):
+- **Delivered means taken.** A publication counts as delivered only when the `next()` of its stream returns it; only then does its stream position move, for client-side and server-side subscriptions alike (Blocks 11, 12). Exactly-once delivery follows on channels with history and recovery while the backlog stays within the server's recovery limit (Centrifugo `client.recovery_max_publication_limit`, default 300; past it recovery fails and `subscribed` reports `recovered` false).
+- **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command.
+- **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
+- **Timers keep running** while the application holds events, with two pauses. The no-ping deadline pauses while the client has stopped reading because the read-ahead is full, and restarts in full when reading resumes; without this pause an application stuck with a full read-ahead would make the client reconnect with code 2 about every 35 s, recovering a full read-ahead each time. A reply deadline (connect, refresh, subscribe, unsubscribe, sub_refresh) pauses while its reply has been read but waits to be handled.
+- **One active stream per object.** The client and each subscription have one active stream. A second `events()` call ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
+- **No stream, no hold-up.** An object whose stream was never requested, or was dropped, takes its events at once: they count as delivered and positions move, events not yet taken included (centrifuge-rust §9.4: "a dropped stream acks like an unregistered handler").
+- **Lifecycle events** go through the same stream as publications, in order, and count as delivered only when taken; none is dropped or merged, and each state change is one event. `state()` returns the current state, which may be ahead of the stream. An event caused by an application call or a timer joins its stream at once.
+- **Withdrawal.** A publication not yet taken when its subscription, client-side or server-side, leaves `subscribed` for a client-side reason (`disconnect()`, `unsubscribe()`, a client-side timeout) is withdrawn and never yielded; its position did not move, so recovery brings it back.
+- **Errors past 256.** When a stream holds 256 events not taken, further `error` events for it are dropped, on the client's stream and on subscription streams alike: they change no state, and they are the only events a timer can add without bound (one per failed connection or subscribe attempt). Events caused by application calls are not bounded by the client: an application that cycles `connect()` and `disconnect()` without reading its stream grows it (documented).
+- **Channels without recovery.** There a slow consumer can lose publications, as with any disconnect; this is documented, with no further signal.
+- **Head-of-line.** The read-ahead belongs to the connection, so one stream not read pauses every subscription of that client (centrifuge-rust §9.2).
+- **Version 0.6.0:** `Config` gains the two read-ahead fields, a second `events()` call ends the earlier stream, and the sans-IO core gains a delivery acknowledgement in its public `machine` API.
+
+Value clause: As an app developer on a device with limited memory, I want the client to hold the server back instead of buffering without limit when my code reads its events slowly, and to deliver each publication exactly once across reconnects, so that a slow or stalled consumer neither exhausts memory nor loses data on recoverable channels.
+
+```gherkin
+Feature: Event delivery and backpressure
+
+  @D
+  Scenario: Publications not taken before disconnect are recovered on the next connect
+    Given a client subscribed to recoverable channel "news" on the fake server, whose subscription's stream has been read up to "subscribed"
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the application has taken only the publication at offset 1 from the subscription's stream
+    And the client holds the publications at offsets 2 and 3 not yet taken
+    When disconnect is called
+    And connect is called
+    And the fake server answers the subscribe command with the publications at offsets 2 and 3 recovered
+    Then that subscribe command asked to recover from offset 1
+    And the subscription's stream yields, in order, "subscribing", "subscribed", and the publications at offsets 2 and 3
+    And no publication is yielded twice
+
+  @D
+  Scenario: Server-side publications not taken before disconnect are recovered on the next connect
+    Given the fake server grants a recoverable server-side subscription to channel "alerts" at offset 0 at connect
+    And the fake server has sent publications at offsets 1, 2 and 3 to "alerts"
+    And the application has read the client's stream up to the server-side publication at offset 1, and no further
+    And the client holds the server-side publications at offsets 2 and 3 not yet taken
+    When disconnect is called
+    And connect is called
+    Then that connect command asks to recover "alerts" from offset 1
+    And the client's stream yields no server-side publication before "connected"
+
+  @D
+  Scenario: Publications not taken before unsubscribe are withdrawn
+    Given a client subscribed to recoverable channel "news" on the fake server, whose subscription's stream has been read up to "subscribed"
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    And the client holds them not yet taken
+    When unsubscribe is called on the subscription
+    Then the subscription's stream yields "unsubscribed" and no publication
+
+  @D
+  Scenario: The server closing the connection is handled only after the publications before it are taken
+    Given a client subscribed to recoverable channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news", then closed the connection with a reconnect-advised code
+    When 2 s elapse
+    Then the client has opened no new connection
+    And when the application reads the subscription's stream, it yields the publications at offsets 1, 2 and 3, then "subscribing"
+    And the next subscribe command for "news" asks to recover from offset 3
+
+  @D
+  Scenario: A state change not taken holds the messages of the next connection
+    Given a client whose stream was taken before connect is called and is not read, connected to the fake server
+    When disconnect is called
+    And connect is called
+    Then within 1 s the fake server has received a second connect command
+    And 1 s later the client's state is "connecting"
+    And when the application reads the client's stream, it yields "connecting", "connected", "disconnected", "connecting", "connected"
+
+  @D
+  Scenario: A stream that is not read stops the client reading after 256 items
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    When the fake server starts sending 10000 publications of 100 bytes to "news"
+    Then the client stops reading with 256 messages in its read-ahead
+    And 1 s later its read-ahead still holds 256 messages
+    And when the application reads the subscription's stream, it yields the 10000 publications in order, each once
+
+  @D
+  Scenario: The read-ahead also stops at 4 MiB
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    When the fake server starts sending 40 publications of 512 KiB to "news"
+    Then the client stops reading with more than 3 MiB and at most 4 MiB in its read-ahead
+    And 1 s later its read-ahead still holds at most 4 MiB
+    And when the application reads the subscription's stream, it yields the 40 publications in order, each once
+
+  @D
+  Scenario: An item larger than the read-ahead budget is still delivered
+    Given a client configured with a read-ahead of 1 KiB, subscribed to channel "news" on the fake server
+    When the fake server sends a publication of 64 KiB to "news"
+    Then the subscription's stream yields it
+
+  @E
+  Scenario Outline: A read-ahead limit of 0 is rejected
+    Given a Config whose read-ahead limit of <limit> is 0
+    When a client is created
+    Then Client::new returns an error
+
+    Examples:
+      | limit    |
+      | messages |
+      | bytes    |
+
+  @D
+  Scenario: A second events() call takes over the subscription's stream
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    And the client holds them not yet taken
+    When the application calls the subscription's events() again
+    Then the first stream's next item is its end
+    And the new stream yields the publications at offsets 1 and 2
+
+  @D
+  Scenario: A second events() call takes over the client's stream
+    Given a client whose stream was taken before connect is called and is not read, connected to the fake server
+    When the application calls the client's events() again
+    Then the first stream's next item is its end
+    And the new stream yields "connecting", then "connected"
+
+  @D
+  Scenario: A cancelled read loses no publication
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed"
+    And the application has started reading the subscription's stream
+    And the client holds a publication to "news" not yet taken
+    When the application cancels that read before polling it again
+    Then the subscription's stream yields that publication
+
+  @D
+  Scenario: Publications of a subscription without a stream do not hold the connection
+    Given a client subscribed to channels "news" and "chat" on the fake server
+    And the application dropped the stream of "news" and reads the stream of "chat"
+    When the fake server sends 1000 publications to "news", then one to "chat"
+    Then the stream of "chat" yields that publication
+
+  @D
+  Scenario: Pings are answered while a stream is not read
+    Given a client connected to the fake server, which pings every 1 s and expects pongs
+    And the client is subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent 10 publications to "news"
+    When 5 s elapse with the fake server pinging every 1 s
+    Then the client has answered every ping
+    And the client has not emitted "connecting" with code 2
+
+  @D
+  Scenario: A full read-ahead does not make the client report missing pings
+    Given a client with maxServerPingDelay 1000 ms, connected to the fake server pinging every 1 s
+    And the client is subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications of 100 bytes to "news" until the client stopped reading
+    When 5 s elapse
+    Then the client has not emitted "connecting" with code 2
+
+  @D
+  Scenario: A subscribe reply waiting behind a publication not taken does not time out
+    Given a client with a timeout of 1 s, subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent a publication to "news"
+    When the application subscribes to channel "chat"
+    And 3 s elapse
+    Then the client has not emitted "connecting" with code 3
+    And when the application reads the stream of "news", the stream of "chat" yields "subscribed"
+
+  @D
+  Scenario: The connection token is refreshed while a stream is not read
+    Given a client connected to the fake server with a connection token that expires in 2 s
+    And the client is subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications of 100 bytes to "news" until the client stopped reading
+    When 3 s elapse
+    Then the fake server has received a refresh command
+
+  @E
+  Scenario: A client stream not read keeps every state change but drops errors past 256 untaken events
+    Given a client whose stream was taken before connect is called and is not read, and whose server is unreachable
+    When 1000 connection attempts fail
+    And the server becomes reachable and the client connects
+    Then reading the stream yields "connecting", 255 error events, then "connected"
+
+  @E
+  Scenario: A subscription stream not read drops errors past 256 untaken events
+    Given a connected client with a subscription whose stream was taken before subscribe is called and is not read, and whose get_data callback fails
+    When 1000 subscribe attempts fail
+    And the get_data callback succeeds and the subscription subscribes
+    Then reading the subscription's stream yields "subscribing", 255 error events, then "subscribed"
+
+  @A
+  Scenario: A slow consumer on a channel with history and recovery loses no publication
+    Given a server whose channel "news" keeps a history of 8000 publications and recovers up to 8000, with a client queue of 64 MiB
+    And a client subscribed to "news", whose subscription's stream has been read up to "subscribed" and is not read after
+    When the server API publishes 8000 publications of 4 KiB to "news"
+    And 2 s elapse
+    And the application then reads the subscription's stream until it has 8000 publications
+    Then they are the offsets 1 to 8000, in order, each exactly once
+    And between them the stream yielded "subscribing", then "subscribed" with recovered true
 ```
