@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
-use futures_channel::mpsc as events;
+use super::outbox as events;
 use futures_core::Stream;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
@@ -48,10 +48,10 @@ impl std::fmt::Debug for Client {
 #[derive(Debug)]
 pub(super) struct Shared {
     pub(super) core: Mutex<Core>,
-    subscribers: Mutex<Vec<events::UnboundedSender<ClientEvent>>>,
+    subscribers: Mutex<Vec<events::Sender<ClientEvent>>>,
     /// Listeners of each subscription's events.
     pub(super) subscription_subscribers:
-        Mutex<HashMap<SubscriptionId, Vec<events::UnboundedSender<SubscriptionEvent>>>>,
+        Mutex<HashMap<SubscriptionId, Vec<events::Sender<SubscriptionEvent>>>>,
     /// Data and token callbacks of the subscriptions that have them.
     pub(super) callbacks: Mutex<SubscriptionCallbacks>,
     /// Wakes the driver when actions are queued.
@@ -151,13 +151,12 @@ impl Shared {
     }
 
     fn emit(&self, event: &ClientEvent) {
-        lock(&self.subscribers)
-            .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+        lock(&self.subscribers).retain(|subscriber| subscriber.send(event.clone()));
     }
 
     fn emit_subscription(&self, id: SubscriptionId, event: &SubscriptionEvent) {
         if let Some(subscribers) = lock(&self.subscription_subscribers).get_mut(&id) {
-            subscribers.retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+            subscribers.retain(|subscriber| subscriber.send(event.clone()));
         }
     }
 
@@ -338,9 +337,21 @@ impl Client {
     /// borrows nothing from the client, so it can be kept beside it, and it
     /// ends once the client is dropped.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
-        let (sender, receiver) = events::unbounded();
+        let (sender, receiver) = events::channel();
         lock(&self.shared.subscribers).push(sender);
         receiver
+    }
+
+    /// Events of the client queued for its streams and not yet taken, so
+    /// that tests can wait for them. Only with the `test-util` feature.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_events(&self) -> usize {
+        lock(&self.shared.subscribers)
+            .iter()
+            .map(events::Sender::held)
+            .sum()
     }
 
     /// Starts connecting; reconnects until connected or disconnected. The

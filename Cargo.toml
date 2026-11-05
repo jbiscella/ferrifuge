@@ -16,7 +16,6 @@ tokio = [
     "dep:tokio",
     "dep:tokio-tungstenite",
     "dep:futures-util",
-    "dep:futures-channel",
     "dep:futures-core",
     "dep:rustls",
     "dep:rustls-native-certs",
@@ -36,7 +35,6 @@ test-util = []
 
 [dependencies]
 fastrand = "2.5.0"
-futures-channel = { version = "0.3.34", optional = true }
 futures-core = { version = "0.3.34", optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"], optional = true }
 prost = "0.14.4"

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use futures_channel::mpsc as events;
+use super::outbox as events;
 use futures_core::Stream;
 
 use super::client::{Callbacks, Client, GetData, GetState, GetSubscriptionToken, Shared, lock};
@@ -58,11 +58,23 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
+    /// Events of the subscription queued for its streams and not yet
+    /// taken, so that tests can wait for them. Only with the `test-util`
+    /// feature.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_events(&self) -> usize {
+        lock(&self.shared.subscription_subscribers)
+            .get(&self.id)
+            .map_or(0, |senders| senders.iter().map(events::Sender::held).sum())
+    }
+
     /// Events from now on. Each call returns an independent stream; it
     /// borrows nothing from the subscription, so it can be kept beside it,
     /// and it ends once the subscription is removed or its client dropped.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + use<> {
-        let (sender, receiver) = events::unbounded();
+        let (sender, receiver) = events::channel();
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then ends the streams, so a removed
         // subscription's stream ends at once instead of leaking a sender.

@@ -1216,7 +1216,6 @@ dependencies = [
  "dhat",
  "fastrand",
  "ferrifuge",
- "futures-channel",
  "futures-core",
  "futures-util",
  "gungraun",
