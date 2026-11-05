@@ -505,6 +505,7 @@ Feature: Protobuf encoding
 - within the first sequence the next transport is tried at once; once every transport has failed, the next sequence starts after the reconnect backoff delay (Block 2), as centrifuge-js counts only the first round as handshake;
 - a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`);
 - an emulation request answered with HTTP 413 keeps the transport and ends only the commands it carried, at once; none is retried automatically with the same payload (owner decision, 2026-11-04; diverges from centrifuge-js 63ed73e, which leaves the command to its reply timeout, `transport_http_stream.ts:199-205`): a call the application awaits (publish, RPC, history, presence, presence stats, send) fails with error code 10 "transport write error" (centrifuge-js `errorCodes.transportWriteError`); a subscribe or a sub_refresh moves the subscription to `unsubscribed` with code 3 "message size limit exceeded", sending an unsubscribe command when the server holds the subscription (after a sub_refresh); a connection refresh disconnects the client with code 3 "message size limit exceeded", the code and reason review item C4 proposes for websocket close code 1009 (centrifuge-js `disconnectedCodes.messageSizeLimit`); an unsubscribe fails as any unsubscribe error, so the client reconnects with code 4 (Block 9);
+- a websocket write never blocks the client: frames are queued and written while the client goes on handling timers, incoming frames and calls; a frame not written within `Config::timeout` of being queued closes the transport, and the client reconnects with code 1 "transport closed", as for any lost transport; closing a websocket, its close handshake included, is bounded by `Config::timeout` too, after which the connection is aborted (owner decision, 2026-11-05, review item C1; centrifuge-js 63ed73e has no counterpart, since a browser's `WebSocket.send` never blocks);
 - no construction path accepts an empty endpoint, or an `http://` or `https://` endpoint configured for the websocket transport: building the client fails with a configuration error naming the transport, and `Client::new` returns that error instead of panicking; `http(s)://` endpoints stay valid for http_stream and sse (owner decision, 2026-11-04).
 
 `VERIFY:` the bidirectional emulation protocol (stream request, `/emulation` command requests and their session and node fields) in centrifuge-js `transport_http_stream.ts` and `transport_sse.ts`; there is no other implementation to cross-check against. Centrifugo v6 defaults verified: `http_stream.enabled` and `sse.enabled` are false, the emulation handler prefix is `/emulation`.
@@ -582,6 +583,23 @@ Feature: Transport fallback
     Given a client configured with websocket and http_stream endpoints
     When the websocket opens and no connect reply arrives within the configured timeout
     Then the next attempt opens the http_stream transport
+
+  @D
+  Scenario: A websocket write the server never reads closes the transport
+    Given a client connected to the fake server
+    And the fake server stops reading from the connection
+    When the client sends more data than the connection can buffer
+    Then within the configured timeout plus tolerance the client emits "connecting" with code 1
+    And the client opens a new connection
+
+  @D
+  Scenario: A stalled websocket write does not delay disconnect
+    Given a client connected to the fake server
+    And the fake server stops reading from the connection
+    And the client has sent more data than the connection can buffer
+    When disconnect is called
+    Then the client emits "disconnected" before the configured timeout
+    And the fake server sees the connection closed within the configured timeout plus tolerance
 
   Scenario: Every transport unreachable
     Given a client configured with unreachable websocket, http_stream and sse endpoints
@@ -1483,7 +1501,7 @@ Feature: Server-side subscriptions
 
 **Out of scope:** publish debouncing (Block 0); batching several calls into one frame, planned as its own block after this one (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API).
 
-**To decide while planning this block (owner decision, 2026-11-04):** join and leave pushes and the `join_leave` subscription option (spec, "ask server to push Join/Leave"; out of scope in Block 9).
+**To decide while planning this block (owner decision, 2026-11-04):** join and leave pushes and the `join_leave` subscription option (spec, "ask server to push Join/Leave"; out of scope in Block 9); a size bound for the websocket write queue (bytes or messages) and what a call does when it is full, since Block 8's per-frame write deadline bounds time, not memory, once the application can publish (owner decision, 2026-11-05).
 
 **Decisions:** `async fn` returning `Result` (Block 0); a call made while not connected waits for the connection, bounded by `Config::timeout`, also on a client whose `connect()` was never called, and entering `disconnected`, by `disconnect()` or a terminal condition (terminal disconnect code, denied token), fails at once every pending call, queued or already sent (centrifuge-js `_methodCall`, `_disconnect`, which rejects them whenever it does not reconnect); losing the transport fails calls already sent at once with "connection closed" (centrifuge-js error code 11), since their replies can no longer arrive; a subscription-level call made while the subscription is `subscribing` waits until it is `subscribed`, bounded by `Config::timeout`, made while it is `unsubscribed` fails at once with "subscription unsubscribed" (centrifuge-js error code 7) and sends nothing, and a waiting call fails the same way when the subscription becomes `unsubscribed` (centrifuge-js `_methodCall`, `_setUnsubscribed`); a command without a reply fails with the timeout error (code 1); a call that times out while waiting for the connection is dropped and never sent, since its command is built only once the connection is there (centrifuge-js `_methodCall`); a command error keeps the protocol error's code, message and `temporary` flag (`client.proto`, `Error`); RPC data is bytes both ways, like publication data (Block 0; `client.proto`, `RPCRequest.data`, `RPCResult.data`); history takes `limit`, `since` and `reverse` and returns the publications with the stream's current `epoch` and `offset`, and `limit: 0` returns only that position (spec, "Channel history API"); an asynchronous server `message` push is delivered to the application as a client event carrying its bytes (`client.proto`, `Push.message`; spec, client protocol "Asynchronous pushes").
 

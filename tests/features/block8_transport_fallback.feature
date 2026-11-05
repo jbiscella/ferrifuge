@@ -69,6 +69,23 @@ Feature: Transport fallback
     When the websocket opens and no connect reply arrives within the configured timeout
     Then the next attempt opens the http_stream transport
 
+  @D
+  Scenario: A websocket write the server never reads closes the transport
+    Given a client connected to the fake server
+    And the fake server stops reading from the connection
+    When the client sends more data than the connection can buffer
+    Then within the configured timeout plus tolerance the client emits "connecting" with code 1
+    And the client opens a new connection
+
+  @D
+  Scenario: A stalled websocket write does not delay disconnect
+    Given a client connected to the fake server
+    And the fake server stops reading from the connection
+    And the client has sent more data than the connection can buffer
+    When disconnect is called
+    Then the client emits "disconnected" before the configured timeout
+    And the fake server sees the connection closed within the configured timeout plus tolerance
+
   Scenario: Every transport unreachable
     Given a client configured with unreachable websocket, http_stream and sse endpoints
     When connect is called
