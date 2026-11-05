@@ -35,7 +35,16 @@ pub(super) struct Deliveries {
     /// Objects with a stream open: a subscription, or the client (`None`),
     /// whose stream also takes the server-side subscriptions' events.
     streams: HashSet<Option<SubscriptionId>>,
+    /// Events emitted to an open stream and not yet taken, with the
+    /// stream, and how many each stream holds.
+    untaken: HashMap<EventId, Option<SubscriptionId>>,
+    held: HashMap<Option<SubscriptionId>, usize>,
 }
+
+/// Untaken events a stream holds past which further `error` events for it
+/// are dropped: they change no state, and they are the only events a timer
+/// can add without bound, one per failed attempt (Block 15).
+const ERRORS_DROPPED_PAST: usize = 256;
 
 impl Owner {
     /// The stream taking this owner's publications.
@@ -106,6 +115,35 @@ impl Machine {
         }
     }
 
+    /// Id of an event for the stream of `stream`, or `None` to drop it: an
+    /// `error` event once that stream holds 256 untaken events.
+    pub(super) fn admit_event(
+        &mut self,
+        stream: Option<SubscriptionId>,
+        error: bool,
+    ) -> Option<EventId> {
+        let open = self.deliveries.streams.contains(&stream);
+        let held = self.deliveries.held.get(&stream).copied().unwrap_or(0);
+        if error && open && held >= ERRORS_DROPPED_PAST {
+            return None;
+        }
+        let id = self.event_id();
+        if open {
+            self.deliveries.untaken.insert(id, stream);
+            *self.deliveries.held.entry(stream).or_default() += 1;
+        }
+        Some(id)
+    }
+
+    /// The event `id` left its stream: taken or withdrawn.
+    fn untake(&mut self, id: EventId) {
+        if let Some(stream) = self.deliveries.untaken.remove(&id)
+            && let Some(held) = self.deliveries.held.get_mut(&stream)
+        {
+            *held = held.saturating_sub(1);
+        }
+    }
+
     /// A stream of the subscription `of`, or of the client when `None`,
     /// takes its events from now on.
     pub(super) fn stream_opened(&mut self, of: Option<SubscriptionId>) {
@@ -116,6 +154,7 @@ impl Machine {
     /// publications not yet taken no longer matter.
     pub(super) fn forget_deliveries(&mut self, id: SubscriptionId) {
         self.deliveries.streams.remove(&Some(id));
+        self.forget_held(Some(id));
         self.deliveries
             .pending
             .retain(|_, commit| commit.owner != Owner::Client(id));
@@ -130,10 +169,18 @@ impl Machine {
     /// once from now on.
     pub(super) fn stream_closed(&mut self, of: Option<SubscriptionId>) {
         self.deliveries.streams.remove(&of);
+        self.forget_held(of);
+    }
+
+    /// No event of the stream of `of` waits anymore.
+    fn forget_held(&mut self, of: Option<SubscriptionId>) {
+        self.deliveries.held.remove(&of);
+        self.deliveries.untaken.retain(|_, stream| *stream != of);
     }
 
     /// The application took the event `id`.
     pub(super) fn event_taken(&mut self, id: EventId) {
+        self.untake(id);
         if let Some(commit) = self.deliveries.pending.remove(&id) {
             self.commit(commit);
         }
@@ -164,6 +211,7 @@ impl Machine {
         ids.sort_unstable();
         for id in &ids {
             self.deliveries.pending.remove(id);
+            self.untake(*id);
             self.settle_event(*id);
         }
         self.actions.push(Action::Withdraw(ids));
@@ -185,5 +233,57 @@ impl Machine {
             offset,
             epoch: replied.epoch.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Input, Timer};
+    use super::*;
+    use crate::{ClientEvent, Config};
+
+    /// Fails `attempts` connection attempts, taking each event at once when
+    /// `read`; the error events emitted.
+    fn errors_of_failed_attempts(attempts: usize, read: bool) -> usize {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        let mut errors = 0;
+        let mut actions = machine.handle(Input::Connect);
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+            }
+            let transport = actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::OpenTransport { transport, .. } => Some(*transport),
+                    _ => None,
+                })
+                .expect("a transport to open");
+            actions.extend(machine.handle(Input::TransportFailed {
+                transport,
+                message: "refused".into(),
+            }));
+            for action in &actions {
+                if let Action::Emit(id, event) = action {
+                    errors += usize::from(matches!(event, ClientEvent::Error(_)));
+                    if read {
+                        machine.handle(Input::EventTaken(*id));
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn a_stream_that_is_read_gets_every_error() {
+        assert_eq!(errors_of_failed_attempts(300, true), 300);
+    }
+
+    #[test]
+    fn a_stream_not_read_gets_errors_only_until_it_holds_256_events() {
+        // The connecting event comes first.
+        assert_eq!(errors_of_failed_attempts(300, false), 255);
     }
 }

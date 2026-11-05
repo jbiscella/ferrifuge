@@ -233,7 +233,9 @@ impl Machine {
         publication: Publication,
         reply: Option<(&StreamPosition, bool)>,
     ) {
-        let id = self.event_id();
+        let Some(id) = self.admit_event(None, false) else {
+            return;
+        };
         self.deliver_publication(id, Owner::Server(channel.to_owned()), &publication, reply);
         self.actions.push(super::Action::Emit(
             id,

@@ -918,9 +918,11 @@ impl Machine {
         ) {
             self.withdraw(&Owner::Client(id));
         }
-        let event_id = self.event_id();
-        self.actions
-            .push(Action::EmitSubscription(event_id, id, event));
+        let error = matches!(event, SubscriptionEvent::Error(_));
+        if let Some(event_id) = self.admit_event(Some(id), error) {
+            self.actions
+                .push(Action::EmitSubscription(event_id, id, event));
+        }
     }
 
     /// Emits a publication of `id`, which moves its position once taken;
@@ -932,7 +934,9 @@ impl Machine {
         publication: Publication,
         reply: Option<(&StreamPosition, bool)>,
     ) {
-        let event_id = self.event_id();
+        let Some(event_id) = self.admit_event(Some(id), false) else {
+            return;
+        };
         self.deliver_publication(event_id, Owner::Client(id), &publication, reply);
         self.actions.push(Action::EmitSubscription(
             event_id,
