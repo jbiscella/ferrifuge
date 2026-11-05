@@ -1530,8 +1530,10 @@ impl Machine {
     }
 
     fn emit(&mut self, event: ClientEvent) {
-        let id = self.event_id();
-        self.actions.push(Action::Emit(id, event));
+        let error = matches!(event, ClientEvent::Error(_));
+        if let Some(id) = self.admit_event(None, error) {
+            self.actions.push(Action::Emit(id, event));
+        }
     }
 
     /// Id of the next event emitted.
