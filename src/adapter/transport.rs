@@ -17,7 +17,7 @@ use crate::machine::FrameType;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
@@ -76,10 +76,14 @@ impl WebSocket {
         }
         // tungstenite fails the handshake unless the server accepts the
         // subprotocol asked for.
-        let (stream, _) =
-            tokio_tungstenite::connect_async_tls_with_config(request, None, true, Some(connector))
-                .await
-                .map_err(|e| e.to_string())?;
+        let (stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(websocket_config()),
+            true,
+            Some(connector),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(Self {
             stream,
             queue: VecDeque::new(),
@@ -231,6 +235,20 @@ fn note_stall<T>(poll: &Poll<T>) {
 
 #[cfg(not(feature = "test-util"))]
 fn note_stall<T>(_: &Poll<T>) {}
+
+/// Limits of a websocket connection: a frame may be as large as a message
+/// (64 MiB, tungstenite's default and the HTTP transports' limit), since
+/// Centrifugo sends each reply, a recovery's included, as one frame;
+/// tungstenite's default frame limit of 16 MiB would refuse a large one
+/// and close the connection on every attempt.
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE))
+}
+
+/// Largest message, and frame, accepted from the server.
+const MAX_MESSAGE: usize = 64 << 20;
 
 /// TLS settings of an HTTP client that only ever speaks plain `http://`:
 /// no root certificates, so it works on hosts without platform ones, and
@@ -470,6 +488,31 @@ mod tests {
             })
         );
         assert_eq!(received, None);
+    }
+
+    // A recovery reply of thousands of publications comes as one frame:
+    // tungstenite's default frame limit (16 MiB) closed the connection.
+    #[tokio::test]
+    async fn a_frame_larger_than_16_mib_is_received() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Message::text("x".repeat(20 << 20))).await.unwrap();
+            let _ = ws.next().await;
+        });
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
+            .await
+            .unwrap();
+
+        let received = ws.recv().await;
+
+        assert!(
+            matches!(&received, Inbound::Frame(data) if data.len() == 20 << 20),
+            "{:?}",
+            std::mem::discriminant(&received)
+        );
     }
 
     #[tokio::test]
