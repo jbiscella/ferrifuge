@@ -7,6 +7,7 @@ mod token_flow;
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::delivery::{Commit, Owner};
 use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
 use crate::backoff::Backoff;
@@ -99,22 +100,6 @@ impl Subscription {
         if let Some(position) = &mut self.position {
             position.offset = 0;
             UNMATCHABLE_EPOCH.clone_into(&mut position.epoch);
-        }
-    }
-
-    /// Moves the stream position to a publication's, as received live or
-    /// recovered (centrifuge-js `_handlePublication`); a changed epoch
-    /// comes with it (`client.proto`, `Publication.epoch`).
-    fn advance(&mut self, publication: &Publication) {
-        if publication.offset.is_none() && publication.epoch.is_none() {
-            return;
-        }
-        let position = self.position.get_or_insert_default();
-        if let Some(offset) = publication.offset {
-            position.offset = offset;
-        }
-        if let Some(epoch) = &publication.epoch {
-            epoch.clone_into(&mut position.epoch);
         }
     }
 
@@ -603,11 +588,14 @@ impl Machine {
                     epoch: result.epoch.clone(),
                 });
                 sub.recover = result.recoverable;
-                if result.recoverable {
-                    sub.position = Some(StreamPosition {
-                        offset: result.offset,
-                        epoch: result.epoch,
-                    });
+                // With publications, the reply's position is reached once
+                // the last of them is taken (Block 15).
+                let replied = result.recoverable.then_some(StreamPosition {
+                    offset: result.offset,
+                    epoch: result.epoch,
+                });
+                if result.publications.is_empty() && replied.is_some() {
+                    sub.position.clone_from(&replied);
                 }
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
@@ -624,12 +612,11 @@ impl Machine {
                     }),
                 );
                 // Recovered publications, or initial ones, follow it and
-                // move the position.
-                for publication in result.publications {
-                    if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                        sub.advance(&publication);
-                    }
-                    self.emit_subscription(id, SubscriptionEvent::Publication(publication));
+                // move the position once taken.
+                let last = result.publications.len().saturating_sub(1);
+                for (index, publication) in result.publications.into_iter().enumerate() {
+                    let reply = replied.as_ref().map(|position| (position, index == last));
+                    self.emit_publication(id, publication, reply);
                 }
             }
             // A reply to subscribe without its result breaks the protocol.
@@ -816,10 +803,7 @@ impl Machine {
                 .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
         });
         if let Some(id) = subscribed {
-            if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                sub.advance(&publication);
-            }
-            self.emit_subscription(id, SubscriptionEvent::Publication(publication));
+            self.emit_publication(id, publication, None);
         } else {
             self.server_publication(channel, publication);
         }
@@ -909,9 +893,41 @@ impl Machine {
     }
 
     fn emit_subscription(&mut self, id: SubscriptionId, event: SubscriptionEvent) {
+        // Leaving subscribed withdraws the publications not yet taken.
+        if matches!(
+            event,
+            SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Unsubscribed { .. }
+        ) {
+            self.withdraw(&Owner::Client(id));
+        }
         let event_id = self.event_id();
         self.actions
             .push(Action::EmitSubscription(event_id, id, event));
+    }
+
+    /// Emits a publication of `id`, which moves its position once taken;
+    /// `reply` is the position of the subscribe reply it came with, and
+    /// whether it is that reply's last publication.
+    fn emit_publication(
+        &mut self,
+        id: SubscriptionId,
+        publication: Publication,
+        reply: Option<(&StreamPosition, bool)>,
+    ) {
+        let event_id = self.event_id();
+        self.deliver_publication(event_id, Owner::Client(id), &publication, reply);
+        self.actions.push(Action::EmitSubscription(
+            event_id,
+            id,
+            SubscriptionEvent::Publication(publication),
+        ));
+    }
+
+    /// Applies a taken publication's `commit` to the position of `id`.
+    pub(super) fn commit_subscription_position(&mut self, id: SubscriptionId, commit: Commit) {
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            commit.apply(&mut sub.position);
+        }
     }
 }
 
@@ -983,6 +999,99 @@ mod tests {
             reason: "closed by the test".into(),
         });
         machine.handle(Input::TimerFired(Timer::Reconnect))
+    }
+
+    /// Subscribes `id` over `transport`, the server answering command 2
+    /// with a recoverable stream at offset 0 of epoch "e".
+    fn subscribed_recoverable(machine: &mut Machine, transport: TransportId, id: SubscriptionId) {
+        machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":0}}"#.to_vec(),
+        });
+    }
+
+    /// The ids of the publications emitted among `actions`, in order.
+    fn publication_ids(actions: &[Action]) -> Vec<EventId> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::EmitSubscription(event, _, SubscriptionEvent::Publication(_)) => {
+                    Some(*event)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn offset_of(machine: &Machine, id: SubscriptionId) -> Option<u64> {
+        machine.subscriptions.by_id[&id]
+            .position
+            .as_ref()
+            .map(|position| position.offset)
+    }
+
+    #[test]
+    fn a_publication_moves_the_position_only_once_taken() {
+        let (mut machine, transport, id) = connected();
+        subscribed_recoverable(&mut machine, transport, id);
+        let pushed = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
+        });
+        let received = offset_of(&machine, id);
+
+        machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
+
+        assert_eq!(received, Some(0));
+        assert_eq!(offset_of(&machine, id), Some(1));
+    }
+
+    #[test]
+    fn a_publication_not_taken_when_its_subscription_leaves_subscribed_is_withdrawn() {
+        let (mut machine, transport, id) = connected();
+        subscribed_recoverable(&mut machine, transport, id);
+        let pushed = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
+        });
+        let publication = publication_ids(&pushed)[0];
+
+        let disconnected = machine.handle(Input::Disconnect);
+        machine.handle(Input::EventTaken(publication));
+
+        assert!(
+            disconnected.contains(&Action::Withdraw(vec![publication])),
+            "{disconnected:?}"
+        );
+        assert_eq!(offset_of(&machine, id), Some(0));
+    }
+
+    #[test]
+    fn publications_of_a_subscribe_reply_move_the_position_one_by_one_as_taken() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        let replied = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":2,"publications":[{"data":{},"offset":1},{"data":{},"offset":2}]}}"#.to_vec(),
+        });
+        let publications = publication_ids(&replied);
+        let before = offset_of(&machine, id);
+
+        machine.handle(Input::EventTaken(publications[0]));
+        let after_first = offset_of(&machine, id);
+        machine.handle(Input::EventTaken(publications[1]));
+
+        assert_eq!(before, None);
+        assert_eq!(after_first, Some(1));
+        assert_eq!(offset_of(&machine, id), Some(2));
+        assert_eq!(
+            machine.subscriptions.by_id[&id]
+                .position
+                .as_ref()
+                .map(|position| position.epoch.as_str()),
+            Some("e")
+        );
     }
 
     // Block 11c: the client-side half of "Connection state invalidation

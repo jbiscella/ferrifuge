@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+mod delivery;
 mod server_subscriptions;
 mod subscriptions;
 mod tokens;
@@ -85,6 +86,14 @@ pub struct FetchId(u64);
 /// [`Input::EventTaken`] once the application has taken it (Block 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventId(u64);
+
+impl EventId {
+    /// An id for the adapter's unit tests.
+    #[cfg(all(test, feature = "tokio"))]
+    pub(crate) fn for_tests(n: u64) -> Self {
+        Self(n)
+    }
+}
 
 /// Identifies a subscription in the machine's registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -448,6 +457,10 @@ pub enum Action {
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
+    /// Never deliver these events, emitted and not yet taken: publications
+    /// of a subscription that left `subscribed`, which recovery brings back
+    /// (Block 15).
+    Withdraw(Vec<EventId>),
     /// Ask the subscription's data callback for the data of its next
     /// subscribe command; report the answer with
     /// [`Input::SubscriptionDataFetched`]. Only issued for subscriptions
@@ -625,6 +638,7 @@ impl std::fmt::Debug for Action {
                 .field(id)
                 .field(event)
                 .finish(),
+            Self::Withdraw(ids) => f.debug_tuple("Withdraw").field(ids).finish(),
             Self::FetchSubscriptionData {
                 subscription,
                 channel,
@@ -706,6 +720,8 @@ pub struct Machine {
     next_transport: u64,
     next_command: u32,
     next_event: u64,
+    /// Publications emitted and not yet taken (Block 15).
+    deliveries: delivery::Deliveries,
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
     /// Connection token state and policy.
@@ -806,6 +822,7 @@ impl Machine {
             transport_open: false,
             next_transport: 0,
             next_event: 0,
+            deliveries: delivery::Deliveries::default(),
             next_command: 0,
             connect_command: None,
             tokens,
@@ -899,14 +916,13 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            // About a transport already abandoned, or an event taken, which
-            // changes nothing yet.
+            Input::EventTaken(id) => self.event_taken(id),
+            // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::Frame { .. }
-            | Input::SendRejected { .. }
-            | Input::EventTaken(_) => {}
+            | Input::SendRejected { .. } => {}
         }
         std::mem::take(&mut self.actions)
     }
