@@ -18,6 +18,7 @@ use std::{env, fs, thread};
 
 use cucumber::gherkin::{Feature, GherkinEnv, Rule, Scenario};
 use cucumber::tag::Ext as _;
+use cucumber::runner::ScenarioType;
 use cucumber::{World, cli};
 
 use steps::ClientWorld;
@@ -264,6 +265,15 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 /// where Linux gives 8 MiB.
 const RUNNER_STACK: usize = 8 << 20;
 
+/// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
+/// debug build, enough to delay the timers of scenarios running alongside
+/// (seen: a missed ping deadline in "Regular pings keep the connection
+/// alive").
+const SERIAL: &[&str] = &[
+    "A websocket write the server never reads closes the transport",
+    "A stalled websocket write does not delay disconnect",
+];
+
 fn main() {
     // `cargo test <filter>` passes a libtest filter to every test target,
     // e.g. when cargo-bolero runs one fuzz target; cucumber takes options
@@ -315,6 +325,13 @@ async fn run_scenarios() {
     };
     ClientWorld::cucumber()
         .with_cli(cli)
+        .which_scenario(|_, _, scenario| {
+            if SERIAL.contains(&scenario.name.as_str()) {
+                ScenarioType::Serial
+            } else {
+                ScenarioType::Concurrent
+            }
+        })
         .before(|_, _, scenario, world| {
             Box::pin(async move {
                 running().push((scenario_key(scenario), Instant::now()));
