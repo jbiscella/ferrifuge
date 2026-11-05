@@ -205,7 +205,7 @@ fn a_client_with_every_transport_unreachable(world: &mut ClientWorld) {
 /// The websocket is a counting relay that is down, so the scenario can tell
 /// whether the client went back to it.
 #[given(
-    r#"a client configured with an unreachable websocket endpoint behind a counting relay, then the server's http_stream and sse endpoints, connected over transport "http_stream""#
+    r#"a client configured with a websocket endpoint behind a relay that is down and the server's http_stream and sse endpoints, connected over transport "http_stream""#
 )]
 async fn a_client_after_an_unreachable_websocket(world: &mut ClientWorld) {
     let address = server(world).address().to_owned();
