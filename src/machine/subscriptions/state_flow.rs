@@ -3,6 +3,7 @@
 //! Behaviour follows centrifuge-js `subscription.ts` (`_subscribe`,
 //! `_loadStreamState`, `_subscribeError` for code 112).
 
+use super::super::delivery::Owner;
 use super::super::{Action, FetchId, Machine, SubscriptionId};
 use crate::wire::Error;
 use crate::{StateError, StreamPosition, SubscriptionState, codes};
@@ -64,6 +65,7 @@ impl Machine {
             Ok(position) => {
                 sub.position = Some(position);
                 sub.recover = true;
+                self.discard_commits(&Owner::Client(id));
                 self.start_subscribe(id);
             }
             // A temporary subscribe error: reported, then retried after the
@@ -92,6 +94,7 @@ impl Machine {
             return false;
         }
         sub.forget_position();
+        self.discard_commits(&Owner::Client(id));
         self.schedule_resubscribe(id);
         true
     }

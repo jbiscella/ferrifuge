@@ -597,6 +597,7 @@ impl Machine {
                 if let Some(replied) = &replied {
                     sub.position = Some(Machine::reply_baseline(replied, &result.publications));
                 }
+                self.discard_commits(&Owner::Client(id));
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
                 }
@@ -772,6 +773,7 @@ impl Machine {
             sub.tokens.invalidate();
             sub.forget_position();
         }
+        self.discard_commits(&Owner::Client(id));
     }
 
     /// "State invalidated" (disconnect code 3014): every subscription keeps
@@ -790,6 +792,7 @@ impl Machine {
                 sub.invalidate_position();
                 sub.tokens.invalidate();
             }
+            self.discard_commits(&Owner::Client(id));
         }
     }
 
@@ -1083,6 +1086,28 @@ mod tests {
         machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
 
         assert_eq!(offset_of(&machine, id), Some(1));
+    }
+
+    // Codex on PR #64: a publication taken after a state-invalidated
+    // disconnect must not overwrite the sentinel position it set.
+    #[test]
+    fn a_publication_taken_after_state_invalidation_keeps_the_sentinel() {
+        let (mut machine, transport, id) = connected();
+        subscribed_recoverable(&mut machine, transport, id);
+        let pushed = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1,"epoch":"e"}}}
+{"push":{"disconnect":{"code":3014,"reason":"state invalidated"}}}"#
+                .to_vec(),
+        });
+
+        machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
+
+        let position = machine.subscriptions.by_id[&id].position.clone();
+        assert_eq!(
+            position.map(|position| (position.offset, position.epoch)),
+            Some((0, UNMATCHABLE_EPOCH.to_owned()))
+        );
     }
 
     #[test]
