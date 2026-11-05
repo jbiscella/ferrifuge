@@ -124,8 +124,15 @@ the stream before calling `connect()` or `subscribe()` to get every event,
 and exactly-once delivery on channels with history and recovery, as the
 examples here do. The client and each subscription have one active stream:
 a second `events()` call ends the first, and the events it had not yielded
-go to the new one. A stream borrows nothing from the client, so it can be
-kept beside it, e.g. in the same struct. Dropping the client disconnects it
+go to the new one. Messages from the server are handled in order, each
+after the events of the earlier ones are taken: an application that stops
+reading a stream makes the client stop reading the connection once
+`read_ahead_messages` or `read_ahead_bytes` is reached, while pings are
+still answered and commands still sent. The server's handling of slow
+clients then decides; on channels with history and recovery, recovery
+delivers what was missed, exactly once, within the server's recovery limit.
+A stream borrows nothing from the client, so it can be kept beside it, e.g.
+in the same struct. Dropping the client disconnects it
 and ends its streams. `Client::new` and a builder that cannot work return a
 `ClientError`, which implements `std::error::Error`: for instance an empty
 endpoint, or an `http://` or `https://` one for websocket, which needs
