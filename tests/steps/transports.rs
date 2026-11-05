@@ -454,6 +454,70 @@ fn next_sequence_after_backoff(world: &mut ClientWorld) {
     );
 }
 
+#[given("a client configured with http_stream and sse endpoints")]
+fn a_machine_with_emulated_transports(world: &mut ClientWorld) {
+    world.transports = vec![TransportKind::HttpStream, TransportKind::Sse];
+}
+
+/// Drives the sans-IO core: the first transport opens and the server
+/// answers its connect with a temporary error; records the next transport
+/// opened and the reconnect delay before it.
+#[when("the http_stream transport opens and the server answers its connect with a temporary error")]
+fn the_server_answers_with_a_temporary_error(world: &mut ClientWorld) {
+    let mut machine = Machine::new(test_config())
+        .with_transports(world.transports.clone())
+        .expect("valid transports");
+    let actions = machine.handle(Input::Connect);
+    let (transport, connect) = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport {
+                transport,
+                initial_frame: Some(frame),
+                ..
+            } => Some((*transport, frame.clone())),
+            _ => None,
+        })
+        .expect("an emulated transport to open, carrying the connect");
+    let command: serde_json::Value = serde_json::from_slice(&connect).expect("a JSON connect");
+    let id = &command["id"];
+    machine.handle(Input::TransportOpened(transport));
+    let mut actions = machine.handle(Input::Frame {
+        transport,
+        data: format!(r#"{{"id":{id},"error":{{"code":100,"message":"busy","temporary":true}}}}"#)
+            .into_bytes(),
+    });
+    let mut delay = Duration::ZERO;
+    loop {
+        if let Some(kind) = actions.iter().find_map(|action| match action {
+            Action::OpenTransport { kind, .. } => Some(*kind),
+            _ => None,
+        }) {
+            world.opened.push((kind, delay));
+            return;
+        }
+        delay = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no further attempt: {actions:?}"));
+        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+    }
+}
+
+#[then("the next attempt opens the http_stream transport again, after the reconnect backoff delay")]
+fn the_same_transport_after_backoff(world: &mut ClientWorld) {
+    let (kind, delay) = world.opened[0];
+    assert_eq!(kind, TransportKind::HttpStream, "{:?}", world.opened);
+    assert!(
+        delay >= test_config().min_reconnect_delay,
+        "{:?}",
+        world.opened
+    );
+}
+
 #[given(regex = r"^client options with the Protobuf protocol and an? (\w+) endpoint$")]
 fn client_options_with_protobuf(world: &mut ClientWorld, transport: String) {
     world.pending_builder = Some(

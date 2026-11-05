@@ -194,6 +194,8 @@ const IMPLEMENTED: &[&str] = &[
     "Recovered server-side publications advance the stored position",
     "A server-side unsubscribe carries its code and reason and forgets the subscription",
     "Connection state invalidation clears the token and invalidates every position",
+    // Review item C2.
+    "An emulated transport the server answered is kept",
     // Block 15, sub-increment 15a.
     "Publications not taken before disconnect are recovered on the next connect",
     "Server-side publications not taken before disconnect are recovered on the next connect",
