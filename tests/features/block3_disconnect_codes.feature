@@ -27,6 +27,13 @@ Feature: Disconnect codes
       | 3500 | disconnected |
       | 3999 | disconnected |
 
+  @D
+  Scenario: Close code 1009 stops the client
+    Given a client connected to the fake server
+    When the fake server disconnects the client with code 1009
+    Then the client emits "disconnected" with code 3 and reason "message size limit exceeded"
+    And the client makes no new connection attempt
+
   @B
   Scenario Outline: Disconnect returned by the connect proxy
     Given the connect proxy answers with disconnect code <code>
