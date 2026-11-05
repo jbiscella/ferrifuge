@@ -265,6 +265,7 @@ fn closed(frame: Option<CloseFrame>) -> Inbound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
@@ -336,6 +337,49 @@ mod tests {
 
         assert_eq!(text, Inbound::Frame(b"text".to_vec()));
         assert_eq!(binary, Inbound::Frame(b"binary".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_close_past_the_timeout_resets_a_connection_the_server_stopped_reading() {
+        // The server reads nothing until the client has given up closing.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed, read_now) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            read_now.await.unwrap();
+            let mut buffer = vec![0; 1 << 16];
+            loop {
+                match ws.get_mut().read(&mut buffer).await {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => {}
+                    Err(error) => return Err(error.kind()),
+                }
+            }
+        });
+        let timeout = Duration::from_millis(200);
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
+            .await
+            .unwrap();
+        // Far more than the sockets of both ends buffer.
+        ws.send(vec![b'x'; 32 << 20], FrameType::Text).unwrap();
+        let stalled = ws.recv().await;
+
+        ws.close().await;
+        closed.send(()).unwrap();
+        let ended = server.await.unwrap();
+
+        assert_eq!(
+            stalled,
+            Inbound::Closed {
+                code: None,
+                reason: String::new()
+            }
+        );
+        // A plain close would deliver what the system had buffered, then
+        // end the stream; a reset ends it with an error.
+        assert_eq!(ended, Err(std::io::ErrorKind::ConnectionReset));
     }
 
     #[tokio::test]

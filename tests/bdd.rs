@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use cucumber::gherkin::{Feature, GherkinEnv, Rule, Scenario};
-use cucumber::tag::Ext as _;
 use cucumber::runner::ScenarioType;
+use cucumber::tag::Ext as _;
 use cucumber::{World, cli};
 
 use steps::ClientWorld;
