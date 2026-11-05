@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::outbox as events;
 use futures_core::Stream;
 
-use super::client::{Callbacks, Client, GetData, GetState, GetSubscriptionToken, Shared, lock};
+use super::client::{
+    Callbacks, Client, EventStream, GetData, GetState, GetSubscriptionToken, Shared, lock,
+};
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
     DataError, StateError, StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState,
@@ -65,30 +66,37 @@ impl Subscription {
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {
-        lock(&self.shared.subscription_subscribers)
+        lock(&self.shared.outboxes)
+            .subscriptions
             .get(&self.id)
-            .map_or(0, |senders| senders.iter().map(events::Sender::held).sum())
+            .map_or(0, super::outbox::Outbox::held)
     }
 
-    /// Events from now on. Each call returns an independent stream; it
+    /// Events from now on. An event counts as delivered once this stream
+    /// yields it; until a stream is taken, events count as delivered at
+    /// once, so take it before calling [`Subscription::subscribe`] to get
+    /// every one. A later call takes over: the earlier stream ends and the
+    /// events it had not yielded are the new one's (Block 15). The stream
     /// borrows nothing from the subscription, so it can be kept beside it,
     /// and it ends once the subscription is removed or its client dropped.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + use<> {
-        let (sender, receiver) = events::channel();
         // Checked against the registry under the core lock: removal leaves
-        // the registry first, then ends the streams, so a removed
-        // subscription's stream ends at once instead of leaking a sender.
+        // the registry first, then closes the outbox, so a removed
+        // subscription's stream ends at once.
         let core = lock(&self.shared.core);
-        if core.machine.subscription_state(self.id).is_some()
+        let number = if core.machine.subscription_state(self.id).is_some()
             && !self.shared.closed.load(Ordering::Acquire)
         {
-            lock(&self.shared.subscription_subscribers)
+            lock(&self.shared.outboxes)
+                .subscriptions
                 .entry(self.id)
                 .or_default()
-                .push(sender);
-        }
+                .open_stream()
+        } else {
+            0
+        };
         drop(core);
-        receiver
+        EventStream::new(Arc::clone(&self.shared), Some(self.id), number)
     }
 
     /// Starts subscribing: at once when the client is connected, otherwise
@@ -350,8 +358,15 @@ impl Client {
         self.shared()
             .apply(Input::RemoveSubscription(subscription.id));
         lock(&self.shared().callbacks).0.remove(&subscription.id);
-        // The final events were delivered by the call above.
-        lock(&self.shared().subscription_subscribers).remove(&subscription.id);
+        // The final events were queued by the call above: its streams end
+        // once they have yielded them.
+        let mut outboxes = lock(&self.shared().outboxes);
+        if let Some(outbox) = outboxes.subscriptions.get_mut(&subscription.id) {
+            outbox.close();
+            if outbox.is_finished() {
+                outboxes.subscriptions.remove(&subscription.id);
+            }
+        }
     }
 }
 

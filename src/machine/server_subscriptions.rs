@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use super::Machine;
+use super::delivery::{Commit, Owner};
 use super::subscriptions::UNMATCHABLE_EPOCH;
 use crate::wire::{SubscribeRequest, SubscribeResult};
 use crate::{ClientEvent, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed, codes};
@@ -30,21 +31,6 @@ struct ServerSubscription {
     /// connect reply or the `Subscribe` push, then of every publication
     /// delivered (centrifuge-js `_handleSubscribe`, `_handlePublication`).
     position: Option<StreamPosition>,
-}
-
-impl ServerSubscription {
-    /// Moves the position to `publication`'s, when there is one to keep.
-    fn advance(&mut self, publication: &Publication) {
-        let Some(position) = &mut self.position else {
-            return;
-        };
-        if let Some(offset) = publication.offset {
-            position.offset = offset;
-        }
-        if let Some(epoch) = &publication.epoch {
-            epoch.clone_into(&mut position.epoch);
-        }
-    }
 }
 
 impl Machine {
@@ -127,16 +113,26 @@ impl Machine {
     /// Registers `channel` as subscribed and emits its `subscribed` event,
     /// then its initial or recovered publications.
     fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) {
+        // A recoverable subscription's position: the stream's, or after a
+        // recovery the one it recovers from. With publications, it is
+        // reached once the last of them is taken (Block 15).
+        let replied = result.recoverable.then(|| StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch.clone(),
+        });
+        let position = if result.publications.is_empty() {
+            replied.clone()
+        } else {
+            self.server_subscriptions
+                .by_channel
+                .get(channel)
+                .and_then(|sub| sub.position.clone())
+        };
         self.server_subscriptions.by_channel.insert(
             channel.to_owned(),
             ServerSubscription {
                 subscribed: true,
-                // A recoverable subscription's position: the stream's, or
-                // after a recovery the one it recovers from.
-                position: result.recoverable.then(|| StreamPosition {
-                    offset: result.offset,
-                    epoch: result.epoch.clone(),
-                }),
+                position,
             },
         );
         let stream_position = (result.positioned || result.recoverable).then(|| StreamPosition {
@@ -154,15 +150,12 @@ impl Machine {
                 stream_position,
             }),
         );
-        // Initial or recovered publications follow it and move the position.
-        for publication in result.publications {
-            if let Some(sub) = self.server_subscriptions.by_channel.get_mut(channel) {
-                sub.advance(&publication);
-            }
-            self.emit_server_subscription(
-                channel,
-                ServerSubscriptionEvent::Publication(publication),
-            );
+        // Initial or recovered publications follow it and move the position
+        // once taken.
+        let last = result.publications.len().saturating_sub(1);
+        for (index, publication) in result.publications.into_iter().enumerate() {
+            let reply = replied.as_ref().map(|position| (position, index == last));
+            self.emit_server_publication(channel, publication, reply);
         }
     }
 
@@ -219,19 +212,55 @@ impl Machine {
     /// subscription takes: the server-side subscription's, if subscribed
     /// (Block 12; centrifuge-js `_getSubForPush`).
     pub(super) fn server_publication(&mut self, channel: &str, publication: Publication) {
-        let Some(sub) = self
+        if !self
             .server_subscriptions
             .by_channel
-            .get_mut(channel)
-            .filter(|sub| sub.subscribed)
-        else {
+            .get(channel)
+            .is_some_and(|sub| sub.subscribed)
+        {
             return;
-        };
-        sub.advance(&publication);
-        self.emit_server_subscription(channel, ServerSubscriptionEvent::Publication(publication));
+        }
+        self.emit_server_publication(channel, publication, None);
+    }
+
+    /// Emits a publication of the server-side subscription to `channel`,
+    /// which moves its position once taken; `reply` is the position of the
+    /// reply it came with, and whether it is that reply's last publication.
+    fn emit_server_publication(
+        &mut self,
+        channel: &str,
+        publication: Publication,
+        reply: Option<(&StreamPosition, bool)>,
+    ) {
+        let id = self.event_id();
+        self.deliver_publication(id, Owner::Server(channel.to_owned()), &publication, reply);
+        self.actions.push(super::Action::Emit(
+            id,
+            ClientEvent::ServerSubscription {
+                channel: channel.to_owned(),
+                event: ServerSubscriptionEvent::Publication(publication),
+            },
+        ));
+    }
+
+    /// Applies a taken publication's `commit` to the position of the
+    /// server-side subscription to `channel`, when it keeps one.
+    pub(super) fn commit_server_subscription_position(&mut self, channel: &str, commit: Commit) {
+        if let Some(sub) = self.server_subscriptions.by_channel.get_mut(channel)
+            && (commit.replaces || sub.position.is_some())
+        {
+            commit.apply(&mut sub.position);
+        }
     }
 
     fn emit_server_subscription(&mut self, channel: &str, event: ServerSubscriptionEvent) {
+        // Leaving subscribed withdraws the publications not yet taken.
+        if matches!(
+            event,
+            ServerSubscriptionEvent::Subscribing | ServerSubscriptionEvent::Unsubscribed { .. }
+        ) {
+            self.withdraw(&Owner::Server(channel.to_owned()));
+        }
         self.emit(ClientEvent::ServerSubscription {
             channel: channel.to_owned(),
             event,

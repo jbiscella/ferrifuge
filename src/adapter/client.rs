@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
-use super::outbox as events;
+use super::outbox::Outbox;
 use futures_core::Stream;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
@@ -48,10 +48,8 @@ impl std::fmt::Debug for Client {
 #[derive(Debug)]
 pub(super) struct Shared {
     pub(super) core: Mutex<Core>,
-    subscribers: Mutex<Vec<events::Sender<ClientEvent>>>,
-    /// Listeners of each subscription's events.
-    pub(super) subscription_subscribers:
-        Mutex<HashMap<SubscriptionId, Vec<events::Sender<SubscriptionEvent>>>>,
+    /// Events waiting for the streams of the client and its subscriptions.
+    pub(super) outboxes: Mutex<Outboxes>,
     /// Data and token callbacks of the subscriptions that have them.
     pub(super) callbacks: Mutex<SubscriptionCallbacks>,
     /// Wakes the driver when actions are queued.
@@ -59,6 +57,24 @@ pub(super) struct Shared {
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
+}
+
+/// Events waiting for their streams (Block 15). Locked after
+/// [`Shared::core`], never before.
+#[derive(Debug, Default)]
+pub(super) struct Outboxes {
+    pub(super) client: Outbox<ClientEvent>,
+    /// Those of the subscriptions whose `events()` was called.
+    pub(super) subscriptions: HashMap<SubscriptionId, Outbox<SubscriptionEvent>>,
+}
+
+impl Outboxes {
+    fn withdraw(&mut self, ids: &[crate::machine::EventId]) {
+        self.client.withdraw(ids);
+        for outbox in self.subscriptions.values_mut() {
+            outbox.withdraw(ids);
+        }
+    }
 }
 
 /// The machine and its pending actions, locked together: API calls change
@@ -140,28 +156,127 @@ impl Shared {
         self.actions_queued.notify_one();
     }
 
-    fn handle(&self, core: &mut Core, input: Input) {
-        for action in core.machine.handle(input) {
-            match action {
-                Action::Emit(_, event) => self.emit(&event),
-                Action::EmitSubscription(_, id, event) => self.emit_subscription(id, &event),
-                action => core.actions.push_back(action),
+    /// Feeds `input` to the machine: events go to their outboxes, taken at
+    /// once where no stream takes them, other actions to the driver.
+    pub(super) fn handle(&self, core: &mut Core, input: Input) {
+        let mut inputs = VecDeque::from([input]);
+        while let Some(input) = inputs.pop_front() {
+            for action in core.machine.handle(input) {
+                let mut outboxes = lock(&self.outboxes);
+                let taken = match action {
+                    Action::Emit(id, event) => outboxes.client.offer(id, event),
+                    Action::EmitSubscription(id, subscription, event) => {
+                        match outboxes.subscriptions.get_mut(&subscription) {
+                            Some(outbox) => outbox.offer(id, event),
+                            None => Some(id),
+                        }
+                    }
+                    Action::Withdraw(ids) => {
+                        outboxes.withdraw(&ids);
+                        None
+                    }
+                    action => {
+                        core.actions.push_back(action);
+                        None
+                    }
+                };
+                inputs.extend(taken.map(Input::EventTaken));
             }
-        }
-    }
-
-    fn emit(&self, event: &ClientEvent) {
-        lock(&self.subscribers).retain(|subscriber| subscriber.send(event.clone()));
-    }
-
-    fn emit_subscription(&self, id: SubscriptionId, event: &SubscriptionEvent) {
-        if let Some(subscribers) = lock(&self.subscription_subscribers).get_mut(&id) {
-            subscribers.retain(|subscriber| subscriber.send(event.clone()));
         }
     }
 
     fn next_action(&self) -> Option<Action> {
         lock(&self.core).actions.pop_front()
+    }
+}
+
+/// A stream of the client's or a subscription's events, taking them from
+/// its outbox: each event it yields is reported taken to the machine
+/// under the core lock, so a withdrawal never races a take (Block 15).
+pub(super) struct EventStream<E> {
+    shared: Arc<Shared>,
+    /// The subscription whose events it yields; the client's when `None`.
+    of: Option<SubscriptionId>,
+    number: u64,
+    event: std::marker::PhantomData<fn() -> E>,
+}
+
+/// Events with an outbox: the client's and the subscriptions'.
+pub(super) trait Routed: Sized {
+    fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>>;
+}
+
+impl Routed for ClientEvent {
+    fn outbox(outboxes: &mut Outboxes, _: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
+        Some(&mut outboxes.client)
+    }
+}
+
+impl Routed for SubscriptionEvent {
+    fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
+        outboxes.subscriptions.get_mut(&of?)
+    }
+}
+
+impl<E> EventStream<E> {
+    pub(super) fn new(shared: Arc<Shared>, of: Option<SubscriptionId>, number: u64) -> Self {
+        Self {
+            shared,
+            of,
+            number,
+            event: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<E: Routed> Stream for EventStream<E> {
+    type Item = E;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<E>> {
+        let mut core = lock(&self.shared.core);
+        let mut outboxes = lock(&self.shared.outboxes);
+        let Some(outbox) = E::outbox(&mut outboxes, self.of) else {
+            return Poll::Ready(None);
+        };
+        let polled = outbox.poll_take(self.number, cx);
+        if outbox.is_finished()
+            && let Some(of) = self.of
+        {
+            outboxes.subscriptions.remove(&of);
+        }
+        drop(outboxes);
+        let Poll::Ready(Some((id, event))) = polled else {
+            return polled.map(|_| None);
+        };
+        self.shared.handle(&mut core, Input::EventTaken(id));
+        drop(core);
+        self.shared.actions_queued.notify_one();
+        Poll::Ready(Some(event))
+    }
+}
+
+impl<E> Drop for EventStream<E> {
+    // Dropping the active stream takes what it held, as with no stream.
+    fn drop(&mut self) {
+        let mut core = lock(&self.shared.core);
+        let mut outboxes = lock(&self.shared.outboxes);
+        let taken = match self.of {
+            None => outboxes.client.drop_stream(self.number),
+            Some(of) => {
+                let Some(outbox) = outboxes.subscriptions.get_mut(&of) else {
+                    return;
+                };
+                let taken = outbox.drop_stream(self.number);
+                if outbox.is_finished() {
+                    outboxes.subscriptions.remove(&of);
+                }
+                taken
+            }
+        };
+        drop(outboxes);
+        for id in taken {
+            self.shared.handle(&mut core, Input::EventTaken(id));
+        }
     }
 }
 
@@ -294,8 +409,7 @@ impl Client {
                 machine,
                 actions: VecDeque::new(),
             }),
-            subscribers: Mutex::new(Vec::new()),
-            subscription_subscribers: Mutex::new(HashMap::new()),
+            outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
@@ -333,13 +447,18 @@ impl Client {
         lock(&self.shared.core).machine.state()
     }
 
-    /// Events from now on. Each call returns an independent stream; it
-    /// borrows nothing from the client, so it can be kept beside it, and it
-    /// ends once the client is dropped.
+    /// Events from now on. An event counts as delivered once this stream
+    /// yields it; until a stream is taken, events count as delivered at
+    /// once, so take it before calling [`Client::connect`] to get every
+    /// one. A later call takes over: the earlier stream ends and the events
+    /// it had not yielded are the new one's (Block 15). The stream borrows
+    /// nothing from the client, so it can be kept beside it, and it ends
+    /// once the client is dropped.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
-        let (sender, receiver) = events::channel();
-        lock(&self.shared.subscribers).push(sender);
-        receiver
+        let core = lock(&self.shared.core);
+        let number = lock(&self.shared.outboxes).client.open_stream();
+        drop(core);
+        EventStream::new(Arc::clone(&self.shared), None, number)
     }
 
     /// Events of the client queued for its streams and not yet taken, so
@@ -348,10 +467,7 @@ impl Client {
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {
-        lock(&self.shared.subscribers)
-            .iter()
-            .map(events::Sender::held)
-            .sum()
+        lock(&self.shared.outboxes).client.held()
     }
 
     /// Starts connecting; reconnects until connected or disconnected. The
@@ -492,8 +608,10 @@ impl Driver {
                 // Handles of subscriptions may outlive the client: end
                 // every event stream rather than leave it pending forever,
                 // and release the data callbacks nothing can call anymore.
-                lock(&self.shared.subscribers).clear();
-                lock(&self.shared.subscription_subscribers).clear();
+                let mut outboxes = lock(&self.shared.outboxes);
+                outboxes.client.close();
+                outboxes.subscriptions.values_mut().for_each(Outbox::close);
+                drop(outboxes);
                 lock(&self.shared.callbacks).0.clear();
                 return;
             }
@@ -611,8 +729,10 @@ impl Driver {
             }
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
-            Action::Emit(_, event) => self.shared.emit(&event),
-            Action::EmitSubscription(_, id, event) => self.shared.emit_subscription(id, &event),
+            // Shared::handle routes them to the outboxes.
+            Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
+                unreachable!("events never reach the driver")
+            }
             Action::SetSubscriptionTimer(id, timer, delay) => {
                 self.subscription_timers.set(id, timer, delay);
             }
