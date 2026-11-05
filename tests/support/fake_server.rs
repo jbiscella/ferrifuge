@@ -128,7 +128,7 @@ impl FakeServer {
                     state.current = Some(control);
                 }
                 let connection = Connection {
-                    ws,
+                    ws: Some(ws),
                     protobuf,
                     announce,
                     state: Arc::clone(&shared),
@@ -334,8 +334,15 @@ fn asks_for_protobuf(request: &Request) -> bool {
         .any(|protocol| protocol.trim() == protobuf::SUBPROTOCOL)
 }
 
+/// What the writer task of a connection sends.
+enum Outgoing {
+    Message(Message),
+    Close(CloseFrame),
+}
+
 struct Connection {
-    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    /// Taken by [`Connection::serve`], which splits it.
+    ws: Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>,
     protobuf: bool,
     announce: Announce,
     state: Arc<Mutex<State>>,
@@ -343,55 +350,71 @@ struct Connection {
 }
 
 impl Connection {
+    /// Reads the client's commands and the test's controls, while a writer
+    /// task sends the replies and pushes in order: a client that stops
+    /// reading blocks the writer, never the reading of its commands.
     async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) {
+        let (mut sink, mut stream) = self.ws.take().expect("not served yet").split();
+        let (out, mut queue) = mpsc::unbounded_channel::<Outgoing>();
+        let writer = tokio::spawn(async move {
+            while let Some(outgoing) = queue.recv().await {
+                match outgoing {
+                    Outgoing::Message(message) => {
+                        if sink.send(message).await.is_err() {
+                            return;
+                        }
+                    }
+                    Outgoing::Close(frame) => {
+                        let _ = sink.send(Message::Close(Some(frame))).await;
+                        let _ = sink.close().await;
+                        return;
+                    }
+                }
+            }
+        });
         let mut reading = true;
         let mut probes = tokio::time::interval(PROBE_PERIOD);
         loop {
-            tokio::select! {
-                message = self.ws.next(), if reading => {
+            let outgoing = tokio::select! {
+                message = stream.next(), if reading => {
                     let replies = match message {
                         Some(Ok(Message::Text(text))) => self.json_commands(&text),
                         Some(Ok(Message::Binary(frame))) => self.protobuf_commands(&frame),
                         _ => return,
                     };
-                    for reply in replies {
-                        if self.ws.send(reply).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                command = commands.recv() => {
-                    let message = match command {
-                        Some(Control::Send(message)) => message,
-                        Some(Control::Ping) => self.ping(),
-                        Some(Control::StopReading) => {
-                            reading = false;
-                            continue;
-                        }
-                        Some(Control::Close(code, reason)) => {
-                            let _ = self
-                                .ws
-                                .close(Some(CloseFrame {
-                                    code: CloseCode::from(code),
-                                    reason: reason.into(),
-                                }))
-                                .await;
-                            return;
-                        }
-                        None => return,
-                    };
-                    if self.ws.send(message).await.is_err() {
+                    if replies
+                        .into_iter()
+                        .any(|reply| out.send(Outgoing::Message(reply)).is_err())
+                    {
                         return;
                     }
+                    continue;
                 }
+                command = commands.recv() => match command {
+                    Some(Control::Send(message)) => Outgoing::Message(message),
+                    Some(Control::Ping) => Outgoing::Message(self.ping()),
+                    Some(Control::StopReading) => {
+                        reading = false;
+                        continue;
+                    }
+                    Some(Control::Close(code, reason)) => {
+                        let _ = out.send(Outgoing::Close(CloseFrame {
+                            code: CloseCode::from(code),
+                            reason: reason.into(),
+                        }));
+                        let _ = writer.await;
+                        return;
+                    }
+                    None => return,
+                },
                 // Without reading, only a failing write tells that the
                 // client has gone.
-                _ = probes.tick(), if !reading => {
-                    let ping = self.ping();
-                    if self.ws.send(ping).await.is_err() {
-                        return;
-                    }
-                }
+                _ = probes.tick(), if !reading => Outgoing::Message(self.ping()),
+                // The writer failed: the client has gone.
+                () = out.closed() => return,
+            };
+            if out.send(outgoing).is_err() {
+                return;
             }
         }
     }
