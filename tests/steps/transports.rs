@@ -30,17 +30,18 @@ const UNREACHABLE_SSE: &str = "http://127.0.0.1:1/connection/sse";
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
-/// Size of the subscription tokens that fill the stalled connection: well
-/// above what the client's socket, the counting relay and the fake server's
-/// socket buffer together (about 11 MiB measured on Linux loopback).
-const STALLING_TOKEN_SIZE: usize = 32 << 20;
+/// Size of the subscription tokens that fill the stalled connection: more
+/// than the client's socket and the relay's receive window take once the
+/// relay stops reading (about 2.6 MiB measured on Linux loopback), and
+/// small enough to encode quickly in a debug build on a slow runner.
+const STALLING_TOKEN_SIZE: usize = 8 << 20;
 /// Lifetime of the subscription tokens, in seconds, after which the client
 /// sends the large ones in `sub_refresh` commands.
 const STALLING_TOKEN_TTL: u32 = 2;
-/// Channels whose large `sub_refresh` commands stall the connection. Two,
-/// because Windows takes a single large write whole, however large: the
-/// second one stalls there.
-const STALLING_CHANNELS: [&str; 2] = ["stall", "stall2"];
+/// Channels whose large `sub_refresh` commands stall the connection.
+/// Several, because Windows takes a single large write whole, however
+/// large: a later one stalls there.
+const STALLING_CHANNELS: [&str; 4] = ["stall", "stall2", "stall3", "stall4"];
 
 pub(super) fn kind(name: &str) -> TransportKind {
     match name {
