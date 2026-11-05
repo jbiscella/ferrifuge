@@ -106,12 +106,15 @@ impl WebSocket {
 
     /// Writes the queued frames while waiting for the next frame or for the
     /// end of the connection, which a failed write, or a frame not written
-    /// in time, also is. Cancel-safe: dropping the future loses no message.
-    pub(crate) async fn recv(&mut self) -> Inbound {
-        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    /// in time, also is. Without `reading`, it only writes, until a write
+    /// fails or misses its deadline: a full read-ahead stops the reading,
+    /// never the writing (Block 15). Cancel-safe: dropping the future loses
+    /// no message.
+    pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
+        std::future::poll_fn(|cx| self.poll_recv(cx, reading)).await
     }
 
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Inbound> {
+    fn poll_recv(&mut self, cx: &mut Context<'_>, reading: bool) -> Poll<Inbound> {
         let lost = Inbound::Closed {
             code: None,
             reason: String::new(),
@@ -127,6 +130,9 @@ impl WebSocket {
             if self.deadline.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(lost);
             }
+        }
+        if !reading {
+            return Poll::Pending;
         }
         loop {
             let Some(Ok(message)) = ready!(self.stream.poll_next_unpin(cx)) else {
@@ -355,8 +361,8 @@ mod tests {
         let mut ws = WebSocket::open(&url, None, TIMEOUT).await.unwrap();
 
         ws.send(b"{\"id\":1}".to_vec(), FrameType::Text).unwrap();
-        let echoed = ws.recv().await;
-        let closed = ws.recv().await;
+        let echoed = ws.recv(true).await;
+        let closed = ws.recv(true).await;
 
         assert_eq!(echoed, Inbound::Frame(b"{\"id\":1}".to_vec()));
         assert_eq!(
@@ -390,9 +396,9 @@ mod tests {
             .unwrap();
 
         ws.send(b"{}".to_vec(), FrameType::Text).unwrap();
-        let text = ws.recv().await;
+        let text = ws.recv(true).await;
         ws.send(vec![0xff, 0x00], FrameType::Binary).unwrap();
-        let binary = ws.recv().await;
+        let binary = ws.recv(true).await;
 
         assert_eq!(text, Inbound::Frame(b"text".to_vec()));
         assert_eq!(binary, Inbound::Frame(b"binary".to_vec()));
@@ -428,7 +434,9 @@ mod tests {
             ws.send(vec![b'x'; 1 << 20], FrameType::Text).unwrap();
             queued += 1 << 20;
             assert!(queued <= 1 << 30, "the system buffered 1 GiB");
-            if let Ok(inbound) = tokio::time::timeout(Duration::from_millis(10), ws.recv()).await {
+            if let Ok(inbound) =
+                tokio::time::timeout(Duration::from_millis(10), ws.recv(true)).await
+            {
                 break inbound;
             }
         };
@@ -476,7 +484,7 @@ mod tests {
         // socket could take it at any time.
         tokio::time::sleep(timeout * 2).await;
 
-        let overdue = tokio::time::timeout(TIMEOUT, ws.recv()).await;
+        let overdue = tokio::time::timeout(TIMEOUT, ws.recv(true)).await;
         drop(ws);
         let received = server.await.unwrap();
 
@@ -506,7 +514,7 @@ mod tests {
             .await
             .unwrap();
 
-        let received = ws.recv().await;
+        let received = ws.recv(true).await;
 
         assert!(
             matches!(&received, Inbound::Frame(data) if data.len() == 20 << 20),
