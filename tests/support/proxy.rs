@@ -1,6 +1,7 @@
 //! Proxy backend for @B scenarios: an HTTP server that Centrifugo calls on
-//! every connection attempt and every subscription to a channel without
-//! namespace, answering what the scenario programmed.
+//! every connection attempt, every subscription to a channel without
+//! namespace and every RPC to a method without namespace, answering what the
+//! scenario programmed.
 //! Reference: <https://centrifugal.dev/docs/server/proxy>.
 
 use std::collections::{HashMap, VecDeque};
@@ -68,6 +69,7 @@ impl ProxyBackend {
         let app = axum::Router::new()
             .route("/connect", post(connect))
             .route("/subscribe", post(subscribe))
+            .route("/rpc", post(rpc))
             .with_state(Arc::clone(&state));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("proxy server");
@@ -79,8 +81,8 @@ impl ProxyBackend {
         }
     }
 
-    /// Centrifugo settings enabling this proxy for connections and for
-    /// subscriptions to channels without namespace.
+    /// Centrifugo settings enabling this proxy for connections, and for
+    /// subscriptions and RPCs without namespace.
     pub(crate) fn centrifugo_env(&self) -> Vec<(&'static str, String)> {
         vec![
             ("CENTRIFUGO_CLIENT_PROXY_CONNECT_ENABLED", "true".to_owned()),
@@ -106,6 +108,14 @@ impl ProxyBackend {
             (
                 "CENTRIFUGO_CHANNEL_PROXY_SUBSCRIBE_TIMEOUT",
                 "5s".to_owned(),
+            ),
+            (
+                "CENTRIFUGO_RPC_WITHOUT_NAMESPACE_PROXY_ENABLED",
+                "true".to_owned(),
+            ),
+            (
+                "CENTRIFUGO_RPC_PROXY_ENDPOINT",
+                format!("http://{HOST_GATEWAY}:{}/rpc", self.port),
             ),
         ]
     }
@@ -245,4 +255,16 @@ async fn subscribe(
     };
     tokio::time::sleep(answer.delay).await;
     Json(answer.body.unwrap_or_else(|| json!({"result": {}})))
+}
+
+/// Answers RPCs: "echo" returns its input, "busy" fails with a temporary
+/// error 1000 "try later", and any other method returns no data.
+async fn rpc(Json(request): Json<Value>) -> Json<Value> {
+    Json(match request["method"].as_str() {
+        Some("echo") => json!({"result": {"data": request["data"]}}),
+        Some("busy") => {
+            json!({"error": {"code": 1000, "message": "try later", "temporary": true}})
+        }
+        _ => json!({"result": {}}),
+    })
 }
