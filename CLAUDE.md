@@ -241,6 +241,8 @@ Rule (spec): codes 3000–3499 and 4000–4499 → reconnect (`connecting`); eve
 
 **Owner decision (1b review):** the spec's "other codes" covers custom codes only. Codes ≥ 5000 are reserved by Centrifuge and reconnect, as `client.proto` (`Disconnect`) and centrifuge-js specify. Effective rule: 3500–3999 and 4500–4999 → `disconnected`; every other server code (3000–3499, 4000–4499, ≥ 5000) → reconnect.
 
+**Close code 1009 (review item C4):** a websocket closed with code 1009 ("message too big") ends the client: `disconnected` with client-side code 3 "message size limit exceeded", without reconnecting, since a reconnect would send the same oversized data again (owner decision, 2026-11-04, on the code; centrifuge-js 63ed73e `centrifuge.ts:1310-1313`, `disconnectedCodes.messageSizeLimit`).
+
 `VERIFY:` the server HTTP API `disconnect` method accepts custom `code` and `reason`; whether it accepts codes outside 4000–4999 is not confirmed. Codes 3000–3999 are therefore tested on @D. Client-side code values (< 3000): take from centrifuge-js source.
 
 Verified (Centrifugo v6.10.1, raw websocket client, while implementing 1b):
@@ -278,6 +280,13 @@ Feature: Disconnect codes
       | 3499 | connecting   |
       | 3500 | disconnected |
       | 3999 | disconnected |
+
+  @D
+  Scenario: Close code 1009 stops the client
+    Given a client connected to the fake server
+    When the fake server disconnects the client with code 1009
+    Then the client emits "disconnected" with code 3 and reason "message size limit exceeded"
+    And the client makes no new connection attempt
 
   @B
   Scenario Outline: Disconnect returned by the connect proxy
