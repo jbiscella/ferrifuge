@@ -112,6 +112,21 @@ impl Machine {
         self.deliveries.streams.insert(of);
     }
 
+    /// The subscription `id` left the registry: its stream and its
+    /// publications not yet taken no longer matter.
+    pub(super) fn forget_deliveries(&mut self, id: SubscriptionId) {
+        self.deliveries.streams.remove(&Some(id));
+        self.deliveries
+            .pending
+            .retain(|_, commit| commit.owner != Owner::Client(id));
+    }
+
+    /// Whether a stream takes the events of `of`.
+    #[cfg(test)]
+    pub(super) fn has_stream(&self, of: Option<SubscriptionId>) -> bool {
+        self.deliveries.streams.contains(&of)
+    }
+
     /// No stream takes the events of `of` anymore: they count as taken at
     /// once from now on.
     pub(super) fn stream_closed(&mut self, of: Option<SubscriptionId>) {

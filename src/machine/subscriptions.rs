@@ -673,6 +673,7 @@ impl Machine {
         if let Some(sub) = self.subscriptions.by_id.remove(&id) {
             self.subscriptions.by_channel.remove(&sub.channel);
         }
+        self.forget_deliveries(id);
     }
 
     /// Moves a subscription to unsubscribed; with `send`, a server-side
@@ -1043,6 +1044,18 @@ mod tests {
             )
             .into_bytes(),
         }
+    }
+
+    // Codex on PR #64: a long-lived client creating and removing
+    // subscriptions keeps no trace of the removed ones' streams.
+    #[test]
+    fn removing_a_subscription_forgets_its_stream() {
+        let (mut machine, _, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+
+        machine.handle(Input::RemoveSubscription(id));
+
+        assert!(!machine.has_stream(Some(id)));
     }
 
     #[test]
