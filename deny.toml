@@ -22,7 +22,13 @@ targets = [
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # Dev-only, through testcontainers 0.28.0 (the latest), which the test
+    # suite uses to start Centrifugo; nothing ferrifuge ships depends on it.
+    # Unmaintained, no known vulnerability. Remove once a testcontainers
+    # release drops it: https://github.com/testcontainers/testcontainers-rs/pull/1006
+    { id = "RUSTSEC-2026-0440", reason = "dev-only via testcontainers; upstream fix in testcontainers-rs#1006" },
+]
 
 [licenses]
 # Permissive licenses only: anything ferrifuge ships must stay usable under 0BSD terms.
