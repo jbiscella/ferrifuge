@@ -1,12 +1,15 @@
 //! TCP relay in front of the test server that counts the connections it
 //! accepts: one per transport the client opens, so steps can assert that no
 //! further connection attempt was made. It can also stand in for a server
-//! that is down, or one that accepts connections but never answers.
+//! that is down, or one that accepts connections but never answers, and it
+//! can stop reading what clients send.
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 /// How the relay treats the connections it accepts.
@@ -28,6 +31,52 @@ pub(crate) struct CountingRelay {
     server: JoinHandle<()>,
     /// Connections held open in [`Mode::Silent`].
     held: Arc<Mutex<Vec<TcpStream>>>,
+    /// Gates of the forwarded connections, to stop them reading.
+    gates: Arc<Mutex<Vec<Weak<Gate>>>>,
+}
+
+/// Stops the relay reading from clients, so that what they write stays in
+/// their own socket and the relay's receive window, whatever the system
+/// buffers further on.
+#[derive(Default)]
+struct Gate {
+    closed: AtomicBool,
+    opened: Notify,
+}
+
+impl Gate {
+    async fn wait_open(&self) {
+        loop {
+            let opened = self.opened.notified();
+            if !self.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            opened.await;
+        }
+    }
+}
+
+/// Relays `inbound` to `outbound` both ways until either side ends, reading
+/// from `inbound` only while `gate` is open.
+async fn forward(inbound: TcpStream, outbound: TcpStream, gate: Arc<Gate>) {
+    let (mut from_client, mut to_client) = inbound.into_split();
+    let (mut from_server, mut to_server) = outbound.into_split();
+    let up = async {
+        let mut buffer = vec![0; 64 << 10];
+        loop {
+            gate.wait_open().await;
+            let read = from_client.read(&mut buffer).await?;
+            if read == 0 {
+                return to_server.shutdown().await;
+            }
+            to_server.write_all(&buffer[..read]).await?;
+        }
+    };
+    let down = tokio::io::copy(&mut from_server, &mut to_client);
+    tokio::select! {
+        _ = up => {}
+        _ = down => {}
+    }
 }
 
 impl CountingRelay {
@@ -43,20 +92,26 @@ impl CountingRelay {
         let accepted = Arc::new(AtomicUsize::new(0));
         let mode = Arc::new(AtomicU8::new(mode as u8));
         let held = Arc::new(Mutex::new(Vec::new()));
-        let (counter, current, holding) =
-            (Arc::clone(&accepted), Arc::clone(&mode), Arc::clone(&held));
+        let gates = Arc::new(Mutex::new(Vec::new()));
+        let (counter, current, holding, gating) = (
+            Arc::clone(&accepted),
+            Arc::clone(&mode),
+            Arc::clone(&held),
+            Arc::clone(&gates),
+        );
         let server = tokio::spawn(async move {
-            while let Ok((mut inbound, _)) = listener.accept().await {
+            while let Ok((inbound, _)) = listener.accept().await {
                 counter.fetch_add(1, Ordering::SeqCst);
                 match current.load(Ordering::SeqCst) {
                     m if m == Mode::Silent as u8 => holding.lock().unwrap().push(inbound),
                     m if m == Mode::Down as u8 => drop(inbound),
                     _ => {
+                        let gate = Arc::new(Gate::default());
+                        gating.lock().unwrap().push(Arc::downgrade(&gate));
                         let target = target.clone();
                         tokio::spawn(async move {
-                            if let Ok(mut outbound) = TcpStream::connect(&target).await {
-                                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
-                                    .await;
+                            if let Ok(outbound) = TcpStream::connect(&target).await {
+                                forward(inbound, outbound, gate).await;
                             }
                         });
                     }
@@ -69,6 +124,15 @@ impl CountingRelay {
             mode,
             server,
             held,
+            gates,
+        }
+    }
+
+    /// Stops reading what clients send on the connections open now; later
+    /// ones are read as usual.
+    pub(crate) fn stop_reading(&self) {
+        for gate in self.gates.lock().unwrap().iter().filter_map(Weak::upgrade) {
+            gate.closed.store(true, Ordering::SeqCst);
         }
     }
 
