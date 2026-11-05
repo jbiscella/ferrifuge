@@ -282,6 +282,9 @@ impl<E> Drop for EventStream<E> {
             self.shared.handle(&mut core, Input::EventTaken(id));
         }
         self.shared.handle(&mut core, Input::StreamClosed(self.of));
+        drop(core);
+        // Held messages may now be handled and the reading resume.
+        self.shared.actions_queued.notify_one();
     }
 }
 
@@ -1213,6 +1216,71 @@ mod tests {
             matches!(&error, Some(ClientEvent::Error(e)) if e.message == "token callback panicked"),
             "{error:?}"
         );
+    }
+
+    // Codex on PR #65: dropping the stream that held a full read-ahead
+    // lets the held messages go, and the driver must then read again.
+    #[tokio::test]
+    async fn dropping_the_stream_that_held_the_read_ahead_resumes_reading() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Answers the connect and the subscribe, then pushes two
+        // publications and a disconnect.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(Message::Text(frame))) = ws.next().await {
+                for line in frame.as_str().lines() {
+                    let command: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let id = &command["id"];
+                    if command.get("connect").is_some() {
+                        let reply = format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#);
+                        ws.send(Message::text(reply)).await.unwrap();
+                    } else if command.get("subscribe").is_some() {
+                        let reply = format!(r#"{{"id":{id},"subscribe":{{}}}}"#);
+                        ws.send(Message::text(reply)).await.unwrap();
+                        for n in 1..=2 {
+                            let push = format!(
+                                r#"{{"push":{{"channel":"news","pub":{{"data":{{"n":{n}}}}}}}}}"#
+                            );
+                            ws.send(Message::text(push)).await.unwrap();
+                        }
+                        let bye = r#"{"push":{"disconnect":{"code":3500,"reason":"bye"}}}"#;
+                        ws.send(Message::text(bye)).await.unwrap();
+                    }
+                }
+            }
+        });
+        let config = Config {
+            read_ahead_messages: 1,
+            ..Config::default()
+        };
+        let client = Client::new(endpoint, config).unwrap();
+        let subscription = client.new_subscription("news").unwrap();
+        let mut events = subscription.events();
+        client.connect();
+        subscription.subscribe();
+        while !matches!(events.next().await, Some(SubscriptionEvent::Subscribed(_))) {}
+        let filled = tokio::time::timeout(Duration::from_secs(5), async {
+            while client.read_ahead().0 < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        drop(events);
+        let read_on = tokio::time::timeout(Duration::from_secs(2), async {
+            while client.state() == State::Connected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        assert!(filled.is_ok(), "the read-ahead never filled");
+        assert!(read_on.is_ok(), "the disconnect push was never read");
     }
 
     /// A websocket server answering every connect and subscribe command:

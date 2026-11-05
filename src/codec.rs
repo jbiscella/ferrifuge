@@ -36,10 +36,19 @@ impl Codec {
 
     /// Decodes every reply of `frame`; `None` for a frame that is not valid
     /// client protocol in this encoding.
+    #[cfg(test)]
     pub(crate) fn decode(self, frame: &[u8]) -> Option<Vec<Reply>> {
         match self {
             Self::Json => json::decode(frame).ok(),
             Self::Protobuf => protobuf::decode(frame).ok(),
+        }
+    }
+
+    /// Decodes the replies of a frame, each with its encoded size.
+    pub(crate) fn decode_sized(self, frame: &[u8]) -> Option<Vec<(Reply, usize)>> {
+        match self {
+            Self::Json => json::decode_sized(frame).ok(),
+            Self::Protobuf => protobuf::decode_sized(frame).ok(),
         }
     }
 

@@ -39,10 +39,21 @@ pub(crate) fn command_ids(mut frame: &[u8]) -> Vec<u32> {
     ids
 }
 
-pub(crate) fn decode(mut frame: &[u8]) -> Result<Vec<Reply>, prost::DecodeError> {
+#[cfg(test)]
+pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, prost::DecodeError> {
+    Ok(decode_sized(frame)?
+        .into_iter()
+        .map(|(reply, _)| reply)
+        .collect())
+}
+
+/// Decodes every reply in a frame, each with its encoded size.
+pub(crate) fn decode_sized(mut frame: &[u8]) -> Result<Vec<(Reply, usize)>, prost::DecodeError> {
     let mut replies = Vec::new();
     while !frame.is_empty() {
-        replies.push(pb::Reply::decode_length_delimited(&mut frame)?.into());
+        let before = frame.len();
+        let reply = pb::Reply::decode_length_delimited(&mut frame)?.into();
+        replies.push((reply, before - frame.len()));
     }
     Ok(replies)
 }

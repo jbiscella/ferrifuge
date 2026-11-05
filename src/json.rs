@@ -55,11 +55,26 @@ pub(crate) fn command_ids(frame: &[u8]) -> Vec<u32> {
 }
 
 /// Decodes every reply in a frame.
+#[cfg(test)]
 pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, DecodeError> {
-    serde_json::Deserializer::from_slice(frame)
-        .into_iter::<BTreeMap<String, Box<RawValue>>>()
-        .map(|fields| reply(fields.map_err(DecodeError)?))
-        .collect()
+    Ok(decode_sized(frame)?
+        .into_iter()
+        .map(|(reply, _)| reply)
+        .collect())
+}
+
+/// Decodes every reply in a frame, each with its encoded size.
+pub(crate) fn decode_sized(frame: &[u8]) -> Result<Vec<(Reply, usize)>, DecodeError> {
+    let mut stream =
+        serde_json::Deserializer::from_slice(frame).into_iter::<BTreeMap<String, Box<RawValue>>>();
+    let (mut replies, mut start) = (Vec::new(), 0);
+    while let Some(fields) = stream.next() {
+        let reply = reply(fields.map_err(DecodeError)?)?;
+        let end = stream.byte_offset();
+        replies.push((reply, end - start));
+        start = end;
+    }
+    Ok(replies)
 }
 
 /// Body of a request to the emulation endpoint carrying `frame` for the
