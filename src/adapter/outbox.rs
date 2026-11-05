@@ -55,16 +55,9 @@ impl<E> Outbox<E> {
         None
     }
 
-    /// Drops the queued events among `ids`, sorted, never to be delivered;
-    /// adds their ids to `dropped`.
-    pub(super) fn withdraw(&mut self, ids: &[EventId], dropped: &mut Vec<EventId>) {
-        self.events.retain(|(id, _)| {
-            let withdrawn = ids.binary_search(id).is_ok();
-            if withdrawn {
-                dropped.push(*id);
-            }
-            !withdrawn
-        });
+    /// Drops the events among `ids`, sorted, never to be delivered.
+    pub(super) fn withdraw(&mut self, ids: &[EventId]) {
+        self.events.retain(|(id, _)| ids.binary_search(id).is_err());
     }
 
     /// The next event for stream `number`, which ends once superseded, or
@@ -88,14 +81,15 @@ impl<E> Outbox<E> {
     }
 
     /// Stream `number` was dropped: if it was the active one, its queued
-    /// events count as taken, as with no stream; their ids are returned.
-    pub(super) fn drop_stream(&mut self, number: u64) -> Vec<EventId> {
+    /// events count as taken, as with no stream, and their ids are
+    /// returned; `None` for a stream already superseded.
+    pub(super) fn drop_stream(&mut self, number: u64) -> Option<Vec<EventId>> {
         if self.stream != Some(number) {
-            return Vec::new();
+            return None;
         }
         self.stream = None;
         self.waker = None;
-        self.events.drain(..).map(|(id, _)| id).collect()
+        Some(self.events.drain(..).map(|(id, _)| id).collect())
     }
 
     /// No event will come: the active stream ends once it took the queued
@@ -186,10 +180,8 @@ mod tests {
             outbox.offer(id(n), "publication");
         }
 
-        let mut dropped = Vec::new();
-        outbox.withdraw(&[id(1), id(3), id(4)], &mut dropped);
+        outbox.withdraw(&[id(1), id(3)]);
 
-        assert_eq!(dropped, [id(1), id(3)]);
         assert_eq!(
             take(&mut outbox, stream),
             Poll::Ready(Some((id(2), "publication")))
@@ -205,7 +197,7 @@ mod tests {
 
         let taken = outbox.drop_stream(stream);
 
-        assert_eq!(taken, [id(1)]);
+        assert_eq!(taken, Some(vec![id(1)]));
         assert_eq!(outbox.offer(id(2), "b"), Some(id(2)));
     }
 
@@ -218,7 +210,7 @@ mod tests {
 
         let taken = outbox.drop_stream(first);
 
-        assert_eq!(taken, []);
+        assert_eq!(taken, None);
         assert_eq!(outbox.held(), 1);
     }
 

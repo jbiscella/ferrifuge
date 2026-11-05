@@ -69,15 +69,11 @@ pub(super) struct Outboxes {
 }
 
 impl Outboxes {
-    /// Drops the queued events among `ids`; their ids. The others were
-    /// taken already, and their [`Input::EventTaken`] is on its way.
-    fn withdraw(&mut self, ids: &[crate::machine::EventId]) -> Vec<crate::machine::EventId> {
-        let mut dropped = Vec::new();
-        self.client.withdraw(ids, &mut dropped);
+    fn withdraw(&mut self, ids: &[crate::machine::EventId]) {
+        self.client.withdraw(ids);
         for outbox in self.subscriptions.values_mut() {
-            outbox.withdraw(ids, &mut dropped);
+            outbox.withdraw(ids);
         }
-        dropped
     }
 }
 
@@ -176,8 +172,7 @@ impl Shared {
                         }
                     }
                     Action::Withdraw(ids) => {
-                        let dropped = outboxes.withdraw(&ids);
-                        inputs.extend(dropped.into_iter().map(Input::EventWithdrawn));
+                        outboxes.withdraw(&ids);
                         None
                     }
                     action => {
@@ -279,9 +274,14 @@ impl<E> Drop for EventStream<E> {
             }
         };
         drop(outboxes);
+        // A superseded stream leaves the active one in place.
+        let Some(taken) = taken else {
+            return;
+        };
         for id in taken {
             self.shared.handle(&mut core, Input::EventTaken(id));
         }
+        self.shared.handle(&mut core, Input::StreamClosed(self.of));
     }
 }
 
@@ -460,8 +460,9 @@ impl Client {
     /// nothing from the client, so it can be kept beside it, and it ends
     /// once the client is dropped.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
-        let core = lock(&self.shared.core);
+        let mut core = lock(&self.shared.core);
         let number = lock(&self.shared.outboxes).client.open_stream();
+        self.shared.handle(&mut core, Input::StreamOpened(None));
         drop(core);
         EventStream::new(Arc::clone(&self.shared), None, number)
     }

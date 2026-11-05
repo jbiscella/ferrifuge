@@ -65,7 +65,7 @@ impl Machine {
             Ok(position) => {
                 sub.position = Some(position);
                 sub.recover = true;
-                self.discard_commits(&Owner::Client(id));
+                self.withdraw(&Owner::Client(id));
                 self.start_subscribe(id);
             }
             // A temporary subscribe error: reported, then retried after the
@@ -94,7 +94,7 @@ impl Machine {
             return false;
         }
         sub.forget_position();
-        self.discard_commits(&Owner::Client(id));
+        self.withdraw(&Owner::Client(id));
         self.schedule_resubscribe(id);
         true
     }

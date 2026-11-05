@@ -4,7 +4,7 @@
 //! `subscribed` is withdrawn: never delivered, its position unmoved, so
 //! recovery brings it back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{Action, EventId, Machine, SubscriptionId};
 use crate::{Publication, StreamPosition};
@@ -28,10 +28,23 @@ pub(super) struct Commit {
     pub(super) replaces: bool,
 }
 
-/// Publications emitted and not yet taken.
+/// Publications emitted and not yet taken, and the streams taking them.
 #[derive(Debug, Default)]
 pub(super) struct Deliveries {
     pending: HashMap<EventId, Commit>,
+    /// Objects with a stream open: a subscription, or the client (`None`),
+    /// whose stream also takes the server-side subscriptions' events.
+    streams: HashSet<Option<SubscriptionId>>,
+}
+
+impl Owner {
+    /// The stream taking this owner's publications.
+    fn stream(&self) -> Option<SubscriptionId> {
+        match self {
+            Self::Client(id) => Some(*id),
+            Self::Server(_) => None,
+        }
+    }
 }
 
 impl Commit {
@@ -53,7 +66,9 @@ impl Commit {
 
 impl Machine {
     /// Records that taking the event `id`, the publication `publication`
-    /// of `owner`, moves the owner's position to it. One that came with a
+    /// of `owner`, moves the owner's position to it; with no stream open
+    /// for it, the event counts as taken at once, and the position moves
+    /// now. One that came with a
     /// subscribe reply takes the reply's epoch when it carries none, and
     /// the reply's offset too when it is the reply's `last` and carries no
     /// offset, so the position ends where centrifuge-js's does
@@ -78,22 +93,39 @@ impl Machine {
             ),
             None => (publication.offset, publication.epoch.clone()),
         };
-        self.deliveries.pending.insert(
-            id,
-            Commit {
-                owner,
-                offset,
-                epoch,
-                replaces,
-            },
-        );
+        let commit = Commit {
+            owner,
+            offset,
+            epoch,
+            replaces,
+        };
+        if self.deliveries.streams.contains(&commit.owner.stream()) {
+            self.deliveries.pending.insert(id, commit);
+        } else {
+            self.commit(commit);
+        }
+    }
+
+    /// A stream of the subscription `of`, or of the client when `None`,
+    /// takes its events from now on.
+    pub(super) fn stream_opened(&mut self, of: Option<SubscriptionId>) {
+        self.deliveries.streams.insert(of);
+    }
+
+    /// No stream takes the events of `of` anymore: they count as taken at
+    /// once from now on.
+    pub(super) fn stream_closed(&mut self, of: Option<SubscriptionId>) {
+        self.deliveries.streams.remove(&of);
     }
 
     /// The application took the event `id`.
     pub(super) fn event_taken(&mut self, id: EventId) {
-        let Some(commit) = self.deliveries.pending.remove(&id) else {
-            return;
-        };
+        if let Some(commit) = self.deliveries.pending.remove(&id) {
+            self.commit(commit);
+        }
+    }
+
+    fn commit(&mut self, commit: Commit) {
         match commit.owner.clone() {
             Owner::Client(of) => self.commit_subscription_position(of, commit),
             Owner::Server(channel) => self.commit_server_subscription_position(&channel, commit),
@@ -101,11 +133,9 @@ impl Machine {
     }
 
     /// Withdraws the publications of `owner` not yet taken: it left
-    /// `subscribed`. Each keeps its commit until the owner of the machine
-    /// answers: [`Input::EventTaken`](super::Input::EventTaken) when it was
-    /// delivered already, such as one taken at once for want of a stream,
-    /// [`Input::EventWithdrawn`](super::Input::EventWithdrawn) when it was
-    /// dropped.
+    /// `subscribed`, or its position was just set otherwise (invalidated,
+    /// dropped or loaded), which an older publication taken later must
+    /// not overwrite.
     pub(super) fn withdraw(&mut self, owner: &Owner) {
         let mut ids: Vec<EventId> = self
             .deliveries
@@ -118,22 +148,10 @@ impl Machine {
             return;
         }
         ids.sort_unstable();
+        for id in &ids {
+            self.deliveries.pending.remove(id);
+        }
         self.actions.push(Action::Withdraw(ids));
-    }
-
-    /// Forgets the commits of `owner` not yet answered: its position was
-    /// just set otherwise (invalidated, dropped, loaded or replied), which
-    /// an older publication taken later must not overwrite.
-    pub(super) fn discard_commits(&mut self, owner: &Owner) {
-        self.deliveries
-            .pending
-            .retain(|_, commit| commit.owner != *owner);
-    }
-
-    /// The owner of the machine dropped the withdrawn event `id` without
-    /// delivering it: the position stays.
-    pub(super) fn event_withdrawn(&mut self, id: EventId) {
-        self.deliveries.pending.remove(&id);
     }
 
     /// The position a subscribe reply at `replied` sets before any of its

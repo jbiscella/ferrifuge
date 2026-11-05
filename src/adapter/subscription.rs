@@ -83,15 +83,18 @@ impl Subscription {
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then closes the outbox, so a removed
         // subscription's stream ends at once.
-        let core = lock(&self.shared.core);
+        let mut core = lock(&self.shared.core);
         let number = if core.machine.subscription_state(self.id).is_some()
             && !self.shared.closed.load(Ordering::Acquire)
         {
-            lock(&self.shared.outboxes)
+            let number = lock(&self.shared.outboxes)
                 .subscriptions
                 .entry(self.id)
                 .or_default()
-                .open_stream()
+                .open_stream();
+            self.shared
+                .handle(&mut core, Input::StreamOpened(Some(self.id)));
+            number
         } else {
             0
         };

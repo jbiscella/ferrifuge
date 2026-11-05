@@ -400,12 +400,17 @@ pub enum Input {
         result: Result<StreamPosition, StateError>,
     },
     /// The application took an event of [`Action::Emit`] or
-    /// [`Action::EmitSubscription`] from its stream, or the event was
-    /// delivered at once because no stream was taking that object's events.
+    /// [`Action::EmitSubscription`] from its stream.
     EventTaken(EventId),
-    /// An event of [`Action::Withdraw`] was dropped without being
-    /// delivered.
-    EventWithdrawn(EventId),
+    /// A stream takes the events of a subscription, or of the client when
+    /// `None` (server-side subscriptions' included), from now on. Until
+    /// then, and after [`Input::StreamClosed`], their events count as taken
+    /// once emitted (Block 15).
+    StreamOpened(Option<SubscriptionId>),
+    /// No stream takes the events of a subscription, or of the client when
+    /// `None`, anymore: report the events it had not taken with
+    /// [`Input::EventTaken`] first.
+    StreamClosed(Option<SubscriptionId>),
 }
 
 /// Something the owner of the machine must do.
@@ -460,11 +465,9 @@ pub enum Action {
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
-    /// Never deliver these events, emitted and not yet reported taken:
-    /// publications of a subscription that left `subscribed`, which
-    /// recovery brings back (Block 15). Answer each with
-    /// [`Input::EventTaken`] if it was delivered already, or with
-    /// [`Input::EventWithdrawn`] once dropped.
+    /// Never deliver these events, emitted and not yet taken: publications
+    /// of a subscription that left `subscribed`, or whose position was set
+    /// otherwise, which recovery brings back (Block 15).
     Withdraw(Vec<EventId>),
     /// Ask the subscription's data callback for the data of its next
     /// subscribe command; report the answer with
@@ -585,7 +588,8 @@ impl std::fmt::Debug for Input {
                 .field("result", result)
                 .finish(),
             Self::EventTaken(id) => f.debug_tuple("EventTaken").field(id).finish(),
-            Self::EventWithdrawn(id) => f.debug_tuple("EventWithdrawn").field(id).finish(),
+            Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
+            Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
         }
     }
 }
@@ -923,7 +927,8 @@ impl Machine {
                 self.subscription_state_fetched(fetch, result);
             }
             Input::EventTaken(id) => self.event_taken(id),
-            Input::EventWithdrawn(id) => self.event_withdrawn(id),
+            Input::StreamOpened(of) => self.stream_opened(of),
+            Input::StreamClosed(of) => self.stream_closed(of),
             // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }

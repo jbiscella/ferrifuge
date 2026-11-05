@@ -597,7 +597,7 @@ impl Machine {
                 if let Some(replied) = &replied {
                     sub.position = Some(Machine::reply_baseline(replied, &result.publications));
                 }
-                self.discard_commits(&Owner::Client(id));
+                self.withdraw(&Owner::Client(id));
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
                 }
@@ -773,7 +773,7 @@ impl Machine {
             sub.tokens.invalidate();
             sub.forget_position();
         }
-        self.discard_commits(&Owner::Client(id));
+        self.withdraw(&Owner::Client(id));
     }
 
     /// "State invalidated" (disconnect code 3014): every subscription keeps
@@ -792,7 +792,7 @@ impl Machine {
                 sub.invalidate_position();
                 sub.tokens.invalidate();
             }
-            self.discard_commits(&Owner::Client(id));
+            self.withdraw(&Owner::Client(id));
         }
     }
 
@@ -1034,14 +1034,23 @@ mod tests {
             .map(|position| position.offset)
     }
 
+    /// A frame of `transport` pushing a publication at `offset` to "news".
+    fn pushed(transport: TransportId, offset: u64) -> Input {
+        Input::Frame {
+            transport,
+            data: format!(
+                r#"{{"push":{{"channel":"news","pub":{{"data":{{}},"offset":{offset}}}}}}}"#
+            )
+            .into_bytes(),
+        }
+    }
+
     #[test]
     fn a_publication_moves_the_position_only_once_taken() {
         let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
         subscribed_recoverable(&mut machine, transport, id);
-        let pushed = machine.handle(Input::Frame {
-            transport,
-            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
-        });
+        let pushed = machine.handle(pushed(transport, 1));
         let received = offset_of(&machine, id);
 
         machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
@@ -1051,17 +1060,42 @@ mod tests {
     }
 
     #[test]
-    fn a_publication_not_taken_when_its_subscription_leaves_subscribed_is_withdrawn() {
+    fn without_a_stream_a_publication_moves_the_position_at_once() {
         let (mut machine, transport, id) = connected();
         subscribed_recoverable(&mut machine, transport, id);
-        let pushed = machine.handle(Input::Frame {
+
+        machine.handle(pushed(transport, 1));
+
+        assert_eq!(offset_of(&machine, id), Some(1));
+    }
+
+    // Codex on PR #64: without a stream, a resubscribe made by a later
+    // message of the same frame recovers from the publication before it.
+    #[test]
+    fn without_a_stream_a_resubscribe_in_the_same_frame_recovers_after_the_publication() {
+        let (mut machine, transport, id) = connected();
+        subscribed_recoverable(&mut machine, transport, id);
+
+        let actions = machine.handle(Input::Frame {
             transport,
-            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
+            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}
+{"push":{"channel":"news","unsubscribe":{"code":2500,"reason":"resubscribe"}}}"#
+                .to_vec(),
         });
-        let publication = publication_ids(&pushed)[0];
+
+        let resubscribe = String::from_utf8(frame_sent(&actions)).unwrap();
+        assert!(resubscribe.contains(r#""offset":1"#), "{resubscribe}");
+    }
+
+    #[test]
+    fn a_publication_not_taken_when_its_subscription_leaves_subscribed_is_withdrawn() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+        subscribed_recoverable(&mut machine, transport, id);
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
 
         let disconnected = machine.handle(Input::Disconnect);
-        machine.handle(Input::EventWithdrawn(publication));
+        machine.handle(Input::EventTaken(publication));
 
         assert!(
             disconnected.contains(&Action::Withdraw(vec![publication])),
@@ -1070,39 +1104,25 @@ mod tests {
         assert_eq!(offset_of(&machine, id), Some(0));
     }
 
-    // Codex on PR #64: without a stream, a publication counts as taken at
-    // once, but the adapter reports it only after the machine handled the
-    // rest of the frame, which may withdraw it.
+    // Codex on PR #64: state invalidation withdraws the publications not
+    // yet taken, which then cannot overwrite the sentinel position.
     #[test]
-    fn a_withdrawn_publication_reported_taken_moves_the_position() {
+    fn state_invalidation_withdraws_the_publications_not_yet_taken() {
         let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
         subscribed_recoverable(&mut machine, transport, id);
-        let pushed = machine.handle(Input::Frame {
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
+
+        let invalidated = machine.handle(Input::Frame {
             transport,
-            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
+            data: br#"{"push":{"disconnect":{"code":3014,"reason":"state invalidated"}}}"#.to_vec(),
         });
-        machine.handle(Input::Disconnect);
+        machine.handle(Input::EventTaken(publication));
 
-        machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
-
-        assert_eq!(offset_of(&machine, id), Some(1));
-    }
-
-    // Codex on PR #64: a publication taken after a state-invalidated
-    // disconnect must not overwrite the sentinel position it set.
-    #[test]
-    fn a_publication_taken_after_state_invalidation_keeps_the_sentinel() {
-        let (mut machine, transport, id) = connected();
-        subscribed_recoverable(&mut machine, transport, id);
-        let pushed = machine.handle(Input::Frame {
-            transport,
-            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1,"epoch":"e"}}}
-{"push":{"disconnect":{"code":3014,"reason":"state invalidated"}}}"#
-                .to_vec(),
-        });
-
-        machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
-
+        assert!(
+            invalidated.contains(&Action::Withdraw(vec![publication])),
+            "{invalidated:?}"
+        );
         let position = machine.subscriptions.by_id[&id].position.clone();
         assert_eq!(
             position.map(|position| (position.offset, position.epoch)),
@@ -1113,6 +1133,7 @@ mod tests {
     #[test]
     fn publications_of_a_subscribe_reply_move_the_position_one_by_one_as_taken() {
         let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
         machine.handle(Input::Subscribe(id));
         let replied = machine.handle(Input::Frame {
             transport,
