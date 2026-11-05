@@ -368,6 +368,8 @@ while the client keeps reconnecting.
 | `max_server_ping_delay` | 10 s | Wait past the server's ping interval before reconnecting; 0 disables |
 | `protocol` | `Protocol::Json` | Encoding of the client protocol: `Json` or `Protobuf` (binary frames, any payload bytes) |
 | `reconnect_jitter_window` | 0 | Upper bound of a random delay added to the first reconnect after losing a connection, so that many clients disconnected at once do not reconnect at once |
+| `read_ahead_messages` | 256 | Most messages read and not yet handled while the application has not taken earlier events; then the client stops reading the connection, holding the server back instead of buffering |
+| `read_ahead_bytes` | 4 MiB | Most bytes of those messages; a single larger message is still read when none waits |
 
 ### Cargo features
 

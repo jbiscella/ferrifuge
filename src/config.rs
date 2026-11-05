@@ -34,6 +34,14 @@ pub struct Config {
     /// at once does not reconnect at once (Block 14). Not applied to
     /// `connect()`. Default 0: no added delay.
     pub reconnect_jitter_window: Duration,
+    /// Most messages read from the server and not yet handled, waiting
+    /// for the application to take earlier events from its streams; once
+    /// reached, the client stops reading the connection, so the server's
+    /// slow-client handling acts (Block 15). At least 1. Default 256.
+    pub read_ahead_messages: usize,
+    /// Most bytes of those messages; a single larger message is still
+    /// read when none waits. At least 1. Default 4 MiB.
+    pub read_ahead_bytes: usize,
 }
 
 /// Encoding of the client protocol (`client.proto`).
@@ -71,6 +79,8 @@ impl Default for Config {
             max_server_ping_delay: Duration::from_secs(10),
             protocol: Protocol::Json,
             reconnect_jitter_window: Duration::ZERO,
+            read_ahead_messages: 256,
+            read_ahead_bytes: 4 << 20,
         }
     }
 }
@@ -93,6 +103,8 @@ impl std::fmt::Debug for Config {
             .field("max_server_ping_delay", &self.max_server_ping_delay)
             .field("protocol", &self.protocol)
             .field("reconnect_jitter_window", &self.reconnect_jitter_window)
+            .field("read_ahead_messages", &self.read_ahead_messages)
+            .field("read_ahead_bytes", &self.read_ahead_bytes)
             .finish()
     }
 }
