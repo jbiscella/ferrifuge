@@ -69,11 +69,15 @@ pub(super) struct Outboxes {
 }
 
 impl Outboxes {
-    fn withdraw(&mut self, ids: &[crate::machine::EventId]) {
-        self.client.withdraw(ids);
+    /// Drops the queued events among `ids`; their ids. The others were
+    /// taken already, and their [`Input::EventTaken`] is on its way.
+    fn withdraw(&mut self, ids: &[crate::machine::EventId]) -> Vec<crate::machine::EventId> {
+        let mut dropped = Vec::new();
+        self.client.withdraw(ids, &mut dropped);
         for outbox in self.subscriptions.values_mut() {
-            outbox.withdraw(ids);
+            outbox.withdraw(ids, &mut dropped);
         }
+        dropped
     }
 }
 
@@ -172,7 +176,8 @@ impl Shared {
                         }
                     }
                     Action::Withdraw(ids) => {
-                        outboxes.withdraw(&ids);
+                        let dropped = outboxes.withdraw(&ids);
+                        inputs.extend(dropped.into_iter().map(Input::EventWithdrawn));
                         None
                     }
                     action => {

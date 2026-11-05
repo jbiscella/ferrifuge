@@ -594,8 +594,8 @@ impl Machine {
                     offset: result.offset,
                     epoch: result.epoch,
                 });
-                if result.publications.is_empty() && replied.is_some() {
-                    sub.position.clone_from(&replied);
+                if let Some(replied) = &replied {
+                    sub.position = Some(Machine::reply_baseline(replied, &result.publications));
                 }
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
@@ -1058,13 +1058,31 @@ mod tests {
         let publication = publication_ids(&pushed)[0];
 
         let disconnected = machine.handle(Input::Disconnect);
-        machine.handle(Input::EventTaken(publication));
+        machine.handle(Input::EventWithdrawn(publication));
 
         assert!(
             disconnected.contains(&Action::Withdraw(vec![publication])),
             "{disconnected:?}"
         );
         assert_eq!(offset_of(&machine, id), Some(0));
+    }
+
+    // Codex on PR #64: without a stream, a publication counts as taken at
+    // once, but the adapter reports it only after the machine handled the
+    // rest of the frame, which may withdraw it.
+    #[test]
+    fn a_withdrawn_publication_reported_taken_moves_the_position() {
+        let (mut machine, transport, id) = connected();
+        subscribed_recoverable(&mut machine, transport, id);
+        let pushed = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#.to_vec(),
+        });
+        machine.handle(Input::Disconnect);
+
+        machine.handle(Input::EventTaken(publication_ids(&pushed)[0]));
+
+        assert_eq!(offset_of(&machine, id), Some(1));
     }
 
     #[test]
@@ -1082,7 +1100,9 @@ mod tests {
         let after_first = offset_of(&machine, id);
         machine.handle(Input::EventTaken(publications[1]));
 
-        assert_eq!(before, None);
+        // Just before the first: recovery brings them back if none is
+        // taken (Codex on PR #64).
+        assert_eq!(before, Some(0));
         assert_eq!(after_first, Some(1));
         assert_eq!(offset_of(&machine, id), Some(2));
         assert_eq!(

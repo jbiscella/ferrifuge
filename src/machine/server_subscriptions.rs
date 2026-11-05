@@ -120,14 +120,9 @@ impl Machine {
             offset: result.offset,
             epoch: result.epoch.clone(),
         });
-        let position = if result.publications.is_empty() {
-            replied.clone()
-        } else {
-            self.server_subscriptions
-                .by_channel
-                .get(channel)
-                .and_then(|sub| sub.position.clone())
-        };
+        let position = replied
+            .as_ref()
+            .map(|replied| Machine::reply_baseline(replied, &result.publications));
         self.server_subscriptions.by_channel.insert(
             channel.to_owned(),
             ServerSubscription {
@@ -318,6 +313,27 @@ mod tests {
         let names: Vec<_> = events(&actions).iter().map(|event| event.name()).collect();
         assert_eq!(names, ["connected", "subscribed", "publication"]);
         assert_eq!(machine.server_subscriptions(), ["alerts"]);
+    }
+
+    // Codex on PR #64: a grant without recovery forgets the position, also
+    // when it comes with publications.
+    #[test]
+    fn a_grant_without_recovery_drops_the_position_even_with_publications() {
+        let (mut machine, transport) = opened();
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"alerts":{"recoverable":true,"epoch":"e","offset":0}}}}"#,
+        ));
+
+        machine.handle(reply(
+            transport,
+            r#"{"push":{"channel":"alerts","subscribe":{"publications":[{"data":{},"offset":5}]}}}"#,
+        ));
+
+        assert_eq!(
+            machine.server_subscriptions.by_channel["alerts"].position,
+            None
+        );
     }
 
     // Client-side precedence applies to Unsubscribe pushes and publications

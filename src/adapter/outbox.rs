@@ -55,9 +55,16 @@ impl<E> Outbox<E> {
         None
     }
 
-    /// Drops the events among `ids`, sorted, never to be delivered.
-    pub(super) fn withdraw(&mut self, ids: &[EventId]) {
-        self.events.retain(|(id, _)| ids.binary_search(id).is_err());
+    /// Drops the queued events among `ids`, sorted, never to be delivered;
+    /// adds their ids to `dropped`.
+    pub(super) fn withdraw(&mut self, ids: &[EventId], dropped: &mut Vec<EventId>) {
+        self.events.retain(|(id, _)| {
+            let withdrawn = ids.binary_search(id).is_ok();
+            if withdrawn {
+                dropped.push(*id);
+            }
+            !withdrawn
+        });
     }
 
     /// The next event for stream `number`, which ends once superseded, or
@@ -179,8 +186,10 @@ mod tests {
             outbox.offer(id(n), "publication");
         }
 
-        outbox.withdraw(&[id(1), id(3)]);
+        let mut dropped = Vec::new();
+        outbox.withdraw(&[id(1), id(3), id(4)], &mut dropped);
 
+        assert_eq!(dropped, [id(1), id(3)]);
         assert_eq!(
             take(&mut outbox, stream),
             Poll::Ready(Some((id(2), "publication")))

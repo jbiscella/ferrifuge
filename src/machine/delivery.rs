@@ -101,7 +101,11 @@ impl Machine {
     }
 
     /// Withdraws the publications of `owner` not yet taken: it left
-    /// `subscribed`.
+    /// `subscribed`. Each keeps its commit until the owner of the machine
+    /// answers: [`Input::EventTaken`](super::Input::EventTaken) when it was
+    /// delivered already, such as one taken at once for want of a stream,
+    /// [`Input::EventWithdrawn`](super::Input::EventWithdrawn) when it was
+    /// dropped.
     pub(super) fn withdraw(&mut self, owner: &Owner) {
         let mut ids: Vec<EventId> = self
             .deliveries
@@ -114,9 +118,30 @@ impl Machine {
             return;
         }
         ids.sort_unstable();
-        for id in &ids {
-            self.deliveries.pending.remove(id);
-        }
         self.actions.push(Action::Withdraw(ids));
+    }
+
+    /// The owner of the machine dropped the withdrawn event `id` without
+    /// delivering it: the position stays.
+    pub(super) fn event_withdrawn(&mut self, id: EventId) {
+        self.deliveries.pending.remove(&id);
+    }
+
+    /// The position a subscribe reply at `replied` sets before any of its
+    /// `publications` is taken: just before the first, in the reply's
+    /// epoch, so that recovery brings them back if none is taken; the
+    /// reply's own when it has none, or when the first carries no offset.
+    pub(super) fn reply_baseline(
+        replied: &StreamPosition,
+        publications: &[Publication],
+    ) -> StreamPosition {
+        let offset = publications
+            .first()
+            .and_then(|first| first.offset)
+            .map_or(replied.offset, |first| first.saturating_sub(1));
+        StreamPosition {
+            offset,
+            epoch: replied.epoch.clone(),
+        }
     }
 }
