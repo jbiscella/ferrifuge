@@ -155,14 +155,18 @@ impl WebSocket {
                 return Poll::Ready(Err(Error::Io(std::io::ErrorKind::TimedOut.into())));
             }
             if self.writing.is_some() {
-                ready!(self.stream.poll_flush_unpin(cx))?;
+                let flushed = self.stream.poll_flush_unpin(cx);
+                note_stall(&flushed);
+                ready!(flushed)?;
                 self.writing = None;
                 continue;
             }
             if self.queue.is_empty() {
                 return Poll::Ready(Ok(()));
             }
-            ready!(self.stream.poll_ready_unpin(cx))?;
+            let ready = self.stream.poll_ready_unpin(cx);
+            note_stall(&ready);
+            ready!(ready)?;
             let (message, queued) = self.queue.pop_front().expect("the queue is not empty");
             self.stream.start_send_unpin(message)?;
             self.writing = Some(queued);
@@ -203,6 +207,30 @@ impl WebSocket {
         }
     }
 }
+
+/// Writes that found a connection unable to take more, across the process.
+#[cfg(feature = "test-util")]
+static STALLED_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times so far in this process a websocket write found the
+/// connection unable to take more, so that tests can wait for a stalled
+/// write instead of guessing how much the system buffers. Only with the
+/// `test-util` feature.
+#[cfg(feature = "test-util")]
+pub fn stalled_websocket_writes() -> usize {
+    STALLED_WRITES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Counts a write that `poll` shows stalled, for [`stalled_websocket_writes`].
+#[cfg(feature = "test-util")]
+fn note_stall<T>(poll: &Poll<T>) {
+    if poll.is_pending() {
+        STALLED_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "test-util"))]
+fn note_stall<T>(_: &Poll<T>) {}
 
 /// TLS settings of an HTTP client that only ever speaks plain `http://`:
 /// no root certificates, so it works on hosts without platform ones, and

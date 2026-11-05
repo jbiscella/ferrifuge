@@ -18,6 +18,9 @@ mod subscription;
 mod token;
 mod wire;
 
+#[cfg(all(feature = "tokio", feature = "test-util"))]
+#[doc(hidden)]
+pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
 pub use adapter::{Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use config::{Config, Protocol};
