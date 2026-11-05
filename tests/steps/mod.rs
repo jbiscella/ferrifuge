@@ -324,18 +324,46 @@ impl ClientWorld {
 
 /// The next event that is not a transport error, within [`EVENT_TIMEOUT`]:
 /// failed attempts, e.g. of a fallback, may come first, and keep coming
-/// while the client retries.
+/// while the client retries. Before the client's first connection, those
+/// attempts must follow its configured transports in order, starting over
+/// while it retries, and a `connected` event must name the transport that
+/// comes next (Block 8; review item D5).
 pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -> ClientEvent {
-    tokio::time::timeout(EVENT_TIMEOUT, async {
+    let mut failed = Vec::new();
+    let event = tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             match world.next_event().await {
-                ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {}
+                ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {
+                    failed.push(error.transport.unwrap_or_default());
+                }
                 event => return event,
             }
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("only transport errors for {EVENT_TIMEOUT:?}"))
+    .unwrap_or_else(|_| panic!("only transport errors for {EVENT_TIMEOUT:?}"));
+    if world.client_id.is_none() {
+        let configured: Vec<&str> = if world.transports.is_empty() {
+            vec![TransportKind::WebSocket.name()]
+        } else {
+            world.transports.iter().map(|kind| kind.name()).collect()
+        };
+        let expected: Vec<&str> = (0..failed.len())
+            .map(|attempt| configured[attempt % configured.len()])
+            .collect();
+        assert_eq!(
+            failed, expected,
+            "failed attempts out of the configured order"
+        );
+        if let ClientEvent::Connected { transport, .. } = &event {
+            assert_eq!(
+                transport,
+                configured[failed.len() % configured.len()],
+                "connected over a transport out of order after {failed:?}"
+            );
+        }
+    }
+    event
 }
 
 /// Waits for the next event and checks its name.

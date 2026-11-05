@@ -90,6 +90,9 @@ async fn the_client_emits_connecting_with_code(world: &mut ClientWorld, code: u3
     assert_eq!(got, code);
 }
 
+/// How long a step watches for a pong beyond the expected ones.
+const NO_MORE_PONGS: Duration = Duration::from_millis(300);
+
 /// Waits until the fake server has received `count` pongs (empty Protobuf
 /// commands), and no more.
 async fn wait_for_pongs(world: &ClientWorld, count: usize) {
@@ -113,5 +116,8 @@ async fn wait_for_pongs(world: &ClientWorld, count: usize) {
         pongs(),
         world.fake().received_protobuf()
     );
+    // "And no more": a pong too many would come right after the others
+    // (review item D3).
+    tokio::time::sleep(NO_MORE_PONGS).await;
     assert_eq!(pongs(), count);
 }
