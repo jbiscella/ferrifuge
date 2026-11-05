@@ -23,6 +23,7 @@ use crate::support::relay::CountingRelay;
 mod backoff;
 mod codes;
 mod connection;
+mod delivery;
 mod jitter;
 mod ping;
 mod protobuf;
@@ -142,6 +143,8 @@ pub(crate) struct ClientWorld {
     pub(crate) recovery: recovery::Recovery,
     /// Expected publications of a Block 12 scenario.
     pub(crate) server_side: server_subs::ServerSide,
+    /// Streams a Block 15 scenario reads itself.
+    pub(crate) delivery: delivery::Delivery,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
