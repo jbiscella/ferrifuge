@@ -81,6 +81,11 @@ pub struct TransportId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FetchId(u64);
 
+/// Identifies an event the machine emitted, for its owner to report with
+/// [`Input::EventTaken`] once the application has taken it (Block 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EventId(u64);
+
 /// Identifies a subscription in the machine's registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SubscriptionId(u64);
@@ -385,6 +390,10 @@ pub enum Input {
         /// it could not load it.
         result: Result<StreamPosition, StateError>,
     },
+    /// The application took an event of [`Action::Emit`] or
+    /// [`Action::EmitSubscription`] from its stream, or the event was
+    /// delivered at once because no stream was taking that object's events.
+    EventTaken(EventId),
 }
 
 /// Something the owner of the machine must do.
@@ -425,8 +434,9 @@ pub enum Action {
     SetTimer(Timer, Duration),
     /// Stop a timer if it runs.
     CancelTimer(Timer),
-    /// Deliver an event to the application.
-    Emit(ClientEvent),
+    /// Deliver an event to the application; report it with
+    /// [`Input::EventTaken`] once the application has taken it.
+    Emit(EventId, ClientEvent),
     /// Ask the application's token callback for a new connection token;
     /// report the answer with [`Input::TokenFetched`]. Only issued by a
     /// machine created with [`Machine::with_token_source`].
@@ -435,8 +445,9 @@ pub enum Action {
     SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
     /// Stop a subscription's timer if it runs.
     CancelSubscriptionTimer(SubscriptionId, SubscriptionTimer),
-    /// Deliver an event to a subscription's listeners.
-    EmitSubscription(SubscriptionId, SubscriptionEvent),
+    /// Deliver an event to a subscription's listeners; report it with
+    /// [`Input::EventTaken`] once the application has taken it.
+    EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
     /// Ask the subscription's data callback for the data of its next
     /// subscribe command; report the answer with
     /// [`Input::SubscriptionDataFetched`]. Only issued for subscriptions
@@ -555,6 +566,7 @@ impl std::fmt::Debug for Input {
                 .field("fetch", fetch)
                 .field("result", result)
                 .finish(),
+            Self::EventTaken(id) => f.debug_tuple("EventTaken").field(id).finish(),
         }
     }
 }
@@ -594,7 +606,7 @@ impl std::fmt::Debug for Action {
                 f.debug_tuple("SetTimer").field(timer).field(delay).finish()
             }
             Self::CancelTimer(timer) => f.debug_tuple("CancelTimer").field(timer).finish(),
-            Self::Emit(event) => f.debug_tuple("Emit").field(event).finish(),
+            Self::Emit(id, event) => f.debug_tuple("Emit").field(id).field(event).finish(),
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
             Self::SetSubscriptionTimer(id, timer, delay) => f
                 .debug_tuple("SetSubscriptionTimer")
@@ -607,8 +619,9 @@ impl std::fmt::Debug for Action {
                 .field(id)
                 .field(timer)
                 .finish(),
-            Self::EmitSubscription(id, event) => f
+            Self::EmitSubscription(event_id, id, event) => f
                 .debug_tuple("EmitSubscription")
+                .field(event_id)
                 .field(id)
                 .field(event)
                 .finish(),
@@ -692,6 +705,7 @@ pub struct Machine {
     transport_open: bool,
     next_transport: u64,
     next_command: u32,
+    next_event: u64,
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
     /// Connection token state and policy.
@@ -791,6 +805,7 @@ impl Machine {
             transport: None,
             transport_open: false,
             next_transport: 0,
+            next_event: 0,
             next_command: 0,
             connect_command: None,
             tokens,
@@ -884,12 +899,14 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            // About a transport already abandoned.
+            // About a transport already abandoned, or an event taken, which
+            // changes nothing yet.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::Frame { .. }
-            | Input::SendRejected { .. } => {}
+            | Input::SendRejected { .. }
+            | Input::EventTaken(_) => {}
         }
         std::mem::take(&mut self.actions)
     }
@@ -1482,7 +1499,15 @@ impl Machine {
     }
 
     fn emit(&mut self, event: ClientEvent) {
-        self.actions.push(Action::Emit(event));
+        let id = self.event_id();
+        self.actions.push(Action::Emit(id, event));
+    }
+
+    /// Id of the next event emitted.
+    fn event_id(&mut self) -> EventId {
+        let id = EventId(self.next_event);
+        self.next_event += 1;
+        id
     }
 }
 
@@ -1525,7 +1550,7 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::Emit(event) => Some(event),
+                Action::Emit(_, event) => Some(event),
                 _ => None,
             })
             .collect()

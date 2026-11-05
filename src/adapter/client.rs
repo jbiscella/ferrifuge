@@ -143,8 +143,8 @@ impl Shared {
     fn handle(&self, core: &mut Core, input: Input) {
         for action in core.machine.handle(input) {
             match action {
-                Action::Emit(event) => self.emit(&event),
-                Action::EmitSubscription(id, event) => self.emit_subscription(id, &event),
+                Action::Emit(_, event) => self.emit(&event),
+                Action::EmitSubscription(_, id, event) => self.emit_subscription(id, &event),
                 action => core.actions.push_back(action),
             }
         }
@@ -600,8 +600,8 @@ impl Driver {
             }
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
-            Action::Emit(event) => self.shared.emit(&event),
-            Action::EmitSubscription(id, event) => self.shared.emit_subscription(id, &event),
+            Action::Emit(_, event) => self.shared.emit(&event),
+            Action::EmitSubscription(_, id, event) => self.shared.emit_subscription(id, &event),
             Action::SetSubscriptionTimer(id, timer, delay) => {
                 self.subscription_timers.set(id, timer, delay);
             }
