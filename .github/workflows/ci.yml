@@ -139,6 +139,10 @@ jobs:
       - name: doctests
         run: cargo test --doc
 
+      # The sans-IO core alone, without the tokio adapter (review item D6).
+      - name: cargo test (no default features)
+        run: cargo test --no-default-features --lib
+
       - name: Coverage summary
         if: ${{ !cancelled() }}
         run: |
@@ -363,3 +367,7 @@ jobs:
 
       - name: cargo check on MSRV
         run: cargo check --all-targets
+
+      # The sans-IO core alone (review item D6).
+      - name: cargo check on MSRV (no default features)
+        run: cargo check --all-targets --no-default-features
