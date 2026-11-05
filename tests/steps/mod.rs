@@ -145,6 +145,9 @@ pub(crate) struct ClientWorld {
     pub(crate) server_side: server_subs::ServerSide,
     /// Streams a Block 15 scenario reads itself.
     pub(crate) delivery: delivery::Delivery,
+    /// The relay standing in for an unreachable websocket endpoint, and
+    /// its connection attempts once the client connected (review item C5).
+    pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
