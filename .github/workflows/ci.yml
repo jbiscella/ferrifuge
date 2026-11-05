@@ -13,11 +13,12 @@ on:
 permissions:
   contents: read
 
-# One run per branch: a new push cancels the branch's run in progress, on
-# main too. Nightly runs have their own group, so a merge never cancels one.
+# One run per branch. A new push to a pull request cancels its running CI;
+# runs on main are never cancelled, so quick merges do not cut its heavy
+# jobs short. Nightly runs have their own group, apart from merges.
 concurrency:
   group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
