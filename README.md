@@ -354,7 +354,7 @@ while the client keeps reconnecting.
 |---|---|---|
 | `min_reconnect_delay` | 500 ms | Lower bound of the reconnect delay |
 | `max_reconnect_delay` | 20 s | Upper bound of the reconnect delay |
-| `timeout` | 5 s | Time allowed from opening the transport to the connect reply |
+| `timeout` | 5 s | Time allowed from opening the transport to the connect reply, for a websocket frame to be written (a server that stops reading then counts as a lost connection), and for closing a websocket |
 | `name` | `ferrifuge` | Client name reported to the server |
 | `version` | crate version | Client version reported to the server |
 | `token` | empty | Connection token sent with the first connect |
