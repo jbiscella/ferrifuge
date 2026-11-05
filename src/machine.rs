@@ -403,6 +403,9 @@ pub enum Input {
     /// [`Action::EmitSubscription`] from its stream, or the event was
     /// delivered at once because no stream was taking that object's events.
     EventTaken(EventId),
+    /// An event of [`Action::Withdraw`] was dropped without being
+    /// delivered.
+    EventWithdrawn(EventId),
 }
 
 /// Something the owner of the machine must do.
@@ -457,9 +460,11 @@ pub enum Action {
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
-    /// Never deliver these events, emitted and not yet taken: publications
-    /// of a subscription that left `subscribed`, which recovery brings back
-    /// (Block 15).
+    /// Never deliver these events, emitted and not yet reported taken:
+    /// publications of a subscription that left `subscribed`, which
+    /// recovery brings back (Block 15). Answer each with
+    /// [`Input::EventTaken`] if it was delivered already, or with
+    /// [`Input::EventWithdrawn`] once dropped.
     Withdraw(Vec<EventId>),
     /// Ask the subscription's data callback for the data of its next
     /// subscribe command; report the answer with
@@ -580,6 +585,7 @@ impl std::fmt::Debug for Input {
                 .field("result", result)
                 .finish(),
             Self::EventTaken(id) => f.debug_tuple("EventTaken").field(id).finish(),
+            Self::EventWithdrawn(id) => f.debug_tuple("EventWithdrawn").field(id).finish(),
         }
     }
 }
@@ -917,6 +923,7 @@ impl Machine {
                 self.subscription_state_fetched(fetch, result);
             }
             Input::EventTaken(id) => self.event_taken(id),
+            Input::EventWithdrawn(id) => self.event_withdrawn(id),
             // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
