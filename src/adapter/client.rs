@@ -401,6 +401,7 @@ impl Client {
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
+        check_read_ahead(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
         let machine = if get_token.is_some() {
@@ -631,6 +632,10 @@ impl Driver {
                 lock(&self.shared.callbacks).0.clear();
                 return;
             }
+            // A full read-ahead stops the reading: the server's handling of
+            // slow clients acts instead (Block 15). Taking an event wakes
+            // the loop.
+            let reading = lock(&self.shared.core).machine.wants_frames();
             let input = tokio::select! {
                 // Queued by an API call; performed at the top of the loop.
                 () = self.shared.actions_queued.notified() => continue,
@@ -644,7 +649,7 @@ impl Driver {
                         Err(message) => Input::TransportFailed { transport: id, message },
                     }
                 }
-                (id, inbound) = received(&mut self.transport) => match inbound {
+                (id, inbound) = received(&mut self.transport), if reading => match inbound {
                     Inbound::Frame(data) => Input::Frame { transport: id, data },
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Closed { code, reason } => {
@@ -978,6 +983,19 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
         code: codes::error::BAD_CONFIGURATION,
         message,
         transport: Some(kind.name().to_owned()),
+    })
+}
+
+/// A read-ahead limit of 0 could never let a message in (Block 15).
+fn check_read_ahead(config: &Config) -> Result<(), ClientError> {
+    if config.read_ahead_messages > 0 && config.read_ahead_bytes > 0 {
+        return Ok(());
+    }
+    Err(ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: "the read-ahead limits must be at least 1".to_owned(),
+        transport: None,
     })
 }
 

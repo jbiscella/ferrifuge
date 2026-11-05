@@ -111,6 +111,20 @@ impl Subscription {
 
 impl Subscriptions {
     /// Whether `id` is the id of a subscribe or unsubscribe command.
+    /// The subscription and the reply deadline of command `id`, if it is a
+    /// subscription's command awaiting its reply.
+    pub(super) fn reply_timer(&self, id: u32) -> Option<(SubscriptionId, SubscriptionTimer)> {
+        if let Some((sub, _)) = self.subscribes.get(&id) {
+            return Some((*sub, SubscriptionTimer::SubscribeReply));
+        }
+        if let Some((sub, _)) = self.unsubscribes.get(&id) {
+            return Some((*sub, SubscriptionTimer::UnsubscribeReply));
+        }
+        self.sub_refreshes
+            .get(&id)
+            .map(|sub| (*sub, SubscriptionTimer::RefreshReply))
+    }
+
     pub(super) fn owns_command(&self, id: u32) -> bool {
         self.subscribes.contains_key(&id)
             || self.unsubscribes.contains_key(&id)
@@ -1007,12 +1021,19 @@ mod tests {
 
     /// Subscribes `id` over `transport`, the server answering command 2
     /// with a recoverable stream at offset 0 of epoch "e".
+    /// The events with a stream to take them wait to be taken before the
+    /// next message is handled (Block 15): the subscribe's are taken.
     fn subscribed_recoverable(machine: &mut Machine, transport: TransportId, id: SubscriptionId) {
         machine.handle(Input::Subscribe(id));
-        machine.handle(Input::Frame {
+        let replied = machine.handle(Input::Frame {
             transport,
             data: br#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":0}}"#.to_vec(),
         });
+        for action in replied {
+            if let Action::EmitSubscription(event, ..) | Action::Emit(event, _) = action {
+                machine.handle(Input::EventTaken(event));
+            }
+        }
     }
 
     /// The ids of the publications emitted among `actions`, in order.
@@ -1117,24 +1138,34 @@ mod tests {
         assert_eq!(offset_of(&machine, id), Some(0));
     }
 
-    // Codex on PR #64: state invalidation withdraws the publications not
-    // yet taken, which then cannot overwrite the sentinel position.
+    // Block 15, rule X: a state invalidation read after a publication not
+    // yet taken waits for it; taken, it moves the position, which the
+    // invalidation then makes unmatchable.
     #[test]
-    fn state_invalidation_withdraws_the_publications_not_yet_taken() {
+    fn a_state_invalidation_waits_for_the_publication_before_it() {
         let (mut machine, transport, id) = connected();
         machine.handle(Input::StreamOpened(Some(id)));
         subscribed_recoverable(&mut machine, transport, id);
         let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
 
-        let invalidated = machine.handle(Input::Frame {
+        let held = machine.handle(Input::Frame {
             transport,
             data: br#"{"push":{"disconnect":{"code":3014,"reason":"state invalidated"}}}"#.to_vec(),
         });
-        machine.handle(Input::EventTaken(publication));
+        let read_ahead = machine.read_ahead();
+        let taken = machine.handle(Input::EventTaken(publication));
 
         assert!(
-            invalidated.contains(&Action::Withdraw(vec![publication])),
-            "{invalidated:?}"
+            !held.iter().any(|action| matches!(action, Action::Emit(..))),
+            "{held:?}"
+        );
+        assert_eq!(read_ahead.0, 1);
+        assert!(
+            taken.iter().any(|action| matches!(
+                action,
+                Action::Emit(_, crate::ClientEvent::Connecting { .. })
+            )),
+            "{taken:?}"
         );
         let position = machine.subscriptions.by_id[&id].position.clone();
         assert_eq!(

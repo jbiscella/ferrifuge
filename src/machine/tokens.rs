@@ -182,6 +182,11 @@ impl Tokens {
 
     /// Whether `id` answers the pending refresh command, which it no
     /// longer is afterwards.
+    /// Whether the refresh command `id` awaits its reply.
+    pub(super) fn awaits_refresh_reply(&self, id: u32) -> bool {
+        self.refresh_command == Some(id)
+    }
+
     pub(super) fn take_refresh_reply(&mut self, id: u32) -> bool {
         self.refresh_command
             .take_if(|pending| *pending == id)
