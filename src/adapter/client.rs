@@ -283,7 +283,7 @@ impl Client {
             check_endpoint(*kind, endpoint)?;
         }
         let subprotocol = config.protocol.websocket_subprotocol();
-        let request_timeout = config.timeout;
+        let timeout = config.timeout;
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
         } else {
@@ -308,7 +308,7 @@ impl Client {
                 .collect(),
             subprotocol,
             emulation_endpoint,
-            request_timeout,
+            timeout,
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
@@ -379,8 +379,9 @@ struct Driver {
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
     emulation_endpoint: Option<String>,
-    /// Time allowed for an emulation request (`Config::timeout`).
-    request_timeout: Duration,
+    /// Time allowed for an emulation request, and for writing a websocket
+    /// frame or closing a websocket (`Config::timeout`).
+    timeout: Duration,
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
@@ -474,7 +475,7 @@ impl Driver {
     async fn run(mut self) {
         loop {
             while let Some(action) = self.shared.next_action() {
-                self.perform(action).await;
+                self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
                 // Handles of subscriptions may outlive the client: end
@@ -533,7 +534,7 @@ impl Driver {
         }
     }
 
-    async fn perform(&mut self, action: Action) {
+    fn perform(&mut self, action: Action) {
         match action {
             Action::OpenTransport {
                 transport: id,
@@ -543,15 +544,16 @@ impl Driver {
             } => {
                 let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
                 let subprotocol = self.subprotocol;
+                let timeout = self.timeout;
                 let opening: Opening = match kind {
                     TransportKind::WebSocket => Box::pin(async move {
-                        WebSocket::open(&url, subprotocol)
+                        WebSocket::open(&url, subprotocol, timeout)
                             .await
                             .map(|websocket| Transport::WebSocket(Box::new(websocket)))
                     }),
                     TransportKind::HttpStream | TransportKind::Sse => {
                         let emulation = self.emulation_endpoint.clone();
-                        let request_timeout = self.request_timeout;
+                        let request_timeout = self.timeout;
                         Box::pin(async move {
                             HttpTransport::open(
                                 kind,
@@ -586,7 +588,7 @@ impl Driver {
             } => {
                 if let Some((id, open)) = &mut self.transport
                     && *id == transport
-                    && open.send(frame, frame_type).await.is_err()
+                    && open.send(frame, frame_type).is_err()
                 {
                     self.transport = None;
                     self.shared.apply(Input::TransportClosed {
@@ -766,9 +768,10 @@ enum Transport {
 }
 
 impl Transport {
-    async fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
+    /// Queues `frame`; it is written while [`Transport::recv`] runs.
+    fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
         match self {
-            Self::WebSocket(websocket) => websocket.send(frame, frame_type).await,
+            Self::WebSocket(websocket) => websocket.send(frame, frame_type),
             // Failures end the transport through `recv`.
             Self::Http(http) => {
                 http.send(frame);

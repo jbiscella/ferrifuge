@@ -1,24 +1,42 @@
 //! Websocket transport of the tokio adapter.
 
+use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use rustls::crypto::CryptoProvider;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use tokio::net::TcpStream;
+use tokio::time::{Instant, Sleep};
 
 use crate::machine::FrameType;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 /// An open websocket connection to the server.
+///
+/// Writing never blocks the caller: frames are queued by [`WebSocket::send`]
+/// and written while [`WebSocket::recv`] waits for the server, so a server
+/// that stops reading cannot freeze the client (Block 8).
 pub(crate) struct WebSocket {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    /// Frames not yet handed to the stream, with the time each was queued.
+    queue: VecDeque<(Message, Instant)>,
+    /// When the frame being written was queued; none when no write is under way.
+    writing: Option<Instant>,
+    /// Fires [`WebSocket::timeout`] after the oldest frame not yet written
+    /// was queued.
+    deadline: Pin<Box<Sleep>>,
+    /// Bound on writing a frame, and on closing (`Config::timeout`).
+    timeout: Duration,
 }
 
 /// What the server sent, as far as the client protocol is concerned.
@@ -35,8 +53,13 @@ pub(crate) enum Inbound {
 
 impl WebSocket {
     /// Opens a connection to `url` (`ws://` or `wss://`), asking for
-    /// `subprotocol` if any.
-    pub(crate) async fn open(url: &str, subprotocol: Option<&str>) -> Result<Self, String> {
+    /// `subprotocol` if any. A frame not written within `timeout` of being
+    /// queued ends the connection, and closing it takes at most `timeout`.
+    pub(crate) async fn open(
+        url: &str,
+        subprotocol: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
             .get(..6)
@@ -57,45 +80,114 @@ impl WebSocket {
             tokio_tungstenite::connect_async_tls_with_config(request, None, true, Some(connector))
                 .await
                 .map_err(|e| e.to_string())?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            queue: VecDeque::new(),
+            writing: None,
+            deadline: Box::pin(tokio::time::sleep(timeout)),
+            timeout,
+        })
     }
 
-    /// Sends one frame of encoded commands as a text or binary message.
-    pub(crate) async fn send(
-        &mut self,
-        frame: Vec<u8>,
-        frame_type: FrameType,
-    ) -> Result<(), String> {
+    /// Queues one frame of encoded commands, to go out as a text or binary
+    /// message while [`WebSocket::recv`] runs.
+    pub(crate) fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
         let message = match frame_type {
             FrameType::Text => Message::text(String::from_utf8(frame).map_err(|e| e.to_string())?),
             FrameType::Binary => Message::binary(frame),
         };
-        self.stream.send(message).await.map_err(|e| e.to_string())
+        self.queue.push_back((message, Instant::now()));
+        Ok(())
     }
 
-    /// Waits for the next frame or for the end of the connection.
-    /// Cancel-safe: dropping the future loses no message.
+    /// Writes the queued frames while waiting for the next frame or for the
+    /// end of the connection, which a failed write, or a frame not written
+    /// in time, also is. Cancel-safe: dropping the future loses no message.
     pub(crate) async fn recv(&mut self) -> Inbound {
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Inbound> {
+        let lost = Inbound::Closed {
+            code: None,
+            reason: String::new(),
+        };
+        if let Poll::Ready(Err(_)) = self.poll_write(cx) {
+            return Poll::Ready(lost);
+        }
+        if let Some(queued) = self
+            .writing
+            .or(self.queue.front().map(|(_, queued)| *queued))
+        {
+            let deadline = queued + self.timeout;
+            if self.deadline.deadline() != deadline {
+                self.deadline.as_mut().reset(deadline);
+            }
+            if self.deadline.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(lost);
+            }
+        }
         loop {
-            let Some(Ok(message)) = self.stream.next().await else {
-                return Inbound::Closed {
-                    code: None,
-                    reason: String::new(),
-                };
+            let Some(Ok(message)) = ready!(self.stream.poll_next_unpin(cx)) else {
+                return Poll::Ready(lost);
             };
             match message {
-                Message::Text(text) => return Inbound::Frame(text.as_bytes().to_vec()),
-                Message::Binary(bytes) => return Inbound::Frame(bytes.to_vec()),
-                Message::Close(frame) => return closed(frame),
+                Message::Text(text) => {
+                    return Poll::Ready(Inbound::Frame(text.as_bytes().to_vec()));
+                }
+                Message::Binary(bytes) => return Poll::Ready(Inbound::Frame(bytes.to_vec())),
+                Message::Close(frame) => return Poll::Ready(closed(frame)),
                 // Websocket-level keepalive is answered by tungstenite itself.
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
             }
         }
     }
 
-    /// Closes the connection, ignoring failures: it is abandoned either way.
+    /// Writes the queued frames one at a time, each flushed before the next
+    /// is handed to the stream, so that a written frame is one the network
+    /// took. Ready once every queued frame is written.
+    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        loop {
+            if self.writing.is_some() {
+                ready!(self.stream.poll_flush_unpin(cx))?;
+                self.writing = None;
+            }
+            if self.queue.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            ready!(self.stream.poll_ready_unpin(cx))?;
+            let (message, queued) = self.queue.pop_front().expect("the queue is not empty");
+            self.stream.start_send_unpin(message)?;
+            self.writing = Some(queued);
+        }
+    }
+
+    /// Writes the queued frames, then closes the connection, within the
+    /// timeout; past it, the connection is aborted. Failures are ignored: the
+    /// connection is abandoned either way.
     pub(crate) async fn close(mut self) {
-        let _ = self.stream.close(None).await;
+        let timeout = self.timeout;
+        let closing = tokio::time::timeout(timeout, async {
+            std::future::poll_fn(|cx| self.poll_write(cx)).await?;
+            self.stream.close(None).await
+        })
+        .await;
+        if closing.is_err() {
+            self.abort();
+        }
+    }
+
+    /// Drops the connection with a TCP reset, discarding the data the server
+    /// never read, rather than leaving the system to keep trying to send it.
+    fn abort(self) {
+        let tcp = match self.stream.get_ref() {
+            MaybeTlsStream::Plain(tcp) => Some(tcp),
+            MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0),
+            _ => None,
+        };
+        if let Some(tcp) = tcp {
+            let _ = tcp.set_zero_linger();
+        }
     }
 }
 
@@ -176,6 +268,8 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
     /// Starts a server that echoes one text message, then closes with `code`.
     async fn echo_then_close(code: u16, reason: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -198,11 +292,9 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url, None).await.unwrap();
+        let mut ws = WebSocket::open(&url, None, TIMEOUT).await.unwrap();
 
-        ws.send(b"{\"id\":1}".to_vec(), FrameType::Text)
-            .await
-            .unwrap();
+        ws.send(b"{\"id\":1}".to_vec(), FrameType::Text).unwrap();
         let echoed = ws.recv().await;
         let closed = ws.recv().await;
 
@@ -233,13 +325,13 @@ mod tests {
                 ws.send(Message::text(kind)).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
             .await
             .unwrap();
 
-        ws.send(b"{}".to_vec(), FrameType::Text).await.unwrap();
+        ws.send(b"{}".to_vec(), FrameType::Text).unwrap();
         let text = ws.recv().await;
-        ws.send(vec![0xff, 0x00], FrameType::Binary).await.unwrap();
+        ws.send(vec![0xff, 0x00], FrameType::Binary).unwrap();
         let binary = ws.recv().await;
 
         assert_eq!(text, Inbound::Frame(b"text".to_vec()));
@@ -252,7 +344,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         drop(listener);
 
-        let result = WebSocket::open(&format!("ws://{address}"), None).await;
+        let result = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT).await;
 
         assert!(result.is_err());
     }
