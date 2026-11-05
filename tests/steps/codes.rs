@@ -7,7 +7,7 @@ use ferrifuge::{ClientEvent, State};
 use serde_json::json;
 
 use super::connection::a_connected_client;
-use super::{ClientWorld, EVENT_TIMEOUT};
+use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD};
 use crate::support::proxy;
 
 #[given("a client connected to the fake server")]
@@ -113,6 +113,35 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
         world.state_event = Some(event);
         return;
     }
+}
+
+#[then(regex = r#"^the client emits "disconnected" with code (\d+) and reason "([^"]*)"$"#)]
+async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
+    loop {
+        let event = world.next_event().await;
+        match event {
+            ClientEvent::Disconnected {
+                code: got,
+                reason: got_reason,
+            } => {
+                assert_eq!((got, got_reason.as_str()), (code, reason.as_str()));
+                return;
+            }
+            ClientEvent::Connecting { .. } | ClientEvent::Connected { .. } => {
+                panic!("expected disconnected, got {event:?}");
+            }
+            // Errors and events added later.
+            _ => {}
+        }
+    }
+}
+
+#[then("the client makes no new connection attempt")]
+async fn no_new_connection_attempt(world: &mut ClientWorld) {
+    let relay = world.relay.as_ref().expect("the relay");
+    let before = relay.connections();
+    tokio::time::sleep(QUIET_PERIOD).await;
+    assert_eq!(relay.connections(), before);
 }
 
 #[then(regex = r"^the event carries code (\d+) and the reason sent$")]
