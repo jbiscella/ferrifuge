@@ -131,6 +131,11 @@ reading a stream makes the client stop reading the connection once
 still answered and commands still sent. The server's handling of slow
 clients then decides; on channels with history and recovery, recovery
 delivers what was missed, exactly once, within the server's recovery limit.
+On channels without recovery a slow consumer can lose publications, as with
+any disconnect. A stream holding 256 events not taken gets no further
+`error` events, which change no state, so retries against a server that is
+down do not grow it; events caused by the application's own calls, such as
+cycling `connect()` and `disconnect()`, still go to it.
 A stream borrows nothing from the client, so it can be kept beside it, e.g.
 in the same struct. Dropping the client disconnects it
 and ends its streams. `Client::new` and a builder that cannot work return a
