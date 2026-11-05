@@ -383,6 +383,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_frame_still_queued_past_the_timeout_is_not_written_late() {
+        // The server reads everything and reports the first text message.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                if let Message::Text(text) = message {
+                    return Some(text.to_string());
+                }
+            }
+            None
+        });
+        let timeout = Duration::from_millis(100);
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
+            .await
+            .unwrap();
+        ws.send(b"late".to_vec(), FrameType::Text).unwrap();
+        // The client is not polled until the frame is overdue, while the
+        // socket could take it at any time.
+        tokio::time::sleep(timeout * 2).await;
+
+        let overdue = tokio::time::timeout(TIMEOUT, ws.recv()).await;
+        drop(ws);
+        let received = server.await.unwrap();
+
+        assert_eq!(
+            overdue,
+            Ok(Inbound::Closed {
+                code: None,
+                reason: String::new()
+            })
+        );
+        assert_eq!(received, None);
+    }
+
+    #[tokio::test]
     async fn open_fails_on_refused_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
