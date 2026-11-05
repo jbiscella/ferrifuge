@@ -214,6 +214,9 @@ const IMPLEMENTED: &[&str] = &[
     "A subscribe reply waiting behind a publication not taken does not time out",
     "The connection token is refreshed while a stream is not read",
     "A slow consumer on a channel with history and recovery loses no publication",
+    // Block 15, sub-increment 15c.
+    "A client stream not read keeps every state change but drops errors past 256 untaken events",
+    "A subscription stream not read drops errors past 256 untaken events",
 ];
 
 /// Server configuration of @A scenarios.

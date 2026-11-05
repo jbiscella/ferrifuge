@@ -50,6 +50,8 @@ pub(crate) struct Delivery {
     config: Option<ferrifuge::Config>,
     /// Events the application read in one go.
     yielded: Vec<SubscriptionEvent>,
+    /// The core of a 15c scenario.
+    unread: Option<UnreadCore>,
 }
 
 impl Delivery {
@@ -1126,4 +1128,213 @@ async fn connected_with_an_expiring_token(world: &mut ClientWorld, seconds: u32)
     world.client().connect();
     let client = world.client();
     wait_until("connected", || client.state() == State::Connected).await;
+}
+
+// Block 15, sub-increment 15c: errors past 256 untaken events.
+
+/// The sans-IO core of a 15c scenario, whose streams are open and never
+/// read: every event it emits stays untaken.
+pub(crate) struct UnreadCore {
+    machine: ferrifuge::machine::Machine,
+    transport: Option<ferrifuge::machine::TransportId>,
+    subscription: Option<ferrifuge::machine::SubscriptionId>,
+    /// The events emitted, in order: what reading the stream yields.
+    client_events: Vec<ClientEvent>,
+    subscription_events: Vec<SubscriptionEvent>,
+    /// The data callback's fetch awaiting its answer.
+    fetch: Option<ferrifuge::machine::FetchId>,
+    /// The commands sent, encoded.
+    sent: Vec<Vec<u8>>,
+}
+
+impl UnreadCore {
+    fn new() -> Self {
+        Self {
+            machine: ferrifuge::machine::Machine::new(super::test_config()),
+            transport: None,
+            subscription: None,
+            client_events: Vec::new(),
+            subscription_events: Vec::new(),
+            fetch: None,
+            sent: Vec::new(),
+        }
+    }
+
+    fn handle(&mut self, input: ferrifuge::machine::Input) {
+        use ferrifuge::machine::Action;
+        for action in self.machine.handle(input) {
+            match action {
+                Action::Emit(_, event) => self.client_events.push(event),
+                Action::EmitSubscription(_, _, event) => self.subscription_events.push(event),
+                Action::OpenTransport { transport, .. } => self.transport = Some(transport),
+                Action::FetchSubscriptionData { fetch, .. } => self.fetch = Some(fetch),
+                Action::Send { frame, .. } => self.sent.push(frame),
+                _ => {}
+            }
+        }
+    }
+
+    /// The id of the last command sent.
+    fn last_command_id(&self) -> u64 {
+        let frame = self.sent.last().expect("a command sent");
+        let command: Value = serde_json::from_slice(frame).expect("a JSON command");
+        command["id"].as_u64().expect("an id")
+    }
+
+    /// Opens the transport just requested and answers the connect.
+    fn connects(&mut self) {
+        use ferrifuge::machine::Input;
+        let transport = self.transport.expect("a transport to open");
+        self.handle(Input::TransportOpened(transport));
+        let id = self.last_command_id();
+        self.handle(Input::Frame {
+            transport,
+            data: format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#).into_bytes(),
+        });
+    }
+}
+
+fn unread_core(world: &mut ClientWorld) -> &mut UnreadCore {
+    world.delivery.unread.as_mut().expect("the scenario's core")
+}
+
+/// The names yielded: runs of `error` counted, e.g. `["connecting", "255
+/// error", "connected"]`.
+fn names_with_errors_counted<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut errors = 0;
+    for name in names {
+        if name == "error" {
+            errors += 1;
+            continue;
+        }
+        if errors > 0 {
+            out.push(format!("{errors} error"));
+            errors = 0;
+        }
+        out.push(name.to_owned());
+    }
+    if errors > 0 {
+        out.push(format!("{errors} error"));
+    }
+    out
+}
+
+#[given(
+    "a client whose stream was taken before connect is called and is not read, and whose server is unreachable"
+)]
+fn an_unread_client(world: &mut ClientWorld) {
+    let mut core = UnreadCore::new();
+    core.handle(ferrifuge::machine::Input::StreamOpened(None));
+    world.delivery.unread = Some(core);
+}
+
+#[when(regex = r"^(\d+) connection attempts fail$")]
+fn connection_attempts_fail(world: &mut ClientWorld, attempts: usize) {
+    use ferrifuge::machine::{Input, Timer};
+    let core = unread_core(world);
+    core.handle(Input::Connect);
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            core.handle(Input::TimerFired(Timer::Reconnect));
+        }
+        let transport = core.transport.expect("a transport to open");
+        core.handle(Input::TransportFailed {
+            transport,
+            message: "refused".into(),
+        });
+    }
+}
+
+#[when("the server becomes reachable and the client connects")]
+fn the_server_becomes_reachable(world: &mut ClientWorld) {
+    let core = unread_core(world);
+    core.handle(ferrifuge::machine::Input::TimerFired(
+        ferrifuge::machine::Timer::Reconnect,
+    ));
+    core.connects();
+}
+
+#[given(
+    "a connected client with a subscription whose stream was taken before subscribe is called and is not read, and whose get_data callback fails"
+)]
+fn an_unread_subscription(world: &mut ClientWorld) {
+    use ferrifuge::machine::{Input, SubscriptionOptions};
+    let mut core = UnreadCore::new();
+    core.handle(Input::Connect);
+    core.connects();
+    let mut options = SubscriptionOptions::default();
+    options.data_source = true;
+    let id = core
+        .machine
+        .add_subscription("news".into(), options)
+        .expect("a new subscription");
+    core.subscription = Some(id);
+    core.handle(Input::StreamOpened(Some(id)));
+    world.delivery.unread = Some(core);
+}
+
+#[when(regex = r"^(\d+) subscribe attempts fail$")]
+fn subscribe_attempts_fail(world: &mut ClientWorld, attempts: usize) {
+    use ferrifuge::machine::{Input, SubscriptionTimer};
+    let core = unread_core(world);
+    let id = core.subscription.expect("the subscription");
+    core.handle(Input::Subscribe(id));
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            core.handle(Input::SubscriptionTimerFired(
+                id,
+                SubscriptionTimer::Resubscribe,
+            ));
+        }
+        let fetch = core.fetch.take().expect("a data fetch");
+        core.handle(Input::SubscriptionDataFetched {
+            fetch,
+            result: Err(ferrifuge::DataError::Failed("backend down".into())),
+        });
+    }
+}
+
+#[when("the get_data callback succeeds and the subscription subscribes")]
+fn the_data_callback_succeeds(world: &mut ClientWorld) {
+    use ferrifuge::machine::{Input, SubscriptionTimer};
+    let core = unread_core(world);
+    let id = core.subscription.expect("the subscription");
+    core.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    let fetch = core.fetch.take().expect("a data fetch");
+    core.handle(Input::SubscriptionDataFetched {
+        fetch,
+        result: Ok(b"{}".to_vec()),
+    });
+    let command = core.last_command_id();
+    let transport = core.transport.expect("the transport");
+    core.handle(Input::Frame {
+        transport,
+        data: format!(r#"{{"id":{command},"subscribe":{{}}}}"#).into_bytes(),
+    });
+}
+
+#[then(regex = r#"^reading the stream yields "(\w+)", (\d+) error events, then "(\w+)"$"#)]
+fn the_client_stream_yields(world: &mut ClientWorld, first: String, errors: usize, last: String) {
+    let core = unread_core(world);
+    let names = names_with_errors_counted(core.client_events.iter().map(ClientEvent::name));
+    assert_eq!(names, [first, format!("{errors} error"), last]);
+}
+
+#[then(
+    regex = r#"^reading the subscription's stream yields "(\w+)", (\d+) error events, then "(\w+)"$"#
+)]
+fn the_subscription_stream_yields_errors(
+    world: &mut ClientWorld,
+    first: String,
+    errors: usize,
+    last: String,
+) {
+    let core = unread_core(world);
+    let names =
+        names_with_errors_counted(core.subscription_events.iter().map(SubscriptionEvent::name));
+    assert_eq!(names, [first, format!("{errors} error"), last]);
 }
