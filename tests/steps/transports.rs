@@ -3,11 +3,15 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::{Action, Input, Machine, Timer, TransportKind};
-use ferrifuge::{Client, ClientEvent, Config, ErrorKind, Protocol, codes};
+use ferrifuge::{
+    Client, ClientEvent, Config, ErrorKind, Protocol, SubscriptionEvent, TokenError, codes,
+};
+use serde_json::json;
 
 use super::tls::a_tls_server;
 use super::token::with_expiring_token;
@@ -26,6 +30,13 @@ const UNREACHABLE_SSE: &str = "http://127.0.0.1:1/connection/sse";
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
+/// Size of the subscription token that fills the stalled connection: well
+/// above what the client's socket, the counting relay and the fake server's
+/// socket buffer together (about 11 MiB measured on Linux loopback).
+const STALLING_TOKEN_SIZE: usize = 32 << 20;
+/// Lifetime of the subscription token, in seconds, after which the client
+/// sends the large one in a `sub_refresh`.
+const STALLING_TOKEN_TTL: u32 = 2;
 
 pub(super) fn kind(name: &str) -> TransportKind {
     match name {
@@ -465,4 +476,82 @@ fn building_fails(world: &mut ClientWorld, transport: String) {
         "{error:?}"
     );
     assert_eq!(error.transport.as_deref(), Some(transport.as_str()));
+}
+
+/// Before the server stops reading, the client subscribes with a token
+/// callback whose next token, sent in a `sub_refresh` when the first
+/// expires, is larger than the connection can buffer. A `sub_refresh`
+/// without a reply is retried (Block 10) rather than ending the connection,
+/// unlike a subscribe (code 3), so only the stalled write can end it.
+#[given("the fake server stops reading from the connection")]
+async fn the_fake_server_stops_reading(world: &mut ClientWorld) {
+    let calls = Arc::clone(&world.token_calls);
+    let subscription = world
+        .client()
+        .subscription_builder("stall")
+        .get_token(move |channel: String| {
+            let mut calls = calls.lock().unwrap();
+            calls.push(channel);
+            let token = if calls.len() == 1 {
+                "first".to_owned()
+            } else {
+                "t".repeat(STALLING_TOKEN_SIZE)
+            };
+            std::future::ready(Ok::<_, TokenError>(token))
+        })
+        .build()
+        .expect("no subscription yet");
+    world.track_subscription(subscription);
+    world
+        .fake()
+        .answer_a_subscribe_with(json!({"expires": true, "ttl": STALLING_TOKEN_TTL}));
+    world.subscription().subscribe();
+    let subscribed = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while !matches!(
+            world.next_subscription_event(false).await,
+            SubscriptionEvent::Subscribed(_)
+        ) {}
+    })
+    .await;
+    assert!(subscribed.is_ok(), "{:?}", world.subscription());
+    world.fake().stop_reading();
+}
+
+#[when("the client sends more data than the connection can buffer")]
+#[given("the client has sent more data than the connection can buffer")]
+async fn the_client_sends_more_than_can_be_buffered(world: &mut ClientWorld) {
+    let limit = Duration::from_secs(STALLING_TOKEN_TTL.into()) + EVENT_TIMEOUT;
+    let fetched = tokio::time::timeout(limit, async {
+        while world.token_calls.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(fetched.is_ok(), "the large token was never fetched");
+    // Leaves the client time to encode the sub_refresh and start writing it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+#[then(r#"the client emits "disconnected" before the configured timeout"#)]
+async fn disconnected_before_the_timeout(world: &mut ClientWorld) {
+    let limit = test_config().timeout;
+    let event = tokio::time::timeout(limit, world.next_event())
+        .await
+        .unwrap_or_else(|_| panic!("no event within {limit:?}"));
+    assert!(
+        matches!(event, ClientEvent::Disconnected { .. }),
+        "{event:?}"
+    );
+}
+
+#[then("the fake server sees the connection closed within the configured timeout plus tolerance")]
+async fn the_fake_server_sees_the_connection_closed(world: &mut ClientWorld) {
+    let limit = test_config().timeout + TOLERANCE;
+    let closed = tokio::time::timeout(limit, async {
+        while world.fake().closed_connections() < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the connection is still open after {limit:?}");
 }
