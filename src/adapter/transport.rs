@@ -312,17 +312,24 @@ pub(super) fn tls_config() -> Result<Arc<ClientConfig>, String> {
     })
 }
 
-/// A value built once per process, at first use, and shared (Block 6).
-pub(super) struct BuildOnce<T>(OnceLock<Result<T, String>>);
+/// A value built at first use and shared by the process; a build that
+/// fails is not kept, so the next use builds again (Block 6, review item
+/// C7).
+pub(super) struct BuildOnce<T>(OnceLock<T>);
 
 impl<T: Clone> BuildOnce<T> {
     pub(super) const fn new() -> Self {
         Self(OnceLock::new())
     }
 
-    /// The value, built by `build` at the first call.
+    /// The value, built by `build` unless an earlier build succeeded. Two
+    /// first uses racing may both build; one value is kept.
     pub(super) fn get(&self, build: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        self.0.get_or_init(build).clone()
+        if let Some(value) = self.0.get() {
+            return Ok(value.clone());
+        }
+        let value = build()?;
+        Ok(self.0.get_or_init(|| value).clone())
     }
 }
 
