@@ -714,6 +714,9 @@ struct Pings {
     pong: bool,
 }
 
+/// Websocket close code "message too big" (RFC 6455).
+const MESSAGE_TOO_BIG: u32 = 1009;
+
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
@@ -1058,6 +1061,14 @@ impl Machine {
                 self.server_answered();
                 self.disconnect(code, reason, reconnect_advised(code));
             }
+            // "Message too big": a reconnect would send the same data again
+            // (Block 3, review item C4; centrifuge-js 63ed73e
+            // `centrifuge.ts:1310-1313`).
+            Some(MESSAGE_TOO_BIG) => self.disconnect(
+                codes::disconnected::MESSAGE_SIZE_LIMIT,
+                subscriptions::MESSAGE_SIZE_LIMIT_REASON,
+                false,
+            ),
             _ if self.state == State::Connecting && !self.transport_open => {
                 self.transport_failed("transport closed".to_owned());
             }
@@ -1899,6 +1910,27 @@ mod tests {
                 reason: "transport closed".into()
             }]
         );
+    }
+
+    #[test]
+    fn close_code_1009_is_a_terminal_message_size_limit() {
+        let (mut machine, transport) = awaiting_connect_reply();
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        let actions = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(1009),
+            reason: "message too big".into(),
+        });
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Disconnected {
+                code: codes::disconnected::MESSAGE_SIZE_LIMIT,
+                reason: "message size limit exceeded".into()
+            }]
+        );
+        assert_eq!(machine.state(), State::Disconnected);
     }
 
     #[test]
