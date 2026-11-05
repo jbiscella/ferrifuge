@@ -123,7 +123,7 @@ impl Machine {
         let position = replied
             .as_ref()
             .map(|replied| Machine::reply_baseline(replied, &result.publications));
-        self.discard_commits(&Owner::Server(channel.to_owned()));
+        self.withdraw(&Owner::Server(channel.to_owned()));
         self.server_subscriptions.by_channel.insert(
             channel.to_owned(),
             ServerSubscription {
@@ -190,7 +190,7 @@ impl Machine {
             channels.push(channel.clone());
         }
         for channel in channels {
-            self.discard_commits(&Owner::Server(channel));
+            self.withdraw(&Owner::Server(channel));
         }
     }
 
