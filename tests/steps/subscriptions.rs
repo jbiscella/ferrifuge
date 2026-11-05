@@ -1068,7 +1068,7 @@ impl MachineRun {
         self.actions
             .iter()
             .filter_map(|action| match action {
-                Action::EmitSubscription(_, event) => Some(event),
+                Action::EmitSubscription(_, _, event) => Some(event),
                 _ => None,
             })
             .collect()

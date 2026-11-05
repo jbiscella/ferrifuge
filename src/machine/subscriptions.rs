@@ -909,7 +909,9 @@ impl Machine {
     }
 
     fn emit_subscription(&mut self, id: SubscriptionId, event: SubscriptionEvent) {
-        self.actions.push(Action::EmitSubscription(id, event));
+        let event_id = self.event_id();
+        self.actions
+            .push(Action::EmitSubscription(event_id, id, event));
     }
 }
 
@@ -918,8 +920,23 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::machine::{Input, Timer, TransportId, TransportKind};
+    use crate::machine::{EventId, Input, Timer, TransportId, TransportKind};
     use crate::{Config, StateError, TokenError};
+
+    /// `actions` with every event id 0, to compare emitted events by value.
+    fn without_ids(actions: &[Action]) -> Vec<Action> {
+        actions
+            .iter()
+            .cloned()
+            .map(|action| match action {
+                Action::Emit(_, event) => Action::Emit(EventId(0), event),
+                Action::EmitSubscription(_, id, event) => {
+                    Action::EmitSubscription(EventId(0), id, event)
+                }
+                action => action,
+            })
+            .collect()
+    }
 
     /// A machine connected over a transport, with a subscription to "news".
     fn connected() -> (Machine, TransportId, SubscriptionId) {
@@ -1338,7 +1355,7 @@ mod tests {
 
     fn reconnect_code(actions: &[Action]) -> Option<u32> {
         actions.iter().find_map(|action| match action {
-            Action::Emit(crate::ClientEvent::Connecting { code, .. }) => Some(*code),
+            Action::Emit(_, crate::ClientEvent::Connecting { code, .. }) => Some(*code),
             _ => None,
         })
     }
@@ -1509,7 +1526,8 @@ mod tests {
         });
 
         assert!(
-            rejected.contains(&Action::EmitSubscription(
+            without_ids(&rejected).contains(&Action::EmitSubscription(
+                EventId(0),
                 id,
                 SubscriptionEvent::Unsubscribed {
                     code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
@@ -1546,7 +1564,7 @@ mod tests {
         assert!(
             rejected.iter().any(|action| matches!(
                 action,
-                Action::Emit(crate::ClientEvent::Connecting { code, .. })
+                Action::Emit(_, crate::ClientEvent::Connecting { code, .. })
                     if *code == codes::connecting::UNSUBSCRIBE_ERROR
             )),
             "{rejected:?}"
@@ -1567,7 +1585,8 @@ mod tests {
         });
 
         assert!(
-            rejected.contains(&Action::EmitSubscription(
+            without_ids(&rejected).contains(&Action::EmitSubscription(
+                EventId(0),
                 id,
                 SubscriptionEvent::Unsubscribed {
                     code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
@@ -1657,7 +1676,7 @@ mod tests {
         assert!(
             rejected.iter().any(|action| matches!(
                 action,
-                Action::EmitSubscription(of, SubscriptionEvent::Unsubscribed { code, .. })
+                Action::EmitSubscription(_, of, SubscriptionEvent::Unsubscribed { code, .. })
                     if *of == id && *code == codes::unsubscribed::MESSAGE_SIZE_LIMIT
             )),
             "{rejected:?}"
@@ -1701,7 +1720,8 @@ mod tests {
         ));
 
         assert!(
-            actions.contains(&Action::EmitSubscription(
+            without_ids(&actions).contains(&Action::EmitSubscription(
+                EventId(0),
                 id,
                 SubscriptionEvent::Error(ClientError {
                     kind: ErrorKind::Subscribe,
@@ -1813,7 +1833,8 @@ mod tests {
 
         assert_ne!(transport_again, transport);
         assert!(
-            unsubscribed.contains(&Action::EmitSubscription(
+            without_ids(&unsubscribed).contains(&Action::EmitSubscription(
+                EventId(0),
                 id,
                 SubscriptionEvent::Unsubscribed {
                     code: codes::unsubscribed::UNSUBSCRIBE_CALLED,

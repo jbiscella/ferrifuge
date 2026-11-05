@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use super::Machine;
 use super::subscriptions::UNMATCHABLE_EPOCH;
-use super::{Action, Machine};
 use crate::wire::{SubscribeRequest, SubscribeResult};
 use crate::{ClientEvent, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed, codes};
 
@@ -232,11 +232,10 @@ impl Machine {
     }
 
     fn emit_server_subscription(&mut self, channel: &str, event: ServerSubscriptionEvent) {
-        self.actions
-            .push(Action::Emit(ClientEvent::ServerSubscription {
-                channel: channel.to_owned(),
-                event,
-            }));
+        self.emit(ClientEvent::ServerSubscription {
+            channel: channel.to_owned(),
+            event,
+        });
     }
 }
 
@@ -244,7 +243,7 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::Config;
-    use crate::machine::{Input, Timer, TransportId};
+    use crate::machine::{Action, Input, Timer, TransportId};
 
     /// A machine over a websocket that opened; the connect command is 1.
     fn opened() -> (Machine, TransportId) {
@@ -272,7 +271,7 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::Emit(event) => Some(event),
+                Action::Emit(_, event) => Some(event),
                 _ => None,
             })
             .collect()
