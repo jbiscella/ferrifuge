@@ -31,7 +31,7 @@ Feature: Transport fallback
 
   @A
   Scenario: A transport that worked is kept on reconnect
-    Given a client configured with an unreachable websocket endpoint behind a counting relay, then the server's http_stream and sse endpoints, connected over transport "http_stream"
+    Given a client configured with a websocket endpoint behind a relay that is down and the server's http_stream and sse endpoints, connected over transport "http_stream"
     When the server disconnects the client with a reconnect-advised code
     Then the client emits "connecting" with that code and reason
     And then the client emits "connected" over transport "http_stream"
