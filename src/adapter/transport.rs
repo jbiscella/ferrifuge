@@ -375,13 +375,24 @@ mod tests {
         let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
             .await
             .unwrap();
-        // Far more than the sockets of both ends buffer.
-        ws.send(vec![b'x'; 32 << 20], FrameType::Text).unwrap();
-        let stalled = ws.recv().await;
+        // Frames are queued until one is not written in time: how much the
+        // system buffers varies (Windows took a single 32 MiB frame whole).
+        let mut queued = 0;
+        let stalled = loop {
+            ws.send(vec![b'x'; 1 << 20], FrameType::Text).unwrap();
+            queued += 1 << 20;
+            assert!(queued <= 1 << 30, "the system buffered 1 GiB");
+            if let Ok(inbound) = tokio::time::timeout(Duration::from_millis(10), ws.recv()).await {
+                break inbound;
+            }
+        };
 
         ws.close().await;
         closed.send(()).unwrap();
-        let ended = server.await.unwrap();
+        let ended = tokio::time::timeout(TIMEOUT, server)
+            .await
+            .expect("the server's read ends")
+            .unwrap();
 
         assert_eq!(
             stalled,
