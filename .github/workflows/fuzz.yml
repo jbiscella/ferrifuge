@@ -10,10 +10,11 @@ on:
 permissions:
   contents: read
 
-# One run per branch: a new run cancels the one in progress.
+# One run per branch; it never runs on pull requests, so a run in progress
+# is never cancelled: a new one waits for it.
 concurrency:
   group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   fuzz:
