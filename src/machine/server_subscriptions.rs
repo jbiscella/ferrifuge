@@ -123,6 +123,7 @@ impl Machine {
         let position = replied
             .as_ref()
             .map(|replied| Machine::reply_baseline(replied, &result.publications));
+        self.discard_commits(&Owner::Server(channel.to_owned()));
         self.server_subscriptions.by_channel.insert(
             channel.to_owned(),
             ServerSubscription {
@@ -180,11 +181,16 @@ impl Machine {
     /// its recovery at the next connect fails and its `subscribed` event says
     /// so (owner decision, 2026-11-04; centrifuge-js `_disconnect`).
     pub(super) fn invalidate_server_subscriptions(&mut self) {
-        for sub in self.server_subscriptions.by_channel.values_mut() {
+        let mut channels = Vec::new();
+        for (channel, sub) in &mut self.server_subscriptions.by_channel {
             if let Some(position) = &mut sub.position {
                 position.offset = 0;
                 UNMATCHABLE_EPOCH.clone_into(&mut position.epoch);
             }
+            channels.push(channel.clone());
+        }
+        for channel in channels {
+            self.discard_commits(&Owner::Server(channel));
         }
     }
 

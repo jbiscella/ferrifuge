@@ -121,6 +121,15 @@ impl Machine {
         self.actions.push(Action::Withdraw(ids));
     }
 
+    /// Forgets the commits of `owner` not yet answered: its position was
+    /// just set otherwise (invalidated, dropped, loaded or replied), which
+    /// an older publication taken later must not overwrite.
+    pub(super) fn discard_commits(&mut self, owner: &Owner) {
+        self.deliveries
+            .pending
+            .retain(|_, commit| commit.owner != *owner);
+    }
+
     /// The owner of the machine dropped the withdrawn event `id` without
     /// delivering it: the position stays.
     pub(super) fn event_withdrawn(&mut self, id: EventId) {
