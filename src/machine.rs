@@ -1222,17 +1222,14 @@ impl Machine {
         self.server_subscriptions_connected(std::mem::take(&mut result.subs));
     }
 
-    /// The server answered on the websocket being tried: an error reply to
-    /// the connect, a `Disconnect` push or a close code from 3000 (the
-    /// connect reply chooses it too, in `connected`). The websocket is kept
-    /// then, and only then: one that opens but never answers falls back
-    /// (Block 8; owner decision Q8, brief C3; the answers centrifuge-js keeps
-    /// a transport on, brief C2). Emulated transports are kept on their
-    /// connect reply only, pending C2.
+    /// The server answered on the transport being tried: an error reply to
+    /// the connect, a `Disconnect` push or, over websocket, a close code from
+    /// 3000 (the connect reply chooses it too, in `connected`). The transport
+    /// is kept then, and only then: one that opens but never answers falls
+    /// back (Block 8; owner decision Q8; review items C2 and C3;
+    /// centrifuge-js 63ed73e `_transportWasOpen`).
     fn server_answered(&mut self) {
-        if !self.transport_kind().is_emulated() {
-            self.transports.choose();
-        }
+        self.transports.choose();
     }
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
