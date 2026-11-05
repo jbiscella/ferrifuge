@@ -70,7 +70,16 @@ struct State {
     /// Server-side subscriptions of the next connect replies only, in
     /// order, before [`State::server_subscriptions`] applies again.
     next_server_subscriptions: VecDeque<serde_json::Map<String, Value>>,
+    /// Publications pushed with [`FakeServer::publish`], by channel.
+    history: std::collections::HashMap<String, Vec<Value>>,
+    /// Channels whose subscribes are answered from their history.
+    recovering: std::collections::HashSet<String>,
+    /// Results of the subscribe replies sent, with their channel, in order.
+    subscribe_replies: Vec<(String, Value)>,
 }
+
+/// Epoch of the channels answered from their history.
+pub(crate) const HISTORY_EPOCH: &str = "history-epoch";
 
 pub(crate) struct FakeServer {
     port: u16,
@@ -237,6 +246,38 @@ impl FakeServer {
             .push_back(result);
     }
 
+    /// Pushes a publication at `offset` to `channel`, its data `{"n":
+    /// offset}`, and keeps it for the subscribes recovering the channel.
+    pub(crate) fn publish(&self, channel: &str, offset: u64) {
+        let publication = json!({"data": {"n": offset}, "offset": offset});
+        self.state
+            .lock()
+            .unwrap()
+            .history
+            .entry(channel.to_owned())
+            .or_default()
+            .push(publication.clone());
+        self.send(&json!({"push": {"channel": channel, "pub": publication}}).to_string());
+    }
+
+    /// Answers the subscribes to `channel` as a server with history and
+    /// recovery would, from the publications pushed with
+    /// [`FakeServer::publish`]: positioned and recoverable at
+    /// [`HISTORY_EPOCH`], and, to a subscribe recovering from an offset,
+    /// with the publications after it.
+    pub(crate) fn recover_from_history(&self, channel: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .recovering
+            .insert(channel.to_owned());
+    }
+
+    /// Results of the subscribe replies sent so far, with their channel.
+    pub(crate) fn subscribe_replies(&self) -> Vec<(String, Value)> {
+        self.state.lock().unwrap().subscribe_replies.clone()
+    }
+
     /// Every Protobuf command received from clients so far.
     /// Grants the server-side subscriptions `subs`, by channel, in the JSON
     /// connect replies from now on; none for an empty object.
@@ -392,7 +433,18 @@ impl Connection {
                 if state.ignored_subscribes > 0 {
                     state.ignored_subscribes -= 1;
                 } else {
-                    let result = state.subscribe_results.pop_front().unwrap_or(json!({}));
+                    let channel = message["subscribe"]["channel"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let result = match state.subscribe_results.pop_front() {
+                        Some(result) => result,
+                        None if state.recovering.contains(&channel) => {
+                            from_history(&state, &channel, &message["subscribe"])
+                        }
+                        None => json!({}),
+                    };
+                    state.subscribe_replies.push((channel, result.clone()));
                     replies.push(Message::text(
                         json!({"id": message["id"], "subscribe": result}).to_string(),
                     ));
@@ -457,4 +509,30 @@ impl Connection {
         self.client_id += 1;
         format!("fake-{}", self.client_id)
     }
+}
+
+/// The result of a subscribe to `channel` answered from its history.
+fn from_history(state: &State, channel: &str, subscribe: &Value) -> Value {
+    let history = state.history.get(channel).map_or(&[][..], Vec::as_slice);
+    let top = history
+        .last()
+        .map_or(0, |publication| publication["offset"].as_u64().unwrap_or(0));
+    let mut result = json!({
+        "recoverable": true,
+        "positioned": true,
+        "epoch": HISTORY_EPOCH,
+        "offset": top,
+    });
+    if subscribe["recover"] == true {
+        let from = subscribe["offset"].as_u64().unwrap_or(0);
+        result["was_recovering"] = json!(true);
+        result["recovered"] = json!(subscribe["epoch"] == HISTORY_EPOCH);
+        result["publications"] = json!(
+            history
+                .iter()
+                .filter(|publication| publication["offset"].as_u64().unwrap_or(0) > from)
+                .collect::<Vec<_>>()
+        );
+    }
+    result
 }

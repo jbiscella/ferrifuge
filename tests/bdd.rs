@@ -194,6 +194,14 @@ const IMPLEMENTED: &[&str] = &[
     "Recovered server-side publications advance the stored position",
     "A server-side unsubscribe carries its code and reason and forgets the subscription",
     "Connection state invalidation clears the token and invalidates every position",
+    // Block 15, sub-increment 15a.
+    "Publications not taken before disconnect are recovered on the next connect",
+    "Server-side publications not taken before disconnect are recovered on the next connect",
+    "Publications not taken before unsubscribe are withdrawn",
+    "A second events() call takes over the subscription's stream",
+    "A second events() call takes over the client's stream",
+    "A cancelled read loses no publication",
+    "Publications of a subscription without a stream do not hold the connection",
 ];
 
 /// Server configuration of @A scenarios.
