@@ -37,6 +37,9 @@ const STALLING_TOKEN_SIZE: usize = 32 << 20;
 /// Lifetime of the subscription token, in seconds, after which the client
 /// sends the large one in a `sub_refresh`.
 const STALLING_TOKEN_TTL: u32 = 2;
+/// Bytes from the client past which it is writing the large `sub_refresh`:
+/// encoding it takes time, so its write deadline starts only then.
+const WRITING_THRESHOLD: usize = 1 << 20;
 
 pub(super) fn kind(name: &str) -> TransportKind {
     match name {
@@ -520,16 +523,21 @@ async fn the_fake_server_stops_reading(world: &mut ClientWorld) {
 #[when("the client sends more data than the connection can buffer")]
 #[given("the client has sent more data than the connection can buffer")]
 async fn the_client_sends_more_than_can_be_buffered(world: &mut ClientWorld) {
+    let relay = world.relay.as_ref().expect("the fake server's relay");
+    // Until the server stopped reading, the client sent only its connect
+    // and subscribe commands, far less than this.
+    let writing = |relay: &CountingRelay| relay.received() > WRITING_THRESHOLD;
     let limit = Duration::from_secs(STALLING_TOKEN_TTL.into()) + EVENT_TIMEOUT;
-    let fetched = tokio::time::timeout(limit, async {
-        while world.token_calls.lock().unwrap().len() < 2 {
+    let started = tokio::time::timeout(limit, async {
+        while !writing(relay) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
-    assert!(fetched.is_ok(), "the large token was never fetched");
-    // Leaves the client time to encode the sub_refresh and start writing it.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        started.is_ok(),
+        "the client did not start writing the large sub_refresh"
+    );
 }
 
 #[then(r#"the client emits "disconnected" before the configured timeout"#)]
@@ -553,5 +561,8 @@ async fn the_fake_server_sees_the_connection_closed(world: &mut ClientWorld) {
         }
     })
     .await;
-    assert!(closed.is_ok(), "the connection is still open after {limit:?}");
+    assert!(
+        closed.is_ok(),
+        "the connection is still open after {limit:?}"
+    );
 }
