@@ -123,6 +123,9 @@ pub(crate) struct ClientWorld {
     pub(crate) data_calls: Arc<std::sync::Mutex<Vec<String>>>,
     /// Channels the subscription token callback was called with, in order.
     pub(crate) token_calls: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Stalled websocket writes counted when the fake server stopped
+    /// reading, before the scenario's own.
+    pub(crate) stalled_writes: usize,
     /// The publication a step looked at last.
     pub(crate) last_publication: Option<ferrifuge::Publication>,
     /// Raw data a fake server pushed in a publication.

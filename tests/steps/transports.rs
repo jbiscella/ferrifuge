@@ -9,7 +9,7 @@ use std::time::Duration;
 use cucumber::{given, then, when};
 use ferrifuge::machine::{Action, Input, Machine, Timer, TransportKind};
 use ferrifuge::{
-    Client, ClientEvent, Config, ErrorKind, Protocol, SubscriptionEvent, TokenError, codes,
+    Client, ClientEvent, Config, ErrorKind, Protocol, SubscriptionState, TokenError, codes,
 };
 use serde_json::json;
 
@@ -30,16 +30,17 @@ const UNREACHABLE_SSE: &str = "http://127.0.0.1:1/connection/sse";
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
-/// Size of the subscription token that fills the stalled connection: well
+/// Size of the subscription tokens that fill the stalled connection: well
 /// above what the client's socket, the counting relay and the fake server's
 /// socket buffer together (about 11 MiB measured on Linux loopback).
 const STALLING_TOKEN_SIZE: usize = 32 << 20;
-/// Lifetime of the subscription token, in seconds, after which the client
-/// sends the large one in a `sub_refresh`.
+/// Lifetime of the subscription tokens, in seconds, after which the client
+/// sends the large ones in `sub_refresh` commands.
 const STALLING_TOKEN_TTL: u32 = 2;
-/// Bytes from the client past which it is writing the large `sub_refresh`:
-/// encoding it takes time, so its write deadline starts only then.
-const WRITING_THRESHOLD: usize = 1 << 20;
+/// Channels whose large `sub_refresh` commands stall the connection. Two,
+/// because Windows takes a single large write whole, however large: the
+/// second one stalls there.
+const STALLING_CHANNELS: [&str; 2] = ["stall", "stall2"];
 
 pub(super) fn kind(name: &str) -> TransportKind {
     match name {
@@ -488,55 +489,61 @@ fn building_fails(world: &mut ClientWorld, transport: String) {
 /// unlike a subscribe (code 3), so only the stalled write can end it.
 #[given("the fake server stops reading from the connection")]
 async fn the_fake_server_stops_reading(world: &mut ClientWorld) {
-    let calls = Arc::clone(&world.token_calls);
-    let subscription = world
-        .client()
-        .subscription_builder("stall")
-        .get_token(move |channel: String| {
-            let mut calls = calls.lock().unwrap();
-            calls.push(channel);
-            let token = if calls.len() == 1 {
-                "first".to_owned()
-            } else {
-                "t".repeat(STALLING_TOKEN_SIZE)
-            };
-            std::future::ready(Ok::<_, TokenError>(token))
-        })
-        .build()
-        .expect("no subscription yet");
-    world.track_subscription(subscription);
-    world
-        .fake()
-        .answer_a_subscribe_with(json!({"expires": true, "ttl": STALLING_TOKEN_TTL}));
-    world.subscription().subscribe();
+    for channel in STALLING_CHANNELS {
+        let calls = Arc::clone(&world.token_calls);
+        let subscription = world
+            .client()
+            .subscription_builder(channel)
+            .get_token(move |channel: String| {
+                let mut calls = calls.lock().unwrap();
+                let first = !calls.contains(&channel);
+                calls.push(channel);
+                let token = if first {
+                    "first".to_owned()
+                } else {
+                    "t".repeat(STALLING_TOKEN_SIZE)
+                };
+                std::future::ready(Ok::<_, TokenError>(token))
+            })
+            .build()
+            .expect("no subscription yet");
+        world
+            .fake()
+            .answer_a_subscribe_with(json!({"expires": true, "ttl": STALLING_TOKEN_TTL}));
+        subscription.subscribe();
+        world.named_subscriptions.push(subscription);
+    }
     let subscribed = tokio::time::timeout(EVENT_TIMEOUT, async {
-        while !matches!(
-            world.next_subscription_event(false).await,
-            SubscriptionEvent::Subscribed(_)
-        ) {}
+        while world
+            .named_subscriptions
+            .iter()
+            .any(|subscription| subscription.state() != SubscriptionState::Subscribed)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
     .await;
-    assert!(subscribed.is_ok(), "{:?}", world.subscription());
+    assert!(subscribed.is_ok(), "{:?}", world.named_subscriptions);
+    world.stalled_writes = ferrifuge::stalled_websocket_writes();
     world.fake().stop_reading();
 }
 
+/// Waits for a websocket write to stall, which the client's write deadline
+/// then counts from at the latest.
 #[when("the client sends more data than the connection can buffer")]
 #[given("the client has sent more data than the connection can buffer")]
 async fn the_client_sends_more_than_can_be_buffered(world: &mut ClientWorld) {
-    let relay = world.relay.as_ref().expect("the fake server's relay");
-    // Until the server stopped reading, the client sent only its connect
-    // and subscribe commands, far less than this.
-    let writing = |relay: &CountingRelay| relay.received() > WRITING_THRESHOLD;
+    let before = world.stalled_writes;
     let limit = Duration::from_secs(STALLING_TOKEN_TTL.into()) + EVENT_TIMEOUT;
-    let started = tokio::time::timeout(limit, async {
-        while !writing(relay) {
+    let stalled = tokio::time::timeout(limit, async {
+        while ferrifuge::stalled_websocket_writes() == before {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     assert!(
-        started.is_ok(),
-        "the client did not start writing the large sub_refresh"
+        stalled.is_ok(),
+        "no websocket write stalled within {limit:?}"
     );
 }
 
