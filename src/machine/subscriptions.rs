@@ -1174,6 +1174,65 @@ mod tests {
         );
     }
 
+    // Codex on PR #65: a server's close held behind an untaken event stops
+    // the no-ping deadline, which would otherwise end the connection with
+    // code 2 before the close is handled.
+    #[test]
+    fn a_held_close_stops_the_no_ping_deadline() {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":1,"connect":{"client":"c","ping":25}}"#.to_vec(),
+        });
+
+        let closed = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3500),
+            reason: "bye".into(),
+        });
+
+        assert_eq!(machine.state(), State::Connected);
+        assert!(
+            closed.contains(&Action::CancelTimer(Timer::ServerPing)),
+            "{closed:?}"
+        );
+    }
+
+    // Codex on PR #65: each held message counts its own encoded size, not
+    // an even share of its frame.
+    #[test]
+    fn a_held_message_counts_its_own_size() {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
+        });
+        let large = format!(
+            "{{\"push\":{{\"channel\":\"x\",\"pub\":{{\"data\":\"{}\"}}}}}}\n{{}}\n{{}}\n{{}}",
+            "x".repeat(8 << 20)
+        );
+
+        machine.handle(Input::Frame {
+            transport,
+            data: large.into_bytes(),
+        });
+
+        // The connected event is not taken: the publication is held, and
+        // the read-ahead holds it alone, though over the byte limit.
+        assert!(
+            machine.read_ahead().1 > 8 << 20,
+            "{:?}",
+            machine.read_ahead()
+        );
+        assert!(!machine.wants_frames());
+    }
+
     #[test]
     fn publications_of_a_subscribe_reply_move_the_position_one_by_one_as_taken() {
         let (mut machine, transport, id) = connected();

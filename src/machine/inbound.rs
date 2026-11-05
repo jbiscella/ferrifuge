@@ -26,7 +26,7 @@ enum Item {
 struct Held {
     transport: TransportId,
     item: Item,
-    /// Its share of the frame it came in.
+    /// Its encoded size.
     size: usize,
 }
 
@@ -46,7 +46,7 @@ impl Machine {
     /// Reads a frame of `transport`: answers its pings at once and queues
     /// its other messages, which are then handled as rule X allows.
     pub(super) fn frame(&mut self, transport: TransportId, data: &[u8]) {
-        let Some(replies) = self.codec.decode(data) else {
+        let Some(replies) = self.codec.decode_sized(data) else {
             // Not client protocol data, e.g. from a misconfigured proxy.
             self.reconnect_after_transport_closed();
             return;
@@ -57,8 +57,7 @@ impl Machine {
         // Any data from the server proves the connection alive, as in
         // centrifuge-js `_dataReceived`.
         self.wait_server_ping();
-        let share = data.len() / replies.len();
-        for reply in replies {
+        for (reply, size) in replies {
             if reply.id == 0 && matches!(reply.result, ReplyResult::Empty) && reply.error.is_none()
             {
                 self.ping_read();
@@ -67,7 +66,7 @@ impl Machine {
             if reply.id > 0 {
                 self.pause_reply_deadline(reply.id);
             }
-            self.hold(transport, Item::Reply(Box::new(reply)), share.max(1));
+            self.hold(transport, Item::Reply(Box::new(reply)), size.max(1));
         }
         self.handle_inbound();
     }
@@ -80,6 +79,9 @@ impl Machine {
         reason: String,
     ) {
         self.hold(transport, Item::Closed { code, reason }, 0);
+        // No data can come after the close: no ping deadline either, or it
+        // would end the connection before the close is handled.
+        self.actions.push(Action::CancelTimer(Timer::ServerPing));
         self.handle_inbound();
     }
 
@@ -223,9 +225,15 @@ impl Machine {
         (messages, bytes)
     }
 
-    /// Whether the read-ahead is full and reading stopped.
+    /// Whether no data is read now: the read-ahead is full, or the
+    /// server's close of the transport is held.
     pub(super) fn reading_stopped(&self) -> bool {
         self.inbound.full
+            || self
+                .inbound
+                .held
+                .iter()
+                .any(|held| matches!(held.item, Item::Closed { .. }))
     }
 
     /// Whether a message of `transport` is held.
