@@ -69,6 +69,12 @@ Feature: Transport fallback
     When the websocket opens and no connect reply arrives within the configured timeout
     Then the next attempt opens the http_stream transport
 
+  @E
+  Scenario: An emulated transport the server answered is kept
+    Given a client configured with http_stream and sse endpoints
+    When the http_stream transport opens and the server answers its connect with a temporary error
+    Then the next attempt opens the http_stream transport again, after the reconnect backoff delay
+
   @D
   Scenario: A websocket write the server never reads closes the transport
     Given a client connected to the fake server

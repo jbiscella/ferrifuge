@@ -496,7 +496,7 @@ Feature: Protobuf encoding
 
 **Decisions** (documented in the centrifuge-js README unless noted):
 - the client takes a list of (transport, endpoint); a single endpoint string means websocket only;
-- transports are tried in order during the initial handshake only, until one succeeds; reconnects then use only that transport;
+- transports are tried in order during the initial handshake only, until the server answers on one: a connect reply, an error reply to the connect, a Disconnect push, or, over websocket, a close code from 3000 (review items C2 and C3; centrifuge-js 63ed73e `_transportWasOpen`); reconnects then use only that transport, the first of them after the reconnect backoff delay (Block 2);
 - reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope;
 - a client configured with the Protobuf protocol and an http_stream or sse endpoint is rejected when it is built, with a configuration error naming the combination, rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
@@ -583,6 +583,12 @@ Feature: Transport fallback
     Given a client configured with websocket and http_stream endpoints
     When the websocket opens and no connect reply arrives within the configured timeout
     Then the next attempt opens the http_stream transport
+
+  @E
+  Scenario: An emulated transport the server answered is kept
+    Given a client configured with http_stream and sse endpoints
+    When the http_stream transport opens and the server answers its connect with a temporary error
+    Then the next attempt opens the http_stream transport again, after the reconnect backoff delay
 
   @D
   Scenario: A websocket write the server never reads closes the transport
