@@ -72,6 +72,8 @@ struct State {
     next_server_subscriptions: VecDeque<serde_json::Map<String, Value>>,
     /// Publications pushed with [`FakeServer::publish`], by channel.
     history: std::collections::HashMap<String, Vec<Value>>,
+    /// Pings sent by [`FakeServer::ping_every`].
+    pings: usize,
     /// Channels whose subscribes are answered from their history.
     recovering: std::collections::HashSet<String>,
     /// Results of the subscribe replies sent, with their channel, in order.
@@ -157,8 +159,11 @@ impl FakeServer {
             let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 ticks.tick().await;
-                if let Some(current) = &state.lock().unwrap().current {
-                    let _ = current.send(Control::Ping);
+                let mut state = state.lock().unwrap();
+                if let Some(current) = &state.current
+                    && current.send(Control::Ping).is_ok()
+                {
+                    state.pings += 1;
                 }
             }
         });
@@ -249,7 +254,12 @@ impl FakeServer {
     /// Pushes a publication at `offset` to `channel`, its data `{"n":
     /// offset}`, and keeps it for the subscribes recovering the channel.
     pub(crate) fn publish(&self, channel: &str, offset: u64) {
-        let publication = json!({"data": {"n": offset}, "offset": offset});
+        self.publish_sized(channel, offset, 0);
+    }
+
+    /// As [`FakeServer::publish`], its data padded by `size` bytes.
+    pub(crate) fn publish_sized(&self, channel: &str, offset: u64, size: usize) {
+        let publication = json!({"data": {"n": offset, "pad": "x".repeat(size)}, "offset": offset});
         self.state
             .lock()
             .unwrap()
@@ -271,6 +281,11 @@ impl FakeServer {
             .unwrap()
             .recovering
             .insert(channel.to_owned());
+    }
+
+    /// Pings sent by [`FakeServer::ping_every`] so far.
+    pub(crate) fn pings(&self) -> usize {
+        self.state.lock().unwrap().pings
     }
 
     /// Results of the subscribe replies sent so far, with their channel.

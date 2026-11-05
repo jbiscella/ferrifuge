@@ -18,8 +18,11 @@ use futures_util::{FutureExt, StreamExt};
 use serde_json::{Value, json};
 
 use super::connection::a_connected_client;
+use super::ping::time_elapses;
 use super::{ClientWorld, EVENT_TIMEOUT, Events, SubscriptionEvents};
-use crate::support::fake_server::HISTORY_EPOCH;
+use crate::support::centrifugo::Centrifugo;
+use crate::support::fake_server::{Announce, HISTORY_EPOCH};
+use crate::support::relay::CountingRelay;
 
 /// How long a step watches a stream for events that must not come.
 const QUIET: Duration = Duration::from_millis(500);
@@ -40,6 +43,25 @@ pub(crate) struct Delivery {
     /// Offsets the fake server pushed, and those the application took.
     sent: Vec<u64>,
     taken: Vec<u64>,
+    /// Options of the scenario's client, besides the world's.
+    read_ahead_bytes: Option<usize>,
+    timeout: Option<Duration>,
+    /// A configuration a step creates a client with.
+    config: Option<ferrifuge::Config>,
+    /// Events the application read in one go.
+    yielded: Vec<SubscriptionEvent>,
+}
+
+impl Delivery {
+    /// Applies the scenario's options to the client's `config`.
+    pub(crate) fn configure(&self, config: &mut ferrifuge::Config) {
+        if let Some(bytes) = self.read_ahead_bytes {
+            config.read_ahead_bytes = bytes;
+        }
+        if let Some(timeout) = self.timeout {
+            config.timeout = timeout;
+        }
+    }
 }
 
 impl std::fmt::Debug for Delivery {
@@ -201,11 +223,17 @@ async fn a_client_whose_stream_is_not_read(world: &mut ClientWorld) {
     wait_until("connected", || client.state() == State::Connected).await;
 }
 
-#[given(regex = r#"^the fake server has sent publications at offsets ([\d, and]+) to "(\w+)"$"#)]
-fn the_fake_server_has_sent(world: &mut ClientWorld, list: String, channel: String) {
+#[given(
+    regex = r#"^the fake server has sent publications at offsets ([\d, and]+) to "(\w+)"(, then closed the connection with a reconnect-advised code)?$"#
+)]
+fn the_fake_server_has_sent(world: &mut ClientWorld, list: String, channel: String, close: String) {
     for offset in offsets(&list) {
         world.fake().publish(&channel, offset);
         world.delivery.sent.push(offset);
+    }
+    if !close.is_empty() {
+        // A close code in the protocol's reconnect range (Block 3).
+        world.fake().close(3001, "reconnect");
     }
 }
 
@@ -547,4 +575,527 @@ async fn the_stream_of_yields(world: &mut ClientWorld, channel: String) {
         matches!(&event, SubscriptionEvent::Publication(publication) if offset(publication) == 1),
         "{event:?}"
     );
+}
+
+// Block 15, sub-increment 15b: the bounded read-ahead.
+
+/// How long the read-ahead must stay as it is to count as stopped.
+const STOPPED: Duration = Duration::from_secs(1);
+
+fn size(amount: u64, unit: &str) -> usize {
+    let amount = usize::try_from(amount).expect("a size that fits");
+    match unit {
+        "KiB" => amount << 10,
+        "MiB" => amount << 20,
+        _ => amount,
+    }
+}
+
+/// Reads the subscription's stream until it has yielded `count`
+/// publications; they are offsets 1 to `count`, in order, each once.
+async fn read_publications_in_order(world: &mut ClientWorld, count: u64) {
+    let mut offsets = Vec::new();
+    while offsets.len() < usize::try_from(count).expect("a count that fits") {
+        if let SubscriptionEvent::Publication(publication) = next_subscription_event(world).await {
+            offsets.push(offset(&publication));
+        }
+    }
+    assert!(
+        offsets.iter().copied().eq(1..=count),
+        "not offsets 1 to {count} in order: {:?}",
+        &offsets[..offsets.len().min(20)]
+    );
+}
+
+#[given(
+    regex = r#"^a client configured with a read-ahead of (\d+) (bytes|KiB|MiB), subscribed to channel "(\w+)" on the fake server$"#
+)]
+async fn a_client_with_a_read_ahead(
+    world: &mut ClientWorld,
+    amount: u64,
+    unit: String,
+    channel: String,
+) {
+    world.delivery.read_ahead_bytes = Some(size(amount, &unit));
+    a_subscription_read_up_to_subscribed(world, String::new(), channel).await;
+}
+
+#[given(
+    regex = r#"^a client with a timeout of (\d+) s, subscribed to channel "(\w+)" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after$"#
+)]
+async fn a_client_with_a_timeout(world: &mut ClientWorld, seconds: u64, channel: String) {
+    world.delivery.timeout = Some(Duration::from_secs(seconds));
+    a_subscription_read_up_to_subscribed(world, String::new(), channel).await;
+}
+
+#[given(
+    regex = r"^a client connected to the fake server, which pings every (\d+) s and expects pongs$"
+)]
+async fn connected_to_a_pinging_fake_server(world: &mut ClientWorld, seconds: u32) {
+    world
+        .restart_fake(Announce {
+            ping: seconds,
+            pong: true,
+            ..Announce::default()
+        })
+        .await;
+    a_connected_client(world).await;
+    world.fake().ping_every(Duration::from_secs(seconds.into()));
+}
+
+#[given(
+    regex = r"^a client with maxServerPingDelay (\d+) ms, connected to the fake server pinging every (\d+) s$"
+)]
+async fn connected_with_a_ping_delay(world: &mut ClientWorld, millis: u64, seconds: u32) {
+    world.max_server_ping_delay = Some(Duration::from_millis(millis));
+    world
+        .restart_fake(Announce {
+            ping: seconds,
+            ..Announce::default()
+        })
+        .await;
+    a_connected_client(world).await;
+    world.fake().ping_every(Duration::from_secs(seconds.into()));
+}
+
+#[given(
+    regex = r#"^the client is subscribed to channel "(\w+)", whose subscription's stream has been read up to "subscribed" and is not read after$"#
+)]
+async fn the_client_is_subscribed(world: &mut ClientWorld, channel: String) {
+    let (subscription, events) = subscribed(world, &channel).await;
+    world.subscription = Some(subscription);
+    world.delivery.subscription_events = Some(events);
+}
+
+#[given(regex = r#"^the fake server has sent (?:(\d+) publications|a publication) to "(\w+)"$"#)]
+fn the_fake_server_has_sent_some(world: &mut ClientWorld, count: String, channel: String) {
+    let count: u64 = count.parse().unwrap_or(1);
+    for offset in 1..=count {
+        world.fake().publish(&channel, offset);
+        world.delivery.sent.push(offset);
+    }
+}
+
+#[given(
+    regex = r#"^the fake server has sent publications of (\d+) (bytes|KiB) to "(\w+)" until the client stopped reading$"#
+)]
+async fn sent_until_the_client_stopped_reading(
+    world: &mut ClientWorld,
+    amount: u64,
+    unit: String,
+    channel: String,
+) {
+    let limit = world.client_config().read_ahead_messages;
+    for offset in 1..=u64::try_from(limit).expect("a limit that fits") * 4 {
+        world
+            .fake()
+            .publish_sized(&channel, offset, size(amount, &unit));
+    }
+    let client = world.client();
+    wait_until("the read-ahead full", || client.read_ahead().0 >= limit).await;
+}
+
+#[when(
+    regex = r#"^the fake server (?:starts sending|sends) (\d+) publications? of (\d+) (bytes|KiB|MiB) to "(\w+)"$"#
+)]
+fn starts_sending(world: &mut ClientWorld, count: u64, amount: u64, unit: String, channel: String) {
+    for offset in 1..=count {
+        world
+            .fake()
+            .publish_sized(&channel, offset, size(amount, &unit));
+        world.delivery.sent.push(offset);
+    }
+}
+
+#[when(regex = r#"^the fake server sends a publication of (\d+) (bytes|KiB|MiB) to "(\w+)"$"#)]
+fn sends_one_publication(world: &mut ClientWorld, amount: u64, unit: String, channel: String) {
+    starts_sending(world, 1, amount, unit, channel);
+}
+
+#[when(regex = r#"^the application subscribes to channel "(\w+)"$"#)]
+fn subscribes_to(world: &mut ClientWorld, channel: String) {
+    let subscription = world
+        .client()
+        .subscription_builder(&channel)
+        .build()
+        .expect("no subscription to the channel yet");
+    let events: SubscriptionEvents = Box::pin(subscription.events());
+    subscription.subscribe();
+    world
+        .delivery
+        .channels
+        .insert(channel, (subscription, Some(events)));
+}
+
+#[when(regex = r"^(\d+) s elapse with the fake server pinging every \d+ s$")]
+async fn elapse_while_pinging(world: &mut ClientWorld, seconds: u64) {
+    time_elapses(world, seconds).await;
+}
+
+#[then("the client has opened no new connection")]
+fn no_new_connection(world: &mut ClientWorld) {
+    assert_eq!(world.elapsed_new_connections, 0);
+}
+
+#[then(regex = r#"^the client has not emitted "connecting" with code (\d+)$"#)]
+fn not_connecting_with(world: &mut ClientWorld, code: u32) {
+    assert!(
+        !world.elapsed_events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Connecting { code: of, .. } if *of == code
+        )),
+        "{:?}",
+        world.elapsed_events
+    );
+}
+
+#[then("the client has answered every ping")]
+fn answered_every_ping(world: &mut ClientWorld) {
+    let fake = world.fake();
+    let pongs = fake
+        .received()
+        .iter()
+        .filter(|command| command.as_object().is_some_and(serde_json::Map::is_empty))
+        .count();
+    // The last ping may still be on its way back.
+    assert!(
+        pongs + 1 >= fake.pings(),
+        "{pongs} pongs to {} pings",
+        fake.pings()
+    );
+}
+
+#[then(
+    regex = r#"^when the application reads the subscription's stream, it yields the publications at offsets ([\d, and]+), then "subscribing"$"#
+)]
+async fn yields_publications_then_subscribing(world: &mut ClientWorld, list: String) {
+    for expected in offsets(&list) {
+        let event = next_subscription_event(world).await;
+        assert!(
+            matches!(&event, SubscriptionEvent::Publication(publication) if offset(publication) == expected),
+            "{event:?}"
+        );
+    }
+    let event = next_subscription_event(world).await;
+    assert_eq!(event.name(), "subscribing", "{event:?}");
+}
+
+#[then(regex = r#"^the next subscribe command for "(\w+)" asks to recover from offset (\d+)$"#)]
+async fn next_subscribe_recovers_from(world: &mut ClientWorld, channel: String, expected: u64) {
+    let fake = world.fake();
+    let recovering = || {
+        fake.received().into_iter().any(|command| {
+            let subscribe = &command["subscribe"];
+            subscribe["channel"] == channel.as_str()
+                && subscribe["recover"] == true
+                && subscribe["offset"].as_u64() == Some(expected)
+        })
+    };
+    wait_until("a subscribe recovering from that offset", recovering).await;
+}
+
+#[then(regex = r"^within (\d+) s the fake server has received a second connect command$")]
+async fn second_connect_within(world: &mut ClientWorld, seconds: u64) {
+    let fake = world.fake();
+    let connects = || {
+        fake.received()
+            .into_iter()
+            .filter(|command| command["connect"].is_object())
+            .count()
+    };
+    let waited = tokio::time::timeout(Duration::from_secs(seconds), async {
+        while connects() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "{} connect commands", connects());
+}
+
+#[then(regex = r#"^(\d+) s later the client's state is "(\w+)"$"#)]
+async fn state_later(world: &mut ClientWorld, seconds: u64, expected: String) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    assert_eq!(
+        format!("{:?}", world.client().state()).to_lowercase(),
+        expected
+    );
+}
+
+#[then(
+    regex = r#"^when the application reads the client's stream, it yields ((?:"\w+"(?:, )?)+)$"#
+)]
+async fn client_stream_yields(world: &mut ClientWorld, list: String) {
+    let expected: Vec<&str> = list
+        .split(", ")
+        .map(|name| name.trim_matches('"'))
+        .collect();
+    let mut names = Vec::new();
+    for _ in 0..expected.len() {
+        names.push(next_client_event(world).await.name().to_owned());
+    }
+    assert_eq!(names, expected);
+}
+
+#[then(regex = r"^the client stops reading with (\d+) messages in its read-ahead$")]
+async fn stops_reading_with_messages(world: &mut ClientWorld, expected: usize) {
+    let client = world.client();
+    wait_until(&format!("{expected} messages in the read-ahead"), || {
+        client.read_ahead().0 == expected
+    })
+    .await;
+    tokio::time::sleep(STOPPED).await;
+    assert_eq!(client.read_ahead().0, expected);
+}
+
+#[then(regex = r"^1 s later its read-ahead still holds (\d+) messages$")]
+async fn still_holds_messages(world: &mut ClientWorld, expected: usize) {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(world.client().read_ahead().0, expected);
+}
+
+#[then(
+    regex = r"^the client stops reading with more than (\d+) MiB and at most (\d+) MiB in its read-ahead$"
+)]
+async fn stops_reading_with_bytes(world: &mut ClientWorld, more_than: usize, at_most: usize) {
+    let client = world.client();
+    wait_until(
+        &format!("more than {more_than} MiB in the read-ahead"),
+        || client.read_ahead().1 > more_than << 20,
+    )
+    .await;
+    tokio::time::sleep(STOPPED).await;
+    assert!(
+        client.read_ahead().1 <= at_most << 20,
+        "{:?}",
+        client.read_ahead()
+    );
+}
+
+#[then(regex = r"^1 s later its read-ahead still holds at most (\d+) MiB$")]
+async fn still_holds_at_most(world: &mut ClientWorld, at_most: usize) {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let held = world.client().read_ahead();
+    assert!(held.1 <= at_most << 20, "{held:?}");
+}
+
+#[then(
+    regex = r"^when the application reads the subscription's stream, it yields the (\d+) publications in order, each once$"
+)]
+async fn yields_all_in_order(world: &mut ClientWorld, count: u64) {
+    read_publications_in_order(world, count).await;
+}
+
+#[then("the subscription's stream yields it")]
+async fn the_subscription_stream_yields_it(world: &mut ClientWorld) {
+    let event = next_subscription_event(world).await;
+    assert!(
+        matches!(&event, SubscriptionEvent::Publication(publication) if offset(publication) == 1),
+        "{event:?}"
+    );
+}
+
+#[then(
+    regex = r#"^when the application reads the stream of "(\w+)", the stream of "(\w+)" yields "subscribed"$"#
+)]
+async fn reading_one_releases_the_other(world: &mut ClientWorld, read: String, other: String) {
+    let event = next_subscription_event(world).await;
+    assert!(
+        matches!(event, SubscriptionEvent::Publication(_)),
+        "reading {read}: {event:?}"
+    );
+    let stream = world
+        .delivery
+        .channels
+        .get_mut(&other)
+        .expect("that subscription")
+        .1
+        .as_mut()
+        .expect("its stream");
+    loop {
+        match next_of(stream).await.expect("the stream has not ended") {
+            SubscriptionEvent::Subscribed(_) => return,
+            SubscriptionEvent::Subscribing { .. } => {}
+            event => panic!("{event:?} before subscribed"),
+        }
+    }
+}
+
+#[then("the fake server has received a refresh command")]
+fn received_a_refresh(world: &mut ClientWorld) {
+    assert!(
+        world
+            .fake()
+            .received()
+            .iter()
+            .any(|command| command["refresh"].is_object()),
+        "{:?}",
+        world.fake().received()
+    );
+}
+
+#[given(regex = r"^a Config whose read-ahead limit of (messages|bytes) is 0$")]
+fn a_config_with_a_zero_limit(world: &mut ClientWorld, limit: String) {
+    let mut config = ferrifuge::Config::default();
+    if limit == "messages" {
+        config.read_ahead_messages = 0;
+    } else {
+        config.read_ahead_bytes = 0;
+    }
+    world.delivery.config = Some(config);
+}
+
+#[when("a client is created")]
+fn a_client_is_created(world: &mut ClientWorld) {
+    let config = world.delivery.config.clone().expect("a Config");
+    match Client::new("ws://127.0.0.1:1/connection/websocket", config) {
+        Ok(client) => world.client = Some(client),
+        Err(error) => world.build_error = Some(error),
+    }
+}
+
+#[then("Client::new returns an error")]
+fn client_new_returns_an_error(world: &mut ClientWorld) {
+    let error = world.build_error.as_ref().expect("an error");
+    assert_eq!(error.kind, ferrifuge::ErrorKind::Configuration, "{error:?}");
+}
+
+#[given(
+    regex = r#"^a server whose channel "\w+" keeps a history of (\d+) publications and recovers up to (\d+), with a client queue of (\d+) MiB$"#
+)]
+async fn a_server_with_a_long_history(
+    world: &mut ClientWorld,
+    history: u64,
+    recovers: u64,
+    queue: usize,
+) {
+    if let Some(server) = world.server.take() {
+        server.stop().await;
+    }
+    let (history, recovers, queue) = (
+        history.to_string(),
+        recovers.to_string(),
+        (queue << 20).to_string(),
+    );
+    let env: Vec<(&str, &str)> = crate::SERVER_A
+        .iter()
+        .copied()
+        .filter(|(name, _)| !name.starts_with("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY"))
+        .chain([
+            (
+                "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE",
+                history.as_str(),
+            ),
+            ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
+            (
+                "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_FORCE_RECOVERY",
+                "true",
+            ),
+            (
+                "CENTRIFUGO_CLIENT_RECOVERY_MAX_PUBLICATION_LIMIT",
+                recovers.as_str(),
+            ),
+            ("CENTRIFUGO_CLIENT_QUEUE_MAX_SIZE", queue.as_str()),
+        ])
+        .collect();
+    let server = Centrifugo::start(&env).await;
+    world.relay = Some(CountingRelay::start(server.address().to_owned()).await);
+    world.server = Some(server);
+}
+
+#[given(
+    regex = r#"^a client subscribed to "(\w+)", whose subscription's stream has been read up to "subscribed" and is not read after$"#
+)]
+async fn a_client_subscribed_on_the_server(world: &mut ClientWorld, channel: String) {
+    a_connected_client(world).await;
+    the_client_is_subscribed(world, channel).await;
+}
+
+#[when(regex = r#"^the server API publishes (\d+) publications of (\d+) KiB to "(\w+)"$"#)]
+async fn the_server_api_publishes(world: &mut ClientWorld, count: u64, kib: u64, channel: String) {
+    let server = world.server.as_ref().expect("a Centrifugo server");
+    let pad = "x".repeat(size(kib, "KiB"));
+    for n in 1..=count {
+        server
+            .api()
+            .call(
+                "publish",
+                json!({"channel": channel, "data": {"n": n, "pad": pad}}),
+            )
+            .await
+            .expect("publish");
+    }
+}
+
+#[when(
+    regex = r"^the application then reads the subscription's stream until it has (\d+) publications$"
+)]
+async fn reads_until(world: &mut ClientWorld, count: u64) {
+    world.delivery.sent = (1..=count).collect();
+    let mut events = Vec::new();
+    while events
+        .iter()
+        .filter(|event| matches!(event, SubscriptionEvent::Publication(_)))
+        .count()
+        < usize::try_from(count).expect("a count that fits")
+    {
+        let event = next_subscription_event(world).await;
+        events.push(event);
+    }
+    world.delivery.yielded = events;
+}
+
+#[then(regex = r"^they are the offsets 1 to (\d+), in order, each exactly once$")]
+fn offsets_in_order(world: &mut ClientWorld, count: u64) {
+    let offsets: Vec<u64> = world
+        .delivery
+        .yielded
+        .iter()
+        .filter_map(|event| match event {
+            SubscriptionEvent::Publication(publication) => Some(offset(publication)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        offsets.iter().copied().eq(1..=count),
+        "{:?}",
+        &offsets[..offsets.len().min(20)]
+    );
+}
+
+#[then(r#"between them the stream yielded "subscribing", then "subscribed" with recovered true"#)]
+fn yielded_a_recovery(world: &mut ClientWorld) {
+    let yielded = &world.delivery.yielded;
+    let subscribing = yielded
+        .iter()
+        .position(|event| event.name() == "subscribing")
+        .expect("a subscribing event");
+    let recovered = yielded[subscribing..].iter().any(
+        |event| matches!(event, SubscriptionEvent::Subscribed(subscribed) if subscribed.recovered),
+    );
+    assert!(
+        recovered,
+        "{:?}",
+        yielded
+            .iter()
+            .map(SubscriptionEvent::name)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[given(
+    regex = r"^a client connected to the fake server with a connection token that expires in (\d+) s$"
+)]
+async fn connected_with_an_expiring_token(world: &mut ClientWorld, seconds: u32) {
+    world
+        .restart_fake(Announce {
+            ttl: seconds,
+            ..Announce::default()
+        })
+        .await;
+    let builder =
+        super::token::with_expiring_token(world, Client::builder(world.server_endpoint()));
+    world.build_client(builder);
+    world.client().connect();
+    let client = world.client();
+    wait_until("connected", || client.state() == State::Connected).await;
 }

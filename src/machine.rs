@@ -847,6 +847,13 @@ impl Machine {
         }
     }
 
+    /// Messages read from the server and not yet handled, and their
+    /// bytes: the read-ahead of Block 15, which holds none yet.
+    #[must_use]
+    pub fn read_ahead(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> State {

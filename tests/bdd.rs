@@ -202,6 +202,18 @@ const IMPLEMENTED: &[&str] = &[
     "A second events() call takes over the client's stream",
     "A cancelled read loses no publication",
     "Publications of a subscription without a stream do not hold the connection",
+    // Block 15, sub-increment 15b.
+    "The server closing the connection is handled only after the publications before it are taken",
+    "A state change not taken holds the messages of the next connection",
+    "A stream that is not read stops the client reading after 256 items",
+    "The read-ahead also stops at 4 MiB",
+    "An item larger than the read-ahead budget is still delivered",
+    "A read-ahead limit of 0 is rejected",
+    "Pings are answered while a stream is not read",
+    "A full read-ahead does not make the client report missing pings",
+    "A subscribe reply waiting behind a publication not taken does not time out",
+    "The connection token is refreshed while a stream is not read",
+    "A slow consumer on a channel with history and recovery loses no publication",
 ];
 
 /// Server configuration of @A scenarios.

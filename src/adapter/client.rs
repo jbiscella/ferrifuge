@@ -467,6 +467,16 @@ impl Client {
         EventStream::new(Arc::clone(&self.shared), None, number)
     }
 
+    /// Messages read from the server and not yet handled, and their bytes
+    /// (Block 15), so that tests can wait for the read-ahead to fill. Only
+    /// with the `test-util` feature.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn read_ahead(&self) -> (usize, usize) {
+        lock(&self.shared.core).machine.read_ahead()
+    }
+
     /// Events of the client queued for its streams and not yet taken, so
     /// that tests can wait for them. Only with the `test-util` feature.
     #[cfg(feature = "test-util")]
