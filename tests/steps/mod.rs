@@ -146,6 +146,25 @@ pub(crate) struct ClientWorld {
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
 
+/// Takes every event of `stream` as soon as it comes, as an application
+/// reading at once would, and keeps them for the steps: a stream that a
+/// step leaves unread must not hold back delivery (Block 15).
+fn recorded<E: Send + 'static>(
+    mut stream: impl Stream<Item = E> + Send + Unpin + 'static,
+) -> Pin<Box<dyn Stream<Item = E> + Send>> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(event) = stream.next().await {
+            if sender.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    Box::pin(futures_util::stream::poll_fn(move |cx| {
+        receiver.poll_recv(cx)
+    }))
+}
+
 impl fmt::Debug for ClientWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientWorld")
@@ -188,7 +207,7 @@ impl ClientWorld {
 
     pub(crate) fn build_client(&mut self, builder: ClientBuilder) {
         let client = builder.build().expect("a valid client configuration");
-        self.events = Some(Box::pin(client.events()));
+        self.events = Some(recorded(client.events()));
         self.client = Some(client);
     }
 
@@ -203,13 +222,13 @@ impl ClientWorld {
 
     /// Makes `subscription` the scenario's, recording its events.
     pub(crate) fn track_subscription(&mut self, subscription: Subscription) {
-        self.subscription_events = Some(Box::pin(subscription.events()));
+        self.subscription_events = Some(recorded(subscription.events()));
         self.subscription = Some(subscription);
     }
 
     /// Makes `subscription` the scenario's new one, recording its events.
     pub(crate) fn track_new_subscription(&mut self, subscription: Subscription) {
-        self.new_subscription_events = Some(Box::pin(subscription.events()));
+        self.new_subscription_events = Some(recorded(subscription.events()));
         self.new_subscription = Some(subscription);
     }
 
