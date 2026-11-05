@@ -4,17 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Runs the merge-only jobs on any branch, on demand.
+  # The jobs pull requests skip (perf, wall-clock, fuzz) also run nightly.
+  schedule:
+    - cron: "23 2 * * *"
+  # Runs every job on any branch, on demand.
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A new push to a pull request cancels its running CI; runs on main are
-# never cancelled, so quick merges do not cut its heavy jobs short.
+# One run per branch: a new push cancels the branch's run in progress, on
+# main too. Nightly runs have their own group, so a merge never cancels one.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -167,7 +170,7 @@ jobs:
   # Deterministic @P metrics of Block 14: instruction counts, with gungraun
   # on Valgrind.
   perf:
-    # Heavy: on merges to main and on demand, not on every PR push.
+    # Heavy: on main (merges and nightly) and on demand, not on pull requests.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -216,7 +219,7 @@ jobs:
   # Wall-clock figures of Block 14 (@P): measured and reported, never
   # gating, since they depend on the runner.
   wall-clock:
-    # Heavy: on merges to main and on demand, not on every PR push.
+    # Heavy: on main (merges and nightly) and on demand, not on pull requests.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -244,8 +247,6 @@ jobs:
   # The unit, @E and @D layers on Windows and macOS (Block 14e). @A and @B
   # need Docker, so they run on Linux only.
   portability:
-    # Heavy: on merges to main and on demand, not on every PR push.
-    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -293,7 +294,7 @@ jobs:
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.
   fuzz:
-    # Heavy: on merges to main and on demand, not on every PR push.
+    # Heavy: on main (merges and nightly) and on demand, not on pull requests.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45

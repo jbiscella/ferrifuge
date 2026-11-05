@@ -15,8 +15,10 @@ on:
 permissions:
   contents: read
 
+# One run per branch: a new push cancels the branch's run in progress.
+# Daily runs have their own group, so a merge never cancels one.
 concurrency:
-  group: dependencies-${{ github.ref }}
+  group: dependencies-${{ github.event_name == 'schedule' && 'daily' || github.ref }}
   cancel-in-progress: true
 
 jobs:
