@@ -295,23 +295,35 @@ fn crypto_provider() -> CryptoProvider {
 /// default: when another crate also enables another rustls provider, rustls
 /// cannot pick a default and panics.
 pub(super) fn tls_config() -> Result<Arc<ClientConfig>, String> {
-    static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            // Unreadable platform certificates are skipped, as browsers do.
-            let (added, _) = roots.add_parsable_certificates(load_native_certs().certs);
-            if added == 0 {
-                return Err("no platform root certificates found".to_owned());
-            }
-            let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-                .with_safe_default_protocol_versions()
-                .map_err(|e| e.to_string())?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Ok(Arc::new(config))
-        })
-        .clone()
+    static CONFIG: BuildOnce<Arc<ClientConfig>> = BuildOnce::new();
+    CONFIG.get(|| {
+        let mut roots = RootCertStore::empty();
+        // Unreadable platform certificates are skipped, as browsers do.
+        let (added, _) = roots.add_parsable_certificates(load_native_certs().certs);
+        if added == 0 {
+            return Err("no platform root certificates found".to_owned());
+        }
+        let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Ok(Arc::new(config))
+    })
+}
+
+/// A value built once per process, at first use, and shared (Block 6).
+pub(super) struct BuildOnce<T>(OnceLock<Result<T, String>>);
+
+impl<T: Clone> BuildOnce<T> {
+    pub(super) const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    /// The value, built by `build` at the first call.
+    pub(super) fn get(&self, build: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        self.0.get_or_init(build).clone()
+    }
 }
 
 fn closed(frame: Option<CloseFrame>) -> Inbound {
@@ -532,6 +544,34 @@ mod tests {
         let result = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT).await;
 
         assert!(result.is_err());
+    }
+
+    // Review item C7: a transient failure (a CA bundle being replaced, no
+    // file descriptor left) must not break every later secure connection.
+    #[test]
+    fn a_failed_tls_setup_is_retried() {
+        let setup = BuildOnce::new();
+
+        let failed = setup.get(|| Err("no platform root certificates found".to_owned()));
+        let retried = setup.get(|| Ok(1));
+
+        assert!(failed.is_err());
+        assert_eq!(retried, Ok(1));
+    }
+
+    #[test]
+    fn a_built_tls_setup_is_reused() {
+        let setup = BuildOnce::new();
+        let builds = std::cell::Cell::new(0);
+        let build = || {
+            builds.set(builds.get() + 1);
+            Ok(builds.get())
+        };
+
+        let first = setup.get(build);
+        let second = setup.get(build);
+
+        assert_eq!((first, second, builds.get()), (Ok(1), Ok(1), 1));
     }
 
     #[test]

@@ -7,7 +7,6 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -15,7 +14,7 @@ use futures_util::stream::{BoxStream, FuturesUnordered};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 
-use super::transport::{Inbound, plain_tls_config, tls_config};
+use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_config};
 use crate::machine::TransportKind;
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
@@ -223,27 +222,25 @@ fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> 
 /// The HTTP client for `https://` endpoints or for plain ones, built once
 /// per process with the client's TLS configuration.
 fn http_client(secure: bool) -> Result<reqwest::Client, String> {
-    static SECURE: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    static PLAIN: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    static SECURE: BuildOnce<reqwest::Client> = BuildOnce::new();
+    static PLAIN: BuildOnce<reqwest::Client> = BuildOnce::new();
     let client = if secure { &SECURE } else { &PLAIN };
-    client
-        .get_or_init(|| {
-            let tls = if secure {
-                (*tls_config()?).clone()
-            } else {
-                plain_tls_config()
-            };
-            reqwest::Client::builder()
-                .tls_backend_preconfigured(tls)
-                // The TLS setup and the emulation endpoint follow from the
-                // configured URL: a redirect elsewhere fails the attempt,
-                // like an unreachable endpoint, rather than splitting the
-                // stream and the commands between two servers.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| e.to_string())
-        })
-        .clone()
+    client.get(|| {
+        let tls = if secure {
+            (*tls_config()?).clone()
+        } else {
+            plain_tls_config()
+        };
+        reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
+            // The TLS setup and the emulation endpoint follow from the
+            // configured URL: a redirect elsewhere fails the attempt, like an
+            // unreachable endpoint, rather than splitting the stream and the
+            // commands between two servers.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Splits a response body into the messages it carries: one JSON reply per
