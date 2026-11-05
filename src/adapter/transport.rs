@@ -112,13 +112,10 @@ impl WebSocket {
             code: None,
             reason: String::new(),
         };
-        if let Poll::Ready(Err(_)) = self.poll_write(cx) {
+        if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
             return Poll::Ready(lost);
         }
-        if let Some(queued) = self
-            .writing
-            .or(self.queue.front().map(|(_, queued)| *queued))
-        {
+        if let Some(queued) = self.oldest_unwritten() {
             let deadline = queued + self.timeout;
             if self.deadline.deadline() != deadline {
                 self.deadline.as_mut().reset(deadline);
@@ -145,12 +142,22 @@ impl WebSocket {
 
     /// Writes the queued frames one at a time, each flushed before the next
     /// is handed to the stream, so that a written frame is one the network
-    /// took. Ready once every queued frame is written.
-    fn poll_write(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    /// took. Ready once every queued frame is written. With `on_time`, a
+    /// frame queued longer than the timeout is never written: the write
+    /// fails instead, even if the socket could take it now.
+    fn poll_write(&mut self, cx: &mut Context<'_>, on_time: bool) -> Poll<Result<(), Error>> {
         loop {
+            if on_time
+                && self
+                    .oldest_unwritten()
+                    .is_some_and(|queued| queued.elapsed() >= self.timeout)
+            {
+                return Poll::Ready(Err(Error::Io(std::io::ErrorKind::TimedOut.into())));
+            }
             if self.writing.is_some() {
                 ready!(self.stream.poll_flush_unpin(cx))?;
                 self.writing = None;
+                continue;
             }
             if self.queue.is_empty() {
                 return Poll::Ready(Ok(()));
@@ -168,13 +175,19 @@ impl WebSocket {
     pub(crate) async fn close(mut self) {
         let timeout = self.timeout;
         let closing = tokio::time::timeout(timeout, async {
-            std::future::poll_fn(|cx| self.poll_write(cx)).await?;
+            std::future::poll_fn(|cx| self.poll_write(cx, false)).await?;
             self.stream.close(None).await
         })
         .await;
         if closing.is_err() {
             self.abort();
         }
+    }
+
+    /// When the oldest frame not yet written was queued.
+    fn oldest_unwritten(&self) -> Option<Instant> {
+        self.writing
+            .or(self.queue.front().map(|(_, queued)| *queued))
     }
 
     /// Drops the connection with a TCP reset, discarding the data the server
