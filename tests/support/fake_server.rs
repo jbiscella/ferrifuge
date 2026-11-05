@@ -39,13 +39,22 @@ enum Control {
     /// A server ping, in the connection's encoding.
     Ping,
     Close(u16, String),
+    /// Stops reading from the connection, as a server that hangs while
+    /// TCP stays open, until the client closes it.
+    StopReading,
 }
+
+/// How often a connection that stopped reading probes the client with a
+/// ping, to notice that the client closed it.
+const PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Default)]
 struct State {
     /// Instructions to the latest connection, if one is open.
     current: Option<mpsc::UnboundedSender<Control>>,
     connections: usize,
+    /// Connections whose end the server has seen.
+    closed: usize,
     /// Every JSON message received from clients, in order.
     received: Vec<Value>,
     /// Every Protobuf command received from clients, in order.
@@ -116,7 +125,11 @@ impl FakeServer {
                     state: Arc::clone(&shared),
                     client_id: 0,
                 };
-                tokio::spawn(connection.serve(commands));
+                let closed = Arc::clone(&shared);
+                tokio::spawn(async move {
+                    connection.serve(commands).await;
+                    closed.lock().unwrap().closed += 1;
+                });
             }
         });
         Self {
@@ -186,6 +199,17 @@ impl FakeServer {
     /// Connections accepted so far.
     pub(crate) fn connections(&self) -> usize {
         self.state.lock().unwrap().connections
+    }
+
+    /// Connections whose end the server has seen so far.
+    pub(crate) fn closed_connections(&self) -> usize {
+        self.state.lock().unwrap().closed
+    }
+
+    /// Stops reading from the current connection; it sends a ping every
+    /// [`PROBE_PERIOD`] until it sees the client close it.
+    pub(crate) fn stop_reading(&self) {
+        self.control(Control::StopReading);
     }
 
     /// Every JSON message received from clients so far.
@@ -279,9 +303,11 @@ struct Connection {
 
 impl Connection {
     async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) {
+        let mut reading = true;
+        let mut probes = tokio::time::interval(PROBE_PERIOD);
         loop {
             tokio::select! {
-                message = self.ws.next() => {
+                message = self.ws.next(), if reading => {
                     let replies = match message {
                         Some(Ok(Message::Text(text))) => self.json_commands(&text),
                         Some(Ok(Message::Binary(frame))) => self.protobuf_commands(&frame),
@@ -297,6 +323,10 @@ impl Connection {
                     let message = match command {
                         Some(Control::Send(message)) => message,
                         Some(Control::Ping) => self.ping(),
+                        Some(Control::StopReading) => {
+                            reading = false;
+                            continue;
+                        }
                         Some(Control::Close(code, reason)) => {
                             let _ = self
                                 .ws
@@ -310,6 +340,14 @@ impl Connection {
                         None => return,
                     };
                     if self.ws.send(message).await.is_err() {
+                        return;
+                    }
+                }
+                // Without reading, only a failing write tells that the
+                // client has gone.
+                _ = probes.tick(), if !reading => {
+                    let ping = self.ping();
+                    if self.ws.send(ping).await.is_err() {
                         return;
                     }
                 }
