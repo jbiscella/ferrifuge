@@ -67,7 +67,7 @@ fn the_fake_server_stops_sending_pings(world: &mut ClientWorld) {
 }
 
 #[when(regex = r"^(\d+) s elapse$")]
-async fn time_elapses(world: &mut ClientWorld, seconds: u64) {
+pub(super) async fn time_elapses(world: &mut ClientWorld, seconds: u64) {
     let connections = world.relay.as_ref().map(CountingRelay::connections);
     world.elapsed_events = world.events_during(Duration::from_secs(seconds)).await;
     world.elapsed_new_connections = world

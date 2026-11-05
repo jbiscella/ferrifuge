@@ -191,6 +191,7 @@ impl ClientWorld {
         if let Some(delay) = self.max_server_ping_delay {
             config.max_server_ping_delay = delay;
         }
+        self.delivery.configure(&mut config);
         config.protocol = self.protocol;
         config
     }
