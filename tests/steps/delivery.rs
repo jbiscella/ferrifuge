@@ -273,9 +273,9 @@ async fn the_subscription_holds(world: &mut ClientWorld, list: String) {
     } else {
         offsets(&list).len()
     };
-    let subscription = world.subscription();
-    wait_until(&format!("{expected} events held"), || {
-        subscription.held_events() == expected
+    let (client, subscription) = (world.client(), world.subscription());
+    wait_until(&format!("{expected} publications held"), || {
+        subscription.held_events() + client.read_ahead().0 == expected
     })
     .await;
 }
@@ -286,8 +286,8 @@ async fn the_subscription_holds(world: &mut ClientWorld, list: String) {
 async fn the_client_holds(world: &mut ClientWorld, list: String) {
     let expected = offsets(&list).len();
     let client = world.client();
-    wait_until(&format!("{expected} events held"), || {
-        client.held_events() == expected
+    wait_until(&format!("{expected} publications held"), || {
+        client.held_events() + client.read_ahead().0 == expected
     })
     .await;
 }
@@ -1032,13 +1032,31 @@ async fn the_server_api_publishes(world: &mut ClientWorld, count: u64, kib: u64,
 async fn reads_until(world: &mut ClientWorld, count: u64) {
     world.delivery.sent = (1..=count).collect();
     let mut events = Vec::new();
-    while events
-        .iter()
-        .filter(|event| matches!(event, SubscriptionEvent::Publication(_)))
-        .count()
-        < usize::try_from(count).expect("a count that fits")
-    {
-        let event = next_subscription_event(world).await;
+    let mut publications = 0;
+    while publications < usize::try_from(count).expect("a count that fits") {
+        let stream = world
+            .delivery
+            .subscription_events
+            .as_mut()
+            .expect("the subscription's stream");
+        let Ok(Some(event)) = tokio::time::timeout(EVENT_TIMEOUT, stream.next()).await else {
+            let client = world.client();
+            panic!(
+                "stalled after {publications} publications, last events {:?}; client {:?}, read-ahead {:?}, held {}",
+                events
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .map(SubscriptionEvent::name)
+                    .collect::<Vec<_>>(),
+                client.state(),
+                client.read_ahead(),
+                world.subscription().held_events(),
+            );
+        };
+        if matches!(event, SubscriptionEvent::Publication(_)) {
+            publications += 1;
+        }
         events.push(event);
     }
     world.delivery.yielded = events;

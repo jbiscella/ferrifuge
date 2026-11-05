@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 mod delivery;
+mod inbound;
 mod server_subscriptions;
 mod subscriptions;
 mod tokens;
@@ -732,6 +733,8 @@ pub struct Machine {
     next_event: u64,
     /// Publications emitted and not yet taken (Block 15).
     deliveries: delivery::Deliveries,
+    /// Messages read and not yet handled (Block 15).
+    inbound: inbound::Inbound,
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
     /// Connection token state and policy.
@@ -833,6 +836,7 @@ impl Machine {
             next_transport: 0,
             next_event: 0,
             deliveries: delivery::Deliveries::default(),
+            inbound: inbound::Inbound::default(),
             next_command: 0,
             connect_command: None,
             tokens,
@@ -845,13 +849,6 @@ impl Machine {
             pings: None,
             actions: Vec::new(),
         }
-    }
-
-    /// Messages read from the server and not yet handled, and their
-    /// bytes: the read-ahead of Block 15, which holds none yet.
-    #[must_use]
-    pub fn read_ahead(&self) -> (usize, usize) {
-        (0, 0)
     }
 
     /// Current connection state.
@@ -877,8 +874,17 @@ impl Machine {
                 transport,
                 code,
                 reason,
-            } if self.is_current(transport) => self.transport_closed(code, &reason),
-            Input::Frame { transport, data } if self.is_current(transport) => self.frame(&data),
+            } if self.is_current(transport) => {
+                // A server's close comes after the messages read before it.
+                if self.holds_messages_of(transport) || self.events_hold_inbound() {
+                    self.transport_closed_in_order(transport, code, reason);
+                } else {
+                    self.transport_closed(code, &reason);
+                }
+            }
+            Input::Frame { transport, data } if self.is_current(transport) => {
+                self.frame(transport, &data);
+            }
             Input::SendRejected { transport, frame } if self.is_current(transport) => {
                 self.send_rejected(&frame);
             }
@@ -933,7 +939,10 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            Input::EventTaken(id) => self.event_taken(id),
+            Input::EventTaken(id) => {
+                self.event_taken(id);
+                self.settle_event(id);
+            }
             Input::StreamOpened(of) => self.stream_opened(of),
             Input::StreamClosed(of) => self.stream_closed(of),
             // About a transport already abandoned.
@@ -943,6 +952,9 @@ impl Machine {
             | Input::Frame { .. }
             | Input::SendRejected { .. } => {}
         }
+        // Taken or withdrawn events may let held messages follow; a
+        // transport gone drops its own (Block 15).
+        self.handle_inbound();
         std::mem::take(&mut self.actions)
     }
 
@@ -1059,26 +1071,6 @@ impl Machine {
             "transport closed",
             true,
         );
-    }
-
-    fn frame(&mut self, data: &[u8]) {
-        let Some(replies) = self.codec.decode(data) else {
-            // Not client protocol data, e.g. from a misconfigured proxy.
-            self.reconnect_after_transport_closed();
-            return;
-        };
-        // Any data from the server proves the connection alive, as in
-        // centrifuge-js `_dataReceived`.
-        if !replies.is_empty() {
-            self.wait_server_ping();
-        }
-        for reply in replies {
-            self.reply(reply);
-            if self.transport.is_none() {
-                // The reply ended this transport: the rest belongs to it.
-                return;
-            }
-        }
     }
 
     fn reply(&mut self, reply: Reply) {
@@ -1480,6 +1472,10 @@ impl Machine {
         let Some(pings) = self.pings else {
             return;
         };
+        // Paused while a full read-ahead stops the reading (Block 15).
+        if self.reading_stopped() {
+            return;
+        }
         if self.state != State::Connected || self.config.max_server_ping_delay.is_zero() {
             return;
         }

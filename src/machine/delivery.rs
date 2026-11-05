@@ -122,7 +122,6 @@ impl Machine {
     }
 
     /// Whether a stream takes the events of `of`.
-    #[cfg(test)]
     pub(super) fn has_stream(&self, of: Option<SubscriptionId>) -> bool {
         self.deliveries.streams.contains(&of)
     }
@@ -165,6 +164,7 @@ impl Machine {
         ids.sort_unstable();
         for id in &ids {
             self.deliveries.pending.remove(id);
+            self.settle_event(*id);
         }
         self.actions.push(Action::Withdraw(ids));
     }
