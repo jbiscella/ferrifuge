@@ -116,10 +116,17 @@ docker run --rm -p 8000:8000 \
 
 `Client::new` must be called inside a tokio runtime. `connect()` and
 `disconnect()` change the state before they return. `events()` returns a
-`Stream` of the events emitted from then on; each call returns an independent
-stream. A stream borrows nothing from the client, so it can be kept beside
-it, e.g. in the same struct. Dropping the client disconnects it and ends its
-streams. `Client::new` and a builder that cannot work return a
+`Stream` of the events emitted from then on. An event counts as delivered
+only when the stream yields it: a publication's stream position, which
+recovery resumes from after a reconnect, moves only then. Until a stream is
+taken, and once it is dropped, events count as delivered at once, so take
+the stream before calling `connect()` or `subscribe()` to get every event,
+and exactly-once delivery on channels with history and recovery, as the
+examples here do. The client and each subscription have one active stream:
+a second `events()` call ends the first, and the events it had not yielded
+go to the new one. A stream borrows nothing from the client, so it can be
+kept beside it, e.g. in the same struct. Dropping the client disconnects it
+and ends its streams. `Client::new` and a builder that cannot work return a
 `ClientError`, which implements `std::error::Error`: for instance an empty
 endpoint, or an `http://` or `https://` one for websocket, which needs
 `ws://` or `wss://` (`http(s)://` is right for http_stream and sse).
