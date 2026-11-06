@@ -116,6 +116,11 @@ required-features = ["tokio"]
 name = "perf_sim"
 required-features = ["test-util"]
 
+# Seeded chaos on the sans-IO core (Block 16); uses Machine::with_seed.
+[[test]]
+name = "chaos"
+required-features = ["test-util"]
+
 [[bench]]
 name = "wallclock"
 harness = false
