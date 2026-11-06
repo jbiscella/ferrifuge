@@ -156,6 +156,9 @@ pub struct SubscriptionOptions {
     /// Asks for a recoverable subscription on a channel that allows it but
     /// does not force it (spec, `recoverable`).
     pub recoverable: bool,
+    /// Asks the server for join and leave pushes, on channels that have
+    /// them (spec, "ask server to push Join/Leave").
+    pub join_leave: bool,
 }
 
 impl std::fmt::Debug for SubscriptionOptions {
@@ -177,6 +180,7 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("state_source", &self.state_source)
             .field("positioned", &self.positioned)
             .field("recoverable", &self.recoverable)
+            .field("join_leave", &self.join_leave)
             .finish()
     }
 }
@@ -194,6 +198,7 @@ impl Default for SubscriptionOptions {
             state_source: false,
             positioned: false,
             recoverable: false,
+            join_leave: false,
         }
     }
 }
@@ -272,6 +277,13 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn recoverable(mut self, recoverable: bool) -> Self {
         self.recoverable = recoverable;
+        self
+    }
+
+    /// Asks the server for join and leave pushes.
+    #[must_use]
+    pub fn join_leave(mut self, join_leave: bool) -> Self {
+        self.join_leave = join_leave;
         self
     }
 }

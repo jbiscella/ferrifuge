@@ -188,6 +188,8 @@ struct JsonSubscribeRequest<'a> {
     recoverable: bool,
     #[serde(skip_serializing_if = "is_zero_i64")]
     flag: i64,
+    #[serde(skip_serializing_if = "is_false")]
+    join_leave: bool,
 }
 
 #[derive(Serialize)]
@@ -305,6 +307,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 positioned,
                 recoverable,
                 flag,
+                join_leave,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
                     channel,
@@ -316,6 +319,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     positioned: *positioned,
                     recoverable: *recoverable,
                     flag: *flag,
+                    join_leave: *join_leave,
                 });
             }
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
@@ -641,6 +645,14 @@ struct JsonPush {
     // `Subscribe` has a subset of the fields of `SubscribeResult`.
     subscribe: Option<JsonSubscribeResult>,
     message: Option<JsonMessage>,
+    join: Option<JsonJoinLeave>,
+    leave: Option<JsonJoinLeave>,
+}
+
+/// `Join` and `Leave`, which carry the same field.
+#[derive(Deserialize)]
+struct JsonJoinLeave {
+    info: Option<JsonClientInfo>,
 }
 
 #[derive(Deserialize)]
@@ -672,6 +684,16 @@ impl From<JsonPush> for Push {
             }
         } else if let Some(message) = push.message {
             Self::Message(message.data.as_deref().map(raw_bytes).unwrap_or_default())
+        } else if let Some(join) = push.join {
+            Self::Join {
+                channel: push.channel,
+                info: join.info.map(ClientInfo::from).unwrap_or_default(),
+            }
+        } else if let Some(leave) = push.leave {
+            Self::Leave {
+                channel: push.channel,
+                info: leave.info.map(ClientInfo::from).unwrap_or_default(),
+            }
         } else {
             Self::Unsupported
         }
@@ -924,6 +946,45 @@ mod tests {
     }
 
     #[test]
+    fn encodes_join_leave_and_decodes_join_and_leave_pushes() {
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                join_leave: true,
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let replies = decode(
+            concat!(
+                r#"{"push":{"channel":"news","join":{"info":{"user":"u","client":"c","conn_info":{"a": 1},"chan_info":{"b":2}}}}}"#,
+                "\n",
+                r#"{"push":{"channel":"news","leave":{"info":{"user":"u","client":"c"}}}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":2,"subscribe":{"channel":"news","join_leave":true}}"#
+        );
+        let ReplyResult::Push(Push::Join { channel, info }) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        assert_eq!(
+            (channel.as_str(), info.user.as_str(), info.client.as_str()),
+            ("news", "u", "c")
+        );
+        assert_eq!(info.conn_info.as_deref(), Some(&br#"{"a": 1}"#[..]));
+        assert_eq!(info.chan_info.as_deref(), Some(&br#"{"b":2}"#[..]));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Leave { channel, info }) if channel == "news" && info.client == "c"
+        ));
+    }
+
+    #[test]
     fn encodes_connect_command_omitting_empty_fields() {
         let frame = encode(&[connect_command(1, "")]);
 
@@ -1083,7 +1144,8 @@ mod tests {
     #[test]
     fn unknown_results_and_pushes_are_unsupported_not_errors() {
         let replies =
-            decode(b"{\"id\":5,\"ping\":{}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}").unwrap();
+            decode(b"{\"id\":5,\"ping\":{}}\n{\"push\":{\"channel\":\"c\",\"refresh\":{}}}")
+                .unwrap();
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
         assert_eq!(replies[1].result, ReplyResult::Push(Push::Unsupported));
