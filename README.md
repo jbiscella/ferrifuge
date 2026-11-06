@@ -67,9 +67,9 @@ Available now:
   (`Config::write_queue_bytes`);
 - join and leave events of the clients of a channel.
 
-Planned after Block 13 (the owner sets the order): connect data and
-headers, `setToken` and `setData`; batching several commands in one frame;
-a seeded chaos harness checking delivery invariants.
+Planned next, in this order: a seeded chaos harness checking delivery
+invariants; connect data and headers, `setToken` and `setData`; batching
+several commands in one frame.
 
 ## Usage
 
@@ -140,9 +140,9 @@ delivers what was missed, exactly once, within the server's recovery limit.
 On channels without recovery a slow consumer can lose publications, as with
 any disconnect. A recovery reply is queued whole on the server, so one larger
 than Centrifugo's `client.queue_max_size` (1 MiB by default) is answered with
-3008 "slow" however fast the client reads, and the client reconnects about
-every second until the backlog passes `client.recovery_max_publication_limit`
-or the history expires: keep `client.queue_max_size` above
+3008 "slow" however fast the client reads, and the client keeps reconnecting,
+its backoff growing up to `max_reconnect_delay`, until the backlog passes
+`client.recovery_max_publication_limit` or the history expires: keep `client.queue_max_size` above
 `client.recovery_max_publication_limit` times the largest publication,
 summed over the server-side subscriptions one connect recovers. A stream holding 256 events not taken gets no further
 `error` events, which change no state, so retries against a server that is
