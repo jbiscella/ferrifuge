@@ -121,6 +121,11 @@ required-features = ["test-util"]
 name = "chaos"
 required-features = ["test-util"]
 
+# Seeded chaos on the tokio client against the fake server (Block 16).
+[[test]]
+name = "chaos_adapter"
+required-features = ["tokio"]
+
 [[bench]]
 name = "wallclock"
 harness = false
