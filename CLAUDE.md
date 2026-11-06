@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–20 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–21 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3192,3 +3192,102 @@ Feature: Release setup
 The release-check scenarios pass the outline's tag descriptions to the step, which builds the tag from the manifest's version. The quickstart scenario runs the example's binary, which its step builds with `cargo build --example quickstart` and the features of the test build, since `cargo test --all-targets` builds examples only as test harnesses (not a nested `cargo run`), and waits for its "subscribed" line before publishing.
 
 **Exceptions introduced:** the workflow's publishing, the GitHub release and the CI jobs are verified by running them, not by scenarios: they need the owner's crates.io and repository setup (out of scope above). The first release is the first full run of `release.yml`.
+
+---
+
+## Block 21 — Logging
+
+**Goal:** an operator of a fleet can see why a client reconnects, falls back, resubscribes or stops, by turning on a log filter, without a rebuild and without any secret reaching a log (parity item 9; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art).
+
+**Dependencies:** Blocks 3 (close code 1009), 5c and 5d (the codec and transport seams), 8 (transports and fallback), 14 (the @P gates), 15 (the read-ahead), 17 (the redacting `Debug` implementations, `Action` exhaustive), 19 (delta errors), 20 (changelog).
+
+**Out of scope:**
+- logging in the sans-IO core: it stays free of any logging dependency and reports what only it sees as an action (D4);
+- metrics and counters (item 8, `statistics()`, Block 31);
+- a switch to log payloads: no payload reaches a Ferrifuge record;
+- the records of Ferrifuge's dependencies: tungstenite, reqwest and rustls log through `log`, hyper-util through `tracing`, at their own levels; the documentation warns about them (D6);
+- INFO and ERROR records: Ferrifuge's events are WARN, DEBUG and TRACE only (D3).
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Dependency.** `tracing` 0.1.44 without default features, with `std` and `log`, a regular dependency of the `tokio` feature, with no feature of its own: with no subscriber a callsite costs a few relaxed atomic loads, and the default build already links `tracing` through hyper-util. With `log`, Ferrifuge's records go to the `log` logger as long as no `tracing` dispatcher, global or scoped, has ever been set in the process (tracing-core 0.1.36 `dispatcher::has_been_set`); once one is, they go to `tracing` only, never to both. No `#[instrument]` (no `attributes` feature): spans are created by hand.
+- **D2 Spans.** A DEBUG span `client` per client, with one field `client`: a number unique within the process, given when the client is built. A DEBUG span `subscription` per client-side subscription, child of its client's, with one field `channel`. Server-side subscriptions log in the client's span with a `channel` field on the record. Spans carry no other field. Every record is made in its span: the adapter enters the client's span where it feeds the machine (application calls and stream reads run on the application's tasks), instruments the driver and every task it spawns, and gives subscription records their span as explicit parent. WARN records also carry `client`, and `channel` when they have one, so they keep their client under a filter that disables DEBUG spans and through `log`, which drops span fields. A `test-util` hook gives the tests a client's number.
+- **D3 Levels.** Every event's target starts with `ferrifuge`. Records give their values as fields: `state`, `code`, `reason`, `transport`, `endpoint`, `channel`, `bytes`, `delay`, `kind`.
+  - WARN, server anomalies: a frame that is not client protocol data and a reply without the result of the command it answers (D4); a delta that cannot be applied (Block 19); a message larger than the size limit; a websocket closed with 1009. A reply whose id matches no command is no anomaly (the reply to a call abandoned or timed out): it shows only at TRACE, as an input.
+  - DEBUG: every state change of the client and of each subscription, client-side and server-side, with its code and reason; each transport attempt (kind and endpoint, D5), its opening, its failure (the error's message) and its close (code and reason); the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback (token, data, getState) started and how it ended (got a value, failed, denied, panicked), never the value; the read-ahead filling (reading stops) and draining (reading resumes); each call that fails, with its kind and code.
+  - TRACE: every input the adapter gives the machine and every action the machine returns, through their `Debug` (D5); each frame sent or received, with its transport kind, frame type and length.
+- **D4 Anomalies only the core sees.** A frame that is not client protocol data, and a reply without its command's result, make the core reconnect with code 1 "transport closed", as a lost transport does (`machine/inbound.rs` `frame`, `machine/calls.rs` `call_reply`, `machine.rs` `command_reply`). The core reports each, before the actions of that reconnect, with a new action `Action::Anomaly(Anomaly)`: `Anomaly` is a `#[non_exhaustive]` enum naming the transport and, for a frame, its length, for a reply, the kind of command it answers, never payload bytes. The adapter logs it at WARN; another owner of the machine may ignore it. `Action` stays exhaustive (Block 17), so the variant is breaking (D9). The core logs nothing itself. The adapter sees the other anomalies of D3 itself: the delta error event, its size limit, the 1009 close.
+- **D5 Redaction.** Every value logged goes through a redacting `Debug` or `Display`: tokens as `<redacted>`; connect, subscription, publication, RPC, publish, send, message and server data, and connection and channel info, as a length; headers and tags by name only. This block makes the `Debug` of `ClientEvent`, `SubscriptionEvent`, `ServerSubscriptionEvent`, `Subscribed`, `Publication` and `ClientInfo` redacting: `Action::Emit` and `Action::EmitSubscription` carry them, and their derived `Debug` shows data bytes. Endpoints, of every transport and the emulation endpoint, are logged as scheme, host, port and path: userinfo, query and fragment are left out, as each may hold a credential; an endpoint that does not parse is logged as `<invalid>`; `ClientBuilder`'s `Debug` shows them the same way. The sse request URL, whose `cf_connect` carries the connect command and its token, is never logged. No error message carries a URL: the emulation request's error drops it (`reqwest::Error::without_url`), as the stream request's already does.
+- **D6 Documentation.** A "Logging" section in the crate documentation and the README: the targets, levels and fields (D2, D3); how to enable them with `tracing-subscriber`'s `EnvFilter` or with `env_logger` (`RUST_LOG=ferrifuge=debug`); that through `log` records carry no span fields, the WARN records keeping their own `client`, and span entries and exits appear at TRACE under the target `tracing::span::active`; and a warning: Ferrifuge's dependencies log on their own, and at TRACE tungstenite 0.30.0 logs the whole upgrade request with its query and header values (`handshake/client.rs:197`), every message received (`protocol/mod.rs:475`) and every frame sent (`:768`), the connect frame and its token included, so production filters keep dependencies at INFO or above (`RUST_LOG=info,ferrifuge=trace`). A `tracing` application sees the dependencies' `log` records only through `tracing-log`.
+- **D7 Capture.** The BDD run installs once a process-wide subscriber (`tracing-subscriber` 0.3.23 as a dev-dependency, registry only) with a test layer recording each event with its level, target, fields and the fields of the spans in its scope. A scenario reads the records in its clients' spans, by their `client` field. The secret checks read every record whose target starts with `ferrifuge`, in a span or not, and look for each secret as text and as the `Debug` list of its bytes; the secrets differ per scenario, so concurrent scenarios cannot match each other's. The `log` path is tested in its own binary, `tests/log_facade.rs`, which sets a capturing `log` logger and never a `tracing` dispatcher (one set anywhere in a process stops `log` records for good): a client connects to the fake server with a token, its DEBUG state changes reach the logger under targets starting with `ferrifuge`, and none of Ferrifuge's records holds the token.
+- **D8 Footprint.** With its level off, logging adds no allocation per message, call or state change: `tracing` formats fields only for an enabled record; a span is kept per client and per subscription. The Block 14 @P gates pass unchanged.
+- **D9 Version and changelog.** 0.13.0 (D4, D5); `Unreleased` entries: "Added" logging; "Changed" `Action::Anomaly` and the `Debug` output of events showing data as lengths; "Fixed" the emulation request's error no longer carrying its URL.
+
+Value clause: As an operator of a fleet of devices running Ferrifuge, I want each client to log why it reconnects, falls back, resubscribes or stops, at levels I turn on without a rebuild, with no token, payload or header value in any record, so that I can diagnose connection problems in production without exposing user secrets.
+
+**Structural acceptance:** `tracing` is a normal dependency of the `tokio` feature only (`cargo tree --no-default-features -e normal -i tracing` finds no package); no logging call in `src/machine*`, `src/codec.rs`, `src/json.rs`, `src/protobuf.rs`, `src/wire.rs` or `src/fossil.rs`; every event's target starts with `ferrifuge`; a unit test checks that the `Debug` of every event type holding data or info shows none of it; `tests/log_facade.rs` passes; the Block 14 @P gates pass unchanged.
+
+```gherkin
+Feature: Logging
+
+  @D
+  Scenario: State changes are logged with their codes and reasons
+    Given a client connected to the fake server, its log records captured
+    When the fake server disconnects the client with code 3001 and reason "going away"
+    Then a DEBUG record in the client's span says it is connecting with code 3001 and reason "going away"
+    And then a DEBUG record in the client's span says it is connected over transport "websocket"
+
+  @D
+  Scenario: Subscription records are in the subscription's span
+    Given a client connected to the fake server, its log records captured
+    When a subscription to channel "news" is created and subscribed
+    Then a DEBUG record in the span of the subscription to "news" says it is subscribed
+
+  @D
+  Scenario: A frame that is not client protocol data is logged as a warning
+    Given a client connected to the fake server, its log records captured
+    When the fake server sends the text frame "not-json-7f3a"
+    Then a WARN record in the client's span says a frame from the server could not be decoded, with a length of 13 bytes and the client's number
+    And no record contains "not-json-7f3a"
+
+  Scenario: Endpoints are logged without credentials, query or fragment
+    Given a client configured with the unreachable websocket endpoint "ws://user:pw-5c1e@127.0.0.1:9/connection/websocket?token=tk-8d2b#f" and the unreachable http_stream endpoint "http://user:pw-5c1e@127.0.0.1:9/connection/http_stream?token=tk-8d2b", its log records captured
+    When connect is called
+    Then a DEBUG record in the client's span names a websocket attempt to "ws://127.0.0.1:9/connection/websocket"
+    And then a DEBUG record in the client's span names an http_stream attempt to "http://127.0.0.1:9/connection/http_stream"
+    And no record contains "pw-5c1e" or "tk-8d2b"
+
+  @D
+  Scenario: No secret reaches a record
+    Given a client with a connection token, connect data, an HTTP header and an emulated header, each holding a distinct secret, its log records captured
+    And the fake server answers connects with data holding a distinct secret and answers RPC with the data it received
+    And the client is connected to the fake server
+    When a subscription to channel "news" with a subscription token and subscription data, each holding a distinct secret, is subscribed
+    And the fake server pushes a publication on "news" whose data holds a distinct secret
+    And the client publishes data holding a distinct secret to "news" and calls RPC "echo" with data holding a distinct secret
+    Then the client's span holds TRACE records of inputs, actions, and frames sent and received
+    And no record contains any of those secrets, as text or as the Debug list of its bytes
+
+  @D
+  Scenario: The records of two clients are told apart
+    Given two clients, each connected to its own fake server, their log records captured
+    When the first client's fake server disconnects it with code 3001 and reason "going away"
+    Then the record saying a client is connecting with code 3001 is in the first client's span only
+
+  @E
+  Scenario: The core reports a frame that is not client protocol data
+    Given a machine connected over a websocket transport
+    When it is given a frame of 13 bytes that is not client protocol data
+    Then its actions report an anomaly naming that transport and a length of 13 bytes
+    And then they close the transport and emit "connecting" with code 1 and reason "transport closed"
+
+  @E
+  Scenario: The core reports a reply without its command's result
+    Given a machine connected over a websocket transport, with an RPC call sent
+    When it is given the reply to that call carrying a history result
+    Then its actions report an anomaly naming that transport and the command kind "rpc"
+    And then the call fails with a "connection closed" error and the machine emits "connecting" with code 1
+```
+
+The secrets are distinct random strings per scenario, so a match cannot be a coincidence of the scenario's text or of another scenario's. "Says" in a Then step means the record's fields (D3), not the wording of its message. The fake server gains an RPC mode answering with the data it received. The @E scenarios are unit tests of the machine.
+
+**Exceptions introduced:** `tests/log_facade.rs` runs outside cucumber (D7): once a process sets a `tracing` dispatcher, `tracing` sends nothing more to `log`, so the facade check needs its own binary.
