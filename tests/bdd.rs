@@ -236,6 +236,21 @@ const IMPLEMENTED: &[&str] = &[
     "Disconnect fails a call already sent at once",
     "A call whose emulation request fails fails at once",
     "Losing the transport fails calls already sent at once",
+    // Block 13, sub-increment 13b: publish, history, presence and
+    // subscription-level calls.
+    "Publish reaches subscribers",
+    "History returns the last publications",
+    "A subscription command fails after the timeout when the subscribe never completes",
+    "History since a known position",
+    "History in reverse order",
+    "History with limit 0 returns only the stream position",
+    "A client-published publication carries its publisher",
+    "Subscription-level commands use the subscription's channel",
+    "A subscription command on an unsubscribed subscription fails at once",
+    "A subscription command waiting for a failed subscribe fails at once",
+    "A subscription command waits until the subscription is subscribed",
+    "Presence lists the subscribed clients",
+    "Presence stats count clients and users",
 ];
 
 /// Server configuration of @A scenarios.

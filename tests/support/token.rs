@@ -23,6 +23,27 @@ pub(crate) fn subscription_token(user: &str, channel: &str, lifetime: Duration) 
     signed(&json!({"sub": user, "channel": channel, "exp": expires_in(lifetime)}))
 }
 
+/// A token for `user` carrying `info`, the connection info the server
+/// attaches to the user's publications and presence (claim `info`).
+pub(crate) fn connection_token_with_info(user: &str, info: &serde_json::Value) -> String {
+    signed(&json!({"sub": user, "info": info, "exp": expires_in(Duration::from_secs(3600))}))
+}
+
+/// A subscription token for `user` and `channel` carrying `info`, the
+/// channel info the server attaches (claim `info`).
+pub(crate) fn subscription_token_with_info(
+    user: &str,
+    channel: &str,
+    info: &serde_json::Value,
+) -> String {
+    signed(&json!({
+        "sub": user,
+        "channel": channel,
+        "info": info,
+        "exp": expires_in(Duration::from_secs(3600)),
+    }))
+}
+
 fn expires_in(lifetime: Duration) -> u64 {
     SystemTime::now()
         .checked_add(lifetime)

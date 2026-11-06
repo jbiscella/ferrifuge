@@ -74,6 +74,8 @@ struct State {
     received_protobuf: Vec<protobuf::Command>,
     /// Subscribe commands still to leave unanswered.
     ignored_subscribes: usize,
+    /// Every subscribe command is left unanswered.
+    ignore_subscribes: bool,
     /// Results of the replies to the next subscribe commands, in order;
     /// an empty result once none is left.
     subscribe_results: VecDeque<Value>,
@@ -95,6 +97,13 @@ struct State {
     /// The RPC command whose answer waits for the next one's, in
     /// [`Rpc::Reverse`].
     held_rpc: Option<Value>,
+    /// When each message of `received` arrived.
+    received_at: Vec<std::time::Instant>,
+    /// Subscribe commands are answered after this delay, with this error
+    /// when one is given.
+    subscribe_delay: Option<(std::time::Duration, Option<Value>)>,
+    /// When each delayed subscribe answer was sent.
+    subscribes_answered_at: Vec<std::time::Instant>,
 }
 
 /// Epoch of the channels answered from their history.
@@ -251,6 +260,34 @@ impl FakeServer {
     /// Leaves the next subscribe command unanswered.
     pub(crate) fn ignore_next_subscribe(&self) {
         self.state.lock().unwrap().ignored_subscribes += 1;
+    }
+
+    /// Leaves every subscribe command unanswered.
+    pub(crate) fn ignore_subscribes(&self) {
+        self.state.lock().unwrap().ignore_subscribes = true;
+    }
+
+    /// Answers subscribe commands after `delay`: with `error` (an `Error`
+    /// object) when given, else with an empty result.
+    pub(crate) fn answer_subscribes_after(&self, delay: std::time::Duration, error: Option<Value>) {
+        self.state.lock().unwrap().subscribe_delay = Some((delay, error));
+    }
+
+    /// When each delayed subscribe answer was sent.
+    pub(crate) fn subscribes_answered_at(&self) -> Vec<std::time::Instant> {
+        self.state.lock().unwrap().subscribes_answered_at.clone()
+    }
+
+    /// The JSON commands received with `method` set, with when each arrived.
+    pub(crate) fn commands_with_times(&self, method: &str) -> Vec<(Value, std::time::Instant)> {
+        let state = self.state.lock().unwrap();
+        state
+            .received
+            .iter()
+            .zip(&state.received_at)
+            .filter(|(message, _)| message[method].is_object())
+            .map(|(message, at)| (message.clone(), *at))
+            .collect()
     }
 
     /// Includes `publications` in the reply to the next subscribe command.
@@ -497,26 +534,7 @@ impl Connection {
                     .to_string(),
                 ));
             } else if message["subscribe"].is_object() {
-                let mut state = self.state.lock().unwrap();
-                if state.ignored_subscribes > 0 {
-                    state.ignored_subscribes -= 1;
-                } else {
-                    let channel = message["subscribe"]["channel"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned();
-                    let result = match state.subscribe_results.pop_front() {
-                        Some(result) => result,
-                        None if state.recovering.contains(&channel) => {
-                            from_history(&state, &channel, &message["subscribe"])
-                        }
-                        None => json!({}),
-                    };
-                    state.subscribe_replies.push((channel, result.clone()));
-                    replies.push(Message::text(
-                        json!({"id": message["id"], "subscribe": result}).to_string(),
-                    ));
-                }
+                replies.extend(self.subscribe_answer(&message));
             } else if message["rpc"].is_object() {
                 let mut state = self.state.lock().unwrap();
                 match state.rpc {
@@ -530,6 +548,11 @@ impl Connection {
                     },
                     Rpc::Ignore => {}
                 }
+            } else if message["history"].is_object() {
+                replies.push(Message::text(
+                    json!({"id": message["id"], "history": {"epoch": "fake", "offset": 0}})
+                        .to_string(),
+                ));
             } else if message["unsubscribe"].is_object() {
                 replies.push(Message::text(
                     json!({"id": message["id"], "unsubscribe": {}}).to_string(),
@@ -544,9 +567,55 @@ impl Connection {
                     .to_string(),
                 ));
             }
-            self.state.lock().unwrap().received.push(message);
+            let mut state = self.state.lock().unwrap();
+            state.received.push(message);
+            state.received_at.push(std::time::Instant::now());
         }
         replies
+    }
+
+    /// The answer to the JSON subscribe command `message`, unless it is
+    /// left unanswered or answered later.
+    fn subscribe_answer(&self, message: &Value) -> Option<Message> {
+        let mut state = self.state.lock().unwrap();
+        if state.ignore_subscribes {
+            return None;
+        }
+        if state.ignored_subscribes > 0 {
+            state.ignored_subscribes -= 1;
+            return None;
+        }
+        if let Some((delay, error)) = state.subscribe_delay.clone() {
+            let answer = match error {
+                Some(error) => json!({"id": message["id"], "error": error}),
+                None => json!({"id": message["id"], "subscribe": {}}),
+            };
+            let shared = Arc::clone(&self.state);
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let mut state = shared.lock().unwrap();
+                state.subscribes_answered_at.push(std::time::Instant::now());
+                if let Some(current) = &state.current {
+                    let _ = current.send(Control::Send(Message::text(answer.to_string())));
+                }
+            });
+            return None;
+        }
+        let channel = message["subscribe"]["channel"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let result = match state.subscribe_results.pop_front() {
+            Some(result) => result,
+            None if state.recovering.contains(&channel) => {
+                from_history(&state, &channel, &message["subscribe"])
+            }
+            None => json!({}),
+        };
+        state.subscribe_replies.push((channel, result.clone()));
+        Some(Message::text(
+            json!({"id": message["id"], "subscribe": result}).to_string(),
+        ))
     }
 
     /// Records the Protobuf commands of a binary frame; the replies to send.
