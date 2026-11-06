@@ -33,6 +33,8 @@ const OPS: usize = 60;
 const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 /// Operations of each seed of the long run.
 const OPS_VARIABLE: &str = "FERRIFUGE_CHAOS_OPS";
+/// `0` runs the long run without subscriptions, as the connection runner.
+const SUBSCRIPTIONS_VARIABLE: &str = "FERRIFUGE_CHAOS_SUBSCRIPTIONS";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
 /// I4: how long after healing the client must be connected.
@@ -112,6 +114,8 @@ struct Violation {
     op: usize,
     /// Operations the seed runs.
     of: usize,
+    /// The runner had subscriptions.
+    subscriptions: bool,
     detail: String,
     /// The operations up to it.
     ops: Vec<String>,
@@ -124,8 +128,8 @@ impl fmt::Display for Violation {
         write!(
             f,
             "seed {} broke {} at operation {}: {}\n\
-             rerun: {SEED_VARIABLE}={} {OPS_VARIABLE}={} cargo test --release --test chaos \
-             seeded_chaos_long_run -- --ignored\n\
+             rerun: {SEED_VARIABLE}={} {OPS_VARIABLE}={} {SUBSCRIPTIONS_VARIABLE}={} cargo test \
+             --release --test chaos seeded_chaos_long_run -- --ignored\n\
              operations:\n  {}\nlast inputs and actions:\n  {}",
             self.seed,
             self.invariant,
@@ -133,6 +137,7 @@ impl fmt::Display for Violation {
             self.detail,
             self.seed,
             self.of,
+            u8::from(self.subscriptions),
             self.ops.join("\n  "),
             self.tail.join("\n  ")
         )
@@ -404,6 +409,8 @@ enum Kind {
     Subscribed {
         was_recovering: bool,
         recovered: bool,
+        /// The stream position the subscription starts from.
+        offset: Option<u64>,
     },
     Other,
 }
@@ -530,6 +537,7 @@ impl Run {
             invariant,
             op: self.op,
             of: self.of,
+            subscriptions: self.subscriptions,
             detail: detail.into(),
             ops: self
                 .trace
@@ -1254,6 +1262,7 @@ impl Run {
                 Kind::Subscribed {
                     was_recovering: subscribed.was_recovering,
                     recovered: subscribed.recovered,
+                    offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
             ServerSubscriptionEvent::Unsubscribed { .. } => {
@@ -1303,6 +1312,7 @@ impl Run {
                 Kind::Subscribed {
                     was_recovering: subscribed.was_recovering,
                     recovered: subscribed.recovered,
+                    offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
             SubscriptionEvent::Unsubscribed { .. } => {
@@ -1370,6 +1380,7 @@ impl Run {
             Kind::Subscribed {
                 was_recovering,
                 recovered,
+                offset,
             } => {
                 if was_recovering {
                     self.count(if recovered {
@@ -1379,9 +1390,9 @@ impl Run {
                     });
                 }
                 if !recovered {
-                    // The stream restarts: the server could not bring
-                    // back what was missed.
-                    self.checker.delivered.insert(sub, None);
+                    // The stream restarts from the position the server
+                    // gave, as it could not bring back what was missed.
+                    self.checker.delivered.insert(sub, offset);
                 }
             }
             Kind::Publication(None) | Kind::Other => {}
@@ -1900,9 +1911,9 @@ fn trace() {
 
 /// The main and nightly run (Block 16, "CI"): `FERRIFUGE_CHAOS_SEEDS`
 /// seeds (10 000 by default) of `FERRIFUGE_CHAOS_OPS` operations (200),
-/// with subscriptions, from a start seed drawn per run, or
-/// `FERRIFUGE_CHAOS_START`; `FERRIFUGE_CHAOS_SEED` alone when set, which
-/// reruns a failure.
+/// with subscriptions unless `FERRIFUGE_CHAOS_SUBSCRIPTIONS=0`, from a start
+/// seed drawn per run, or `FERRIFUGE_CHAOS_START`; `FERRIFUGE_CHAOS_SEED`
+/// alone when set, which reruns a failure.
 #[test]
 #[ignore = "long: main and nightly, in release"]
 fn seeded_chaos_long_run() {
@@ -1914,12 +1925,13 @@ fn seeded_chaos_long_run() {
     let start = number("FERRIFUGE_CHAOS_START", fastrand::u64(..u64::MAX / 2));
     let seeds = number("FERRIFUGE_CHAOS_SEEDS", 10_000);
     let ops = usize::try_from(number(OPS_VARIABLE, 200)).expect("a count");
+    let subscriptions = number(SUBSCRIPTIONS_VARIABLE, 1) != 0;
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);
     println!(
-        "chaos: seeds {}..{} of {ops} operations",
+        "chaos: seeds {}..{} of {ops} operations, subscriptions {subscriptions}",
         seeds.start, seeds.end
     );
-    if let Err(violation) = run_seeds(seeds, ops, None, true) {
+    if let Err(violation) = run_seeds(seeds, ops, None, subscriptions) {
         panic!("{violation}");
     }
 }
