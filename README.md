@@ -64,6 +64,9 @@ Available now:
   no position to recover from, or a recovery fails;
 - the server's "state invalidated" codes: tokens and stream positions are
   dropped before subscribing or connecting again;
+- Fossil delta compression: publications sent as deltas against the
+  previous one and rebuilt by the client, a broken delta making the
+  subscription subscribe again rather than reach the application;
 - server-side subscriptions, granted at connect or added and removed by the
   server later, with their events and publications, and recovery of the
   publications they missed across reconnects and `disconnect()`/`connect()`;
@@ -310,6 +313,37 @@ yet taken when the subscription stops are withdrawn, as publications are.
 let subscription = client
     .subscription_builder("chat")
     .join_leave(true)
+    .build()?;
+```
+
+### Delta compression
+
+A subscription built with `.delta(DeltaFormat::Fossil)` asks the server to
+send each publication as a Fossil delta against the previous one, which
+saves bandwidth on channels whose payloads change a little at a time. The
+client rebuilds every publication: the application always receives whole
+payloads, byte for byte as published, and `Subscribed::delta` says whether
+the server agreed. On Centrifugo the channel needs `allowed_delta_types:
+["fossil"]` and a positioned subscription (`force_positioning`, or
+recovery); `delta_publish` sends every publication as a delta.
+
+A delta that cannot be applied (a wrong checksum, a copy past the previous
+data, a delta with nothing to apply to) never reaches the application: the
+subscription emits an `error` event (`ErrorKind::Delta`, code 15) and
+subscribes again after its resubscribe backoff (`subscribing` code 2),
+recovering from its last publication taken on channels with recovery. A
+delta publication on a server-side subscription, which the client never asks
+for, makes the client reconnect (`connecting` code 5). A rebuilt payload, and
+the publications of one message together, are capped by the inbound message
+limit (64 MiB); a recovery larger than that fails on every resubscribe, as an
+oversized recovery reply does without delta.
+
+```rust
+use ferrifuge::DeltaFormat;
+
+let subscription = client
+    .subscription_builder("dashboard")
+    .delta(DeltaFormat::Fossil)
     .build()?;
 ```
 
