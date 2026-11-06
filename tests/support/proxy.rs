@@ -33,6 +33,8 @@ struct Answers {
     programmed: VecDeque<Answer>,
     /// Bodies of the connect requests received.
     requests: Vec<Value>,
+    /// Headers of the connect requests received (Block 17).
+    request_headers: Vec<axum::http::HeaderMap>,
     /// How subscribe requests are answered, by channel; others succeed.
     subscribe: HashMap<String, SubscribeAnswer>,
     /// Bodies of the subscribe requests received.
@@ -100,6 +102,16 @@ impl ProxyBackend {
             // holds stays unanswered until the client gives up, rather than
             // the server answering it with an error first (brief C3).
             ("CENTRIFUGO_CLIENT_PROXY_CONNECT_TIMEOUT", "15s".to_owned()),
+            // Each header travels one way only, so a scenario fails when
+            // its header was sent the other way (Block 17).
+            (
+                "CENTRIFUGO_CLIENT_PROXY_CONNECT_HTTP_HEADERS",
+                "x-device-real".to_owned(),
+            ),
+            (
+                "CENTRIFUGO_CLIENT_PROXY_CONNECT_EMULATED_HEADERS",
+                "x-device-emulated".to_owned(),
+            ),
             (
                 "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_SUBSCRIBE_PROXY_ENABLED",
                 "true".to_owned(),
@@ -225,6 +237,23 @@ impl ProxyBackend {
         self.state.lock().unwrap().requests.len()
     }
 
+    /// The values of header `name` of the connection attempts so far, in
+    /// order, `None` where one did not carry it.
+    pub(crate) fn request_headers(&self, name: &str) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .unwrap()
+            .request_headers
+            .iter()
+            .map(|headers| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
     /// Body of the `index`-th connection attempt.
     pub(crate) fn request(&self, index: usize) -> Value {
         self.state.lock().unwrap().requests[index].clone()
@@ -239,11 +268,13 @@ impl Drop for ProxyBackend {
 
 async fn connect(
     State(state): State<Arc<Mutex<Answers>>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<Value>,
 ) -> Json<Value> {
     let (answer, granted, accept_delay, data) = {
         let mut answers = state.lock().unwrap();
         answers.requests.push(request);
+        answers.request_headers.push(headers);
         (
             answers.programmed.pop_front(),
             answers.granted.clone(),

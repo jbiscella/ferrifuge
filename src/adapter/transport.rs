@@ -68,6 +68,7 @@ impl WebSocket {
         url: &str,
         subprotocol: Option<&str>,
         timeout: Duration,
+        headers: &reqwest::header::HeaderMap,
     ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
@@ -79,6 +80,10 @@ impl WebSocket {
             Connector::Plain
         };
         let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+        // The application's, which leave out those the handshake sets.
+        for (name, value) in headers {
+            request.headers_mut().insert(name.clone(), value.clone());
+        }
         if let Some(subprotocol) = subprotocol {
             let value = HeaderValue::from_str(subprotocol).map_err(|e| e.to_string())?;
             request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
@@ -413,6 +418,7 @@ fn closed(frame: Option<CloseFrame>) -> Inbound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::HeaderMap;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -451,7 +457,9 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url, None, TIMEOUT).await.unwrap();
+        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new())
+            .await
+            .unwrap();
 
         ws.send(
             FrameId::for_tests(1),
@@ -487,7 +495,7 @@ mod tests {
                 ws.send(message).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
             .await
             .unwrap();
         ws.send(FrameId::for_tests(1), b"1".to_vec(), FrameType::Text)
@@ -523,7 +531,7 @@ mod tests {
                 ws.send(Message::text(kind)).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
             .await
             .unwrap();
 
@@ -558,7 +566,7 @@ mod tests {
             }
         });
         let timeout = Duration::from_millis(200);
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout, &HeaderMap::new())
             .await
             .unwrap();
         // Frames are queued until one is not written in time: how much the
@@ -611,7 +619,7 @@ mod tests {
             None
         });
         let timeout = Duration::from_millis(100);
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout, &HeaderMap::new())
             .await
             .unwrap();
         ws.send(FrameId::for_tests(5), b"late".to_vec(), FrameType::Text)
@@ -646,7 +654,7 @@ mod tests {
             ws.send(Message::text("x".repeat(20 << 20))).await.unwrap();
             let _ = ws.next().await;
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
             .await
             .unwrap();
 
@@ -665,7 +673,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         drop(listener);
 
-        let result = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT).await;
+        let result =
+            WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new()).await;
 
         assert!(result.is_err());
     }

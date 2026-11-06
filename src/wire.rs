@@ -42,6 +42,8 @@ pub(crate) struct ConnectRequest {
     pub(crate) token: String,
     /// The application's connect data, if any (Block 17).
     pub(crate) data: Option<Vec<u8>>,
+    /// Emulated headers, by name (`ConnectRequest.headers`, Block 17).
+    pub(crate) headers: BTreeMap<String, String>,
     pub(crate) name: String,
     pub(crate) version: String,
     /// Server-side subscriptions to recover, by channel: only `recover`,

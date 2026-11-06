@@ -44,7 +44,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// test clients' maximum reconnect delay.
 const QUIET_PERIOD: Duration = Duration::from_secs(1);
 /// An endpoint nothing listens on: connections are refused at once.
-const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
+pub(crate) const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
 
 type Events = Pin<Box<dyn Stream<Item = ClientEvent> + Send>>;
 

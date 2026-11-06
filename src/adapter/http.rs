@@ -7,12 +7,13 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, FuturesUnordered};
 use reqwest::Url;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 
 use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_setup};
 use crate::machine::{FrameId, TransportKind};
@@ -43,6 +44,8 @@ pub(crate) struct HttpTransport {
     emulation_url: Url,
     /// Time allowed for an emulation request, as for a command's reply.
     request_timeout: Duration,
+    /// The application's HTTP headers, on every request (Block 17).
+    headers: Arc<HeaderMap>,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
     decoder: Decoder,
     /// Messages decoded but not received yet.
@@ -67,6 +70,7 @@ impl HttpTransport {
         initial_frame: Vec<u8>,
         emulation_endpoint: Option<&str>,
         request_timeout: Duration,
+        headers: Arc<HeaderMap>,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
         let http = http_client(url.scheme() == "https")?;
@@ -75,9 +79,12 @@ impl HttpTransport {
         let request = if sse {
             url.query_pairs_mut()
                 .append_pair("cf_connect", &String::from_utf8_lossy(&initial_frame));
-            http.get(url).header(ACCEPT, "text/event-stream")
+            http.get(url)
+                .headers((*headers).clone())
+                .header(ACCEPT, "text/event-stream")
         } else {
             http.post(url)
+                .headers((*headers).clone())
                 .header(ACCEPT, JSON)
                 .header(CONTENT_TYPE, JSON)
                 .body(initial_frame)
@@ -117,6 +124,7 @@ impl HttpTransport {
             emulation_http: http_client(emulation_url.scheme() == "https")?,
             emulation_url,
             request_timeout,
+            headers,
             body,
             decoder: Decoder::new(sse, MAX_MESSAGE),
             frames: VecDeque::new(),
@@ -136,6 +144,7 @@ impl HttpTransport {
         let request = self
             .emulation_http
             .post(self.emulation_url.clone())
+            .headers((*self.headers).clone())
             .header(CONTENT_TYPE, JSON)
             .body(frame);
         let timeout = self.request_timeout;
@@ -516,6 +525,7 @@ mod tests {
             connect,
             None,
             TIMEOUT,
+            Arc::default(),
         )
         .await;
 
@@ -596,6 +606,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&redirecting),
             TIMEOUT,
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -640,6 +651,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -680,6 +692,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -721,6 +734,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&rejecting),
             TIMEOUT,
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -760,6 +774,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&hung),
             Duration::from_secs(60),
+            Arc::default(),
         )
         .await
         .unwrap();
@@ -810,6 +825,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
+            Arc::default(),
         )
         .await;
 
@@ -828,8 +844,15 @@ mod tests {
         )
         .await;
 
-        let result =
-            HttpTransport::open(TransportKind::Sse, &url, b"{}".to_vec(), None, TIMEOUT).await;
+        let result = HttpTransport::open(
+            TransportKind::Sse,
+            &url,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            Arc::default(),
+        )
+        .await;
 
         let Err(message) = result else {
             panic!("accepted a JSON response as an event stream");
