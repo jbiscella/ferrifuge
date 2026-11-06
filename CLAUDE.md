@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–15 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–16 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -1918,7 +1918,7 @@ The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (
 
 - **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js).
 - **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome.
-- **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice.
+- **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice. Specified as Block 16.
 
 ## Block 14 — Footprint, performance and fleet behaviour
 
@@ -2307,3 +2307,122 @@ Feature: Event delivery and backpressure
     And the reconnect delay after that close is computed 1000 times
     Then every computed delay is at most 1000 ms
 ```
+
+---
+
+## Block 16 — Validation harness
+
+**Goal:** seeded random-operations runners drive the client through connects, disconnects, subscriptions, calls, slow reading and server faults, and check its invariants after every step and at quiescent points, so that a regression in exactly-once delivery, liveness or cleanup fails CI with the seed that found it (owner decision, 2026-11-04, "Planned after Block 13"; modelled on centrifugal/centrifuge-rust `docs/spec.md` §11.3).
+
+**Dependencies:** Blocks 1–15, 15d included.
+
+**Out of scope:**
+- replaying the traces of centrifuge-rust's TLA+ model (optional, later, keeping its MIT notice);
+- a chaos TCP proxy against a real Centrifugo (centrifuge-rust §11.4);
+- the emulated transports and Protobuf in the runners: the core runner uses websocket and JSON, and the fake server speaks websocket only (Block 15);
+- delta compression, map and shared-poll subscriptions (Block 0);
+- performance (Block 14);
+- changes to the client's behaviour: a bug the runners find is fixed in its own pull request.
+
+**Decisions** (reviewer, 2026-11-06, delegated by the owner):
+- **Two runners.**
+  - The **core runner** drives the sans-IO `Machine`, seeded with `Machine::with_seed`, against a server simulated in the test, on a simulated clock: no network, no real time. A seed fixes every choice, so it gives the same trace on every run and platform. It reads frames only while `Machine::wants_frames()` is true, as the adapter does.
+  - The **adapter runner** drives the tokio `Client` against the fake server (`tests/support/fake_server.rs`) in real time. A seed fixes the operations, not their timing: a failure is replayed, not always reproduced. It covers what the core cannot: the driver's tasks, hand-off delivery, a second `events()` taking over, cancel-safe `next()`. The fake server gains the controls it needs (connect errors, history that expires or passes the recovery limit).
+- **Operations** (chosen by the seed): `connect`, `disconnect`; add, `subscribe`, `unsubscribe` and remove a subscription; calls (rpc, publish, history, presence); the application taking the next event, holding its events, opening and dropping a stream, and in the adapter a second `events()` and a cancelled read; advancing the simulated clock.
+- **Server behaviour** (chosen by the seed): numbered publications on recoverable channels with history, live and recovered; answers, no answer, late answers; temporary and permanent errors, 109 and 112 included; closes with reconnect-advised and terminal codes, 3008 and 3014 included; disconnect and unsubscribe pushes; server-side subscriptions granted at connect, added and removed; history that expires or passes the recovery limit, so recovery fails; server pings, and gaps in them. 3008 is a seeded close, never the result of a modelled client queue, so the loop of "Recovery larger than the server's queue" (Block 15) does not defeat I4.
+- **Chaos configuration:** reconnect and resubscribe delays from 50 ms to 500 ms, `Config::timeout` 1 s, a read-ahead of 8 messages and 4 KiB so that it fills; other options default.
+- **Invariants** (centrifuge-rust §11.3, adapted: ferrifuge has streams, no handlers). "Healed": the last fault is over, the server answers every command and pings, and the application takes every event.
+  - I1 state chain: each state event of the client or a subscription differs from the previous one of that object and never goes from `disconnected` to `connected` or from `unsubscribed` to `subscribed`; once every event is taken, `state()` equals the last state event. Core: both; adapter: the first.
+  - I2 no panic: core, in the step; adapter, on any thread, the driver's tasks included, recorded by a panic hook.
+  - I3 at most one open transport per client: core, after every step; adapter, at quiescence (`FakeServer::connections`).
+  - I4 liveness: within 3 s of healing, the client is `connected` and every subscription not `unsubscribed` is `subscribed`. Core; the adapter reports I4 when quiescence is not reached within 10 s.
+  - I5 cleanup: after `disconnect()` and until the next `connect()`, no transport is open or opened, no client or subscription timer runs, and no token, data or state fetch starts; only the timers of calls made since run (Block 13). Core; adapter: no new connection and no callback call at quiescence.
+  - I6 every call settles: each of its waits (for its subscription or the connection, for room, for its reply) ends within `Config::timeout` (Block 13), so it settles within 3 × `Config::timeout`: exactly in the core, plus 1 s in the adapter.
+  - I7 no duplicate `connected` or `subscribed` without a state change between: part of I1, since each state change is one event (Block 15).
+  - I8 exactly once: per recoverable subscription, client-side and server-side, the offsets delivered continue without gap or duplicate across reconnects, resubscribes and `unsubscribe()`/`subscribe()`; they restart only after `subscribed` with `recovered` false or a getState reload. Delivered means taken, or emitted while no stream is open (Block 15). A removed and added subscription is a new one. Core; adapter: on subscriptions whose stream is never dropped.
+  - I9 read-ahead (Block 15): after every step, `Machine::wants_frames()` is false whenever `Machine::read_ahead()` has reached the message or byte limit, and `Action::Withdraw` names only events emitted and not yet taken. Core.
+- **Checking the checker.** Each invariant but I2 and I7 has a planted fault, in the simulated server, the application model or the tap between the machine and the checker, never in the client, that the pull-request seeds must report. It proves that the checker fires and that the seeds reach the state it watches.
+- **Run counters.** Each run counts every operation and server behaviour, and the outcomes its scenario lists; a count of 0 fails the run.
+- **Reproduction.** A failure prints the seed, the invariant and the operations up to it; `FERRIFUGE_CHAOS_SEED=<seed>` reruns that seed alone. A seed that found a bug joins the pull-request seeds with its fix. The core trace depends only on the seed: no wall clock, no unseeded randomness, nothing ordered by hash-map iteration.
+- **CI.** Core scenarios: seeds 0–299 × 60 operations in the `test` job and the portability job (Windows, macOS) of every pull request; on main and nightly, 10 000 seeds × 200 operations in release, from a start seed drawn per run and printed. Adapter: seeds 0–19 × 30 operations in the `test` job of every pull request; on main and nightly, 500 seeds on Linux and seeds 0–19 on Windows and macOS.
+- **Public API:** none added. A hook the runners need is gated by `test-util` and `#[doc(hidden)]`, as `Client::read_ahead` is, outside the semver check (`--default-features`).
+- **Test layer:** `@P` (Block 0), each scenario claimed by its runner with `// @P scenario:`.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Scope | Scenarios |
+|---|---|---|
+| 16a | core runner without subscriptions: connection, calls, the client's stream, server faults, clock; I1–I7; reproduction; CI | "Seeded chaos on the core keeps the connection invariants", "A seed of the core runner reproduces its run", "The core runner reports a planted connection fault" |
+| 16b | client-side and server-side subscriptions, recovery, streams and read-ahead in the core runner; I8, I9 | "Seeded chaos with subscriptions on the core keeps every invariant", "The core runner reports a planted delivery fault" |
+| 16c | adapter runner, tokio client and fake server, with the fake server's new controls | "Seeded chaos on the tokio client keeps the invariants", "The adapter runner reports a planted fault" |
+
+Value clause: As a maintainer shipping ferrifuge to large fleets of end-user devices, I want seeded random-operations runners to check the client's invariants under chaos, so that a regression in exactly-once delivery, liveness or cleanup fails CI, with a seed that reproduces it when the sans-IO core is at fault.
+
+```gherkin
+Feature: Validation harness
+
+  @P
+  Scenario: Seeded chaos on the core keeps the connection invariants
+    Given the core runner with the chaos configuration and no subscriptions
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariants I1 to I7
+    And the run counted every operation and server behaviour, reconnects and call timeouts, none of them 0
+
+  @P
+  Scenario: A seed of the core runner reproduces its run
+    Given seed 7 of the core runner
+    When it runs twice in one process
+    Then both traces are equal, each holding 60 operations and every input and action of the machine
+    And seed 8 gives a different list of operations
+
+  @P
+  Scenario Outline: The core runner reports a planted connection fault
+    Given the core runner without subscriptions, with <fault> planted
+    When seeds 0 to 299 run
+    Then the runner reports a violation of <invariant>, naming the first seed that shows it and the operations up to it
+    And rerunning that seed alone with FERRIFUGE_CHAOS_SEED reports the same violation at the same operation
+
+    Examples:
+      | fault                                                                     | invariant |
+      | a state event of the client dropped before the checker                    | I1        |
+      | a transport the client closed kept open by the simulated network          | I3        |
+      | a simulated server that ignores connect commands from healing on          | I4        |
+      | a timer the client cancelled after disconnect kept by the simulated clock | I5        |
+      | a call outcome dropped before the checker                                 | I6        |
+
+  @P
+  Scenario: Seeded chaos with subscriptions on the core keeps every invariant
+    Given the core runner with the chaos configuration and client-side and server-side subscriptions to recoverable channels
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariants I1 to I9
+    And the run counted every operation and server behaviour, resubscribes, recoveries with recovered true and with recovered false, full read-aheads and withdrawals, none of them 0
+
+  @P
+  Scenario Outline: The core runner reports a planted delivery fault
+    Given the core runner with subscriptions, with <fault> planted
+    When seeds 0 to 299 run
+    Then the runner reports a violation of <invariant>, naming the first seed that shows it and the operations up to it
+
+    Examples:
+      | fault                                                                           | invariant |
+      | a subscribe reply that recovers with an offset skipped                          | I8        |
+      | a connect reply that recovers a server-side subscription with an offset skipped | I8        |
+      | a publication duplicated before the checker                                     | I8        |
+      | a state event of a subscription dropped before the checker                      | I1        |
+      | wants_frames() reported true to the checker while the read-ahead is full        | I9        |
+
+  @P
+  Scenario: Seeded chaos on the tokio client keeps the invariants
+    Given the adapter runner with the chaos configuration, a tokio client and the fake server
+    When seeds 0 to 19 each run 30 random operations with faults
+    Then no seed violates invariants I1, I2, I3, I5, I6 or I8 as the adapter checks them, and each reaches quiescence within 10 s
+    And the run counted reconnects, recoveries with recovered true, second events() calls and cancelled reads, none of them 0
+
+  @P
+  Scenario: The adapter runner reports a planted fault
+    Given the adapter runner with a fake server whose recovery skips an offset
+    When seeds 0 to 19 run
+    Then the runner reports a violation of I8, naming the seed and the operations up to it
+```
+
+**Exceptions introduced:** none.
