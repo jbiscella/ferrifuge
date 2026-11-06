@@ -22,7 +22,7 @@ use cucumber::tag::Ext as _;
 use cucumber::{World, cli};
 
 use steps::ClientWorld;
-use support::centrifugo::Centrifugo;
+use support::centrifugo::{self, Centrifugo};
 use support::fake_server::{Announce, FakeServer};
 use support::proxy::ProxyBackend;
 use support::relay::CountingRelay;
@@ -541,13 +541,41 @@ fn trust_test_ca() {
         return;
     }
     tls::create();
+    let run = process::id().to_string();
     let status = Command::new(env::current_exe().expect("runner path"))
         .args(env::args_os().skip(1))
         .env("SSL_CERT_FILE", tls::ca_path())
         .env(TEST_CA_MARKER, "1")
+        .env(centrifugo::RUN_VARIABLE, &run)
         .status()
         .expect("run the scenarios");
+    remove_containers(&run);
     process::exit(status.code().unwrap_or(1));
+}
+
+/// Removes the Centrifugo containers of run `run` still there: the runner
+/// exits the process without dropping every world (a hang, a panic, or a
+/// server a step replaced and dropped in the background), and those would
+/// otherwise keep running. Best effort: without the Docker CLI it does
+/// nothing.
+fn remove_containers(run: &str) {
+    let label = format!("label={}={run}", centrifugo::RUN_LABEL);
+    let Ok(listed) = Command::new("docker")
+        .args(["ps", "-aq", "--filter", &label])
+        .output()
+    else {
+        return;
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if !ids.is_empty() {
+        let _ = Command::new("docker")
+            .args(["rm", "-f"])
+            .args(&ids)
+            .output();
+    }
 }
 
 /// A misspelt entry in [`IMPLEMENTED`] would silently run nothing.
