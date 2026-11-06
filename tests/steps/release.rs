@@ -124,9 +124,20 @@ fn manifest_is_newest(_world: &mut ClientWorld) {
     assert!(version(VERSION) >= newest, "{VERSION} below {newest:?}");
 }
 
+/// The bash that runs the release check: Git's on Windows, where `bash`
+/// may resolve to WSL's launcher, which has no distribution on CI runners.
+fn bash() -> PathBuf {
+    let git_bash = Path::new(r"C:\Program Files\Git\bin\bash.exe");
+    if cfg!(windows) && git_bash.exists() {
+        git_bash.to_owned()
+    } else {
+        PathBuf::from("bash")
+    }
+}
+
 /// Runs the release check for `tag` in `dir`.
 fn release_check(dir: &Path, tag: &str) -> Output {
-    Command::new("bash")
+    Command::new(bash())
         .arg(repository().join("scripts").join("check-release-tag"))
         .arg(tag)
         .arg(dir)
