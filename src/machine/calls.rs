@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::{Action, CallId, Machine};
+use super::{Action, CallId, CallTimer, Machine};
 use crate::wire::{Command, Error, Method, Reply, ReplyResult, RpcRequest};
 use crate::{CallError, CallReply, CallRequest, State, codes};
 
@@ -36,6 +36,17 @@ pub(super) struct Calls {
     by_command: HashMap<u32, CallId>,
 }
 
+impl Phase {
+    /// The timer of this phase.
+    fn timer(&self) -> Option<CallTimer> {
+        match self {
+            Self::Added => None,
+            Self::Queued => Some(CallTimer::Connection),
+            Self::Sent(_) => Some(CallTimer::Reply),
+        }
+    }
+}
+
 impl Calls {
     /// Whether the command `id` is a call's.
     pub(super) fn owns_command(&self, id: u32) -> bool {
@@ -62,20 +73,26 @@ impl Machine {
     }
 
     /// Starts call `id`: sent at once when connected, otherwise queued
-    /// until the connection is there (centrifuge-js `_methodCall`).
+    /// until the connection is there (centrifuge-js `_methodCall`). A
+    /// transport whose close is read but not yet handled counts as gone:
+    /// the call waits for the next one.
     pub(super) fn call(&mut self, id: CallId) {
+        let connected = self.state == State::Connected && !self.transport_closing();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
         };
         if !matches!(call.phase, Phase::Added) {
             return;
         }
-        if self.state == State::Connected {
+        if connected {
             self.send_call(id);
         } else {
             call.phase = Phase::Queued;
-            self.actions
-                .push(Action::SetCallTimer(id, self.config.timeout));
+            self.actions.push(Action::SetCallTimer(
+                id,
+                CallTimer::Connection,
+                self.config.timeout,
+            ));
         }
     }
 
@@ -89,6 +106,10 @@ impl Machine {
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
         };
+        if matches!(call.phase, Phase::Queued) {
+            self.actions
+                .push(Action::CancelCallTimer(id, CallTimer::Connection));
+        }
         call.phase = Phase::Sent(command_id);
         let method = match &call.request {
             CallRequest::Rpc { method, data } => Method::Rpc(RpcRequest {
@@ -104,8 +125,11 @@ impl Machine {
                 method,
             },
         );
-        self.actions
-            .push(Action::SetCallTimer(id, self.config.timeout));
+        self.actions.push(Action::SetCallTimer(
+            id,
+            CallTimer::Reply,
+            self.config.timeout,
+        ));
     }
 
     /// The client is connected: the queued calls are sent, in order.
@@ -124,13 +148,14 @@ impl Machine {
 
     /// A call's deadline passed: waiting for the connection or for the
     /// reply, it fails with the timeout error, and a queued one is never
-    /// sent.
-    pub(super) fn call_timer_fired(&mut self, id: CallId) {
+    /// sent. The timer of a phase the call has left is stale: it fired
+    /// before the call moved on, and its input came after.
+    pub(super) fn call_timer_fired(&mut self, id: CallId, timer: CallTimer) {
         if self
             .calls
             .by_id
             .get(&id)
-            .is_some_and(|call| !matches!(call.phase, Phase::Added))
+            .is_some_and(|call| call.phase.timer() == Some(timer))
         {
             self.settle_call(id, Err(CallError::new(codes::error::TIMEOUT, "timeout")));
         }
@@ -143,7 +168,9 @@ impl Machine {
             if let Phase::Sent(command) = call.phase {
                 self.calls.by_command.remove(&command);
             }
-            self.actions.push(Action::CancelCallTimer(id));
+            if let Some(timer) = call.phase.timer() {
+                self.actions.push(Action::CancelCallTimer(id, timer));
+            }
         }
     }
 
@@ -210,7 +237,9 @@ impl Machine {
         if let Phase::Sent(command) = call.phase {
             self.calls.by_command.remove(&command);
         }
-        self.actions.push(Action::CancelCallTimer(id));
+        if let Some(timer) = call.phase.timer() {
+            self.actions.push(Action::CancelCallTimer(id, timer));
+        }
         self.actions.push(Action::CallSettled { call: id, result });
     }
 }
@@ -314,7 +343,7 @@ mod tests {
             sent_text(&actions),
             [r#"{"id":2,"rpc":{"method":"echo","data":{"n":1}}}"#]
         );
-        assert!(actions.contains(&Action::SetCallTimer(id, TIMEOUT)));
+        assert!(actions.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
     }
 
     #[test]
@@ -326,11 +355,48 @@ mod tests {
         let connected = connect_reply(&mut machine, transport);
 
         assert_eq!(sent_text(&queued), Vec::<String>::new());
-        assert!(queued.contains(&Action::SetCallTimer(id, TIMEOUT)));
+        assert!(queued.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
         // Each phase gets the whole timeout (centrifuge-js `_methodCall`,
         // then `_registerCall`).
         assert_eq!(sent_text(&connected).len(), 1, "{connected:?}");
-        assert!(connected.contains(&Action::SetCallTimer(id, TIMEOUT)));
+        assert!(connected.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
+        assert!(connected.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
+    }
+
+    #[test]
+    fn a_connection_timer_firing_after_the_call_was_sent_is_ignored() {
+        let mut machine = machine();
+        let transport = opened(&mut machine);
+        let (id, _) = rpc(&mut machine, "echo");
+        connect_reply(&mut machine, transport);
+
+        // It fired before the connect reply was handled; its input comes
+        // after (review of PR #74).
+        let stale = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
+        let replied = machine.handle(frame(transport, r#"{"id":2,"rpc":{}}"#));
+
+        assert_eq!(stale, []);
+        assert_eq!(settled(&replied), [(id, Ok(CallReply::Rpc(Vec::new())))]);
+    }
+
+    #[test]
+    fn a_call_made_while_a_close_waits_behind_events_is_queued() {
+        let mut machine = machine();
+        // A stream that takes nothing holds the messages after `connected`.
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened(&mut machine);
+        connect_reply(&mut machine, transport);
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+
+        let (id, actions) = rpc(&mut machine, "echo");
+
+        assert_eq!(machine.state(), State::Connected);
+        assert_eq!(sent_text(&actions), Vec::<String>::new());
+        assert!(actions.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
     }
 
     #[test]
@@ -339,7 +405,7 @@ mod tests {
         let transport = opened(&mut machine);
         let (id, _) = rpc(&mut machine, "echo");
 
-        let timed_out = machine.handle(Input::CallTimerFired(id));
+        let timed_out = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
         let connected = connect_reply(&mut machine, transport);
 
         assert_eq!(error_code(&timed_out), Some(codes::error::TIMEOUT));
@@ -355,7 +421,10 @@ mod tests {
         let abandoned = machine.handle(Input::CallAbandoned(id));
         let connected = connect_reply(&mut machine, transport);
 
-        assert_eq!(abandoned, [Action::CancelCallTimer(id)]);
+        assert_eq!(
+            abandoned,
+            [Action::CancelCallTimer(id, CallTimer::Connection)]
+        );
         assert_eq!(sent_text(&connected), Vec::<String>::new());
         assert_eq!(settled(&connected), []);
     }
@@ -421,9 +490,9 @@ mod tests {
         let (id, _) = rpc(&mut machine, "echo");
 
         let replied = machine.handle(frame(transport, r#"{"id":2,"rpc":{}}"#));
-        let fired = machine.handle(Input::CallTimerFired(id));
+        let fired = machine.handle(Input::CallTimerFired(id, CallTimer::Reply));
 
-        assert!(replied.contains(&Action::CancelCallTimer(id)));
+        assert!(replied.contains(&Action::CancelCallTimer(id, CallTimer::Reply)));
         assert_eq!(settled(&replied), [(id, Ok(CallReply::Rpc(Vec::new())))]);
         assert_eq!(fired, []);
     }
@@ -501,7 +570,7 @@ mod tests {
                 Err(CallError::new(codes::error::DISCONNECTED, "disconnected"))
             )]
         );
-        assert!(actions.contains(&Action::CancelCallTimer(id)));
+        assert!(actions.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
     }
 
     #[test]

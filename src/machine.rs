@@ -279,6 +279,16 @@ pub enum SubscriptionTimer {
     RefreshReply,
 }
 
+/// Timers the machine sets for a call, one per phase: a timer of the phase
+/// the call has left is ignored when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallTimer {
+    /// Deadline for the connection, while the call waits for it.
+    Connection,
+    /// Deadline for the reply, once the call is sent.
+    Reply,
+}
+
 /// Timers the machine sets. At most one of each kind runs at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Timer {
@@ -423,7 +433,7 @@ pub enum Input {
     /// until then.
     Call(CallId),
     /// A timer set by [`Action::SetCallTimer`] fired.
-    CallTimerFired(CallId),
+    CallTimerFired(CallId, CallTimer),
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting.
     CallAbandoned(CallId),
@@ -530,9 +540,9 @@ pub enum Action {
     /// is no longer wanted.
     CancelSubscriptionState(FetchId),
     /// Start a call's timer, replacing its running one.
-    SetCallTimer(CallId, Duration),
+    SetCallTimer(CallId, CallTimer, Duration),
     /// Stop a call's timer if it runs.
-    CancelCallTimer(CallId),
+    CancelCallTimer(CallId, CallTimer),
     /// Give the application the outcome of a call; the call is forgotten.
     CallSettled {
         /// The call settled.
@@ -618,7 +628,11 @@ impl std::fmt::Debug for Input {
             Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
             Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
             Self::Call(id) => f.debug_tuple("Call").field(id).finish(),
-            Self::CallTimerFired(id) => f.debug_tuple("CallTimerFired").field(id).finish(),
+            Self::CallTimerFired(id, timer) => f
+                .debug_tuple("CallTimerFired")
+                .field(id)
+                .field(timer)
+                .finish(),
             Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
         }
     }
@@ -722,12 +736,17 @@ impl std::fmt::Debug for Action {
                 .debug_tuple("CancelSubscriptionState")
                 .field(fetch)
                 .finish(),
-            Self::SetCallTimer(id, delay) => f
+            Self::SetCallTimer(id, timer, delay) => f
                 .debug_tuple("SetCallTimer")
                 .field(id)
+                .field(timer)
                 .field(delay)
                 .finish(),
-            Self::CancelCallTimer(id) => f.debug_tuple("CancelCallTimer").field(id).finish(),
+            Self::CancelCallTimer(id, timer) => f
+                .debug_tuple("CancelCallTimer")
+                .field(id)
+                .field(timer)
+                .finish(),
             Self::CallSettled { call, result } => f
                 .debug_struct("CallSettled")
                 .field("call", call)
@@ -996,7 +1015,7 @@ impl Machine {
             Input::StreamOpened(of) => self.stream_opened(of),
             Input::StreamClosed(of) => self.stream_closed(of),
             Input::Call(id) => self.call(id),
-            Input::CallTimerFired(id) => self.call_timer_fired(id),
+            Input::CallTimerFired(id, timer) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),
             // About a transport already abandoned.
             Input::TransportOpened(_)
