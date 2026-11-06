@@ -495,6 +495,15 @@ fn asks_for_protobuf(request: &Request) -> bool {
         .any(|protocol| protocol.trim() == protobuf::SUBPROTOCOL)
 }
 
+/// Aborts its task when dropped.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// What the writer task of a connection sends.
 enum Outgoing {
     Message(Message),
@@ -522,7 +531,9 @@ impl Connection {
         let (mut sink, mut stream) = self.ws.take().expect("not served yet").split();
         let out = self.out.clone();
         let mut queue = self.queue.take().expect("not served yet");
-        let writer = tokio::spawn(async move {
+        // Aborted when the connection ends: `State::out` keeps a sender, so
+        // the writer would otherwise wait on its queue forever.
+        let mut writer = AbortOnDrop(tokio::spawn(async move {
             while let Some(outgoing) = queue.recv().await {
                 match outgoing {
                     Outgoing::Message(message) => {
@@ -537,7 +548,7 @@ impl Connection {
                     }
                 }
             }
-        });
+        }));
         let mut reading = true;
         let mut probes = tokio::time::interval(PROBE_PERIOD);
         loop {
@@ -568,7 +579,7 @@ impl Connection {
                             code: CloseCode::from(code),
                             reason: reason.into(),
                         }));
-                        let _ = writer.await;
+                        let _ = (&mut writer.0).await;
                         return;
                     }
                     None => return,

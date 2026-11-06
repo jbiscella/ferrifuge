@@ -422,10 +422,12 @@ impl Run {
         Ok(())
     }
 
-    /// Reads every stream until none has had an event for [`QUIET`].
-    async fn read_until_quiet(&mut self) -> Step {
+    /// Reads every stream until none has had an event for [`QUIET`], or
+    /// `deadline` passes: a client that never stops emitting must not hang
+    /// the runner.
+    async fn read_until_quiet(&mut self, deadline: Instant) -> Step {
         let mut quiet_since = Instant::now();
-        while quiet_since.elapsed() < QUIET {
+        while quiet_since.elapsed() < QUIET && Instant::now() < deadline {
             let mut any = self.read(Target::Client, READ_WAIT).await?;
             for n in 0..CHANNELS.len() {
                 any |= self.read(Target::Subscription(n), READ_WAIT).await?;
@@ -450,7 +452,7 @@ impl Run {
             if self.client.state() == State::Disconnected {
                 self.client.connect();
             }
-            self.read_until_quiet().await?;
+            self.read_until_quiet(deadline).await?;
             if self.quiescent() {
                 break;
             }
@@ -497,11 +499,11 @@ impl Run {
     /// is made.
     async fn after_disconnect(&mut self) -> Step {
         self.client.disconnect();
-        self.read_until_quiet().await?;
+        self.read_until_quiet(Instant::now() + QUIESCENCE).await?;
         let connections = self.server.connections();
         let deadline = Instant::now() + AFTER_DISCONNECT;
         while Instant::now() < deadline {
-            self.read_until_quiet().await?;
+            self.read_until_quiet(deadline).await?;
         }
         let made = self.server.connections() - connections;
         let open = self.server.connections() - self.server.closed_connections();
