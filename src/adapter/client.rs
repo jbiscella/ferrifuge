@@ -588,10 +588,10 @@ impl Client {
     /// The server's error, with its code, message and `temporary` flag, or
     /// a client-side one: [`codes::error::TIMEOUT`],
     /// [`codes::error::DISCONNECTED`] when the client enters
-    /// `disconnected`, [`codes::error::CONNECTION_CLOSED`] when the
-    /// transport the call was sent on closes, and
-    /// [`codes::error::TRANSPORT_WRITE`] when the server refuses the
-    /// request carrying it (HTTP 413).
+    /// `disconnected`, including when the `Client` is dropped,
+    /// [`codes::error::CONNECTION_CLOSED`] when the transport the call was
+    /// sent on closes, and [`codes::error::TRANSPORT_WRITE`] when the
+    /// server refuses the request carrying it (HTTP 413).
     pub fn rpc(
         &self,
         method: impl Into<String>,
