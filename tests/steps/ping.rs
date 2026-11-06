@@ -40,6 +40,11 @@ fn a_client_with_max_server_ping_delay(world: &mut ClientWorld, millis: u64) {
 
 #[given(regex = r"^connected to the fake server announcing a ping interval of (\d+) s$")]
 async fn connected_announcing_ping_interval(world: &mut ClientWorld, seconds: u32) {
+    restart_announcing_ping_interval(world, seconds).await;
+    a_connected_client(world).await;
+}
+
+async fn restart_announcing_ping_interval(world: &mut ClientWorld, seconds: u32) {
     world
         .restart_fake(Announce {
             ping: seconds,
@@ -47,13 +52,15 @@ async fn connected_announcing_ping_interval(world: &mut ClientWorld, seconds: u3
             ..Announce::default()
         })
         .await;
-    a_connected_client(world).await;
 }
 
 #[given(regex = r"^connected to the fake server pinging every (\d+) s$")]
 async fn connected_to_pinging_fake_server(world: &mut ClientWorld, seconds: u32) {
-    connected_announcing_ping_interval(world, seconds).await;
+    restart_announcing_ping_interval(world, seconds).await;
+    // Pinging before the connection: the first ping then comes within one
+    // period of the connect reply, however long the step takes to read it.
     world.fake().ping_every(Duration::from_secs(seconds.into()));
+    a_connected_client(world).await;
 }
 
 #[when("the fake server sends a ping")]

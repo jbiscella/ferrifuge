@@ -660,8 +660,10 @@ async fn connected_to_a_pinging_fake_server(world: &mut ClientWorld, seconds: u3
             ..Announce::default()
         })
         .await;
-    a_connected_client(world).await;
+    // Pinging before the connection: the first ping then comes within one
+    // period of the connect reply, however long the step takes to read it.
     world.fake().ping_every(Duration::from_secs(seconds.into()));
+    a_connected_client(world).await;
 }
 
 #[given(
@@ -675,8 +677,10 @@ async fn connected_with_a_ping_delay(world: &mut ClientWorld, millis: u64, secon
             ..Announce::default()
         })
         .await;
-    a_connected_client(world).await;
+    // Pinging before the connection: the first ping then comes within one
+    // period of the connect reply, however long the step takes to read it.
     world.fake().ping_every(Duration::from_secs(seconds.into()));
+    a_connected_client(world).await;
 }
 
 #[given(
