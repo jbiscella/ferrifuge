@@ -1568,10 +1568,14 @@ impl Machine {
             let awaited =
                 call || self.awaits_subscription_reply(id) || self.tokens.awaits_refresh_reply(id);
             if !awaited {
+                // A subscribe its subscription no longer waits for is
+                // retired as a rejected one: no reply will clear it.
+                self.subscription_command_too_large(id);
                 continue;
             }
             let (session, node) = self.emulation.clone().unwrap_or_default();
             let request = json::emulation_request(&session, &node, line);
+            let size = request.len();
             let sent = FrameId(self.next_frame);
             self.next_frame += 1;
             self.actions.push(Action::Send {
@@ -1581,7 +1585,8 @@ impl Machine {
                 frame_type: self.codec.frame_type(),
             });
             if call {
-                self.batch_frame_sent(sent, line.len());
+                // The whole request, as for any call's frame.
+                self.batch_frame_sent(sent, size);
             }
         }
     }

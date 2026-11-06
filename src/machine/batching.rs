@@ -120,7 +120,10 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
-    use crate::machine::{Action, Input, Machine};
+    use crate::machine::{
+        Action, FrameId, Input, Machine, SubscriptionOptions, SubscriptionTimer, TransportId,
+        TransportKind,
+    };
     use crate::{CallRequest, Config};
 
     /// A connected machine with `config`; the connect command was id 1.
@@ -140,6 +143,138 @@ mod tests {
             data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
         });
         machine
+    }
+
+    /// A machine connected over `http_stream`, with session "s", node "n".
+    fn emulated(config: Config) -> (Machine, TransportId) {
+        let mut machine = Machine::new(config)
+            .with_transports(vec![TransportKind::HttpStream])
+            .expect("an emulated transport");
+        let transport = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a transport");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":1,"connect":{"client":"c","session":"s","node":"n"}}"#.to_vec(),
+        });
+        (machine, transport)
+    }
+
+    fn rpc(method: &str) -> CallRequest {
+        CallRequest::Rpc {
+            method: method.to_owned(),
+            data: b"{}".to_vec(),
+        }
+    }
+
+    /// The frames of `actions`, with their ids.
+    fn sent(actions: &[Action]) -> Vec<(FrameId, Vec<u8>)> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { id, frame, .. } => Some((*id, frame.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The server refuses `frame` with HTTP 413; the transport reports it
+    /// written too, as the HTTP transport does.
+    fn refuse(
+        machine: &mut Machine,
+        transport: TransportId,
+        (id, frame): (FrameId, Vec<u8>),
+    ) -> Vec<Action> {
+        let mut actions = machine.handle(Input::SendRejected { transport, frame });
+        actions.extend(machine.handle(Input::FrameWritten {
+            transport,
+            frame: id,
+        }));
+        actions
+    }
+
+    // Codex #94: a batched subscribe its subscription no longer waits for
+    // is retired when its request is refused, not left blocking the channel
+    // until its reply deadline reconnects the client.
+    #[test]
+    fn a_refused_stale_subscribe_is_retired_not_resent() {
+        let (mut machine, transport) = emulated(Config::default());
+        let sub = machine
+            .add_subscription("news".to_owned(), SubscriptionOptions::default())
+            .expect("a new channel");
+        machine.handle(Input::StartBatching);
+        let call = machine.add_call(rpc("a"));
+        machine.handle(Input::Call(call));
+        machine.handle(Input::Subscribe(sub));
+        let batch = sent(&machine.handle(Input::StopBatching)).remove(0);
+        machine.handle(Input::Unsubscribe(sub));
+
+        let actions = refuse(&mut machine, transport, batch);
+
+        assert!(
+            actions.contains(&Action::CancelSubscriptionTimer(
+                sub,
+                SubscriptionTimer::SubscribeReply
+            )),
+            "{actions:?}"
+        );
+        let resent = sent(&actions);
+        assert_eq!(resent.len(), 1, "{actions:?}");
+        assert!(
+            String::from_utf8_lossy(&resent[0].1).contains("rpc"),
+            "{actions:?}"
+        );
+    }
+
+    // Codex #94: a resent call counts its whole emulation request against
+    // the write queue, as any call's frame does.
+    #[test]
+    fn a_resent_call_counts_its_whole_request() {
+        // Request and inner sizes of a resent rpc, measured on a first run.
+        let (mut machine, transport) = emulated(Config::default());
+        machine.handle(Input::StartBatching);
+        for method in ["a", "b"] {
+            let call = machine.add_call(rpc(method));
+            machine.handle(Input::Call(call));
+        }
+        let batch = sent(&machine.handle(Input::StopBatching)).remove(0);
+        let resent = sent(&refuse(&mut machine, transport, batch));
+        let full: usize = resent.iter().map(|(_, frame)| frame.len()).sum();
+        let inner: usize = resent
+            .iter()
+            .map(|(_, frame)| {
+                crate::json::emulation_frame(frame)
+                    .expect("a request")
+                    .len()
+            })
+            .sum();
+        let next = resent[0].1.len();
+        assert!(full > inner);
+
+        // A queue a third call fits only when the resent calls count their
+        // inner commands alone: halfway between the two counts.
+        let (mut machine, transport) = emulated(Config {
+            write_queue_bytes: inner + next + (full - inner) / 2,
+            ..Config::default()
+        });
+        machine.handle(Input::StartBatching);
+        for method in ["a", "b"] {
+            let call = machine.add_call(rpc(method));
+            machine.handle(Input::Call(call));
+        }
+        let batch = sent(&machine.handle(Input::StopBatching)).remove(0);
+        refuse(&mut machine, transport, batch);
+        let third = machine.add_call(rpc("c"));
+
+        let actions = machine.handle(Input::Call(third));
+
+        assert_eq!(sent(&actions), Vec::new(), "{actions:?}");
     }
 
     /// An rpc whose command encodes to 300 bytes once numbered `id`.
