@@ -65,6 +65,11 @@ const PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 struct State {
     /// Instructions to the latest connection, if one is open.
     current: Option<mpsc::UnboundedSender<Control>>,
+    /// What the latest connection writes, in order. Frames the server sends
+    /// on its own (pushes, publications) and subscribe replies answered from
+    /// history go here while the state is locked, so that the client
+    /// receives them in the order they change the history.
+    out: Option<mpsc::UnboundedSender<Outgoing>>,
     connections: usize,
     /// Connections whose end the server has seen.
     closed: usize,
@@ -104,6 +109,15 @@ struct State {
     subscribe_delay: Option<(std::time::Duration, Option<Value>)>,
     /// When each delayed subscribe answer was sent.
     subscribes_answered_at: Vec<std::time::Instant>,
+    /// Per channel, the offset up to which the history has expired.
+    expired: std::collections::HashMap<String, u64>,
+    /// Publications a recovery may bring back at most; more fail it.
+    recovery_limit: Option<u64>,
+    /// A recovery of two publications or more skips the first: a planted
+    /// fault for the chaos runner (Block 16).
+    skip_recovered: bool,
+    /// Connect commands still to answer with a temporary error.
+    failing_connects: usize,
 }
 
 /// Epoch of the channels answered from their history.
@@ -150,13 +164,17 @@ impl FakeServer {
                     continue;
                 };
                 let (control, commands) = mpsc::unbounded_channel();
+                let (out, queue) = mpsc::unbounded_channel();
                 {
                     let mut state = shared.lock().unwrap();
                     state.connections += 1;
                     state.current = Some(control);
+                    state.out = Some(out.clone());
                 }
                 let connection = Connection {
                     ws: Some(ws),
+                    out,
+                    queue: Some(queue),
                     protobuf,
                     announce,
                     state: Arc::clone(&shared),
@@ -216,12 +234,69 @@ impl FakeServer {
 
     /// Sends a raw text frame over the current connection.
     pub(crate) fn send(&self, frame: &str) {
-        self.control(Control::Send(Message::text(frame)));
+        self.enqueue(Message::text(frame));
     }
 
     /// Sends a raw binary frame over the current connection.
     pub(crate) fn send_binary(&self, frame: Vec<u8>) {
-        self.control(Control::Send(Message::binary(frame)));
+        self.enqueue(Message::binary(frame));
+    }
+
+    /// Queues `message` for the current connection's writer, in order with
+    /// publications and history replies.
+    fn enqueue(&self, message: Message) {
+        self.state
+            .lock()
+            .unwrap()
+            .out
+            .as_ref()
+            .expect("no connection to the fake server")
+            .send(Outgoing::Message(message))
+            .expect("fake server connection gone");
+    }
+
+    /// Closes the current connection with `code` and `reason`, if there is
+    /// one; whether there was.
+    pub(crate) fn close_current(&self, code: u16, reason: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_some_and(|current| {
+                current
+                    .send(Control::Close(code, reason.to_owned()))
+                    .is_ok()
+            })
+    }
+
+    /// The history of `channel` before its current last offset expires:
+    /// a recovery from before it fails.
+    pub(crate) fn expire_history(&self, channel: &str) {
+        let mut state = self.state.lock().unwrap();
+        let top = state
+            .history
+            .get(channel)
+            .and_then(|history| history.last())
+            .map_or(0, |publication| publication["offset"].as_u64().unwrap_or(0));
+        state.expired.insert(channel.to_owned(), top);
+    }
+
+    /// A recovery of more than `limit` publications fails, as with
+    /// Centrifugo's `client.recovery_max_publication_limit`.
+    pub(crate) fn limit_recovery(&self, limit: u64) {
+        self.state.lock().unwrap().recovery_limit = Some(limit);
+    }
+
+    /// Recoveries of two publications or more skip the first (a planted
+    /// fault for the chaos runner).
+    pub(crate) fn skip_recovered_offset(&self) {
+        self.state.lock().unwrap().skip_recovered = true;
+    }
+
+    /// Answers the next `count` connect commands with a temporary error.
+    pub(crate) fn fail_connects(&self, count: usize) {
+        self.state.lock().unwrap().failing_connects = count;
     }
 
     /// Sends `replies` length-delimited in one binary frame, as the Protobuf
@@ -314,14 +389,18 @@ impl FakeServer {
     /// As [`FakeServer::publish`], its data padded by `size` bytes.
     pub(crate) fn publish_sized(&self, channel: &str, offset: u64, size: usize) {
         let publication = json!({"data": {"n": offset, "pad": "x".repeat(size)}, "offset": offset});
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        state
             .history
             .entry(channel.to_owned())
             .or_default()
             .push(publication.clone());
-        self.send(&json!({"push": {"channel": channel, "pub": publication}}).to_string());
+        // With the state locked: a subscribe answered from history is
+        // queued before this push, or includes this publication.
+        if let Some(out) = &state.out {
+            let push = json!({"push": {"channel": channel, "pub": publication}});
+            let _ = out.send(Outgoing::Message(Message::text(push.to_string())));
+        }
     }
 
     /// Answers the subscribes to `channel` as a server with history and
@@ -425,6 +504,10 @@ enum Outgoing {
 struct Connection {
     /// Taken by [`Connection::serve`], which splits it.
     ws: Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>,
+    /// What the writer task sends, in order.
+    out: mpsc::UnboundedSender<Outgoing>,
+    /// Taken by [`Connection::serve`]'s writer task.
+    queue: Option<mpsc::UnboundedReceiver<Outgoing>>,
     protobuf: bool,
     announce: Announce,
     state: Arc<Mutex<State>>,
@@ -437,7 +520,8 @@ impl Connection {
     /// reading blocks the writer, never the reading of its commands.
     async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) {
         let (mut sink, mut stream) = self.ws.take().expect("not served yet").split();
-        let (out, mut queue) = mpsc::unbounded_channel::<Outgoing>();
+        let out = self.out.clone();
+        let mut queue = self.queue.take().expect("not served yet");
         let writer = tokio::spawn(async move {
             while let Some(outgoing) = queue.recv().await {
                 match outgoing {
@@ -508,7 +592,18 @@ impl Connection {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            if message["connect"].is_object() {
+            let failing = message["connect"].is_object() && {
+                let mut state = self.state.lock().unwrap();
+                let failing = state.failing_connects > 0;
+                state.failing_connects = state.failing_connects.saturating_sub(1);
+                failing
+            };
+            if failing {
+                replies.push(Message::text(
+                    json!({"id": message["id"], "error": {"code": 100, "message": "busy", "temporary": true}})
+                        .to_string(),
+                ));
+            } else if message["connect"].is_object() {
                 let client = self.next_client();
                 let subs = {
                     let mut state = self.state.lock().unwrap();
@@ -595,8 +690,8 @@ impl Connection {
                 tokio::time::sleep(delay).await;
                 let mut state = shared.lock().unwrap();
                 state.subscribes_answered_at.push(std::time::Instant::now());
-                if let Some(current) = &state.current {
-                    let _ = current.send(Control::Send(Message::text(answer.to_string())));
+                if let Some(out) = &state.out {
+                    let _ = out.send(Outgoing::Message(Message::text(answer.to_string())));
                 }
             });
             return None;
@@ -605,17 +700,21 @@ impl Connection {
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        let result = match state.subscribe_results.pop_front() {
-            Some(result) => result,
+        let (result, from_history) = match state.subscribe_results.pop_front() {
+            Some(result) => (result, false),
             None if state.recovering.contains(&channel) => {
-                from_history(&state, &channel, &message["subscribe"])
+                (from_history(&state, &channel, &message["subscribe"]), true)
             }
-            None => json!({}),
+            None => (json!({}), false),
         };
         state.subscribe_replies.push((channel, result.clone()));
-        Some(Message::text(
-            json!({"id": message["id"], "subscribe": result}).to_string(),
-        ))
+        let reply = Message::text(json!({"id": message["id"], "subscribe": result}).to_string());
+        if from_history {
+            // In order with the publications pushed (see `State::out`).
+            let _ = self.out.send(Outgoing::Message(reply));
+            return None;
+        }
+        Some(reply)
     }
 
     /// Records the Protobuf commands of a binary frame; the replies to send.
@@ -753,13 +852,23 @@ fn from_history(state: &State, channel: &str, subscribe: &Value) -> Value {
     if subscribe["recover"] == true {
         let from = subscribe["offset"].as_u64().unwrap_or(0);
         result["was_recovering"] = json!(true);
+        let expired = state.expired.get(channel).is_some_and(|upto| from < *upto);
+        let too_many = state
+            .recovery_limit
+            .is_some_and(|limit| top.saturating_sub(from) > limit);
+        if expired || too_many {
+            result["recovered"] = json!(false);
+            return result;
+        }
         result["recovered"] = json!(subscribe["epoch"] == HISTORY_EPOCH);
-        result["publications"] = json!(
-            history
-                .iter()
-                .filter(|publication| publication["offset"].as_u64().unwrap_or(0) > from)
-                .collect::<Vec<_>>()
-        );
+        let mut publications: Vec<&Value> = history
+            .iter()
+            .filter(|publication| publication["offset"].as_u64().unwrap_or(0) > from)
+            .collect();
+        if state.skip_recovered && publications.len() >= 2 {
+            publications.remove(0);
+        }
+        result["publications"] = json!(publications);
     }
     result
 }
