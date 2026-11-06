@@ -66,7 +66,7 @@ Order: production priority. Items 1–4, 9 and 21 come first, as the owner asked
 | 24 | Cookies on the HTTP transports | Adopted (owner, 2026-11-06 late): a `CookieJar` trait with a default in-memory jar on `cookie_store`, on every transport | additive | M |
 | 17 | Callback API, WeakClient, delivery modes, deadlock detection | Adopted (owner, 2026-11-06 late): handlers as one more consumer of Block 15's outbox, delivery modes Task, Thread and Inline, `Client: Clone` with `WeakClient`, deadlock detection in Thread and Inline | additive | L |
 | 20 | Replay of their TLA+ traces | Adopted (owner, 2026-11-06 late): a replay harness with a mapping and an explicit divergence list | none | L |
-| 25 | WebAssembly / browser adapter | Adopt only a wasm32 build check of the core now; the adapter on demand | none | S |
+| 25 | WebAssembly / browser adapter | Adopted as design B (owner, 2026-11-06 late): a browser adapter on the sans-IO core, taking the browser-only options (item 39) | additive | L |
 
 ## Earlier exclusions this reverses
 
@@ -687,7 +687,7 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 | Semver | none | additive, but the `Send` bounds may need a breaking change |
 | Cost | S | L |
 
-**Recommendation.** A. Before B, verify which core dependencies build for `wasm32-unknown-unknown` (not checked: fastrand's seed source there). Tokio's timers do not work on that target (tokio 1.54.1 docs), so the browser adapter would use browser timers (`gloo-timers` 0.4.0, `futures-timer` 3.0.4) and the browser WebSocket (`web-sys`, or `gloo-net` 0.7.0).
+**Owner decision (2026-11-06, late):** design B, the browser adapter, which takes the browser-only options of centrifuge-js (item 39). A's build check comes first, in its block. Before B, verify which core dependencies build for `wasm32-unknown-unknown` (not checked: fastrand's seed source there). Tokio's timers do not work on that target (tokio 1.54.1 docs), so the browser adapter would use browser timers (`gloo-timers` 0.4.0, `futures-timer` 3.0.4) and the browser WebSocket (`web-sys`, or `gloo-net` 0.7.0).
 
 ---
 
@@ -760,6 +760,183 @@ Found by the review: `client.proto` fields 9 and 10 of `Publication`, exposed by
 **Recommendation.** A. Whether Centrifugo v6.10.1 has wildcard subscriptions decides @A or @D.
 
 ---
+
+## centrifuge-js parity (owner decision, 2026-11-06, late)
+
+Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but only if it makes sense for a native Rust client. Each item first answers three questions: does the problem exist outside a browser or JavaScript runtime; does Centrifugo v6.10.1 still support the server side; would a native Rust application use it rather than an existing Rust alternative. An item that fails is not adopted and never implemented. Experimental features follow the pinned commit: their public API is marked unstable in its documentation, and later centrifuge-js changes are not chased without a decision. Block 0's components rule applies. Inventory from centrifuge-js 63ed73e's README and `src/`, checked against Centrifugo v6.10.1 and centrifugal/centrifuge 7ac0371 (the version v6.10.1 pins).
+
+## 29. Map subscriptions (map, map_clients, map_users; experimental)
+
+**Fit.** Outside a browser: yes, a protocol feature. Server: Centrifugo v6.10.1 supports it (`subscription_type`: stream, map, map_clients, map_users, shared_poll, `internal/configtypes/namespace.go:204-213`; needs ≥ 6.8.0, centrifuge-js README.md:891). Rust alternative: none. **Makes sense.**
+
+**Problem.** A channel whose state is a keyed map (presence lists, live dashboards, game lobbies): the client loads the state page by page, then receives updates per key, and resynchronises after a gap instead of recovering a stream.
+
+**centrifuge-js** (`centrifuge.ts:267`, `:294`, `:322`; `subscription.ts:2771`, `:2896-2913`; `types.ts:676-716`): `newMapSubscription`, `newMapClientsSubscription`, `newMapUsersSubscription`; `sync` and `update` events; `publish(key, data)` and `remove(key)`; `pageSize`; `unrecoverableStrategy`. README.md:880-893: "may change in a backwards-incompatible way".
+
+**Designs.**
+- **A. A handle type of its own**, `MapSubscription`, from `Client::new_map_subscription(channel, MapKind::{Map, Clients, Users})`, with its own `MapSubscriptionEvent` stream (`Sync` pages, `Update` per key) and calls `publish(key, data)`, `remove(key)`; the core gains a subscription kind with its state-then-stream phases (`client.proto`: `type`, `phase`, `cursor`, `limit`, `state`).
+- **B. One `Subscription` with a `type` option**, the map events added to `SubscriptionEvent`.
+
+| | A | B |
+|---|---|---|
+| Fit | good: a subscription kind in the core, Block 15 delivery reused | fair: map phases mixed into stream subscriptions |
+| Idiom | good: types say what a handle can do | poor: `publish(key)` valid on some subscriptions only |
+| Consistency | good: as `Subscription` | fair |
+| Tests | good: @A on Centrifugo v6.10.1 (`subscription_type: map`); @D for pages and resync | good |
+| Semver | additive, marked unstable | additive, and every `SubscriptionEvent` match grows |
+| Cost | L | L |
+
+**Recommendation.** A, its API documented as unstable.
+
+## 30. Shared poll subscriptions (experimental)
+
+**Fit.** Outside a browser: yes. Server: Centrifugo v6.10.1 supports it (`namespace.go:213`, `:244`; HMAC keys `types.go:75-81`; `shared_poll_refresh` proxy `types.go:521`). Rust alternative: none. **Makes sense.**
+
+**Problem.** Many clients tracking the same items (prices, statuses) without each polling the backend: the server polls once per key and fans the versions out; the client tracks and untracks keys, each signed by the backend.
+
+**centrifuge-js** (`centrifuge.ts:350`; `subscription.ts:2915-3084`; `types.ts:791-816`): `newSharedPollSubscription`; `track(keys)`, `untrack(keys)`, `trackedKeys()`; a `getSignature` callback; versions deduplicated per key. README.md:895-908 marks it experimental.
+
+**Designs.**
+- **A. A handle type of its own**, `SharedPollSubscription`, with `track`, `untrack`, `tracked_keys` and an async `get_signature` callback built like `get_token` (Block 10); the client checks no signature (the server does), so no cryptography is involved.
+- **B. Options and methods on `Subscription`.**
+
+| | A | B |
+|---|---|---|
+| Fit | good: a kind in the core, per-key versions there | fair |
+| Idiom | good | poor: track on a stream subscription is meaningless |
+| Consistency | good: the callback as `get_token` | fair |
+| Tests | @B: the shared-poll refresh proxy answered by the test backend; @D | same |
+| Semver | additive, marked unstable | additive |
+| Cost | L | L |
+
+**Recommendation.** A, its API documented as unstable.
+
+## 31. Optimistic subscriptions
+
+**Fit.** Outside a browser: yes (saves a round trip per connection). Server: the client protocol carries several commands per frame; the server's handling of subscribes before the connect reply needs verifying on v6.10.1. Rust alternative: none. **Makes sense.**
+
+**Problem.** A client that subscribes at startup waits a full round trip for the connect reply before subscribing; on mobile links that doubles the time to the first publication.
+
+**centrifuge-js** (`centrifuge.ts:1240-1258`): when a websocket opens (never over emulation, which needs the connect reply's session), the connect command and the subscribe commands of the subscriptions subscribing go out in one batch, before the connect reply.
+
+**Designs.**
+- **A. As centrifuge-js, always over websocket**: the subscribes join the connect command's frame; their replies are handled after the connect reply; a failed connect fails them as a teardown does. Reverses Block 18's out-of-scope line.
+- **B. Opt-in**, a `Config` option.
+
+| | A | B |
+|---|---|---|
+| Fit | good: a core change in the connect step | good |
+| Idiom | good | fair: an option for a behaviour with no downside found |
+| Consistency | good: centrifuge-js behaviour | fair |
+| Tests | good: @D, one frame with the connect and the subscribes; @A on v6.10.1 | good |
+| Semver | none | additive |
+| Cost | M | M |
+
+**Recommendation.** A, after verifying the server's ordering on v6.10.1 (`VERIFY` in its block).
+
+## 32. Client publish debouncing
+
+**Fit.** Outside a browser: yes (fewer publishes from chatty producers). Server: `SubscribeResult.publish_debounce` is set by the centrifuge library from `ClientPublishDebounceInterval` (`client.go:5101-5102`, `client_map.go:1062`), which Centrifugo v6.10.1 OSS never sets: a Centrifugo PRO feature, as channel compaction. Rust alternative: none. **Makes sense** (PRO users), tested on @D as compaction (item 7).
+
+**centrifuge-js** (`subscription.ts:255-312`, `:573-575`, `:2626-2628`): with a debounce interval from the subscribe reply, publishes of a key within the interval are merged, the latest data sent when it ends.
+
+**Designs.**
+- **A. In the core**: a debounce timer per subscription and key, the latest data kept, @E-testable.
+- **B. In the adapter**, around the call futures.
+
+| | A | B |
+|---|---|---|
+| Fit | good: a timer and state in the core | fair: the adapter has no per-subscription state |
+| Idiom | good | fair |
+| Consistency | good: as Block 13's calls | fair |
+| Tests | good: @E timing, @D reply carrying `publish_debounce` | fair |
+| Semver | additive (a call outcome) | additive |
+| Cost | M | M |
+
+**Recommendation.** A, with item 29 (keys are map keys).
+
+## 33. WebTransport transport (experimental)
+
+**Fit.** Outside a browser: yes (QUIC: connection migration across networks, no TCP head-of-line blocking; relevant to mobile fleets). Server: Centrifugo v6.10.1 supports it only with experimental HTTP/3 (`webtransport.enabled`, `types.go:122-126`; `mux.go:407-411`; webtransport-go v0.13.0). Rust alternative: none for Centrifugo. **Makes sense.**
+
+**centrifuge-js** (`transport_webtransport.ts:4-148`; `centrifuge.ts:1076-1081`): one bidirectional stream; JSON or Protobuf; README.md:174 marks it experimental.
+
+**Designs.**
+- **A. A fourth `TransportKind`** over `wtransport` 0.7.2 (2026-08-11, MIT OR Apache-2.0, MSRV 1.88, rustls 0.23 with ring, aws-lc-rs or fips features, on quinn 0.11), behind a `webtransport` cargo feature, in the fallback list.
+- **B. The same over `web-transport-quinn`** 0.13.6 (2026-11-03, MIT OR Apache-2.0; no fips feature).
+
+| | A | B |
+|---|---|---|
+| Fit | good: a transport of the adapter, the core unchanged | good |
+| Idiom | good | good |
+| Consistency | good: keeps the fips build's provider (Block 6) | poor: no FIPS build |
+| Tests | @A with Centrifugo's experimental HTTP/3 and the test CA; interop with webtransport-go 0.13 to verify | same |
+| Semver | additive, feature-gated, marked unstable | same |
+| Cost | L | L |
+
+**Recommendation.** A (the components rule: maintained crates; cryptography stays in rustls).
+
+## 34. SockJS transport
+
+**Fit.** Outside a browser: no (SockJS emulates WebSocket in old browsers). Server: removed in Centrifugo v6 (centrifuge-js README.md:145-147; no SockJS in v6.10.1's sources or `go.mod`). Rust alternative: n/a. **Not adopted**: Centrifugo v6.10.1 cannot serve it, and no native client needs it.
+
+## 35. An injectable connector (centrifuge-js's custom WebSocket constructor)
+
+**Fit.** Outside a browser: yes, in its Rust form: applications bring their own networking (a VPN tunnel, a custom proxy, an in-process transport for tests). Server: n/a. Rust alternative: none for Ferrifuge. **Makes sense.**
+
+**centrifuge-js** (`centrifuge.ts:1070-1100`): `websocket`, `fetch`, `readableStream`, `eventsource` constructor options.
+
+**Designs.**
+- **A. `ClientBuilder::connector`**: an async function from the endpoint URL to a connected byte stream (`AsyncRead + AsyncWrite + Send + Unpin`); Ferrifuge runs TLS (when the scheme asks) and the websocket handshake over it. It is also what item 22's in-memory server double plugs into.
+- **B. A public `Transport` trait** applications implement end to end.
+
+| | A | B |
+|---|---|---|
+| Fit | good: adapter only | fair: exposes the adapter's internals |
+| Idiom | good: as tokio-tungstenite's `client_async` | fair |
+| Consistency | good: with item 1's proxy decision (a connector is the general case) | fair |
+| Tests | good: @D through a test connector | good |
+| Semver | additive | additive, but every transport change breaks implementers |
+| Cost | M | L |
+
+**Recommendation.** A.
+
+## 36. Protobuf over http_stream
+
+**Fit.** Outside a browser: yes. Server: Centrifugo v6.10.1 serves it (`Content-Type: application/octet-stream`, centrifuge `handler_http_stream.go:73-74`; sse has no Protobuf). Rust alternative: n/a. **Makes sense.** Reverses Block 8's decision rejecting Protobuf with an HTTP transport at build time, for http_stream only.
+
+**centrifuge-js** (`transport_http_stream.ts:107-119`, `:176-183`).
+
+**Designs.**
+- **A. Length-delimited Protobuf in the http_stream decoder**, split with prost's `decode_length_delimiter` (a maintained component) over a bounded buffer, fuzzed with the other decoders; sse stays JSON.
+- **B. Keep rejecting it.**
+
+| | A | B |
+|---|---|---|
+| Fit | good: a decoder mode, the core unchanged | good |
+| Idiom | good | good |
+| Consistency | good: the codec seam (Block 5c) | fair: a combination centrifuge-js allows |
+| Tests | good: @A over http_stream with Protobuf; fuzz | — |
+| Semver | none (a build error becomes a working build) | none |
+| Cost | M | none |
+
+**Recommendation.** A, with the components block (27) that replaces the http_stream decoder.
+
+## 37. `hasRecoveredPublications` on the subscribed event
+
+**Fit.** Yes, client-only (metrics). **Makes sense.** centrifuge-js `types.ts:324-326`, `centrifuge.ts:2491`, `:2520`.
+
+**Designs.** A: `Subscribed::has_recovered_publications: bool`. B: leave it to the application to count. **Recommendation.** A (one field, `Subscribed` is `#[non_exhaustive]`).
+
+## 38. Delta statistics (`deltaStats()`)
+
+**Fit.** Yes (operators measure what delta saves). **Makes sense.** centrifuge-js `subscription.ts:388-400`, `types.ts:818-830`.
+
+**Designs.** A: `Subscription::delta_statistics()` (publications, full payloads, deltas, bytes received and decoded), next to item 8's `statistics()`. B: folded into the client's `statistics()` per channel. **Recommendation.** A, with item 8.
+
+## 39. Browser-only options
+
+**Fit.** Online and offline events, page hide and show (back/forward cache), fetch, ReadableStream and EventSource shims, `withCredentials` (`centrifuge.ts:796-918`, `types.ts:177`, `:184`): browser APIs. **Not native items**: they belong to the browser adapter, item 25 design B (owner decision), whose block takes them.
 
 ## Components audit (owner decision, 2026-11-06)
 
