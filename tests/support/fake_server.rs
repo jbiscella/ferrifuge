@@ -626,8 +626,8 @@ impl Connection {
             let Ok(command) = protobuf::Command::decode_length_delimited(&mut frame) else {
                 return replies;
             };
-            if command.connect.is_some() {
-                let reply = protobuf::Reply {
+            let reply = if command.connect.is_some() {
+                Some(protobuf::Reply {
                     id: command.id,
                     connect: Some(protobuf::ConnectResult {
                         client: self.next_client(),
@@ -639,7 +639,11 @@ impl Connection {
                         ..Default::default()
                     }),
                     ..Default::default()
-                };
+                })
+            } else {
+                protobuf_result(&command)
+            };
+            if let Some(reply) = reply {
                 replies.push(Message::binary(reply.encode_length_delimited_to_vec()));
             }
             self.state.lock().unwrap().received_protobuf.push(command);
@@ -659,6 +663,72 @@ impl Connection {
         self.client_id += 1;
         format!("fake-{}", self.client_id)
     }
+}
+
+/// The fixed Protobuf results the fake server answers calls with, by
+/// command (Block 13): what [`protobuf_result`] sends.
+pub(crate) mod protobuf_results {
+    use super::protobuf;
+
+    /// RPC result data.
+    pub(crate) const RPC_DATA: [u8; 3] = [0xfe, 0x00, 0xff];
+
+    pub(crate) fn history() -> protobuf::HistoryResult {
+        protobuf::HistoryResult {
+            publications: vec![protobuf::Publication {
+                data: vec![0xfe, 0x01],
+                offset: 4,
+                ..Default::default()
+            }],
+            epoch: "pb-epoch".to_owned(),
+            offset: 4,
+        }
+    }
+
+    pub(crate) fn presence() -> protobuf::PresenceResult {
+        protobuf::PresenceResult {
+            presence: [(
+                "pb-client".to_owned(),
+                protobuf::ClientInfo {
+                    user: "pb-user".to_owned(),
+                    client: "pb-client".to_owned(),
+                    conn_info: vec![0xff],
+                    chan_info: vec![0x00],
+                },
+            )]
+            .into(),
+        }
+    }
+
+    pub(crate) fn presence_stats() -> protobuf::PresenceStatsResult {
+        protobuf::PresenceStatsResult {
+            num_clients: 3,
+            num_users: 2,
+        }
+    }
+}
+
+/// The answer to a Protobuf call command, if it is one the fake server
+/// answers: RPC, history, presence or presence stats.
+fn protobuf_result(command: &protobuf::Command) -> Option<protobuf::Reply> {
+    let mut reply = protobuf::Reply {
+        id: command.id,
+        ..Default::default()
+    };
+    if command.rpc.is_some() {
+        reply.rpc = Some(protobuf::RpcResult {
+            data: protobuf_results::RPC_DATA.to_vec(),
+        });
+    } else if command.history.is_some() {
+        reply.history = Some(protobuf_results::history());
+    } else if command.presence.is_some() {
+        reply.presence = Some(protobuf_results::presence());
+    } else if command.presence_stats.is_some() {
+        reply.presence_stats = Some(protobuf_results::presence_stats());
+    } else {
+        return None;
+    }
+    Some(reply)
 }
 
 /// The answer to the JSON RPC command `rpc`.
