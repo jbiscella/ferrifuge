@@ -60,13 +60,14 @@ Available now:
   publications they missed across reconnects and `disconnect()`/`connect()`;
 - RPC, publish, history, presence and presence stats calls, client-level and
   subscription-level, which wait for the connection, and for the
-  subscription, when made before them.
+  subscription, when made before them;
+- `send` to the server, and the server's asynchronous messages as
+  `Message` events.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| `send` and asynchronous server messages | Block 13c |
 | a size bound for calls waiting to be written | Block 13d |
 | join and leave events | Block 13e |
 
@@ -323,6 +324,7 @@ The client's calls:
 | `client.history(channel, options)` | a `HistoryResult`: the publications `HistoryOptions` select (`limit`, `since`, `reverse`), and the stream's current `epoch` and `offset` |
 | `client.presence(channel)` | a `PresenceResult`: the subscribed clients by client id, with their user, connection info and channel info |
 | `client.presence_stats(channel)` | a `PresenceStatsResult`: `num_clients` and `num_users` |
+| `client.send(data)` | `()` once the message is written: the server sends no reply. It waits for the connection as the others do, but has no reply to wait for |
 
 Data is raw JSON with the JSON protocol, any bytes with Protobuf. Each call
 is made when the method returns, and its future borrows nothing from the
@@ -424,7 +426,8 @@ The client is `Disconnected`, `Connecting` or `Connected`. Each change emits
 carry a numeric `code` and a `reason`. Client-side codes are in
 `ferrifuge::codes`, and their values follow centrifuge-js. `Error` events
 report problems that do not change the state, such as a failed attempt
-while the client keeps reconnecting.
+while the client keeps reconnecting. `Message` events carry the data of the
+server's asynchronous messages, exactly as received.
 
 ### Configuration
 
