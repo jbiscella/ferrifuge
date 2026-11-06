@@ -57,13 +57,17 @@ Available now:
   dropped before subscribing or connecting again;
 - server-side subscriptions, granted at connect or added and removed by the
   server later, with their events and publications, and recovery of the
-  publications they missed across reconnects and `disconnect()`/`connect()`.
+  publications they missed across reconnects and `disconnect()`/`connect()`;
+- RPC calls, which wait for the connection when made before it.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| RPC, publish, history, presence | later blocks |
+| publish, history, presence, presence stats | Block 13b |
+| `send` and asynchronous server messages | Block 13c |
+| a size bound for calls waiting to be written | Block 13d |
+| join and leave events | Block 13e |
 
 ## Usage
 
@@ -307,6 +311,34 @@ which reports `was_recovering` and `recovered`. On "state invalidated" (3014)
 the position becomes unmatchable, so the recovery fails and `subscribed`
 reports `recovered` false, as for client-side subscriptions.
 
+### RPC
+
+`client.rpc(method, data)` calls the server's RPC handler (with Centrifugo,
+its RPC proxy) and returns the result data: raw JSON with the JSON protocol,
+any bytes with Protobuf. The call is made when `rpc` returns, and the future
+borrows nothing from the client, so it can be spawned.
+
+```rust
+let result = client.rpc("echo", br#"{"n":1}"#.to_vec()).await?;
+```
+
+A call made before the client is connected, `connect()` included, waits for
+the connection, then for its reply, each for at most `Config::timeout`. It
+fails with a `CallError` carrying the server's code, message and `temporary`
+flag, or with a client-side code:
+
+| Code | When |
+|---|---|
+| 1 `TIMEOUT` | no connection, or no reply, within `Config::timeout` |
+| 3 `DISCONNECTED` | the client entered `disconnected`: `disconnect()`, a terminal disconnect code or a denied token |
+| 10 `TRANSPORT_WRITE` | the server refused the HTTP request carrying the call as too large (413) |
+| 11 `CONNECTION_CLOSED` | the transport the call was sent on closed before the reply |
+
+A reply settles its call as soon as it is read, even while the application
+has not taken earlier events, so call results are not ordered with events.
+Dropping the future abandons the call: one still waiting for the connection
+is never sent.
+
 ### Transport fallback
 
 To fall back to http_stream, then sse, where websocket is blocked, give the
@@ -373,7 +405,7 @@ while the client keeps reconnecting.
 |---|---|---|
 | `min_reconnect_delay` | 500 ms | Lower bound of the reconnect delay |
 | `max_reconnect_delay` | 20 s | Upper bound of the reconnect delay |
-| `timeout` | 5 s | Time allowed from opening the transport to the connect reply, for a websocket frame to be written (a server that stops reading then counts as a lost connection), and for closing a websocket |
+| `timeout` | 5 s | Time allowed from opening the transport to the connect reply, for a websocket frame to be written (a server that stops reading then counts as a lost connection), for closing a websocket, and for a call to get the connection, then its reply |
 | `name` | `ferrifuge` | Client name reported to the server |
 | `version` | crate version | Client version reported to the server |
 | `token` | empty | Connection token sent with the first connect |
