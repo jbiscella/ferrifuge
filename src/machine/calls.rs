@@ -228,7 +228,8 @@ impl Machine {
     }
 
     /// Held call `id` joins a frame of its stopped batch when it fits the
-    /// write queue with the calls before it in the batch (`batch_bytes`),
+    /// write queue with what is unwritten and the calls of the frame being
+    /// built (`batch_bytes`), which are not counted yet,
     /// the first fitting alone when nothing is unwritten (Block 18, D4);
     /// its command and size, or `None` when it waits for room.
     pub(super) fn release_held(

@@ -75,10 +75,9 @@ impl Machine {
     fn send_held(&mut self) {
         let held = std::mem::take(&mut self.batching.held);
         let mut frame: Vec<Command> = Vec::new();
-        // Bytes of the calls in `frame`, and of the calls of the batch sent
-        // so far, against the write queue.
+        // Bytes of the calls in `frame`, not yet counted against the write
+        // queue: those of the frames sent before it are.
         let mut frame_calls = 0;
-        let mut batch_calls = 0;
         for command in held {
             let (command, calls) = match command {
                 HeldCommand::Call(id) => {
@@ -86,11 +85,8 @@ impl Machine {
                         // Settled or abandoned meanwhile.
                         continue;
                     }
-                    match self.release_held(id, batch_calls) {
-                        Some((command, size)) => {
-                            batch_calls += size;
-                            (command, size)
-                        }
+                    match self.release_held(id, frame_calls) {
+                        Some(released) => released,
                         None => continue,
                     }
                 }
@@ -119,5 +115,66 @@ impl Machine {
         };
         let (frame, _) = self.send_commands(transport, commands);
         self.batch_frame_sent(frame, calls);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::machine::{Action, Input, Machine};
+    use crate::{CallRequest, Config};
+
+    /// A connected machine with `config`; the connect command was id 1.
+    fn connected(config: Config) -> Machine {
+        let mut machine = Machine::new(config);
+        let transport = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a transport");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
+        });
+        machine
+    }
+
+    /// An rpc whose command encodes to 300 bytes once numbered `id`.
+    fn rpc_300(id: u32) -> CallRequest {
+        let base = format!(r#"{{"id":{id},"rpc":{{"method":"m","data":""}}}}"#).len();
+        CallRequest::Rpc {
+            method: "m".to_owned(),
+            data: format!("\"{}\"", "x".repeat(300 - base)).into_bytes(),
+        }
+    }
+
+    // Codex #93: the calls of a frame already sent count once, as unwritten,
+    // not again with the calls of the batch.
+    #[test]
+    fn calls_of_frames_already_sent_count_once_against_the_write_queue() {
+        let mut machine = connected(Config {
+            batch_frame_bytes: 1000,
+            write_queue_bytes: 2000,
+            ..Config::default()
+        });
+        machine.handle(Input::StartBatching);
+        for id in 2..7 {
+            let call = machine.add_call(rpc_300(id));
+            machine.handle(Input::Call(call));
+        }
+
+        let actions = machine.handle(Input::StopBatching);
+
+        let frames: Vec<usize> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(frame.split(|byte| *byte == b'\n').count()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, [3, 2]);
     }
 }
