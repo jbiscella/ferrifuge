@@ -132,8 +132,13 @@ impl Machine {
         ));
     }
 
-    /// The client is connected: the queued calls are sent, in order.
+    /// The client is connected: the queued calls are sent, in order,
+    /// unless the transport's close is already read, held behind earlier
+    /// events: they wait for the next connection then.
     pub(super) fn calls_connected(&mut self) {
+        if self.transport_closing() {
+            return;
+        }
         let queued: Vec<CallId> = self
             .calls
             .by_id
@@ -253,8 +258,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::Config;
     use crate::machine::{Input, TransportId};
+    use crate::{ClientEvent, Config};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -397,6 +402,43 @@ mod tests {
         assert_eq!(machine.state(), State::Connected);
         assert_eq!(sent_text(&actions), Vec::<String>::new());
         assert!(actions.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
+    }
+
+    #[test]
+    fn queued_calls_stay_queued_when_a_held_connect_reply_comes_after_the_close() {
+        let mut machine = machine();
+        // A stream that takes nothing: the first `connected` event, not
+        // taken, holds the messages of the next connection (Block 15).
+        machine.handle(Input::StreamOpened(None));
+        let first = opened(&mut machine);
+        let connected = connect_reply(&mut machine, first)
+            .into_iter()
+            .find_map(|action| match action {
+                Action::Emit(event, ClientEvent::Connected { .. }) => Some(event),
+                _ => None,
+            })
+            .expect("a connected event");
+        machine.handle(Input::Disconnect);
+        let second = opened(&mut machine);
+        let (id, _) = rpc(&mut machine, "echo");
+        machine.handle(frame(second, r#"{"id":2,"connect":{"client":"c2"}}"#));
+        machine.handle(Input::TransportClosed {
+            transport: second,
+            code: None,
+            reason: String::new(),
+        });
+
+        let released = machine.handle(Input::EventTaken(connected));
+
+        assert!(
+            released
+                .iter()
+                .any(|action| matches!(action, Action::Emit(_, ClientEvent::Connected { .. }))),
+            "the held connect reply was not handled: {released:?}"
+        );
+        assert_eq!(sent_text(&released), Vec::<String>::new());
+        assert_eq!(settled(&released), []);
+        assert!(machine.calls.by_id.contains_key(&id));
     }
 
     #[test]
