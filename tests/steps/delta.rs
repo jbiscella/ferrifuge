@@ -446,7 +446,7 @@ async fn receives_no_publication(world: &mut ClientWorld) {
 async fn subscribed_without_delta_on(world: &mut ClientWorld, how: String) {
     a_connected_client(world).await;
     let builder = world.client().subscription_builder(CHANNEL);
-    let builder = if how.starts_with("with") {
+    let builder = if how.starts_with("with the fossil delta option") {
         builder.delta(DeltaFormat::Fossil)
     } else {
         builder
@@ -541,6 +541,9 @@ async fn the_stream_yields_the_failure(world: &mut ClientWorld) {
     expect_subscription_event(world, "subscribed", false).await;
     subscription_emits_a_delta_error(world, 15).await;
     subscription_emits_subscribing_with(world, 2).await;
+    // The next subscribe is the one after the failure, not the reconnect's
+    // (Codex on PR #100).
+    note_commands_before_disconnect(world);
 }
 
 #[given(

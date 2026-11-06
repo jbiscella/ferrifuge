@@ -527,24 +527,24 @@ fn a_delta_subscription_with_resubscribe_options(world: &mut ClientWorld, min: u
 #[when(
     regex = r"^each of (\d+) subscribes is answered with delta on, a whole publication and then a broken delta$"
 )]
-fn subscribes_followed_by_broken_deltas(world: &mut ClientWorld, subscribes: usize) {
+async fn subscribes_followed_by_broken_deltas(world: &mut ClientWorld, subscribes: usize) {
     let UnderTest::Resubscribe(options) = under_test(world).clone() else {
         panic!("this step needs a subscription with resubscribe options");
     };
-    world.upper_bounds = (0..subscribes)
-        .map(|attempt| {
-            (0..SAMPLES)
-                .map(|_| {
-                    let mut run = ResubscribeRun::new(options.clone());
-                    (0..=attempt)
-                        .map(|_| run.fail_with_broken_delta())
-                        .last()
-                        .expect("at least one attempt")
-                })
-                .max()
-                .expect("samples")
-        })
-        .collect();
+    // Each run gives one sample of every attempt's delay. Off the async
+    // runtime, so that the scenarios running alongside keep their timing.
+    world.upper_bounds = tokio::task::spawn_blocking(move || {
+        let mut bounds = vec![Duration::ZERO; subscribes];
+        for _ in 0..SAMPLES {
+            let mut run = ResubscribeRun::new(options.clone());
+            for bound in &mut bounds {
+                *bound = (*bound).max(run.fail_with_broken_delta());
+            }
+        }
+        bounds
+    })
+    .await
+    .expect("the sampling task");
 }
 
 #[then(
