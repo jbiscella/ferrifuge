@@ -25,6 +25,8 @@ const SEEDS: Range<u64> = 0..300;
 const OPS: usize = 60;
 /// Reruns one seed alone.
 const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
+/// Operations of each seed of the long run.
+const OPS_VARIABLE: &str = "FERRIFUGE_CHAOS_OPS";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
 /// I4: how long after healing the client must be connected.
@@ -71,6 +73,8 @@ struct Violation {
     invariant: &'static str,
     /// Index of the operation during which it broke.
     op: usize,
+    /// Operations the seed runs.
+    of: usize,
     detail: String,
     /// The operations up to it.
     ops: Vec<String>,
@@ -82,13 +86,16 @@ impl fmt::Display for Violation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "seed {} broke {} at operation {}: {} (rerun with {SEED_VARIABLE}={})\n\
+            "seed {} broke {} at operation {}: {}\n\
+             rerun: {SEED_VARIABLE}={} {OPS_VARIABLE}={} cargo test --release --test chaos \
+             seeded_chaos_long_run -- --ignored\n\
              operations:\n  {}\nlast inputs and actions:\n  {}",
             self.seed,
             self.invariant,
             self.op,
             self.detail,
             self.seed,
+            self.of,
             self.ops.join("\n  "),
             self.tail.join("\n  ")
         )
@@ -240,6 +247,8 @@ struct Run {
     checker: Checker,
     /// The operation being run.
     op: usize,
+    /// Operations the seed runs.
+    of: usize,
     /// Every operation, input and action, in order.
     trace: Vec<String>,
     /// How often each operation, server behaviour and outcome happened.
@@ -270,6 +279,7 @@ impl Run {
             taken_at_once: Vec::new(),
             checker: Checker::default(),
             op: 0,
+            of: 0,
             trace: Vec::new(),
             counts: BTreeMap::new(),
         }
@@ -277,6 +287,7 @@ impl Run {
 
     /// Runs `ops` operations, heals, and checks liveness.
     fn run(&mut self, ops: usize) -> Step {
+        self.of = ops;
         for op in 0..ops {
             self.op = op;
             let next = Op::pick(&mut self.rng);
@@ -299,6 +310,7 @@ impl Run {
             seed: self.seed,
             invariant,
             op: self.op,
+            of: self.of,
             detail: detail.into(),
             ops: self
                 .trace
@@ -994,7 +1006,7 @@ fn the_core_runner_reports_a_planted_connection_fault() {
 #[ignore = "a debugging aid"]
 fn trace() {
     let seed = seeds_from(std::env::var(SEED_VARIABLE).ok(), 0..1).start;
-    let ops = std::env::var("FERRIFUGE_CHAOS_OPS")
+    let ops = std::env::var(OPS_VARIABLE)
         .ok()
         .map_or(OPS, |value| value.trim().parse().expect("a number"));
     let mut run = Run::new(seed, None);
@@ -1007,7 +1019,8 @@ fn trace() {
 
 /// The main and nightly run (Block 16, "CI"): `FERRIFUGE_CHAOS_SEEDS`
 /// seeds (10 000 by default) of `FERRIFUGE_CHAOS_OPS` operations (200),
-/// from a start seed drawn per run, or `FERRIFUGE_CHAOS_START`.
+/// from a start seed drawn per run, or `FERRIFUGE_CHAOS_START`;
+/// `FERRIFUGE_CHAOS_SEED` alone when set, which reruns a failure.
 #[test]
 #[ignore = "long: main and nightly, in release"]
 fn seeded_chaos_long_run() {
@@ -1018,12 +1031,13 @@ fn seeded_chaos_long_run() {
     };
     let start = number("FERRIFUGE_CHAOS_START", fastrand::u64(..u64::MAX / 2));
     let seeds = number("FERRIFUGE_CHAOS_SEEDS", 10_000);
-    let ops = usize::try_from(number("FERRIFUGE_CHAOS_OPS", 200)).expect("a count");
+    let ops = usize::try_from(number(OPS_VARIABLE, 200)).expect("a count");
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);
     println!(
-        "chaos: seeds {start}..{} of {ops} operations",
-        start + seeds
+        "chaos: seeds {}..{} of {ops} operations",
+        seeds.start, seeds.end
     );
-    if let Err(violation) = run_seeds(start..start + seeds, ops, None) {
+    if let Err(violation) = run_seeds(seeds, ops, None) {
         panic!("{violation}");
     }
 }
