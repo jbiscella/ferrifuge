@@ -105,6 +105,7 @@ impl Machine {
     /// reply asked for pongs, even one still held (centrifuge-js
     /// `_handleServerPing`).
     fn ping_read(&mut self) {
+        self.pinged = true;
         let pong = match self.state {
             State::Connected => {
                 // A ping proves the connection usable.

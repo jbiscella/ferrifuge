@@ -127,8 +127,8 @@ fn connect_id(actions: &[Action]) -> u64 {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::Send { frame, .. } => Some(frame),
-            Action::OpenTransport {
+            Action::Send { frame, .. }
+            | Action::OpenTransport {
                 initial_frame: Some(frame),
                 ..
             } => Some(frame),
@@ -159,6 +159,7 @@ fn plan(world: &mut ClientWorld) -> &mut SlowPlan {
 #[given(
     regex = r#"^a client with minReconnectDelay (\d+) ms and maxReconnectDelay (\d+) ms, subscribed to channels "news" and "chat" over (websocket|http_stream)$"#
 )]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn a_subscribed_client(world: &mut ClientWorld, min: u64, max: u64, transport: String) {
     let config = Config {
         min_reconnect_delay: Duration::from_millis(min),
@@ -179,6 +180,7 @@ fn a_subscribed_client(world: &mut ClientWorld, min: u64, max: u64, transport: S
 #[when(
     regex = r#"^the server closes (\d+) connections in a row with code 3008 "slow", each after its connect reply( and the subscribe reply for "chat")?, before any server ping$"#
 )]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn closes_in_a_row(world: &mut ClientWorld, closes: usize, chat: String) {
     let connection = Connection::slow(!chat.is_empty());
     plan(world)

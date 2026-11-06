@@ -14,6 +14,9 @@ pub(crate) struct Backoff {
     min: Duration,
     max: Duration,
     attempt: u32,
+    /// The attempt counter a [`Backoff::reset`] replaced, while
+    /// [`Backoff::undo_reset`] can still bring it back.
+    before_reset: Option<u32>,
 }
 
 impl Backoff {
@@ -22,6 +25,7 @@ impl Backoff {
             min,
             max,
             attempt: 0,
+            before_reset: None,
         }
     }
 
@@ -32,9 +36,30 @@ impl Backoff {
         delay
     }
 
-    /// Starts the sequence over, after a connection proved usable.
+    /// Starts the sequence over, after a connection proved usable; until
+    /// [`Backoff::keep_reset`], [`Backoff::undo_reset`] can take it back.
     pub(crate) fn reset(&mut self) {
+        self.before_reset.get_or_insert(self.attempt);
         self.attempt = 0;
+    }
+
+    /// The last reset stands.
+    pub(crate) fn keep_reset(&mut self) {
+        self.before_reset = None;
+    }
+
+    /// Takes back the resets since the last [`Backoff::keep_reset`]: the
+    /// sequence goes on from where it stood before them.
+    pub(crate) fn undo_reset(&mut self) {
+        if let Some(attempt) = self.before_reset.take() {
+            self.attempt = attempt;
+        }
+    }
+
+    /// Starts the sequence over for good.
+    pub(crate) fn restart(&mut self) {
+        self.attempt = 0;
+        self.before_reset = None;
     }
 }
 
@@ -55,6 +80,36 @@ mod tests {
 
     const MIN: Duration = Duration::from_millis(500);
     const MAX: Duration = Duration::from_secs(20);
+
+    #[test]
+    fn an_undone_reset_continues_the_sequence() {
+        let mut backoff = Backoff::new(MIN, MAX);
+        let mut rng = fastrand::Rng::with_seed(7);
+        for _ in 0..3 {
+            backoff.next_delay(&mut rng);
+        }
+
+        backoff.reset();
+        backoff.reset();
+        backoff.undo_reset();
+
+        assert_eq!(backoff.attempt, 3);
+    }
+
+    #[test]
+    fn a_kept_or_restarted_sequence_is_not_undone() {
+        let mut rng = fastrand::Rng::with_seed(7);
+        for finish in [Backoff::keep_reset, Backoff::restart] {
+            let mut backoff = Backoff::new(MIN, MAX);
+            backoff.next_delay(&mut rng);
+            backoff.reset();
+            finish(&mut backoff);
+
+            backoff.undo_reset();
+
+            assert_eq!(backoff.attempt, 0);
+        }
+    }
 
     #[test]
     fn delays_stay_within_min_and_max() {

@@ -833,6 +833,9 @@ const MESSAGE_TOO_BIG: u32 = 1009;
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
+/// Disconnect code of a client the server found too slow (Centrifugo
+/// `DisconnectSlow`).
+const SLOW: u32 = 3008;
 
 /// The client connection state machine.
 #[derive(Debug)]
@@ -872,6 +875,9 @@ pub struct Machine {
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
     backoff_reset_pending: bool,
+    /// A server ping was read on the current connection: a 3008 close then
+    /// keeps the backoff reset (Block 15, "Backoff after 3008").
+    pinged: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     actions: Vec<Action>,
@@ -967,6 +973,7 @@ impl Machine {
             server_subscriptions: ServerSubscriptions::default(),
             calls: calls::Calls::default(),
             backoff_reset_pending: false,
+            pinged: false,
             pings: None,
             actions: Vec::new(),
         }
@@ -1102,7 +1109,9 @@ impl Machine {
             code: codes::connecting::CONNECT_CALLED,
             reason: "connect called".to_owned(),
         });
-        // The first attempt is immediate; delays apply to reconnects.
+        // centrifuge-js `connect`. The first attempt is immediate; delays
+        // apply to reconnects.
+        self.backoff.restart();
         self.start_attempt();
     }
 
@@ -1451,8 +1460,16 @@ impl Machine {
         self.transport_open = false;
         self.emulation = None;
         // A connection that ends before it proved usable keeps the backoff
-        // growing.
+        // growing, and so does one the server found too slow before any
+        // ping (Block 15, "Backoff after 3008"): each reconnect would ask
+        // for the same backlog.
         self.backoff_reset_pending = false;
+        let pinged = std::mem::take(&mut self.pinged);
+        if code == SLOW && !pinged {
+            self.backoff.undo_reset();
+        } else {
+            self.backoff.keep_reset();
+        }
         self.connect_command = None;
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
@@ -1839,7 +1856,12 @@ mod tests {
     /// Connects an `http_stream`-only machine, then closes the stream;
     /// the reconnect delay, after `ping` if set.
     fn emulated_reconnect_delay(machine: &mut Machine, ping: bool) -> Duration {
-        let transport = opened_transport(&machine.handle(Input::Connect));
+        let next = if machine.state == State::Disconnected {
+            Input::Connect
+        } else {
+            Input::TimerFired(Timer::Reconnect)
+        };
+        let transport = opened_transport(&machine.handle(next));
         machine.handle(Input::TransportOpened(transport));
         let connect_id = machine.connect_command.expect("connect command pending");
         machine.handle(frame(
@@ -1854,7 +1876,6 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        machine.handle(Input::Disconnect);
         actions
             .iter()
             .find_map(|action| match action {
@@ -2828,6 +2849,41 @@ mod tests {
             transport,
             code: None,
             reason: String::new(),
+        });
+
+        let Some(Action::SetTimer(Timer::Reconnect, delay)) = actions.last() else {
+            panic!("no reconnect timer in {actions:?}");
+        };
+        assert!(*delay <= Duration::from_millis(200), "{delay:?}");
+    }
+
+    // centrifuge-js `connect` resets the attempt counter: delays grown
+    // before an explicit disconnect do not carry over to the next connect.
+    #[test]
+    fn connect_resets_the_backoff() {
+        let mut machine = Machine::with_rng(
+            Config {
+                min_reconnect_delay: Duration::from_millis(100),
+                max_reconnect_delay: Duration::from_secs(60),
+                ..Config::default()
+            },
+            false,
+            fastrand::Rng::with_seed(7),
+        );
+        let mut transport = opened_transport(&machine.handle(Input::Connect));
+        for _ in 0..10 {
+            machine.handle(Input::TransportFailed {
+                transport,
+                message: "refused".into(),
+            });
+            transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        }
+        machine.handle(Input::Disconnect);
+        let transport = opened_transport(&machine.handle(Input::Connect));
+
+        let actions = machine.handle(Input::TransportFailed {
+            transport,
+            message: "refused".into(),
         });
 
         let Some(Action::SetTimer(Timer::Reconnect, delay)) = actions.last() else {
