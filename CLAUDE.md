@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–19 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–20 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3114,3 +3114,81 @@ Order of the blocks:
 | 38 | 18: typed JSON helpers |
 | 39 | 13: publications-only stream |
 | 40 | 25: wasm32 build check |
+
+---
+
+## Block 20 — Release setup
+
+**Goal:** Ferrifuge can be depended on as a production component: it is published to crates.io from CI only, with a changelog, a security policy, its documentation on docs.rs, compiled examples, and a stated toolchain floor that CI checks for every build (parity item 21; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art).
+
+**Dependencies:** Blocks 0 (lints, deny.toml, crate layout), 6 (feature sets), 16 (CI layout), 19 (the fossil vectors under `tests/fixtures`).
+
+**Out of scope:**
+- the owner's actions outside the repository: the crates.io account and ownership of the name, the first publish (crates.io requires an API token for it), the trusted-publisher entry naming `release.yml` and the environment `release`, the GitHub `release` environment with a required reviewer and deployments limited to `v*` tags, a tag ruleset for `v*`, private vulnerability reporting (to be on before `SECURITY.md` is relied on), immutable releases;
+- publishing a version: this block makes it possible, the owner decides when;
+- committing the generated Protobuf code instead of generating it at build time (opentelemetry-proto does): a later decision;
+- conventional-commit tooling (git-cliff, release-plz): the commit style is the project's `[block][phase]` one;
+- workflow linters (zizmor, actionlint) as CI jobs: a later block.
+
+**Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Release workflow.** `.github/workflows/release.yml`, triggered by a pushed tag `v*`, in three jobs, so that every check comes before the publish, which cannot be undone (a version can only be yanked):
+  - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), and runs `cargo-semver-checks` (a pinned version, default features, as the pull-request job) against the crate's latest version on crates.io, skipped only when the index has none;
+  - `publish` (`needs: verify`; environment `release`; `id-token: write`): `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token);
+  - `github-release` (`needs: publish`; `contents: write`): the GitHub release with that version's changelog section as its notes; re-running it never publishes again.
+  Every action is pinned by commit SHA; checkouts use `persist-credentials: false`; no build cache is used; the toolchain action names its toolchain.
+- **D2 Release check.** `scripts/check-release-tag` (bash and cargo only, so it runs on every CI OS) takes a tag and succeeds only when the tag is exactly `v` followed by the `Cargo.toml` version, without a suffix, and `CHANGELOG.md` has a section for that version; otherwise it fails naming the version the tag must be, or the missing section. The workflow and a test run it.
+- **D3 Package contents.** `Cargo.toml` lists what is published (`include`): `src`, `proto`, `build.rs`, `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; Cargo adds `Cargo.toml.orig`, `Cargo.lock` and `.cargo_vcs_info.json`. Tests, benches, fixtures, workflows, `.claude`, `CLAUDE.md`, `deny.toml` and the logo stay out (today 155 files are packaged). The published crate's own unit tests do not build, as `src/fossil.rs` includes fixtures that are not shipped; that is accepted (they run in this repository). A `package` CI job on pull requests runs `cargo publish --dry-run`, which builds the crate as published (verified: `build.rs`, `proto/` and `protoc-bin-vendored` work; the path-only dev-dependency on itself is dropped).
+- **D4 Changelog.** `CHANGELOG.md` in Keep a Changelog form, written by hand: `## [Unreleased]` on top, then `## [x.y.z] - YYYY-MM-DD` for each version from 0.1.0, newest first, with Added, Changed, Deprecated, Removed, Fixed and Security subsections, backfilled from the history (the version each block reached, `git log -G'^version'` on `Cargo.toml`, and the block table of this file); no compare links for versions never tagged. A pull request that changes the public API or behaviour adds an `Unreleased` entry; the release moves them under the new version.
+- **D5 Security policy.** `SECURITY.md`: reports go through GitHub private vulnerability reporting (the repository's "Report a vulnerability" button), never public issues; the supported versions are the latest minor release; fixes are released as a patch of it and announced as a GitHub security advisory, with a RustSec advisory requested for crates.io users. No response-time commitment.
+- **D6 MSRV policy.** `rust-version` in `Cargo.toml` is the floor; it is raised only when a dependency or a language feature needs it, never in a patch release, and the changelog says so. The `msrv` CI job checks it for every feature set CI builds: the default (ring), the core alone, `aws-lc-rs` and `fips`, installing CMake and Go for the last two as the `providers` job does (closing the analysis's finding F4).
+- **D7 docs.rs.** `[package.metadata.docs.rs]` builds the default features on `x86_64-unknown-linux-gnu` only (never `fips`, whose build needs Go and CMake); items behind a feature say so (`doc(cfg)` under the `docsrs` cfg, which docs.rs sets). A `docs-rs` CI job on nightly builds with `RUSTDOCFLAGS="--cfg docsrs -D warnings"`; `lint` keeps its stable `cargo doc` step. The crate-level documentation (`src/lib.rs`) gains an overview and a `no_run` quickstart, instead of pointing to this file.
+- **D8 Examples.** `examples/` holds runnable programs, each `required-features = ["tokio"]`: `quickstart` (connect, subscribe, print publications), `recovery` (a recoverable subscription, its position saved and resumed with `since`), `calls` (publish, history, presence and presence stats; RPC needs a server-side handler and is left out) and `delta` (a subscription with fossil delta). They take the endpoint from `FERRIFUGE_EXAMPLE_ENDPOINT`, default `ws://localhost:8000/connection/websocket`, and run against one server configuration, `examples/centrifugo.json`, which the README shows and the @A scenario uses. The `portability` jobs build the examples on every OS on pull requests (`lint` already builds them with `--all-targets`).
+- **D9 Crate metadata and README.** `documentation` (docs.rs) is added; `homepage` is not (it would repeat `repository`), nor `readme` (found automatically). The README stops saying the crate is not on crates.io and shows a crates.io dependency instead of a git one, with the version the manifest has; a test checks that every `ferrifuge = "x.y"` in the README matches the manifest's major and minor version and that the MSRV it states matches `rust-version`.
+
+Value clause: As a team adopting Ferrifuge in production, I want it published from CI with a changelog, a security policy, its documentation, compiled examples and a checked toolchain floor, so that we can audit what we depend on, upgrade knowingly and report vulnerabilities privately.
+
+**Structural acceptance:** `release.yml` as D1 (three jobs, SHA-pinned actions, no stored token, no cache); `cargo publish --dry-run` in a pull-request `package` job; the `msrv` job over the four feature sets; the `docs-rs` job as D7; the examples built on every OS on pull requests.
+
+```gherkin
+Feature: Release setup
+
+  Scenario: The changelog is in step with the crate's version
+    Given the crate's manifest
+    Then CHANGELOG.md begins with an Unreleased section, then version sections from newest to oldest, each headed by its version and a date
+    And the manifest's version is the newest of those versions, or above it
+
+  Scenario Outline: The release check refuses a tag that does not name the crate's version
+    Given the crate's manifest
+    When the release check runs for tag "<tag>"
+    Then it <outcome>
+
+    Examples:
+      | tag                                 | outcome                                   |
+      | v followed by its version           | succeeds                                  |
+      | v0.0.0                              | fails, naming the version the tag must be |
+      | its version without the v           | fails, naming the version the tag must be |
+      | v followed by its version and -rc.1 | fails, naming the version the tag must be |
+
+  Scenario: The release check refuses a version without a changelog section
+    Given a copy of the crate whose CHANGELOG.md has no section for its version
+    When the release check runs for tag "v" followed by its version
+    Then it fails, naming the missing section
+
+  Scenario: The published package holds only what the crate needs
+    Given the crate's manifest
+    When the files of its package are listed
+    Then each is under src or proto, or is build.rs, Cargo.toml, Cargo.toml.orig, Cargo.lock, .cargo_vcs_info.json, README.md, LICENSE, CHANGELOG.md or SECURITY.md
+    And build.rs, proto/client.proto, proto/LICENSE, LICENSE, README.md, CHANGELOG.md and SECURITY.md are among them
+
+  @A
+  Scenario: The quickstart example receives a publication
+    Given a server
+    When the quickstart example runs against the server's websocket endpoint
+    And it prints that it is subscribed to its channel
+    And the server API publishes {"text":"hello"} to that channel
+    Then the example prints {"text":"hello"}
+```
+
+The release-check scenarios pass the outline's tag descriptions to the step, which builds the tag from the manifest's version. The quickstart scenario runs the example binary Cargo builds next to the test binary (not a nested `cargo run`), and waits for its "subscribed" line before publishing.
+
+**Exceptions introduced:** the workflow's publishing, the GitHub release and the CI jobs are verified by running them, not by scenarios: they need the owner's crates.io and repository setup (out of scope above). The first release is the first full run of `release.yml`.
