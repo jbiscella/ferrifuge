@@ -16,6 +16,9 @@ use crate::support::relay::Mode;
 
 /// Margin for a call's timeout to fire and its failure to reach the step.
 const TOLERANCE: Duration = Duration::from_secs(1);
+/// How long the connect proxy takes to accept a connection in the
+/// scenarios calling while the client connects.
+const CONNECTING_FOR: Duration = Duration::from_millis(500);
 
 /// Calls of the scenario, in the order they were made.
 #[derive(Default)]
@@ -119,9 +122,16 @@ async fn a_connected_client_and_an_rpc_proxy(world: &mut ClientWorld) {
     a_connected_client(world).await;
 }
 
+/// The connect proxy accepts connections only after a delay, so that a
+/// call made right after `connect()` is made while the client connects.
 #[given(r#"an RPC proxy answering method "echo" with its input"#)]
 fn an_rpc_proxy(world: &mut ClientWorld) {
     assert_rpc_proxy(world);
+    world
+        .proxy
+        .as_ref()
+        .expect("the RPC proxy")
+        .accept_after(CONNECTING_FOR);
 }
 
 #[given(

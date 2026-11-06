@@ -42,6 +42,8 @@ struct Answers {
     /// Channels an accepted connection is subscribed to on the server side,
     /// each with whether it is recoverable.
     granted: Vec<(String, bool)>,
+    /// Delay before accepting a connection, when no answer is programmed.
+    accept_delay: Duration,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -167,6 +169,12 @@ impl ProxyBackend {
             ));
     }
 
+    /// Accepts connections only after `delay` from now on, when no answer is
+    /// programmed, so that a scenario can act while the client connects.
+    pub(crate) fn accept_after(&self, delay: Duration) {
+        self.state.lock().unwrap().accept_delay = delay;
+    }
+
     /// Answers the next connection attempt with a disconnect after `delay`.
     pub(crate) fn disconnect_next_after(&self, delay: Duration, code: u32, reason: &str) {
         self.state
@@ -226,10 +234,14 @@ async fn connect(
     State(state): State<Arc<Mutex<Answers>>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let (answer, granted) = {
+    let (answer, granted, accept_delay) = {
         let mut answers = state.lock().unwrap();
         answers.requests.push(request);
-        (answers.programmed.pop_front(), answers.granted.clone())
+        (
+            answers.programmed.pop_front(),
+            answers.granted.clone(),
+            answers.accept_delay,
+        )
     };
     match answer {
         Some(Answer::Respond(answer)) => Json(answer),
@@ -240,6 +252,7 @@ async fn connect(
         // Ends when the proxy is dropped with the scenario.
         Some(Answer::Hold) => std::future::pending().await,
         None => {
+            tokio::time::sleep(accept_delay).await;
             let channels: Vec<_> = granted
                 .iter()
                 .filter(|(_, recoverable)| !recoverable)
