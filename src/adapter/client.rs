@@ -14,18 +14,18 @@ use futures_core::Stream;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 
 use super::http::HttpTransport;
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{
-    Action, FetchId, FrameType, Input, Machine, SubscriptionId, SubscriptionTimer, Timer,
+    Action, CallId, FetchId, FrameType, Input, Machine, SubscriptionId, SubscriptionTimer, Timer,
     TransportId, TransportKind,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError, StreamPosition,
-    SubscriptionEvent, TokenError, codes,
+    CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
+    State, StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 
 /// Centrifugo client running on tokio.
@@ -52,6 +52,8 @@ pub(super) struct Shared {
     pub(super) outboxes: Mutex<Outboxes>,
     /// Data and token callbacks of the subscriptions that have them.
     pub(super) callbacks: Mutex<SubscriptionCallbacks>,
+    /// Where the outcome of each call goes, by call (Block 13).
+    calls: Mutex<HashMap<CallId, oneshot::Sender<Result<CallReply, CallError>>>>,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
@@ -175,6 +177,15 @@ impl Shared {
                         outboxes.withdraw(&ids);
                         None
                     }
+                    // Settled at once: a call's outcome does not wait for
+                    // the driver.
+                    Action::CallSettled { call, result } => {
+                        if let Some(sender) = lock(&self.calls).remove(&call) {
+                            // The future may be gone already.
+                            let _ = sender.send(result);
+                        }
+                        None
+                    }
                     action => {
                         core.actions.push_back(action);
                         None
@@ -187,6 +198,53 @@ impl Shared {
 
     fn next_action(&self) -> Option<Action> {
         lock(&self.core).actions.pop_front()
+    }
+
+    /// Makes a call and awaits its outcome; dropping the future abandons
+    /// the call (Block 13).
+    pub(super) async fn call(
+        self: &Arc<Self>,
+        request: CallRequest,
+    ) -> Result<CallReply, CallError> {
+        let (sender, receiver) = oneshot::channel();
+        let id = {
+            let mut core = lock(&self.core);
+            // The driver has stopped: nothing would ever settle the call.
+            if self.closed.load(Ordering::Acquire) {
+                return Err(CallError::new(codes::error::DISCONNECTED, "disconnected"));
+            }
+            let id = core.machine.add_call(request);
+            lock(&self.calls).insert(id, sender);
+            self.handle(&mut core, Input::Call(id));
+            id
+        };
+        self.actions_queued.notify_one();
+        let mut pending = PendingCall {
+            shared: Arc::clone(self),
+            id,
+            settled: false,
+        };
+        let result = receiver.await;
+        pending.settled = true;
+        // The sender was dropped unsettled only when the driver stopped.
+        result.unwrap_or_else(|_| Err(CallError::new(codes::error::DISCONNECTED, "disconnected")))
+    }
+}
+
+/// A call awaiting its outcome: dropped before it, the call is abandoned.
+struct PendingCall {
+    shared: Arc<Shared>,
+    id: CallId,
+    settled: bool,
+}
+
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        lock(&self.shared.calls).remove(&self.id);
+        self.shared.apply(Input::CallAbandoned(self.id));
     }
 }
 
@@ -420,6 +478,7 @@ impl Client {
             }),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
+            calls: Mutex::new(HashMap::new()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
         });
@@ -438,7 +497,8 @@ impl Client {
             fetching: None,
             stale_fetching: None,
             timers: Timers::default(),
-            subscription_timers: SubscriptionTimers::default(),
+            subscription_timers: KeyedTimers::default(),
+            call_timers: KeyedTimers::default(),
             subscription_fetches: FuturesUnordered::new(),
             subscription_fetch_aborts: HashMap::new(),
         };
@@ -497,9 +557,42 @@ impl Client {
     }
 
     /// Disconnects and stops reconnecting. The state is
-    /// [`State::Disconnected`] when this returns.
+    /// [`State::Disconnected`] when this returns. Every pending call fails
+    /// with code [`codes::error::DISCONNECTED`].
     pub fn disconnect(&self) {
         self.shared.apply(Input::Disconnect);
+    }
+
+    /// Calls the server's RPC `method` with `data` and returns the result
+    /// data: raw JSON with the JSON protocol, any bytes with Protobuf.
+    ///
+    /// A call made while not connected waits for the connection, then for
+    /// the reply, each for at most `Config::timeout`. Results are not
+    /// ordered with events: a reply settles its call as soon as it is read.
+    /// Dropping the future abandons the call: if it is still waiting for
+    /// the connection, it is never sent.
+    ///
+    /// # Errors
+    ///
+    /// The server's error, with its code, message and `temporary` flag, or
+    /// a client-side one: [`codes::error::TIMEOUT`],
+    /// [`codes::error::DISCONNECTED`] when the client enters
+    /// `disconnected`, [`codes::error::CONNECTION_CLOSED`] when the
+    /// transport the call was sent on closes, and
+    /// [`codes::error::TRANSPORT_WRITE`] when the server refuses the
+    /// request carrying it (HTTP 413).
+    pub async fn rpc(
+        &self,
+        method: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<Vec<u8>, CallError> {
+        let request = CallRequest::Rpc {
+            method: method.into(),
+            data: data.into(),
+        };
+        match self.shared.call(request).await? {
+            CallReply::Rpc(data) => Ok(data),
+        }
     }
 }
 
@@ -539,7 +632,8 @@ struct Driver {
     /// the machine, which ignores any other answer of it.
     stale_fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
-    subscription_timers: SubscriptionTimers,
+    subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer)>,
+    call_timers: KeyedTimers<CallId>,
     /// Subscription data and token callbacks running, each yielding the
     /// input answering it; an aborted one yields `None`.
     subscription_fetches: FuturesUnordered<SubscriptionFetching>,
@@ -549,23 +643,28 @@ struct Driver {
 
 type SubscriptionFetching = Pin<Box<dyn Future<Output = Option<(FetchId, Input)>> + Send>>;
 
-/// The machine's subscription timers, by subscription and kind.
-#[derive(Default)]
-struct SubscriptionTimers(HashMap<(SubscriptionId, SubscriptionTimer), Pin<Box<Sleep>>>);
+/// The machine's subscription timers, by subscription and kind, or its
+/// call timers, by call.
+struct KeyedTimers<K>(HashMap<K, Pin<Box<Sleep>>>);
 
-impl SubscriptionTimers {
-    fn set(&mut self, id: SubscriptionId, timer: SubscriptionTimer, delay: Duration) {
-        self.0
-            .insert((id, timer), Box::pin(tokio::time::sleep(delay)));
+impl<K> Default for KeyedTimers<K> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
+    fn set(&mut self, key: K, delay: Duration) {
+        self.0.insert(key, Box::pin(tokio::time::sleep(delay)));
     }
 
-    fn cancel(&mut self, id: SubscriptionId, timer: SubscriptionTimer) {
-        self.0.remove(&(id, timer));
+    fn cancel(&mut self, key: K) {
+        self.0.remove(&key);
     }
 
     /// Resolves with the first timer to fire, which is removed; never while
     /// none is set. Cancel-safe.
-    async fn fired(&mut self) -> (SubscriptionId, SubscriptionTimer) {
+    async fn fired(&mut self) -> K {
         std::future::poll_fn(|cx| {
             let fired = self
                 .0
@@ -664,6 +763,7 @@ impl Driver {
                 (id, timer) = self.subscription_timers.fired() => {
                     Input::SubscriptionTimerFired(id, timer)
                 }
+                id = self.call_timers.fired() => Input::CallTimerFired(id),
                 Some(fetched) = self.subscription_fetches.next(),
                     if !self.subscription_fetches.is_empty() =>
                 {
@@ -754,15 +854,20 @@ impl Driver {
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
             // Shared::handle routes them to the outboxes.
-            Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
-                unreachable!("events never reach the driver")
+            Action::Emit(..)
+            | Action::EmitSubscription(..)
+            | Action::Withdraw(_)
+            | Action::CallSettled { .. } => {
+                unreachable!("events and call outcomes never reach the driver")
             }
             Action::SetSubscriptionTimer(id, timer, delay) => {
-                self.subscription_timers.set(id, timer, delay);
+                self.subscription_timers.set((id, timer), delay);
             }
             Action::CancelSubscriptionTimer(id, timer) => {
-                self.subscription_timers.cancel(id, timer);
+                self.subscription_timers.cancel((id, timer));
             }
+            Action::SetCallTimer(id, delay) => self.call_timers.set(id, delay),
+            Action::CancelCallTimer(id) => self.call_timers.cancel(id),
             action @ (Action::FetchSubscriptionData { .. }
             | Action::FetchSubscriptionToken { .. }
             | Action::FetchSubscriptionState { .. }

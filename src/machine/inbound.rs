@@ -63,6 +63,13 @@ impl Machine {
                 self.ping_read();
                 continue;
             }
+            // A call's reply settles it when read, ahead of held messages
+            // (Block 13; centrifuge-rust `docs/spec.md` §9.3).
+            if reply.id > 0 && self.calls.owns_command(reply.id) {
+                self.reset_backoff_if_pending();
+                self.call_reply(reply);
+                continue;
+            }
             if reply.id > 0 {
                 self.pause_reply_deadline(reply.id);
             }

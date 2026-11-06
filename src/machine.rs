@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+mod calls;
 mod delivery;
 mod inbound;
 mod server_subscriptions;
@@ -31,8 +32,8 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{
-    ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError, StreamPosition,
-    SubscriptionEvent, TokenError, codes,
+    CallError, CallReply, ClientError, ClientEvent, Config, DataError, ErrorKind, State,
+    StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 use server_subscriptions::ServerSubscriptions;
 use subscriptions::Subscriptions;
@@ -95,6 +96,11 @@ impl EventId {
         Self(n)
     }
 }
+
+/// Identifies a call the machine settles with [`Action::CallSettled`];
+/// [`Machine::add_call`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CallId(u64);
 
 /// Identifies a subscription in the machine's registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -412,6 +418,15 @@ pub enum Input {
     /// `None`, anymore: report the events it had not taken with
     /// [`Input::EventTaken`] first.
     StreamClosed(Option<SubscriptionId>),
+    /// The application made the call [`Machine::add_call`] added: it is
+    /// sent when the client is connected, waiting for the connection
+    /// until then.
+    Call(CallId),
+    /// A timer set by [`Action::SetCallTimer`] fired.
+    CallTimerFired(CallId),
+    /// The application no longer awaits the call, e.g. its future was
+    /// dropped: it is forgotten, and never sent if it was waiting.
+    CallAbandoned(CallId),
 }
 
 /// Something the owner of the machine must do.
@@ -514,6 +529,17 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionState`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionState(FetchId),
+    /// Start a call's timer, replacing its running one.
+    SetCallTimer(CallId, Duration),
+    /// Stop a call's timer if it runs.
+    CancelCallTimer(CallId),
+    /// Give the application the outcome of a call; the call is forgotten.
+    CallSettled {
+        /// The call settled.
+        call: CallId,
+        /// What the server returned, or why the call failed.
+        result: Result<CallReply, CallError>,
+    },
 }
 
 impl std::fmt::Debug for Input {
@@ -591,11 +617,15 @@ impl std::fmt::Debug for Input {
             Self::EventTaken(id) => f.debug_tuple("EventTaken").field(id).finish(),
             Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
             Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
+            Self::Call(id) => f.debug_tuple("Call").field(id).finish(),
+            Self::CallTimerFired(id) => f.debug_tuple("CallTimerFired").field(id).finish(),
+            Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
         }
     }
 }
 
 impl std::fmt::Debug for Action {
+    #[allow(clippy::too_many_lines)] // One arm per variant.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OpenTransport {
@@ -692,6 +722,17 @@ impl std::fmt::Debug for Action {
                 .debug_tuple("CancelSubscriptionState")
                 .field(fetch)
                 .finish(),
+            Self::SetCallTimer(id, delay) => f
+                .debug_tuple("SetCallTimer")
+                .field(id)
+                .field(delay)
+                .finish(),
+            Self::CancelCallTimer(id) => f.debug_tuple("CancelCallTimer").field(id).finish(),
+            Self::CallSettled { call, result } => f
+                .debug_struct("CallSettled")
+                .field("call", call)
+                .field("result", result)
+                .finish(),
         }
     }
 }
@@ -752,6 +793,8 @@ pub struct Machine {
     subscriptions: Subscriptions,
     /// Server-side subscriptions (Block 12).
     server_subscriptions: ServerSubscriptions,
+    /// Calls not yet settled (Block 13).
+    calls: calls::Calls,
     /// The connection is emulated and only its stream is proven: the backoff
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
@@ -848,6 +891,7 @@ impl Machine {
             emulation: None,
             subscriptions: Subscriptions::default(),
             server_subscriptions: ServerSubscriptions::default(),
+            calls: calls::Calls::default(),
             backoff_reset_pending: false,
             pings: None,
             actions: Vec::new(),
@@ -878,6 +922,9 @@ impl Machine {
                 code,
                 reason,
             } if self.is_current(transport) => {
+                // No reply can come for the calls sent on it: they fail
+                // when the close is read (Block 13).
+                self.fail_sent_calls();
                 // A server's close comes after the messages read before it.
                 if self.holds_messages_of(transport) || self.events_hold_inbound() {
                     self.transport_closed_in_order(transport, code, reason);
@@ -948,6 +995,9 @@ impl Machine {
             }
             Input::StreamOpened(of) => self.stream_opened(of),
             Input::StreamClosed(of) => self.stream_closed(of),
+            Input::Call(id) => self.call(id),
+            Input::CallTimerFired(id) => self.call_timer_fired(id),
+            Input::CallAbandoned(id) => self.call_abandoned(id),
             // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
@@ -1131,9 +1181,9 @@ impl Machine {
     /// transport (HTTP 413 on an emulation request): each of its commands
     /// ends at once, and none is retried with the same payload (owner
     /// decision, 2026-11-04). A subscribe or `sub_refresh` unsubscribes, a
-    /// refresh disconnects the client, any other command fails as if the
-    /// server had answered it with a temporary error (an unsubscribe then
-    /// reconnects). It proves nothing about the connection, so the backoff
+    /// refresh disconnects the client, a call fails with "transport write
+    /// error", any other command fails as if the server had answered it with
+    /// a temporary error (an unsubscribe then reconnects). It proves nothing about the connection, so the backoff
     /// is not reset.
     fn send_rejected(&mut self, frame: &[u8]) {
         // Over an emulated transport the commands are inside the request.
@@ -1149,6 +1199,19 @@ impl Machine {
         };
         for id in self.codec.command_ids(frame) {
             if id == 0 || self.subscription_command_too_large(id) {
+                continue;
+            }
+            // Retrying the same payload would fail the same way.
+            if self.calls.owns_command(id) {
+                self.call_reply(Reply {
+                    id,
+                    error: Some(Error {
+                        code: codes::error::TRANSPORT_WRITE,
+                        message: "transport write error".to_owned(),
+                        temporary: false,
+                    }),
+                    result: ReplyResult::Empty,
+                });
                 continue;
             }
             if self.state == State::Connected && self.tokens.take_refresh_reply(id) {
@@ -1174,6 +1237,10 @@ impl Machine {
 
     /// The reply to command `reply.id`, or its failure.
     fn command_reply(&mut self, reply: Reply) {
+        if self.calls.owns_command(reply.id) {
+            self.call_reply(reply);
+            return;
+        }
         if self.subscriptions.owns_command(reply.id) {
             self.subscription_command_reply(reply);
             return;
@@ -1231,6 +1298,7 @@ impl Machine {
         });
         self.subscriptions_connected();
         self.server_subscriptions_connected(std::mem::take(&mut result.subs));
+        self.calls_connected();
     }
 
     /// The server answered on the transport being tried: an error reply to
@@ -1276,9 +1344,17 @@ impl Machine {
             self.invalidate_subscriptions();
             self.invalidate_server_subscriptions();
         }
+        // Calls cannot outlive `disconnected` (Block 13): a call made after
+        // the client stopped fails at the next `disconnect()` too
+        // (centrifuge-js `disconnect`).
+        if !reconnect {
+            self.fail_calls_disconnected();
+        }
         if self.state == State::Disconnected {
             return;
         }
+        // No reply can come for the calls sent on the transport.
+        self.fail_sent_calls();
         let was_connected = self.state == State::Connected;
         if let Some(transport) = self.transport.take() {
             self.actions.push(Action::CloseTransport(transport));

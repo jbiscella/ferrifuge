@@ -6,6 +6,7 @@
 #[cfg(feature = "tokio")]
 mod adapter;
 mod backoff;
+mod call;
 mod codec;
 pub mod codes;
 mod config;
@@ -23,6 +24,7 @@ mod wire;
 pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
 pub use adapter::{Client, ClientBuilder, Subscription, SubscriptionBuilder};
+pub use call::{CallError, CallReply, CallRequest};
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
 pub use subscription::{

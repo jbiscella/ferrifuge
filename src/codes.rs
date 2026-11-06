@@ -57,16 +57,24 @@ pub mod unsubscribed {
     pub const NOT_GRANTED_ON_RECONNECT: u32 = 4;
 }
 
-/// Codes of [`crate::ClientError`].
+/// Codes of [`crate::ClientError`] and [`crate::CallError`].
 pub mod error {
-    /// The server did not reply to a command in time.
+    /// The server did not reply to a command in time, or a call waited for
+    /// the connection longer than the timeout.
     pub const TIMEOUT: u32 = 1;
     /// The transport failed to open or closed while connecting.
     pub const TRANSPORT_CLOSED: u32 = 2;
+    /// The client entered `disconnected` while a call was pending
+    /// (centrifuge-js `clientDisconnected`).
+    pub const DISCONNECTED: u32 = 3;
     /// The token callback failed while getting a token to connect with.
     pub const CONNECT_TOKEN: u32 = 5;
     /// The token callback failed while getting a token to refresh with.
     pub const REFRESH_TOKEN: u32 = 6;
+    /// A subscription-level call was made, or was waiting, while its
+    /// subscription is unsubscribed (centrifuge-js
+    /// `subscriptionUnsubscribed`).
+    pub const SUBSCRIPTION_UNSUBSCRIBED: u32 = 7;
     /// A subscription token callback failed while getting a token to
     /// subscribe with (centrifuge-js `subscriptionSubscribeToken`).
     pub const SUBSCRIPTION_SUBSCRIBE_TOKEN: u32 = 8;
@@ -77,6 +85,9 @@ pub mod error {
     /// the transport: an emulation request answered with HTTP 413
     /// (centrifuge-js `transportWriteError`).
     pub const TRANSPORT_WRITE: u32 = 10;
+    /// The transport a call was sent on closed before its reply arrived
+    /// (centrifuge-js `connectionClosed`).
+    pub const CONNECTION_CLOSED: u32 = 11;
     /// The client is misconfigured, e.g. a token expires without a callback.
     pub const BAD_CONFIGURATION: u32 = 12;
     /// The subscription getState callback failed (centrifuge-js
