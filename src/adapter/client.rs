@@ -687,6 +687,31 @@ impl Client {
         reply_of(call, presence_of)
     }
 
+    /// Sends `data` to the server as an asynchronous message, which gets no
+    /// reply (`client.proto`, `SendRequest`): raw JSON with the JSON
+    /// protocol, any bytes with Protobuf.
+    ///
+    /// The call is made when this returns. While the client is not
+    /// connected it waits for the connection, for at most
+    /// `Config::timeout`; the future resolves once the message is written.
+    /// Dropping the future before then abandons the message: a send whose
+    /// future is never awaited may be lost.
+    ///
+    /// # Errors
+    ///
+    /// [`codes::error::TIMEOUT`] when no connection comes in time, and
+    /// [`codes::error::DISCONNECTED`] when the client enters
+    /// `disconnected`, including when the `Client` is dropped.
+    pub fn send(
+        &self,
+        data: impl Into<Vec<u8>>,
+    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+        let call = self
+            .shared
+            .call(None, CallRequest::Send { data: data.into() });
+        reply_of(call, |reply| matches!(reply, CallReply::Send).then_some(()))
+    }
+
     /// How many clients and users are subscribed to `channel`. Made,
     /// waiting and failing as [`Client::rpc`].
     ///

@@ -43,6 +43,12 @@ pub enum CallRequest {
         /// The channel.
         channel: String,
     },
+    /// An asynchronous message to the server, which sends no reply
+    /// (`client.proto`, `SendRequest`).
+    Send {
+        /// Raw JSON with the JSON protocol, any bytes with Protobuf.
+        data: Vec<u8>,
+    },
 }
 
 impl std::fmt::Debug for CallRequest {
@@ -72,6 +78,10 @@ impl std::fmt::Debug for CallRequest {
                 .debug_struct("PresenceStats")
                 .field("channel", channel)
                 .finish(),
+            Self::Send { data } => f
+                .debug_struct("Send")
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
         }
     }
 }
@@ -80,7 +90,7 @@ impl CallRequest {
     /// The channel the request is about, if any.
     pub(crate) fn channel_mut(&mut self) -> Option<&mut String> {
         match self {
-            Self::Rpc { .. } => None,
+            Self::Rpc { .. } | Self::Send { .. } => None,
             Self::Publish { channel, .. }
             | Self::History { channel, .. }
             | Self::Presence { channel }
@@ -177,6 +187,8 @@ pub enum CallReply {
     Presence(PresenceResult),
     /// How many clients and users are subscribed to a channel.
     PresenceStats(PresenceStatsResult),
+    /// The message was written: no reply follows.
+    Send,
 }
 
 impl std::fmt::Debug for CallReply {
@@ -204,6 +216,7 @@ impl std::fmt::Debug for CallReply {
                 .field("clients", &format_args!("<{}>", presence.clients.len()))
                 .finish(),
             Self::PresenceStats(stats) => f.debug_tuple("PresenceStats").field(stats).finish(),
+            Self::Send => f.write_str("Send"),
         }
     }
 }

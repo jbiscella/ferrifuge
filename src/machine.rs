@@ -1184,6 +1184,8 @@ impl Machine {
                 ReplyResult::Push(Push::Subscribe { channel, result }) => {
                     self.server_subscription_pushed(&channel, result);
                 }
+                // centrifuge-js `_handleMessage`.
+                ReplyResult::Push(Push::Message(data)) => self.emit(ClientEvent::Message(data)),
                 // An empty reply is a server ping (client.proto, Reply).
                 ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
                     // A ping proves the connection usable (centrifuge-js

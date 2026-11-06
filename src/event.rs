@@ -66,6 +66,10 @@ pub enum ClientEvent {
         /// What happened.
         event: ServerSubscriptionEvent,
     },
+    /// An asynchronous message from the server (`client.proto`,
+    /// `Message.data`): raw JSON with the JSON protocol, any bytes with
+    /// Protobuf, exactly as received.
+    Message(Vec<u8>),
 }
 
 /// Something that happened to a server-side subscription, as for a
@@ -115,6 +119,7 @@ impl ClientEvent {
             Self::Disconnected { .. } => "disconnected",
             Self::Error(_) => "error",
             Self::ServerSubscription { event, .. } => event.name(),
+            Self::Message(_) => "message",
         }
     }
 }
