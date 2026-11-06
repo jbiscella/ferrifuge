@@ -600,14 +600,17 @@ operations against a simulated server, on a simulated clock, and checks
 the client's invariants after every step: legal state changes, at most one
 transport, liveness once faults stop, cleanup after `disconnect()`, calls
 that settle, exactly-once delivery on recoverable channels, a bounded
-read-ahead, and batches that hold their calls and respect the frame cap. A seed fixes every choice, so a failure prints the command that
-reruns it:
+read-ahead, batches that hold their calls and respect the frame cap, and
+publications that carry exactly the payload published, also when they come
+as Fossil deltas, some of them broken by the simulated server. A seed fixes
+every choice, so a failure prints the command that reruns it:
 
 ```sh
 cargo test --test chaos                                     # seeds 0-299, runs with the tests
 cargo test --release --test chaos seeded_chaos_long_run -- --ignored   # 10 000 seeds from a random start
 FERRIFUGE_CHAOS_SEED=<seed> FERRIFUGE_CHAOS_OPS=<ops> cargo test --release --test chaos seeded_chaos_long_run -- --ignored
 FERRIFUGE_CHAOS_SEED=<seed> cargo test --test chaos trace -- --ignored --nocapture   # a seed's whole trace
+FERRIFUGE_CHAOS_SUBSCRIPTIONS=3 cargo test --release --test chaos seeded_chaos_long_run -- --ignored   # the long run with delta subscriptions
 ```
 
 `tests/chaos_adapter.rs` runs the same kind of operations on the tokio
@@ -619,6 +622,7 @@ failure is replayed rather than always reproduced:
 ```sh
 cargo test --test chaos_adapter                             # seeds 0-19, runs with the tests
 cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored   # 500 seeds
+FERRIFUGE_CHAOS_DELTA=1 cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored   # with delta subscriptions
 ```
 
 ### Interop, fuzzing and semver

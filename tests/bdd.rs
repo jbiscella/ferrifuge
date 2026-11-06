@@ -337,6 +337,8 @@ const IMPLEMENTED: &[&str] = &[
     "A broken delta among recovered publications makes the subscription resubscribe from the same position",
     "Resubscribe delays keep growing while every subscribe is followed by a broken delta",
     "A delta on a server-side subscription makes the client reconnect",
+    // Block 19, sub-increment 19c.
+    "Publications missed by a delta subscription are recovered whole",
 ];
 
 /// Server configuration of @A scenarios.

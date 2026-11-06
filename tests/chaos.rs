@@ -10,6 +10,8 @@
 // @P scenario: The core runner reports a planted delivery fault
 // @P scenario: Seeded chaos with batching on the core keeps every invariant
 // @P scenario: The core runner reports a planted batching fault
+// @P scenario: Seeded chaos with delta subscriptions keeps every invariant
+// @P scenario: The core runner reports a planted payload fault
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -22,8 +24,9 @@ use ferrifuge::machine::{
     SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
 };
 use ferrifuge::{
-    CallRequest, ClientEvent, Config, HistoryOptions, ServerSubscriptionEvent, State, StateError,
-    StreamPosition, SubscriptionEvent, SubscriptionState, TokenError, codes,
+    CallRequest, ClientEvent, Config, DeltaFormat, HistoryOptions, ServerSubscriptionEvent, State,
+    StateError, StreamPosition, SubscriptionEvent, SubscriptionState, TokenError, codes,
+    write_fossil_delta,
 };
 use serde_json::{Value, json};
 
@@ -94,6 +97,8 @@ enum Mode {
     Subscriptions,
     /// Subscriptions and batches (18d).
     Batching,
+    /// Subscriptions with fossil delta, some deltas broken (19c).
+    Delta,
 }
 
 impl Mode {
@@ -103,6 +108,7 @@ impl Mode {
             Self::Connection => 0,
             Self::Subscriptions => 1,
             Self::Batching => 2,
+            Self::Delta => 3,
         }
     }
 }
@@ -139,6 +145,9 @@ enum Fault {
     /// A batch stop reported to the checker one step after the client
     /// handled it (I10).
     LateStop,
+    /// One byte of a publication's payload flipped by the tap before the
+    /// checker (I11).
+    FlipPayloadByte,
 }
 
 /// An invariant a seed broke.
@@ -425,6 +434,12 @@ struct Server {
     streams: BTreeMap<&'static str, Stream>,
     /// Server-side subscriptions it grants at connect.
     granted: BTreeSet<&'static str>,
+    /// The payload of each publication made, by channel and offset: live
+    /// and recovered ones carry the same (I11).
+    payloads: BTreeMap<(String, u64), String>,
+    /// The client-side channels whose subscription on `current` has delta
+    /// on, with the payload the next delta applies to (Block 19).
+    delta: BTreeMap<&'static str, Option<String>>,
 }
 
 /// An object whose events the application reads from one stream.
@@ -562,6 +577,8 @@ impl Run {
                 last_arrival: BTreeMap::new(),
                 streams: BTreeMap::new(),
                 granted: BTreeSet::new(),
+                payloads: BTreeMap::new(),
+                delta: BTreeMap::new(),
             },
             subs: [None; CHANNELS.len()],
             streams: BTreeMap::new(),
@@ -802,6 +819,9 @@ impl Run {
                 if n == 1 {
                     options = options.state_source();
                 }
+                if self.mode == Mode::Delta {
+                    options = options.delta(DeltaFormat::Fossil);
+                }
                 let id = self
                     .machine
                     .add_subscription(CHANNELS[n].to_owned(), options)
@@ -837,6 +857,7 @@ impl Run {
             }
             Op::UnsubscribePush(n, code) => {
                 let channel = CHANNELS[n];
+                self.server.delta.remove(channel);
                 if self.server.subscribed.remove(channel)
                     && let Some(transport) = self.server.current
                 {
@@ -884,10 +905,47 @@ impl Run {
         if self.server.subscribed.contains(channel)
             && let Some(transport) = self.server.current
         {
-            let publication = publication(offset, self.rng.usize(0..=600));
+            let publication = self.publication(channel, offset);
             let push = json!({"push": {"channel": channel, "pub": publication}});
             self.arrive(transport, frame(&push));
         }
+    }
+
+    /// The payload of `channel`'s publication at `offset`, made once.
+    fn payload(&mut self, channel: &'static str, offset: u64) -> String {
+        if let Some(payload) = self.server.payloads.get(&(channel.to_owned(), offset)) {
+            return payload.clone();
+        }
+        let payload = json!({"n": offset, "pad": "x".repeat(self.rng.usize(0..=600))}).to_string();
+        self.server
+            .payloads
+            .insert((channel.to_owned(), offset), payload.clone());
+        payload
+    }
+
+    /// The publication at `offset` as the server sends it to the current
+    /// connection: whole, or with delta on as a JSON string holding the
+    /// payload or a delta against the previous one, sometimes broken while
+    /// faults last (Block 19).
+    fn publication(&mut self, channel: &'static str, offset: u64) -> Value {
+        let payload = self.payload(channel, offset);
+        let Some(base) = self.server.delta.get(channel).cloned() else {
+            let data: Value = serde_json::from_str(&payload).expect("a JSON payload");
+            return json!({"data": data, "offset": offset});
+        };
+        self.server.delta.insert(channel, Some(payload.clone()));
+        let Some(base) = base else {
+            return json!({"data": payload, "offset": offset});
+        };
+        let mut delta = String::from_utf8(write_fossil_delta(base.as_bytes(), payload.as_bytes()))
+            .expect("an ASCII delta");
+        self.count("delta publication");
+        if !self.server.healed && self.rng.u32(0..100) < 10 {
+            // Without its trailer's end: the client cannot apply it.
+            delta.pop();
+            self.count("corrupted delta");
+        }
+        json!({"data": delta, "offset": offset, "delta": true})
     }
 
     /// Faults stop, the application reads every event and wants to be
@@ -1011,6 +1069,7 @@ impl Run {
                 self.server.current = Some(transport);
                 self.server.connected = false;
                 self.server.subscribed.clear();
+                self.server.delta.clear();
                 self.feed(Input::TransportOpened(transport))
             }
             Due::Refused(transport) => {
@@ -1435,6 +1494,7 @@ impl Run {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             ServerSubscriptionEvent::Publication(publication) => {
+                self.check_payload(channel, publication)?;
                 (None, Kind::Publication(publication.offset))
             }
             _ => (None, Kind::Other),
@@ -1470,7 +1530,10 @@ impl Run {
     ) -> Step {
         let sub = Sub::Client(id);
         let (state, kind) = match sub_event {
-            SubscriptionEvent::Subscribing { .. } => {
+            SubscriptionEvent::Subscribing { code, .. } => {
+                if *code == codes::subscribing::DELTA_ERROR {
+                    self.count("delta resubscribe");
+                }
                 (Some(SubscriptionState::Subscribing), Kind::Other)
             }
             SubscriptionEvent::Subscribed(subscribed) => (
@@ -1485,6 +1548,7 @@ impl Run {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             SubscriptionEvent::Publication(publication) => {
+                self.check_payload(self.channel_of(id), publication)?;
                 (None, Kind::Publication(publication.offset))
             }
             _ => (None, Kind::Other),
@@ -1501,6 +1565,39 @@ impl Run {
             Some(state) => self.sub_state(sub, state, true),
             None => Ok(()),
         }
+    }
+
+    /// I11: a publication carries exactly the payload the server published
+    /// at its offset, whether it came whole or as a delta.
+    fn check_payload(&mut self, channel: &str, publication: &ferrifuge::Publication) -> Step {
+        let Some(offset) = publication.offset else {
+            return Ok(());
+        };
+        let Some(published) = self
+            .server
+            .payloads
+            .get(&(channel.to_owned(), offset))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let mut data = publication.data.clone();
+        if self.fault == Some(Fault::FlipPayloadByte)
+            && let Some(first) = data.first_mut()
+        {
+            *first ^= 0x20;
+        }
+        if data != published.as_bytes() {
+            return Err(self.violation(
+                "I11",
+                format!(
+                    "{channel} offset {offset} carries {} instead of {published}",
+                    String::from_utf8_lossy(&data)
+                ),
+            ));
+        }
+        self.count("payload checked");
+        Ok(())
     }
 
     /// I1 for a subscription: each state event differs from the last, and
@@ -1673,6 +1770,7 @@ impl Run {
         };
         if let Some(channel) = command["unsubscribe"]["channel"].as_str() {
             self.server.subscribed.retain(|known| *known != channel);
+            self.server.delta.retain(|known, _| *known != channel);
         }
         let connect = command.get("connect").is_some();
         if connect && self.server.healed && self.fault == Some(Fault::IgnoreConnectWhenHealed) {
@@ -1739,8 +1837,19 @@ impl Run {
                 return error(id.as_u64().unwrap_or(0), 112, false);
             }
             self.server.subscribed.insert(channel);
+            // Each subscribe starts a new chain (Block 19, D5).
+            let delta = subscribe["delta"] == "fossil";
+            if delta {
+                self.server.delta.insert(channel, None);
+            } else {
+                self.server.delta.remove(channel);
+            }
             let skip = self.fault == Some(Fault::SkipRecovered);
-            return json!({"id": id, "subscribe": self.recovery(channel, subscribe, skip)});
+            let mut result = self.recovery(channel, subscribe, skip);
+            if delta {
+                result["delta"] = json!(true);
+            }
+            return json!({"id": id, "subscribe": result});
         }
         let result = if command.get("refresh").is_some() {
             json!({"refresh": {"expires": true, "ttl": ttl}})
@@ -1793,7 +1902,7 @@ impl Run {
                 }
                 let publications: Vec<Value> = offsets
                     .into_iter()
-                    .map(|offset| publication(offset, self.rng.usize(0..=600)))
+                    .map(|offset| self.publication(channel, offset))
                     .collect();
                 result["publications"] = json!(publications);
             }
@@ -1804,10 +1913,6 @@ impl Run {
 
 fn frame(value: &Value) -> Inbound {
     Inbound::Frame(value.to_string().into_bytes())
-}
-
-fn publication(offset: u64, pad: usize) -> Value {
-    json!({"data": {"n": offset, "pad": "x".repeat(pad)}, "offset": offset})
 }
 
 /// Whether `due` is something the server or the application's callbacks
@@ -2093,6 +2198,32 @@ fn the_core_runner_reports_a_planted_batching_fault() {
     }
 }
 
+#[test]
+fn seeded_chaos_with_delta_subscriptions_keeps_every_invariant() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Delta)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let mut expected = subscription_counts();
+    expected.extend(
+        [
+            "delta publication",
+            "corrupted delta",
+            "delta resubscribe",
+            "payload checked",
+        ]
+        .map(str::to_owned),
+    );
+    assert_counted(&counts, &expected);
+}
+
+#[test]
+fn the_core_runner_reports_a_planted_payload_fault() {
+    assert_reported(Fault::FlipPayloadByte, "I11", Mode::Delta);
+}
+
 /// Prints the whole trace of `FERRIFUGE_CHAOS_SEED` (seed 0 without it),
 /// of `FERRIFUGE_CHAOS_OPS` operations (60 without it), with
 /// subscriptions: `cargo test --test chaos trace -- --ignored --nocapture`.
@@ -2130,6 +2261,7 @@ fn seeded_chaos_long_run() {
     let mode = match number(SUBSCRIPTIONS_VARIABLE, 2) {
         0 => Mode::Connection,
         1 => Mode::Subscriptions,
+        3 => Mode::Delta,
         _ => Mode::Batching,
     };
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);

@@ -193,6 +193,8 @@ jobs:
         run: |
           set -o pipefail
           cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee chaos.txt
+          # And with delta subscriptions, some deltas broken (Block 19).
+          FERRIFUGE_CHAOS_SUBSCRIPTIONS=3 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
 
       # The drawn start seed, and the failing seed, also when the run fails.
       - name: Chaos summary
@@ -232,6 +234,7 @@ jobs:
           set -o pipefail
           if [ "$RUNNER_OS" = Linux ]; then
             cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored --nocapture 2>&1 | tee chaos.txt
+            FERRIFUGE_CHAOS_DELTA=1 FERRIFUGE_CHAOS_SEEDS=100 cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
           else
             cargo test --test chaos_adapter 2>&1 | tee chaos.txt
           fi
