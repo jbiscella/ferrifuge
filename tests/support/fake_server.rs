@@ -118,6 +118,8 @@ struct State {
     skip_recovered: bool,
     /// Connect commands still to answer with a temporary error.
     failing_connects: usize,
+    /// Errors to answer the next connect commands with, in order (Block 17).
+    connect_errors: VecDeque<Value>,
     /// Raw JSON the JSON connect replies carry as `data`, byte for byte
     /// (Block 17).
     connect_data: Option<String>,
@@ -300,6 +302,15 @@ impl FakeServer {
     /// JSON connect replies carry `raw` as their `data`, byte for byte.
     pub(crate) fn answer_connects_with_data(&self, raw: &str) {
         self.state.lock().unwrap().connect_data = Some(raw.to_owned());
+    }
+
+    /// Answers the next connect command with error `code` and `message`.
+    pub(crate) fn fail_next_connect_with(&self, code: u32, message: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .connect_errors
+            .push_back(json!({"code": code, "message": message}));
     }
 
     /// Answers the next `count` connect commands with a temporary error.
@@ -611,16 +622,17 @@ impl Connection {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            let failing = message["connect"].is_object() && {
+            let failing = message["connect"].is_object().then(|| {
                 let mut state = self.state.lock().unwrap();
-                let failing = state.failing_connects > 0;
-                state.failing_connects = state.failing_connects.saturating_sub(1);
-                failing
-            };
-            if failing {
+                if state.failing_connects > 0 {
+                    state.failing_connects -= 1;
+                    return Some(json!({"code": 100, "message": "busy", "temporary": true}));
+                }
+                state.connect_errors.pop_front()
+            });
+            if let Some(Some(error)) = failing {
                 replies.push(Message::text(
-                    json!({"id": message["id"], "error": {"code": 100, "message": "busy", "temporary": true}})
-                        .to_string(),
+                    json!({"id": message["id"], "error": error}).to_string(),
                 ));
             } else if message["connect"].is_object() {
                 let client = self.next_client();

@@ -431,6 +431,15 @@ pub enum Input {
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
     },
+    /// The application set the connection token used from the next
+    /// connection attempt (`set_token`, Block 17); empty for none.
+    SetToken(String),
+    /// The application set the connect data used from the next connection
+    /// attempt, unless a connect data callback replaces it (`set_data`).
+    SetData(Vec<u8>),
+    /// The application set the emulated headers sent from the next
+    /// connection attempt (`set_emulated_headers`).
+    SetEmulatedHeaders(BTreeMap<String, String>),
     /// The connect data callback answered a [`Action::FetchConnectData`].
     ConnectDataFetched {
         /// The fetch answered.
@@ -615,6 +624,28 @@ pub enum Action {
     },
 }
 
+impl Input {
+    /// The `Debug` output of a setter input: the token redacted, the data
+    /// as its length, the headers by name.
+    fn fmt_setter(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SetToken(token) => f
+                .debug_tuple("SetToken")
+                .field(&Secret(token.clone()))
+                .finish(),
+            Self::SetData(data) => f
+                .debug_tuple("SetData")
+                .field(&format_args!("<{} bytes>", data.len()))
+                .finish(),
+            Self::SetEmulatedHeaders(headers) => f
+                .debug_tuple("SetEmulatedHeaders")
+                .field(&headers.keys().collect::<Vec<_>>())
+                .finish(),
+            _ => unreachable!("not a setter input"),
+        }
+    }
+}
+
 impl std::fmt::Debug for Input {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -661,6 +692,9 @@ impl std::fmt::Debug for Input {
                     &result.as_ref().map(|token| Secret(token.clone())),
                 )
                 .finish(),
+            Self::SetToken(_) | Self::SetData(_) | Self::SetEmulatedHeaders(_) => {
+                self.fmt_setter(f)
+            }
             Self::ConnectDataFetched { fetch, result } => f
                 .debug_struct("ConnectDataFetched")
                 .field("fetch", fetch)
@@ -1115,36 +1149,7 @@ impl Machine {
             Input::FrameWritten { transport, frame } if self.is_current(transport) => {
                 self.frame_written(frame);
             }
-            Input::TimerFired(Timer::Reconnect) => {
-                if self.state == State::Connecting && self.transport.is_none() {
-                    self.start_attempt();
-                }
-            }
-            Input::TimerFired(Timer::ConnectTimeout) => {
-                if self.state == State::Connecting && self.transport.is_some() {
-                    self.transport_failed("connect timeout".to_owned());
-                }
-            }
-            Input::TimerFired(Timer::Refresh) => {
-                if self.state == State::Connected && !self.tokens.refresh_in_flight() {
-                    self.refresh();
-                }
-            }
-            Input::TimerFired(Timer::ServerPing) => {
-                if self.state == State::Connected {
-                    self.disconnect(codes::connecting::NO_PING, "no ping", true);
-                }
-            }
-            Input::TimerFired(Timer::RefreshReply) => {
-                if self.state == State::Connected && self.tokens.refresh_timed_out() {
-                    // centrifuge-js: a command timeout is error code 1.
-                    self.refresh_error(&Error {
-                        code: codes::error::TIMEOUT,
-                        message: "timeout".to_owned(),
-                        temporary: false,
-                    });
-                }
-            }
+            Input::TimerFired(timer) => self.timer_fired(timer),
             Input::TokenFetched { fetch, result } => {
                 if self.tokens.take_stale_fetch(fetch) {
                     self.stale_token_fetched(&result);
@@ -1154,6 +1159,9 @@ impl Machine {
             }
 
             Input::ConnectDataFetched { fetch, result } => self.connect_data_fetched(fetch, result),
+            input @ (Input::SetToken(_) | Input::SetData(_) | Input::SetEmulatedHeaders(_)) => {
+                self.set(input);
+            }
             Input::Subscribe(id) => self.subscribe(id),
             Input::Unsubscribe(id) => self.unsubscribe(id),
             Input::RemoveSubscription(id) => self.remove_subscription(id),
@@ -1228,6 +1236,54 @@ impl Machine {
         let fetch = self.subscriptions.new_fetch();
         self.connect_data.fetch = Some(fetch);
         self.actions.push(Action::FetchConnectData(fetch));
+    }
+
+    /// A timer set by [`Action::SetTimer`] fired; one of a state the
+    /// machine has left does nothing.
+    fn timer_fired(&mut self, timer: Timer) {
+        match timer {
+            Timer::Reconnect => {
+                if self.state == State::Connecting && self.transport.is_none() {
+                    self.start_attempt();
+                }
+            }
+            Timer::ConnectTimeout => {
+                if self.state == State::Connecting && self.transport.is_some() {
+                    self.transport_failed("connect timeout".to_owned());
+                }
+            }
+            Timer::Refresh => {
+                if self.state == State::Connected && !self.tokens.refresh_in_flight() {
+                    self.refresh();
+                }
+            }
+            Timer::ServerPing => {
+                if self.state == State::Connected {
+                    self.disconnect(codes::connecting::NO_PING, "no ping", true);
+                }
+            }
+            Timer::RefreshReply => {
+                if self.state == State::Connected && self.tokens.refresh_timed_out() {
+                    // centrifuge-js: a command timeout is error code 1.
+                    self.refresh_error(&Error {
+                        code: codes::error::TIMEOUT,
+                        message: "timeout".to_owned(),
+                        temporary: false,
+                    });
+                }
+            }
+        }
+    }
+
+    /// centrifuge-js `setToken`, `setData`, `setHeaders`: the value is used
+    /// from the next connection attempt, and nothing is sent now.
+    fn set(&mut self, input: Input) {
+        match input {
+            Input::SetToken(token) => self.tokens.set(token),
+            Input::SetData(data) => self.config.data = Some(data),
+            Input::SetEmulatedHeaders(headers) => self.emulated_headers = EmulatedHeaders(headers),
+            _ => unreachable!("not a setter input: {input:?}"),
+        }
     }
 
     /// centrifuge-js `_handleGetDataError`: a denial disconnects the client

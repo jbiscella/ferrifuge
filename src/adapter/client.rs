@@ -674,6 +674,46 @@ impl Client {
         self.shared.apply(Input::Disconnect);
     }
 
+    /// Sets the connection token used from the next connection attempt,
+    /// sending nothing now; empty for none (centrifuge-js `setToken`).
+    /// Without a token callback, a token the server rejected as expired
+    /// (error 109) is then replaced by this one, instead of the client
+    /// stopping on a configuration error; with one, the next attempt still
+    /// calls it. A connected client's refresh needs the callback.
+    pub fn set_token(&self, token: impl Into<String>) {
+        self.shared.apply(Input::SetToken(token.into()));
+    }
+
+    /// Sets the connect data used from the next connection attempt, sending
+    /// nothing now; a [`ClientBuilder::get_data`] callback still replaces it
+    /// on every attempt (centrifuge-js `setData`).
+    pub fn set_data(&self, data: impl Into<Vec<u8>>) {
+        self.shared.apply(Input::SetData(data.into()));
+    }
+
+    /// Replaces the emulated headers sent from the next connection attempt,
+    /// sending nothing now (centrifuge-js `setHeaders`).
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::ErrorKind::Configuration`] error naming a header whose
+    /// name or value is not valid HTTP, as [`ClientBuilder::emulated_headers`];
+    /// the headers are then left as they were.
+    pub fn set_emulated_headers<I, K, V>(&self, headers: I) -> Result<(), ClientError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let headers: Vec<(String, String)> = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        let headers = emulated_header_map(&headers)?;
+        self.shared.apply(Input::SetEmulatedHeaders(headers));
+        Ok(())
+    }
+
     /// Calls the server's RPC `method` with `data`; the future gives the
     /// result data: raw JSON with the JSON protocol, any bytes with
     /// Protobuf.

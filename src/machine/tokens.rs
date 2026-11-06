@@ -144,6 +144,18 @@ impl Tokens {
         }
     }
 
+    /// The application set `token`, used from the next connection attempt
+    /// (centrifuge-js `setToken`). Without a source it also clears a
+    /// pending "token expired": nothing else could replace the expired
+    /// token. With one, the next attempt still asks it, as the token set
+    /// may be the expired one.
+    pub(super) fn set(&mut self, token: String) {
+        self.current = Secret(token);
+        if !self.source {
+            self.refresh_required = false;
+        }
+    }
+
     /// The token for a connect command, remembered as the one sent.
     pub(super) fn for_connect(&mut self) -> String {
         self.sent_with_connect.clone_from(&self.current);
@@ -279,6 +291,21 @@ mod tests {
         tokens.connect_token_expired();
 
         assert_eq!(tokens.before_connect(), BeforeConnect::Ready);
+    }
+
+    #[test]
+    fn a_token_set_replaces_an_expired_one_only_without_a_source() {
+        let mut fixed = Tokens::new("old".into(), false);
+        let mut sourced = Tokens::new("old".into(), true);
+        for tokens in [&mut fixed, &mut sourced] {
+            tokens.for_connect();
+            tokens.connect_token_expired();
+            tokens.set("new".into());
+        }
+
+        assert_eq!(fixed.before_connect(), BeforeConnect::Ready);
+        assert_eq!(fixed.for_connect(), "new");
+        assert_eq!(sourced.before_connect(), BeforeConnect::Fetch);
     }
 
     #[test]
