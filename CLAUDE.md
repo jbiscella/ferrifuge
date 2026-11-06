@@ -57,12 +57,21 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 
 ### Out of scope (v1)
 
-- sockjs, webtransport transports
-- map subscriptions, shared poll subscriptions (experimental)
-- client publish debouncing (Centrifugo PRO)
+- sockjs, webtransport transports (webtransport planned: Block 48)
+- map subscriptions, shared poll subscriptions (experimental; planned: Blocks 45 and 47)
+- client publish debouncing (Centrifugo PRO; planned: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it
-- browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims
+- browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims (planned: Block 44)
 - `closed` state
+
+### Reversed exclusions
+
+| Excluded in | Exclusion | Reversed by | Block |
+|---|---|---|---|
+| Block 15, out of scope | a callback-style handler API | owner, 2026-11-06, late (item 17) | 41 |
+| Block 16, out of scope; "Planned after Block 13" | trace replay "optional, later" | same (item 20) | 42 |
+| "Planned after Block 19" | items 17, 20, 24 not adopted | same | 41–43 |
+| Block 17, out of scope | a cookie jar | same (item 24) | 43 |
 
 ### Test layers
 
@@ -1919,7 +1928,7 @@ The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (
 
 - **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js). Specified as Block 17.
 - **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome. Specified as Block 18.
-- **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice. Specified as Block 16.
+- **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice (reversed by the owner decision of 2026-11-06, late: Block 42). Specified as Block 16.
 
 ## Block 14 — Footprint, performance and fleet behaviour
 
@@ -2060,7 +2069,7 @@ Feature: Footprint, performance and fleet behaviour
 **Dependencies:** Blocks 4, 8, 9, 11, 12, 14.
 
 **Out of scope:**
-- a callback-style handler API: ferrifuge has streams only;
+- a callback-style handler API: ferrifuge has streams only (reversed by the owner decision of 2026-11-06, late: Block 41);
 - a read-ahead scenario over the HTTP streaming transports: the fake server speaks websocket only, so unit tests cover them;
 - the size bound of the write queue (Block 13);
 - whether call replies resolve when read, ahead of held events (Block 13; centrifuge-rust §9.3).
@@ -2318,7 +2327,7 @@ Feature: Event delivery and backpressure
 **Dependencies:** Blocks 1–15, 15d included.
 
 **Out of scope:**
-- replaying the traces of centrifuge-rust's TLA+ model (optional, later, keeping its MIT notice);
+- replaying the traces of centrifuge-rust's TLA+ model (optional, later, keeping its MIT notice) (reversed by the owner decision of 2026-11-06, late: Block 42);
 - a chaos TCP proxy against a real Centrifugo (centrifuge-rust §11.4);
 - the emulated transports and Protobuf in the runners: the core runner uses websocket and JSON, and the fake server speaks websocket only (Block 15);
 - delta compression, map and shared-poll subscriptions (Block 0);
@@ -2441,7 +2450,7 @@ Feature: Validation harness
 - changing the current connection: every option and setter here applies from the next connection attempt and sends no command;
 - a timeout on the `get_data` callback (none in centrifuge-js, none in Block 9);
 - the other `ConnectRequest` and `ConnectResult` fields of the vendored `client.proto` (`flag`, `profile`, `dict`, `time`);
-- a cookie jar: a native client has none; an application sets `Cookie` as an HTTP header.
+- a cookie jar: a native client has none; an application sets `Cookie` as an HTTP header (reversed by the owner decision of 2026-11-06, late: Block 43).
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner):
 - **Connect data.** `Config::data: Option<Vec<u8>>`, raw JSON with JSON, any bytes with Protobuf, encoded as subscription data is (Block 9), is sent as `ConnectRequest.data` with every connect command (spec, "Client common options": "option to set connect data"; `client.proto`, `ConnectRequest.data`). `ClientBuilder::get_data` sets an async callback returning `Result<Vec<u8>, DataError>` (Block 9's type); when set, it is called before every connection attempt, each transport of a fallback sequence included, and its result is sent instead of `data` (centrifuge-js 63ed73e `_startReconnecting`). It runs after the reconnect delay, never before it, so Block 14's jitter spreads a fleet's callback calls as it spreads its connects.
@@ -3079,15 +3088,22 @@ Feature: Fossil delta compression
 
 ## Planned after Block 19 (owner decision, 2026-11-06; decided by the reviewer by state of the art, delegated by the owner)
 
-The owner decided parity with centrifugal/centrifuge-rust and the listed community requests (`ANALYSIS-PARITY.md`, branch `analysis/parity`, items 1–28), under the clean-room rule, and delegated the open choices to the reviewer with the criterion "what would be state of the art" (mature, maintained Rust network clients: reqwest, hyper-util, tonic, aws-sdk-rust, async-nats, rumqttc, tokio-tungstenite, rustls; the Rust API Guidelines). Each item becomes a block with its value clause and scenarios when its turn comes, one spec PR then the implementation; each block records in Block 0 the exclusion it reverses.
+The owner decided parity with centrifugal/centrifuge-rust and the listed community requests (`ANALYSIS-PARITY.md`, branch `analysis/parity`, items 1–28), then centrifuge-js 63ed73e parity where it fits a native client (items 29–39, owner decision 2026-11-06, late), under the clean-room rule, and delegated the open choices to the reviewer with the criterion "what would be state of the art" (mature, maintained Rust network clients: reqwest, hyper-util, tonic, aws-sdk-rust, async-nats, rumqttc, tokio-tungstenite, rustls; the Rust API Guidelines). Each item becomes a block with its value clause and scenarios when its turn comes, one spec PR then the implementation; each block records in Block 0 the exclusion it reverses.
 
 Decisions that bind the blocks:
-- **Items adopted** as the analysis recommends, except: item 1's CONNECT and SOCKS5 handshakes use hyper-util's maintained `Tunnel` and `SocksV5` connectors, not in-house code (Block 0, "Components"; reqwest 0.13.5 uses them), so a CONNECT failure reports 407 or "unsuccessful", not every status; item 2's raw `rustls::ClientConfig` is public without a semver-exempt feature (async-nats, tokio-tungstenite and rumqttc expose it), the fips build keeping webpki verification; items 11 and 12 land in one breaking release that also marks `Config` `#[non_exhaustive]` (as tungstenite's `WebSocketConfig`). Not adopted: items 17 (callback API, WeakClient, delivery modes, deadlock detection), 20 (TLA+ trace replay; Block 16's "optional, later" replay is dropped) and 24 (cookie jar). Item 25 is a wasm32 build check of the core only. Item 5 is Block 19.
+- **Items adopted** as the analysis recommends, except: item 1's CONNECT and SOCKS5 handshakes use hyper-util's maintained `Tunnel` and `SocksV5` connectors, not in-house code (Block 0, "Components"; reqwest 0.13.5 uses them), so a CONNECT failure reports 407 or "unsuccessful", not every status; item 2's raw `rustls::ClientConfig` is public without a semver-exempt feature (async-nats, tokio-tungstenite and rumqttc expose it), the fips build keeping webpki verification; items 11 and 12 land in one breaking release that also marks `Config` `#[non_exhaustive]` (as tungstenite's `WebSocketConfig`). Items 17, 20 and 24 are adopted (owner decision, 2026-11-06, late; reversals recorded in Block 0): handlers keep Block 15's guarantees, and a delivery mode that gives one up says which in its documentation; item 20 restores Block 16's trace replay, reading the trace data files for its block only, keeping their MIT notice, never centrifuge-rust's `crates/` source. Item 25 is Block 40's wasm32 build check, then a browser adapter (design B) taking item 39's browser-only options. centrifuge-js 63ed73e parity (items 29–39) is adopted except item 34 (SockJS: Centrifugo v6 removed it; no native client needs it). Experimental APIs (items 29, 30, 33) are behind a non-default `unstable` feature, documented unstable and pinned to 63ed73e. Item 5 is Block 19.
 - **Proxies (item 1):** environment variables, then OS settings, by default, with an opt-out (reqwest 0.13.5 `system-proxy` default, aws-sdk-rust since behaviour version 2025-08-07, ureq 3).
 - **Logging (item 9):** `tracing` with its `log` feature, in the tokio adapter only, as a regular dependency of the `tokio` feature; DEBUG and TRACE, WARN for server anomalies; spans skip their fields, values go through the redacting `Debug`; no payload switch; a capture test; the docs warn that dependencies log secrets at TRACE through `log`.
 - **Release (item 21):** a tag-triggered `release.yml` with crates.io trusted publishing (`rust-lang/crates-io-auth-action`, environment `release`, version and `cargo-semver-checks` checked, actions pinned by SHA), a hand-written Keep a Changelog `CHANGELOG.md`, `SECURITY.md` pointing to GitHub private vulnerability reporting, docs.rs metadata, and an MSRV raised only in a minor version and only when needed. The account, first publish, trusted-publisher registration and repository settings are the owner's.
 - **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
 - **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by mime; the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
+- **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs.
+- **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` on, `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
+- **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
+- **Publish debouncing (item 32):** in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
+- **WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`. `VERIFY:` that it accepts the client's own `rustls::ClientConfig`.
+- **Connector (item 35):** a `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures, yielding `AsyncRead + AsyncWrite + Send + Unpin`; Ferrifuge runs TLS and the websocket handshake over it. Websocket only: a connector with an HTTP transport or proxy settings fails `build()`, as reqwest's connector layer cannot carry an outside connection.
+- **Unstable APIs (items 29, 30, 33):** behind a non-default `unstable` feature, since the release check runs cargo-semver-checks on default features (Block 20, D1; precedent: `tokio_unstable`, `reqwest_unstable`).
 
 Order of the blocks:
 
@@ -3100,20 +3116,28 @@ Order of the blocks:
 | 24 | 3: Android and iOS builds, mobile lifecycle |
 | 25 | 4: sleep, network changes, captive portals |
 | 26 | Block 5c drift refactor |
-| 27 | components: sse and http_stream decoders, content-type check |
+| 27 | components: sse and http_stream decoders, content-type check; and 36: Protobuf over http_stream (stream and emulation requests included) |
 | 28 | 15: tokio runtime handle (fixes `Client::new` panicking outside a runtime) |
 | 29 | 11 and 12: handshake timeout, maximum incoming message size, `Config` `#[non_exhaustive]` |
 | 30 | 10: `ready()` |
-| 31 | 8: `statistics()` |
+| 31 | 8 and 38: `statistics()`, delta statistics |
 | 32 | 14 and 27: `set_http_headers`, `Subscription::set_data` |
 | 33 | 16: `close()` |
 | 34 | 23: table of codes |
-| 35 | 6, 7 and 28: tag filters, channel compaction, `Publication.channel` |
-| 36 | 26: automatic command batching |
-| 37 | 19 and 22: test constructors, in-memory server double |
+| 35 | 6, 7, 28 and 37: tag filters, channel compaction, `Publication.channel`, `has_recovered_publications` |
+| 36 | 26 and 31: automatic command batching, optimistic subscriptions |
+| 37 | 19, 22 and 35: test constructors, in-memory server double, injectable connector |
 | 38 | 18: typed JSON helpers |
 | 39 | 13: publications-only stream |
 | 40 | 25: wasm32 build check |
+| 41 | 17: handler API, `WeakClient`, delivery modes, deadlock detection |
+| 42 | 20: TLA+ trace replay |
+| 43 | 24: cookie jar |
+| 44 | 25 and 39: browser adapter, browser-only options |
+| 45 | 29: map subscriptions (unstable) |
+| 46 | 32: publish debouncing |
+| 47 | 30: shared poll subscriptions (unstable) |
+| 48 | 33: WebTransport (unstable) |
 
 ---
 
