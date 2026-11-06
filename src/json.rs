@@ -169,6 +169,7 @@ struct JsonConnectSub<'a> {
     offset: u64,
 }
 
+#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeRequest.
 #[derive(Serialize)]
 struct JsonSubscribeRequest<'a> {
     channel: &'a str,

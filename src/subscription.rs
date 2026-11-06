@@ -56,6 +56,13 @@ pub enum SubscriptionEvent {
     /// An error that does not change the state, e.g. a failing data
     /// callback while the subscription keeps trying.
     Error(ClientError),
+    /// A client subscribed to the channel: a join push, sent to
+    /// subscriptions with [`crate::machine::SubscriptionOptions::join_leave`]
+    /// on channels that have them.
+    Join(ClientInfo),
+    /// A client unsubscribed from the channel: a leave push, as for
+    /// [`SubscriptionEvent::Join`].
+    Leave(ClientInfo),
 }
 
 impl SubscriptionEvent {
@@ -68,6 +75,8 @@ impl SubscriptionEvent {
             Self::Unsubscribed { .. } => "unsubscribed",
             Self::Publication(_) => "publication",
             Self::Error(_) => "error",
+            Self::Join(_) => "join",
+            Self::Leave(_) => "leave",
         }
     }
 }

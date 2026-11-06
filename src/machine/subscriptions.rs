@@ -17,7 +17,7 @@ use crate::wire::{
     UnsubscribeRequest,
 };
 use crate::{
-    ClientError, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
+    ClientError, ClientInfo, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
     SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
 };
 
@@ -839,6 +839,34 @@ impl Machine {
         }
     }
 
+    /// A join or leave push for `channel`, routed as a publication is: to
+    /// its client-side subscription when that is subscribed, else to its
+    /// server-side one; dropped when neither is subscribed (centrifuge-js
+    /// `_handleJoin`, `_handleLeave`).
+    pub(super) fn join_or_leave(&mut self, channel: &str, info: ClientInfo, join: bool) {
+        let subscribed = self.find_subscription(channel).filter(|id| {
+            self.subscriptions
+                .by_id
+                .get(id)
+                .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
+        });
+        let Some(id) = subscribed else {
+            self.server_join_or_leave(channel, info, join);
+            return;
+        };
+        let Some(event_id) = self.admit_event(Some(id), false) else {
+            return;
+        };
+        self.deliver_unpositioned(event_id, Owner::Client(id));
+        let event = if join {
+            SubscriptionEvent::Join(info)
+        } else {
+            SubscriptionEvent::Leave(info)
+        };
+        self.actions
+            .push(Action::EmitSubscription(event_id, id, event));
+    }
+
     /// The connection is established: subscribing subscriptions subscribe.
     pub(super) fn subscriptions_connected(&mut self) {
         let subscribing: Vec<_> = self
@@ -1493,6 +1521,86 @@ mod tests {
             transport,
             data: json.as_bytes().to_vec(),
         }
+    }
+
+    /// The join and leave events of `actions`, by subscription, with the
+    /// client they name.
+    fn joins_and_leaves(actions: &[Action]) -> Vec<(&'static str, String)> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::EmitSubscription(_, _, SubscriptionEvent::Join(info)) => {
+                    Some(("join", info.client.clone()))
+                }
+                Action::EmitSubscription(_, _, SubscriptionEvent::Leave(info)) => {
+                    Some(("leave", info.client.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    const JOIN: &str = r#"{"push":{"channel":"news","join":{"info":{"client":"c2","user":"u2"}}}}"#;
+    const LEAVE: &str =
+        r#"{"push":{"channel":"news","leave":{"info":{"client":"c2","user":"u2"}}}}"#;
+
+    #[test]
+    fn the_join_leave_option_is_sent_with_the_subscribe_command() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().join_leave(true));
+
+        let actions = machine.handle(Input::Subscribe(id));
+
+        assert_eq!(
+            sent(&actions),
+            [r#"{"id":2,"subscribe":{"channel":"news","join_leave":true}}"#]
+        );
+    }
+
+    #[test]
+    fn joins_and_leaves_reach_a_subscribed_subscription_only() {
+        let (mut machine, transport, id) = connected();
+        let before = machine.handle(reply(transport, JOIN));
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        let after = machine.handle(reply(transport, &format!("{JOIN}\n{LEAVE}")));
+
+        assert_eq!(joins_and_leaves(&before), []);
+        assert_eq!(
+            joins_and_leaves(&after),
+            [("join", "c2".to_owned()), ("leave", "c2".to_owned())]
+        );
+    }
+
+    #[test]
+    fn joins_and_leaves_not_taken_before_unsubscribe_are_withdrawn() {
+        let (mut machine, transport, id) = connected();
+        // A stream read up to "subscribed", then not read.
+        machine.handle(Input::StreamOpened(Some(id)));
+        let mut emitted = machine.handle(Input::Subscribe(id));
+        emitted.extend(machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#)));
+        for action in emitted {
+            if let Action::EmitSubscription(event, ..) = action {
+                machine.handle(Input::EventTaken(event));
+            }
+        }
+        let pushed = machine.handle(reply(transport, JOIN));
+        let join = pushed
+            .iter()
+            .find_map(|action| match action {
+                Action::EmitSubscription(event, _, SubscriptionEvent::Join(_)) => Some(*event),
+                _ => None,
+            })
+            .expect("a join event");
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+
+        assert!(
+            unsubscribed
+                .iter()
+                .any(|action| matches!(action, Action::Withdraw(ids) if ids.contains(&join))),
+            "{unsubscribed:?}"
+        );
     }
 
     #[test]

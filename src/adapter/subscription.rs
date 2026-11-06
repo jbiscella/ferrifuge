@@ -285,6 +285,16 @@ impl SubscriptionBuilder {
         self
     }
 
+    /// Asks the server for join and leave pushes, delivered as
+    /// [`SubscriptionEvent::Join`] and [`SubscriptionEvent::Leave`]: the
+    /// channel must have them, and the client the right to see its
+    /// presence (Centrifugo `join_leave`).
+    #[must_use]
+    pub fn join_leave(mut self, join_leave: bool) -> Self {
+        self.options = self.options.join_leave(join_leave);
+        self
+    }
+
     /// Sends `token`, a subscription token (JWT) for the channel, with the
     /// first subscribe command. With [`Self::get_token`] too, the callback
     /// is asked once it expires.

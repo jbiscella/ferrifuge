@@ -115,6 +115,21 @@ impl Machine {
         }
     }
 
+    /// Records the event `id`, a join or leave of `owner`, which moves no
+    /// position: it waits to be taken, and is withdrawn, as a publication
+    /// is (Block 13), but taking it changes nothing.
+    pub(super) fn deliver_unpositioned(&mut self, id: EventId, owner: Owner) {
+        let commit = Commit {
+            owner,
+            offset: None,
+            epoch: None,
+            replaces: false,
+        };
+        if self.deliveries.streams.contains(&commit.owner.stream()) {
+            self.deliveries.pending.insert(id, commit);
+        }
+    }
+
     /// Id of an event for the stream of `stream`, or `None` to drop it: an
     /// `error` event once that stream holds 256 untaken events.
     pub(super) fn admit_event(

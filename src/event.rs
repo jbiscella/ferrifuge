@@ -1,6 +1,6 @@
 //! Client state and the events reporting its changes.
 
-use crate::{Publication, Subscribed};
+use crate::{ClientInfo, Publication, Subscribed};
 
 /// Connection state of a client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,6 +94,10 @@ pub enum ServerSubscriptionEvent {
     },
     /// A publication in the channel.
     Publication(Publication),
+    /// A client subscribed to the channel (a join push).
+    Join(ClientInfo),
+    /// A client unsubscribed from the channel (a leave push).
+    Leave(ClientInfo),
 }
 
 impl ServerSubscriptionEvent {
@@ -105,6 +109,8 @@ impl ServerSubscriptionEvent {
             Self::Subscribed(_) => "subscribed",
             Self::Unsubscribed { .. } => "unsubscribed",
             Self::Publication(_) => "publication",
+            Self::Join(_) => "join",
+            Self::Leave(_) => "leave",
         }
     }
 }
