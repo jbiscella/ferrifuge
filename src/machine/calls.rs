@@ -172,11 +172,29 @@ impl Machine {
     }
 
     /// Sends call `id`, whose reply is then awaited for `Config::timeout`.
-    /// Its command is built only now (centrifuge-js `_methodCall`).
+    /// Its command is built only now (centrifuge-js `_methodCall`). A send
+    /// has no reply: it settles once written, its command with no id
+    /// (`client.proto`, `SendRequest`; centrifuge-js `send`).
     fn send_call(&mut self, id: CallId) {
         let Some(transport) = self.transport else {
             return;
         };
+        if let Some(Call {
+            request: CallRequest::Send { data },
+            phase,
+            ..
+        }) = self.calls.by_id.get_mut(&id)
+        {
+            let method = Method::Send(data.clone());
+            if matches!(phase, Phase::Queued) {
+                self.actions
+                    .push(Action::CancelCallTimer(id, CallTimer::Connection));
+            }
+            *phase = Phase::Added;
+            self.send(transport, Command { id: 0, method });
+            self.settle_call(id, Ok(CallReply::Send));
+            return;
+        }
         let command_id = self.command_id();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
@@ -210,6 +228,7 @@ impl Machine {
             CallRequest::PresenceStats { channel } => Method::PresenceStats(ChannelRequest {
                 channel: channel.clone(),
             }),
+            CallRequest::Send { .. } => unreachable!("sent above, without a reply"),
         };
         self.calls.by_command.insert(command_id, id);
         self.send(
@@ -1069,5 +1088,56 @@ mod tests {
                 }))
             )
         );
+    }
+
+    #[test]
+    fn a_send_is_written_without_an_id_and_settles_at_once() {
+        let (mut machine, _) = connected();
+        let id = machine.add_call(CallRequest::Send {
+            data: br#"{"note":"x"}"#.to_vec(),
+        });
+
+        let actions = machine.handle(Input::Call(id));
+
+        assert_eq!(sent_text(&actions), [r#"{"send":{"data":{"note":"x"}}}"#]);
+        assert_eq!(settled(&actions), [(id, Ok(CallReply::Send))]);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::SetCallTimer(..))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_send_made_before_the_connection_is_written_once_connected() {
+        let mut machine = machine();
+        let transport = opened(&mut machine);
+        let id = machine.add_call(CallRequest::Send {
+            data: b"1".to_vec(),
+        });
+        let queued = machine.handle(Input::Call(id));
+
+        let connected = connect_reply(&mut machine, transport);
+
+        assert_eq!(settled(&queued), []);
+        assert_eq!(sent_text(&connected), [r#"{"send":{"data":1}}"#]);
+        assert_eq!(settled(&connected), [(id, Ok(CallReply::Send))]);
+        assert!(connected.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
+    }
+
+    #[test]
+    fn a_message_push_is_emitted_with_its_exact_bytes() {
+        let (mut machine, transport) = connected();
+
+        let actions = machine.handle(frame(
+            transport,
+            r#"{"push":{"message":{"data":{"b": 1.0,  "a":2}}}}"#,
+        ));
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Emit(_, ClientEvent::Message(data)) if data == br#"{"b": 1.0,  "a":2}"#
+        )));
     }
 }
