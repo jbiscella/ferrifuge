@@ -460,7 +460,9 @@ centrifuge-js 63ed73e has it too, so this is also centrifuge-js parity: a `delta
 
 Sources for A: the Fossil delta format is documented by the Fossil project; the reference `delta.c` is BSD 2-Clause (D. Richard Hipp). centrifugal/fdelta (Go, BSD 2-Clause) ships 5 origin/target/delta vectors produced by Fossil itself (`testdata/fossil-vectors/`), usable as test data with their notice. Neither is centrifuge-rust, so the clean-room rule does not apply to them.
 
-**Recommendation** (question Q5). A. The failure rules (resubscribe a client-side subscription, reconnect for a server-side one) are new behaviour: centrifuge-js has none, and the only source for "end the client" is centrifuge-rust's documentation. Delta with a tag filter: `client.proto` says a tag filter disables delta compression, so the builder rejects both together.
+**Decided by the owner (2026-11-06):** A, from scratch: no other crate meets the components rule's definition of maintained (Block 0, PR #97). The failure rules are Q5's answer. Format facts checked through the reviewer: the trailer is a checksum, and centrifuge-js checks it; the sum is modulo 2^32 (centrifuge-js, fdelta and Fossil's own vectors), not the document's 2^32−1; integers are MSB first; a zero-length copy copies nothing. Ferrifuge is stricter where the document allows: integers over 32 bits, numbers with no digits, and anything after the trailer are failures; the whole delta is validated before the declared size is allocated. Block 15's read-ahead byte bound counts the decoded size.
+
+**Recommendation** (question Q5, answered). A. The failure rules (resubscribe a client-side subscription, reconnect for a server-side one) are new behaviour: centrifuge-js has none, and the only source for "end the client" is centrifuge-rust's documentation. Delta with a tag filter: `client.proto` says a tag filter disables delta compression, so the builder rejects both together.
 
 ## 6. Server-side tag filters
 
@@ -756,6 +758,24 @@ Found by the review: `client.proto` fields 9 and 10 of `Publication`, exposed by
 
 ---
 
+## Components audit (owner decision, 2026-11-06)
+
+The components rule (Block 0, PR #97) applied to the existing in-house parsing and encoding of network input in `src/`. Existing code is unchanged; proposals become blocks in the owner's order. Checked through the reviewer.
+
+| # | Component | Where | Maintained replacement | Proposal | Fuzz target | Size bound |
+|---|---|---|---|---|---|---|
+| 1 | SSE (text/event-stream) parser | `src/adapter/http.rs` `Decoder`, sse mode | sse-parse 0.1.0 (2026-08-24, MIT, forbid(unsafe), fuzzed upstream; `max_buffer` counts line + data + event, overflow drops the event and counts it; decodes invalid UTF-8 to U+FFFD where Ferrifuge passes bytes on); finesse 2.4.3 (2026-11-03, Apache-2.0, MSRV 1.88, no dependencies, separate line and event limits, fails with `Overflow`; possible quadratic drain on many tiny lines, not measured); sse-core 0.2.3 (2026-07-31, per-field limits, `Buf` API) | replacement block, choosing among the three in its spec; Ferrifuge keeps failing on overflow and keeps its fuzz target | yes | yes, 64 MiB (line + data) |
+| 2 | http_stream newline-delimited splitter | same `Decoder`, other mode | tokio-util 0.7.20 `LinesCodec::new_with_max_length` (already in the build through reqwest; a direct dependency with feature `codec`, no new crate) | in the same block as 1; Ferrifuge keeps the length error fatal and keeps skipping blank lines | yes | yes, 64 MiB |
+| 3 | `Content-Type` check of sse responses | `src/adapter/http.rs:249` `is_event_stream` | mime 0.3.18 (hyperium, 2026-11-05; a new direct dependency; the release before it is from 2023-03-20) | in the same block as 1 | no | header size bounded by hyper |
+| 4 | Protobuf length-delimited framing | `src/protobuf.rs:19-60` | already prost's | none | yes | frame bounded by the transport |
+| 5 | JSON reply decoding | `src/json.rs:60-82` and `reply()` | already serde_json; the field dispatch is client logic | none | yes | frame bounded by the transport |
+| 6 | JSON command encoding, emulation request bodies | `src/json.rs:31-112` | already serde_json; the client's own output | none | — | write queue and frame cap |
+| 7 | Websocket, TLS, HTTP, URLs, headers | tungstenite, rustls, reqwest/hyper, url, http | components | none | — | 64 MiB websocket message and frame |
+
+The client also re-parses frames it encoded itself (`Codec::command_ids`, `json::emulation_frame`, the line split in `Machine::resend_alone`): not network input, outside the rule.
+
+Separate from the rule, a solidifier review found drift from Block 5c ("`machine.rs` calls no codec module directly"): `src/machine.rs:1502`, `:1577`, `:1976` and `src/machine/calls.rs:321` call `json::` directly. Proposal: a refactor block routing them through `Codec` or an emulation helper, with no API change.
+
 ## Questions for the owner
 
 Each question has a recommendation. Reply per question; "OK" approves the recommendation.
@@ -766,7 +786,6 @@ Each question has a recommendation. Reply per question; "OK" approves the recomm
 | Q1 | Default proxy behaviour (item 1): follow the environment, then OS settings, as browsers do; or direct unless configured | environment, then OS settings |
 | Q3 | Logging (item 9): `tracing` or `log` | `tracing` with its `log` feature, adapter only, no payload switch |
 | Q4 | Publishing (item 21): the owner creates the crates.io ownership (the name is free), does the first publish, adds the trusted publisher and a `release` environment, and turns on private vulnerability reporting | yes |
-| Q5 | Delta failure (item 5): resubscribe a client-side subscription and reconnect for a server-side one; or end the client as the official SDK | resubscribe or reconnect |
 | Q6 | JSON helpers (item 18): always available; or behind a `serde` feature | always available |
 
 ## Decided through the reviewer
