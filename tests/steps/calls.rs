@@ -44,6 +44,8 @@ pub(crate) struct Calls {
     published: Vec<StreamPosition>,
     /// The second client of a scenario with two.
     second: Option<Second>,
+    /// The third client of a join and leave scenario.
+    third: Option<Second>,
     /// The write-queue limit of the scenario's client (Block 13d, @D).
     pub(crate) write_queue_bytes: Option<usize>,
     /// The sans-IO core of an @E write-queue scenario.
@@ -55,7 +57,7 @@ struct Second {
     /// Kept so that it stays connected.
     _client: Client,
     client_id: String,
-    _subscription: Subscription,
+    subscription: Subscription,
     events: Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>,
 }
 
@@ -427,10 +429,11 @@ async fn the_client_reconnects_over(world: &mut ClientWorld, transport: String) 
     }
 }
 
-/// User, connection info and channel info of the two clients' tokens.
-const USERS: [(&str, &str, &str); 2] = [
+/// User, connection info and channel info of the clients' tokens.
+const USERS: [(&str, &str, &str); 3] = [
     ("alice", r#"{"name":"alice"}"#, r#"{"seat":1}"#),
     ("bob", r#"{"name":"bob"}"#, r#"{"seat":2}"#),
+    ("carol", r#"{"name":"carol"}"#, r#"{"seat":3}"#),
 ];
 /// The channel of the scenarios with two clients.
 const CHANNEL: &str = "news";
@@ -510,7 +513,7 @@ async fn two_clients(world: &mut ClientWorld, info: bool) {
     world.calls.second = Some(Second {
         _client: client,
         client_id,
-        _subscription: subscription,
+        subscription,
         events,
     });
 }
@@ -1552,4 +1555,271 @@ async fn the_fake_server_received_three_sends(world: &mut ClientWorld) {
         .map(|(command, _)| command["send"]["data"].clone())
         .collect();
     assert_eq!(data, [json!({"n": 1}), json!({"n": 2}), json!({"n": 3})]);
+}
+
+/// Another client of user `index`, subscribed to [`CHANNEL`], asking for
+/// join and leave pushes when `join_leave` is set.
+async fn another_client(world: &mut ClientWorld, index: usize, join_leave: bool) -> Second {
+    let (client, client_id) = connected_as(world, index, false).await;
+    let subscription = client
+        .subscription_builder(CHANNEL)
+        .join_leave(join_leave)
+        .build()
+        .expect("no subscription to the channel yet");
+    let mut events = super::recorded(subscription.events());
+    subscription.subscribe();
+    let subscribed = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while let Some(event) = events.next().await {
+            if event.name() == "subscribed" {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(subscribed.is_ok(), "client {index} did not subscribe");
+    Second {
+        _client: client,
+        client_id,
+        subscription,
+        events,
+    }
+}
+
+#[given(
+    regex = r"^a client subscribed (with|without) the join_leave option to a channel with join and leave events$"
+)]
+async fn a_client_subscribed_for_join_leave(world: &mut ClientWorld, with: String) {
+    a_connected_client(world).await;
+    let subscription = world
+        .client()
+        .subscription_builder(CHANNEL)
+        .join_leave(with == "with")
+        .build()
+        .expect("no subscription to the channel yet");
+    world.track_subscription(subscription);
+    subscribe(world).await;
+    expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[given("a second client subscribed to the channel with the join_leave option")]
+async fn a_second_client_with_join_leave(world: &mut ClientWorld) {
+    let second = another_client(world, 1, true).await;
+    world.calls.second = Some(second);
+}
+
+#[when("a second client subscribes to the channel")]
+async fn a_second_client_subscribes(world: &mut ClientWorld) {
+    let second = another_client(world, 1, false).await;
+    world.calls.second = Some(second);
+}
+
+#[when("the second client unsubscribes from the channel")]
+fn the_second_client_unsubscribes(world: &mut ClientWorld) {
+    second(world).subscription.unsubscribe();
+}
+
+#[when("a third client subscribes to the channel and then unsubscribes")]
+async fn a_third_client_comes_and_goes(world: &mut ClientWorld) {
+    let third = another_client(world, 2, false).await;
+    third.subscription.unsubscribe();
+    world.calls.third = Some(third);
+}
+
+/// Waits for a join or leave event naming `client` among `events`,
+/// skipping the others (a subscriber may get its own join).
+async fn expect_join_or_leave(
+    events: &mut Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>,
+    kind: &str,
+    client: &str,
+) {
+    let found = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while let Some(event) = events.next().await {
+            match (&event, kind) {
+                (SubscriptionEvent::Join(info), "join")
+                | (SubscriptionEvent::Leave(info), "leave")
+                    if info.client == client =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "no {kind} naming {client}");
+}
+
+#[then(regex = r#"^the subscription emits a "(join|leave)" event naming the second client$"#)]
+async fn the_subscription_emits_join_or_leave(world: &mut ClientWorld, kind: String) {
+    let client = second(world).client_id.clone();
+    let events = world
+        .subscription_events
+        .as_mut()
+        .expect("no subscription created yet");
+    expect_join_or_leave(events, &kind, &client).await;
+}
+
+#[when(
+    regex = r#"^the second client's subscription has emitted a "leave" event naming the third client$"#
+)]
+async fn the_second_saw_the_third_leave(world: &mut ClientWorld) {
+    let third = world
+        .calls
+        .third
+        .as_ref()
+        .expect("a third client")
+        .client_id
+        .clone();
+    let events = &mut second(world).events;
+    expect_join_or_leave(events, "leave", &third).await;
+}
+
+#[then(r#"the first client's subscription has emitted no "join" or "leave" event"#)]
+async fn the_first_saw_no_join_or_leave(world: &mut ClientWorld) {
+    let seen = world.subscription_events_during(QUIET_PERIOD).await;
+    assert!(
+        !seen.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Join(_) | SubscriptionEvent::Leave(_)
+        )),
+        "{seen:?}"
+    );
+}
+
+#[when(regex = r#"^a subscription to channel "(\w+)" with the join_leave option is subscribed$"#)]
+async fn a_join_leave_subscription_is_subscribed(world: &mut ClientWorld, channel: String) {
+    let subscription = world
+        .client()
+        .subscription_builder(channel)
+        .join_leave(true)
+        .build()
+        .expect("no subscription to the channel yet");
+    world.track_subscription(subscription);
+    subscribe(world).await;
+    expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[then(
+    regex = r#"^the fake server received (\d+) subscribe commands for "(\w+)", each requesting join_leave$"#
+)]
+fn the_fake_server_received_join_leave_subscribes(
+    world: &mut ClientWorld,
+    count: usize,
+    channel: String,
+) {
+    let subscribes: Vec<Value> = world
+        .fake()
+        .received()
+        .into_iter()
+        .filter(|message| message["subscribe"]["channel"] == channel.as_str())
+        .collect();
+    assert_eq!(subscribes.len(), count, "{subscribes:?}");
+    assert!(
+        subscribes
+            .iter()
+            .all(|message| message["subscribe"]["join_leave"] == true),
+        "{subscribes:?}"
+    );
+}
+
+/// The client info of the join and of the leave the fake server pushes.
+fn pushed_info(kind: &str) -> Value {
+    if kind == "join" {
+        json!({"client": "c-join", "user": "u-join", "conn_info": {"j": 1}, "chan_info": {"k": 2}})
+    } else {
+        json!({"client": "c-leave", "user": "u-leave", "conn_info": {"j": 3}, "chan_info": {"k": 4}})
+    }
+}
+
+fn push_join_or_leave(world: &ClientWorld, kind: &str, channel: &str) {
+    world.fake().send(
+        &json!({"push": {"channel": channel, kind: {"info": pushed_info(kind)}}}).to_string(),
+    );
+}
+
+#[when(
+    regex = r#"^the fake server pushes a join and then a leave of different clients for channel "(\w+)"$"#
+)]
+fn the_fake_server_pushes_join_and_leave(world: &mut ClientWorld, channel: String) {
+    push_join_or_leave(world, "join", &channel);
+    push_join_or_leave(world, "leave", &channel);
+}
+
+#[when(regex = r#"^the fake server pushes a (join|leave) for channel "(\w+)"$"#)]
+fn the_fake_server_pushes(world: &mut ClientWorld, kind: String, channel: String) {
+    push_join_or_leave(world, &kind, &channel);
+}
+
+#[then(
+    regex = r#"^(?:then )?the client emits a server-side "(join|leave)" event for channel "(\w+)" with the pushed client info$"#
+)]
+async fn the_client_emits_a_server_side_join_or_leave(
+    world: &mut ClientWorld,
+    kind: String,
+    channel: String,
+) {
+    let event = loop {
+        if let ClientEvent::ServerSubscription {
+            channel: got,
+            event,
+        } = world.next_event().await
+            && got == channel
+            && matches!(
+                event,
+                ferrifuge::ServerSubscriptionEvent::Join(_)
+                    | ferrifuge::ServerSubscriptionEvent::Leave(_)
+            )
+        {
+            break event;
+        }
+    };
+    let (name, info) = match event {
+        ferrifuge::ServerSubscriptionEvent::Join(info) => ("join", info),
+        ferrifuge::ServerSubscriptionEvent::Leave(info) => ("leave", info),
+        _ => unreachable!("matched above"),
+    };
+    assert_eq!(name, kind);
+    let expected = pushed_info(&kind);
+    assert_eq!(info.client, expected["client"]);
+    assert_eq!(info.user, expected["user"]);
+    assert_eq!(
+        info.conn_info.as_deref().map(json_of),
+        Some(expected["conn_info"].clone())
+    );
+    assert_eq!(
+        info.chan_info.as_deref().map(json_of),
+        Some(expected["chan_info"].clone())
+    );
+}
+
+/// Without taking its events: a later step reads them.
+#[when("the subscription is subscribed")]
+async fn the_subscription_is_subscribed(world: &mut ClientWorld) {
+    let subscription = world.subscription().clone();
+    subscription.subscribe();
+    let subscribed = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while subscription.state() != ferrifuge::SubscriptionState::Subscribed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(subscribed.is_ok(), "not subscribed in time");
+}
+
+#[then(
+    r#"the subscription's stream yields "subscribing", "subscribed" and "leave", and no "join" event"#
+)]
+async fn yields_subscribed_then_leave_only(world: &mut ClientWorld) {
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        names.push(world.next_subscription_event(false).await.name());
+    }
+    assert_eq!(names, ["subscribing", "subscribed", "leave"]);
+    let seen = world.subscription_events_during(QUIET_PERIOD).await;
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Join(_))),
+        "{seen:?}"
+    );
 }
