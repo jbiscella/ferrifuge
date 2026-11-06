@@ -21,6 +21,8 @@ pub(crate) const RUN_VARIABLE: &str = "FERRIFUGE_BDD_RUN";
 pub(crate) const HOST_GATEWAY: &str = "host.docker.internal";
 
 const PORT: u16 = 8000;
+/// Where a configuration file given to the server goes in the container.
+const CONFIG_PATH: &str = "/centrifugo/config.json";
 /// Port of the API and health endpoints when the client endpoints use TLS.
 const INTERNAL_PORT: u16 = 9000;
 
@@ -40,17 +42,23 @@ impl Centrifugo {
     /// Starts a server with the HTTP API and health endpoint enabled, plus
     /// `env`: extra `CENTRIFUGO_*` variables for this config variant.
     pub(crate) async fn start(env: &[(&str, &str)]) -> Self {
-        Self::launch(env, None).await
+        Self::launch(env, None, None).await
+    }
+
+    /// Like [`Self::start`], configured by the JSON file `config` instead
+    /// of variables, e.g. the examples' (Block 20).
+    pub(crate) async fn start_with_config(config: &str) -> Self {
+        Self::launch(&[], None, Some(config)).await
     }
 
     /// Like [`Self::start`], with the client endpoints served over TLS with
     /// `cert_pem` and `key_pem`. The API and health endpoints stay plain
     /// HTTP on an internal port, so the test drives the server as usual.
     pub(crate) async fn start_tls(env: &[(&str, &str)], cert_pem: &str, key_pem: &str) -> Self {
-        Self::launch(env, Some((cert_pem, key_pem))).await
+        Self::launch(env, Some((cert_pem, key_pem)), None).await
     }
 
-    async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>) -> Self {
+    async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>, config: Option<&str>) -> Self {
         let api_port = if tls.is_some() { INTERNAL_PORT } else { PORT };
         let mut image = GenericImage::new(IMAGE, TAG).with_exposed_port(ContainerPort::Tcp(PORT));
         if tls.is_some() {
@@ -62,11 +70,17 @@ impl Centrifugo {
                     .with_port(ContainerPort::Tcp(api_port))
                     .with_expected_status_code(200u16),
             ))
-            .with_cmd(["centrifugo"])
+            .with_cmd(match config {
+                Some(_) => vec!["centrifugo", "--config", CONFIG_PATH],
+                None => vec!["centrifugo"],
+            })
             .with_label(RUN_LABEL, std::env::var(RUN_VARIABLE).unwrap_or_default())
             .with_host(HOST_GATEWAY, Host::HostGateway)
             .with_env_var("CENTRIFUGO_HTTP_API_KEY", API_KEY)
             .with_env_var("CENTRIFUGO_HEALTH_ENABLED", "true");
+        if let Some(config) = config {
+            request = request.with_copy_to(CONFIG_PATH, config.as_bytes().to_vec());
+        }
         if let Some((cert_pem, key_pem)) = tls {
             request = request
                 .with_env_var("CENTRIFUGO_HTTP_SERVER_TLS_ENABLED", "true")

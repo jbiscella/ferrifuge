@@ -32,6 +32,7 @@ mod jitter;
 mod ping;
 mod protobuf;
 mod recovery;
+mod release;
 mod server_subs;
 mod slow;
 mod sub_tokens;
@@ -162,6 +163,7 @@ pub(crate) struct ClientWorld {
     /// Batches of a Block 18 scenario.
     pub(crate) batching: batching::Batching,
     pub(crate) delta: delta::Delta,
+    pub(crate) release: release::Release,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

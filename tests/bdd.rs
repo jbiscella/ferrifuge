@@ -339,6 +339,12 @@ const IMPLEMENTED: &[&str] = &[
     "A delta on a server-side subscription makes the client reconnect",
     // Block 19, sub-increment 19c.
     "Publications missed by a delta subscription are recovered whole",
+    // Block 20: release setup.
+    "The changelog is in step with the crate's version",
+    "The release check refuses a tag that does not name the crate's version",
+    "The release check refuses a version without a changelog section",
+    "The published package holds only what the crate needs",
+    "The quickstart example receives a publication",
 ];
 
 /// Server configuration of @A scenarios.

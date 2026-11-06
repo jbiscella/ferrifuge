@@ -355,6 +355,10 @@ jobs:
       - name: Spec sync and simulations
         run: cargo test --test spec_sync --test perf_sim --test chaos
 
+      # Examples build on every OS (Block 20, D8).
+      - name: Examples
+        run: cargo build --examples
+
   # The public API against the base branch (Block 14e): a breaking change
   # needs a version bump (0.x: the minor version).
   semver:
@@ -453,3 +457,49 @@ jobs:
       # The sans-IO core alone (review item D6).
       - name: cargo check on MSRV (no default features)
         run: cargo check --all-targets --no-default-features
+
+      # The aws-lc builds too (Block 20, D6): their build scripts run under
+      # cargo check, so CMake and Go are installed as for the providers job.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: cargo check on MSRV (aws-lc-rs)
+        run: cargo check --all-targets --no-default-features --features tokio,aws-lc-rs
+
+      - name: cargo check on MSRV (fips)
+        run: cargo check --all-targets --no-default-features --features tokio,fips
+
+  # The crate as crates.io gets it (Block 20, D3): only what `include`
+  # lists, built without the repository around it.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
+
+  # The documentation as docs.rs builds it (Block 20, D7): nightly, with the
+  # docsrs cfg that shows which items need which feature.
+  docs-rs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustdoc as on docs.rs
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
