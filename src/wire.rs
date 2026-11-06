@@ -4,10 +4,10 @@
 //! translate between these types and bytes on the wire. Publications use
 //! the public [`Publication`] type, filled as they are delivered.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::Publication;
 use crate::token::Secret;
+use crate::{ClientInfo, Publication};
 
 /// A command sent by the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,10 @@ pub(crate) enum Method {
     Unsubscribe(UnsubscribeRequest),
     SubRefresh(SubRefreshRequest),
     Rpc(RpcRequest),
+    Publish(PublishRequest),
+    History(HistoryRequest),
+    Presence(ChannelRequest),
+    PresenceStats(ChannelRequest),
     /// The empty command answering a server ping; sent with id 0.
     Pong,
 }
@@ -92,6 +96,33 @@ pub(crate) struct RpcRequest {
     pub(crate) data: Vec<u8>,
 }
 
+/// `PublishRequest` of `client.proto`, for regular publications.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PublishRequest {
+    pub(crate) channel: String,
+    /// Raw JSON with the JSON protocol, any bytes with Protobuf.
+    pub(crate) data: Vec<u8>,
+}
+
+/// `HistoryRequest` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HistoryRequest {
+    pub(crate) channel: String,
+    /// 0 returns only the stream position, -1 every publication.
+    pub(crate) limit: i32,
+    /// Publications after this offset and epoch (before it with
+    /// `reverse`).
+    pub(crate) since: Option<(u64, String)>,
+    pub(crate) reverse: bool,
+}
+
+/// `PresenceRequest` and `PresenceStatsRequest` of `client.proto`, which
+/// carry only the channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ChannelRequest {
+    pub(crate) channel: String,
+}
+
 /// A reply or push received from the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reply {
@@ -113,6 +144,12 @@ pub(crate) enum ReplyResult {
     /// `RPCResult.data`: raw JSON with the JSON protocol, any bytes with
     /// Protobuf; empty when the server sent none.
     Rpc(Vec<u8>),
+    /// `PublishResult`, which is empty.
+    Publish,
+    History(HistoryResult),
+    /// `PresenceResult.presence`: the clients by client id.
+    Presence(HashMap<String, ClientInfo>),
+    PresenceStats(PresenceStatsResult),
     Push(Push),
     /// An empty reply: a server ping, or a reply carrying only an error.
     Empty,
@@ -144,6 +181,22 @@ pub(crate) struct ConnectResult {
     /// The server-side subscriptions of the connection, by channel, in
     /// channel order.
     pub(crate) subs: BTreeMap<String, SubscribeResult>,
+}
+
+/// `HistoryResult` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HistoryResult {
+    pub(crate) publications: Vec<Publication>,
+    /// The stream's current epoch and top offset.
+    pub(crate) epoch: String,
+    pub(crate) offset: u64,
+}
+
+/// `PresenceStatsResult` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PresenceStatsResult {
+    pub(crate) num_clients: u32,
+    pub(crate) num_users: u32,
 }
 
 /// `RefreshResult` of `client.proto`.
