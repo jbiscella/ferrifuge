@@ -35,6 +35,16 @@ pub(crate) enum DeltaError {
     Trailer,
     /// The target's checksum is not the trailer's.
     Checksum,
+    /// A delta came before any whole publication of the subscribe (D5).
+    NoBase,
+    /// A delta came on a subscription without delta on (D5).
+    NotOn,
+    /// With JSON, the data of a publication with delta on is not a JSON
+    /// string (D7).
+    NotAString,
+    /// The publications of one message together build more than the
+    /// inbound message limit (D6).
+    MessageTooLarge,
 }
 
 impl std::fmt::Display for DeltaError {
@@ -49,6 +59,12 @@ impl std::fmt::Display for DeltaError {
             Self::Size => "delta builds a different size than it declares",
             Self::Trailer => "delta trailer is missing or followed by bytes",
             Self::Checksum => "delta checksum does not match",
+            Self::NoBase => "delta publication before any whole publication",
+            Self::NotOn => "delta publication on a subscription without delta",
+            Self::NotAString => "publication data of a delta subscription is not a JSON string",
+            Self::MessageTooLarge => {
+                "delta publications of one message exceed the inbound message limit"
+            }
         })
     }
 }
@@ -110,8 +126,8 @@ impl Segments<'_> {
                     if reader.next() != Some(b',') {
                         return Err(DeltaError::Segment);
                     }
-                    let range =
-                        span(widen(offset), count, self.base.len()).ok_or(DeltaError::CopyPastBase)?;
+                    let range = span(widen(offset), count, self.base.len())
+                        .ok_or(DeltaError::CopyPastBase)?;
                     &self.base[range]
                 }
                 Some(b':') => {
@@ -213,11 +229,7 @@ fn checksum(target: &[u8]) -> u32 {
 #[cfg(any(test, feature = "test-util"))]
 #[must_use]
 pub fn write(base: &[u8], target: &[u8]) -> Vec<u8> {
-    let prefix = base
-        .iter()
-        .zip(target)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let prefix = base.iter().zip(target).take_while(|(a, b)| a == b).count();
     let suffix = base[prefix..]
         .iter()
         .rev()
@@ -255,9 +267,8 @@ fn len(value: usize) -> u64 {
 /// `value` in the delta's base-64 digits, most significant first.
 #[cfg(any(test, feature = "test-util"))]
 fn number(value: impl Into<u64>) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
     let mut value = value.into();
-    const ALPHABET: &[u8; 64] =
-        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
     let mut digits = Vec::new();
     loop {
         digits.push(ALPHABET[(value % 64) as usize]);
@@ -310,7 +321,12 @@ mod tests {
     #[test]
     fn fossils_own_deltas_rebuild_their_targets() {
         for (i, (origin, target, delta)) in VECTORS.iter().enumerate() {
-            assert_eq!(apply(origin, delta, LIMIT).as_deref(), Ok(*target), "vector {}", i + 1);
+            assert_eq!(
+                apply(origin, delta, LIMIT).as_deref(),
+                Ok(*target),
+                "vector {}",
+                i + 1
+            );
         }
     }
 
@@ -367,12 +383,20 @@ mod tests {
             (delta(2, b"3:abc", b"abc"), DeltaError::Size),
             (delta(3, b"3:abc", b"abd"), DeltaError::Checksum),
             (b"3\n3:abc".to_vec(), DeltaError::Trailer),
-            ([delta(3, b"3:abc", b"abc"), b"x".to_vec()].concat(), DeltaError::Trailer),
+            (
+                [delta(3, b"3:abc", b"abc"), b"x".to_vec()].concat(),
+                DeltaError::Trailer,
+            ),
             (delta(3, b":abc", b"abc"), DeltaError::Number),
         ];
 
         for (delta, reason) in cases {
-            assert_eq!(apply(base, &delta, LIMIT), Err(reason), "{}", String::from_utf8_lossy(&delta));
+            assert_eq!(
+                apply(base, &delta, LIMIT),
+                Err(reason),
+                "{}",
+                String::from_utf8_lossy(&delta)
+            );
         }
     }
 
@@ -410,7 +434,11 @@ mod tests {
 
         let delta = write(base, target);
 
-        assert!(delta.len() < target.len(), "{}", String::from_utf8_lossy(&delta));
+        assert!(
+            delta.len() < target.len(),
+            "{}",
+            String::from_utf8_lossy(&delta)
+        );
         assert_eq!(apply(base, &delta, LIMIT).as_deref(), Ok(&target[..]));
     }
 

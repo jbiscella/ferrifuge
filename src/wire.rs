@@ -77,7 +77,13 @@ pub(crate) struct SubscribeRequest {
     pub(crate) flag: i64,
     /// Asks the server for join and leave pushes.
     pub(crate) join_leave: bool,
+    /// Asks for publications as Fossil deltas (Block 19, D4), sent as
+    /// `SubscribeRequest.delta = "fossil"`.
+    pub(crate) delta: bool,
 }
+
+/// The only delta format of `client.proto` (`SubscribeRequest.delta`).
+pub(crate) const FOSSIL: &str = "fossil";
 
 /// Fail a subscribe whose recovery is not possible with error 112 instead
 /// of succeeding unrecovered (`client.proto`, `SubscribeRequest.flag`).
@@ -238,6 +244,9 @@ pub(crate) struct SubscribeResult {
     /// The server attempted a recovery, and whether it recovered everything.
     pub(crate) was_recovering: bool,
     pub(crate) recovered: bool,
+    /// Publications come as Fossil deltas until the next subscribe
+    /// (`SubscribeResult.delta`, Block 19, D4).
+    pub(crate) delta: bool,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.

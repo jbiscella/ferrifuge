@@ -17,6 +17,9 @@ pub mod connecting {
     /// An unsubscribe command failed or got no reply in time: the
     /// server-side subscription state is unknown, so the client reconnects.
     pub const UNSUBSCRIBE_ERROR: u32 = 4;
+    /// A server-side subscription received a delta publication, which the
+    /// client never asks for there (Block 19, D8).
+    pub const DELTA_ERROR: u32 = 5;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].
@@ -38,6 +41,10 @@ pub mod subscribing {
     pub const SUBSCRIBE_CALLED: u32 = 0;
     /// The connection closed; the subscription resubscribes on the next.
     pub const TRANSPORT_CLOSED: u32 = 1;
+    /// A delta publication could not be applied: the subscription
+    /// subscribes again, recovering from its last publication taken
+    /// (Block 19, D8).
+    pub const DELTA_ERROR: u32 = 2;
 }
 
 /// Codes of [`crate::SubscriptionEvent::Unsubscribed`], besides server error
@@ -93,4 +100,6 @@ pub mod error {
     /// The subscription getState callback failed (centrifuge-js
     /// `subscriptionGetState`).
     pub const SUBSCRIPTION_GET_STATE: u32 = 13;
+    /// A delta publication could not be applied (Block 19, D8).
+    pub const DELTA: u32 = 15;
 }

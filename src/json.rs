@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::wire::{
-    ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, HistoryRequest,
-    HistoryResult, Method, PresenceStatsResult, PublishRequest, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
-    SubscribeResult, UnsubscribeRequest,
+    ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, FOSSIL,
+    HistoryRequest, HistoryResult, Method, PresenceStatsResult, PublishRequest, Push,
+    RefreshRequest, RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest,
+    SubscribeRequest, SubscribeResult, UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -76,6 +76,15 @@ pub(crate) fn decode_sized(frame: &[u8]) -> Result<Vec<(Reply, usize)>, DecodeEr
         start = end;
     }
     Ok(replies)
+}
+
+/// The value of `data` when it is a JSON string: a publication of a
+/// subscription with delta on (`client.proto`, `Publication.data`; Block 19,
+/// D7).
+pub(crate) fn string_value(data: &[u8]) -> Option<Vec<u8>> {
+    serde_json::from_slice::<String>(data)
+        .ok()
+        .map(String::into_bytes)
 }
 
 /// Body of a request to the emulation endpoint carrying `frame` for the
@@ -195,6 +204,8 @@ struct JsonSubscribeRequest<'a> {
     flag: i64,
     #[serde(skip_serializing_if = "is_false")]
     join_leave: bool,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    delta: &'a str,
 }
 
 #[derive(Serialize)]
@@ -317,8 +328,10 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 recoverable,
                 flag,
                 join_leave,
+                delta,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
+                    delta: if *delta { FOSSIL } else { "" },
                     channel,
                     token: &token.0,
                     data: data.as_deref().map(JsonData::new),
@@ -590,6 +603,7 @@ struct JsonSubscribeResult {
     offset: u64,
     was_recovering: bool,
     recovered: bool,
+    delta: bool,
 }
 
 impl From<JsonSubscribeResult> for SubscribeResult {
@@ -609,6 +623,7 @@ impl From<JsonSubscribeResult> for SubscribeResult {
             offset: subscribe.offset,
             was_recovering: subscribe.was_recovering,
             recovered: subscribe.recovered,
+            delta: subscribe.delta,
         }
     }
 }
@@ -731,6 +746,8 @@ struct JsonPublication {
     info: Option<JsonClientInfo>,
     #[serde(default)]
     epoch: String,
+    #[serde(default)]
+    delta: bool,
 }
 
 impl From<JsonPublication> for Publication {
@@ -745,6 +762,7 @@ impl From<JsonPublication> for Publication {
             tags: publication.tags,
             info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
+            delta: publication.delta,
         }
     }
 }

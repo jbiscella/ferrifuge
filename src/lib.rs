@@ -23,9 +23,6 @@ mod wire;
 #[cfg(all(feature = "tokio", feature = "test-util"))]
 #[doc(hidden)]
 pub use adapter::stalled_websocket_writes;
-#[cfg(feature = "test-util")]
-#[doc(hidden)]
-pub use fossil::write as write_fossil_delta;
 #[cfg(feature = "tokio")]
 pub use adapter::{Batch, Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use call::{
@@ -34,8 +31,11 @@ pub use call::{
 };
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use fossil::write as write_fossil_delta;
 pub use subscription::{
-    ClientInfo, DataError, Publication, StateError, StreamPosition, Subscribed, SubscriptionError,
-    SubscriptionEvent, SubscriptionState,
+    ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,
+    SubscriptionError, SubscriptionEvent, SubscriptionState,
 };
 pub use token::TokenError;

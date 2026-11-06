@@ -28,6 +28,8 @@ jobs:
           - protobuf::tests::fuzz_decode
           - adapter::http::tests::fuzz_http_stream_decoder
           - adapter::http::tests::fuzz_sse_decoder
+          - fossil::tests::fuzz_apply
+          - fossil::tests::fuzz_written_delta_round_trip
     steps:
       - uses: actions/checkout@v7
 

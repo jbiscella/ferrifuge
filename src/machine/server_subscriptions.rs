@@ -10,8 +10,8 @@ use super::delivery::{Commit, Owner};
 use super::subscriptions::UNMATCHABLE_EPOCH;
 use crate::wire::{SubscribeRequest, SubscribeResult};
 use crate::{
-    ClientEvent, ClientInfo, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed,
-    codes,
+    ClientError, ClientEvent, ClientInfo, ErrorKind, Publication, ServerSubscriptionEvent,
+    StreamPosition, Subscribed, codes,
 };
 
 /// Reason of [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
@@ -54,10 +54,15 @@ impl Machine {
     /// whether or not it recovers (Block 12); one of the registry the reply
     /// leaves out ends with [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`]
     /// and leaves the registry (centrifuge-js `_processServerSubs`).
+    /// Whether a subscription of the reply carried a delta publication,
+    /// which the client never asks for on server-side subscriptions
+    /// (Block 19, D8): the caller reconnects once the reply is handled.
+    #[must_use]
     pub(super) fn server_subscriptions_connected(
         &mut self,
         subs: BTreeMap<String, SubscribeResult>,
-    ) {
+    ) -> bool {
+        let mut delta = false;
         let gone: Vec<String> = self
             .server_subscriptions
             .by_channel
@@ -66,7 +71,7 @@ impl Machine {
             .cloned()
             .collect();
         for (channel, result) in subs {
-            self.subscribe_server_side(&channel, result);
+            delta |= self.subscribe_server_side(&channel, result);
         }
         for channel in gone {
             self.server_subscriptions.by_channel.remove(&channel);
@@ -78,12 +83,29 @@ impl Machine {
                 },
             );
         }
+        delta
     }
 
     /// The server subscribed the connection to `channel` during the
     /// connection (`Subscribe` push; spec, "Server-side subscriptions").
     pub(super) fn server_subscription_pushed(&mut self, channel: &str, result: SubscribeResult) {
-        self.subscribe_server_side(channel, result);
+        if self.subscribe_server_side(channel, result) {
+            self.server_delta_failed();
+        }
+    }
+
+    /// A server-side subscription received a delta publication: an error
+    /// event, then the client reconnects with code 5, its reconnect backoff
+    /// not reset by this connection, and recovers its server-side
+    /// subscriptions from their last positions taken (Block 19, D8).
+    pub(super) fn server_delta_failed(&mut self) {
+        self.emit(ClientEvent::Error(ClientError {
+            kind: ErrorKind::Delta,
+            code: codes::error::DELTA,
+            message: "delta publication on a server-side subscription".to_owned(),
+            transport: None,
+        }));
+        self.disconnect(codes::connecting::DELTA_ERROR, "delta error", true);
     }
 
     /// The server ended the server-side subscription to `channel`
@@ -115,7 +137,9 @@ impl Machine {
 
     /// Registers `channel` as subscribed and emits its `subscribed` event,
     /// then its initial or recovered publications.
-    fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) {
+    /// Whether one of its publications was a delta, which is not delivered,
+    /// nor any after it (Block 19, D8).
+    fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) -> bool {
         // A recoverable subscription's position: the stream's, or after a
         // recovery the one it recovers from. With publications, it is
         // reached once the last of them is taken (Block 15).
@@ -147,15 +171,21 @@ impl Machine {
                 was_recovering: result.was_recovering,
                 recovered: result.recovered,
                 stream_position,
+                // The client never asks for delta here (Block 19).
+                delta: false,
             }),
         );
         // Initial or recovered publications follow it and move the position
         // once taken.
         let last = result.publications.len().saturating_sub(1);
         for (index, publication) in result.publications.into_iter().enumerate() {
+            if publication.delta {
+                return true;
+            }
             let reply = replied.as_ref().map(|position| (position, index == last));
             self.emit_server_publication(channel, publication, reply);
         }
+        false
     }
 
     /// The server-side subscriptions the next connect asks to recover, from
@@ -222,6 +252,10 @@ impl Machine {
             .get(channel)
             .is_some_and(|sub| sub.subscribed)
         {
+            return;
+        }
+        if publication.delta {
+            self.server_delta_failed();
             return;
         }
         self.emit_server_publication(channel, publication, None);

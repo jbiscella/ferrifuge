@@ -394,7 +394,8 @@ jobs:
       - name: Fuzz each decoder
         run: |
           for target in json::tests::fuzz_decode protobuf::tests::fuzz_decode \
-              adapter::http::tests::fuzz_http_stream_decoder adapter::http::tests::fuzz_sse_decoder; do
+              adapter::http::tests::fuzz_http_stream_decoder adapter::http::tests::fuzz_sse_decoder \
+              fossil::tests::fuzz_apply fossil::tests::fuzz_written_delta_round_trip; do
             cargo bolero test --toolchain nightly "$target" -T 30s
           done
 

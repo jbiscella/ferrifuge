@@ -60,6 +60,16 @@ impl Codec {
         }
     }
 
+    /// The delta, or whole payload, a publication of a subscription with
+    /// delta on carries: with JSON its data is a JSON string, whose value it
+    /// is; `None` when it is not one (Block 19, D7).
+    pub(crate) fn delta_payload(self, data: Vec<u8>) -> Option<Vec<u8>> {
+        match self {
+            Self::Json => json::string_value(&data),
+            Self::Protobuf => Some(data),
+        }
+    }
+
     /// How this encoding's frames travel on a websocket.
     pub(crate) fn frame_type(self) -> FrameType {
         match self {

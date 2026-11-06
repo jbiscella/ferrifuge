@@ -161,6 +161,9 @@ pub struct SubscriptionOptions {
     /// Asks the server for join and leave pushes, on channels that have
     /// them (spec, "ask server to push Join/Leave").
     pub join_leave: bool,
+    /// Asks the server for publications as deltas against the previous one,
+    /// on channels that allow it; the client rebuilds them (Block 19).
+    pub delta: Option<crate::DeltaFormat>,
 }
 
 impl std::fmt::Debug for SubscriptionOptions {
@@ -183,6 +186,7 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("positioned", &self.positioned)
             .field("recoverable", &self.recoverable)
             .field("join_leave", &self.join_leave)
+            .field("delta", &self.delta)
             .finish()
     }
 }
@@ -201,6 +205,7 @@ impl Default for SubscriptionOptions {
             positioned: false,
             recoverable: false,
             join_leave: false,
+            delta: None,
         }
     }
 }
@@ -286,6 +291,13 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn join_leave(mut self, join_leave: bool) -> Self {
         self.join_leave = join_leave;
+        self
+    }
+
+    /// Asks for publications as deltas in `format` (Block 19).
+    #[must_use]
+    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
+        self.delta = Some(format);
         self
     }
 }
@@ -1654,7 +1666,10 @@ impl Machine {
             data: result.data.take(),
         });
         self.subscriptions_connected();
-        self.server_subscriptions_connected(std::mem::take(&mut result.subs));
+        if self.server_subscriptions_connected(std::mem::take(&mut result.subs)) {
+            self.server_delta_failed();
+            return;
+        }
         self.calls_connected();
     }
 
@@ -1727,7 +1742,9 @@ impl Machine {
         // for the same backlog.
         self.backoff_reset_pending = false;
         let pinged = std::mem::take(&mut self.pinged);
-        if code == SLOW && !pinged {
+        // A server-side subscription's broken delta keeps it growing too
+        // (Block 19, D8).
+        if (code == SLOW && !pinged) || code == codes::connecting::DELTA_ERROR {
             self.backoff.undo_reset();
         } else {
             self.backoff.keep_reset();
