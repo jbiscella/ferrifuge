@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–17 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–18 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -1518,7 +1518,7 @@ Feature: Server-side subscriptions
 
 **Dependencies:** Blocks 8, 9, 12, 15.
 
-**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, planned as its own block after this one (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API).
+**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, Block 18 (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API).
 
 **Decided while planning this block** (2026-11-06, through the reviewer the owner delegated such points to; the owner's decisions of 2026-11-04 and 2026-11-05 put them here):
 - **join and leave:** a `join_leave` subscription option, sent as `SubscribeRequest.join_leave`, asks the server for join and leave pushes, delivered, each carrying the `ClientInfo`, as `SubscriptionEvent::Join` and `SubscriptionEvent::Leave`, and as `ServerSubscriptionEvent::Join` and `ServerSubscriptionEvent::Leave` for server-side subscriptions; a push for a subscription that is not subscribed is dropped; under Block 15 these events wait and are withdrawn like publications (spec, "ask server to push Join/Leave"; `client.proto`, `Push.join`, `Push.leave`; centrifuge-js 63ed73e `subscription.ts:1252-1262`, `centrifuge.ts:2556-2593`);
@@ -1917,7 +1917,7 @@ Feature: Client commands
 The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (backoff after 3008), then the validation harness, then centrifuge-js parity, then the batching API. Each becomes a block with its value clause and scenarios when its turn comes.
 
 - **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js). Specified as Block 17.
-- **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome.
+- **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome. Specified as Block 18.
 - **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice. Specified as Block 16.
 
 ## Block 14 — Footprint, performance and fleet behaviour
@@ -2638,3 +2638,238 @@ Feature: Connect data, headers, set_token and set_data
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 18 — Batching API
+
+**Goal:** an application groups its calls and subscriptions into one frame (websocket) or one emulation request (http_stream, sse), and the client sends the subscribe commands of a connect reply the same way, so that a burst of commands costs one write or one HTTP request instead of one each, and never ends a connection that sending them one by one would have kept (owner decision, 2026-11-04, "Planned after Block 13"; order decided 2026-11-06).
+
+**Dependencies:** Blocks 3 (close code 1009), 7 (Protobuf frames), 8 (emulation requests, the HTTP 413 rule), 9 and 10 (subscribe and unsubscribe commands, their reply deadlines), 13 (calls, their phases, the write queue), 15 (in-order handling), 16 (runners and invariants), 17 (`Input` is `#[non_exhaustive]`).
+
+**Out of scope:**
+- automatic batching of every command a step or a burst produces (centrifugal/centrifuge-rust `docs/spec.md` §9.10, decision 11): only the application's batches and the subscribe commands of a connect reply are batched;
+- subscribe commands in the frame of the connect command on websocket open (centrifuge-js 63ed73e `centrifuge.ts:1243-1258`): ferrifuge subscribes once connected (Block 9), and subscribing earlier is optimistic subscription (centrifuge-rust §9.11, phase 3);
+- batching the calls a new connection releases (Block 13) when no batch is open: each still goes in its own frame;
+- a batch delay timer (centrifuge-rust §9.10);
+- publish debouncing (Block 0);
+- emulated transports and Protobuf in the validation runners (Block 16).
+
+**Decisions** (reviewer, 2026-11-06, delegated by the owner; the official spec does not mention batching; the client protocol lets one frame carry several commands, newline-joined in JSON and varint-delimited in Protobuf, and several replies, https://centrifugal.dev/docs/transports/client_protocol, "Batching: many messages, one frame"):
+- **D1 API.** `Client::start_batching()` returns a `#[must_use]` `Batch`, which borrows nothing from the client and is `Send`; `Batch::stop()`, or dropping the `Batch`, stops it (centrifuge-js `startBatching`, `stopBatching`). A guard, so that a forgotten stop cannot outlive its scope; there is no client-level `stop_batching`. Several batches may be open at once, from several tasks: commands are held while any batch is open, and stopping one sends everything held so far, the others staying open. Stopping sends at once, without centrifuge-js's two promise turns (`centrifuge.ts:675-685`), which exist only for its asynchronous subscribe path. Dropping the `Client` while a batch is open disconnects it as Block 13 says. Sans-IO: `Input::StartBatching`, `Input::StopBatching`; no new `Action`.
+- **D2 What is held.** While a batch is open the client holds the application's calls other than `send` (rpc, publish, history, presence, presence stats, client-level and subscription-level), each from when it would be sent, a call released by a new connection included, except a call already waiting for room when the batch opened; and the subscribe and unsubscribe commands that the application's `subscribe()`, `unsubscribe()` and subscription removal cause, built while a batch is open, after a token or data callback answers included. Not held: `send` (centrifuge-js writes it at once, `centrifuge.ts:523`), pong (`:2746`), connect, refresh, sub_refresh, and the subscribe commands a connect reply or a resubscribe backoff starts. A `send` or a pong made during a batch can therefore reach the server before the batch's commands (documented). Diverges from centrifuge-js 63ed73e, which also holds refresh and sub_refresh (both go through `_call`, `centrifuge.ts:1871-1884`): they are timer-driven, and holding them could let a token expire.
+- **D3 Deadlines.** A held subscribe or unsubscribe is handled as if sent when held: its reply deadline runs from then (centrifuge-js `_call` registers the reply timer before `_addCommand`, `centrifuge.ts:1871-1884`, `:2789`), so a batch never stopped ends in "subscribe timeout" (connecting code 3) or an unsubscribe error (connecting code 4), as when the reply never comes; losing the transport or entering `disconnected` drops it, as a sent command is lost (centrifuge-js `_disconnect` empties `_commands`, `:1986`). A held call has no command yet (Block 13: its command is built when sent); its hold counts as waiting for room: if it is not sent within `Config::timeout` of being held, it fails with the timeout error (code 1) and is never sent, and waiting for room after the batch stops does not restart that deadline, so Block 16 I6 keeps its bound of 3 × `Config::timeout`. Diverges from centrifuge-js 63ed73e, whose flush still sends a command whose call timed out. A held call keeps waiting across a lost transport, as a call waiting for room does, and fails with "disconnected" (code 3) when the client enters `disconnected` (Block 13). A batch that stays open across a reconnect holds the commands of the new connection.
+- **D4 Write queue (Block 13).** When a batch stops, its held commands go out in the order they were held. The client's own commands (subscribe, unsubscribe) always go through. Held calls are admitted one by one, in order, behind the calls already waiting for room: a call joins the batch while it fits `Config::write_queue_bytes` with what is unwritten and the calls before it in the batch, the first held call fitting alone when nothing is unwritten; the first call that does not fit and every later one wait for room with their deadline, each sent in its own frame as room frees. A held call is not in the queue of calls waiting for room until its batch stops, so a `send` made during a batch is not delayed by it. A frame counts the encoded size of the calls it carries until `Input::FrameWritten`.
+- **D5 Frame cap.** `Config::batch_frame_bytes`, default 16 KiB, at least 1 or `Client::new` returns an error, bounds every frame of several commands, measured as sent (over an emulated transport, the request body); a batch that would exceed it is split, in order, and a single larger command goes alone. Centrifugo v6.10.1 refuses a websocket message over `websocket.message_size_limit` (65 536 bytes by default) with close code 1009, which ends the client (Block 3), and an emulation request over `max_request_body_size` (65 536 bytes by default) with HTTP 413 (`internal/configtypes/types.go`): without a cap, commands that each fit could end the client together, on every reconnect when they are the subscribe commands of a connect reply. Diverges from centrifuge-js 63ed73e, which has no cap; centrifuge-rust §9.10 caps frames at 15 KB, as centrifuge-csharp. The README tells operators to keep `batch_frame_bytes` below both server limits.
+- **D6 Emulated transports and HTTP 413 (Block 8).** A frame of several commands is one emulation request (centrifuge-js `transport_http_stream.ts`, `transport_sse.ts` `send`: one request per `_transportSendCommands`). The owner's rule (2026-11-04) holds: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome Block 8 lists. The resent requests go at once, in the order of the refused request, without write-queue admission (their calls count as unwritten again), and every deadline keeps running; a command no longer awaited (its call settled or abandoned, its subscription no longer waiting for that reply) is not resent.
+- **D7 Encodings.** As the client protocol and centrifuge-js (`json.ts` `encodeCommands`, `protobuf.codec.ts` `encodeCommands`): JSON commands joined with `\n`, without a trailing newline; Protobuf commands varint-delimited, over websocket only (Block 8). Replies to a batch may come in one frame or several; they are handled as any (Block 15), each call settling when its reply is read (Block 13).
+- **D8 Connect reply.** The subscribe commands a connect reply starts go out as one batch, split by the cap (centrifuge-js `_connectResponse`, `centrifuge.ts:2350-2352`), and are never held by an application's batch.
+- **D9 Validation harness (Block 16).** Both runners gain the operations `start_batching` and stop, and the adapter runner also drops a `Batch`; "healed" also requires every batch to be stopped. New invariant I10, core, after every step: no frame of several commands exceeds `batch_frame_bytes`, and no call made while a batch is open is sent before a batch is stopped. The chaos configuration sets `batch_frame_bytes` to 1 KiB so that batches split. Each new invariant check has a planted fault, as Block 16 requires.
+- **Public API and version.** 18a adds a field to `Config`, which is exhaustive: breaking, version 0.12.0. `Client::start_batching`, `Batch` and the two `Input` variants are additions; no `Action`, `CallTimer` or `SubscriptionTimer` variant is added. 18b, 18c and 18d add no public item.
+- **Fixtures.**
+  - The fake server records the frame each command arrived in, text or binary.
+  - The HTTP proxy (Block 8) can answer HTTP 413, without relaying, to every emulation request whose body exceeds a given size, and records the requests it refused.
+
+`VERIFY:` that Centrifugo v6.10.1 runs every command of one emulation request and answers a body over `max_request_body_size` with 413: checked only in centrifugal/centrifuge `emulation.go` on master (d6b56cb, `HandleReadFrame` over the request's data; `http.StatusRequestEntityTooLarge`), not at the version v6.10.1 pins; the @B 413 scenario confirms it.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Scope | Scenarios |
+|---|---|---|
+| 18a | `start_batching`, `Batch`, what is held, deadlines, write-queue admission, `Config::batch_frame_bytes`, disconnect and lost transport, JSON and Protobuf over websocket; version 0.12.0 | "Calls made while batching go out in one frame when the batch ends", "Subscriptions subscribed while batching send their subscribe commands in one frame", "A batch over Protobuf is one binary frame", "A batch is split at the frame cap", "Held calls are admitted to the write queue one by one", "A call held past the timeout fails and is never sent", "A subscribe held past the timeout reconnects the client", "The client's own commands and send are not held", "Disconnect fails the calls a batch holds", "A held call waits across a lost transport", "Stopping one of two batches sends what is held" |
+| 18b | emulated transports and the 413 resend | "A batch refused with HTTP 413 is resent command by command", "Over an emulated transport only the command refused alone fails" |
+| 18c | the subscribe commands of a connect reply in one batch | "A reconnect sends its subscribe commands in one frame", "The subscribe commands of a connect reply are split at the frame cap", "An open batch does not hold the subscribe commands of a connect reply" |
+| 18d | batching in both runners, I10, planted faults | "Seeded chaos with batching on the core keeps every invariant", "The core runner reports a planted batching fault", "Seeded chaos with batching on the tokio client keeps the invariants" |
+
+Value clause: As an app developer shipping ferrifuge to fleets of devices, I want to group calls and subscriptions into one frame or emulation request, and the client to resubscribe in as few frames as the frame cap allows, so that a burst of commands costs one write or one HTTP request per `batch_frame_bytes` instead of one per command, and a batch never ends the connection or fails a command that would have succeeded alone.
+
+```gherkin
+Feature: Batching
+
+  @D
+  Scenario Outline: Calls made while batching go out in one frame when the batch ends
+    Given a client connected to the fake server
+    When the application starts a batch, calls RPC "a", publishes {"n":1} to channel "news" and requests the history of channel "news"
+    And 200 ms elapse
+    Then the fake server has received no command since the batch started
+    When the batch is <ended>
+    Then the fake server receives one frame carrying the rpc, publish and history commands, in that order
+    And each call returns the fake server's reply
+
+    Examples:
+      | ended   |
+      | stopped |
+      | dropped |
+
+  @D
+  Scenario: Subscriptions subscribed while batching send their subscribe commands in one frame
+    Given a client connected to the fake server, with three subscriptions not subscribed
+    When the application starts a batch and calls subscribe on the three subscriptions
+    And 200 ms elapse
+    Then the fake server has received no command since the batch started
+    When the batch is stopped
+    Then the fake server receives one frame carrying the three subscribe commands, in that order
+    And the three subscriptions reach state "subscribed"
+
+  @D
+  Scenario: A batch over Protobuf is one binary frame
+    Given a client configured with the Protobuf protocol, connected to the fake server
+    When the application starts a batch, calls RPC "a" and RPC "b", and stops the batch
+    Then the fake server receives one binary frame carrying the two rpc commands, varint-delimited, in that order
+    And both calls return the fake server's reply
+
+  @E
+  Scenario Outline: A batch is split at the frame cap
+    Given a connected client with a batch frame cap of 1000 bytes
+    When the application starts a batch, makes calls whose commands encode to <sizes> bytes, and stops the batch
+    Then the client sends frames carrying <frames> calls, in the order the calls were made
+    And no frame carrying several commands exceeds 1000 bytes
+
+    Examples:
+      | sizes                   | frames  |
+      | 300, 300, 300, 300, 300 | 3, 2    |
+      | 300, 1500, 300          | 1, 1, 1 |
+
+  @E
+  Scenario: Held calls are admitted to the write queue one by one
+    Given a connected client with a write queue of 1000 bytes and nothing unwritten
+    When the application starts a batch, makes five calls whose commands encode to 300 bytes each, and stops the batch
+    Then the client sends one frame carrying the first three calls
+    And the client sends nothing more until that frame is reported written
+    And then the fourth and fifth calls are sent, each in its own frame
+
+  @E
+  Scenario: A call held past the timeout fails and is never sent
+    Given a connected client with a timeout of 5 s
+    When the application starts a batch and calls RPC "a"
+    And 5 s elapse
+    Then the call fails with error code 1
+    When the batch is stopped
+    Then the client has sent no frame since the batch started
+
+  @E
+  Scenario: A subscribe held past the timeout reconnects the client
+    Given a connected client with a timeout of 5 s and a subscription not subscribed
+    When the application starts a batch and calls subscribe on the subscription
+    And 5 s elapse
+    Then the client has sent no frame since the batch started
+    And the client emits "connecting" with code 3 and reason "subscribe timeout"
+
+  @E
+  Scenario: The client's own commands and send are not held
+    Given a connected client with a token callback, whose connect reply asked for pongs and whose connection token expires
+    When the application starts a batch
+    And the server sends a ping
+    And the application calls send with {"n":1}
+    And the connection token's refresh time comes and the token callback answers
+    Then the client sends a pong, the send command and a refresh command, each in its own frame, before the batch is stopped
+    And the send call returns
+
+  @E
+  Scenario: Disconnect fails the calls a batch holds
+    Given a connected client
+    When the application starts a batch and calls RPC "a"
+    And disconnect is called
+    Then the call fails with error code 3
+    When connect is called and the client reaches state "connected"
+    And the batch is stopped
+    Then the client has sent no rpc command
+
+  @E
+  Scenario: A held call waits across a lost transport
+    Given a connected client
+    When the application starts a batch and calls RPC "a"
+    And the transport closes
+    Then the call has not failed
+    When the client reaches state "connected" on a new transport
+    And the batch is stopped
+    Then the rpc command is sent on the new transport
+    And no rpc command was sent on the closed transport
+
+  @E
+  Scenario: Stopping one of two batches sends what is held
+    Given a connected client
+    When the application starts batches A and B and calls RPC "a"
+    And batch A is stopped
+    Then the client sends one frame carrying RPC "a"
+    When the application calls RPC "b"
+    Then the client sends no frame
+    When batch B is stopped
+    Then the client sends one frame carrying RPC "b"
+
+  @E
+  Scenario: A batch refused with HTTP 413 is resent command by command
+    Given a client connected over an emulated transport, with a subscription not subscribed
+    And the application started a batch, called RPC "a" and subscribe on the subscription, and stopped the batch
+    When the server refuses the request carrying both commands with HTTP 413
+    Then the call has not failed and the subscription is "subscribing"
+    And the client sends two requests, carrying RPC "a" and then the subscribe command
+    When the server refuses the request carrying RPC "a" with HTTP 413 and answers the subscribe command
+    Then the call fails with error code 10
+    And the subscription reaches state "subscribed"
+    And the transport stays open
+
+  @B
+  Scenario Outline: Over an emulated transport only the command refused alone fails
+    Given a client subscribed to channel "news" over transport "<transport>" through an HTTP proxy answering HTTP 413 to every emulation request over 2000 bytes
+    When the application starts a batch, publishes a 2100-byte JSON string and then {"n":1} to channel "news", and stops the batch
+    Then the HTTP proxy refused one request carrying both publish commands
+    And the first publish fails with error code 10
+    And the second publish succeeds
+    And the subscription receives the publication {"n":1} and no other
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  @D
+  Scenario: A reconnect sends its subscribe commands in one frame
+    Given a client with three subscriptions subscribed, connected to the fake server
+    When the fake server disconnects the client with a reconnect-advised code
+    Then after the next connect reply the fake server receives one frame carrying the three subscribe commands
+    And the three subscriptions reach state "subscribed"
+
+  @E
+  Scenario: The subscribe commands of a connect reply are split at the frame cap
+    Given a client with a batch frame cap of 1000 bytes and five subscriptions whose subscribe commands encode to 300 bytes each
+    When connect is called and the server answers the connect command
+    Then the client sends two frames, carrying three and then two subscribe commands
+
+  @E
+  Scenario: An open batch does not hold the subscribe commands of a connect reply
+    Given a client with a subscription in state "subscribing"
+    And the application has started a batch
+    When connect is called and the server answers the connect command
+    Then the client sends the subscribe command while the batch is open
+
+  @P
+  Scenario: Seeded chaos with batching on the core keeps every invariant
+    Given the core runner with the chaos configuration, a batch frame cap of 1 KiB, client-side and server-side subscriptions to recoverable channels and batching operations
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariants I1 to I10
+    And the run counted batches stopped, frames of several commands, split batches and held calls that timed out, none of them 0
+
+  @P
+  Scenario Outline: The core runner reports a planted batching fault
+    Given the core runner with batching operations, with <fault> planted
+    When seeds 0 to 299 run
+    Then the runner reports a violation of I10, naming the first seed that shows it and the operations up to it
+
+    Examples:
+      | fault                                                                  |
+      | two frames of several commands merged by the tap past the frame cap    |
+      | a batch stop reported to the checker one step after the client handled it |
+
+  @P
+  Scenario: Seeded chaos with batching on the tokio client keeps the invariants
+    Given the adapter runner with the chaos configuration, a batch frame cap of 1 KiB, a tokio client, the fake server and batching operations
+    When seeds 0 to 19 each run 30 random operations with faults
+    Then no seed violates invariants I1, I2, I3, I5, I6 or I8 as the adapter checks them, and each reaches quiescence within 10 s
+    And the run counted batches stopped and batches dropped, none of them 0
+```
+
+**Exceptions introduced:** three divergences from centrifuge-js 63ed73e, each recorded in the decisions above:
+- refresh and sub_refresh are not held (D2);
+- a held call that times out is never sent (D3);
+- frames of several commands are capped by `Config::batch_frame_bytes` (D5).
