@@ -65,11 +65,11 @@ Available now:
   `Message` events;
 - a bound on the bytes of calls waiting to be written
   (`Config::write_queue_bytes`);
-- join and leave events of the clients of a channel.
+- join and leave events of the clients of a channel;
+- a seeded chaos harness checking the client's invariants (Block 16).
 
-In progress: a seeded chaos harness checking the client's invariants
-(Block 16). Planned next, in this order: connect data and headers,
-`setToken` and `setData`; batching several commands in one frame.
+Planned next, in this order: connect data and headers, `setToken` and
+`setData`; batching several commands in one frame.
 
 ## Usage
 
@@ -565,6 +565,17 @@ cargo test --test chaos                                     # seeds 0-299, runs 
 cargo test --release --test chaos seeded_chaos_long_run -- --ignored   # 10 000 seeds from a random start
 FERRIFUGE_CHAOS_SEED=<seed> FERRIFUGE_CHAOS_OPS=<ops> cargo test --release --test chaos seeded_chaos_long_run -- --ignored
 FERRIFUGE_CHAOS_SEED=<seed> cargo test --test chaos trace -- --ignored --nocapture   # a seed's whole trace
+```
+
+`tests/chaos_adapter.rs` runs the same kind of operations on the tokio
+client against the fake server, in real time, checking what the adapter
+adds: the driver's tasks, hand-off delivery, a second `events()` call and
+cancelled reads. Its seeds fix the operations, not their timing, so a
+failure is replayed rather than always reproduced:
+
+```sh
+cargo test --test chaos_adapter                             # seeds 0-19, runs with the tests
+cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored   # 500 seeds
 ```
 
 ### Interop, fuzzing and semver

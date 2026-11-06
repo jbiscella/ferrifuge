@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The jobs pull requests skip (perf, wall-clock, fuzz) also run nightly.
+  # The jobs pull requests skip (chaos, chaos-adapter, perf, wall-clock,
+  # fuzz) also run nightly.
   schedule:
     - cron: "23 2 * * *"
   # Runs every job on any branch, on demand.
