@@ -862,8 +862,9 @@ const MESSAGE_TOO_BIG: u32 = 1009;
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
-/// The connect data callback's state (Block 17).
-#[derive(Debug, Default)]
+/// The connect data callback's state (Block 17). Its `Debug` output shows
+/// the data as its length.
+#[derive(Default)]
 struct ConnectData {
     /// Whether the owner answers [`Action::FetchConnectData`].
     source: bool,
@@ -871,6 +872,33 @@ struct ConnectData {
     fetch: Option<FetchId>,
     /// The data the callback gave the current attempt.
     attempt: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for ConnectData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectData")
+            .field("source", &self.source)
+            .field("fetch", &self.fetch)
+            .field(
+                "attempt",
+                &self
+                    .attempt
+                    .as_ref()
+                    .map(|data| format!("<{} bytes>", data.len())),
+            )
+            .finish()
+    }
+}
+
+/// Emulated headers, by name. Their `Debug` output shows the names only:
+/// a value may be a secret.
+#[derive(Default)]
+struct EmulatedHeaders(BTreeMap<String, String>);
+
+impl std::fmt::Debug for EmulatedHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
 }
 
 /// Disconnect code of a client the server found too slow (Centrifugo
@@ -923,7 +951,7 @@ pub struct Machine {
     /// The connect data callback's state (Block 17).
     connect_data: ConnectData,
     /// Emulated headers sent with every connect command (Block 17).
-    emulated_headers: BTreeMap<String, String>,
+    emulated_headers: EmulatedHeaders,
     actions: Vec<Action>,
 }
 
@@ -1006,7 +1034,7 @@ impl Machine {
     /// its proxies (Block 17).
     #[must_use]
     pub fn with_emulated_headers(mut self, headers: BTreeMap<String, String>) -> Self {
-        self.emulated_headers = headers;
+        self.emulated_headers = EmulatedHeaders(headers);
         self
     }
 
@@ -1039,7 +1067,7 @@ impl Machine {
             pinged: false,
             pings: None,
             connect_data: ConnectData::default(),
-            emulated_headers: BTreeMap::new(),
+            emulated_headers: EmulatedHeaders::default(),
             actions: Vec::new(),
         }
     }
@@ -1283,7 +1311,7 @@ impl Machine {
                 } else {
                     self.config.data.clone()
                 },
-                headers: self.emulated_headers.clone(),
+                headers: self.emulated_headers.0.clone(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
                 subs: self.server_subscriptions_to_recover(),
@@ -2976,6 +3004,33 @@ mod tests {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");
+    }
+
+    #[test]
+    fn debug_hides_emulated_header_values_and_connect_data() {
+        let mut machine = machine()
+            .with_data_source()
+            .with_emulated_headers([("Authorization".to_owned(), "e-secret".to_owned())].into());
+        let fetch = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchConnectData(fetch) => Some(*fetch),
+                _ => None,
+            })
+            .expect("a data fetch");
+        machine.handle(Input::ConnectDataFetched {
+            fetch,
+            result: Ok(b"d-secret".to_vec()),
+        });
+
+        let debug = format!("{machine:?}");
+
+        assert!(debug.contains("Authorization"), "{debug}");
+        assert!(
+            !debug.contains("e-secret") && !debug.contains("d-secret"),
+            "{debug}"
+        );
     }
 
     // Block 17: a disconnect while the connect data callback runs cancels
