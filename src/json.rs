@@ -136,6 +136,8 @@ struct JsonCommand<'a> {
     presence: Option<JsonChannelRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     presence_stats: Option<JsonChannelRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send: Option<JsonSendRequest<'a>>,
 }
 
 #[derive(Serialize)]
@@ -234,6 +236,11 @@ struct JsonStreamPosition<'a> {
 #[derive(Serialize)]
 struct JsonChannelRequest<'a> {
     channel: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonSendRequest<'a> {
+    data: JsonData<'a>,
 }
 
 /// Application data, embedded as the JSON it is. Bytes that are not JSON
@@ -353,6 +360,11 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
             }
             Method::PresenceStats(ChannelRequest { channel }) => {
                 json.presence_stats = Some(JsonChannelRequest { channel });
+            }
+            Method::Send(data) => {
+                json.send = Some(JsonSendRequest {
+                    data: JsonData::new(data),
+                });
             }
             // A pong is the empty command: no request field.
             Method::Pong => {}
@@ -628,6 +640,13 @@ struct JsonPush {
     unsubscribe: Option<JsonDisconnect>,
     // `Subscribe` has a subset of the fields of `SubscribeResult`.
     subscribe: Option<JsonSubscribeResult>,
+    message: Option<JsonMessage>,
+}
+
+#[derive(Deserialize)]
+struct JsonMessage {
+    #[serde(default, deserialize_with = "present")]
+    data: Option<Box<RawValue>>,
 }
 
 impl From<JsonPush> for Push {
@@ -651,6 +670,8 @@ impl From<JsonPush> for Push {
                 code,
                 reason,
             }
+        } else if let Some(message) = push.message {
+            Self::Message(message.data.as_deref().map(raw_bytes).unwrap_or_default())
         } else {
             Self::Unsupported
         }
@@ -881,6 +902,24 @@ mod tests {
                 num_clients: 2,
                 num_users: 1
             })
+        );
+    }
+
+    #[test]
+    fn encodes_send_without_an_id_and_decodes_a_message_push_exactly() {
+        let frame = encode(&[Command {
+            id: 0,
+            method: Method::Send(br#"{"note":"x"}"#.to_vec()),
+        }]);
+        let replies = decode(br#"{"push":{"message":{"data":{"b": 1.0,  "a":2}}}}"#).unwrap();
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"send":{"data":{"note":"x"}}}"#
+        );
+        assert_eq!(
+            replies[0].result,
+            ReplyResult::Push(Push::Message(br#"{"b": 1.0,  "a":2}"#.to_vec()))
         );
     }
 
