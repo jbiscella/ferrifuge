@@ -20,8 +20,8 @@ use tokio::time::Sleep;
 use super::http::HttpTransport;
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{
-    Action, CallId, FetchId, FrameType, Input, Machine, SubscriptionId, SubscriptionTimer, Timer,
-    TransportId, TransportKind,
+    Action, CallId, CallTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
+    SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use crate::{
     CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
@@ -646,7 +646,7 @@ struct Driver {
     stale_fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
     subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer)>,
-    call_timers: KeyedTimers<CallId>,
+    call_timers: KeyedTimers<(CallId, CallTimer)>,
     /// Subscription data and token callbacks running, each yielding the
     /// input answering it; an aborted one yields `None`.
     subscription_fetches: FuturesUnordered<SubscriptionFetching>,
@@ -776,7 +776,7 @@ impl Driver {
                 (id, timer) = self.subscription_timers.fired() => {
                     Input::SubscriptionTimerFired(id, timer)
                 }
-                id = self.call_timers.fired() => Input::CallTimerFired(id),
+                (id, timer) = self.call_timers.fired() => Input::CallTimerFired(id, timer),
                 Some(fetched) = self.subscription_fetches.next(),
                     if !self.subscription_fetches.is_empty() =>
                 {
@@ -879,8 +879,8 @@ impl Driver {
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.subscription_timers.cancel((id, timer));
             }
-            Action::SetCallTimer(id, delay) => self.call_timers.set(id, delay),
-            Action::CancelCallTimer(id) => self.call_timers.cancel(id),
+            Action::SetCallTimer(id, timer, delay) => self.call_timers.set((id, timer), delay),
+            Action::CancelCallTimer(id, timer) => self.call_timers.cancel((id, timer)),
             action @ (Action::FetchSubscriptionData { .. }
             | Action::FetchSubscriptionToken { .. }
             | Action::FetchSubscriptionState { .. }

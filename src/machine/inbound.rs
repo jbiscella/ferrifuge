@@ -243,6 +243,14 @@ impl Machine {
                 .any(|held| matches!(held.item, Item::Closed { .. }))
     }
 
+    /// Whether the server's close of the current transport is read and
+    /// waits behind earlier messages: nothing sent on it now would arrive.
+    pub(super) fn transport_closing(&self) -> bool {
+        self.inbound.held.iter().any(|held| {
+            Some(held.transport) == self.transport && matches!(held.item, Item::Closed { .. })
+        })
+    }
+
     /// Whether a message of `transport` is held.
     pub(super) fn holds_messages_of(&self, transport: TransportId) -> bool {
         self.inbound
