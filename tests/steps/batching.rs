@@ -1140,3 +1140,140 @@ async fn receives_only(world: &mut ClientWorld, data: String) {
     .await;
     assert!(more.is_err(), "another publication");
 }
+
+// 18c: the subscribe commands of a connect reply in one batch.
+
+#[given("a client with three subscriptions subscribed, connected to the fake server")]
+async fn three_subscribed_on_the_fake_server(world: &mut ClientWorld) {
+    super::connection::a_connected_client(world).await;
+    for channel in ["a", "b", "c"] {
+        let subscription = world
+            .client()
+            .new_subscription(channel)
+            .expect("a new channel");
+        subscription.subscribe();
+        world.named_subscriptions.push(subscription);
+    }
+    three_subscribed(world).await;
+    world.batching.received_at_start = world.fake().received().len();
+}
+
+#[then(
+    "after the next connect reply the fake server receives one frame carrying the three subscribe commands"
+)]
+async fn resubscribes_in_one_frame(world: &mut ClientWorld) {
+    let start = world.batching.received_at_start;
+    let subscribes = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let subscribes: Vec<(Value, usize)> = world.fake().received_with_frames()[start..]
+                .iter()
+                .filter(|(command, _)| command["subscribe"].is_object())
+                .cloned()
+                .collect();
+            if subscribes.len() >= 3 {
+                return subscribes;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("three subscribe commands");
+    assert_eq!(subscribes.len(), 3, "{subscribes:?}");
+    assert!(
+        subscribes
+            .iter()
+            .all(|(_, frame)| *frame == subscribes[0].1),
+        "{subscribes:?}"
+    );
+}
+
+/// A subscription whose subscribe command encodes to `size` bytes once
+/// numbered `id`.
+fn subscription_of_size(run: &mut BatchRun, id: u64, size: usize) {
+    let base = json!({"id": id, "subscribe": {"channel": ""}})
+        .to_string()
+        .len();
+    let channel = "c".repeat(size.checked_sub(base).expect("a larger size"));
+    let sub = run
+        .machine
+        .add_subscription(
+            format!("{id}{}", &channel[1..]),
+            SubscriptionOptions::default(),
+        )
+        .expect("a new channel");
+    run.handle(Input::Subscribe(sub));
+    run.subscriptions.push(sub);
+}
+
+#[given(
+    regex = r"^a client with a batch frame cap of (\d+) bytes and five subscriptions whose subscribe commands encode to (\d+) bytes each$"
+)]
+fn five_subscriptions_of_size(world: &mut ClientWorld, cap: usize, size: usize) {
+    let mut run = BatchRun::new(
+        Config {
+            batch_frame_bytes: cap,
+            ..Config::default()
+        },
+        false,
+    );
+    // The connect command is 1, the subscribe commands 2 to 6.
+    for id in 2..7 {
+        subscription_of_size(&mut run, id, size);
+    }
+    world.batching.run = Some(run);
+}
+
+#[when("connect is called and the server answers the connect command")]
+fn connect_and_answer(world: &mut ClientWorld) {
+    let run = run(world);
+    run.handle(Input::Connect);
+    run.mark = run.actions.len();
+    run.connect(&json!({"client": "c"}));
+}
+
+#[then("the client sends two frames, carrying three and then two subscribe commands")]
+fn two_frames_of_subscribes(world: &mut ClientWorld) {
+    let run = run(world);
+    let counts: Vec<usize> = run
+        .frames()
+        .iter()
+        .map(|(_, commands)| {
+            commands
+                .iter()
+                .filter(|command| command["subscribe"].is_object())
+                .count()
+        })
+        .filter(|count| *count > 0)
+        .collect();
+    assert_eq!(counts, [3, 2], "{:?}", run.frames());
+}
+
+#[given(r#"a client with a subscription in state "subscribing""#)]
+fn a_subscribing_subscription(world: &mut ClientWorld) {
+    let mut run = BatchRun::new(Config::default(), false);
+    let id = run
+        .machine
+        .add_subscription("news".to_owned(), SubscriptionOptions::default())
+        .expect("a new channel");
+    run.handle(Input::Subscribe(id));
+    run.subscriptions.push(id);
+    world.batching.run = Some(run);
+}
+
+#[given("the application has started a batch")]
+fn the_application_has_started_a_batch(world: &mut ClientWorld) {
+    run(world).handle(Input::StartBatching);
+}
+
+#[then("the client sends the subscribe command while the batch is open")]
+fn subscribe_sent_while_open(world: &mut ClientWorld) {
+    let run = run(world);
+    assert!(
+        run.frames()
+            .iter()
+            .flat_map(|(_, commands)| commands)
+            .any(|command| command["subscribe"].is_object()),
+        "{:?}",
+        run.frames()
+    );
+}

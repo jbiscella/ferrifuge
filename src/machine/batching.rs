@@ -18,12 +18,24 @@ pub(super) enum HeldCommand {
     Command(Command),
 }
 
+/// A frame of several commands being built.
+#[derive(Default)]
+struct Frame {
+    commands: Vec<Command>,
+    /// Bytes of the calls among them, not yet counted against the write
+    /// queue: those of the frames sent before it are.
+    calls: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Batching {
     /// Batches open.
     open: usize,
     /// What they hold, in order.
     held: Vec<HeldCommand>,
+    /// The subscribe commands a connect reply starts, collected to go out as
+    /// one batch.
+    connect_reply: Option<Vec<Command>>,
     /// The input being handled is the application's `unsubscribe()` or
     /// removal of a subscription, whose unsubscribe command a batch holds.
     pub(super) application_unsubscribe: bool,
@@ -44,6 +56,8 @@ impl Machine {
     pub(super) fn send_or_hold(&mut self, transport: TransportId, held: bool, command: Command) {
         if held {
             self.hold_in_batch(HeldCommand::Command(command));
+        } else if let Some(collected) = &mut self.batching.connect_reply {
+            collected.push(command);
         } else {
             self.send(transport, command);
         }
@@ -74,10 +88,7 @@ impl Machine {
     /// command alone (Block 18, D4, D5).
     fn send_held(&mut self) {
         let held = std::mem::take(&mut self.batching.held);
-        let mut frame: Vec<Command> = Vec::new();
-        // Bytes of the calls in `frame`, not yet counted against the write
-        // queue: those of the frames sent before it are.
-        let mut frame_calls = 0;
+        let mut frame = Frame::default();
         for command in held {
             let (command, calls) = match command {
                 HeldCommand::Call(id) => {
@@ -85,36 +96,57 @@ impl Machine {
                         // Settled or abandoned meanwhile.
                         continue;
                     }
-                    match self.release_held(id, frame_calls) {
+                    match self.release_held(id, frame.calls) {
                         Some(released) => released,
                         None => continue,
                     }
                 }
                 HeldCommand::Command(command) => (command, 0),
             };
-            if !frame.is_empty() {
-                frame.push(command.clone());
-                let fits = self.frame_of(&frame).len() <= self.config.batch_frame_bytes.max(1);
-                frame.pop();
-                if !fits {
-                    self.send_batch_frame(&std::mem::take(&mut frame), frame_calls);
-                    frame_calls = 0;
-                }
-            }
-            frame.push(command);
-            frame_calls += calls;
+            self.add_to_frame(&mut frame, command, calls);
         }
-        if !frame.is_empty() {
-            self.send_batch_frame(&frame, frame_calls);
-        }
+        self.send_frame(frame);
     }
 
-    fn send_batch_frame(&mut self, commands: &[Command], calls: usize) {
+    /// While the subscriptions subscribe after a connect reply, their
+    /// subscribe commands are collected, then sent as one batch, split at
+    /// the frame cap (Block 18, D8; centrifuge-js `_connectResponse`).
+    pub(super) fn collect_connect_subscribes(&mut self) {
+        self.batching.connect_reply = Some(Vec::new());
+    }
+
+    pub(super) fn send_connect_subscribes(&mut self) {
+        let mut frame = Frame::default();
+        for command in self.batching.connect_reply.take().unwrap_or_default() {
+            self.add_to_frame(&mut frame, command, 0);
+        }
+        self.send_frame(frame);
+    }
+
+    /// Adds `command`, carrying `calls` bytes of calls, to `frame`, sending
+    /// the frame first when the command would take it past the cap.
+    fn add_to_frame(&mut self, frame: &mut Frame, command: Command, calls: usize) {
+        if !frame.commands.is_empty() {
+            frame.commands.push(command.clone());
+            let fits = self.frame_of(&frame.commands).len() <= self.config.batch_frame_bytes.max(1);
+            frame.commands.pop();
+            if !fits {
+                self.send_frame(std::mem::take(frame));
+            }
+        }
+        frame.commands.push(command);
+        frame.calls += calls;
+    }
+
+    fn send_frame(&mut self, frame: Frame) {
         let Some(transport) = self.transport else {
             return;
         };
-        let (frame, _) = self.send_commands(transport, commands);
-        self.batch_frame_sent(frame, calls);
+        if frame.commands.is_empty() {
+            return;
+        }
+        let (sent, _) = self.send_commands(transport, &frame.commands);
+        self.batch_frame_sent(sent, frame.calls);
     }
 }
 

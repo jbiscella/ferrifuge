@@ -928,12 +928,14 @@ impl Machine {
             })
             .map(|(id, _)| *id)
             .collect();
+        self.collect_connect_subscribes();
         for id in subscribing {
             if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
                 sub.started_by = StartedBy::Client;
             }
             self.start_subscribe(id);
         }
+        self.send_connect_subscribes();
     }
 
     /// The connection is torn down: commands in flight will get no reply,
@@ -2054,11 +2056,13 @@ mod tests {
         );
     }
 
-    // A request the server refuses as too large (HTTP 413) concerns its
-    // one command only, so ending that command is right (owner condition on
-    // the 413 rule, 2026-11-04).
+    // Block 18, D8: the subscribe commands of a connect reply go as one
+    // batch, one emulation request; a request of several commands refused
+    // with HTTP 413 is resent command by command (18b), so that only a
+    // command refused alone ends (owner condition on the 413 rule,
+    // 2026-11-04).
     #[test]
-    fn every_emulation_request_carries_one_command() {
+    fn the_subscribe_commands_of_a_connect_reply_go_in_one_emulation_request() {
         let mut machine = Machine::new(Config::default())
             .with_transports(vec![TransportKind::HttpStream])
             .unwrap();
@@ -2083,16 +2087,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(requests.len(), 3, "{connected:?}");
-        for request in requests {
-            let frame = crate::json::emulation_frame(request).expect("an emulation request");
-            assert_eq!(
-                crate::codec::Codec::Json.command_ids(&frame).len(),
-                1,
-                "{}",
-                String::from_utf8_lossy(&frame)
-            );
-        }
+        assert_eq!(requests.len(), 1, "{connected:?}");
+        let frame = crate::json::emulation_frame(requests[0]).expect("an emulation request");
+        assert_eq!(
+            crate::codec::Codec::Json.command_ids(&frame).len(),
+            3,
+            "{}",
+            String::from_utf8_lossy(&frame)
+        );
     }
 
     // Over http_stream and sse the commands travel inside an emulation
