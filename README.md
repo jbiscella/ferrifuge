@@ -67,9 +67,9 @@ Available now:
   (`Config::write_queue_bytes`);
 - join and leave events of the clients of a channel.
 
-Planned next, in this order: a seeded chaos harness checking delivery
-invariants; connect data and headers, `setToken` and `setData`; batching
-several commands in one frame.
+In progress: a seeded chaos harness checking the client's invariants
+(Block 16). Planned next, in this order: connect data and headers,
+`setToken` and `setData`; batching several commands in one frame.
 
 ## Usage
 
@@ -550,6 +550,23 @@ version of `gungraun` in `Cargo.lock`
 (`cargo install gungraun-runner --version <version>`). Under
 `cargo test --all-targets` both are skipped.
 
+### Seeded chaos
+
+`tests/chaos.rs` (Block 16) drives the sans-IO core through random
+operations against a simulated server, on a simulated clock, and checks
+the client's invariants after every step: legal state changes, at most one
+transport, liveness once faults stop, cleanup after `disconnect()`, calls
+that settle, exactly-once delivery on recoverable channels, and a bounded
+read-ahead. A seed fixes every choice, so a failure prints the command that
+reruns it:
+
+```sh
+cargo test --test chaos                                     # seeds 0-299, runs with the tests
+cargo test --release --test chaos seeded_chaos_long_run -- --ignored   # 10 000 seeds from a random start
+FERRIFUGE_CHAOS_SEED=<seed> FERRIFUGE_CHAOS_OPS=<ops> cargo test --release --test chaos seeded_chaos_long_run -- --ignored
+FERRIFUGE_CHAOS_SEED=<seed> cargo test --test chaos trace -- --ignored --nocapture   # a seed's whole trace
+```
+
 ### Interop, fuzzing and semver
 
 ```sh
@@ -572,12 +589,11 @@ features, rustdoc, the tests with a 70% line-coverage floor, an MSRV build
 and cargo-deny. It also builds and tests with the aws-lc-rs and fips
 providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
-build. It runs the unit tests and the scenarios that need no server on
-Windows and macOS, the interop test, each fuzz target for 30 s (10 min
-weekly) and the semver check. To save Actions minutes, the perf,
-wall-clock, Windows/macOS and fuzz jobs run on merges to `main` and on
-demand (`workflow_dispatch`), not on every pull request push. cargo-deny
-also runs daily.
+build. It runs the unit tests, the scenarios that need no server and the
+chaos seeds on Windows and macOS, the interop test, each fuzz target for
+30 s (10 min nightly) and the semver check. The perf, wall-clock, fuzz and long chaos jobs
+run on merges to `main`, nightly and on demand (`workflow_dispatch`), not
+on pull requests. cargo-deny also runs daily.
 
 ## License
 
