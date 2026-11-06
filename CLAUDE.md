@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–18 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–19 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -2874,3 +2874,201 @@ Feature: Batching
 - refresh and sub_refresh are not held (D2);
 - a held call that times out is never sent (D3);
 - frames of several commands are capped by `Config::batch_frame_bytes` (D5).
+
+---
+
+## Block 19 — Fossil delta compression
+
+**Goal:** a subscription can ask the server to send each publication as a Fossil delta against the previous one, and the client rebuilds every publication exactly, so that channels whose payloads change a little at a time cost a fraction of their bandwidth; a broken delta never reaches the application and never stops the client (owner decisions, 2026-11-06: item 5 of the parity analysis, Q5).
+
+**Dependencies:** Blocks 2 (reconnect backoff), 5 (5c codec seam), 9 (subscriptions, publication bytes), 10 (resubscribe backoff), 11 (recovery, state invalidation), 12 (server-side subscriptions), 14 (jitter window, fuzz targets), 15 (delivery, withdrawal, read-ahead, backoff after 3008), 16 (validation runners), and Block 0's components rule.
+
+**Out of scope:**
+- encoding deltas: the client never sends one (owner decision);
+- delta for server-side subscriptions: the client never asks for it in `ConnectRequest.subs` (centrifuge-js 63ed73e has no server-side delta either), so a delta publication there is a protocol fault (D8);
+- a tag filter together with delta: tag filters are not implemented yet (parity item 6); when they are, a subscription with both is rejected when built (`client.proto`, `SubscribeRequest.tf`: "disables delta compression"; centrifuge-js `subscription.ts:368-370`);
+- delta statistics (centrifuge-js `deltaStats()`): with `statistics()`, parity item 8;
+- a configurable inbound message limit (parity item 12);
+- map and shared-poll subscriptions and their per-key delta chains (Block 0).
+
+**Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Component.** The decoder is written from scratch (owner decision, item 5). No crate meets Block 0's definition of a maintained component: fossil-delta 0.2.0 has had no release or commit since 2023-01-14; heroforge-core has no public repository; libfossil-rs is AGPL-3.0; delta-compression, xpatch and gdelta implement other formats; centrifuge-client-core 0.1.0 is excluded, as the sans-IO state machine behind centrifuge-client, which Block 0's first row does not reuse, and whose source the clean-room rule closes. The decoder is implemented from the Fossil documentation ("Fossil Delta Format", fossil-scm.org, read 2026-11-06) and cross-checked against centrifuge-js 63ed73e `src/fossil.ts`; no Rust crate's code is read or copied. As Block 0 requires of in-house components, it has a cargo-bolero target, run in ci.yml's `fuzz` loop and the fuzz.yml matrix (Block 14e), whose oracle round-trips the test-only writer's deltas (D9) and checks that any input either fails or builds a target within the limit; explicit bounds (D6); and no unsafe code. Only apply is implemented.
+- **D2 Format.** A delta is a header (the target size, then `\n`), segments (a copy `count@offset,` of bytes of the base, or an insert `count:` followed by that many bytes of the delta), and a trailer (a checksum, then `;`), the trailer ending the delta. Integers are base-64 digits of the alphabet `0-9A-Z_a-z~`, most significant first: the document says both "MSB first" and least significant first, and its example (`1Xb` = 6246) settles MSB first, as centrifuge-js reads them. The checksum is the sum, modulo 2^32, of the target read as 32-bit big-endian words, the last zero-padded: centrifuge-js (`fossil.ts`, `checksum`), centrifugal/fdelta 9e22462 (`checksum.go`, the encoder Centrifugo uses) and the five vectors Fossil itself produced (fdelta `testdata/fossil-vectors/`) agree, against the document's "modulo 2^32-1", which four of the five vectors fail. A copy of count 0 copies nothing, as centrifuge-js and fdelta do; the document says it copies to the end of the base (recorded divergence; no vector has one).
+- **D3 Failures.** A delta fails when: the header is not a number followed by `\n`; a segment is neither a copy nor an insert; a copy is not followed by `,`; a copy reads past the end of the base; an insert runs past the end of the delta; the segments produce more or fewer bytes than the header declares; the checksum differs; the trailer is missing or bytes follow it; a number has no digit, or a value above 2^32 − 1 (the document: "the format currently handles only 32 bit integers"); a byte outside the alphabet appears where a digit is expected, high-bit bytes included. centrifuge-js and fdelta accept some of these (empty numbers read as 0, values wrap, centrifuge-js masks high-bit bytes and ignores bytes after the trailer); neither encoder writes them, so being stricter rejects no delta Centrifugo sends. Offsets, counts and totals are computed without overflow.
+- **D4 Negotiation.** `SubscriptionOptions::delta: Option<DeltaFormat>`, set with `SubscriptionBuilder::delta`; `DeltaFormat` is `#[non_exhaustive]` with one variant, `Fossil`, the only value `client.proto` supports. It is sent as `SubscribeRequest.delta = "fossil"` with every subscribe and resubscribe (centrifuge-js `subscription.ts:990`). Each subscribe reply's `SubscribeResult.delta` says whether delta is on for that subscription until its next subscribe (centrifuge-js `:567-571`); the `subscribed` event reports it in a new `Subscribed::delta` field. The wire model gains the `Publication.delta` flag, decoded by both codecs.
+- **D5 Base and order.** A delta applies to the data of the previous publication of the subscription (`client.proto`, `Publication.delta`: "against the data of the previous publication in this subscription"), live or carried by a subscribe reply, in the order Block 15 handles them. The base is cleared at each subscribe and on state invalidation (unsubscribe code 2502, disconnect code 3014, Block 11): a delta with no base fails. centrifuge-js keeps its base across resubscribes and clears it only on state invalidation (`subscription.ts:495-518`) and on error 112 with getState (`:1025-1033`); `client.proto`'s "in this subscription" outranks it, and Centrifugo v6.10.1 sends the first publication after each subscribe whole, recovered or live (centrifuge 7ac037196c95, pinned by v6.10.1: `client.go:5436-5446`, `makeRecoveredPubsDeltaFossil`, and the live write path from `:5761`). A delta publication on a subscription whose last subscribe reply did not turn delta on fails as well, with or without the delta option (centrifuge-js delivers the delta bytes as the payload, `subscription.ts:1119`). Delta checks apply after routing: a publication no subscribed subscription takes (Block 9, Block 12) is dropped as today, unchecked.
+- **D6 Bounds.** Every D3 check but the checksum is made before the target is allocated, and the checksum after it is built: a 20-byte delta cannot make the client allocate 64 MiB. A target larger than the inbound message limit fails; the limit becomes one core constant, 64 MiB, used by both adapters (today `src/adapter/transport.rs:303` and `src/adapter/http.rs:27`) and by the decoder. So does a message whose decoded publications together exceed that limit, since the same publications sent whole would not fit one message either; such a recovery fails on every resubscribe until history no longer holds it, as a recovery reply over 64 MiB does without delta (documented). The Block 15 read-ahead keeps counting the bytes read; decoded data is held only for the message being handled (Block 15, "one message at a time"), and each delta subscription holds one base of at most the limit.
+- **D7 Encodings.** With Protobuf, `Publication.data` is the delta or the whole payload. With JSON, on a subscription with delta on, `data` is a JSON string whatever the publication (`client.proto`, `Publication.data`): its value, unescaped as JSON, gives UTF-8 bytes that are the delta, or the whole payload, and the payload delivered is that value, so the application gets the JSON text it would get without delta, byte for byte (centrifuge-js `json.ts`, `applyDeltaIfNeeded`). A `data` that is not a JSON string there fails. The decoded payload is not validated as JSON: the checksum binds it to the server's payload. The unwrapping goes through `Codec` (Block 5c), after routing, since only the subscription knows whether delta is on.
+- **D8 Failure outcomes** (owner decision Q5).
+  - Client-side subscription: an `error` event of the new kind `ErrorKind::Delta`, code 15 "delta error", then the subscription resubscribes: it moves to `subscribing` with the new code 2 "delta error", sends an unsubscribe command, and subscribes again after the resubscribe backoff (Block 10), once that unsubscribe is settled (Block 9). Its position stays at the last publication taken, so on a recoverable channel the publication that failed, and those after it, are recovered, the first of them whole (D5); publications not yet taken are withdrawn (Block 15 gains this reason), recovered ones of the same reply included. On a channel without recovery they are lost, as on any resubscribe.
+  - Server-side subscription: a delta publication there is a protocol fault (out of scope above); the client emits an `error` event of kind `Delta` and reconnects with the new connecting code 5 "delta error", after the reconnect backoff (Block 2) and the Block 14 jitter window, as for a lost transport; the next connect recovers its server-side subscriptions from their last positions taken (Block 12).
+  - Backoff: a subscribe ended by a delta failure does not reset the resubscribe attempt counter, and a connection ended by code 5 does not reset the reconnect attempt counter, as for 3008 (Block 15, "Backoff after 3008"): a server that breaks every delta sees each client's retries spread to `max_resubscribe_delay` and `max_reconnect_delay`, not a fleet resubscribing every second.
+  - The new codes are not in centrifuge-js 63ed73e, whose code tables stop at error 14, connecting 4 and subscribing 1 (`codes.ts`), and which stops the client on a delta failure instead (`_dispatchFailed`, `centrifuge.ts:1820-1823`: disconnected code 2, no reconnect); Q5 decides otherwise.
+- **D9 Validation harness (Block 16).** Both runners gain subscriptions with delta and a fault that corrupts one delta; invariant I8 (exactly once on recoverable channels) must hold across the resubscribes it causes. New invariant I11, payload integrity: every publication delivered carries exactly the payload published, checked in both runners, with a planted fault (the tap flips one byte of a delivered payload). The fake server and the simulated server build their deltas with a test-only writer of the format (literal inserts and copies of explicit ranges, with their checksum); the decoder's unit tests use the five Fossil-produced vectors of centrifugal/fdelta (`testdata/fossil-vectors/`, BSD-2-Clause, its notice kept beside them).
+- **D10 Public API and version.** All additions: `SubscriptionOptions` and `Subscribed` are `#[non_exhaustive]`, `ErrorKind` too (Block 17), the codes are new constants, `DeltaFormat` and `SubscriptionBuilder::delta` are new, the inbound limit stays a constant. Version unchanged.
+
+`VERIFY:` the environment variables of the Centrifugo v6.10.1 namespace options `allowed_delta_types` and `delta_publish` for the @A server (and the server API `publish` field `delta`, `api.proto:325`); whether a live delta needs channel history; that every v6.10.1 path writing a JSON publication to a delta subscriber wraps it as a string (the @A JSON row, live and recovered).
+
+Value clause: As an app developer shipping to devices on metered networks, I want a channel's publications sent as deltas against the previous one and rebuilt exactly by the client, so that large, slowly changing payloads cost a fraction of their bandwidth without my application ever seeing a corrupted payload.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Scope | Scenarios |
+|---|---|---|
+| 19a | decoder, negotiation, both encodings | "Delta compression is negotiated with the server", "Publications sent as deltas arrive whole", "A delta publication is applied to the previous publication", "The delta option is sent on subscribe and on resubscribe", "With JSON, publications of a delta subscription arrive as their JSON text" |
+| 19b | failures and their backoff | "A broken delta makes the subscription resubscribe", "A delta with no base makes the subscription resubscribe", "A delta on a subscription without delta on makes it resubscribe", "Each subscribe starts a new delta chain", "A broken delta among recovered publications makes the subscription resubscribe from the same position", "Resubscribe delays keep growing while every subscribe is followed by a broken delta", "A delta on a server-side subscription makes the client reconnect", "A delta declaring more than the inbound message limit fails before allocating" |
+| 19c | recovery and the runners | "Publications missed by a delta subscription are recovered whole", "Seeded chaos with delta subscriptions keeps every invariant", "Seeded chaos with delta subscriptions on the tokio client keeps the invariants", "The core runner reports a planted payload fault" |
+
+```gherkin
+Feature: Fossil delta compression
+
+  @A
+  Scenario: Delta compression is negotiated with the server
+    Given a connected client
+    When a subscription with the fossil delta option to a channel allowing fossil delta is subscribed
+    Then the subscription emits "subscribed" reporting delta true
+
+  @A
+  Scenario Outline: Publications sent as deltas arrive whole
+    Given a client configured with the <protocol> protocol, connected through a relay counting bytes, subscribed with the fossil delta option to a channel with history allowing fossil delta and delta publishing
+    And the subscription emitted "subscribed" reporting delta true
+    When the server API publishes, as deltas, 3 payloads of 4 KiB that differ in a few bytes to the channel
+    Then the subscription receives exactly those 3 payloads in order
+    And the client read fewer than 2 KiB for the last 2 publications
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario: A delta publication is applied to the previous publication
+    Given a client subscribed with the fossil delta option to channel "news" on the fake server, which turned delta on
+    When the fake server pushes a whole publication and then a delta publication against it
+    Then the subscription receives the whole payload and then the payload the delta builds
+
+  @D
+  Scenario: The delta option is sent on subscribe and on resubscribe
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the fossil delta option is subscribed
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the fake server received 2 subscribe commands for "news", each asking for fossil delta
+
+  @D
+  Scenario: With JSON, publications of a delta subscription arrive as their JSON text
+    Given a client subscribed with the fossil delta option to channel "news" on the fake server, which turned delta on
+    When the fake server pushes a whole publication whose data is the JSON string of the non-canonical JSON {"b": 1.0,  "a":"é<"}, its é and < sent as \u escapes
+    And then a delta publication against it, as a JSON string
+    Then the subscription receives exactly the bytes {"b": 1.0,  "a":"é<"} and then the bytes the delta builds
+
+  @D
+  Scenario Outline: A broken delta makes the subscription resubscribe
+    Given a client subscribed with the fossil delta option to recoverable channel "news" on the fake server, which turned delta on, whose subscription's stream has taken the whole publication at offset 1
+    When the fake server pushes, at offset 2, a delta <fault>
+    Then the subscription emits an "error" event of kind "delta" with code 15
+    And then the subscription emits "subscribing" with code 2
+    And the fake server receives an unsubscribe command for "news"
+    And the next subscribe command for "news" asks to recover from offset 1
+    And the subscription receives no publication at offset 2 before that subscribe is answered
+    And when the fake server answers it with the publication at offset 2 recovered whole, the subscription receives it exactly once
+
+    Examples:
+      | fault                                         |
+      | whose checksum is wrong                       |
+      | that copies past the end of the previous data |
+      | that builds fewer bytes than it declares      |
+      | that has no trailer                           |
+
+  @D
+  Scenario: A delta with no base makes the subscription resubscribe
+    Given a client subscribed with the fossil delta option to channel "news" on the fake server, which turned delta on
+    When the fake server pushes a delta publication before any whole publication
+    Then the subscription emits an "error" event of kind "delta" with code 15
+    And then the subscription emits "subscribing" with code 2
+    And the subscription receives no publication
+
+  @D
+  Scenario Outline: A delta on a subscription without delta on makes it resubscribe
+    Given a client subscribed to channel "news" on the fake server <how>
+    When the fake server pushes a delta publication
+    Then the subscription emits an "error" event of kind "delta" with code 15
+    And then the subscription emits "subscribing" with code 2
+    And the subscription receives no publication
+
+    Examples:
+      | how                                                         |
+      | with the fossil delta option, which did not turn delta on   |
+      | without the delta option                                    |
+
+  @D
+  Scenario: Each subscribe starts a new delta chain
+    Given a client subscribed with the fossil delta option to channel "news" on the fake server, which turned delta on, and has received a whole publication
+    When the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again, the fake server turning delta on
+    And the fake server pushes a delta publication against the publication received before the disconnect
+    Then the subscription emits an "error" event of kind "delta" with code 15
+
+  @D
+  Scenario: A broken delta among recovered publications makes the subscription resubscribe from the same position
+    Given a client subscribed with the fossil delta option to recoverable channel "news" on the fake server, whose subscription's stream has taken the publication at offset 1
+    When the fake server disconnects the client with a reconnect-advised code
+    And answers the next subscribe with delta on and the publications at offsets 2 and 3 recovered, the one at 3 a delta whose checksum is wrong
+    Then the subscription's stream yields "subscribing", "subscribed", an "error" of kind "delta", and "subscribing" with code 2
+    And the next subscribe command for "news" asks to recover from offset 1
+
+  @E
+  Scenario: Resubscribe delays keep growing while every subscribe is followed by a broken delta
+    Given a subscription with the fossil delta option, min_resubscribe_delay 500 ms and max_resubscribe_delay 20000 ms
+    When each of 8 subscribes is answered with delta on, a whole publication and then a broken delta
+    Then the upper bound of each resubscribe delay is greater than the previous one until it reaches 20000 ms
+
+  @D
+  Scenario: A delta on a server-side subscription makes the client reconnect
+    Given the fake server grants a recoverable server-side subscription to channel "alerts" with a stream position at connect
+    And a client connected to the fake server that has taken the server-side publication at offset 1
+    When the fake server pushes a delta publication at offset 2 on channel "alerts"
+    Then the client emits an "error" event of kind "delta" with code 15
+    And then the client emits "connecting" with code 5
+    And no server-side publication at offset 2 is yielded
+    And the next connect command asks to recover "alerts" from offset 1
+
+  @P
+  Scenario: A delta declaring more than the inbound message limit fails before allocating
+    Given a subscription with the fossil delta option, subscribed with delta on, that has received a whole publication
+    When a delta publication of 20 bytes declaring a target one byte larger than the inbound message limit arrives
+    Then the subscription emits an "error" event of kind "delta" with code 15
+    And the live bytes counted while it is handled stay below 1 MiB
+
+  @A
+  Scenario: Publications missed by a delta subscription are recovered whole
+    Given a client subscribed with the fossil delta option to a channel with history and recovery allowing fossil delta and delta publishing
+    And the subscription emitted "subscribed" reporting delta true
+    And the subscription has received 1 live publication
+    And the client is disconnected with a reconnect-advised code
+    When 2 publications that differ in a few bytes from it are made to the channel, as deltas, while the client reconnects
+    Then the subscription emits "subscribed" with was_recovering true and recovered true, reporting delta true
+    And the subscription receives exactly those 2 publications in order
+
+  @P
+  Scenario: Seeded chaos with delta subscriptions keeps every invariant
+    Given the core runner with the chaos configuration, client-side subscriptions with delta to recoverable channels and a fault corrupting deltas
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariants I1 to I11
+    And the run counted delta publications, corrupted deltas and the resubscribes they caused, none of them 0
+
+  @P
+  Scenario: Seeded chaos with delta subscriptions on the tokio client keeps the invariants
+    Given the adapter runner with the chaos configuration, a tokio client, the fake server, subscriptions with delta and a fault corrupting deltas
+    When seeds 0 to 19 each run 30 random operations with faults
+    Then no seed violates invariants I1, I2, I3, I5, I6, I8 or I11 as the adapter checks them, and each reaches quiescence within 10 s
+    And the run counted corrupted deltas and the resubscribes they caused, none of them 0
+
+  @P
+  Scenario: The core runner reports a planted payload fault
+    Given the core runner with delta subscriptions, with the tap flipping one byte of a delivered payload
+    When seeds 0 to 299 run
+    Then the runner reports a violation of I11, naming the first seed that shows it and the operations up to it
+```
+
+**Exceptions introduced:** divergences, each recorded above: from the Fossil document (the checksum modulus, a copy of count 0; D2); from centrifuge-js 63ed73e (a new chain at each subscribe, a delta without delta on fails, stricter parsing, and resubscribing or reconnecting instead of stopping the client on a delta failure; D3, D5, D8); the new codes (D8); and a subscription without the delta option now fails on a delta publication instead of delivering its bytes (D5).
