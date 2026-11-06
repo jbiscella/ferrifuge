@@ -1286,7 +1286,9 @@ impl Machine {
                 }
             }
             Timer::ServerPing => {
-                if self.state == State::Connected {
+                // Paused while the read-ahead is full (Block 15): a timer
+                // that fired before its cancellation was performed is stale.
+                if self.state == State::Connected && self.wants_frames() {
                     self.disconnect(codes::connecting::NO_PING, "no ping", true);
                 }
             }
