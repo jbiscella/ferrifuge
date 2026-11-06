@@ -173,9 +173,9 @@ jobs:
           cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_FLOOR"
 
   # Seeded chaos on the sans-IO core (Block 16): 10 000 seeds of 200
-  # operations in release, from a start seed drawn per run and printed, so
-  # a failure reruns with FERRIFUGE_CHAOS_SEED. Pull requests run seeds
-  # 0-299 in the test and portability jobs.
+  # operations in release, from a start seed drawn per run and printed; a
+  # failure prints the command that reruns its seed alone. Pull requests
+  # run seeds 0-299 in the test and portability jobs.
   chaos:
     # Heavy: on main (merges and nightly) and on demand, not on pull requests.
     if: github.event_name != 'pull_request'
@@ -189,7 +189,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Long chaos run
-        run: cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture
+        run: |
+          set -o pipefail
+          cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee chaos.txt
+
+      # The drawn start seed, and the failing seed, also when the run fails.
+      - name: Chaos summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Seeded chaos'
+            echo '```'
+            grep -Eo 'chaos: seeds .*|seed [0-9]+ broke .*|rerun: .*' chaos.txt || echo 'no seed printed'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Deterministic @P metrics of Block 14: instruction counts, with gungraun
   # on Valgrind.
