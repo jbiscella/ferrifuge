@@ -75,6 +75,13 @@ struct State {
     closed: usize,
     /// Every JSON message received from clients, in order.
     received: Vec<Value>,
+    /// The frame each message of `received` arrived in, numbered from 0
+    /// over JSON and Protobuf frames alike (Block 18).
+    received_frames: Vec<usize>,
+    /// The frame each command of `received_protobuf` arrived in.
+    received_protobuf_frames: Vec<usize>,
+    /// Frames received so far.
+    frames: usize,
     /// Every Protobuf command received from clients, in order.
     received_protobuf: Vec<protobuf::Command>,
     /// Subscribe commands still to leave unanswered.
@@ -351,6 +358,28 @@ impl FakeServer {
         self.state.lock().unwrap().received.clone()
     }
 
+    /// Every JSON message received so far, with the frame it arrived in.
+    pub(crate) fn received_with_frames(&self) -> Vec<(Value, usize)> {
+        let state = self.state.lock().unwrap();
+        state
+            .received
+            .iter()
+            .cloned()
+            .zip(state.received_frames.iter().copied())
+            .collect()
+    }
+
+    /// Every Protobuf command received so far, with the frame it arrived in.
+    pub(crate) fn received_protobuf_with_frames(&self) -> Vec<(protobuf::Command, usize)> {
+        let state = self.state.lock().unwrap();
+        state
+            .received_protobuf
+            .iter()
+            .cloned()
+            .zip(state.received_protobuf_frames.iter().copied())
+            .collect()
+    }
+
     /// Leaves the next subscribe command unanswered.
     pub(crate) fn ignore_next_subscribe(&self) {
         self.state.lock().unwrap().ignored_subscribes += 1;
@@ -618,6 +647,11 @@ impl Connection {
     /// Records the JSON commands of a text frame; the replies to send.
     fn json_commands(&mut self, text: &str) -> Vec<Message> {
         let mut replies = Vec::new();
+        let frame = {
+            let mut state = self.state.lock().unwrap();
+            state.frames += 1;
+            state.frames - 1
+        };
         for line in text.lines() {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -688,6 +722,10 @@ impl Connection {
                 replies.push(Message::text(
                     json!({"id": message["id"], "unsubscribe": {}}).to_string(),
                 ));
+            } else if message["publish"].is_object() {
+                replies.push(Message::text(
+                    json!({"id": message["id"], "publish": {}}).to_string(),
+                ));
             } else if message["refresh"].is_object() {
                 // The connection lives another ttl, so the client refreshes again.
                 replies.push(Message::text(
@@ -700,6 +738,7 @@ impl Connection {
             }
             let mut state = self.state.lock().unwrap();
             state.received.push(message);
+            state.received_frames.push(frame);
             state.received_at.push(std::time::Instant::now());
         }
         replies
@@ -757,6 +796,11 @@ impl Connection {
     /// A frame that does not decode is dropped.
     fn protobuf_commands(&mut self, mut frame: &[u8]) -> Vec<Message> {
         let mut replies = Vec::new();
+        let number = {
+            let mut state = self.state.lock().unwrap();
+            state.frames += 1;
+            state.frames - 1
+        };
         while !frame.is_empty() {
             let Ok(command) = protobuf::Command::decode_length_delimited(&mut frame) else {
                 return replies;
@@ -781,7 +825,9 @@ impl Connection {
             if let Some(reply) = reply {
                 replies.push(Message::binary(reply.encode_length_delimited_to_vec()));
             }
-            self.state.lock().unwrap().received_protobuf.push(command);
+            let mut state = self.state.lock().unwrap();
+            state.received_protobuf.push(command);
+            state.received_protobuf_frames.push(number);
         }
         replies
     }

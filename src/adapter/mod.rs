@@ -6,7 +6,7 @@ mod outbox;
 mod subscription;
 mod transport;
 
-pub use client::{Client, ClientBuilder};
+pub use client::{Batch, Client, ClientBuilder};
 pub use subscription::{Subscription, SubscriptionBuilder};
 #[cfg(feature = "test-util")]
 pub use transport::stalled_websocket_writes;

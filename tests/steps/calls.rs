@@ -1422,6 +1422,10 @@ fn the_configured_timeout_elapses(world: &mut ClientWorld) {
 
 #[when("the server sends a ping")]
 fn the_server_sends_a_ping(world: &mut ClientWorld) {
+    if super::batching::drives_a_machine(world) {
+        super::batching::server_ping(world);
+        return;
+    }
     queue(world).frame("{}");
 }
 

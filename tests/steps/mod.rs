@@ -21,6 +21,7 @@ use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
 mod backoff;
+mod batching;
 mod calls;
 mod codes;
 mod connect_data;
@@ -157,6 +158,8 @@ pub(crate) struct ClientWorld {
     pub(crate) calls: calls::Calls,
     /// Connect data of a Block 17 scenario.
     pub(crate) connect_data: connect_data::ConnectData,
+    /// Batches of a Block 18 scenario.
+    pub(crate) batching: batching::Batching,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

@@ -31,6 +31,9 @@ enum Phase {
     Queued,
     /// Waiting for room in the write queue.
     Room,
+    /// Held by an open batch (Block 18): it counts as waiting for room, its
+    /// deadline running from when it was held.
+    Held,
     /// Sent as the command with this id, waiting for its reply.
     Sent(u32),
 }
@@ -65,7 +68,7 @@ impl Phase {
             Self::Added => None,
             Self::Subscribing => Some(CallTimer::Subscription),
             Self::Queued => Some(CallTimer::Connection),
-            Self::Room => Some(CallTimer::Room),
+            Self::Room | Self::Held => Some(CallTimer::Room),
             Self::Sent(_) => Some(CallTimer::Reply),
         }
     }
@@ -177,10 +180,105 @@ impl Machine {
                 CallTimer::Connection,
                 self.config.timeout,
             ));
+        } else if self.holds(id) {
+            self.hold_call(id);
         } else if self.waits_for_room() || !self.fits(id) {
             self.wait_for_room(id);
         } else {
             self.send_call(id);
+        }
+    }
+
+    /// Whether an open batch holds call `id` (Block 18): every call but a
+    /// `send` would be held.
+    fn holds(&self, id: CallId) -> bool {
+        self.holding()
+            && self
+                .calls
+                .by_id
+                .get(&id)
+                .is_some_and(|call| !matches!(call.request, CallRequest::Send { .. }))
+    }
+
+    /// Call `id` is held by an open batch: it waits for the batch to stop,
+    /// as for room, for at most `Config::timeout` (Block 18, D3).
+    fn hold_call(&mut self, id: CallId) {
+        let Some(call) = self.calls.by_id.get_mut(&id) else {
+            return;
+        };
+        if matches!(call.phase, Phase::Queued) {
+            self.actions
+                .push(Action::CancelCallTimer(id, CallTimer::Connection));
+        }
+        call.phase = Phase::Held;
+        self.actions.push(Action::SetCallTimer(
+            id,
+            CallTimer::Room,
+            self.config.timeout,
+        ));
+        self.hold_in_batch(super::batching::HeldCommand::Call(id));
+    }
+
+    /// Whether call `id` is still held, its batch's stop to release it.
+    pub(super) fn is_held(&self, id: CallId) -> bool {
+        self.calls
+            .by_id
+            .get(&id)
+            .is_some_and(|call| matches!(call.phase, Phase::Held))
+    }
+
+    /// Held call `id` joins a frame of its stopped batch when it fits the
+    /// write queue with the calls before it in the batch (`batch_bytes`),
+    /// the first fitting alone when nothing is unwritten (Block 18, D4);
+    /// its command and size, or `None` when it waits for room.
+    pub(super) fn release_held(
+        &mut self,
+        id: CallId,
+        batch_bytes: usize,
+    ) -> Option<(Command, usize)> {
+        let request = &self.calls.by_id.get(&id)?.request;
+        let size = self.frame_size(request);
+        let unwritten = self.calls.unwritten_bytes + batch_bytes;
+        let fits = unwritten == 0 || unwritten + size <= self.config.write_queue_bytes.max(1);
+        if !self.can_send() || self.waits_for_room() || !fits {
+            // Behind the calls already waiting, with its deadline running.
+            if let Some(call) = self.calls.by_id.get_mut(&id) {
+                call.phase = Phase::Room;
+            }
+            self.calls.room.insert(id);
+            return None;
+        }
+        self.actions
+            .push(Action::CancelCallTimer(id, CallTimer::Room));
+        let command = self.call_command(id)?;
+        Some((command, size))
+    }
+
+    /// Call `id` is being sent: its command, numbered now, and its reply
+    /// deadline (Block 13). Not for a `send`, which a batch never holds.
+    fn call_command(&mut self, id: CallId) -> Option<Command> {
+        let command_id = self.command_id();
+        let call = self.calls.by_id.get_mut(&id)?;
+        call.phase = Phase::Sent(command_id);
+        let method = method_of(&call.request);
+        self.calls.by_command.insert(command_id, id);
+        self.actions.push(Action::SetCallTimer(
+            id,
+            CallTimer::Reply,
+            self.config.timeout,
+        ));
+        Some(Command {
+            id: command_id,
+            method,
+        })
+    }
+
+    /// The calls of a frame of a stopped batch count `bytes` against the
+    /// write queue until it is written.
+    pub(super) fn batch_frame_sent(&mut self, frame: FrameId, bytes: usize) {
+        if bytes > 0 {
+            self.calls.unwritten.insert(frame, bytes);
+            self.calls.unwritten_bytes += bytes;
         }
     }
 
@@ -338,7 +436,16 @@ impl Machine {
             .collect();
         let mut blocked = false;
         for id in waiting {
-            if !blocked && self.fits(id) {
+            if self.holds(id)
+                && self
+                    .calls
+                    .by_id
+                    .get(&id)
+                    .is_some_and(|call| matches!(call.phase, Phase::Queued))
+            {
+                // Released by the new connection while a batch is open.
+                self.hold_call(id);
+            } else if !blocked && self.fits(id) {
                 self.send_call(id);
             } else {
                 blocked = true;
@@ -367,7 +474,10 @@ impl Machine {
             .iter()
             .filter(|(_, call)| {
                 call.subscription == Some(subscription)
-                    && matches!(call.phase, Phase::Subscribing | Phase::Queued | Phase::Room)
+                    && matches!(
+                        call.phase,
+                        Phase::Subscribing | Phase::Queued | Phase::Room | Phase::Held
+                    )
             })
             .map(|(id, _)| *id)
             .collect();

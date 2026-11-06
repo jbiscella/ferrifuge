@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+mod batching;
 mod calls;
 mod delivery;
 mod inbound;
@@ -431,6 +432,12 @@ pub enum Input {
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
     },
+    /// The application started a batch (`start_batching`, Block 18): its
+    /// calls, but `send`, and the subscribe and unsubscribe commands its
+    /// calls cause are held until a batch stops.
+    StartBatching,
+    /// The application stopped a batch: what all open batches hold is sent.
+    StopBatching,
     /// The application set the connection token used from the next
     /// connection attempt (`set_token`, Block 17); empty for none.
     SetToken(String),
@@ -650,6 +657,8 @@ impl std::fmt::Debug for Input {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect => f.write_str("Connect"),
+            Self::StartBatching => f.write_str("StartBatching"),
+            Self::StopBatching => f.write_str("StopBatching"),
             Self::Disconnect => f.write_str("Disconnect"),
             Self::TransportOpened(id) => f.debug_tuple("TransportOpened").field(id).finish(),
             Self::TransportFailed { transport, message } => f
@@ -986,6 +995,8 @@ pub struct Machine {
     connect_data: ConnectData,
     /// Emulated headers sent with every connect command (Block 17).
     emulated_headers: EmulatedHeaders,
+    /// Open batches and what they hold (Block 18).
+    batching: batching::Batching,
     actions: Vec<Action>,
 }
 
@@ -1102,6 +1113,7 @@ impl Machine {
             pings: None,
             connect_data: ConnectData::default(),
             emulated_headers: EmulatedHeaders::default(),
+            batching: batching::Batching::default(),
             actions: Vec::new(),
         }
     }
@@ -1114,8 +1126,12 @@ impl Machine {
 
     /// Reacts to `input`; the owner performs the returned actions in order.
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
+        self.batching.application_unsubscribe =
+            matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));
         match input {
             Input::Connect => self.connect(),
+            Input::StartBatching => self.start_batching(),
+            Input::StopBatching => self.stop_batching(),
             Input::Disconnect => self.disconnect(
                 codes::disconnected::DISCONNECT_CALLED,
                 "disconnect called",
@@ -1676,6 +1692,7 @@ impl Machine {
         if let Some(fetch) = self.connect_data.fetch.take() {
             self.actions.push(Action::CancelConnectData(fetch));
         }
+        self.drop_held_commands();
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
         // reconnect timer is set again below when reconnecting.
@@ -1902,10 +1919,22 @@ impl Machine {
     /// (HTTP 413) concerns that command only (see `send_rejected`).
     /// Hands `command` to the owner; its frame's id and size.
     fn send(&mut self, transport: TransportId, command: Command) -> (FrameId, usize) {
-        let mut frame = self.codec.encode(&[command]);
-        if let Some((session, node)) = &self.emulation {
-            frame = json::emulation_request(session, node, &frame);
+        self.send_commands(transport, &[command])
+    }
+
+    /// The frame `commands` make together, as sent: over an emulated
+    /// transport, the body of the emulation request.
+    fn frame_of(&self, commands: &[Command]) -> Vec<u8> {
+        let frame = self.codec.encode(commands);
+        match &self.emulation {
+            Some((session, node)) => json::emulation_request(session, node, &frame),
+            None => frame,
         }
+    }
+
+    /// Sends `commands` in one frame (Block 18; one command otherwise).
+    fn send_commands(&mut self, transport: TransportId, commands: &[Command]) -> (FrameId, usize) {
+        let frame = self.frame_of(commands);
         let id = FrameId(self.next_frame);
         self.next_frame += 1;
         let size = frame.len();

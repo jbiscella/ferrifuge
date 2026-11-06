@@ -43,6 +43,8 @@ Available now:
   server forwards to its proxies;
 - `set_token`, `set_data` and `set_emulated_headers`, which apply from the
   next connection attempt;
+- batches (`start_batching`): calls and subscriptions sent together in
+  frames of at most `Config::batch_frame_bytes`;
 - server pings: answered with pongs, and a connection whose pings stop is
   re-established;
 - an `error` event for every failed connection attempt;

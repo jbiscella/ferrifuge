@@ -674,6 +674,24 @@ impl Client {
         self.shared.apply(Input::Disconnect);
     }
 
+    /// Starts a batch: until it stops, the application's calls (but
+    /// `send`) and the subscribe and unsubscribe commands its
+    /// `subscribe()`, `unsubscribe()` and subscription removal cause are
+    /// held, then sent in order in frames of several commands, each within
+    /// [`Config::batch_frame_bytes`] (centrifuge-js `startBatching`). The
+    /// client's own commands are never held. A held call still fails with
+    /// the timeout error when not sent within `Config::timeout`; a held
+    /// subscribe's reply deadline runs too. Several batches may be open:
+    /// stopping one sends what is held so far.
+    #[must_use = "the batch stops when dropped"]
+    pub fn start_batching(&self) -> Batch {
+        self.shared.apply(Input::StartBatching);
+        Batch {
+            shared: Arc::clone(&self.shared),
+            stopped: false,
+        }
+    }
+
     /// Sets the connection token used from the next connection attempt,
     /// sending nothing now; empty for none (centrifuge-js `setToken`).
     /// Without a token callback, a token the server rejected as expired
@@ -860,6 +878,34 @@ impl Client {
             },
         );
         reply_of(call, presence_stats_of)
+    }
+}
+
+/// An open batch of [`Client::start_batching`]: [`Batch::stop`], or dropping
+/// it, stops it and sends what is held (centrifuge-js `stopBatching`). It
+/// borrows nothing from the client.
+#[derive(Debug)]
+pub struct Batch {
+    shared: Arc<Shared>,
+    stopped: bool,
+}
+
+impl Batch {
+    /// Stops the batch: what the open batches hold is sent now.
+    pub fn stop(mut self) {
+        self.end();
+    }
+
+    fn end(&mut self) {
+        if !std::mem::replace(&mut self.stopped, true) {
+            self.shared.apply(Input::StopBatching);
+        }
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -1477,6 +1523,8 @@ fn check_limits(config: &Config) -> Result<(), ClientError> {
         "the read-ahead limits must be at least 1"
     } else if config.write_queue_bytes == 0 {
         "the write queue limit must be at least 1"
+    } else if config.batch_frame_bytes == 0 {
+        "the batch frame limit must be at least 1"
     } else {
         return Ok(());
     };
@@ -1540,6 +1588,13 @@ mod tests {
 
     use super::*;
     use crate::adapter::SubscriptionBuilder;
+
+    // A batch can be stopped from another task (Block 18, D1).
+    #[test]
+    fn a_batch_is_send() {
+        fn send<T: Send>() {}
+        send::<Batch>();
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
