@@ -86,7 +86,7 @@ fn offset(publication: &Publication) -> u64 {
 }
 
 /// Waits for `ready` to hold, or fails with `what`.
-async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+pub(super) async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let waited = tokio::time::timeout(EVENT_TIMEOUT, async {
         while !ready() {
             tokio::time::sleep(Duration::from_millis(10)).await;
