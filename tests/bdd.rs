@@ -221,6 +221,11 @@ const IMPLEMENTED: &[&str] = &[
     // Block 15, sub-increment 15c.
     "A client stream not read keeps every state change but drops errors past 256 untaken events",
     "A subscription stream not read drops errors past 256 untaken events",
+    // Block 15, sub-increment 15d.
+    "Reconnect delays keep growing while the server closes each connection with 3008",
+    "A Disconnect push with 3008 keeps the backoff growing over an emulated transport",
+    "A server ping read before 3008 lets the reset stand",
+    "A close with another code lets the reset stand",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",
