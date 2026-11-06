@@ -64,13 +64,12 @@ Available now:
 - `send` to the server, and the server's asynchronous messages as
   `Message` events;
 - a bound on the bytes of calls waiting to be written
-  (`Config::write_queue_bytes`).
+  (`Config::write_queue_bytes`);
+- join and leave events of the clients of a channel.
 
-Not yet available:
-
-| Planned | Where |
-|---|---|
-| join and leave events | Block 13e |
+Planned after Block 13 (the owner sets the order): connect data and
+headers, `setToken` and `setData`; batching several commands in one frame;
+a seeded chaos harness checking delivery invariants.
 
 ## Usage
 
@@ -278,6 +277,26 @@ one, the connect or subscribe carries no token. A subscription that has a
 stream position keeps it with the epoch `_`, so its next recovery fails and you
 are told: with `get_state` your state is reloaded; without it, the `subscribed`
 event reports `was_recovering` true and `recovered` false.
+
+### Join and leave
+
+A subscription built with `.join_leave(true)` asks the server to tell it
+when clients subscribe to the channel or leave it, as
+`SubscriptionEvent::Join(info)` and `SubscriptionEvent::Leave(info)`, where
+`info` is the client's `ClientInfo` (client id, user, connection and channel
+info). The channel must have join and leave events, and the client the right
+to see its presence (Centrifugo's `join_leave` channel option; with
+`force_push_join_leave` the server sends them without being asked).
+Server-side subscriptions report them as `ServerSubscriptionEvent::Join` and
+`Leave`. They go through the stream in order with publications; those not
+yet taken when the subscription stops are withdrawn, as publications are.
+
+```rust
+let subscription = client
+    .subscription_builder("chat")
+    .join_leave(true)
+    .build()?;
+```
 
 ### Server-side subscriptions
 
