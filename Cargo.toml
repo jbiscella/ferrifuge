@@ -110,6 +110,11 @@ name = "perf_footprint"
 harness = false
 required-features = ["tokio"]
 
+# The oversized-delta bound of Block 19, measured with dhat on the core.
+[[test]]
+name = "perf_delta"
+harness = false
+
 # Uses Machine::with_seed. The dev-dependency enabling test-util has no
 # version, so a packaged crate drops it; this target then skips.
 [[test]]

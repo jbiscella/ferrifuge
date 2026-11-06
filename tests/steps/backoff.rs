@@ -188,6 +188,37 @@ impl ResubscribeRun {
         delay
     }
 
+    /// Answers the pending subscribe command with delta on, then pushes a
+    /// whole publication and a delta whose checksum is wrong (Block 19);
+    /// answers the unsubscribe command the failure sends and returns the
+    /// resubscribe delay scheduled; the next attempt follows.
+    fn fail_with_broken_delta(&mut self) -> Duration {
+        let id = self.pending.take().expect("a subscribe command in flight");
+        self.reply(&format!(r#"{{"id":{id},"subscribe":{{"delta":true}}}}"#));
+        self.reply(r#"{"push":{"channel":"news","pub":{"data":"{}"}}}"#);
+        let actions =
+            self.reply(r#"{"push":{"channel":"news","pub":{"data":"2\n2:{}0;","delta":true}}}"#);
+        let delay = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => {
+                    Some(*delay)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a broken delta schedules a resubscribe: {actions:?}"));
+        let unsubscribe = command_ids(&actions, "unsubscribe")
+            .pop()
+            .expect("an unsubscribe command");
+        self.reply(&format!(r#"{{"id":{unsubscribe},"unsubscribe":{{}}}}"#));
+        let actions = self.machine.handle(Input::SubscriptionTimerFired(
+            self.id,
+            SubscriptionTimer::Resubscribe,
+        ));
+        self.note_subscribe(&actions);
+        delay
+    }
+
     /// Answers the pending subscribe command with success.
     fn succeed(&mut self) {
         let id = self.pending.take().expect("a subscribe command in flight");
@@ -477,4 +508,49 @@ fn expected_bound(min: Duration, max: Duration, attempt: usize) -> Duration {
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).expect("delays fit in u64 ms")
+}
+
+#[given(
+    regex = r"^a subscription with the fossil delta option, min_resubscribe_delay (\d+) ms and max_resubscribe_delay (\d+) ms$"
+)]
+fn a_delta_subscription_with_resubscribe_options(world: &mut ClientWorld, min: u64, max: u64) {
+    let options = SubscriptionOptions::default()
+        .delta(ferrifuge::DeltaFormat::Fossil)
+        .min_resubscribe_delay(Duration::from_millis(min))
+        .max_resubscribe_delay(Duration::from_millis(max));
+    world.backoff = Some(UnderTest::Resubscribe(options));
+}
+
+/// Block 19: each subscribe is followed by a broken delta, whose
+/// resubscribe must not reset the backoff (D8). The bound of attempt `n` is
+/// the largest delay of [`SAMPLES`] runs reaching it.
+#[when(
+    regex = r"^each of (\d+) subscribes is answered with delta on, a whole publication and then a broken delta$"
+)]
+fn subscribes_followed_by_broken_deltas(world: &mut ClientWorld, subscribes: usize) {
+    let UnderTest::Resubscribe(options) = under_test(world).clone() else {
+        panic!("this step needs a subscription with resubscribe options");
+    };
+    world.upper_bounds = (0..subscribes)
+        .map(|attempt| {
+            (0..SAMPLES)
+                .map(|_| {
+                    let mut run = ResubscribeRun::new(options.clone());
+                    (0..=attempt)
+                        .map(|_| run.fail_with_broken_delta())
+                        .last()
+                        .expect("at least one attempt")
+                })
+                .max()
+                .expect("samples")
+        })
+        .collect();
+}
+
+#[then(
+    regex = r"^the upper bound of each resubscribe delay is greater than the previous one until it reaches (\d+) ms$"
+)]
+fn resubscribe_bounds_grow_until(world: &mut ClientWorld, millis_max: u64) {
+    upper_bound_grows(world);
+    upper_bound_stops_growing(world, millis_max);
 }

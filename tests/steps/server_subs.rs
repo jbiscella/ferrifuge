@@ -600,7 +600,11 @@ async fn next_connect(world: &ClientWorld) -> Value {
     connect_request(world, world.recovery.connects_before).await
 }
 
-async fn assert_next_connect_recovers(world: &ClientWorld, channel: &str, from: &StreamPosition) {
+pub(super) async fn assert_next_connect_recovers(
+    world: &ClientWorld,
+    channel: &str,
+    from: &StreamPosition,
+) {
     let connect = next_connect(world).await;
     let sub = &connect["subs"][channel];
     assert_eq!(sub["recover"], true, "{connect}");

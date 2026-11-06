@@ -329,6 +329,14 @@ const IMPLEMENTED: &[&str] = &[
     "A delta publication is applied to the previous publication",
     "The delta option is sent on subscribe and on resubscribe",
     "With JSON, publications of a delta subscription arrive as their JSON text",
+    // Block 19, sub-increment 19b.
+    "A broken delta makes the subscription resubscribe",
+    "A delta with no base makes the subscription resubscribe",
+    "A delta on a subscription without delta on makes it resubscribe",
+    "Each subscribe starts a new delta chain",
+    "A broken delta among recovered publications makes the subscription resubscribe from the same position",
+    "Resubscribe delays keep growing while every subscribe is followed by a broken delta",
+    "A delta on a server-side subscription makes the client reconnect",
 ];
 
 /// Server configuration of @A scenarios.
