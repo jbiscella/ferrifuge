@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::{Action, CallId, CallTimer, Machine, SubscriptionId};
+use super::{Action, CallId, CallTimer, FrameId, Machine, SubscriptionId};
+use crate::json;
 use crate::wire::{
     ChannelRequest, Command, Error, HistoryRequest, Method, PublishRequest, Reply, ReplyResult,
     RpcRequest,
@@ -28,6 +29,8 @@ enum Phase {
     Subscribing,
     /// Waiting for the connection.
     Queued,
+    /// Waiting for room in the write queue.
+    Room,
     /// Sent as the command with this id, waiting for its reply.
     Sent(u32),
 }
@@ -47,6 +50,10 @@ pub(super) struct Calls {
     by_id: BTreeMap<CallId, Call>,
     /// The call each command sent and not yet answered belongs to.
     by_command: HashMap<u32, CallId>,
+    /// Sizes of the calls' frames handed to the current transport and not
+    /// yet written, whatever became of their calls.
+    unwritten: HashMap<FrameId, usize>,
+    unwritten_bytes: usize,
 }
 
 impl Phase {
@@ -56,6 +63,7 @@ impl Phase {
             Self::Added => None,
             Self::Subscribing => Some(CallTimer::Subscription),
             Self::Queued => Some(CallTimer::Connection),
+            Self::Room => Some(CallTimer::Room),
             Self::Sent(_) => Some(CallTimer::Reply),
         }
     }
@@ -147,11 +155,12 @@ impl Machine {
     }
 
     /// Starts call `id` as a client-level call: sent at once when
-    /// connected, otherwise queued until the connection is there
-    /// (centrifuge-js `_methodCall`). A transport whose close is read but
-    /// not yet handled counts as gone: the call waits for the next one.
+    /// connected and it fits the write queue, otherwise waiting for the
+    /// connection (centrifuge-js `_methodCall`) or for room. A transport
+    /// whose close is read but not yet handled counts as gone: the call
+    /// waits for the next one.
     fn start_call(&mut self, id: CallId) {
-        let connected = self.state == State::Connected && !self.transport_closing();
+        let connected = self.can_send();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
         };
@@ -159,108 +168,179 @@ impl Machine {
             self.actions
                 .push(Action::CancelCallTimer(id, CallTimer::Subscription));
         }
-        if connected {
-            self.send_call(id);
-        } else {
+        if !connected {
             call.phase = Phase::Queued;
             self.actions.push(Action::SetCallTimer(
                 id,
                 CallTimer::Connection,
                 self.config.timeout,
             ));
+        } else if self.waits_for_room() || !self.fits(id) {
+            self.wait_for_room(id);
+        } else {
+            self.send_call(id);
+        }
+    }
+
+    /// Whether the client can hand calls to its transport now.
+    fn can_send(&self) -> bool {
+        self.state == State::Connected && self.transport.is_some() && !self.transport_closing()
+    }
+
+    /// Whether a call waits for room in the write queue: later calls wait
+    /// behind it, so that calls are sent in the order they were made.
+    fn waits_for_room(&self) -> bool {
+        self.calls
+            .by_id
+            .values()
+            .any(|call| matches!(call.phase, Phase::Room))
+    }
+
+    /// Whether call `id` fits the write queue now: alone when nothing
+    /// waits to be written, else within `Config::write_queue_bytes` with
+    /// what does (Block 13).
+    fn fits(&self, id: CallId) -> bool {
+        let unwritten = self.calls.unwritten_bytes;
+        unwritten == 0
+            || self.calls.by_id.get(&id).is_some_and(|call| {
+                unwritten + self.frame_size(&call.request) <= self.config.write_queue_bytes.max(1)
+            })
+    }
+
+    /// The size of the frame a call's command makes, its id aside.
+    fn frame_size(&self, request: &CallRequest) -> usize {
+        let frame = self.codec.encode(&[Command {
+            id: 0,
+            method: method_of(request),
+        }]);
+        match &self.emulation {
+            Some((session, node)) => json::emulation_request(session, node, &frame).len(),
+            None => frame.len(),
+        }
+    }
+
+    /// Call `id` waits for room in the write queue, for at most
+    /// `Config::timeout`; one that already waits keeps its deadline.
+    fn wait_for_room(&mut self, id: CallId) {
+        let Some(call) = self.calls.by_id.get_mut(&id) else {
+            return;
+        };
+        match call.phase {
+            Phase::Room => return,
+            Phase::Queued => self
+                .actions
+                .push(Action::CancelCallTimer(id, CallTimer::Connection)),
+            _ => {}
+        }
+        call.phase = Phase::Room;
+        self.actions.push(Action::SetCallTimer(
+            id,
+            CallTimer::Room,
+            self.config.timeout,
+        ));
+    }
+
+    /// Sends the calls waiting for room, in order, while they fit.
+    fn admit_waiting(&mut self) {
+        if !self.can_send() {
+            return;
+        }
+        let waiting: Vec<CallId> = self
+            .calls
+            .by_id
+            .iter()
+            .filter(|(_, call)| matches!(call.phase, Phase::Room))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in waiting {
+            if !self.fits(id) {
+                return;
+            }
+            self.send_call(id);
+        }
+    }
+
+    /// The transport wrote frame `frame`: a call's frame frees its room in
+    /// the write queue, and the calls waiting for room may follow.
+    pub(super) fn frame_written(&mut self, frame: FrameId) {
+        if let Some(size) = self.calls.unwritten.remove(&frame) {
+            self.calls.unwritten_bytes -= size;
+            self.admit_waiting();
         }
     }
 
     /// Sends call `id`, whose reply is then awaited for `Config::timeout`.
-    /// Its command is built only now (centrifuge-js `_methodCall`). A send
-    /// has no reply: it settles once written, its command with no id
+    /// Its command is built only now (centrifuge-js `_methodCall`), and its
+    /// frame counts against the write queue until written. A send has no
+    /// reply: it settles once handed over, its command with no id
     /// (`client.proto`, `SendRequest`; centrifuge-js `send`).
     fn send_call(&mut self, id: CallId) {
         let Some(transport) = self.transport else {
             return;
         };
-        if let Some(Call {
-            request: CallRequest::Send { data },
-            phase,
-            ..
-        }) = self.calls.by_id.get_mut(&id)
-        {
-            let method = Method::Send(data.clone());
-            if matches!(phase, Phase::Queued) {
-                self.actions
-                    .push(Action::CancelCallTimer(id, CallTimer::Connection));
-            }
-            *phase = Phase::Added;
-            self.send(transport, Command { id: 0, method });
-            self.settle_call(id, Ok(CallReply::Send));
-            return;
-        }
-        let command_id = self.command_id();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
         };
-        if matches!(call.phase, Phase::Queued) {
-            self.actions
-                .push(Action::CancelCallTimer(id, CallTimer::Connection));
+        if let Some(timer) = call.phase.timer() {
+            self.actions.push(Action::CancelCallTimer(id, timer));
         }
-        call.phase = Phase::Sent(command_id);
-        let method = match &call.request {
-            CallRequest::Rpc { method, data } => Method::Rpc(RpcRequest {
-                method: method.clone(),
-                data: data.clone(),
-            }),
-            CallRequest::Publish { channel, data } => Method::Publish(PublishRequest {
-                channel: channel.clone(),
-                data: data.clone(),
-            }),
-            CallRequest::History { channel, options } => Method::History(HistoryRequest {
-                channel: channel.clone(),
-                limit: options.limit,
-                since: options
-                    .since
-                    .as_ref()
-                    .map(|position| (position.offset, position.epoch.clone())),
-                reverse: options.reverse,
-            }),
-            CallRequest::Presence { channel } => Method::Presence(ChannelRequest {
-                channel: channel.clone(),
-            }),
-            CallRequest::PresenceStats { channel } => Method::PresenceStats(ChannelRequest {
-                channel: channel.clone(),
-            }),
-            CallRequest::Send { .. } => unreachable!("sent above, without a reply"),
+        let method = method_of(&call.request);
+        let send = matches!(call.request, CallRequest::Send { .. });
+        let command_id = if send {
+            call.phase = Phase::Added;
+            0
+        } else {
+            let command_id = self.command_id();
+            if let Some(call) = self.calls.by_id.get_mut(&id) {
+                call.phase = Phase::Sent(command_id);
+            }
+            self.calls.by_command.insert(command_id, id);
+            command_id
         };
-        self.calls.by_command.insert(command_id, id);
-        self.send(
+        let (frame, size) = self.send(
             transport,
             Command {
                 id: command_id,
                 method,
             },
         );
-        self.actions.push(Action::SetCallTimer(
-            id,
-            CallTimer::Reply,
-            self.config.timeout,
-        ));
+        self.calls.unwritten.insert(frame, size);
+        self.calls.unwritten_bytes += size;
+        if send {
+            self.settle_call(id, Ok(CallReply::Send));
+        } else {
+            self.actions.push(Action::SetCallTimer(
+                id,
+                CallTimer::Reply,
+                self.config.timeout,
+            ));
+        }
     }
 
-    /// The client is connected: the queued calls are sent, in order,
-    /// unless the transport's close is already read, held behind earlier
-    /// events: they wait for the next connection then.
+    /// The client is connected: the calls waiting for the connection or
+    /// for room are sent, in order, while they fit; a queued call that does
+    /// not fit then waits for room, with a fresh deadline. Unless the
+    /// transport's close is already read, held behind earlier events: they
+    /// wait for the next connection then.
     pub(super) fn calls_connected(&mut self) {
-        if self.transport_closing() {
+        if !self.can_send() {
             return;
         }
-        let queued: Vec<CallId> = self
+        let waiting: Vec<CallId> = self
             .calls
             .by_id
             .iter()
-            .filter(|(_, call)| matches!(call.phase, Phase::Queued))
+            .filter(|(_, call)| matches!(call.phase, Phase::Queued | Phase::Room))
             .map(|(id, _)| *id)
             .collect();
-        for id in queued {
-            self.send_call(id);
+        let mut blocked = false;
+        for id in waiting {
+            if !blocked && self.fits(id) {
+                self.send_call(id);
+            } else {
+                blocked = true;
+                self.wait_for_room(id);
+            }
         }
     }
 
@@ -284,13 +364,14 @@ impl Machine {
             .iter()
             .filter(|(_, call)| {
                 call.subscription == Some(subscription)
-                    && matches!(call.phase, Phase::Subscribing | Phase::Queued)
+                    && matches!(call.phase, Phase::Subscribing | Phase::Queued | Phase::Room)
             })
             .map(|(id, _)| *id)
             .collect();
         for id in unsent {
             self.settle_call(id, Err(subscription_unsubscribed()));
         }
+        self.admit_waiting();
     }
 
     /// The calls waiting for `subscription` to be subscribed, in order.
@@ -317,6 +398,8 @@ impl Machine {
             .is_some_and(|call| call.phase.timer() == Some(timer))
         {
             self.settle_call(id, Err(CallError::new(codes::error::TIMEOUT, "timeout")));
+            // A call waiting for room may have been in the way.
+            self.admit_waiting();
         }
     }
 
@@ -329,6 +412,10 @@ impl Machine {
             }
             if let Some(timer) = call.phase.timer() {
                 self.actions.push(Action::CancelCallTimer(id, timer));
+            }
+            // A call waiting for room may have been in the way.
+            if matches!(call.phase, Phase::Room) {
+                self.admit_waiting();
             }
         }
     }
@@ -387,6 +474,11 @@ impl Machine {
     /// The transport is lost: the calls sent on it can no longer get their
     /// reply and fail with "connection closed"; queued ones keep waiting.
     pub(super) fn fail_sent_calls(&mut self) {
+        // Nothing more is written on it: the write queue starts empty on the
+        // next transport, and the calls waiting for room keep waiting, with
+        // their deadline.
+        self.calls.unwritten.clear();
+        self.calls.unwritten_bytes = 0;
         let sent: Vec<CallId> = self.calls.by_command.values().copied().collect();
         for id in sent {
             self.settle_call(id, Err(connection_closed()));
@@ -424,6 +516,36 @@ impl Machine {
             self.actions.push(Action::CancelCallTimer(id, timer));
         }
         self.actions.push(Action::CallSettled { call: id, result });
+    }
+}
+
+/// The command method of a call's request.
+fn method_of(request: &CallRequest) -> Method {
+    match request {
+        CallRequest::Rpc { method, data } => Method::Rpc(RpcRequest {
+            method: method.clone(),
+            data: data.clone(),
+        }),
+        CallRequest::Publish { channel, data } => Method::Publish(PublishRequest {
+            channel: channel.clone(),
+            data: data.clone(),
+        }),
+        CallRequest::History { channel, options } => Method::History(HistoryRequest {
+            channel: channel.clone(),
+            limit: options.limit,
+            since: options
+                .since
+                .as_ref()
+                .map(|position| (position.offset, position.epoch.clone())),
+            reverse: options.reverse,
+        }),
+        CallRequest::Presence { channel } => Method::Presence(ChannelRequest {
+            channel: channel.clone(),
+        }),
+        CallRequest::PresenceStats { channel } => Method::PresenceStats(ChannelRequest {
+            channel: channel.clone(),
+        }),
+        CallRequest::Send { data } => Method::Send(data.clone()),
     }
 }
 

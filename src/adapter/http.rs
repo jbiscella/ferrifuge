@@ -15,7 +15,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 
 use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_config};
-use crate::machine::TransportKind;
+use crate::machine::{FrameId, TransportKind};
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
@@ -26,7 +26,7 @@ const JSON: &str = "application/json";
 const MAX_MESSAGE: usize = 64 << 20;
 
 /// An emulation request in flight; its failure ends the transport.
-type Request = Pin<Box<dyn Future<Output = Result<Sent, String>> + Send>>;
+type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)> + Send>>;
 
 /// How the server took an emulation request it answered.
 enum Sent {
@@ -50,6 +50,9 @@ pub(crate) struct HttpTransport {
     /// Why the stream cannot go on, reported once `frames` are received.
     failed: Option<String>,
     requests: FuturesUnordered<Request>,
+    /// Frames whose request was answered and not yet reported by
+    /// [`HttpTransport::recv`].
+    written: VecDeque<FrameId>,
 }
 
 impl HttpTransport {
@@ -117,12 +120,14 @@ impl HttpTransport {
             frames: VecDeque::new(),
             failed: None,
             requests: FuturesUnordered::new(),
+            written: VecDeque::new(),
         })
     }
 
-    /// Sends `frame`, the body of an emulation request. A request that fails
-    /// ends the transport when [`HttpTransport::recv`] reports it.
-    pub(crate) fn send(&mut self, frame: Vec<u8>) {
+    /// Sends frame `id`, the body of an emulation request, which
+    /// [`HttpTransport::recv`] reports written once answered. A request that
+    /// fails ends the transport when [`HttpTransport::recv`] reports it.
+    pub(crate) fn send(&mut self, id: FrameId, frame: Vec<u8>) {
         // Kept to name the commands of a rejected request.
         let sent = frame.clone();
         let request = self
@@ -132,26 +137,29 @@ impl HttpTransport {
             .body(frame);
         let timeout = self.request_timeout;
         self.requests.push(Box::pin(async move {
-            let response = tokio::time::timeout(timeout, request.send())
-                .await
-                .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
-                .map_err(|e| format!("emulation request failed: {e}"))?;
-            let status = response.status();
-            // A server without the session's node (404) or failing (5xx)
-            // cannot answer the command; other statuses reject only it
-            // (centrifuge-js `send`). A redirect is not followed (see
-            // `http_client`), so its command never arrived either.
-            if status == reqwest::StatusCode::NOT_FOUND
-                || status.is_server_error()
-                || status.is_redirection()
-            {
-                Err(format!("emulation request failed: HTTP status {status}"))
-            } else if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-                // Its commands fail at once (owner decision, 2026-11-04).
-                Ok(Sent::Rejected(sent))
-            } else {
-                Ok(Sent::Accepted)
-            }
+            let answered = async {
+                let response = tokio::time::timeout(timeout, request.send())
+                    .await
+                    .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
+                    .map_err(|e| format!("emulation request failed: {e}"))?;
+                let status = response.status();
+                // A server without the session's node (404) or failing (5xx)
+                // cannot answer the command; other statuses reject only it
+                // (centrifuge-js `send`). A redirect is not followed (see
+                // `http_client`), so its command never arrived either.
+                if status == reqwest::StatusCode::NOT_FOUND
+                    || status.is_server_error()
+                    || status.is_redirection()
+                {
+                    Err(format!("emulation request failed: HTTP status {status}"))
+                } else if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                    // Its commands fail at once (owner decision, 2026-11-04).
+                    Ok(Sent::Rejected(sent))
+                } else {
+                    Ok(Sent::Accepted)
+                }
+            };
+            (id, answered.await)
         }));
     }
 
@@ -168,6 +176,9 @@ impl HttpTransport {
     /// stream ended or failed, or an emulation request failed. Cancel-safe.
     pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
         loop {
+            if let Some(id) = self.written.pop_front() {
+                return Inbound::Written(id);
+            }
             if reading {
                 if let Some(frame) = self.frames.pop_front() {
                     return Inbound::Frame(frame);
@@ -195,11 +206,15 @@ impl HttpTransport {
                 },
                 // Irrefutable: a refutable pattern would disable this branch
                 // after a success until the stream yields (tokio `select!`).
-                Some(result) = self.requests.next(), if !self.requests.is_empty() => {
+                Some((id, result)) = self.requests.next(), if !self.requests.is_empty() => {
                     match result {
                         Err(reason) => return Inbound::Closed { code: None, reason },
-                        Ok(Sent::Rejected(frame)) => return Inbound::Rejected(frame),
-                        Ok(Sent::Accepted) => {}
+                        // Answered, so written; its commands fail first.
+                        Ok(Sent::Rejected(frame)) => {
+                            self.written.push_back(id);
+                            return Inbound::Rejected(frame);
+                        }
+                        Ok(Sent::Accepted) => return Inbound::Written(id),
                     }
                 }
                 else => std::future::pending::<()>().await,
@@ -568,7 +583,7 @@ mod tests {
         )
         .await
         .unwrap();
-        transport.send(b"{}".to_vec());
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
 
         let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
@@ -613,7 +628,7 @@ mod tests {
         .await
         .unwrap();
         transport.emulation_url = Url::parse(&emulation).unwrap();
-        transport.send(b"{\"send\":{}}".to_vec());
+        transport.send(FrameId::for_tests(2), b"{\"send\":{}}".to_vec());
 
         tokio::time::timeout(TIMEOUT, transport.close())
             .await
@@ -653,13 +668,16 @@ mod tests {
         .await
         .unwrap();
         transport.emulation_url = Url::parse(&ok).unwrap();
-        transport.send(b"{}".to_vec());
+        transport.send(FrameId::for_tests(3), b"{}".to_vec());
         transport.emulation_url = Url::parse(&failing).unwrap();
-        transport.send(b"{}".to_vec());
+        transport.send(FrameId::for_tests(4), b"{}".to_vec());
 
-        // The stream stays silent: only the failed request can end it.
+        // The stream stays silent: the answered request is reported
+        // written, then only the failed one can end it.
+        let written = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
         let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
+        assert_eq!(written, Ok(Inbound::Written(FrameId::for_tests(3))));
         assert!(
             matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("503")),
             "{inbound:?}"
@@ -690,7 +708,7 @@ mod tests {
         )
         .await
         .unwrap();
-        transport.send(br#"{"id":2}"#.to_vec());
+        transport.send(FrameId::for_tests(5), br#"{"id":2}"#.to_vec());
 
         let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv(true)).await;
 
@@ -729,7 +747,7 @@ mod tests {
         )
         .await
         .unwrap();
-        transport.send(b"{}".to_vec());
+        transport.send(FrameId::for_tests(6), b"{}".to_vec());
         // Lets the request reach the server.
         let _ = tokio::time::timeout(Duration::from_millis(300), transport.recv(true)).await;
 

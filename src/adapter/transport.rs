@@ -13,7 +13,7 @@ use rustls_native_certs::load_native_certs;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 
-use crate::machine::FrameType;
+use crate::machine::{FrameId, FrameType};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
@@ -28,10 +28,14 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 /// that stops reading cannot freeze the client (Block 8).
 pub(crate) struct WebSocket {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    /// Frames not yet handed to the stream, with the time each was queued.
-    queue: VecDeque<(Message, Instant)>,
-    /// When the frame being written was queued; none when no write is under way.
-    writing: Option<Instant>,
+    /// Frames not yet handed to the stream, with their id and the time each
+    /// was queued.
+    queue: VecDeque<(FrameId, Message, Instant)>,
+    /// The frame being written and when it was queued; none when no write
+    /// is under way.
+    writing: Option<(FrameId, Instant)>,
+    /// Frames written and not yet reported by [`WebSocket::recv`].
+    written: VecDeque<FrameId>,
     /// Fires [`WebSocket::timeout`] after the oldest frame not yet written
     /// was queued.
     deadline: Pin<Box<Sleep>>,
@@ -49,6 +53,9 @@ pub(crate) enum Inbound {
     /// An emulation request carrying this frame was rejected with HTTP 413:
     /// only its commands failed, the transport stays open.
     Rejected(Vec<u8>),
+    /// The frame was written: flushed to the socket, or its emulation
+    /// request answered.
+    Written(FrameId),
 }
 
 impl WebSocket {
@@ -88,25 +95,31 @@ impl WebSocket {
             stream,
             queue: VecDeque::new(),
             writing: None,
+            written: VecDeque::new(),
             deadline: Box::pin(tokio::time::sleep(timeout)),
             timeout,
         })
     }
 
-    /// Queues one frame of encoded commands, to go out as a text or binary
-    /// message while [`WebSocket::recv`] runs.
-    pub(crate) fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
+    /// Queues frame `id` of encoded commands, to go out as a text or binary
+    /// message while [`WebSocket::recv`] runs, which reports it once written.
+    pub(crate) fn send(
+        &mut self,
+        id: FrameId,
+        frame: Vec<u8>,
+        frame_type: FrameType,
+    ) -> Result<(), String> {
         let message = match frame_type {
             FrameType::Text => Message::text(String::from_utf8(frame).map_err(|e| e.to_string())?),
             FrameType::Binary => Message::binary(frame),
         };
-        self.queue.push_back((message, Instant::now()));
+        self.queue.push_back((id, message, Instant::now()));
         Ok(())
     }
 
-    /// Writes the queued frames while waiting for the next frame or for the
-    /// end of the connection, which a failed write, or a frame not written
-    /// in time, also is. Without `reading`, it only writes, until a write
+    /// Writes the queued frames while waiting for the next frame, for a
+    /// frame written, or for the end of the connection, which a failed
+    /// write, or a frame not written in time, also is. Without `reading`, it only writes, until a write
     /// fails or misses its deadline: a full read-ahead stops the reading,
     /// never the writing (Block 15). Cancel-safe: dropping the future loses
     /// no message.
@@ -121,6 +134,9 @@ impl WebSocket {
         };
         if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
             return Poll::Ready(lost);
+        }
+        if let Some(id) = self.written.pop_front() {
+            return Poll::Ready(Inbound::Written(id));
         }
         if let Some(queued) = self.oldest_unwritten() {
             let deadline = queued + self.timeout;
@@ -168,7 +184,9 @@ impl WebSocket {
                 let flushed = self.stream.poll_flush_unpin(cx);
                 note_stall(&flushed);
                 ready!(flushed)?;
-                self.writing = None;
+                if let Some((id, _)) = self.writing.take() {
+                    self.written.push_back(id);
+                }
                 continue;
             }
             if self.queue.is_empty() {
@@ -177,9 +195,9 @@ impl WebSocket {
             let ready = self.stream.poll_ready_unpin(cx);
             note_stall(&ready);
             ready!(ready)?;
-            let (message, queued) = self.queue.pop_front().expect("the queue is not empty");
+            let (id, message, queued) = self.queue.pop_front().expect("the queue is not empty");
             self.stream.start_send_unpin(message)?;
-            self.writing = Some(queued);
+            self.writing = Some((id, queued));
         }
     }
 
@@ -201,7 +219,8 @@ impl WebSocket {
     /// When the oldest frame not yet written was queued.
     fn oldest_unwritten(&self) -> Option<Instant> {
         self.writing
-            .or(self.queue.front().map(|(_, queued)| *queued))
+            .map(|(_, queued)| queued)
+            .or(self.queue.front().map(|(_, _, queued)| *queued))
     }
 
     /// Drops the connection with a TCP reset, discarding the data the server
@@ -374,15 +393,33 @@ mod tests {
         format!("ws://{address}")
     }
 
+    /// The next inbound that is not a written report.
+    async fn next_inbound(ws: &mut WebSocket) -> Inbound {
+        loop {
+            match ws.recv(true).await {
+                Inbound::Written(_) => {}
+                inbound => return inbound,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
         let mut ws = WebSocket::open(&url, None, TIMEOUT).await.unwrap();
 
-        ws.send(b"{\"id\":1}".to_vec(), FrameType::Text).unwrap();
-        let echoed = ws.recv(true).await;
-        let closed = ws.recv(true).await;
+        ws.send(
+            FrameId::for_tests(1),
+            b"{\"id\":1}".to_vec(),
+            FrameType::Text,
+        )
+        .unwrap();
+        let written = ws.recv(true).await;
+        let echoed = next_inbound(&mut ws).await;
+        let closed = next_inbound(&mut ws).await;
 
+        // Reported once flushed, before the server could answer it.
+        assert_eq!(written, Inbound::Written(FrameId::for_tests(1)));
         assert_eq!(echoed, Inbound::Frame(b"{\"id\":1}".to_vec()));
         assert_eq!(
             closed,
@@ -414,10 +451,12 @@ mod tests {
             .await
             .unwrap();
 
-        ws.send(b"{}".to_vec(), FrameType::Text).unwrap();
-        let text = ws.recv(true).await;
-        ws.send(vec![0xff, 0x00], FrameType::Binary).unwrap();
-        let binary = ws.recv(true).await;
+        ws.send(FrameId::for_tests(2), b"{}".to_vec(), FrameType::Text)
+            .unwrap();
+        let text = next_inbound(&mut ws).await;
+        ws.send(FrameId::for_tests(3), vec![0xff, 0x00], FrameType::Binary)
+            .unwrap();
+        let binary = next_inbound(&mut ws).await;
 
         assert_eq!(text, Inbound::Frame(b"text".to_vec()));
         assert_eq!(binary, Inbound::Frame(b"binary".to_vec()));
@@ -450,11 +489,12 @@ mod tests {
         // system buffers varies (Windows took a single 32 MiB frame whole).
         let mut queued = 0;
         let stalled = loop {
-            ws.send(vec![b'x'; 1 << 20], FrameType::Text).unwrap();
+            ws.send(FrameId::for_tests(4), vec![b'x'; 1 << 20], FrameType::Text)
+                .unwrap();
             queued += 1 << 20;
             assert!(queued <= 1 << 30, "the system buffered 1 GiB");
             if let Ok(inbound) =
-                tokio::time::timeout(Duration::from_millis(10), ws.recv(true)).await
+                tokio::time::timeout(Duration::from_millis(10), next_inbound(&mut ws)).await
             {
                 break inbound;
             }
@@ -498,12 +538,13 @@ mod tests {
         let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout)
             .await
             .unwrap();
-        ws.send(b"late".to_vec(), FrameType::Text).unwrap();
+        ws.send(FrameId::for_tests(5), b"late".to_vec(), FrameType::Text)
+            .unwrap();
         // The client is not polled until the frame is overdue, while the
         // socket could take it at any time.
         tokio::time::sleep(timeout * 2).await;
 
-        let overdue = tokio::time::timeout(TIMEOUT, ws.recv(true)).await;
+        let overdue = tokio::time::timeout(TIMEOUT, next_inbound(&mut ws)).await;
         drop(ws);
         let received = server.await.unwrap();
 

@@ -42,6 +42,12 @@ pub struct Config {
     /// Most bytes of those messages; a single larger message is still
     /// read when none waits. At least 1. Default 4 MiB.
     pub read_ahead_bytes: usize,
+    /// Most bytes of the application's calls (`send` included) handed to
+    /// the transport and not yet written; a call that does not fit waits
+    /// for room, for at most `timeout`, and a single larger call is sent
+    /// when none waits. The client's own commands are not counted. At least
+    /// 1. Default 4 MiB.
+    pub write_queue_bytes: usize,
 }
 
 /// Encoding of the client protocol (`client.proto`).
@@ -81,6 +87,7 @@ impl Default for Config {
             reconnect_jitter_window: Duration::ZERO,
             read_ahead_messages: 256,
             read_ahead_bytes: 4 << 20,
+            write_queue_bytes: 4 << 20,
         }
     }
 }
@@ -105,6 +112,7 @@ impl std::fmt::Debug for Config {
             .field("reconnect_jitter_window", &self.reconnect_jitter_window)
             .field("read_ahead_messages", &self.read_ahead_messages)
             .field("read_ahead_bytes", &self.read_ahead_bytes)
+            .field("write_queue_bytes", &self.write_queue_bytes)
             .finish()
     }
 }
