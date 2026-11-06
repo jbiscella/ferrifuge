@@ -155,6 +155,15 @@ impl HttpTransport {
         }));
     }
 
+    /// Closes the stream, and lets the emulation requests in flight finish,
+    /// each within its own timeout: what the client sent before closing is
+    /// not dropped, as a websocket's close writes its queued frames first.
+    pub(crate) async fn close(self) {
+        let Self { body, requests, .. } = self;
+        drop(body);
+        requests.for_each(|_| async {}).await;
+    }
+
     /// The next message from the server, or the end of the transport: the
     /// stream ended or failed, or an emulation request failed. Cancel-safe.
     pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
@@ -567,6 +576,50 @@ mod tests {
             matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains("307")),
             "{inbound:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn closing_lets_emulation_requests_in_flight_finish() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        // An emulation endpoint that notes the request it read, after a
+        // delay that outlasts the close below.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let emulation = format!("http://{}/emulation", listener.local_addr().unwrap());
+        let received = Arc::new(AtomicBool::new(false));
+        let noted = Arc::clone(&received);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let read = socket.read(&mut [0; 4096]).await.unwrap_or(0);
+            noted.store(read > 0, Ordering::SeqCst);
+            let _ = socket.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+        });
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        transport.emulation_url = Url::parse(&emulation).unwrap();
+        transport.send(b"{\"send\":{}}".to_vec());
+
+        tokio::time::timeout(TIMEOUT, transport.close())
+            .await
+            .expect("closed within the request timeout");
+
+        assert!(received.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

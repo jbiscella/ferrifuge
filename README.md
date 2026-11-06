@@ -324,7 +324,7 @@ The client's calls:
 | `client.history(channel, options)` | a `HistoryResult`: the publications `HistoryOptions` select (`limit`, `since`, `reverse`), and the stream's current `epoch` and `offset` |
 | `client.presence(channel)` | a `PresenceResult`: the subscribed clients by client id, with their user, connection info and channel info |
 | `client.presence_stats(channel)` | a `PresenceStatsResult`: `num_clients` and `num_users` |
-| `client.send(data)` | `()` once the message is written: the server sends no reply. It waits for the connection as the others do, but has no reply to wait for |
+| `client.send(data)` | `()` once the message is handed to the transport, which writes it even if the client disconnects right after: the server sends no reply. It waits for the connection as the others do, but has no reply to wait for |
 
 Data is raw JSON with the JSON protocol, any bytes with Protobuf. Each call
 is made when the method returns, and its future borrows nothing from the

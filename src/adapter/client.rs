@@ -178,15 +178,6 @@ impl Shared {
                         outboxes.withdraw(&ids);
                         None
                     }
-                    // Settled at once: a call's outcome does not wait for
-                    // the driver.
-                    Action::CallSettled { call, result } => {
-                        if let Some(sender) = lock(&self.calls).remove(&call) {
-                            // The future may be gone already.
-                            let _ = sender.send(result);
-                        }
-                        None
-                    }
                     action => {
                         core.actions.push_back(action);
                         None
@@ -693,7 +684,9 @@ impl Client {
     ///
     /// The call is made when this returns. While the client is not
     /// connected it waits for the connection, for at most
-    /// `Config::timeout`; the future resolves once the message is written.
+    /// `Config::timeout`; the future resolves once the message is handed to
+    /// the transport, which writes it even if the client disconnects right
+    /// after (within `Config::timeout`), unless the connection fails first.
     /// Dropping the future before then abandons the message: a send whose
     /// future is never awaited may be lost.
     ///
@@ -868,6 +861,9 @@ impl Driver {
                 outboxes.subscriptions.values_mut().for_each(Outbox::close);
                 drop(outboxes);
                 lock(&self.shared.callbacks).0.clear();
+                // The final disconnect settled every call; any other future
+                // gets "disconnected" rather than waiting forever.
+                lock(&self.shared.calls).clear();
                 return;
             }
             // A full read-ahead stops the reading: the server's handling of
@@ -990,11 +986,17 @@ impl Driver {
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
             // Shared::handle routes them to the outboxes.
-            Action::Emit(..)
-            | Action::EmitSubscription(..)
-            | Action::Withdraw(_)
-            | Action::CallSettled { .. } => {
-                unreachable!("events and call outcomes never reach the driver")
+            Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
+                unreachable!("events never reach the driver")
+            }
+            // In order with the other actions: a send settles once its
+            // frame went to the transport, which writes it even when closed
+            // right after.
+            Action::CallSettled { call, result } => {
+                if let Some(sender) = lock(&self.shared.calls).remove(&call) {
+                    // The future may be gone already.
+                    let _ = sender.send(result);
+                }
             }
             Action::SetSubscriptionTimer(id, timer, delay) => {
                 self.subscription_timers.set((id, timer), delay);
@@ -1190,8 +1192,9 @@ impl Transport {
             Self::WebSocket(websocket) => {
                 tokio::spawn(websocket.close());
             }
-            // Dropping the response and the requests in flight closes them.
-            Self::Http(_) => {}
+            Self::Http(http) => {
+                tokio::spawn(http.close());
+            }
         }
     }
 }
