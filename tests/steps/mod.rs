@@ -21,6 +21,7 @@ use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
 mod backoff;
+mod calls;
 mod codes;
 mod connection;
 mod delivery;
@@ -57,6 +58,9 @@ pub(crate) struct ClientWorld {
     pub(crate) relay: Option<CountingRelay>,
     pub(crate) client: Option<Client>,
     events: Option<Events>,
+    /// Events of the client a step looked at and put back, for the next
+    /// step to see first.
+    pub(crate) put_back_events: std::collections::VecDeque<ClientEvent>,
     /// Connection id from the last "connected" event.
     pub(crate) client_id: Option<String>,
     /// Code and reason of the last disconnect the server was asked to send.
@@ -145,6 +149,8 @@ pub(crate) struct ClientWorld {
     pub(crate) server_side: server_subs::ServerSide,
     /// Streams a Block 15 scenario reads itself.
     pub(crate) delivery: delivery::Delivery,
+    /// Calls of a Block 13 scenario.
+    pub(crate) calls: calls::Calls,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
@@ -287,6 +293,9 @@ impl ClientWorld {
     }
 
     pub(crate) async fn next_event(&mut self) -> ClientEvent {
+        if let Some(event) = self.put_back_events.pop_front() {
+            return event;
+        }
         let events = self.events.as_mut().expect("no client created yet");
         tokio::time::timeout(EVENT_TIMEOUT, events.next())
             .await

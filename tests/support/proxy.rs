@@ -55,6 +55,8 @@ struct SubscribeAnswer {
 
 enum Answer {
     Respond(Value),
+    /// Answer after a delay.
+    RespondAfter(Duration, Value),
     /// Leave the request unanswered for as long as the scenario runs.
     Hold,
 }
@@ -165,6 +167,18 @@ impl ProxyBackend {
             ));
     }
 
+    /// Answers the next connection attempt with a disconnect after `delay`.
+    pub(crate) fn disconnect_next_after(&self, delay: Duration, code: u32, reason: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .programmed
+            .push_back(Answer::RespondAfter(
+                delay,
+                json!({"disconnect": {"code": code, "reason": reason}}),
+            ));
+    }
+
     /// Subscribes the connections accepted from now on to `channels` on
     /// the server side (connect result `channels`); none for an empty list.
     pub(crate) fn grant(&self, channels: &[&str]) {
@@ -219,6 +233,10 @@ async fn connect(
     };
     match answer {
         Some(Answer::Respond(answer)) => Json(answer),
+        Some(Answer::RespondAfter(delay, answer)) => {
+            tokio::time::sleep(delay).await;
+            Json(answer)
+        }
         // Ends when the proxy is dropped with the scenario.
         Some(Answer::Hold) => std::future::pending().await,
         None => {
