@@ -25,8 +25,10 @@ tokio. Any other runtime can drive the core through `ferrifuge::machine`.
 
 ## Status
 
-Early development; the API will change. Work is organised in blocks
-specified in [CLAUDE.md](CLAUDE.md).
+Before 1.0, a minor version may break the API; [CHANGELOG.md](CHANGELOG.md)
+says what each version changes. Work is organised in blocks specified in
+[CLAUDE.md](CLAUDE.md). Vulnerabilities are reported privately, as
+[SECURITY.md](SECURITY.md) explains.
 
 Available now:
 
@@ -85,13 +87,27 @@ Planned next, in this order: connect data and headers, `setToken` and
 
 ## Usage
 
-ferrifuge is not on crates.io yet. Depend on the repository:
+Add it to `Cargo.toml` (until the first release reaches crates.io, use
+`ferrifuge = { git = "https://github.com/jbiscella/ferrifuge" }`):
 
 ```toml
 [dependencies]
-ferrifuge = { git = "https://github.com/jbiscella/ferrifuge" }
+ferrifuge = "0.12"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+`examples/` holds runnable programs: `quickstart`, `recovery`, `calls` and
+`delta`. They expect a server started with `examples/centrifugo.json`, which
+accepts connections without a token and keeps a history of channels without
+a namespace; it enables the server API without a key, so it is for local
+development only:
+
+```sh
+docker run --rm -p 8000:8000 -v "$PWD/examples/centrifugo.json:/centrifugo/config.json" \
+  centrifugo/centrifugo:v6.10.1 centrifugo --config /centrifugo/config.json
+cargo run --example quickstart
+curl -d '{"channel":"news","data":{"text":"hello"}}' localhost:8000/api/publish
 ```
 
 ```rust
@@ -533,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.1", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.12", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then

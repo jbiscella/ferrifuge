@@ -1,0 +1,113 @@
+name: release
+
+# Publishes a version to crates.io when its tag is pushed (Block 20, D1):
+# every check first, then the publish, which cannot be undone (a version
+# can only be yanked), then the GitHub release. Trusted publishing: no
+# stored token. The owner registers this workflow and the `release`
+# environment as the crate's trusted publisher on crates.io.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - name: Tag names the version, changelog has its section
+        run: scripts/check-release-tag "$GITHUB_REF_NAME"
+
+      - name: Tagged commit is on main and its CI succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "$GITHUB_SHA is not on main" >&2; exit 1; }
+          conclusion="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main" \
+            --jq '.workflow_runs[0].conclusion // "none"')"
+          if [ "$conclusion" != success ]; then
+            echo "the ci run of main for $GITHUB_SHA has not succeeded ($conclusion): re-run the release once it has" >&2
+            exit 1
+          fi
+
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+
+      # Against the latest version on crates.io, as the pull-request job
+      # checks against the base branch; none before the first publish.
+      - name: cargo semver-checks
+        run: |
+          if curl -sf -A "ferrifuge release (github.com/$GITHUB_REPOSITORY)" \
+              https://crates.io/api/v1/crates/ferrifuge > /dev/null; then
+            cargo semver-checks --default-features
+          else
+            echo "no version on crates.io yet: nothing to compare with"
+          fi
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The version's changelog section as the notes; re-running this job
+      # never publishes again.
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version] - " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md

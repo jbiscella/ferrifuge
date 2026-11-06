@@ -8,6 +8,27 @@ license = "0BSD"
 repository = "https://github.com/jbiscella/ferrifuge"
 keywords = ["centrifugo", "centrifuge", "websocket", "realtime", "pubsub"]
 categories = ["network-programming", "asynchronous"]
+documentation = "https://docs.rs/ferrifuge"
+# What crates.io gets (Block 20, D3): tests, benches, fixtures, workflows
+# and the project's notes stay in the repository.
+# Anchored with "/": the patterns match at any depth otherwise.
+include = [
+    "/src/**",
+    "/proto/**",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    # Fuzzing corpora next to the targets, which .gitignore leaves out but
+    # `include` would not.
+    "!/src/**/__fuzz__/**",
+]
+
+# docs.rs builds the default features on one target: never fips, whose
+# build needs Go and CMake (Block 20, D7).
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
 default = ["tokio", "ring"]
@@ -72,7 +93,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "r
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 testcontainers = { version = "0.28", features = ["http_wait"] }
-tokio = { version = "1.54.0", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.54.0", features = ["macros", "rt-multi-thread", "time", "process", "io-util"] }
 bolero = "0.13.7"
 
 [[test]]
@@ -150,4 +171,21 @@ codegen-units = 1
 [[test]]
 name = "interop"
 harness = false
+required-features = ["tokio"]
+
+# Examples need a server; they build with the tokio adapter (Block 20, D8).
+[[example]]
+name = "quickstart"
+required-features = ["tokio"]
+
+[[example]]
+name = "recovery"
+required-features = ["tokio"]
+
+[[example]]
+name = "calls"
+required-features = ["tokio"]
+
+[[example]]
+name = "delta"
 required-features = ["tokio"]

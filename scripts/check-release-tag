@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Checks that a release tag names the crate's version and that the
+# changelog has a section for it (Block 20, D2). Usage:
+#   scripts/check-release-tag <tag> [crate directory]
+# Needs only bash and cargo, so it runs on every CI OS.
+set -euo pipefail
+
+tag="${1:?usage: check-release-tag <tag> [crate directory]}"
+dir="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$dir"
+
+# The package's version: the first "version" of the metadata, which needs
+# no Cargo.lock.
+version="$(cargo metadata --no-deps --format-version 1 --offline \
+    | grep -o '"version":"[^"]*"' | head -n 1 | cut -d '"' -f 4)"
+expected="v$version"
+
+if [ "$tag" != "$expected" ]; then
+    echo "tag $tag is not the crate's version: the tag must be $expected" >&2
+    exit 1
+fi
+if ! grep -q "^## \[$version\] - " CHANGELOG.md; then
+    echo "CHANGELOG.md has no section for $version: add '## [$version] - <date>'" >&2
+    exit 1
+fi
+echo "tag $tag matches version $version and its changelog section"
