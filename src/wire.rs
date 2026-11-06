@@ -70,6 +70,8 @@ pub(crate) struct SubscribeRequest {
     pub(crate) recoverable: bool,
     /// Bits of `SubscribeRequest.flag`, e.g. [`REJECT_UNRECOVERED`].
     pub(crate) flag: i64,
+    /// Asks the server for join and leave pushes.
+    pub(crate) join_leave: bool,
 }
 
 /// Fail a subscribe whose recovery is not possible with error 112 instead
@@ -256,6 +258,16 @@ pub(crate) enum Push {
     /// An asynchronous message (`Message.data`): raw JSON with the JSON
     /// protocol, any bytes with Protobuf.
     Message(Vec<u8>),
+    /// A client subscribed to `channel` (`Join.info`).
+    Join {
+        channel: String,
+        info: ClientInfo,
+    },
+    /// A client unsubscribed from `channel` (`Leave.info`).
+    Leave {
+        channel: String,
+        info: ClientInfo,
+    },
     Unsupported,
 }
 

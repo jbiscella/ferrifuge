@@ -109,6 +109,7 @@ impl From<&Command> for pb::Command {
                 positioned,
                 recoverable,
                 flag,
+                join_leave,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
                     channel: channel.clone(),
@@ -120,6 +121,7 @@ impl From<&Command> for pb::Command {
                     positioned: *positioned,
                     recoverable: *recoverable,
                     flag: *flag,
+                    join_leave: *join_leave,
                     ..pb::SubscribeRequest::default()
                 });
             }
@@ -312,6 +314,16 @@ impl From<pb::Push> for Push {
             }
         } else if let Some(message) = push.message {
             Push::Message(message.data)
+        } else if let Some(join) = push.join {
+            Push::Join {
+                channel: push.channel,
+                info: join.info.map(ClientInfo::from).unwrap_or_default(),
+            }
+        } else if let Some(leave) = push.leave {
+            Push::Leave {
+                channel: push.channel,
+                info: leave.info.map(ClientInfo::from).unwrap_or_default(),
+            }
         } else {
             Push::Unsupported
         }
@@ -537,6 +549,68 @@ mod tests {
         assert_eq!(
             replies[0].result,
             ReplyResult::Push(Push::Message(vec![0xff, 0x00, 0xfe]))
+        );
+    }
+
+    #[test]
+    fn encodes_join_leave_and_decodes_join_and_leave_pushes() {
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                join_leave: true,
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let info = pb::ClientInfo {
+            user: "u".into(),
+            client: "c".into(),
+            conn_info: vec![0xff],
+            chan_info: vec![0x00],
+        };
+        let replies = decode(&frame_of(&[
+            pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    join: Some(pb::Join {
+                        info: Some(info.clone()),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                push: Some(pb::Push {
+                    channel: "news".into(),
+                    leave: Some(pb::Leave { info: Some(info) }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ]))
+        .unwrap();
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+        assert!(command.subscribe.unwrap().join_leave);
+        let expected = ClientInfo {
+            client: "c".into(),
+            user: "u".into(),
+            conn_info: Some(vec![0xff]),
+            chan_info: Some(vec![0x00]),
+        };
+        assert_eq!(
+            replies[0].result,
+            ReplyResult::Push(Push::Join {
+                channel: "news".into(),
+                info: expected.clone()
+            })
+        );
+        assert_eq!(
+            replies[1].result,
+            ReplyResult::Push(Push::Leave {
+                channel: "news".into(),
+                info: expected
+            })
         );
     }
 
@@ -775,7 +849,7 @@ mod tests {
             pb::Reply {
                 push: Some(pb::Push {
                     channel: "c".into(),
-                    join: Some(pb::Join::default()),
+                    refresh: Some(pb::Refresh::default()),
                     ..Default::default()
                 }),
                 ..Default::default()

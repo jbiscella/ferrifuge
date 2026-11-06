@@ -313,7 +313,11 @@ impl Machine {
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
-        let (positioned, recoverable) = (sub.options.positioned, sub.options.recoverable);
+        let (positioned, recoverable, join_leave) = (
+            sub.options.positioned,
+            sub.options.recoverable,
+            sub.options.join_leave,
+        );
         // With getState, a failed recovery reloads the state rather than
         // succeeding with publications missing.
         let flag = if sub.options.state_source {
@@ -338,6 +342,7 @@ impl Machine {
                     positioned,
                     recoverable,
                     flag,
+                    join_leave,
                 }),
             },
         );
