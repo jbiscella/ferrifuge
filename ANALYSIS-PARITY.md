@@ -63,9 +63,9 @@ Order: production priority. Items 1–4, 9 and 21 come first, as the owner asked
 | 22 | Mocking support for applications | Adopt an in-memory server double for the real `Client`, behind `test-util`; no client trait | additive | M |
 | 18 | Typed JSON helpers | Adopt; no new feature, since serde is already a dependency (question Q6) | additive | S |
 | 13 | Publications-only stream | Adopt as a thin view of the subscription's stream, same delivery rules | additive | S |
-| 24 | Cookies on the HTTP transports | Not adopted now, because `Cookie` in `http_headers` and item 14 cover the native cases; a jar only on evidence; `withCredentials` belongs to item 25 | none | — |
-| 17 | Callback API, WeakClient, delivery modes, deadlock detection | Not adopted, because Block 15's streams already give their guarantees; document the patterns | none | — |
-| 20 | Replay of their TLA+ traces | Not adopted, because the traces encode decisions Ferrifuge took differently and cannot be regenerated | none | — |
+| 24 | Cookies on the HTTP transports | Adopted (owner, 2026-11-06 late): a `CookieJar` trait with a default in-memory jar on `cookie_store`, on every transport | additive | M |
+| 17 | Callback API, WeakClient, delivery modes, deadlock detection | Adopted (owner, 2026-11-06 late): handlers as one more consumer of Block 15's outbox, delivery modes Task, Thread and Inline, `Client: Clone` with `WeakClient`, deadlock detection in Thread and Inline | additive | L |
+| 20 | Replay of their TLA+ traces | Adopted (owner, 2026-11-06 late): a replay harness with a mapping and an explicit divergence list | none | L |
 | 25 | WebAssembly / browser adapter | Adopt only a wasm32 build check of the core now; the adapter on demand | none | S |
 
 ## Earlier exclusions this reverses
@@ -598,70 +598,73 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 
 ## 24. Cookie-based authentication on the HTTP transports
 
-**Problem.** centrifuge-js #308 and #310, centrifugo #1131: browser apps want cookies (HttpOnly session cookies) to authenticate the SSE and HTTP-stream connections, which `EventSource` sends cross-origin only with `withCredentials`. #310 is mostly about connection expiry without a token callback.
+**Owner decision (2026-11-06, late): adopted.** A cookie jar on the HTTP transports, alongside the `Cookie` header in `http_headers`.
+
+**Problem.** centrifuge-js #308 and #310, centrifugo #1131: deployments authenticate with session cookies, which a gateway or Centrifugo's connect proxy reads; some gateways also set cookies (sticky sessions, bot protection) that they expect back. A native client has no browser jar, so it neither stores a `Set-Cookie` nor sends it back.
 
 **Official SDK** (rust spec §5.1): no jar; "cookies are the app's": a session cookie goes in the real headers.
 
 **Designs.**
-- **A. No jar.** A cookie the app holds goes in `http_headers` as `Cookie` (Block 17 allows it on every transport); item 14 replaces it before a reconnect. `withCredentials` is a browser CORS flag with no native meaning: it belongs to item 25.
-- **B. An owned cookie-jar trait** with an in-memory default, fed by `Set-Cookie` of every response and applied to every request and upgrade.
-- **C. reqwest's cookie store** for the HTTP transports, applied by hand to the websocket upgrade.
+- **A. A Ferrifuge `CookieJar` trait with a default in-memory jar.** `ClientBuilder::cookie_jar(Arc<dyn CookieJar>)`: the jar is asked for the cookies of each request's URL (the websocket upgrade, the http_stream and sse requests, every emulation request) and given the `Set-Cookie` headers of each response, the upgrade's included. The default `MemoryJar` parses and matches cookies with the maintained `cookie_store` crate (0.22.1, 2026-02, MIT OR Apache-2.0; Block 0 "Components": `Set-Cookie` is network input). The reqwest transports use it through reqwest's `cookie_provider`, adapted inside the adapter; the websocket path adds the `Cookie` header itself. A `Cookie` set in `http_headers` is sent as given, the jar's cookies appended.
+- **B. Expose reqwest's cookie store** (`reqwest::cookie::Jar`) for the HTTP transports, applied by hand to the websocket upgrade.
+- **C. No jar**: `Cookie` in `http_headers` and `set_http_headers` (item 14) only.
 
 | | A | B | C |
 |---|---|---|---|
-| Fit | good | good: adapter only | good |
-| Idiom | good | good | fair: reqwest types in the public API |
-| Consistency | good | fair: new state shared across transports | fair |
-| Tests | good: @B records the cookie on each transport | good: @B sets a cookie and expects it back | good |
-| Semver | none | additive | ties the API to reqwest |
-| Cost | none | M | M |
+| Fit | good: adapter only | good: adapter only | good |
+| Idiom | good: a trait object with a default, as reqwest's `CookieStore` | fair: reqwest types in the public API | good |
+| Consistency | good: every transport the same | fair: the websocket path differs | good |
+| Tests | good: @D, the fake server sets a cookie on the upgrade and expects it on the next connection; @B on http_stream | good | good |
+| Semver | additive | ties the public API to reqwest 0.x | none |
+| Cost | M | M | none |
 
-**Recommendation.** A, so not adopted as a jar for now: no native user asked, and the browser case is item 25's. B if a gateway is found to set cookies that it requires back. #310's expiry case is already Block 1/17 behaviour (a token callback, or `set_token`).
+**Recommendation.** A. `withCredentials` stays a browser flag: item 25's browser adapter.
 
 ## 17. Callback API, WeakClient, event-delivery modes, deadlock detection
 
-**Problem these solve in the official SDK.** Callbacks run the app's code between the SDK's steps; WeakClient avoids the reference cycle of a handler capturing a cloneable client; delivery modes choose the thread handlers run on; deadlock detection fails fast when a handler blocks on something that needs the loop it is blocking.
+**Owner decision (2026-11-06, late): adopted.** Each keeps Block 15's guarantees (delivered means taken, exactly once on recoverable channels); where a mode cannot keep one, its documentation states which one it gives up.
 
-**Official SDK** (rust spec §4.4, §9.4, §9.5, §9.8): callbacks are primary, streams are adapters over them; a dedicated event thread per client by default or inline delivery; a `WouldDeadlock` error from thread-local and task-local markers; handler panics stop the client.
+**Problem.** Callback-style code (handlers registered once, called per event) is what applications ported from centrifuge-js, centrifuge-go or centrifuge-swift are written in; handlers that capture the client need a handle that does not keep it alive; blocking handlers need their own thread; a handler that blocks on a call needing the loop it is blocking would wait for its timeout instead of failing at once.
+
+**Official SDK** (rust spec §4.4, §9.4, §9.5, §9.8): `on_*` handlers per event kind, on the builder or the client; a dedicated event thread per client by default, or inline delivery; `WeakClient` from `downgrade()`; a `WouldDeadlock` error from a thread-local or task-local marker set while a handler runs; a handler panic stops the client.
 
 **Designs.**
-- **A. Not adopted.** Block 15's streams already deliver by hand-off, one message at a time, with exactly-once on recoverable channels; the app chooses where it polls, so there is no delivery thread to configure. `Client` is not `Clone`, so there is no handler cycle, and `Arc<Client>` gives `Weak`. The deadlock that detection guards against becomes a bounded wait: a call awaited between two `next()` calls either resolves (call replies resolve when read, Block 13) or fails with its timeout, never hangs. For example, a subscription call awaited inside the loop that must first take `subscribed` fails after `Config::timeout`; detection would only make it fail at once, and the SDK cannot tell which task reads the stream. Docs show the patterns: read events in one task, make calls from another; `StreamExt::for_each` for callback style.
-- **B. A thin callback helper** spawning a task per stream that calls a closure for each event.
-- **C. The full callback model** next to streams.
+- **A. Handlers as one more consumer of the same outbox.** `ClientBuilder::on_*` and `SubscriptionBuilder::on_*` closures per event kind (`FnMut(Event) + Send + 'static`), one per kind, registering again replacing it. An object with a handler has no stream: registering a handler takes over, as a second `events()` call does (Block 15), so the two models never split one object's events. An event counts as delivered when its handler returns, which keeps "delivered means taken" (a handler that returned has taken it) and exactly-once on recoverable channels. Delivery modes: `EventDelivery::Task` (default: the handlers of a client run one at a time on a tokio task of their own), `EventDelivery::Thread` (on an OS thread, for handlers that block), `EventDelivery::Inline` (on the driver, the cheapest; a handler must neither block nor wait). A handler that panics takes nothing (its event's position does not move) and stops the client with an error event, so recovery brings the event back on the next `connect()`. `WeakClient`: `Client` becomes `Clone` (clones share one connection, the last dropped one shutting it down, as dropping does today) and `Client::downgrade()` returns a `WeakClient` whose `upgrade()` gives a `Client` while one is alive. Deadlock detection: while a handler runs in `Thread` or `Inline` mode, a thread-local marker names its client; a call or `ready()` of that client that would have to wait for the loop the handler holds fails at its first poll with a new `CallError` kind, instead of reaching its timeout. In `Task` mode the handler is synchronous and cannot await, so the marker is set on that task too.
+- **B. Handlers as a separate delivery path** in the adapter: outboxes call closures directly, beside the streams.
+- **C. A handler trait** (`ClientHandler` with a default no-op method per event), registered once, as rdkafka's contexts or russh's handlers.
 
 | | A | B | C |
 |---|---|---|---|
-| Fit | good | good: built on the streams | poor: a second delivery model in the adapter |
-| Idiom | good: streams are the async-Rust norm | fair: hides a spawned task | fair |
-| Consistency | good: Block 0 and Block 15 | fair | poor: reverses Block 15's design |
-| Tests | — | fair | poor: every Block 15 scenario twice |
-| Semver | none | additive | additive, large |
-| Cost | docs only | S | L |
+| Fit | good: the core and Block 15's outbox unchanged; a handler is a consumer | poor: two delivery paths to keep in step | good: as A, one trait object instead of closures |
+| Idiom | good: closures per kind, as centrifuge-js and the official SDK; `Clone` handles with `Weak` downgrades, as `Arc`/`Weak` | fair | good: common in Rust network crates, heavier for one handler |
+| Consistency | good: one active consumer per object, as Block 15 | poor | good |
+| Tests | good: the Block 15 delivery scenarios run in each mode; a deadlock scenario per mode | poor: every scenario twice | good |
+| Semver | additive (`Client: Clone` is an addition; `CallError` and the events are `#[non_exhaustive]`) | additive | additive |
+| Cost | L | L | L |
 
-Answer to the owner's questions: a callback API, WeakClient and delivery modes do not make sense next to Block 15's streams; deadlock detection would only turn a bounded wait (`Config::timeout`) into an immediate error, and cannot tell which task reads the stream.
-
-**Recommendation.** A.
+**Recommendation.** A. Whether to add C's trait as a second registration form is left to its block's spec.
 
 ## 20. Replay of their TLA+ model traces
 
-**Problem.** Model traces are a strong oracle: each step of a formal model replayed into the core, states and events compared.
+**Owner decision (2026-11-06, late): adopted**, against the sans-IO core, keeping the MIT notice of the trace data; Block 16's "optional, later" replay is restored as a planned block. Reading the trace data files is allowed for this block only; the clean-room rule still forbids centrifuge-rust's `crates/` source.
 
-**Official SDK** (rust spec §0, §11.1, §11.3): the model lives in a Centrifugal Labs internal repository; traces generated by TLC under a narrowing spec specific to their implementation, committed as JSON lines (21 files, about 2.9 MB, under `crates/`), replayed into their core; bug-variant counterexamples must diverge.
+**Problem.** Model traces are an oracle independent of Ferrifuge's own tests: each step of a formal model of the SDK, with its expected states and events, replayed into the core.
+
+**Official SDK** (rust spec §0, §11.1, §11.3): the model is internal to Centrifugal Labs; traces generated by TLC under a narrowing spec specific to their implementation, committed as JSON lines (21 files, about 2.9 MB, under `crates/centrifuge-client-core/tests/tla/traces/`, plus `bugs.jsonl` counterexamples), replayed into their core.
 
 **Designs.**
-- **A. Not adopted.** The traces encode decisions Ferrifuge took differently, and Ferrifuge cannot regenerate them for its own: the model is not public. Known differences (from their spec and Ferrifuge's blocks): backoff reset (first ping or reply, theirs; 3008 rule, Block 15); `disconnect()` failing sent calls (code 3, Ferrifuge Block 13); 2502 sentinel versus dropping the position (Block 11); handler steps and panics (none in Ferrifuge); `close` (item 16); deferred unsubscribe only over emulation (both, but scheduled differently); event delivery by handler return versus by take. Ferrifuge's seeded chaos harness (Block 16, I1–I10) already checks the invariants the model states.
-- **B. Replay with a translation layer** mapping their step names to `Input`s and a divergence filter for each known difference, keeping their MIT notice for the trace data.
+- **A. Replay with a mapping and an explicit divergence list.** A replay harness (an `@P` simulation, as Block 16's runners) maps each trace step to Ferrifuge `Input`s and compares states and events. Where Ferrifuge decided differently (known today: the backoff reset rule, `disconnect()` failing sent calls with code 3, 2502 dropping the position, delivery by take rather than by handler return, deferred unsubscribes), the step is not skipped silently: the harness names the decision that diverges, counts it, and asserts the rest of the trace; a divergence not on the list fails. The trace files are copied with their MIT notice; their format is learned from the data and its README only.
+- **B. Replay only the traces that never meet a divergence**, dropping the others.
+- **C. Translate the traces once into Ferrifuge's own scenario format** (Gherkin or Block 16 runner seeds).
 
-| | A | B |
-|---|---|---|
-| Fit | good | fair: their steps map to Ferrifuge's inputs only approximately |
-| Idiom | n/a | n/a |
-| Consistency | good | poor: a filter that hides divergences weakens the oracle |
-| Tests | good: Block 16 stays the oracle | fair |
-| Semver | none | none |
-| Cost | none | L |
-
-The traces sit under `crates/`, which the clean-room rule closes while designing: design B would need the owner's explicit exception to read them, even as data. Adopting A also drops the "optional, later" trace replay recorded under "Planned after Block 13" and in Block 16.
+| | A | B | C |
+|---|---|---|---|
+| Fit | good: the core is pure, inputs map to steps | good | fair: loses the traces' step-level oracle |
+| Idiom | n/a | n/a | n/a |
+| Consistency | good: divergences recorded where the spec records them | fair: hides how much is not checked | fair |
+| Tests | good: every step checked or named | poor: coverage shrinks with each divergence | fair |
+| Semver | none | none | none |
+| Cost | L | M | L |
 
 **Recommendation.** A.
 
@@ -795,4 +798,4 @@ Answered without the owner under the delegation of 2026-11-06; listed for audit.
 | Question | Answer | Why | Sources |
 |---|---|---|---|
 | TLS under FIPS (item 2): keep webpki verification in the fips build, or use the platform verifier there too | keep webpki in the fips build | The owner asked for a question only if `ClientConfig::fips()` stopped being true; it stays true either way, and keeping webpki leaves Block 6 unchanged | rustls 0.23.46 `client_conn.rs:396-409`; rustls-platform-verifier 0.7.1 |
-| TLA+ traces (item 20): an exception to the clean-room rule to read the trace data under `crates/` | no exception needed | The recommendation does not adopt the replay; the question arises only if the owner picks design B | the owner's clean-room rule |
+| TLA+ traces (item 20): an exception to the clean-room rule to read the trace data under `crates/` | superseded: the owner adopted item 20 (2026-11-06, late) and allowed reading the trace data files for its block only | — | owner decision |
