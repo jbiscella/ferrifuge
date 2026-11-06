@@ -804,13 +804,20 @@ async fn yields_publications_then_subscribing(world: &mut ClientWorld, list: Str
 #[then(regex = r#"^the next subscribe command for "(\w+)" asks to recover from offset (\d+)$"#)]
 async fn next_subscribe_recovers_from(world: &mut ClientWorld, channel: String, expected: u64) {
     let fake = world.fake();
+    // Only those after the point a step noted, e.g. a disconnect: an
+    // earlier subscribe cannot answer for "the next" (Codex on PR #100).
+    let before = world.recovery.subscribes_before;
     let recovering = || {
-        fake.received().into_iter().any(|command| {
-            let subscribe = &command["subscribe"];
-            subscribe["channel"] == channel.as_str()
-                && subscribe["recover"] == true
-                && subscribe["offset"].as_u64() == Some(expected)
-        })
+        fake.received()
+            .into_iter()
+            .filter(|command| command["subscribe"].is_object())
+            .skip(before)
+            .any(|command| {
+                let subscribe = &command["subscribe"];
+                subscribe["channel"] == channel.as_str()
+                    && subscribe["recover"] == true
+                    && subscribe["offset"].as_u64() == Some(expected)
+            })
     };
     wait_until("a subscribe recovering from that offset", recovering).await;
 }
