@@ -1430,6 +1430,36 @@ mod tests {
         );
     }
 
+    // The no-ping deadline is paused while the read-ahead is full (Block
+    // 15): a timer that fires before its cancellation is performed, e.g. at
+    // the moment the read-ahead fills, does not end the connection (a
+    // Windows flake of "A full read-ahead does not make the client report
+    // missing pings").
+    #[test]
+    fn a_no_ping_timer_firing_while_the_read_ahead_is_full_is_ignored() {
+        let mut machine = Machine::new(Config {
+            read_ahead_messages: 1,
+            ..Config::default()
+        });
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":1,"connect":{"client":"c","ping":1,"pong":true}}"#.to_vec(),
+        });
+        // Held behind the connected event, which is not taken.
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"push":{"channel":"x","pub":{"data":{}}}}"#.to_vec(),
+        });
+        assert!(!machine.wants_frames());
+
+        let fired = machine.handle(Input::TimerFired(Timer::ServerPing));
+
+        assert_eq!(machine.state(), State::Connected, "{fired:?}");
+    }
+
     // Codex on PR #65: each held message counts its own encoded size, not
     // an even share of its frame.
     #[test]
