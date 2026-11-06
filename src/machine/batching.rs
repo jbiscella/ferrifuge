@@ -105,7 +105,7 @@ impl Machine {
             };
             self.add_to_frame(&mut frame, command, calls);
         }
-        self.send_frame(frame);
+        self.send_frame(&frame);
     }
 
     /// While the subscriptions subscribe after a connect reply, their
@@ -120,7 +120,7 @@ impl Machine {
         for command in self.batching.connect_reply.take().unwrap_or_default() {
             self.add_to_frame(&mut frame, command, 0);
         }
-        self.send_frame(frame);
+        self.send_frame(&frame);
     }
 
     /// Adds `command`, carrying `calls` bytes of calls, to `frame`, sending
@@ -131,14 +131,14 @@ impl Machine {
             let fits = self.frame_of(&frame.commands).len() <= self.config.batch_frame_bytes.max(1);
             frame.commands.pop();
             if !fits {
-                self.send_frame(std::mem::take(frame));
+                self.send_frame(&std::mem::take(frame));
             }
         }
         frame.commands.push(command);
         frame.calls += calls;
     }
 
-    fn send_frame(&mut self, frame: Frame) {
+    fn send_frame(&mut self, frame: &Frame) {
         let Some(transport) = self.transport else {
             return;
         };
