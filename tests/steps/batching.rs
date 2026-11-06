@@ -25,8 +25,9 @@ pub(crate) struct Batching {
     run: Option<BatchRun>,
     /// The open batches of a @D scenario, by name ("" for the only one).
     batches: BTreeMap<String, Batch>,
-    /// Calls of a @D scenario, in the order they were made.
-    calls: Vec<JoinHandle<bool>>,
+    /// Calls of a @D or @B scenario, in the order they were made, each
+    /// giving its error code when it fails.
+    calls: Vec<JoinHandle<Result<(), u32>>>,
     /// Commands the fake server had received when the batch started.
     received_at_start: usize,
 }
@@ -137,11 +138,20 @@ impl BatchRun {
     fn connect(&mut self, result: &Value) {
         let transport = self.transport.expect("a transport opened");
         self.handle(Input::TransportOpened(transport));
+        // Over an emulated transport the connect command opened it.
+        let initial = self.actions.iter().rev().find_map(|action| match action {
+            Action::OpenTransport {
+                initial_frame: Some(frame),
+                ..
+            } => commands_of(frame).into_iter().next(),
+            _ => None,
+        });
         let id = self
             .frames_since(0)
             .iter()
             .rev()
             .flat_map(|(_, commands)| commands.clone())
+            .chain(initial)
             .find(|command| command["connect"].is_object())
             .and_then(|command| command["id"].as_u64())
             .expect("a connect command");
@@ -162,13 +172,7 @@ impl BatchRun {
             .filter_map(|action| match action {
                 Action::Send {
                     transport, frame, ..
-                } => Some((
-                    *transport,
-                    String::from_utf8_lossy(frame)
-                        .lines()
-                        .map(|line| serde_json::from_str(line).expect("JSON"))
-                        .collect(),
-                )),
+                } => Some((*transport, commands_of(frame))),
                 _ => None,
             })
             .collect()
@@ -202,6 +206,24 @@ impl BatchRun {
             .find(|(of, _)| of == name)
             .map(|(_, id)| *id)
             .expect("a call of that name")
+    }
+}
+
+/// The JSON commands of a frame, unwrapping an emulation request.
+fn commands_of(frame: &[u8]) -> Vec<Value> {
+    let text = String::from_utf8_lossy(frame);
+    let commands: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON"))
+        .collect();
+    match commands.as_slice() {
+        [request] if request.get("session").is_some() => commands_of(
+            request["data"]
+                .as_str()
+                .expect("the commands of an emulation request")
+                .as_bytes(),
+        ),
+        _ => commands,
     }
 }
 
@@ -673,10 +695,9 @@ fn spawn_call<F, T>(world: &mut ClientWorld, call: F)
 where
     F: std::future::Future<Output = Result<T, CallError>> + Send + 'static,
 {
-    world
-        .batching
-        .calls
-        .push(tokio::spawn(async move { call.await.is_ok() }));
+    world.batching.calls.push(tokio::spawn(async move {
+        call.await.map(|_| ()).map_err(|error| error.code)
+    }));
 }
 
 #[when(
@@ -766,11 +787,11 @@ async fn one_frame_of_calls(world: &mut ClientWorld) {
 #[then(regex = r"^(?:each call returns|both calls return) the fake server's reply$")]
 async fn each_call_returns(world: &mut ClientWorld) {
     for call in std::mem::take(&mut world.batching.calls) {
-        let ok = tokio::time::timeout(Duration::from_secs(5), call)
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
             .await
             .expect("the call settles")
             .expect("the call task");
-        assert!(ok, "a call failed");
+        assert_eq!(result, Ok(()), "a call failed");
     }
 }
 
@@ -869,4 +890,253 @@ async fn one_binary_frame(world: &mut ClientWorld) {
         .collect();
     assert_eq!(methods, ["a", "b"], "{received:?}");
     assert_eq!(received[0].1, received[1].1, "{received:?}");
+}
+
+// 18b: emulated transports and the HTTP 413 resend.
+
+#[given("a client connected over an emulated transport, with a subscription not subscribed")]
+fn an_emulated_client(world: &mut ClientWorld) {
+    let mut run = BatchRun::new(Config::default(), false);
+    run.machine = Machine::new(Config::default())
+        .with_transports(vec![ferrifuge::machine::TransportKind::HttpStream])
+        .expect("an emulated transport");
+    run.handle(Input::Connect);
+    run.connect(&json!({"client": "c", "session": "s", "node": "n"}));
+    let id = run
+        .machine
+        .add_subscription("news".to_owned(), SubscriptionOptions::default())
+        .expect("a new channel");
+    run.subscriptions.push(id);
+    world.batching.run = Some(run);
+}
+
+#[given(
+    regex = r#"^the application started a batch, called RPC "(\w+)" and subscribe on the subscription, and stopped the batch$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_batch_of_rpc_and_subscribe(world: &mut ClientWorld, name: String) {
+    let run = run(world);
+    run.handle(Input::StartBatching);
+    run.rpc(&name);
+    let id = run.subscriptions[0];
+    run.handle(Input::Subscribe(id));
+    run.mark = run.actions.len();
+    run.handle(Input::StopBatching);
+}
+
+/// The last frame sent, raw, with the commands it carries.
+fn last_frame(run: &BatchRun) -> (ferrifuge::machine::FrameId, Vec<u8>, Vec<Value>) {
+    run.actions
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::Send { id, frame, .. } => Some((*id, frame.clone(), commands_of(frame))),
+            _ => None,
+        })
+        .expect("a frame sent")
+}
+
+/// The server refuses `frame` with HTTP 413: the transport reports it
+/// rejected, then written, as the HTTP transport does.
+fn refuse(run: &mut BatchRun, id: ferrifuge::machine::FrameId, frame: Vec<u8>) {
+    let transport = run.transport.expect("a transport");
+    run.handle(Input::SendRejected { transport, frame });
+    run.handle(Input::FrameWritten {
+        transport,
+        frame: id,
+    });
+}
+
+#[when("the server refuses the request carrying both commands with HTTP 413")]
+fn refuse_both(world: &mut ClientWorld) {
+    let run = run(world);
+    let (id, frame, commands) = last_frame(run);
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    run.mark = run.actions.len();
+    refuse(run, id, frame);
+}
+
+#[then(regex = r#"^the call has not failed and the subscription is "(\w+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn not_failed_and_subscription(world: &mut ClientWorld, state: String) {
+    let run = run(world);
+    let (_, call) = run.calls.last().expect("a call");
+    assert!(!run.settled.contains_key(call), "{:?}", run.settled);
+    let id = run.subscriptions[0];
+    let got = run.machine.subscription_state(id).expect("a subscription");
+    assert_eq!(format!("{got:?}").to_lowercase(), state);
+}
+
+#[then(
+    regex = r#"^the client sends two requests, carrying RPC "(\w+)" and then the subscribe command$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn two_requests(world: &mut ClientWorld, name: String) {
+    let run = run(world);
+    let frames = run.frames();
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert_eq!(frames[0].1.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].1[0]["rpc"]["method"], name, "{frames:?}");
+    assert_eq!(frames[1].1.len(), 1, "{frames:?}");
+    assert!(frames[1].1[0]["subscribe"].is_object(), "{frames:?}");
+}
+
+#[when(
+    regex = r#"^the server refuses the request carrying RPC "(\w+)" with HTTP 413 and answers the subscribe command$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn refuse_the_rpc(world: &mut ClientWorld, name: String) {
+    let run = run(world);
+    let sent: Vec<(ferrifuge::machine::FrameId, Vec<u8>, Vec<Value>)> = run.actions[run.mark..]
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { id, frame, .. } => Some((*id, frame.clone(), commands_of(frame))),
+            _ => None,
+        })
+        .collect();
+    let (rpc_id, rpc_frame, _) = sent
+        .iter()
+        .find(|(_, _, commands)| commands[0]["rpc"]["method"] == name)
+        .cloned()
+        .expect("the rpc request");
+    let subscribe = sent
+        .iter()
+        .find(|(_, _, commands)| commands[0]["subscribe"].is_object())
+        .and_then(|(_, _, commands)| commands[0]["id"].as_u64())
+        .expect("the subscribe request");
+    run.mark = run.actions.len();
+    refuse(run, rpc_id, rpc_frame);
+    run.frame(&json!({"id": subscribe, "subscribe": {}}));
+}
+
+pub(crate) fn subscription_subscribed(world: &mut ClientWorld) {
+    let run = run(world);
+    let id = run.subscriptions[0];
+    assert_eq!(
+        run.machine.subscription_state(id),
+        Some(ferrifuge::SubscriptionState::Subscribed)
+    );
+}
+
+#[then("the transport stays open")]
+fn the_transport_stays_open(world: &mut ClientWorld) {
+    let run = run(world);
+    assert!(
+        !run.actions
+            .iter()
+            .any(|action| matches!(action, Action::CloseTransport(_))),
+        "{:?}",
+        run.actions
+    );
+}
+
+#[given(
+    regex = r#"^a client subscribed to channel "(\w+)" over transport "(\w+)" through an HTTP proxy answering HTTP 413 to every emulation request over (\d+) bytes$"#
+)]
+async fn a_client_behind_a_refusing_proxy(
+    world: &mut ClientWorld,
+    channel: String,
+    transport: String,
+    limit: usize,
+) {
+    let kind = super::transports::kind(&transport);
+    let http_proxy = crate::support::http_proxy::HttpProxy::start(
+        super::transports::server(world).address().to_owned(),
+    )
+    .await;
+    http_proxy.refuse_emulation_over(limit);
+    let url = format!("http://{}/connection/{}", http_proxy.address(), kind.name());
+    super::transports::configure(world, vec![(kind, url)]);
+    super::transports::connect_and_wait(world).await;
+    world.http_proxy = Some(http_proxy);
+    let subscription = world
+        .client()
+        .new_subscription(channel)
+        .expect("a new channel");
+    world.track_subscription(subscription);
+    world
+        .subscription
+        .as_ref()
+        .expect("the subscription")
+        .subscribe();
+    super::subscriptions::expect_subscription_event(world, "subscribing", false).await;
+    super::subscriptions::expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[when(
+    regex = r#"^the application starts a batch, publishes a (\d+)-byte JSON string and then (\{.*\}) to channel "(\w+)", and stops the batch$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_batch_of_publishes(world: &mut ClientWorld, size: usize, data: String, channel: String) {
+    let batch = world.client().start_batching();
+    let large = format!("\"{}\"", "x".repeat(size - 2)).into_bytes();
+    let first = world.client().publish(channel.clone(), large);
+    spawn_call(world, first);
+    let second = world.client().publish(channel, data.into_bytes());
+    spawn_call(world, second);
+    batch.stop();
+}
+
+#[then("the HTTP proxy refused one request carrying both publish commands")]
+async fn refused_one_with_both(world: &mut ClientWorld) {
+    let proxy = world.http_proxy.as_ref().expect("an HTTP proxy");
+    let found = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let both = proxy
+                .refused()
+                .iter()
+                .filter(|body| {
+                    commands_of(body)
+                        .iter()
+                        .filter(|c| c["publish"].is_object())
+                        .count()
+                        == 2
+                })
+                .count();
+            if both > 0 {
+                return both;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a refused request");
+    assert_eq!(found, 1);
+}
+
+/// The result of call `index`, made in order.
+async fn call_result(world: &mut ClientWorld, index: usize) -> Result<(), u32> {
+    let call = &mut world.batching.calls[index];
+    tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .expect("the call settles")
+        .expect("the call task")
+}
+
+#[then(regex = r"^the first publish fails with error code (\d+)$")]
+async fn the_first_publish_fails(world: &mut ClientWorld, code: u32) {
+    assert_eq!(call_result(world, 0).await, Err(code));
+}
+
+#[then("the second publish succeeds")]
+async fn the_second_publish_succeeds(world: &mut ClientWorld) {
+    assert_eq!(call_result(world, 1).await, Ok(()));
+}
+
+#[then(regex = r"^the subscription receives the publication (\{.*\}) and no other$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn receives_only(world: &mut ClientWorld, data: String) {
+    let expected: Value = serde_json::from_str(&data).expect("JSON data");
+    let event = super::subscriptions::expect_subscription_event(world, "publication", false).await;
+    let ferrifuge::SubscriptionEvent::Publication(publication) = &event else {
+        unreachable!("checked the name");
+    };
+    let got: Value = serde_json::from_slice(&publication.data).expect("JSON data");
+    assert_eq!(got, expected);
+    let more = tokio::time::timeout(
+        Duration::from_millis(500),
+        super::subscriptions::expect_subscription_event(world, "publication", false),
+    )
+    .await;
+    assert!(more.is_err(), "another publication");
 }

@@ -38,6 +38,11 @@ struct ProxyState {
     unsubscribes_relayed: AtomicUsize,
     /// The path and headers of every request received, in order.
     requests: Mutex<Vec<(String, axum::http::HeaderMap)>>,
+    /// Emulation requests with a larger body are answered with HTTP 413,
+    /// without relaying them (Block 18).
+    refuse_over: Mutex<Option<usize>>,
+    /// The bodies of the requests refused that way.
+    refused: Mutex<Vec<Vec<u8>>>,
 }
 
 impl HttpProxy {
@@ -54,6 +59,8 @@ impl HttpProxy {
             delay_next_unsubscribe: Mutex::new(None),
             unsubscribes_relayed: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
+            refuse_over: Mutex::new(None),
+            refused: Mutex::new(Vec::new()),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -106,6 +113,17 @@ impl HttpProxy {
             .collect()
     }
 
+    /// Answers every emulation request whose body exceeds `size` bytes with
+    /// HTTP 413, without relaying it.
+    pub(crate) fn refuse_emulation_over(&self, size: usize) {
+        *self.state.refuse_over.lock().unwrap() = Some(size);
+    }
+
+    /// The bodies of the emulation requests refused with HTTP 413.
+    pub(crate) fn refused(&self) -> Vec<Vec<u8>> {
+        self.state.refused.lock().unwrap().clone()
+    }
+
     /// Whether a rejection is programmed and not yet answered.
     pub(crate) fn rejection_programmed(&self) -> bool {
         self.state.reject_next_emulation.load(Ordering::SeqCst)
@@ -143,6 +161,11 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let limit = *state.refuse_over.lock().unwrap();
+    if parts.uri.path() == "/emulation" && limit.is_some_and(|limit| body.len() > limit) {
+        state.refused.lock().unwrap().push(body.to_vec());
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
     let unsubscribe = parts.uri.path() == "/emulation"
         && body
             .windows(b"unsubscribe".len())

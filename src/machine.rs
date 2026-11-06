@@ -1507,7 +1507,12 @@ impl Machine {
         } else {
             frame
         };
-        for id in self.codec.command_ids(frame) {
+        let ids = self.codec.command_ids(frame);
+        if ids.len() > 1 {
+            self.resend_alone(frame);
+            return;
+        }
+        for id in ids {
             if id == 0 || self.subscription_command_too_large(id) {
                 continue;
             }
@@ -1542,6 +1547,42 @@ impl Machine {
                 }),
                 result: ReplyResult::Empty,
             });
+        }
+    }
+
+    /// A request of several commands refused with HTTP 413: each command
+    /// still awaited goes again in its own request, at once and in order,
+    /// so that only a command refused alone gets the terminal outcome
+    /// (Block 8's rule, owner decision 2026-11-04; Block 18, D6). Its
+    /// deadlines keep running, and a call's command counts as unwritten
+    /// again. Emulated transports carry JSON only (Block 8).
+    fn resend_alone(&mut self, frame: &[u8]) {
+        let Some(transport) = self.transport else {
+            return;
+        };
+        for line in frame.split(|byte| *byte == b'\n') {
+            let Some(&id) = self.codec.command_ids(line).first() else {
+                continue;
+            };
+            let call = self.calls.owns_command(id);
+            let awaited =
+                call || self.awaits_subscription_reply(id) || self.tokens.awaits_refresh_reply(id);
+            if !awaited {
+                continue;
+            }
+            let (session, node) = self.emulation.clone().unwrap_or_default();
+            let request = json::emulation_request(&session, &node, line);
+            let sent = FrameId(self.next_frame);
+            self.next_frame += 1;
+            self.actions.push(Action::Send {
+                transport,
+                id: sent,
+                frame: request,
+                frame_type: self.codec.frame_type(),
+            });
+            if call {
+                self.batch_frame_sent(sent, line.len());
+            }
         }
     }
 

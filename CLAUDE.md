@@ -2670,7 +2670,7 @@ Feature: Connect data, headers, set_token and set_data
   - The fake server records the frame each command arrived in, text or binary.
   - The HTTP proxy (Block 8) can answer HTTP 413, without relaying, to every emulation request whose body exceeds a given size, and records the requests it refused.
 
-`VERIFY:` that Centrifugo v6.10.1 runs every command of one emulation request and answers a body over `max_request_body_size` with 413: checked only in centrifugal/centrifuge `emulation.go` on master (d6b56cb, `HandleReadFrame` over the request's data; `http.StatusRequestEntityTooLarge`), not at the version v6.10.1 pins; the @B 413 scenario confirms it.
+Verified (Centrifugo v6.10.1, the 18b @B scenario's setup, 2026-11-06): one emulation request carrying two publish commands, over http_stream and sse, runs both, and a request body over `max_request_body_size` (a 70 000-byte publish) is answered with HTTP 413, which fails that call with code 10 while the next command, resent alone, succeeds.
 
 **Sub-increments** (one branch and PR each, in this order):
 

@@ -260,6 +260,9 @@ const IMPLEMENTED: &[&str] = &[
     "Disconnect fails the calls a batch holds",
     "A held call waits across a lost transport",
     "Stopping one of two batches sends what is held",
+    // Block 18, sub-increment 18b.
+    "A batch refused with HTTP 413 is resent command by command",
+    "Over an emulated transport only the command refused alone fails",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",
@@ -388,6 +391,12 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
 pub(crate) const SERVER_B: &[(&str, &str)] = &[
     ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
     ("CENTRIFUGO_SSE_ENABLED", "true"),
+    // Clients publish to channels without namespace (Block 18b's 413
+    // scenario); proxy connections belong to a user.
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_CLIENT",
+        "true",
+    ),
     // A history for channels without namespace, so that server-side
     // subscriptions granted recoverable can recover (Block 12c). It gives
     // publications offsets; client-side subscriptions stay unrecoverable.

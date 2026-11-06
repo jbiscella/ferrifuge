@@ -530,6 +530,24 @@ impl Machine {
     /// unsubscribed with [`codes::unsubscribed::MESSAGE_SIZE_LIMIT`],
     /// after an unsubscribe command when the server holds the subscription
     /// (owner decision, 2026-11-04). Whether `command` was one of them.
+    /// Whether `command` is a subscription's command still awaiting its
+    /// reply: a current subscribe, an unsubscribe or a `sub_refresh`
+    /// (Block 18, D6).
+    pub(in crate::machine) fn awaits_subscription_reply(&self, command: u32) -> bool {
+        let subscriptions = &self.subscriptions;
+        subscriptions.unsubscribes.contains_key(&command)
+            || subscriptions.sub_refreshes.contains_key(&command)
+            || subscriptions
+                .subscribes
+                .get(&command)
+                .is_some_and(|(id, _)| {
+                    subscriptions
+                        .by_id
+                        .get(id)
+                        .is_some_and(|sub| sub.subscribe_command == Some(command))
+                })
+    }
+
     pub(in crate::machine) fn subscription_command_too_large(&mut self, command: u32) -> bool {
         if let Some(id) = self.subscriptions.sub_refreshes.remove(&command) {
             self.actions.push(Action::CancelSubscriptionTimer(

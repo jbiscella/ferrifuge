@@ -179,6 +179,10 @@ async fn the_subscription_emits(world: &mut ClientWorld, expected: String) {
 
 #[then(regex = r#"^the subscription reaches state "subscribed"(?: on it)?$"#)]
 async fn the_subscription_reaches_subscribed(world: &mut ClientWorld) {
+    if super::batching::drives_a_machine(world) {
+        super::batching::subscription_subscribed(world);
+        return;
+    }
     reach_subscribed(world, false).await;
 }
 
