@@ -444,6 +444,8 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    # The FIPS build takes several minutes, as in the providers job.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
