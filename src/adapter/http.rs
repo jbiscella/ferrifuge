@@ -14,7 +14,7 @@ use futures_util::stream::{BoxStream, FuturesUnordered};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 
-use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_config};
+use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_setup};
 use crate::machine::{FrameId, TransportKind};
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
@@ -256,16 +256,18 @@ fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> 
 }
 
 /// The HTTP client for `https://` endpoints or for plain ones, built once
-/// per process with the client's TLS configuration.
+/// per process with the client's TLS configuration; not kept when that
+/// configuration is not (Block 6, review item C7).
 fn http_client(secure: bool) -> Result<reqwest::Client, String> {
     static SECURE: BuildOnce<reqwest::Client> = BuildOnce::new();
     static PLAIN: BuildOnce<reqwest::Client> = BuildOnce::new();
     let client = if secure { &SECURE } else { &PLAIN };
-    client.get(|| {
-        let tls = if secure {
-            (*tls_config()?).clone()
+    let (client, _) = client.get(|| {
+        let (tls, keep) = if secure {
+            let (config, keep) = tls_setup()?;
+            ((*config).clone(), keep)
         } else {
-            plain_tls_config()
+            (plain_tls_config(), true)
         };
         reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
@@ -275,8 +277,10 @@ fn http_client(secure: bool) -> Result<reqwest::Client, String> {
             // commands between two servers.
             .redirect(reqwest::redirect::Policy::none())
             .build()
+            .map(|client| (client, keep))
             .map_err(|e| e.to_string())
-    })
+    })?;
+    Ok(client)
 }
 
 /// Splits a response body into the messages it carries: one JSON reply per

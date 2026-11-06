@@ -336,26 +336,42 @@ fn crypto_provider() -> CryptoProvider {
 /// default: when another crate also enables another rustls provider, rustls
 /// cannot pick a default and panics.
 pub(super) fn tls_config() -> Result<Arc<ClientConfig>, String> {
+    tls_setup().map(|(config, _)| config)
+}
+
+/// [`tls_config`], and whether it is kept: a read of the platform's root
+/// certificates that reported errors serves the attempt but is read again
+/// by the next one (Block 6, review item C7).
+pub(super) fn tls_setup() -> Result<(Arc<ClientConfig>, bool), String> {
     static CONFIG: BuildOnce<Arc<ClientConfig>> = BuildOnce::new();
     CONFIG.get(|| {
-        let mut roots = RootCertStore::empty();
-        // Unreadable platform certificates are skipped, as browsers do.
-        let (added, _) = roots.add_parsable_certificates(load_native_certs().certs);
-        if added == 0 {
-            return Err("no platform root certificates found".to_owned());
-        }
-        let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| e.to_string())?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Ok(Arc::new(config))
+        let found = load_native_certs();
+        roots_config(found.certs, found.errors.is_empty())
     })
 }
 
+/// The TLS settings trusting `certs`, kept when `complete`: read without
+/// errors. Unreadable certificates are skipped, as browsers do.
+fn roots_config(
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    complete: bool,
+) -> Result<(Arc<ClientConfig>, bool), String> {
+    let mut roots = RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(certs);
+    if added == 0 {
+        return Err("no platform root certificates found".to_owned());
+    }
+    let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok((Arc::new(config), complete))
+}
+
 /// A value built at first use and shared by the process; a build that
-/// fails is not kept, so the next use builds again (Block 6, review item
-/// C7).
+/// fails, or that its builder says not to keep, is not kept, so the next use
+/// builds again (Block 6, review item C7).
 pub(super) struct BuildOnce<T>(OnceLock<T>);
 
 impl<T: Clone> BuildOnce<T> {
@@ -363,14 +379,21 @@ impl<T: Clone> BuildOnce<T> {
         Self(OnceLock::new())
     }
 
-    /// The value, built by `build` unless an earlier build succeeded. Two
-    /// first uses racing may both build; one value is kept.
-    pub(super) fn get(&self, build: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    /// The value, and whether it is kept: built by `build`, which also says
+    /// whether to keep it, unless an earlier build was kept. Two first uses
+    /// racing may both build; one value is kept.
+    pub(super) fn get(
+        &self,
+        build: impl FnOnce() -> Result<(T, bool), String>,
+    ) -> Result<(T, bool), String> {
         if let Some(value) = self.0.get() {
-            return Ok(value.clone());
+            return Ok((value.clone(), true));
         }
-        let value = build()?;
-        Ok(self.0.get_or_init(|| value).clone())
+        let (value, keep) = build()?;
+        if !keep {
+            return Ok((value, false));
+        }
+        Ok((self.0.get_or_init(|| value).clone(), true))
     }
 }
 
@@ -654,10 +677,39 @@ mod tests {
         let setup = BuildOnce::new();
 
         let failed = setup.get(|| Err("no platform root certificates found".to_owned()));
-        let retried = setup.get(|| Ok(1));
+        let retried = setup.get(|| Ok((1, true)));
 
         assert!(failed.is_err());
-        assert_eq!(retried, Ok(1));
+        assert_eq!(retried, Ok((1, true)));
+    }
+
+    #[test]
+    fn a_tls_setup_its_builder_does_not_keep_is_built_again() {
+        let setup = BuildOnce::new();
+
+        let first = setup.get(|| Ok((1, false)));
+        let second = setup.get(|| Ok((2, true)));
+        let third = setup.get(|| Ok((3, true)));
+
+        assert_eq!(
+            (first, second, third),
+            (Ok((1, false)), Ok((2, true)), Ok((2, true)))
+        );
+    }
+
+    #[test]
+    fn root_certificates_read_with_errors_serve_the_attempt_but_are_not_kept() {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .unwrap()
+            .cert
+            .der()
+            .clone();
+
+        let partial = roots_config(vec![certificate.clone()], false);
+        let complete = roots_config(vec![certificate], true);
+
+        assert!(matches!(partial, Ok((_, false))));
+        assert!(matches!(complete, Ok((_, true))));
     }
 
     #[test]
@@ -666,13 +718,16 @@ mod tests {
         let builds = std::cell::Cell::new(0);
         let build = || {
             builds.set(builds.get() + 1);
-            Ok(builds.get())
+            Ok((builds.get(), true))
         };
 
         let first = setup.get(build);
         let second = setup.get(build);
 
-        assert_eq!((first, second, builds.get()), (Ok(1), Ok(1), 1));
+        assert_eq!(
+            (first, second, builds.get()),
+            (Ok((1, true)), Ok((1, true)), 1)
+        );
     }
 
     #[test]
