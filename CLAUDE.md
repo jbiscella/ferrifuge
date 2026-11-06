@@ -3189,6 +3189,6 @@ Feature: Release setup
     Then the example prints {"text":"hello"}
 ```
 
-The release-check scenarios pass the outline's tag descriptions to the step, which builds the tag from the manifest's version. The quickstart scenario runs the example binary Cargo builds next to the test binary (not a nested `cargo run`), and waits for its "subscribed" line before publishing.
+The release-check scenarios pass the outline's tag descriptions to the step, which builds the tag from the manifest's version. The quickstart scenario runs the example's binary, which its step builds with `cargo build --example quickstart` and the features of the test build, since `cargo test --all-targets` builds examples only as test harnesses (not a nested `cargo run`), and waits for its "subscribed" line before publishing.
 
 **Exceptions introduced:** the workflow's publishing, the GitHub release and the CI jobs are verified by running them, not by scenarios: they need the owner's crates.io and repository setup (out of scope above). The first release is the first full run of `release.yml`.

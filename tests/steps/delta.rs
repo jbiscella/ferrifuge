@@ -541,9 +541,10 @@ async fn the_stream_yields_the_failure(world: &mut ClientWorld) {
     expect_subscription_event(world, "subscribed", false).await;
     subscription_emits_a_delta_error(world, 15).await;
     subscription_emits_subscribing_with(world, 2).await;
-    // The next subscribe is the one after the failure, not the reconnect's
-    // (Codex on PR #100).
-    note_commands_before_disconnect(world);
+    // The next subscribe is the one after the failure: the third, after the
+    // first and the reconnect's (Codex on PR #100). Counted, not noted now:
+    // a slow runner may have sent it before this step takes the events.
+    world.recovery.subscribes_before = 2;
 }
 
 #[given(

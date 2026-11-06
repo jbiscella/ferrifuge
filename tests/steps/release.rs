@@ -290,22 +290,41 @@ async fn a_server_with_the_examples_configuration(world: &mut ClientWorld) {
     world.server = Some(Centrifugo::start_with_config(&config).await);
 }
 
-/// The quickstart binary Cargo builds next to this test's.
+/// The quickstart example's binary, built with the features of this test
+/// build: `cargo test --all-targets` builds examples only as test harnesses
+/// (Codex on PR #105).
 fn quickstart_binary() -> PathBuf {
-    let test = std::env::current_exe().expect("the test binary");
-    let profile = test
-        .parent()
-        .and_then(Path::parent)
-        .expect("the target profile directory");
-    let binary = profile
-        .join("examples")
-        .join(format!("quickstart{}", std::env::consts::EXE_SUFFIX));
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let mut command = Command::new(cargo);
+    command
+        .args(["build", "--example", "quickstart", "--message-format=json"])
+        .current_dir(repository());
+    if !cfg!(feature = "ring") {
+        let provider = if cfg!(feature = "fips") {
+            "fips"
+        } else {
+            "aws-lc-rs"
+        };
+        command.args([
+            "--no-default-features",
+            "--features",
+            &format!("tokio,{provider}"),
+        ]);
+    }
+    let output = command.output().expect("cargo build --example quickstart");
     assert!(
-        binary.exists(),
-        "{} missing: build the examples first (cargo build --examples)",
-        binary.display()
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    binary
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|message| {
+            message["reason"] == "compiler-artifact" && message["target"]["name"] == "quickstart"
+        })
+        .and_then(|artifact| artifact["executable"].as_str().map(PathBuf::from))
+        .expect("the quickstart executable")
 }
 
 #[when("the quickstart example runs against the server's websocket endpoint")]

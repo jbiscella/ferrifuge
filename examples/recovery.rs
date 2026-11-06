@@ -45,10 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "subscribed: recovering {}, recovered {}",
                     subscribed.was_recovering, subscribed.recovered
                 );
-                // Where the stream stood: the next run resumes from here
-                // even if no publication comes in this one.
+                // Where the stream stands, saved unless publications are
+                // being recovered: those are saved one by one as they are
+                // taken, so a crash before the last cannot skip them
+                // (Codex on PR #105).
                 if let Some(position) = subscribed.stream_position {
-                    std::fs::write(&path, format!("{} {}", position.offset, position.epoch))?;
+                    if !subscribed.recovered {
+                        std::fs::write(&path, format!("{} {}", position.offset, position.epoch))?;
+                    }
                     epoch = position.epoch;
                 }
             }
