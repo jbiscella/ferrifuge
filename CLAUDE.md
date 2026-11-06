@@ -1529,6 +1529,8 @@ Feature: Server-side subscriptions
 
 `VERIFY:` the Centrifugo v6 RPC proxy request and response shape, for the @B fixtures. `send` is tested on @D only: Centrifugo does not handle it (centrifuge-js README: "only valid for Centrifuge server library for Go and does not work for Centrifugo server"; no send proxy in v6, verified).
 
+Verified (Centrifugo v6.10.1, the @B RPC proxy, 2026-11-06): with `rpc.proxy.endpoint` and `rpc.without_namespace.proxy_enabled` (environment `CENTRIFUGO_RPC_PROXY_ENDPOINT`, `CENTRIFUGO_RPC_WITHOUT_NAMESPACE_PROXY_ENABLED`), Centrifugo posts a JSON client's RPC to the proxy with its `method` and its `data` as JSON (`b64data` in binary proxy mode, per the proxy documentation; not tested); the proxy answers `{"result": {"data": ...}}`, which the client returns as the call's result, equal as JSON, or `{"error": {"code", "message", "temporary"}}`, which reaches the client with its code, message and `temporary` flag, although the proxy documentation mentions `temporary` only for subscribe errors; the proxy documentation requires error codes in 400–1999.
+
 Value clause: As an app developer, I want to call RPC, publish, send, history and presence over the client's connection, so that request/response work needs no separate HTTP client.
 
 ```gherkin
