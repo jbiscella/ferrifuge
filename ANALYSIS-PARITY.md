@@ -9,7 +9,7 @@ Owner decision (2026-11-06): Ferrifuge gets every feature centrifugal/centrifuge
 - Read from centrifugal/centrifuge-rust: only `docs/spec.md` and `docs/api.md`, at commit `88d6edf178f6db370d8e6756d389c89bf100436b` (2026-11-06). Citations below give the section ("rust spec §5.2", "rust api.md").
 - Not opened: anything under `crates/`, `xtask/`, `docs/decisions-pending.md`, the examples, the workflows. The TLA+ trace files were listed by name and size through the GitHub tree API, never read (item 20).
 - Behaviour sources keep the Block 0 precedence: the Centrifugo client SDK spec, then `client.proto` (vendored at `4455d8e`), then centrifuge-js `63ed73e`. Where centrifuge-rust's documented behaviour is the only source, the item says so.
-- No design below copies centrifuge-rust type names, module layout or code. Where a name is a protocol term or a common Rust idiom (`ready`, `close`, `statistics`, `Proxy`), the item says the name comes from the protocol or the idiom.
+- No design below copies centrifuge-rust internal names, module layout or code. Some public method names documented in its `api.md` recur (`ready`, `close`, `statistics`, `set_http_headers`, `publications`, `runtime`, `test-util`): they are the owner's own item names, protocol terms or common Rust idioms, and public API names are what parity means.
 
 ## How each item is laid out
 
@@ -25,6 +25,10 @@ Owner decision (2026-11-06): Ferrifuge gets every feature centrifugal/centrifuge
    - **Cost**: S (one PR), M (one block of 2–4 PRs), L (several blocks or platform work).
 5. Recommendation.
 
+The audience of every item is an application developer shipping Ferrifuge to a fleet of end-user devices or services (Block 0's project purpose); an item names a narrower audience when it has one.
+
+Block 16's chaos runners grow with the items that change connection or delivery behaviour: 4 (`reconnect()`, sleep), 5 (delta), 7 (compaction), 16 (`close()`), 26 (automatic batching). Each such item's block adds its operations and planted faults there.
+
 Ratings in the tables: **good**, **fair**, **poor**, each with its reason.
 
 Semver baseline: Ferrifuge is 0.12.0. `Config` has public fields and is not `#[non_exhaustive]`, and `State` is an exhaustive enum. A new `Config` field or `State` variant is therefore a breaking change: a 0.x minor bump. New builder methods, new functions and new variants of the `#[non_exhaustive]` enums (`ClientEvent`, `SubscriptionEvent`, `ErrorKind`, `Input`) are additions.
@@ -36,10 +40,10 @@ Order: production priority. Items 1–4, 9 and 21 come first, as the owner asked
 | # | Item | Recommendation | Semver | Cost |
 |---|---|---|---|---|
 | 1 | HTTP CONNECT and SOCKS5 proxies, env, OS settings, per-endpoint, `set_proxy` | Adopt: one proxy decision for every transport, the CONNECT and SOCKS5 handshakes in the adapter; default follows env then OS settings (question Q1) | additive | L |
-| 2 | Platform TLS verifier, extra roots, raw rustls escape hatch | Adopt the platform verifier as the default, extra roots, a raw `rustls::ClientConfig` behind a semver-exempt feature; the fips build keeps webpki verification (question Q2) | additive | M |
+| 2 | Platform TLS verifier, extra roots, raw rustls escape hatch | Adopt the platform verifier as the default, extra roots, a raw `rustls::ClientConfig` behind a semver-exempt feature; the fips build keeps webpki verification (decided through the reviewer, see the end) | additive | M |
 | 3 | Android setup, Android/iOS CI builds, mobile lifecycle docs | Adopt: build-only CI jobs, an Android init function (with item 2), a lifecycle guide | additive | M |
 | 4 | Sleep detection, network changes, captive portals | Adopt sleep detection in the core and a `reconnect()` call for network changes; captive portals as a distinct transport error; no OS network watcher | additive | M |
-| 9 | Logging | Adopt `tracing` in the tokio adapter only, events at the input/action boundary, secrets kept out by construction and by a test (question Q3) | additive | M |
+| 9 | Logging | Adopt `tracing` in the tokio adapter only, events at the input/action boundary, Ferrifuge's own records kept free of secrets by construction and by a test; dependencies log secrets at TRACE, documented (question Q3) | additive | M |
 | 21 | SECURITY.md, examples in CI, CHANGELOG, crates.io workflow, docs.rs, MSRV policy | Adopt all; publishing needs owner actions outside the repo (question Q4) | none | M |
 | 15 | Injected tokio runtime handle | Adopt, and stop `Client::new` panicking outside a runtime | additive | S |
 | 12 | Maximum incoming message size | Adopt as a `Config` field, an oversized message ending the client like close code 1009 | breaking (Config) | S |
@@ -48,17 +52,20 @@ Order: production priority. Items 1–4, 9 and 21 come first, as the owner asked
 | 10 | `ready()` on client and subscription | Adopt, without a timeout parameter | additive | S |
 | 8 | `statistics()` | Adopt: counters kept by the core, bytes by the adapter | additive | M |
 | 14 | `set_http_headers` at runtime | Adopt, adapter only | additive | S |
-| 16 | `close()` and a `Closed` state | Adopt `close(self)`, consuming the client; no `Closed` state; dropping the client ends every stream | additive | S |
-| 5 | Fossil delta compression | Adopt, own implementation in the core from the published format; a delta error resubscribes instead of ending the client (question Q5) | additive | M |
+| 27 | `Subscription::set_data` (found by the review) | Adopt, as Block 17's setters | additive | S |
+| 16 | `close()` and a `Closed` state | Adopt `close(self)`, consuming the client; no `Closed` state; leftover subscriptions report `unsubscribed` with code 2 on close and on drop | additive | S |
+| 5 | Fossil delta compression | Adopt, own implementation in the core from the published format; a delta error resubscribes a client-side subscription and reconnects for a server-side one, instead of ending the client (question Q5) | additive | M |
 | 6 | Server-side tag filters | Adopt: an owned filter type mirroring `client.proto` `FilterNode` | additive | S |
+| 28 | `Publication.channel` (found by the review) | Adopt `channel`; `time` when a server sends it | additive | S |
 | 7 | Channel compaction (PRO) | Adopt as an opt-in subscription option, tested on @D only | additive | S |
+| 26 | Automatic command batching (found by the review) | Adopt as an implicit Block 18 batch around each wake of the driver | additive | M |
 | 19 | Test constructors for events and results | Adopt behind `test-util`, renaming the current internal hooks feature | additive | S |
 | 22 | Mocking support for applications | Adopt an in-memory server double for the real `Client`, behind `test-util`; no client trait | additive | M |
 | 18 | Typed JSON helpers | Adopt; no new feature, since serde is already a dependency (question Q6) | additive | S |
 | 13 | Publications-only stream | Adopt as a thin view of the subscription's stream, same delivery rules | additive | S |
 | 24 | Cookies on the HTTP transports | Not adopted now, because `Cookie` in `http_headers` and item 14 cover the native cases; a jar only on evidence; `withCredentials` belongs to item 25 | none | — |
 | 17 | Callback API, WeakClient, delivery modes, deadlock detection | Not adopted, because Block 15's streams already give their guarantees; document the patterns | none | — |
-| 20 | Replay of their TLA+ traces | Not adopted, because the traces encode decisions Ferrifuge took differently and cannot be regenerated (question Q7) | none | — |
+| 20 | Replay of their TLA+ traces | Not adopted, because the traces encode decisions Ferrifuge took differently and cannot be regenerated | none | — |
 | 25 | WebAssembly / browser adapter | Adopt only a wasm32 build check of the core now; the adapter on demand | none | S |
 
 ## Earlier exclusions this reverses
@@ -74,6 +81,11 @@ To record in Block 0 when the specs land. Each line becomes "reversed by the own
 | Block 14, out of scope | HTTP proxy (CONNECT) support; sleep/resume behaviour | 1, 4 |
 | Block 15, out of scope | a callback-style handler API | 17 (recommended not adopted) |
 | Block 17, out of scope | replacing HTTP headers of a built client; a cookie jar | 14, 24 |
+| Block 1, out of scope | `closed` state | 16 |
+| Blocks 11 and 16, out of scope | delta compression | 5 |
+| Block 16 and "Planned after Block 13" | trace replay "optional, later" | 20 (recommended dropped) |
+| Blocks 0 and 8, out of scope | browser-only options (fetch, EventSource shims, network events) | 24, 25 |
+| Block 18 | batching only on request, plus the connect reply's subscribes | 26 |
 
 ## Findings in the current code
 
@@ -83,10 +95,9 @@ Found while preparing this analysis. Each is production-relevant and belongs to 
 |---|---|---|---|
 | F1 | `Client::new` calls `tokio::spawn`, which panics when no tokio runtime is current (for example in a Tauri setup hook) | `src/adapter/client.rs:616` | 15 |
 | F2 | The websocket transport dials directly, while the reqwest client of http_stream and sse applies `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` by default: behind a proxy set in the environment, websocket fails and the client falls back to http_stream through the proxy, by accident rather than by design | `src/adapter/transport.rs:93`, `src/adapter/http.rs:281-288`; reqwest 0.13.5 `async_impl/client.rs:310` (`auto_sys_proxy: true`), `:417-418`, `proxy.rs:515-517`. OS settings are not read in Ferrifuge's feature set (reqwest's `system-proxy` feature is off) | 1 |
-| F3 | Dropping the `Client` disconnects it but closes no event outbox, so a task reading the client's or a subscription's stream likely waits forever | `src/adapter/client.rs:153-161`; outboxes are closed only by `remove_subscription` (`src/adapter/subscription.rs:455-463`). To confirm with a test | 16 |
-| F4 | The 64 MiB incoming limit is fixed, and what an oversized message does (reconnect loop or terminal) is not specified | `src/adapter/transport.rs:296-303`, `src/adapter/http.rs:27` | 12 |
-| F5 | CI never checks the declared MSRV (`rust-version = "1.88"`): every job uses stable or nightly | `.github/workflows/ci.yml` | 21 |
-| F6 | The `test-util` feature name is taken by internal test hooks "never enabled by applications", the name item 19 would use | `Cargo.toml` `[features]` | 19 |
+| F3 | The 64 MiB incoming limit is fixed, and what an oversized message does (reconnect loop or terminal) is not specified | `src/adapter/transport.rs:296-303`, `src/adapter/http.rs:27` | 12 |
+| F4 | The MSRV job (`cargo check` on 1.88, default and no default features) never checks the `aws-lc-rs` and `fips` builds | `.github/workflows/ci.yml:435-449` | 21 |
+| F5 | The `test-util` feature name is taken by internal test hooks "never enabled by applications", the name item 19 would use | `Cargo.toml` `[features]` | 19 |
 
 ---
 
@@ -144,11 +155,11 @@ Two behaviours cannot be the same in A without care, and need a scenario each: t
 | Semver | additive (the raw type is behind an exempt feature) | additive | exempt feature |
 | Cost | M | M | S |
 
-**FIPS (Block 6).** Block 6 requires `ClientConfig::fips() == true` in the fips build. Verified (rustls 0.23.46 `src/client/client_conn.rs:396-409`; rustls-platform-verifier 0.7.1): `ClientConfig::fips()` checks only the provider, `require_ems` and ECH, never the certificate verifier, so it stays true with the platform verifier. But the verifier checks the certificate chain's signatures inside the OS (Security framework on Apple, CryptoAPI on Windows, the Android trust manager through JNI); only the handshake signature uses the provider. On those platforms the chain checks run outside the AWS-LC FIPS module while `fips()` still reports true. On Linux the verifier uses webpki with the provider's algorithms, so the chain stays inside the module. Question Q2.
+**FIPS (Block 6).** Block 6 requires `ClientConfig::fips() == true` in the fips build. Verified (rustls 0.23.46 `src/client/client_conn.rs:396-409`; rustls-platform-verifier 0.7.1): `ClientConfig::fips()` checks only the provider, `require_ems` and ECH, never the certificate verifier, so it stays true with the platform verifier. But the verifier checks the certificate chain's signatures inside the OS (Security framework on Apple, CryptoAPI on Windows, the Android trust manager through JNI); only the handshake signature uses the provider. On those platforms the chain checks run outside the AWS-LC FIPS module while `fips()` still reports true. On Linux the verifier uses webpki with the provider's algorithms, so the chain stays inside the module. Decided through the reviewer (see the end).
 
 Verified facts: rustls-platform-verifier 0.7.1 (MSRV 1.85, below Ferrifuge's 1.88) takes the crypto provider from its caller and forces none; extra roots are supported on Apple, Windows and Linux, not on Android.
 
-**Recommendation.** A for the ring and aws-lc-rs builds. For the fips build, keep webpki verification with the provider's algorithms (native roots plus extra roots), unless the owner accepts OS chain verification under FIPS (Q2). The "accept invalid certificates" switch is not recommended: a fleet SDK should not ship it; the raw `ClientConfig` covers development needs.
+**Recommendation.** A for the ring and aws-lc-rs builds. For the fips build, keep webpki verification with the provider's algorithms (native roots plus extra roots), since Block 6's FIPS goal is cryptography inside the validated module, and `fips()` alone does not show where chains are checked. The "accept invalid certificates" switch is not recommended: a fleet SDK should not ship it; the raw `ClientConfig` covers development needs.
 
 ## 3. Android setup, Android and iOS CI builds, mobile lifecycle
 
@@ -178,7 +189,7 @@ Verified facts: the ubuntu-24.04 runner image ships Android NDK 27.3 (default), 
 
 ## 4. System sleep, network changes, captive portals
 
-**Problem.** A laptop that sleeps for an hour wakes with a dead socket. Tokio's clock does not advance during sleep on Linux and macOS, so the no-ping deadline (35 s with Centrifugo defaults) still has its full time left, and the app waits up to that long for a reconnect. A phone moving from Wi-Fi to cellular keeps a socket bound to the old network until a timer notices. A captive portal answers with an HTML page, which today shows up as a generic transport error.
+**Problem.** A laptop that sleeps for an hour wakes with a dead socket. Tokio's clock does not advance during sleep on Linux and macOS, and Android and iOS (the platforms where it matters most) behave the same, so the no-ping deadline (35 s with Centrifugo defaults) still has its full time left, and the app waits up to that long for a reconnect. A phone moving from Wi-Fi to cellular keeps a socket bound to the old network until a timer notices. A captive portal answers with an HTML page, which today shows up as a generic transport error.
 
 **Official SDK** (rust spec §9.7, §13, §5.3, decisions 19, 24, 34):
 - the driver compares wall-clock and monotonic time; a jump gives late timers a 1 s grace, re-checks token expiry, restarts the no-ping window from the wake, and reconnects at once when the sleep was at least the no-ping window;
@@ -186,7 +197,7 @@ Verified facts: the ubuntu-24.04 runner image ships Android NDK 27.3 (default), 
 - a 200 HTML answer to the HTTP stream request is a transport failure (captive portal), retried; undecodable data before the first message is a transport failure, never terminal.
 
 **Designs.**
-- **A. Sleep detection split across the sans-IO line, plus a `reconnect()` call.** The adapter notices that wall-clock time advanced well past monotonic time and feeds the core an input carrying the gap; the core decides: when the gap is at least the no-ping window it closes the transport and reconnects at once, as for a lost transport (code 1), otherwise it restarts the no-ping window. `Client::reconnect()` closes the current transport and connects again without the backoff delay, through `connecting`, never `disconnected`, so calls waiting for the connection keep waiting; the Block 14 jitter window still applies, so a building-wide network change does not synchronise a fleet. Captive portals: an HTML or redirect answer during the open is reported as a transport error saying so, and is retried like any failed open.
+- **A. Sleep detection split across the sans-IO line, plus a `reconnect()` call.** The adapter notices that wall-clock time advanced well past monotonic time and feeds the core an input carrying the gap; the core decides: when the gap is at least the no-ping window it closes the transport and handles it as a lost transport (code 1): the Block 2 first-attempt delay and the Block 14 jitter window apply, so it does not reconnect "at once" as the official SDK does, since phones waking on a schedule would otherwise reconnect together; otherwise it restarts the no-ping window. In both cases it moves the token refresh timers by the gap, so a token that expired during the sleep is refreshed (or fetched before the next connect) instead of being sent expired. `Client::reconnect()` closes the current transport and connects again without the backoff delay, through `connecting`, never `disconnected`, so calls waiting for the connection keep waiting; the Block 14 jitter window still applies, so a building-wide network change does not synchronise a fleet. Captive portals: an HTML or redirect answer during the open is reported as a transport error saying so, and is retried like any failed open.
 - **B. Built-in OS network watchers** driving reconnects automatically. A maintained crate exists: `netwatcher` 0.8.0 (2026-08, MIT), event-based on Windows, macOS, Linux, iOS and Android (extra setup there); `if-watch` 3.2.2 polls every 10 s on Android.
 - **C. Documentation only**: `disconnect(); connect()` and a lower `max_server_ping_delay`.
 
@@ -199,7 +210,7 @@ Verified facts: the ubuntu-24.04 runner image ships Android NDK 27.3 (default), 
 | Semver | additive (an `Input` variant, a method) | additive | none |
 | Cost | M | M–L | S |
 
-**Recommendation.** A. B not adopted: apps already receive network-change notifications from their platform and can call `reconnect()`. The jitter on `reconnect()` is a fleet decision the owner may want to see (it diverges from "at once"): the recommendation is to keep it.
+**Recommendation.** A. B not adopted: apps already receive network-change notifications from their platform and can call `reconnect()`. The jitter on `reconnect()` and after a sleep is a fleet decision the owner may want to see (it diverges from "at once"): the recommendation is to keep it.
 
 ## 9. Logging
 
@@ -208,7 +219,7 @@ Verified facts: the ubuntu-24.04 runner image ships Android NDK 27.3 (default), 
 **Official SDK** (rust spec §3.2, §9.9): `tracing`, spans per client and per subscription, frames at TRACE with payloads redacted unless a flag is set; `log` rejected for lack of spans.
 
 **Designs.**
-- **A. `tracing` in the tokio adapter only.** The core stays free of logging (it remains a pure state machine). The adapter logs at the input/action boundary: state changes, transport opens and failures with their codes, fallback steps, retries, at INFO/WARN/DEBUG; frames at TRACE as kind and length only. Every logged value goes through the `Debug` implementations Block 17 already made redacting (tokens never, data as a length, headers by name), so secrets stay out by construction.
+- **A. `tracing` in the tokio adapter only.** The core stays free of logging (it remains a pure state machine). The adapter logs at the input/action boundary: state changes, transport opens and failures with their codes, fallback steps, retries, at INFO/WARN/DEBUG; frames at TRACE as kind and length only. Every logged value goes through the `Debug` implementations Block 17 already made redacting (tokens never, data as a length, headers by name), so Ferrifuge's own records keep secrets out by construction. Its dependencies do not: tungstenite 0.30.0 logs, through `log` at TRACE, the whole upgrade request with header values (`handshake/client.rs:197`), every message received (`protocol/mod.rs:475`) and every frame sent (`:768`), the connect frame with its token included. The docs must warn that enabling TRACE for dependencies logs tokens, data and headers, and the capture test must capture `log` records at TRACE too, asserting that Ferrifuge's own records are clean.
 - **B. `log`** at the same places. Lighter, universally consumed, no spans.
 - **C. No logging**; richer events instead.
 
@@ -238,7 +249,7 @@ Verified facts: the ubuntu-24.04 runner image ships Android NDK 27.3 (default), 
 | Fit | n/a | n/a |
 | Idiom | good: trusted publishing is the crates.io recommendation | fair |
 | Consistency | good: CI layout already splits PR and main jobs | good |
-| Tests | good: the MSRV job closes F5 | good |
+| Tests | good: adding the aws-lc-rs and fips builds to the MSRV job closes F4 | good |
 | Semver | none | none |
 | Cost | M | S |
 
@@ -289,7 +300,7 @@ Name check (2026-11-06): `ferrifuge` is free on crates.io (the API answers 404; 
 | Semver | breaking (Config field) | breaking (meaning of a field) |
 | Cost | S | S |
 
-**Recommendation.** A. It also settles F4.
+**Recommendation.** A. It also settles F3.
 
 ## 11. Separate handshake timeout
 
@@ -298,7 +309,7 @@ Name check (2026-11-06): `ferrifuge` is free on crates.io (the API answers 404; 
 **Official SDK** (rust spec §4.2, §5.1): `handshake_timeout`, 5 s, bounding DNS, TCP, TLS and upgrade, separate from the 5 s command timeout.
 
 **Designs.**
-- **A. `Config::handshake_timeout`** bounds the open, from `OpenTransport` to `TransportOpened`; the connect reply then has `timeout`. The core arms one timer, then the other: both in the core, @E-testable.
+- **A. `Config::handshake_timeout`** bounds the open, from `OpenTransport` to `TransportOpened`; the connect reply then has `timeout`. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and re-arms it with `timeout` at `TransportOpened`: one timer kind, so no new variant of the exhaustive `Timer` and `Action` enums; @E-testable.
 - **B. Rename the meaning**: the single timer takes `handshake_timeout` for open plus reply.
 - **C. Not adopted**: `timeout` already bounds the whole attempt.
 
@@ -311,7 +322,7 @@ Name check (2026-11-06): `ferrifuge` is free on crates.io (the API answers 404; 
 | Semver | breaking (Config field) | breaking | none |
 | Cost | S | S | none |
 
-**Recommendation.** A, default 5 s, so the worst-case attempt goes from 5 s to 10 s; Block 8's scenarios are reworded to name the timer each one exercises.
+**Recommendation.** A, default 5 s. The worst-case attempt goes from 5 s to 10 s, and a first fallback sequence over three transports from 15 s to 30 s; a fleet operator who wants today's bound sets both to 2.5 s. Block 8's scenarios are reworded to name the timer each one exercises.
 
 ## 23. Table of error and disconnect codes
 
@@ -403,14 +414,14 @@ Note: with Block 15, `state()` can be ahead of the stream, so `ready()` can reso
 
 ## 16. `close()` and a `Closed` state
 
-**Problem.** An app wants to stop a client for good and know when it has finished: the close handshake done, streams ended. Ferrifuge's `Client` is not `Clone`; dropping it disconnects (`src/adapter/client.rs:912-916`), but streams appear not to end (F3).
+**Problem.** An app wants to stop a client for good and know when it has finished: the close handshake done, streams ended. Ferrifuge's `Client` is not `Clone`; dropping it disconnects (`src/adapter/client.rs:912-916`) and the driver then ends every stream (`src/adapter/client.rs:1042-1053`; test `streams_end_and_callbacks_go_when_the_client_is_dropped`). `Subscription` is `Clone` and outlives the client: its state stays `subscribing` and its calls fail with "disconnected" (`src/adapter/client.rs:226`).
 
 **Official SDK** (rust spec §4.3, §6.1, §9.8): `close()` starts at the call and its future waits for completion; a terminal `closed` state; every subscription goes `unsubscribed` with code 2 "client closed"; later calls fail with a "client closed" error. Their `Client` is `Clone`, so a terminal state is how other clones learn of it.
 
 **Designs.**
-- **A. `async fn close(self)`, consuming the client.** Ownership already makes "closed" unrepresentable for the client: no handle is left to ask. It disconnects, ends the client's stream and every subscription's stream after their last events (each subscription first emits `Unsubscribed` with client-side code 2 "client closed"), and resolves once the transport is closed (bounded by `Config::timeout`, as Block 8's close). Dropping the client does the same without waiting, which fixes F3. `Subscription` handles left over fail their calls with a "client closed" error.
+- **A. `async fn close(self)`, consuming the client.** Ownership already makes "closed" unrepresentable for the client: no handle is left to ask. It disconnects, ends the client's stream and every subscription's stream after their last events (each subscription first emits `Unsubscribed` with client-side code 2 "client closed"), and resolves once the transport is closed (bounded by `Config::timeout`, as Block 8's close). Dropping the client does the same without waiting. `Subscription` handles left over then report `unsubscribed`; their calls fail with a new "client closed" error instead of today's "disconnected", a behaviour change.
 - **B. `close(&self)` plus `State::Closed`**, as the official SDK.
-- **C. Not adopted**: drop is close; fix F3 only.
+- **C. Not adopted**: drop is close, as today.
 
 | | A | B | C |
 |---|---|---|---|
@@ -421,7 +432,7 @@ Note: with Block 15, `state()` can be ahead of the stream, so `ready()` can reso
 | Semver | additive (a method, an `Unsubscribed` code) | breaking (`State` variant) | none |
 | Cost | S | M | S |
 
-Answer to the owner's question: a `Closed` state adds nothing over dropping the client, because a `Client` cannot be shared without `Arc`, and `Arc<Client>` already gives every holder `Weak` and a well-defined last drop. What `close()` adds is an awaitable end (the close frame sent, the driver stopped) and streams that end; both come with A.
+Answer to the owner's question: a `Closed` state adds nothing over dropping the client, because a `Client` cannot be shared without `Arc`, and `Arc<Client>` already gives every holder `Weak` and a well-defined last drop. What `close()` adds is an awaitable end (the close frame sent, the driver stopped). The real gain is for leftover `Subscription` handles, which today stay `subscribing` forever: a code-2 `Unsubscribed`, on close and on drop alike. Both come with A.
 
 **Recommendation.** A.
 
@@ -431,8 +442,10 @@ Answer to the owner's question: a `Closed` state adds nothing over dropping the 
 
 **Official SDK** (rust spec §7.5; api.md): requested per subscription, applied only when the reply says it was negotiated; the base is the previous full payload, reset at each subscribe (the server sends the first publication after a subscribe in full); JSON carries the delta inside a JSON string; any delta failure (no negotiation, no base, bad patch) ends the client with "delta error", no reconnect; own port of centrifugal/fdelta with its vectors and a fuzz target.
 
+centrifuge-js 63ed73e has it too, so this is also centrifuge-js parity: a `delta: 'fossil'` subscription option, rejected together with a tag filter (`types.ts:639-644`, `subscription.ts:368-370`), decoding in the codec (`applyDeltaIfNeeded`, `subscription.ts`), and `deltaStats()` (`types.ts:818-830`). It has no handling for a failed decode.
+
 **Designs.**
-- **A. Own decoder in the core, from the published format.** The Fossil delta format is documented by the Fossil project; the decoder is a pure function, a natural fit for the sans-IO core and for bolero, which Ferrifuge already uses for fuzzing. On a delta failure the subscription resubscribes from its last delivered position (an unsubscribe-and-resubscribe like code 2500), so the server sends a full payload again and nothing is lost or delivered twice (the failed publication never moved the position).
+- **A. Own decoder in the core, from the published format.** The Fossil delta format is documented by the Fossil project; the decoder is a pure function, a natural fit for the sans-IO core and for bolero, which Ferrifuge already uses for fuzzing. On a delta failure the subscription resubscribes from its last delivered position (an unsubscribe-and-resubscribe like code 2500), so the server sends a full payload again and the failed publication never moved the position: on recoverable channels within the server's recovery limit nothing is lost or delivered twice; elsewhere the gap is reported as any failed recovery is (Block 11). Server-side subscriptions also receive deltas (requested through `ConnectRequest.subs`, `client.proto:409`) and cannot be resubscribed (Block 12): there a delta failure is handled as a lost transport, so the next connect recovers them from their last delivered position. Publications of that subscription not yet taken are withdrawn, which adds a reason to Block 15's withdrawal rule. With JSON, a delta-negotiated subscription receives every payload inside a JSON string (`client.proto:254-256`): the client unwraps it, so Block 9's "exact bytes" rule applies to the decoded payload.
 - **B. Depend on the existing `fossil-delta` crate** (0.2.0, MIT, last release and last push 2023-01-14: unmaintained), same failure rule.
 - **C. Same as A, but a delta failure ends the client**, as the official SDK.
 
@@ -442,18 +455,18 @@ Answer to the owner's question: a `Closed` state adds nothing over dropping the 
 | Idiom | good | fair: an unmaintained dependency in the data path | good |
 | Consistency | good: same recovery path as Block 11's resubscribes | good | fair: a client-wide stop for one channel's fault |
 | Tests | good: @A with a Centrifugo namespace allowing fossil; @D with deltas made by an independent encoder in the test (a dev-dependency), fuzzing the decoder | good | good |
-| Semver | additive (a subscription option, an error kind) | additive | additive |
+| Semver | additive (a subscription option, an error kind, delta statistics) | additive | additive |
 | Cost | M | S–M | M |
 
 Sources for A: the Fossil delta format is documented by the Fossil project; the reference `delta.c` is BSD 2-Clause (D. Richard Hipp). centrifugal/fdelta (Go, BSD 2-Clause) ships 5 origin/target/delta vectors produced by Fossil itself (`testdata/fossil-vectors/`), usable as test data with their notice. Neither is centrifuge-rust, so the clean-room rule does not apply to them.
 
-**Recommendation** (question Q5). A. The resubscribe-on-failure rule diverges from the official SDK; the only source for "end the client" is its documentation. Delta with a tag filter: `client.proto` says a tag filter disables delta compression, so the builder rejects both together.
+**Recommendation** (question Q5). A. The failure rules (resubscribe a client-side subscription, reconnect for a server-side one) are new behaviour: centrifuge-js has none, and the only source for "end the client" is centrifuge-rust's documentation. Delta with a tag filter: `client.proto` says a tag filter disables delta compression, so the builder rejects both together.
 
 ## 6. Server-side tag filters
 
 **Problem.** A subscriber to a broad channel wants only publications with certain tags, filtered by the server to save bandwidth (`client.proto`: `SubscribeRequest.tf`, `FilterNode`; "not an access control mechanism").
 
-**Official SDK** (rust spec §7.9; api.md): a filter built with combinator functions, set on the builder or while unsubscribed, rejected together with delta.
+**Official SDK** (rust spec §7.9; api.md): a filter built with combinator functions, set on the builder or while unsubscribed, rejected together with delta. centrifuge-js 63ed73e has the same option and a `setTagsFilter` taking effect from the next subscribe (`subscription.ts:367-380`), so this is centrifuge-js parity too.
 
 **Designs.**
 - **A. An owned `#[non_exhaustive]` filter enum** mirroring `FilterNode`'s operations (and, or, not, and the leaf comparisons), with constructor functions; encoded by the codec; a subscription option.
@@ -499,14 +512,14 @@ Sources for A: the Fossil delta format is documented by the Fossil project; the 
 **Official SDK** (rust spec §3.3, decision 16; api.md): public constructors behind a `test-util` feature.
 
 **Designs.**
-- **A. Constructors behind `test-util`**, after renaming today's internal hooks feature (F6) to a private name (`__test-hooks`), since it is documented as not for applications.
+- **A. Constructors behind `test-util`**, after renaming today's internal hooks feature (F5) to a private name (`__test-hooks`), since it is documented as not for applications. The rename edits Block 16's recorded decision (its test hooks are "gated by `test-util`"), which the item's spec PR states.
 - **B. Constructors always available** (`Publication::new(data)` and setters).
 
 | | A | B |
 |---|---|---|
 | Fit | n/a: data types | n/a |
 | Idiom | good: the tokio convention | good |
-| Consistency | good, once F6 is resolved | fair: production code could fabricate events |
+| Consistency | good, once F5 is resolved | fair: production code could fabricate events |
 | Tests | good: doc-tests per constructor | good |
 | Semver | additive (feature-gated surface) | additive, permanent surface |
 | Cost | S | S |
@@ -577,7 +590,9 @@ Sources for A: the Fossil delta format is documented by the Fossil project; the 
 | Semver | additive | additive | none |
 | Cost | S | M | none |
 
-**Recommendation.** A.
+A view without lifecycle events also hides a `Subscribed` event reporting `was_recovering` true and `recovered` false, the one signal of a gap on a recoverable channel (Block 11). Its docs must say so: an app that needs to know about gaps reads `events()`.
+
+**Recommendation.** A, with that warning.
 
 ## 24. Cookie-based authentication on the HTTP transports
 
@@ -608,7 +623,7 @@ Sources for A: the Fossil delta format is documented by the Fossil project; the 
 **Official SDK** (rust spec §4.4, §9.4, §9.5, §9.8): callbacks are primary, streams are adapters over them; a dedicated event thread per client by default or inline delivery; a `WouldDeadlock` error from thread-local and task-local markers; handler panics stop the client.
 
 **Designs.**
-- **A. Not adopted.** Block 15's streams already deliver by hand-off, one message at a time, with exactly-once on recoverable channels; the app chooses where it polls, so there is no delivery thread to configure. `Client` is not `Clone`, so there is no handler cycle, and `Arc<Client>` gives `Weak`. The deadlock that detection guards against does not exist: a call awaited between two `next()` calls either resolves (call replies resolve when read, Block 13) or ends with its timeout when reading is stopped, never hangs. Docs show the patterns: read events in one task, make calls from another; `StreamExt::for_each` for callback style.
+- **A. Not adopted.** Block 15's streams already deliver by hand-off, one message at a time, with exactly-once on recoverable channels; the app chooses where it polls, so there is no delivery thread to configure. `Client` is not `Clone`, so there is no handler cycle, and `Arc<Client>` gives `Weak`. The deadlock that detection guards against becomes a bounded wait: a call awaited between two `next()` calls either resolves (call replies resolve when read, Block 13) or fails with its timeout, never hangs. For example, a subscription call awaited inside the loop that must first take `subscribed` fails after `Config::timeout`; detection would only make it fail at once, and the SDK cannot tell which task reads the stream. Docs show the patterns: read events in one task, make calls from another; `StreamExt::for_each` for callback style.
 - **B. A thin callback helper** spawning a task per stream that calls a closure for each event.
 - **C. The full callback model** next to streams.
 
@@ -621,7 +636,7 @@ Sources for A: the Fossil delta format is documented by the Fossil project; the 
 | Semver | none | additive | additive, large |
 | Cost | docs only | S | L |
 
-Answer to the owner's questions: a callback API, WeakClient and delivery modes do not make sense next to Block 15's streams; deadlock detection has nothing to detect, since every wait is bounded by `Config::timeout`.
+Answer to the owner's questions: a callback API, WeakClient and delivery modes do not make sense next to Block 15's streams; deadlock detection would only turn a bounded wait (`Config::timeout`) into an immediate error, and cannot tell which task reads the stream.
 
 **Recommendation.** A.
 
@@ -644,7 +659,7 @@ Answer to the owner's questions: a callback API, WeakClient and delivery modes d
 | Semver | none | none |
 | Cost | none | L |
 
-The traces sit under `crates/`, which the clean-room rule closes while designing; reading them, even as data, needs the owner's explicit exception (question Q7).
+The traces sit under `crates/`, which the clean-room rule closes while designing: design B would need the owner's explicit exception to read them, even as data. Adopting A also drops the "optional, later" trace replay recorded under "Planned after Block 13" and in Block 16.
 
 **Recommendation.** A.
 
@@ -671,17 +686,94 @@ The traces sit under `crates/`, which the clean-room rule closes while designing
 
 ---
 
+## 26. Automatic command batching
+
+Found by the review: part of the official SDK, not in the owner's list.
+
+**Problem.** A burst of commands (subscribing 100 channels in a loop, concurrent publishes from many tasks) costs one write, and over http_stream or sse one HTTP request, per command unless the app opens a Block 18 batch around it. Emulation requests are the expensive case. Block 18 excludes automatic batching.
+
+**Official SDK** (rust spec §9.10, decision 11): one writer per transport takes everything queued when it is ready and writes it as one frame or one emulation request, split at a 15 KB cap; the driver takes every input already waiting before it flushes; no delay timer, so an idle client sends each command at once.
+
+**Designs.**
+- **A. An implicit Block 18 batch around each wake of the driver.** Commands the core produces between two wakes are held as in an open batch and sent when the driver performs its actions, through Block 18's frame building: the same cap, the same write-queue admission, the same HTTP 413 resend rule. No delay is added, since the driver wakes as soon as an action is queued. Sans-IO: one input marking the flush.
+- **B. Coalescing in the adapter's writer**: frames queued while a write is in progress are merged into one message or request.
+- **C. Not adopted**: Block 18's explicit batches suffice.
+
+| | A | B | C |
+|---|---|---|---|
+| Fit | good: reuses Block 18's core logic, @E-testable | poor: the adapter would merge frames whose write and 413 outcomes the core tracks per frame | good |
+| Idiom | good | fair | good |
+| Consistency | good: one batching mechanism | poor: a second one with its own 413 handling | good |
+| Tests | good: @E burst scenarios; @D frame counts; Block 16's I10 extended | fair | — |
+| Semver | additive (an `Input` variant) | none | none |
+| Cost | M | M | none |
+
+What A changes: Block 18 D2 says a `send` and a pong are never held; under A they would still go at once, so only what Block 18 holds is batched automatically. centrifuge-js 63ed73e has no automatic batching, so A is a divergence from it, with centrifuge-rust's documentation as the only source.
+
+**Recommendation.** A.
+
+## 27. `Subscription::set_data`
+
+Found by the review: in the official SDK (api.md) and in centrifuge-js 63ed73e (`subscription.ts:382-386`, `setData`), not in Ferrifuge, which has `Client::set_data` (Block 17) and subscription `data` and `get_data` options (Block 9) only.
+
+**Problem.** An app changes what its subscribe requests carry (a room, a filter of its own) without recreating the subscription.
+
+**Designs.**
+- **A. `Subscription::set_data`**, applied from the next subscribe attempt and to resubscribes, a `get_data` callback still taking precedence (centrifuge-js `setData` docs); an `Input` variant, as for `Client::set_data`.
+- **B. Not adopted**: `get_data` covers dynamic data.
+
+| | A | B |
+|---|---|---|
+| Fit | good: mirrors Block 17's setters | good |
+| Idiom | good | good |
+| Consistency | good | fair: a client setter with no subscription counterpart |
+| Tests | good: @B, the subscribe proxy records the new data on resubscribe | — |
+| Semver | additive | none |
+| Cost | S | none |
+
+**Recommendation.** A.
+
+## 28. `Publication.channel` and `Publication.time`
+
+Found by the review: `client.proto` fields 9 and 10 of `Publication`, exposed by the official SDK (api.md), not by Ferrifuge.
+
+**Problem.** `channel` is set when a publication's channel differs from its subscription's (wildcard subscriptions, `client.proto`); `time` is the publication time, which "the current server" does not send to clients (`client.proto`).
+
+**Designs.**
+- **A. Add `channel: Option<String>`**, set only when the server sends it; leave `time` out until a server sends it.
+- **B. Add both.**
+
+| | A | B |
+|---|---|---|
+| Fit | good: decoded data | good |
+| Idiom | good | fair: a field that is always empty today |
+| Consistency | good: `Publication` is `#[non_exhaustive]` | good |
+| Tests | good: @D pushes a publication with a channel | fair: `time` only on @D |
+| Semver | additive | additive |
+| Cost | S | S |
+
+**Recommendation.** A. Whether Centrifugo v6.10.1 has wildcard subscriptions decides @A or @D.
+
+---
+
 ## Questions for the owner
 
 Each question has a recommendation. Reply per question; "OK" approves the recommendation.
 
 | Q | Question | Recommendation |
 |---|---|---|
-| Q0 | Approve, change or reject each item's recommendation in the summary table, and the order of the blocks | as in the summary table, in that order |
+| Q0 | Approve, change or reject each item's recommendation in the summary table (items 26–28 included), and the order of the blocks | as in the summary table, in that order |
 | Q1 | Default proxy behaviour (item 1): follow the environment, then OS settings, as browsers do; or direct unless configured | environment, then OS settings |
-| Q2 | TLS under FIPS (item 2): keep webpki verification in the fips build; or use the platform verifier there too | keep webpki in the fips build: elsewhere the OS checks chains outside the FIPS module while `fips()` still reports true |
 | Q3 | Logging (item 9): `tracing` or `log` | `tracing` with its `log` feature, adapter only, no payload switch |
-| Q4 | Publishing (item 21): the owner creates the crates.io ownership, does the first publish, adds the trusted publisher, the `release` environment, and turns on private vulnerability reporting | yes, after the name check |
-| Q5 | Delta failure (item 5): resubscribe from the last delivered position; or end the client as the official SDK | resubscribe |
+| Q4 | Publishing (item 21): the owner creates the crates.io ownership (the name is free), does the first publish, adds the trusted publisher and a `release` environment, and turns on private vulnerability reporting | yes |
+| Q5 | Delta failure (item 5): resubscribe a client-side subscription and reconnect for a server-side one; or end the client as the official SDK | resubscribe or reconnect |
 | Q6 | JSON helpers (item 18): always available; or behind a `serde` feature | always available |
-| Q7 | TLA+ traces (item 20): not adopted; or an exception to the clean-room rule for reading the trace data under `crates/` | not adopted |
+
+## Decided through the reviewer
+
+Answered without the owner under the delegation of 2026-11-06; listed for audit.
+
+| Question | Answer | Why | Sources |
+|---|---|---|---|
+| TLS under FIPS (item 2): keep webpki verification in the fips build, or use the platform verifier there too | keep webpki in the fips build | The owner asked for a question only if `ClientConfig::fips()` stopped being true; it stays true either way, and keeping webpki leaves Block 6 unchanged | rustls 0.23.46 `client_conn.rs:396-409`; rustls-platform-verifier 0.7.1 |
+| TLA+ traces (item 20): an exception to the clean-room rule to read the trace data under `crates/` | no exception needed | The recommendation does not adopt the replay; the question arises only if the owner picks design B | the owner's clean-room rule |
