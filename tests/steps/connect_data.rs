@@ -948,8 +948,14 @@ fn set_emulated_headers_is_called(world: &mut ClientWorld, given: String) {
 fn the_proxy_received_headers_in_turn(world: &mut ClientWorld, first: String, then: String) {
     let (name, first) = header(&first);
     let (_, then) = header(&then);
+    let proxy = proxy(world);
+    // The connect requests, to tell where an unexpected attempt came from.
+    let requests: Vec<_> = (0..proxy.requests())
+        .map(|index| proxy.request(index))
+        .collect();
     assert_eq!(
-        proxy(world).request_headers(&name),
-        [Some(first), Some(then)]
+        proxy.request_headers(&name),
+        [Some(first), Some(then)],
+        "connect requests: {requests:?}"
     );
 }
