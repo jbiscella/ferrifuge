@@ -871,7 +871,13 @@ fn from_history(state: &State, channel: &str, subscribe: &Value) -> Value {
             result["recovered"] = json!(false);
             return result;
         }
-        result["recovered"] = json!(subscribe["epoch"] == HISTORY_EPOCH);
+        // As Centrifugo: a failed recovery carries no publications
+        // (centrifuge `client.go`, "recovered=false implies no publications").
+        if subscribe["epoch"] != HISTORY_EPOCH {
+            result["recovered"] = json!(false);
+            return result;
+        }
+        result["recovered"] = json!(true);
         let mut publications: Vec<&Value> = history
             .iter()
             .filter(|publication| publication["offset"].as_u64().unwrap_or(0) > from)
