@@ -32,8 +32,9 @@ use crate::support::token::{connection_token_with_info, subscription_token_with_
 /// Margin for a call's timeout to fire and its failure to reach the step.
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// How long the connect proxy takes to accept a connection in the
-/// scenarios calling while the client connects.
-const CONNECTING_FOR: Duration = Duration::from_millis(500);
+/// scenarios calling while the client connects: 500 ms was too short on a
+/// loaded CI runner (the client was connected when the step called).
+const CONNECTING_FOR: Duration = Duration::from_secs(2);
 
 /// Calls of the scenario, in the order they were made, and what the steps
 /// around them set up.
