@@ -657,8 +657,14 @@ impl Run {
                 self.schedule(after, Due::Token(fetch, result));
             }
             Action::CallSettled { call, result } => {
-                if self.fault != Some(Fault::DropCallOutcome) {
-                    self.checker.calls.remove(&call);
+                if self.fault != Some(Fault::DropCallOutcome)
+                    && let Some(made) = self.checker.calls.remove(&call)
+                    && self.now.saturating_sub(made) > CALL_BOUND
+                {
+                    return Err(self.violation(
+                        "I6",
+                        format!("{call:?} made at {made:?} settled at {:?}", self.now),
+                    ));
                 }
                 if matches!(&result, Err(error) if error.code == codes::error::TIMEOUT) {
                     self.count("call timeout");
