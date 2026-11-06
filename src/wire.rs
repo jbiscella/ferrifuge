@@ -54,6 +54,7 @@ pub(crate) struct RefreshRequest {
 }
 
 /// `SubscribeRequest` of `client.proto`, for the options implemented so far.
+#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeRequest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeRequest {
     pub(crate) channel: String,

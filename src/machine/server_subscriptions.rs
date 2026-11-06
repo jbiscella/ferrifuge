@@ -9,7 +9,10 @@ use super::Machine;
 use super::delivery::{Commit, Owner};
 use super::subscriptions::UNMATCHABLE_EPOCH;
 use crate::wire::{SubscribeRequest, SubscribeResult};
-use crate::{ClientEvent, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed, codes};
+use crate::{
+    ClientEvent, ClientInfo, Publication, ServerSubscriptionEvent, StreamPosition, Subscribed,
+    codes,
+};
 
 /// Reason of [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
 const NOT_GRANTED_REASON: &str = "not subscribed by the server after reconnect";
@@ -222,6 +225,35 @@ impl Machine {
             return;
         }
         self.emit_server_publication(channel, publication, None);
+    }
+
+    /// A join or leave of the server-side subscription to `channel`, when it
+    /// is subscribed.
+    pub(super) fn server_join_or_leave(&mut self, channel: &str, info: ClientInfo, join: bool) {
+        if !self
+            .server_subscriptions
+            .by_channel
+            .get(channel)
+            .is_some_and(|sub| sub.subscribed)
+        {
+            return;
+        }
+        let Some(id) = self.admit_event(None, false) else {
+            return;
+        };
+        self.deliver_unpositioned(id, Owner::Server(channel.to_owned()));
+        let event = if join {
+            ServerSubscriptionEvent::Join(info)
+        } else {
+            ServerSubscriptionEvent::Leave(info)
+        };
+        self.actions.push(super::Action::Emit(
+            id,
+            ClientEvent::ServerSubscription {
+                channel: channel.to_owned(),
+                event,
+            },
+        ));
     }
 
     /// Emits a publication of the server-side subscription to `channel`,
