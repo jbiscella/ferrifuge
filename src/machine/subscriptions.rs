@@ -110,6 +110,15 @@ impl Subscription {
 }
 
 impl Subscriptions {
+    /// The id of a new callback fetch. Subscription callbacks and the
+    /// client's connect data callback share them, so that the owner tells
+    /// every running callback apart by its fetch.
+    pub(super) fn new_fetch(&mut self) -> FetchId {
+        let fetch = FetchId(self.next_fetch);
+        self.next_fetch += 1;
+        fetch
+    }
+
     /// Whether `id` is the id of a subscribe or unsubscribe command.
     /// The subscription and the reply deadline of command `id`, if it is a
     /// subscription's command awaiting its reply.
@@ -281,8 +290,7 @@ impl Machine {
             return;
         };
         if sub.options.data_source {
-            let fetch = FetchId(self.subscriptions.next_fetch);
-            self.subscriptions.next_fetch += 1;
+            let fetch = self.subscriptions.new_fetch();
             let sub = self
                 .subscriptions
                 .by_id

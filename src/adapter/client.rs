@@ -363,12 +363,17 @@ impl<E> Drop for EventStream<E> {
 type GetToken =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>> + Send + Sync>;
 
+/// Async callback returning the data of the next connect command.
+type GetConnectData =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DataError>> + Send>> + Send + Sync>;
+
 /// Builds a [`Client`] with options beyond [`Config`].
 pub struct ClientBuilder {
     /// Transports to try in order, each with its endpoint.
     endpoints: Vec<(TransportKind, String)>,
     config: Config,
     get_token: Option<GetToken>,
+    get_data: Option<GetConnectData>,
     emulation_endpoint: Option<String>,
 }
 
@@ -378,6 +383,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("endpoints", &self.endpoints)
             .field("config", &self.config)
             .field("get_token", &self.get_token.is_some())
+            .field("get_data", &self.get_data.is_some())
             .field("emulation_endpoint", &self.emulation_endpoint)
             .finish()
     }
@@ -401,6 +407,21 @@ impl ClientBuilder {
         Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
     {
         self.get_token = Some(Arc::new(move || Box::pin(get_token())));
+        self
+    }
+
+    /// Sets the callback that provides the data of the next connect command,
+    /// called before every connection attempt once a token is obtained; its
+    /// data replaces [`Config::data`]. Return [`DataError::Unauthorized`] to
+    /// disconnect the client for good; any other error is reported as an
+    /// `error` event and the attempt retried after the reconnect backoff.
+    #[must_use]
+    pub fn get_data<F, Fut>(mut self, get_data: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
+    {
+        self.get_data = Some(Arc::new(move || Box::pin(get_data())));
         self
     }
 
@@ -461,6 +482,7 @@ impl Client {
             endpoints: endpoints.into_iter().collect(),
             config: Config::default(),
             get_token: None,
+            get_data: None,
             emulation_endpoint: None,
         }
     }
@@ -470,6 +492,7 @@ impl Client {
             endpoints,
             config,
             get_token,
+            get_data,
             emulation_endpoint,
         } = builder;
         for (kind, endpoint) in &endpoints {
@@ -482,6 +505,11 @@ impl Client {
             Machine::with_token_source(config)
         } else {
             Machine::new(config)
+        };
+        let machine = if get_data.is_some() {
+            machine.with_data_source()
+        } else {
+            machine
         };
         let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
         let shared = Arc::new(Shared {
@@ -507,13 +535,14 @@ impl Client {
             opening: None,
             transport: None,
             get_token,
+            get_data,
             fetching: None,
             stale_fetching: None,
             timers: Timers::default(),
             subscription_timers: KeyedTimers::default(),
             call_timers: KeyedTimers::default(),
-            subscription_fetches: FuturesUnordered::new(),
-            subscription_fetch_aborts: HashMap::new(),
+            callback_fetches: FuturesUnordered::new(),
+            callback_aborts: HashMap::new(),
         };
         tokio::spawn(driver.run());
         Ok(Self { shared })
@@ -755,6 +784,7 @@ struct Driver {
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     get_token: Option<GetToken>,
+    get_data: Option<GetConnectData>,
     fetching: Option<(FetchId, Fetching)>,
     /// The callback a newer one replaced, still polled: when it was a
     /// refresh of a connection that is gone, its denial must still reach
@@ -763,14 +793,14 @@ struct Driver {
     timers: Timers,
     subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer)>,
     call_timers: KeyedTimers<(CallId, CallTimer)>,
-    /// Subscription data and token callbacks running, each yielding the
+    /// Subscription callbacks and the connect data callback running, each yielding the
     /// input answering it; an aborted one yields `None`.
-    subscription_fetches: FuturesUnordered<SubscriptionFetching>,
+    callback_fetches: FuturesUnordered<CallbackFetching>,
     /// Handles to abort the callbacks running, by fetch.
-    subscription_fetch_aborts: HashMap<FetchId, AbortHandle>,
+    callback_aborts: HashMap<FetchId, AbortHandle>,
 }
 
-type SubscriptionFetching = Pin<Box<dyn Future<Output = Option<(FetchId, Input)>> + Send>>;
+type CallbackFetching = Pin<Box<dyn Future<Output = Option<(FetchId, Input)>> + Send>>;
 
 /// The machine's subscription timers, by subscription and kind, or its
 /// call timers, by call.
@@ -897,14 +927,14 @@ impl Driver {
                     Input::SubscriptionTimerFired(id, timer)
                 }
                 (id, timer) = self.call_timers.fired() => Input::CallTimerFired(id, timer),
-                Some(fetched) = self.subscription_fetches.next(),
-                    if !self.subscription_fetches.is_empty() =>
+                Some(fetched) = self.callback_fetches.next(),
+                    if !self.callback_fetches.is_empty() =>
                 {
                     // Aborted: the machine no longer wants it.
                     let Some((fetch, input)) = fetched else {
                         continue;
                     };
-                    self.subscription_fetch_aborts.remove(&fetch);
+                    self.callback_aborts.remove(&fetch);
                     input
                 }
                 (fetch, result) = fetched(&mut self.fetching) => {
@@ -1011,9 +1041,11 @@ impl Driver {
             action @ (Action::FetchSubscriptionData { .. }
             | Action::FetchSubscriptionToken { .. }
             | Action::FetchSubscriptionState { .. }
+            | Action::FetchConnectData(_)
             | Action::CancelSubscriptionData(_)
             | Action::CancelSubscriptionToken(_)
-            | Action::CancelSubscriptionState(_)) => self.subscription_callback(action),
+            | Action::CancelSubscriptionState(_)
+            | Action::CancelConnectData(_)) => self.callback(action),
             Action::FetchToken(id) => {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
@@ -1029,9 +1061,24 @@ impl Driver {
 }
 
 impl Driver {
-    /// Runs or cancels a subscription callback.
-    fn subscription_callback(&mut self, action: Action) {
+    fn fetch_connect_data(&mut self, fetch: FetchId) {
+        // The machine asks only when it was built with a data source.
+        let Some(get_data) = &self.get_data else {
+            return;
+        };
+        let fetching = guarded(|| get_data(), connect_data_callback_panicked);
+        self.start_fetch(fetch, async move {
+            Input::ConnectDataFetched {
+                fetch,
+                result: fetching.await,
+            }
+        });
+    }
+
+    /// Runs or cancels a subscription callback, or the connect data one.
+    fn callback(&mut self, action: Action) {
         match action {
+            Action::FetchConnectData(fetch) => self.fetch_connect_data(fetch),
             Action::FetchSubscriptionData {
                 subscription,
                 channel,
@@ -1049,12 +1096,13 @@ impl Driver {
             } => self.fetch_subscription_state(subscription, channel, fetch),
             Action::CancelSubscriptionData(fetch)
             | Action::CancelSubscriptionToken(fetch)
-            | Action::CancelSubscriptionState(fetch) => {
-                if let Some(abort) = self.subscription_fetch_aborts.remove(&fetch) {
+            | Action::CancelSubscriptionState(fetch)
+            | Action::CancelConnectData(fetch) => {
+                if let Some(abort) = self.callback_aborts.remove(&fetch) {
                     abort.abort();
                 }
             }
-            _ => unreachable!("not a subscription callback action: {action:?}"),
+            _ => unreachable!("not a callback action: {action:?}"),
         }
     }
 
@@ -1112,15 +1160,16 @@ impl Driver {
         });
     }
 
-    /// Runs a subscription callback, abortable by its fetch.
+    /// Runs a subscription or connect data callback, abortable by its
+    /// fetch.
     fn start_fetch(
         &mut self,
         fetch: FetchId,
         answer: impl Future<Output = Input> + Send + 'static,
     ) {
         let (fetching, abort) = future::abortable(answer);
-        self.subscription_fetch_aborts.insert(fetch, abort);
-        self.subscription_fetches.push(Box::pin(
+        self.callback_aborts.insert(fetch, abort);
+        self.callback_fetches.push(Box::pin(
             fetching.map(move |input| input.ok().map(|input| (fetch, input))),
         ));
     }
@@ -1146,6 +1195,10 @@ fn guarded<T: Send + 'static, E: Send + 'static>(
 
 fn token_callback_panicked() -> TokenError {
     TokenError::Failed("subscription token callback panicked".to_owned())
+}
+
+fn connect_data_callback_panicked() -> DataError {
+    DataError::Failed("connect data callback panicked".to_owned())
 }
 
 fn data_callback_panicked() -> DataError {

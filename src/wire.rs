@@ -40,6 +40,8 @@ pub(crate) enum Method {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConnectRequest {
     pub(crate) token: String,
+    /// The application's connect data, if any (Block 17).
+    pub(crate) data: Option<Vec<u8>>,
     pub(crate) name: String,
     pub(crate) version: String,
     /// Server-side subscriptions to recover, by channel: only `recover`,
@@ -186,6 +188,8 @@ pub(crate) struct ConnectResult {
     /// The server-side subscriptions of the connection, by channel, in
     /// channel order.
     pub(crate) subs: BTreeMap<String, SubscribeResult>,
+    /// The data the server attached, exactly as received (Block 17).
+    pub(crate) data: Option<Vec<u8>>,
 }
 
 /// `HistoryResult` of `client.proto`.

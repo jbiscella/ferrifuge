@@ -69,12 +69,14 @@ impl From<&Command> for pb::Command {
         match &command.method {
             Method::Connect(ConnectRequest {
                 token,
+                data,
                 name,
                 version,
                 subs,
             }) => {
                 pb.connect = Some(pb::ConnectRequest {
                     token: token.clone(),
+                    data: data.clone().unwrap_or_default(),
                     name: name.clone(),
                     version: version.clone(),
                     subs: subs
@@ -224,6 +226,7 @@ impl From<pb::Reply> for Reply {
                     .into_iter()
                     .map(|(channel, result)| (channel, result.into()))
                     .collect(),
+                data: (!connect.data.is_empty()).then_some(connect.data),
             })
         } else if let Some(refresh) = reply.refresh {
             ReplyResult::Refresh(RefreshResult {
@@ -621,6 +624,7 @@ mod tests {
                 id: 1,
                 method: Method::Connect(ConnectRequest {
                     token: "t".into(),
+                    data: None,
                     name: "ferrifuge".into(),
                     version: "0.1.0".into(),
                     subs: [(
@@ -701,6 +705,40 @@ mod tests {
         assert!(result.recoverable && result.positioned);
         assert_eq!((result.epoch.as_str(), result.offset), ("e", 3));
         assert_eq!(result.data.as_deref(), Some(&b"\xff"[..]));
+    }
+
+    #[test]
+    fn connect_data_round_trips_as_bytes() {
+        let command = Command {
+            id: 1,
+            method: Method::Connect(ConnectRequest {
+                data: Some(vec![0xff, 0x00]),
+                ..ConnectRequest::default()
+            }),
+        };
+        let frame = encode(&[command]);
+        let mut rest = frame.as_slice();
+        let sent = pb::Command::decode_length_delimited(&mut rest).unwrap();
+        assert_eq!(sent.connect.unwrap().data, [0xff, 0x00]);
+
+        let reply = |data: Vec<u8>| {
+            frame_of(&[pb::Reply {
+                id: 1,
+                connect: Some(pb::ConnectResult {
+                    client: "c".into(),
+                    data,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }])
+        };
+        let data_of = |frame: Vec<u8>| match decode(&frame).unwrap().remove(0).result {
+            ReplyResult::Connect(result) => result.data,
+            other => panic!("{other:?}"),
+        };
+
+        assert_eq!(data_of(reply(vec![0xfe])), Some(vec![0xfe]));
+        assert_eq!(data_of(reply(Vec::new())), None);
     }
 
     #[test]
@@ -802,6 +840,7 @@ mod tests {
                         session: String::new(),
                         node: String::new(),
                         subs: std::collections::BTreeMap::new(),
+                        data: None,
                     }),
                 },
                 Reply {

@@ -118,6 +118,9 @@ struct State {
     skip_recovered: bool,
     /// Connect commands still to answer with a temporary error.
     failing_connects: usize,
+    /// Raw JSON the JSON connect replies carry as `data`, byte for byte
+    /// (Block 17).
+    connect_data: Option<String>,
 }
 
 /// Epoch of the channels answered from their history.
@@ -292,6 +295,11 @@ impl FakeServer {
     /// fault for the chaos runner).
     pub(crate) fn skip_recovered_offset(&self) {
         self.state.lock().unwrap().skip_recovered = true;
+    }
+
+    /// JSON connect replies carry `raw` as their `data`, byte for byte.
+    pub(crate) fn answer_connects_with_data(&self, raw: &str) {
+        self.state.lock().unwrap().connect_data = Some(raw.to_owned());
     }
 
     /// Answers the next `count` connect commands with a temporary error.
@@ -616,29 +624,34 @@ impl Connection {
                 ));
             } else if message["connect"].is_object() {
                 let client = self.next_client();
-                let subs = {
+                let (subs, data) = {
                     let mut state = self.state.lock().unwrap();
                     let default = state.server_subscriptions.clone();
-                    state
+                    let subs = state
                         .next_server_subscriptions
                         .pop_front()
-                        .unwrap_or(default)
+                        .unwrap_or(default);
+                    (subs, state.connect_data.clone())
                 };
-                replies.push(Message::text(
-                    json!({
-                        "id": message["id"],
-                        "connect": {
-                            "client": client,
-                            "version": "fake",
-                            "ping": self.announce.ping,
-                            "pong": self.announce.pong,
-                            "expires": self.announce.ttl > 0,
-                            "ttl": self.announce.ttl,
-                            "subs": subs,
-                        },
-                    })
-                    .to_string(),
-                ));
+                let connect = json!({
+                    "client": client,
+                    "version": "fake",
+                    "ping": self.announce.ping,
+                    "pong": self.announce.pong,
+                    "expires": self.announce.ttl > 0,
+                    "ttl": self.announce.ttl,
+                    "subs": subs,
+                })
+                .to_string();
+                // Raw data goes in as given, never re-serialized.
+                let connect = match data {
+                    Some(raw) => format!("{},\"data\":{raw}}}", &connect[..connect.len() - 1]),
+                    None => connect,
+                };
+                replies.push(Message::text(format!(
+                    "{{\"id\":{},\"connect\":{connect}}}",
+                    message["id"]
+                )));
             } else if message["subscribe"].is_object() {
                 replies.extend(self.subscribe_answer(&message));
             } else if message["rpc"].is_object() {

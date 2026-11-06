@@ -226,6 +226,17 @@ const IMPLEMENTED: &[&str] = &[
     "A Disconnect push with 3008 keeps the backoff growing over an emulated transport",
     "A server ping read before 3008 lets the reset stand",
     "A close with another code lets the reset stand",
+    // Block 17, sub-increment 17a.
+    "Connect data is sent on connect and on reconnect",
+    "Connect data from a callback is renewed on every attempt",
+    "A failing connect data callback is retried after the reconnect backoff",
+    "A connect data callback denying access disconnects the client",
+    "A disconnect while the data callback runs opens no transport",
+    "The connect data callback runs only after a connection token is obtained",
+    "The connection token is fetched before the connect data",
+    "A client that has a token calls the data callback without the token callback",
+    "Data returned with the connect reply is delivered",
+    "The connected event carries the server's data exactly",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",

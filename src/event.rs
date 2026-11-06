@@ -40,11 +40,16 @@ pub enum ClientEvent {
         reason: String,
     },
     /// The client moved to [`State::Connected`].
+    #[non_exhaustive]
     Connected {
         /// Connection id assigned by the server.
         client_id: String,
         /// Transport in use, e.g. `"websocket"`.
         transport: String,
+        /// The data the server attached to the connect reply
+        /// (`ConnectResult.data`), exactly as received: raw JSON with the
+        /// JSON protocol, any bytes with Protobuf.
+        data: Option<Vec<u8>>,
     },
     /// The client moved to [`State::Disconnected`].
     Disconnected {
@@ -157,6 +162,7 @@ impl std::error::Error for ClientError {}
 
 /// Origin of a [`ClientError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// The transport failed to open, or closed before it opened. As in
     /// centrifuge-js, a transport that opened and then closed before the
@@ -167,6 +173,9 @@ pub enum ErrorKind {
     Connect,
     /// The token callback failed while getting a token to connect with.
     ConnectToken,
+    /// The connect data callback failed; the client retries after the
+    /// reconnect backoff (Block 17).
+    ConnectData,
     /// The token callback failed while getting a token to refresh with.
     RefreshToken,
     /// The server answered the refresh command with a temporary error.

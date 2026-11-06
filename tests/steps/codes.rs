@@ -117,6 +117,10 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
 
 #[then(regex = r#"^the client emits "disconnected" with code (\d+) and reason "([^"]*)"$"#)]
 async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::emitted_disconnected(world, code, &reason);
+        return;
+    }
     loop {
         let event = world.next_event().await;
         match event {

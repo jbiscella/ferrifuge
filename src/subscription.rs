@@ -157,13 +157,15 @@ pub struct ClientInfo {
     pub chan_info: Option<Vec<u8>>,
 }
 
-/// Why a subscription data callback could not provide data.
+/// Why a data callback, a subscription's or the client's connect data
+/// one, could not provide data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataError {
-    /// Access is denied: the subscription is unsubscribed for good.
+    /// Access is denied: the subscription is unsubscribed, or the client
+    /// disconnected, for good.
     Unauthorized,
     /// A failure, e.g. the backend is unreachable: retried after the
-    /// resubscribe backoff.
+    /// resubscribe, or the reconnect, backoff.
     Failed(String),
 }
 
@@ -171,7 +173,7 @@ impl std::fmt::Display for DataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unauthorized => f.write_str("unauthorized"),
-            Self::Failed(reason) => write!(f, "subscription data callback failed: {reason}"),
+            Self::Failed(reason) => write!(f, "data callback failed: {reason}"),
         }
     }
 }

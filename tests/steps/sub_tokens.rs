@@ -520,12 +520,20 @@ fn no_sub_refresh(world: &mut ClientWorld) {
 
 #[then("the data callback is not called for that attempt")]
 fn no_data_callback(world: &mut ClientWorld) {
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::no_data_callback(world);
+        return;
+    }
     let run = run(world);
     assert!(!run.calls.contains(&"data"), "{:?}", run.calls);
 }
 
 #[then("the token callback is called before the data callback")]
 fn token_before_data(world: &mut ClientWorld) {
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::token_before_data(world);
+        return;
+    }
     let run = run(world);
     assert_eq!(run.calls, ["token", "data"]);
 }
@@ -550,6 +558,10 @@ fn subscribe_carries_token_and_data(world: &mut ClientWorld) {
 
 #[then("the token callback is not called")]
 fn token_callback_not_called(world: &mut ClientWorld) {
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::token_callback_not_called(world);
+        return;
+    }
     let run = run(world);
     assert_eq!(run.token_calls, Vec::<String>::new());
 }
