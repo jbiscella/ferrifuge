@@ -221,6 +221,21 @@ const IMPLEMENTED: &[&str] = &[
     // Block 15, sub-increment 15c.
     "A client stream not read keeps every state change but drops errors past 256 untaken events",
     "A subscription stream not read drops errors past 256 untaken events",
+    // Block 13, sub-increment 13a: calls and RPC.
+    "RPC returns the proxy's result",
+    "Temporary RPC error is reported as such",
+    "Concurrent calls get their own replies",
+    "A call without a reply times out",
+    "A call made before connect waits for the connection",
+    "A call made while connecting waits for the connection",
+    "A queued call fails after the timeout when no connection comes",
+    "A call that timed out while queued is never sent",
+    "A call on a client never connected fails after the timeout",
+    "A terminal connect failure fails a queued call at once",
+    "Disconnect fails a queued call at once",
+    "Disconnect fails a call already sent at once",
+    "A call whose emulation request fails fails at once",
+    "Losing the transport fails calls already sent at once",
 ];
 
 /// Server configuration of @A scenarios.

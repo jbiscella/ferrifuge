@@ -200,35 +200,44 @@ impl Shared {
         lock(&self.core).actions.pop_front()
     }
 
-    /// Makes a call and awaits its outcome; dropping the future abandons
-    /// the call (Block 13).
-    pub(super) async fn call(
+    /// Makes a call now; the future gives its outcome. Dropping the future
+    /// abandons the call (Block 13).
+    pub(super) fn call(
         self: &Arc<Self>,
         request: CallRequest,
-    ) -> Result<CallReply, CallError> {
+    ) -> impl Future<Output = Result<CallReply, CallError>> + Send + use<> {
         let (sender, receiver) = oneshot::channel();
-        let id = {
+        let pending = {
             let mut core = lock(&self.core);
             // The driver has stopped: nothing would ever settle the call.
             if self.closed.load(Ordering::Acquire) {
-                return Err(CallError::new(codes::error::DISCONNECTED, "disconnected"));
+                None
+            } else {
+                let id = core.machine.add_call(request);
+                lock(&self.calls).insert(id, sender);
+                self.handle(&mut core, Input::Call(id));
+                Some(PendingCall {
+                    shared: Arc::clone(self),
+                    id,
+                    settled: false,
+                })
             }
-            let id = core.machine.add_call(request);
-            lock(&self.calls).insert(id, sender);
-            self.handle(&mut core, Input::Call(id));
-            id
         };
         self.actions_queued.notify_one();
-        let mut pending = PendingCall {
-            shared: Arc::clone(self),
-            id,
-            settled: false,
-        };
-        let result = receiver.await;
-        pending.settled = true;
-        // The sender was dropped unsettled only when the driver stopped.
-        result.unwrap_or_else(|_| Err(CallError::new(codes::error::DISCONNECTED, "disconnected")))
+        async move {
+            let Some(mut pending) = pending else {
+                return Err(disconnected());
+            };
+            let result = receiver.await;
+            pending.settled = true;
+            // The sender was dropped unsettled only when the driver stopped.
+            result.unwrap_or_else(|_| Err(disconnected()))
+        }
     }
+}
+
+fn disconnected() -> CallError {
+    CallError::new(codes::error::DISCONNECTED, "disconnected")
 }
 
 /// A call awaiting its outcome: dropped before it, the call is abandoned.
@@ -563,14 +572,16 @@ impl Client {
         self.shared.apply(Input::Disconnect);
     }
 
-    /// Calls the server's RPC `method` with `data` and returns the result
-    /// data: raw JSON with the JSON protocol, any bytes with Protobuf.
+    /// Calls the server's RPC `method` with `data`; the future gives the
+    /// result data: raw JSON with the JSON protocol, any bytes with
+    /// Protobuf.
     ///
-    /// A call made while not connected waits for the connection, then for
-    /// the reply, each for at most `Config::timeout`. Results are not
-    /// ordered with events: a reply settles its call as soon as it is read.
-    /// Dropping the future abandons the call: if it is still waiting for
-    /// the connection, it is never sent.
+    /// The call is made when this returns: a call made while not connected
+    /// waits for the connection, then for the reply, each for at most
+    /// `Config::timeout`. The future borrows nothing from the client, so it
+    /// can be spawned. Results are not ordered with events: a reply settles
+    /// its call as soon as it is read. Dropping the future abandons the
+    /// call: if it is still waiting for the connection, it is never sent.
     ///
     /// # Errors
     ///
@@ -581,17 +592,19 @@ impl Client {
     /// transport the call was sent on closes, and
     /// [`codes::error::TRANSPORT_WRITE`] when the server refuses the
     /// request carrying it (HTTP 413).
-    pub async fn rpc(
+    pub fn rpc(
         &self,
         method: impl Into<String>,
         data: impl Into<Vec<u8>>,
-    ) -> Result<Vec<u8>, CallError> {
-        let request = CallRequest::Rpc {
+    ) -> impl Future<Output = Result<Vec<u8>, CallError>> + Send + 'static {
+        let call = self.shared.call(CallRequest::Rpc {
             method: method.into(),
             data: data.into(),
-        };
-        match self.shared.call(request).await? {
-            CallReply::Rpc(data) => Ok(data),
+        });
+        async move {
+            match call.await? {
+                CallReply::Rpc(data) => Ok(data),
+            }
         }
     }
 }

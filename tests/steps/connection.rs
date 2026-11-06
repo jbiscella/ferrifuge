@@ -89,6 +89,7 @@ async fn a_client_disconnected_explicitly(world: &mut ClientWorld) {
     expect_event(world, "disconnected").await;
 }
 
+#[given("connect is called")]
 #[when("connect is called")]
 fn connect_is_called(world: &mut ClientWorld) {
     if super::jitter::drives_a_machine(world) {

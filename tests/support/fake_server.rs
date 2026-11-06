@@ -33,6 +33,19 @@ pub(crate) struct Announce {
     pub(crate) ttl: u32,
 }
 
+/// How the fake server answers RPC commands (Block 13). An answer's data
+/// names the method it replies to: `{"reply_to": method}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Rpc {
+    /// Each at once.
+    #[default]
+    Answer,
+    /// In pairs, the second before the first.
+    Reverse,
+    /// Never.
+    Ignore,
+}
+
 /// An instruction for the current connection.
 enum Control {
     Send(Message),
@@ -78,6 +91,10 @@ struct State {
     recovering: std::collections::HashSet<String>,
     /// Results of the subscribe replies sent, with their channel, in order.
     subscribe_replies: Vec<(String, Value)>,
+    rpc: Rpc,
+    /// The RPC command whose answer waits for the next one's, in
+    /// [`Rpc::Reverse`].
+    held_rpc: Option<Value>,
 }
 
 /// Epoch of the channels answered from their history.
@@ -288,6 +305,19 @@ impl FakeServer {
         self.state.lock().unwrap().pings
     }
 
+    /// Answers RPC commands as `rpc` says from now on.
+    pub(crate) fn answer_rpc(&self, rpc: Rpc) {
+        self.state.lock().unwrap().rpc = rpc;
+    }
+
+    /// The JSON RPC commands received from clients so far.
+    pub(crate) fn rpc_commands(&self) -> Vec<Value> {
+        self.received()
+            .into_iter()
+            .filter(|message| message["rpc"].is_object())
+            .collect()
+    }
+
     /// Results of the subscribe replies sent so far, with their channel.
     pub(crate) fn subscribe_replies(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().subscribe_replies.clone()
@@ -487,6 +517,19 @@ impl Connection {
                         json!({"id": message["id"], "subscribe": result}).to_string(),
                     ));
                 }
+            } else if message["rpc"].is_object() {
+                let mut state = self.state.lock().unwrap();
+                match state.rpc {
+                    Rpc::Answer => replies.push(rpc_answer(&message)),
+                    Rpc::Reverse => match state.held_rpc.take() {
+                        Some(first) => {
+                            replies.push(rpc_answer(&message));
+                            replies.push(rpc_answer(&first));
+                        }
+                        None => state.held_rpc = Some(message.clone()),
+                    },
+                    Rpc::Ignore => {}
+                }
             } else if message["unsubscribe"].is_object() {
                 replies.push(Message::text(
                     json!({"id": message["id"], "unsubscribe": {}}).to_string(),
@@ -547,6 +590,13 @@ impl Connection {
         self.client_id += 1;
         format!("fake-{}", self.client_id)
     }
+}
+
+/// The answer to the JSON RPC command `rpc`.
+fn rpc_answer(rpc: &Value) -> Message {
+    Message::text(
+        json!({"id": rpc["id"], "rpc": {"data": {"reply_to": rpc["rpc"]["method"]}}}).to_string(),
+    )
 }
 
 /// The result of a subscribe to `channel` answered from its history.
