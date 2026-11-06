@@ -36,6 +36,8 @@ Available now:
   server's disconnect code, as the spec defines;
 - connection tokens (JWT), refreshed through a callback before they
   expire;
+- connect data, fixed or from a `get_data` callback called before every
+  connection attempt, and the server's data on the `connected` event;
 - server pings: answered with pongs, and a connection whose pings stop is
   re-established;
 - an `error` event for every failed connection attempt;
