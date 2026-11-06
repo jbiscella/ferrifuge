@@ -172,6 +172,25 @@ jobs:
           fi
           cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_FLOOR"
 
+  # Seeded chaos on the sans-IO core (Block 16): 10 000 seeds of 200
+  # operations in release, from a start seed drawn per run and printed, so
+  # a failure reruns with FERRIFUGE_CHAOS_SEED. Pull requests run seeds
+  # 0-299 in the test and portability jobs.
+  chaos:
+    # Heavy: on main (merges and nightly) and on demand, not on pull requests.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Long chaos run
+        run: cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture
+
   # Deterministic @P metrics of Block 14: instruction counts, with gungraun
   # on Valgrind.
   perf:
@@ -272,7 +291,7 @@ jobs:
         run: cargo test --test bdd -- --tags "not @A and not @B and not @P"
 
       - name: Spec sync and simulations
-        run: cargo test --test spec_sync --test perf_sim
+        run: cargo test --test spec_sync --test perf_sim --test chaos
 
   # The public API against the base branch (Block 14e): a breaking change
   # needs a version bump (0.x: the minor version).
