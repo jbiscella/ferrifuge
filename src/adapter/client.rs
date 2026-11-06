@@ -25,7 +25,8 @@ use crate::machine::{
 };
 use crate::{
     CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
-    State, StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
+    HistoryOptions, HistoryResult, PresenceResult, PresenceStatsResult, State, StateError,
+    StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 
 /// Centrifugo client running on tokio.
@@ -200,10 +201,11 @@ impl Shared {
         lock(&self.core).actions.pop_front()
     }
 
-    /// Makes a call now; the future gives its outcome. Dropping the future
-    /// abandons the call (Block 13).
+    /// Makes a call now, of `subscription` when given; the future gives its
+    /// outcome. Dropping the future abandons the call (Block 13).
     pub(super) fn call(
         self: &Arc<Self>,
+        subscription: Option<SubscriptionId>,
         request: CallRequest,
     ) -> impl Future<Output = Result<CallReply, CallError>> + Send + use<> {
         let (sender, receiver) = oneshot::channel();
@@ -213,7 +215,10 @@ impl Shared {
             if self.closed.load(Ordering::Acquire) {
                 None
             } else {
-                let id = core.machine.add_call(request);
+                let id = match subscription {
+                    Some(subscription) => core.machine.add_subscription_call(subscription, request),
+                    None => core.machine.add_call(request),
+                };
                 lock(&self.calls).insert(id, sender);
                 self.handle(&mut core, Input::Call(id));
                 Some(PendingCall {
@@ -238,6 +243,14 @@ impl Shared {
 
 fn disconnected() -> CallError {
     CallError::new(codes::error::DISCONNECTED, "disconnected")
+}
+
+/// The result `extract` takes from the reply of `call`.
+pub(super) async fn reply_of<T>(
+    call: impl Future<Output = Result<CallReply, CallError>>,
+    extract: fn(CallReply) -> Option<T>,
+) -> Result<T, CallError> {
+    Ok(extract(call.await?).expect("the machine answers each call with its own method's result"))
 }
 
 /// A call awaiting its outcome: dropped before it, the call is abandoned.
@@ -597,15 +610,100 @@ impl Client {
         method: impl Into<String>,
         data: impl Into<Vec<u8>>,
     ) -> impl Future<Output = Result<Vec<u8>, CallError>> + Send + 'static {
-        let call = self.shared.call(CallRequest::Rpc {
-            method: method.into(),
-            data: data.into(),
-        });
-        async move {
-            match call.await? {
-                CallReply::Rpc(data) => Ok(data),
-            }
-        }
+        let call = self.shared.call(
+            None,
+            CallRequest::Rpc {
+                method: method.into(),
+                data: data.into(),
+            },
+        );
+        reply_of(call, |reply| match reply {
+            CallReply::Rpc(data) => Some(data),
+            _ => None,
+        })
+    }
+
+    /// Publishes `data` to `channel`: raw JSON with the JSON protocol, any
+    /// bytes with Protobuf. Made, waiting and failing as [`Client::rpc`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`].
+    pub fn publish(
+        &self,
+        channel: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::Publish {
+                channel: channel.into(),
+                data: data.into(),
+            },
+        );
+        reply_of(call, |reply| {
+            matches!(reply, CallReply::Publish).then_some(())
+        })
+    }
+
+    /// The history of `channel`: the publications `options` select, and the
+    /// stream's current position. Made, waiting and failing as
+    /// [`Client::rpc`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`].
+    pub fn history(
+        &self,
+        channel: impl Into<String>,
+        options: HistoryOptions,
+    ) -> impl Future<Output = Result<HistoryResult, CallError>> + Send + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::History {
+                channel: channel.into(),
+                options,
+            },
+        );
+        reply_of(call, history_of)
+    }
+
+    /// The clients subscribed to `channel`. Made, waiting and failing as
+    /// [`Client::rpc`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`].
+    pub fn presence(
+        &self,
+        channel: impl Into<String>,
+    ) -> impl Future<Output = Result<PresenceResult, CallError>> + Send + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::Presence {
+                channel: channel.into(),
+            },
+        );
+        reply_of(call, presence_of)
+    }
+
+    /// How many clients and users are subscribed to `channel`. Made,
+    /// waiting and failing as [`Client::rpc`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`].
+    pub fn presence_stats(
+        &self,
+        channel: impl Into<String>,
+    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + Send + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::PresenceStats {
+                channel: channel.into(),
+            },
+        );
+        reply_of(call, presence_stats_of)
     }
 }
 
@@ -1139,6 +1237,28 @@ async fn received(
     match transport {
         Some((id, transport)) => (*id, transport.recv(reading).await),
         None => std::future::pending().await,
+    }
+}
+
+pub(super) fn history_of(reply: CallReply) -> Option<HistoryResult> {
+    match reply {
+        CallReply::History(history) => Some(history),
+        _ => None,
+    }
+}
+
+pub(super) fn presence_of(reply: CallReply) -> Option<PresenceResult> {
+    match reply {
+        CallReply::Presence(presence) => Some(presence),
+        _ => None,
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)] // The signature `reply_of` takes.
+pub(super) fn presence_stats_of(reply: CallReply) -> Option<PresenceStatsResult> {
+    match reply {
+        CallReply::PresenceStats(stats) => Some(stats),
+        _ => None,
     }
 }
 

@@ -60,6 +60,7 @@ pub(crate) fn decode_sized(mut frame: &[u8]) -> Result<Vec<(Reply, usize)>, pros
 }
 
 impl From<&Command> for pb::Command {
+    #[allow(clippy::too_many_lines)] // One arm per method.
     fn from(command: &Command) -> Self {
         let mut pb = Self {
             id: command.id,
@@ -385,6 +386,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Four methods, each encoded and decoded.
     fn encodes_publish_history_presence_and_presence_stats_and_decodes_their_results() {
         let frame = encode(&[
             Command {

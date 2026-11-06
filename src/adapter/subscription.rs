@@ -8,12 +8,14 @@ use std::time::Duration;
 use futures_core::Stream;
 
 use super::client::{
-    Callbacks, Client, EventStream, GetData, GetState, GetSubscriptionToken, Shared, lock,
+    Callbacks, Client, EventStream, GetData, GetState, GetSubscriptionToken, Shared, history_of,
+    lock, presence_of, presence_stats_of, reply_of,
 };
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
-    DataError, StateError, StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState,
-    TokenError,
+    CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, PresenceResult,
+    PresenceStatsResult, StateError, StreamPosition, SubscriptionError, SubscriptionEvent,
+    SubscriptionState, TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
@@ -113,6 +115,86 @@ impl Subscription {
     /// this returns.
     pub fn unsubscribe(&self) {
         self.shared.apply(Input::Unsubscribe(self.id));
+    }
+
+    /// Publishes `data` to the subscription's channel, as
+    /// [`Client::publish`] does, once the subscription is subscribed.
+    ///
+    /// The call is made when this returns. While the subscription is
+    /// subscribing, it waits for at most `Config::timeout`; it then waits
+    /// for the connection and the reply as a client's call does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`], and [`crate::codes::error::SUBSCRIPTION_UNSUBSCRIBED`]
+    /// when the subscription is unsubscribed, or becomes so before the call
+    /// is sent. Entering `disconnected` fails a call waiting for the
+    /// subscription with [`crate::codes::error::DISCONNECTED`].
+    pub fn publish(
+        &self,
+        data: impl Into<Vec<u8>>,
+    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+        let call = self.call(CallRequest::Publish {
+            channel: self.channel.to_string(),
+            data: data.into(),
+        });
+        reply_of(call, |reply| {
+            matches!(reply, CallReply::Publish).then_some(())
+        })
+    }
+
+    /// The history of the subscription's channel, as [`Client::history`]
+    /// gives it, once the subscription is subscribed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Subscription::publish`].
+    pub fn history(
+        &self,
+        options: HistoryOptions,
+    ) -> impl Future<Output = Result<HistoryResult, CallError>> + Send + 'static {
+        let call = self.call(CallRequest::History {
+            channel: self.channel.to_string(),
+            options,
+        });
+        reply_of(call, history_of)
+    }
+
+    /// The clients subscribed to the subscription's channel, once the
+    /// subscription is subscribed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Subscription::publish`].
+    pub fn presence(
+        &self,
+    ) -> impl Future<Output = Result<PresenceResult, CallError>> + Send + 'static {
+        let call = self.call(CallRequest::Presence {
+            channel: self.channel.to_string(),
+        });
+        reply_of(call, presence_of)
+    }
+
+    /// How many clients and users are subscribed to the subscription's
+    /// channel, once the subscription is subscribed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Subscription::publish`].
+    pub fn presence_stats(
+        &self,
+    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + Send + 'static {
+        let call = self.call(CallRequest::PresenceStats {
+            channel: self.channel.to_string(),
+        });
+        reply_of(call, presence_stats_of)
+    }
+
+    fn call(
+        &self,
+        request: CallRequest,
+    ) -> impl Future<Output = Result<CallReply, CallError>> + Send + 'static {
+        self.shared.call(Some(self.id), request)
     }
 }
 

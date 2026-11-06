@@ -191,6 +191,11 @@ impl Machine {
         self.subscriptions.by_id.get(&id).map(|sub| sub.state)
     }
 
+    /// The channel of subscription `id`, if it is in the registry.
+    pub(super) fn subscription_channel(&self, id: SubscriptionId) -> Option<&String> {
+        self.subscriptions.by_id.get(&id).map(|sub| &sub.channel)
+    }
+
     /// The subscription to `channel` in the registry, if any.
     #[must_use]
     pub fn find_subscription(&self, channel: &str) -> Option<SubscriptionId> {
@@ -633,6 +638,7 @@ impl Machine {
                     let reply = replied.as_ref().map(|position| (position, index == last));
                     self.emit_publication(id, publication, reply);
                 }
+                self.subscription_calls_subscribed(id);
             }
             // A reply to subscribe without its result breaks the protocol.
             (None, _) => self.reconnect_after_transport_closed(),
@@ -733,6 +739,7 @@ impl Machine {
                 reason: reason.to_owned(),
             },
         );
+        self.subscription_calls_unsubscribed(id);
     }
 
     /// The server unsubscribed the client from `channel` (spec, "Unsubscribe
