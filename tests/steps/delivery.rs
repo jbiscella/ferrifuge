@@ -945,13 +945,16 @@ fn received_a_refresh(world: &mut ClientWorld) {
     );
 }
 
-#[given(regex = r"^a Config whose read-ahead limit of (messages|bytes) is 0$")]
+#[given(
+    regex = r"^a Config whose (?:read-ahead limit of (messages|bytes)|write queue limit) is 0$"
+)]
 fn a_config_with_a_zero_limit(world: &mut ClientWorld, limit: String) {
     let mut config = ferrifuge::Config::default();
-    if limit == "messages" {
-        config.read_ahead_messages = 0;
-    } else {
-        config.read_ahead_bytes = 0;
+    match limit.as_str() {
+        "messages" => config.read_ahead_messages = 0,
+        "bytes" => config.read_ahead_bytes = 0,
+        // Block 13d.
+        _ => config.write_queue_bytes = 0,
     }
     world.delivery.config = Some(config);
 }

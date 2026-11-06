@@ -260,6 +260,16 @@ const IMPLEMENTED: &[&str] = &[
     "Send delivers a message without a reply",
     "Commands round-trip over Protobuf",
     "Send over Protobuf is received without a reply",
+    // Block 13, sub-increment 13d: the write-queue bound.
+    "A call that does not fit the write queue waits until earlier calls are written",
+    "A call waiting for room fails after the timeout and is never sent",
+    "A call larger than the write queue is sent once nothing waits to be written",
+    "The client's own commands are not held by a full write queue",
+    "Calls are admitted in the order they were made",
+    "A call behind one that stopped waiting is sent when it fits",
+    "A call waiting for room keeps its deadline when the transport is lost",
+    "A write queue limit of 0 is rejected",
+    "Sends beyond the write queue go out as earlier ones are written",
 ];
 
 /// Server configuration of @A scenarios.

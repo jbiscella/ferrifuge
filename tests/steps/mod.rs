@@ -201,6 +201,9 @@ impl ClientWorld {
             config.max_server_ping_delay = delay;
         }
         self.delivery.configure(&mut config);
+        if let Some(bytes) = self.calls.write_queue_bytes {
+            config.write_queue_bytes = bytes;
+        }
         config.protocol = self.protocol;
         config
     }
