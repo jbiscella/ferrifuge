@@ -63,6 +63,15 @@ async fn server_disconnects_with_reconnect_code(world: &mut ClientWorld) {
     } else {
         ""
     };
+    // After "connect is called", the connection to disconnect comes first.
+    if world.client_id.is_none() {
+        loop {
+            if let ClientEvent::Connected { client_id, .. } = world.next_event().await {
+                world.client_id = Some(client_id);
+                break;
+            }
+        }
+    }
     let client_id = world.client_id.clone().expect("a connected client");
     world
         .server
@@ -96,6 +105,10 @@ fn connect_is_called(world: &mut ClientWorld) {
         super::jitter::connect(world);
         return;
     }
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::connect(world);
+        return;
+    }
     // Some scenarios (e.g. Block 3's proxy outline) create no client first.
     if world.client.is_none() {
         let endpoint = world.server_endpoint();
@@ -110,12 +123,20 @@ fn disconnect_is_called(world: &mut ClientWorld) {
         super::jitter::disconnect(world);
         return;
     }
+    if super::connect_data::drives_a_machine(world) {
+        super::connect_data::disconnect(world);
+        return;
+    }
     world.client().disconnect();
 }
 
 #[then(expr = "the client state is {string}")]
 #[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn the_client_state_is(world: &mut ClientWorld, expected: String) {
+    if super::connect_data::drives_a_machine(world) {
+        assert_eq!(super::connect_data::state(world).as_str(), expected);
+        return;
+    }
     assert_eq!(world.client().state().as_str(), expected);
 }
 

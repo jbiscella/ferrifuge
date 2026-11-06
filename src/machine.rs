@@ -367,8 +367,10 @@ impl Timer {
 
 /// Something that happened, for the machine to react to.
 ///
-/// Its `Debug` output redacts a fetched token.
+/// Its `Debug` output redacts a fetched token and shows fetched data as
+/// its length.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Input {
     /// The application called `connect()`.
     Connect,
@@ -427,6 +429,13 @@ pub enum Input {
         fetch: FetchId,
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
+    },
+    /// The connect data callback answered a [`Action::FetchConnectData`].
+    ConnectDataFetched {
+        /// The fetch answered.
+        fetch: FetchId,
+        /// The data of the next connect command, or why there is none.
+        result: Result<Vec<u8>, DataError>,
     },
     /// The application called `subscribe()` on a subscription.
     Subscribe(SubscriptionId),
@@ -530,6 +539,13 @@ pub enum Action {
     /// report the answer with [`Input::TokenFetched`]. Only issued by a
     /// machine created with [`Machine::with_token_source`].
     FetchToken(FetchId),
+    /// Ask the application's connect data callback for the data of the next
+    /// connect command; report the answer with [`Input::ConnectDataFetched`].
+    /// Only issued by a machine with [`Machine::with_data_source`].
+    FetchConnectData(FetchId),
+    /// Stop a [`Action::FetchConnectData`] still running: its answer is no
+    /// longer wanted.
+    CancelConnectData(FetchId),
     /// Start a subscription's timer, replacing a running one of the kind.
     SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
     /// Stop a subscription's timer if it runs.
@@ -644,6 +660,16 @@ impl std::fmt::Debug for Input {
                     &result.as_ref().map(|token| Secret(token.clone())),
                 )
                 .finish(),
+            Self::ConnectDataFetched { fetch, result } => f
+                .debug_struct("ConnectDataFetched")
+                .field("fetch", fetch)
+                .field(
+                    "result",
+                    &result
+                        .as_ref()
+                        .map(|data| format!("<{} bytes>", data.len())),
+                )
+                .finish(),
             Self::Subscribe(id) => f.debug_tuple("Subscribe").field(id).finish(),
             Self::Unsubscribe(id) => f.debug_tuple("Unsubscribe").field(id).finish(),
             Self::RemoveSubscription(id) => f.debug_tuple("RemoveSubscription").field(id).finish(),
@@ -729,6 +755,8 @@ impl std::fmt::Debug for Action {
             Self::CancelTimer(timer) => f.debug_tuple("CancelTimer").field(timer).finish(),
             Self::Emit(id, event) => f.debug_tuple("Emit").field(id).field(event).finish(),
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
+            Self::FetchConnectData(id) => f.debug_tuple("FetchConnectData").field(id).finish(),
+            Self::CancelConnectData(id) => f.debug_tuple("CancelConnectData").field(id).finish(),
             Self::SetSubscriptionTimer(id, timer, delay) => f
                 .debug_tuple("SetSubscriptionTimer")
                 .field(id)
@@ -833,6 +861,17 @@ const MESSAGE_TOO_BIG: u32 = 1009;
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
+/// The connect data callback's state (Block 17).
+#[derive(Debug, Default)]
+struct ConnectData {
+    /// Whether the owner answers [`Action::FetchConnectData`].
+    source: bool,
+    /// The fetch awaited, if any.
+    fetch: Option<FetchId>,
+    /// The data the callback gave the current attempt.
+    attempt: Option<Vec<u8>>,
+}
+
 /// Disconnect code of a client the server found too slow (Centrifugo
 /// `DisconnectSlow`).
 const SLOW: u32 = 3008;
@@ -880,6 +919,8 @@ pub struct Machine {
     pinged: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
+    /// The connect data callback's state (Block 17).
+    connect_data: ConnectData,
     actions: Vec<Action>,
 }
 
@@ -947,6 +988,16 @@ impl Machine {
         Self::with_rng(config, true, fastrand::Rng::new())
     }
 
+    /// Makes the owner answer [`Action::FetchConnectData`] from the
+    /// application's connect data callback, asked before every connection
+    /// attempt once a token is obtained; its data replaces
+    /// [`Config::data`] (Block 17).
+    #[must_use]
+    pub fn with_data_source(mut self) -> Self {
+        self.connect_data.source = true;
+        self
+    }
+
     fn with_rng(config: Config, token_source: bool, rng: fastrand::Rng) -> Self {
         let backoff = Backoff::new(config.min_reconnect_delay, config.max_reconnect_delay);
         let tokens = Tokens::new(config.token.clone(), token_source);
@@ -975,6 +1026,7 @@ impl Machine {
             backoff_reset_pending: false,
             pinged: false,
             pings: None,
+            connect_data: ConnectData::default(),
             actions: Vec::new(),
         }
     }
@@ -1060,6 +1112,7 @@ impl Machine {
                 }
             }
 
+            Input::ConnectDataFetched { fetch, result } => self.connect_data_fetched(fetch, result),
             Input::Subscribe(id) => self.subscribe(id),
             Input::Unsubscribe(id) => self.unsubscribe(id),
             Input::RemoveSubscription(id) => self.remove_subscription(id),
@@ -1117,9 +1170,52 @@ impl Machine {
 
     fn start_attempt(&mut self) {
         match self.tokens.before_connect() {
-            BeforeConnect::Ready => self.open_transport(),
+            BeforeConnect::Ready => self.token_ready(),
             BeforeConnect::Fetch => self.fetch_token(FetchPurpose::Connect),
             BeforeConnect::NoSource => self.no_token_source(),
+        }
+    }
+
+    /// The attempt has its token: the connect data callback, when there is
+    /// one, runs next, then the transport opens (centrifuge-js
+    /// `_startReconnecting`).
+    fn token_ready(&mut self) {
+        if !self.connect_data.source {
+            self.open_transport();
+            return;
+        }
+        let fetch = self.subscriptions.new_fetch();
+        self.connect_data.fetch = Some(fetch);
+        self.actions.push(Action::FetchConnectData(fetch));
+    }
+
+    /// centrifuge-js `_handleGetDataError`: a denial disconnects the client
+    /// for good, a failure is reported and the attempt retried after the
+    /// reconnect backoff.
+    fn connect_data_fetched(&mut self, fetch: FetchId, result: Result<Vec<u8>, DataError>) {
+        if self.connect_data.fetch != Some(fetch) {
+            return;
+        }
+        self.connect_data.fetch = None;
+        if self.state != State::Connecting || self.transport.is_some() {
+            return;
+        }
+        match result {
+            Ok(data) => {
+                self.connect_data.attempt = Some(data);
+                self.open_transport();
+            }
+            Err(DataError::Unauthorized) => self.unauthorized(),
+            Err(DataError::Failed(message)) => {
+                self.emit(ClientEvent::Error(ClientError {
+                    kind: ErrorKind::ConnectData,
+                    code: codes::error::BAD_CONFIGURATION,
+                    message,
+                    transport: None,
+                }));
+                let delay = self.backoff.next_delay(&mut self.rng);
+                self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+            }
         }
     }
 
@@ -1169,6 +1265,11 @@ impl Machine {
             id,
             method: Method::Connect(ConnectRequest {
                 token: self.tokens.for_connect(),
+                data: if self.connect_data.source {
+                    self.connect_data.attempt.clone()
+                } else {
+                    self.config.data.clone()
+                },
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
                 subs: self.server_subscriptions_to_recover(),
@@ -1390,6 +1491,7 @@ impl Machine {
         self.emit(ClientEvent::Connected {
             client_id: std::mem::take(&mut result.client),
             transport: self.transport_kind().name().to_owned(),
+            data: result.data.take(),
         });
         self.subscriptions_connected();
         self.server_subscriptions_connected(std::mem::take(&mut result.subs));
@@ -1471,6 +1573,11 @@ impl Machine {
             self.backoff.keep_reset();
         }
         self.connect_command = None;
+        // A data callback still running answers an attempt that is over
+        // (centrifuge-js `_attemptAborted`).
+        if let Some(fetch) = self.connect_data.fetch.take() {
+            self.actions.push(Action::CancelConnectData(fetch));
+        }
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
         // reconnect timer is set again below when reconnecting.
@@ -1570,7 +1677,7 @@ impl Machine {
                 match purpose {
                     FetchPurpose::Connect => {
                         if self.state == State::Connecting && self.transport.is_none() {
-                            self.open_transport();
+                            self.token_ready();
                         }
                     }
                     FetchPurpose::Refresh if self.state == State::Connected => self.send_refresh(),
@@ -2855,6 +2962,33 @@ mod tests {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");
+    }
+
+    // Block 17: a disconnect while the connect data callback runs cancels
+    // it, and its late answer opens nothing.
+    #[test]
+    fn disconnect_cancels_a_pending_connect_data_fetch() {
+        let mut machine = machine().with_data_source();
+        let fetch = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchConnectData(fetch) => Some(*fetch),
+                _ => None,
+            })
+            .expect("a data fetch before the transport");
+
+        let disconnected = machine.handle(Input::Disconnect);
+        let late = machine.handle(Input::ConnectDataFetched {
+            fetch,
+            result: Ok(b"{}".to_vec()),
+        });
+
+        assert!(
+            disconnected.contains(&Action::CancelConnectData(fetch)),
+            "{disconnected:?}"
+        );
+        assert_eq!(late, []);
     }
 
     // centrifuge-js `connect` resets the attempt counter: delays grown

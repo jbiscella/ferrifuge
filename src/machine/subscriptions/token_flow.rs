@@ -26,8 +26,7 @@ const REFRESH_RETRY_MAX: Duration = Duration::from_secs(20);
 impl Machine {
     /// Asks the owner for a subscription token.
     pub(super) fn fetch_subscription_token(&mut self, id: SubscriptionId, purpose: FetchPurpose) {
-        let fetch = FetchId(self.subscriptions.next_fetch);
-        self.subscriptions.next_fetch += 1;
+        let fetch = self.subscriptions.new_fetch();
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };

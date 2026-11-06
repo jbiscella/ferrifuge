@@ -44,6 +44,8 @@ struct Answers {
     granted: Vec<(String, bool)>,
     /// Delay before accepting a connection, when no answer is programmed.
     accept_delay: Duration,
+    /// The `data` of an accepted connection's result, if any (Block 17).
+    connect_data: Option<Value>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -169,6 +171,11 @@ impl ProxyBackend {
             ));
     }
 
+    /// Accepts connections with this result `data` from now on.
+    pub(crate) fn connect_data(&self, data: Value) {
+        self.state.lock().unwrap().connect_data = Some(data);
+    }
+
     /// Accepts connections only after `delay` from now on, when no answer is
     /// programmed, so that a scenario can act while the client connects.
     pub(crate) fn accept_after(&self, delay: Duration) {
@@ -234,13 +241,14 @@ async fn connect(
     State(state): State<Arc<Mutex<Answers>>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let (answer, granted, accept_delay) = {
+    let (answer, granted, accept_delay, data) = {
         let mut answers = state.lock().unwrap();
         answers.requests.push(request);
         (
             answers.programmed.pop_front(),
             answers.granted.clone(),
             answers.accept_delay,
+            answers.connect_data.clone(),
         )
     };
     match answer {
@@ -268,7 +276,11 @@ async fn connect(
                     )
                 })
                 .collect();
-            Json(json!({"result": {"user": USER, "channels": channels, "subs": subs}}))
+            let mut result = json!({"user": USER, "channels": channels, "subs": subs});
+            if let Some(data) = data {
+                result["data"] = data;
+            }
+            Json(json!({"result": result}))
         }
     }
 }

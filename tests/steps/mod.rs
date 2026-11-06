@@ -23,6 +23,7 @@ use crate::support::relay::CountingRelay;
 mod backoff;
 mod calls;
 mod codes;
+mod connect_data;
 mod connection;
 mod delivery;
 mod jitter;
@@ -154,6 +155,8 @@ pub(crate) struct ClientWorld {
     pub(crate) slow: Option<slow::SlowPlan>,
     /// Calls of a Block 13 scenario.
     pub(crate) calls: calls::Calls,
+    /// Connect data of a Block 17 scenario.
+    pub(crate) connect_data: connect_data::ConnectData,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
@@ -194,7 +197,10 @@ impl ClientWorld {
     /// Creates the scenario's client and starts recording its events.
     fn new_client(&mut self, endpoint: String) {
         let config = self.client_config();
-        self.build_client(Client::builder(endpoint).config(config));
+        let builder = self
+            .connect_data
+            .build(Client::builder(endpoint).config(config));
+        self.build_client(builder);
     }
 
     /// Options of the clients the scenario creates.
@@ -208,6 +214,7 @@ impl ClientWorld {
             config.write_queue_bytes = bytes;
         }
         config.protocol = self.protocol;
+        self.connect_data.configure(&mut config);
         config
     }
 

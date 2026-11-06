@@ -149,6 +149,8 @@ struct JsonRefreshRequest<'a> {
 struct JsonConnectRequest<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
     token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<JsonData<'a>>,
     #[serde(skip_serializing_if = "str::is_empty")]
     name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -272,12 +274,14 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
         match &command.method {
             Method::Connect(ConnectRequest {
                 token,
+                data,
                 name,
                 version,
                 subs,
             }) => {
                 json.connect = Some(JsonConnectRequest {
                     token,
+                    data: data.as_deref().map(JsonData::new),
                     name,
                     version,
                     subs: subs
@@ -535,6 +539,8 @@ struct JsonConnectResult {
     session: String,
     node: String,
     subs: BTreeMap<String, JsonSubscribeResult>,
+    #[serde(deserialize_with = "present")]
+    data: Option<Box<RawValue>>,
 }
 
 impl From<JsonConnectResult> for ConnectResult {
@@ -553,6 +559,7 @@ impl From<JsonConnectResult> for ConnectResult {
                 .into_iter()
                 .map(|(channel, result)| (channel, result.into()))
                 .collect(),
+            data: connect.data.as_deref().map(raw_bytes),
         }
     }
 }
@@ -791,6 +798,7 @@ mod tests {
             id,
             method: Method::Connect(ConnectRequest {
                 token: token.to_owned(),
+                data: None,
                 name: "ferrifuge".to_owned(),
                 version: "0.1.0".to_owned(),
                 subs: BTreeMap::new(),
@@ -1043,6 +1051,34 @@ mod tests {
     }
 
     #[test]
+    fn encodes_connect_data_as_raw_json() {
+        let mut command = connect_command(1, "");
+        let Method::Connect(connect) = &mut command.method else {
+            unreachable!("a connect command");
+        };
+        connect.data = Some(br#"{"device":"d1"}"#.to_vec());
+
+        let frame = encode(&[command]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":1,"connect":{"data":{"device":"d1"},"name":"ferrifuge","version":"0.1.0"}}"#
+        );
+    }
+
+    #[test]
+    fn keeps_the_connect_reply_data_exactly() {
+        let frame = br#"{"id":1,"connect":{"client":"c1","data":{"b": 1.0,  "a":2}}}"#;
+
+        let replies = decode(frame).unwrap();
+
+        let ReplyResult::Connect(result) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!(result.data.as_deref(), Some(&br#"{"b": 1.0,  "a":2}"#[..]));
+    }
+
+    #[test]
     fn decodes_connect_reply() {
         let frame = br#"{"id":1,"connect":{"client":"c1","version":"6.10.1","expires":true,"ttl":30,"ping":25,"pong":true,"session":"s","node":"n"}}"#;
 
@@ -1063,6 +1099,7 @@ mod tests {
                     session: "s".into(),
                     node: "n".into(),
                     subs: BTreeMap::new(),
+                    data: None,
                 }),
             }]
         );

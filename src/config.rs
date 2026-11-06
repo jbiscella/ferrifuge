@@ -4,7 +4,8 @@ use std::time::Duration;
 
 /// Options of a client. Defaults follow centrifuge-js.
 ///
-/// Its `Debug` output redacts the token.
+/// Its `Debug` output redacts the token and shows the connect data as its
+/// length.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     /// Lower bound of the reconnect delay. Default 500 ms.
@@ -22,6 +23,11 @@ pub struct Config {
     pub version: String,
     /// Connection token (JWT) sent with the first connect. Empty for none.
     pub token: String,
+    /// Data sent with every connect command (`ConnectRequest.data`): raw
+    /// JSON with the JSON protocol, any bytes with Protobuf. A `get_data`
+    /// callback, when set, replaces it on every attempt (Block 17).
+    /// Default none.
+    pub data: Option<Vec<u8>>,
     /// How long past the server's ping interval to wait for data before
     /// considering the connection broken and reconnecting. Zero disables
     /// the check. Default 10 s.
@@ -82,6 +88,7 @@ impl Default for Config {
             name: "ferrifuge".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             token: String::new(),
+            data: None,
             max_server_ping_delay: Duration::from_secs(10),
             protocol: Protocol::Json,
             reconnect_jitter_window: Duration::ZERO,
@@ -107,6 +114,13 @@ impl std::fmt::Debug for Config {
             .field("name", &self.name)
             .field("version", &self.version)
             .field("token", &Token(&self.token))
+            .field(
+                "data",
+                &self
+                    .data
+                    .as_ref()
+                    .map(|data| format!("<{} bytes>", data.len())),
+            )
             .field("max_server_ping_delay", &self.max_server_ping_delay)
             .field("protocol", &self.protocol)
             .field("reconnect_jitter_window", &self.reconnect_jitter_window)

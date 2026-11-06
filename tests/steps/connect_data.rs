@@ -1,0 +1,506 @@
+//! Steps of Block 17a: connect data, its callback, and the server's data on
+//! the `connected` event.
+//!
+//! @E scenarios drive the sans-IO core: a step answers the token and data
+//! fetches the machine asks for, and the transports it opens. @B and @D
+//! scenarios configure the scenario's client.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use cucumber::{given, then, when};
+use ferrifuge::machine::{Action, FetchId, Input, Machine, TransportId};
+use ferrifuge::{ClientEvent, Config, DataError, ErrorKind, State, TokenError, codes};
+use serde_json::Value;
+
+use super::{ClientWorld, expect_event};
+
+/// The data the @E data callback returns, unless a scenario says otherwise.
+const DATA: &str = r#"{"n":1}"#;
+
+/// Connect options a @B or @D scenario gives its client.
+#[derive(Default)]
+pub(crate) struct ConnectData {
+    /// `Config::data`.
+    pub(crate) data: Option<Vec<u8>>,
+    /// What the data callback returns, call after call.
+    pub(crate) callback: Option<Arc<Mutex<VecDeque<Vec<u8>>>>>,
+    /// The raw data the fake server's connect replies carry.
+    raw: Option<String>,
+    /// The sans-IO core of an @E scenario.
+    pub(crate) run: Option<DataRun>,
+}
+
+impl ConnectData {
+    /// Applies the scenario's options to `config`.
+    pub(crate) fn configure(&self, config: &mut Config) {
+        config.data.clone_from(&self.data);
+    }
+
+    /// Applies the scenario's data callback to `builder`.
+    pub(crate) fn build(&self, builder: ferrifuge::ClientBuilder) -> ferrifuge::ClientBuilder {
+        let Some(answers) = self.callback.clone() else {
+            return builder;
+        };
+        builder.get_data(move || {
+            let data = answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("an answer per call");
+            async move { Ok(data) }
+        })
+    }
+}
+
+/// How the @E token callback answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenAnswer {
+    Token,
+    Unauthorized,
+    Failed,
+    Empty,
+}
+
+/// A machine with a data source, whose fetches a step answers.
+pub(crate) struct DataRun {
+    machine: Machine,
+    /// Every action, in order.
+    pub(crate) actions: Vec<Action>,
+    /// The callbacks called, in order: "token" and "data".
+    calls: Vec<&'static str>,
+    token: TokenAnswer,
+    /// What the data callback answers, call after call; once empty, it
+    /// does not answer.
+    answers: VecDeque<Result<Vec<u8>, DataError>>,
+    /// A data fetch not answered yet.
+    pending: Option<FetchId>,
+}
+
+impl DataRun {
+    fn new(initial_token: Option<&str>, token: Option<TokenAnswer>) -> Self {
+        let config = Config {
+            token: initial_token.unwrap_or_default().to_owned(),
+            ..Config::default()
+        };
+        let machine = if token.is_some() {
+            Machine::with_token_source(config)
+        } else {
+            Machine::new(config)
+        };
+        Self {
+            machine: machine.with_data_source(),
+            actions: Vec::new(),
+            calls: Vec::new(),
+            token: token.unwrap_or(TokenAnswer::Token),
+            answers: VecDeque::new(),
+            pending: None,
+        }
+    }
+
+    fn handle(&mut self, input: Input) {
+        let mut inputs = VecDeque::from([input]);
+        while let Some(input) = inputs.pop_front() {
+            for action in self.machine.handle(input) {
+                match &action {
+                    Action::FetchToken(fetch) => {
+                        self.calls.push("token");
+                        let result = match self.token {
+                            TokenAnswer::Token => Ok("t1".to_owned()),
+                            TokenAnswer::Empty => Ok(String::new()),
+                            TokenAnswer::Unauthorized => Err(TokenError::Unauthorized),
+                            TokenAnswer::Failed => Err(TokenError::Failed("down".to_owned())),
+                        };
+                        inputs.push_back(Input::TokenFetched {
+                            fetch: *fetch,
+                            result,
+                        });
+                    }
+                    Action::FetchConnectData(fetch) => {
+                        self.calls.push("data");
+                        match self.answers.pop_front() {
+                            Some(result) => inputs.push_back(Input::ConnectDataFetched {
+                                fetch: *fetch,
+                                result,
+                            }),
+                            None => self.pending = Some(*fetch),
+                        }
+                    }
+                    Action::OpenTransport { transport, .. } => {
+                        inputs.push_back(Input::TransportOpened(*transport));
+                    }
+                    _ => {}
+                }
+                self.actions.push(action);
+            }
+        }
+    }
+
+    fn opened(&self) -> Vec<TransportId> {
+        self.actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The last connect command sent.
+    fn connect_command(&self) -> Value {
+        self.actions
+            .iter()
+            .rev()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => serde_json::from_slice::<Value>(frame).ok(),
+                _ => None,
+            })
+            .find(|command| command.get("connect").is_some())
+            .expect("a connect command")
+    }
+
+    fn data_calls(&self) -> usize {
+        self.calls.iter().filter(|call| **call == "data").count()
+    }
+}
+
+/// Whether an @E connect data scenario drives the machine.
+pub(crate) fn drives_a_machine(world: &ClientWorld) -> bool {
+    world.connect_data.run.is_some()
+}
+
+pub(crate) fn run(world: &mut ClientWorld) -> &mut DataRun {
+    world
+        .connect_data
+        .run
+        .as_mut()
+        .expect("an @E connect data scenario")
+}
+
+pub(crate) fn connect(world: &mut ClientWorld) {
+    run(world).handle(Input::Connect);
+}
+
+pub(crate) fn disconnect(world: &mut ClientWorld) {
+    run(world).handle(Input::Disconnect);
+}
+
+pub(crate) fn state(world: &mut ClientWorld) -> State {
+    run(world).machine.state()
+}
+
+fn json_bytes(data: &str) -> Vec<u8> {
+    let value: Value = serde_json::from_str(data).expect("JSON data");
+    serde_json::to_vec(&value).expect("serializable")
+}
+
+// @E: the sans-IO core.
+
+#[given("a client whose data callback fails once")]
+fn a_data_callback_failing_once(world: &mut ClientWorld) {
+    let mut run = DataRun::new(None, None);
+    run.answers = VecDeque::from([
+        Err(DataError::Failed("down".to_owned())),
+        Ok(json_bytes(r#"{"n":2}"#)),
+    ]);
+    world.connect_data.run = Some(run);
+}
+
+#[given(r#"a client whose data callback signals "unauthorized""#)]
+fn a_data_callback_denying(world: &mut ClientWorld) {
+    let mut run = DataRun::new(None, None);
+    run.answers = VecDeque::from([Err(DataError::Unauthorized)]);
+    world.connect_data.run = Some(run);
+}
+
+#[given("a client whose data callback has not answered since connect was called")]
+fn a_data_callback_not_answering(world: &mut ClientWorld) {
+    let mut run = DataRun::new(None, None);
+    run.handle(Input::Connect);
+    assert!(run.pending.is_some(), "{:?}", run.actions);
+    world.connect_data.run = Some(run);
+}
+
+#[when("the data callback answers")]
+fn the_data_callback_answers(world: &mut ClientWorld) {
+    let run = run(world);
+    let fetch = run.pending.take().expect("a data fetch not answered");
+    run.handle(Input::ConnectDataFetched {
+        fetch,
+        result: Ok(json_bytes(DATA)),
+    });
+}
+
+#[given(
+    regex = r#"^a client without an initial token, with a data callback whose token callback (signals "unauthorized"|fails with a temporary error|returns an empty token)$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_token_callback_answering(world: &mut ClientWorld, outcome: String) {
+    let token = match outcome.as_str() {
+        r#"signals "unauthorized""# => TokenAnswer::Unauthorized,
+        "fails with a temporary error" => TokenAnswer::Failed,
+        _ => TokenAnswer::Empty,
+    };
+    let mut run = DataRun::new(None, Some(token));
+    run.answers = VecDeque::from([Ok(json_bytes(DATA))]);
+    world.connect_data.run = Some(run);
+}
+
+#[given("a client without an initial token, with a token callback and a data callback")]
+fn a_token_and_a_data_callback(world: &mut ClientWorld) {
+    let mut run = DataRun::new(None, Some(TokenAnswer::Token));
+    run.answers = VecDeque::from([Ok(json_bytes(DATA))]);
+    world.connect_data.run = Some(run);
+}
+
+#[given("a client with an initial token, a token callback and a data callback")]
+fn an_initial_token_and_callbacks(world: &mut ClientWorld) {
+    let mut run = DataRun::new(Some("t0"), Some(TokenAnswer::Token));
+    run.answers = VecDeque::from([Ok(json_bytes(DATA))]);
+    world.connect_data.run = Some(run);
+}
+
+#[then(regex = r#"^the client emits an "error" event of kind connect data with code (\d+)$"#)]
+fn an_error_of_kind_connect_data(world: &mut ClientWorld, code: u32) {
+    let run = run(world);
+    let error = run
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::Emit(_, ClientEvent::Error(error)) => Some(error),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no error event: {:?}", run.actions));
+    assert_eq!(
+        (error.kind, error.code),
+        (ErrorKind::ConnectData, code),
+        "{error:?}"
+    );
+    assert_eq!(code, codes::error::BAD_CONFIGURATION);
+}
+
+/// The retry follows the reconnect backoff of attempt 0 (Block 2): within
+/// the minimum and twice the minimum.
+#[then("the data callback is called again after the reconnect backoff delay")]
+fn the_data_callback_is_called_again(world: &mut ClientWorld) {
+    let run = run(world);
+    let delay = run
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, delay) => Some(*delay),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no reconnect scheduled: {:?}", run.actions));
+    let min = Config::default().min_reconnect_delay;
+    assert!((min..=min * 2).contains(&delay), "{delay:?}");
+    assert_eq!(run.data_calls(), 1, "called again before the delay");
+    run.handle(Input::TimerFired(ferrifuge::machine::Timer::Reconnect));
+    assert_eq!(run.data_calls(), 2, "{:?}", run.actions);
+}
+
+#[then("the connect command carries the data the second call returned")]
+fn the_connect_command_carries_the_second_data(world: &mut ClientWorld) {
+    let command = run(world).connect_command();
+    assert_eq!(
+        command["connect"]["data"],
+        serde_json::json!({"n": 2}),
+        "{command}"
+    );
+}
+
+#[then("no transport is opened")]
+fn no_transport_is_opened(world: &mut ClientWorld) {
+    let run = run(world);
+    assert_eq!(run.opened(), Vec::new(), "{:?}", run.actions);
+}
+
+#[then("no reconnect is scheduled")]
+fn no_reconnect_is_scheduled(world: &mut ClientWorld) {
+    let run = run(world);
+    assert!(
+        !run.actions.iter().any(|action| matches!(
+            action,
+            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, _)
+        )),
+        "{:?}",
+        run.actions
+    );
+}
+
+pub(crate) fn emitted_disconnected(world: &mut ClientWorld, code: u32, reason: &str) {
+    let run = run(world);
+    let disconnected = run
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::Emit(_, ClientEvent::Disconnected { code, reason }) => Some((*code, reason)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no disconnected event: {:?}", run.actions));
+    assert_eq!((disconnected.0, disconnected.1.as_str()), (code, reason));
+    assert!(
+        !run.actions
+            .iter()
+            .any(|action| matches!(action, Action::Emit(_, ClientEvent::Error(_)))),
+        "an error event: {:?}",
+        run.actions
+    );
+}
+
+pub(crate) fn no_data_callback(world: &mut ClientWorld) {
+    let run = run(world);
+    assert_eq!(run.data_calls(), 0, "{:?}", run.calls);
+}
+
+pub(crate) fn token_before_data(world: &mut ClientWorld) {
+    let run = run(world);
+    assert_eq!(run.calls, ["token", "data"]);
+}
+
+pub(crate) fn token_callback_not_called(world: &mut ClientWorld) {
+    let run = run(world);
+    assert_eq!(run.calls, ["data"]);
+}
+
+#[then(regex = r"^the connect command carries (both the token|the initial token) and the data$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_connect_command_carries_token_and_data(world: &mut ClientWorld, which: String) {
+    let command = run(world).connect_command();
+    let token = if which == "both the token" {
+        "t1"
+    } else {
+        "t0"
+    };
+    assert_eq!(command["connect"]["token"], token, "{command}");
+    assert_eq!(
+        command["connect"]["data"],
+        serde_json::json!({"n": 1}),
+        "{command}"
+    );
+}
+
+// @B: a real Centrifugo and the connect proxy.
+
+#[given("a connect proxy recording requests")]
+fn a_recording_connect_proxy(world: &mut ClientWorld) {
+    proxy(world);
+}
+
+fn proxy(world: &ClientWorld) -> &crate::support::proxy::ProxyBackend {
+    world
+        .proxy
+        .as_ref()
+        .expect("this step needs the proxy backend: tag the scenario @B")
+}
+
+#[given(regex = r"^a client with connect data (\{[^}]*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_client_with_connect_data(world: &mut ClientWorld, data: String) {
+    world.connect_data.data = Some(json_bytes(&data));
+}
+
+#[given(
+    regex = r"^a client with connect data (\{.*\}) and a data callback returning (\{.*\}) then (\{.*\})$"
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_client_with_a_data_callback(
+    world: &mut ClientWorld,
+    data: String,
+    first: String,
+    then: String,
+) {
+    world.connect_data.data = Some(json_bytes(&data));
+    world.connect_data.callback = Some(Arc::new(Mutex::new(VecDeque::from([
+        json_bytes(&first),
+        json_bytes(&then),
+    ]))));
+}
+
+#[when(r#"the client reaches state "connected" again"#)]
+async fn the_client_reaches_connected_again(world: &mut ClientWorld) {
+    let reached = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ClientEvent::Connected { .. } = world.next_event().await {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "not connected again");
+}
+
+/// The data of the connect requests the proxy received.
+fn recorded_data(world: &ClientWorld) -> Vec<Value> {
+    let proxy = proxy(world);
+    (0..proxy.requests())
+        .map(|index| proxy.request(index)["data"].clone())
+        .collect()
+}
+
+#[then(regex = r"^the connect proxy recorded data (\{.*\}) on both connect requests$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_proxy_recorded_data_twice(world: &mut ClientWorld, data: String) {
+    let expected: Value = serde_json::from_str(&data).expect("JSON data");
+    assert_eq!(recorded_data(world), [expected.clone(), expected]);
+}
+
+#[then(regex = r"^the connect proxy recorded data (\{.*\}) then (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_proxy_recorded_data_in_turn(world: &mut ClientWorld, first: String, then: String) {
+    let first: Value = serde_json::from_str(&first).expect("JSON data");
+    let then: Value = serde_json::from_str(&then).expect("JSON data");
+    assert_eq!(recorded_data(world), [first, then]);
+}
+
+#[given(regex = r"^the connect proxy answers with data (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_proxy_answers_with_data(world: &mut ClientWorld, data: String) {
+    proxy(world).connect_data(serde_json::from_str(&data).expect("JSON data"));
+}
+
+#[then(regex = r#"^the client emits "connected" with data (\{.*\})$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn connected_with_data(world: &mut ClientWorld, data: String) {
+    expect_event(world, "connecting").await;
+    let event = expect_event(world, "connected").await;
+    let ClientEvent::Connected { data: got, .. } = &event else {
+        unreachable!("expect_event checked the name");
+    };
+    let got: Option<Value> = got
+        .as_deref()
+        .map(|bytes| serde_json::from_slice(bytes).expect("JSON data"));
+    assert_eq!(
+        got,
+        Some(serde_json::from_str::<Value>(&data).expect("JSON data")),
+        "{event:?}"
+    );
+}
+
+// @D: the fake server.
+
+#[given(regex = r"^a fake server answering connects with the non-canonical JSON data (.+)$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_fake_server_with_connect_data(world: &mut ClientWorld, raw: String) {
+    world.fake().answer_connects_with_data(&raw);
+    world.connect_data.raw = Some(raw);
+}
+
+#[when("a client connects to it")]
+fn a_client_connects_to_it(world: &mut ClientWorld) {
+    let endpoint = world.server_endpoint();
+    world.new_client(endpoint);
+    world.client().connect();
+}
+
+#[then(r#"the client emits "connected" with data exactly those bytes"#)]
+async fn connected_with_exact_data(world: &mut ClientWorld) {
+    expect_event(world, "connecting").await;
+    let event = expect_event(world, "connected").await;
+    let ClientEvent::Connected { data, .. } = &event else {
+        unreachable!("expect_event checked the name");
+    };
+    let raw = world.connect_data.raw.as_deref().expect("raw data");
+    assert_eq!(data.as_deref(), Some(raw.as_bytes()), "{event:?}");
+}
