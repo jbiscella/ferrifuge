@@ -1,5 +1,5 @@
-//! Steps of Block 17a: connect data, its callback, and the server's data on
-//! the `connected` event.
+//! Steps of Block 17: connect data, its callback, the server's data on the
+//! `connected` event (17a), and HTTP and emulated headers (17b).
 //!
 //! @E scenarios drive the sans-IO core: a step answers the token and data
 //! fetches the machine asks for, and the transports it opens. @B and @D
@@ -28,6 +28,12 @@ pub(crate) struct ConnectData {
     pub(crate) callback: Option<Arc<Mutex<VecDeque<Vec<u8>>>>>,
     /// The raw data the fake server's connect replies carry.
     raw: Option<String>,
+    /// HTTP headers of the client (17b).
+    http_headers: Vec<(String, String)>,
+    /// Emulated headers of the client (17b).
+    emulated_headers: Vec<(String, String)>,
+    /// The debug output of client options a step formatted.
+    debug: Option<String>,
     /// The sans-IO core of an @E scenario.
     pub(crate) run: Option<DataRun>,
 }
@@ -40,6 +46,9 @@ impl ConnectData {
 
     /// Applies the scenario's data callback to `builder`.
     pub(crate) fn build(&self, builder: ferrifuge::ClientBuilder) -> ferrifuge::ClientBuilder {
+        let builder = builder
+            .http_headers(self.http_headers.clone())
+            .emulated_headers(self.emulated_headers.clone());
         let Some(answers) = self.callback.clone() else {
             return builder;
         };
@@ -503,4 +512,171 @@ async fn connected_with_exact_data(world: &mut ClientWorld) {
     };
     let raw = world.connect_data.raw.as_deref().expect("raw data");
     assert_eq!(data.as_deref(), Some(raw.as_bytes()), "{event:?}");
+}
+
+// 17b: HTTP and emulated headers.
+
+/// A header given as `Name: value`.
+fn header(header: &str) -> (String, String) {
+    let (name, value) = header.split_once(": ").expect("Name: value");
+    (name.to_owned(), value.to_owned())
+}
+
+#[given(
+    regex = r#"^a client with HTTP header "([^"]+)" configured with only the server's (\w+) endpoint$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_client_with_an_http_header(world: &mut ClientWorld, given: String, transport: String) {
+    world.connect_data.http_headers.push(header(&given));
+    let kind = super::transports::kind(&transport);
+    let url = super::transports::server_url(super::transports::server(world), kind);
+    super::transports::configure(world, vec![(kind, url)]);
+}
+
+#[given(regex = r#"^a client with emulated header "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_client_with_an_emulated_header(world: &mut ClientWorld, given: String) {
+    world.connect_data.emulated_headers.push(header(&given));
+}
+
+#[then(regex = r#"^the connect proxy received header "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn the_proxy_received_header(world: &mut ClientWorld, given: String) {
+    let (name, value) = header(&given);
+    let arrived = tokio::time::timeout(Duration::from_secs(10), async {
+        while proxy(world).requests() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(arrived.is_ok(), "no connect request");
+    let received = proxy(world).request_headers(&name);
+    assert!(!received.is_empty(), "no connect request");
+    assert!(
+        received
+            .iter()
+            .all(|got| got.as_deref() == Some(value.as_str())),
+        "{name}: {received:?}"
+    );
+}
+
+#[given(
+    regex = r#"^a client with HTTP header "([^"]+)" connected over transport "(\w+)" through the HTTP proxy$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn a_client_with_a_header_behind_the_http_proxy(
+    world: &mut ClientWorld,
+    given: String,
+    transport: String,
+) {
+    world.connect_data.http_headers.push(header(&given));
+    let kind = super::transports::kind(&transport);
+    let http_proxy = super::transports::pinging_server_behind_an_http_proxy(world).await;
+    let url = format!("http://{}/connection/{}", http_proxy.address(), kind.name());
+    super::transports::configure(world, vec![(kind, url)]);
+    super::transports::connect_and_wait(world).await;
+    world.http_proxy = Some(http_proxy);
+}
+
+#[then("the HTTP proxy relayed the stream request and at least one emulation request")]
+fn the_proxy_relayed_both(world: &mut ClientWorld) {
+    let relayed = relayed(world);
+    assert!(
+        relayed
+            .iter()
+            .any(|(path, _)| path.starts_with("/connection/")),
+        "{relayed:?}"
+    );
+    assert!(
+        relayed.iter().any(|(path, _)| path == "/emulation"),
+        "{relayed:?}"
+    );
+}
+
+fn relayed(world: &ClientWorld) -> Vec<(String, Option<String>)> {
+    world
+        .http_proxy
+        .as_ref()
+        .expect("an HTTP proxy")
+        .requests_with_header("x-device-real")
+}
+
+#[then(regex = r#"^every request it relayed carried header "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn every_request_carried(world: &mut ClientWorld, given: String) {
+    let (name, value) = header(&given);
+    let relayed: Vec<_> = world
+        .http_proxy
+        .as_ref()
+        .expect("an HTTP proxy")
+        .requests_with_header(&name);
+    assert!(
+        relayed
+            .iter()
+            .all(|(_, got)| got.as_deref() == Some(value.as_str())),
+        "{relayed:?}"
+    );
+}
+
+#[given(regex = r#"^client options with HTTP header "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn client_options_with_a_header(world: &mut ClientWorld, given: String) {
+    world.pending_builder = Some(
+        ferrifuge::Client::builder(super::UNREACHABLE_ENDPOINT).http_headers([header(&given)]),
+    );
+}
+
+#[then(regex = r#"^building fails with a configuration error naming "([^"]+)" and not "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn building_fails_naming(world: &mut ClientWorld, name: String, value: String) {
+    let error = world.build_error.as_ref().expect("building succeeded");
+    assert_eq!(error.kind, ErrorKind::Configuration, "{error:?}");
+    assert!(error.message.contains(&name), "{error:?}");
+    assert!(!format!("{error:?}").contains(&value), "{error:?}");
+}
+
+#[given(
+    regex = r#"^client options with token "([^"]+)", connect data (\{.*\}), HTTP header "([^"]+)" and emulated header "([^"]+)"$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn client_options_with_secrets(
+    world: &mut ClientWorld,
+    token: String,
+    data: String,
+    http: String,
+    emulated: String,
+) {
+    world.pending_builder = Some(
+        ferrifuge::Client::builder(super::UNREACHABLE_ENDPOINT)
+            .config(Config {
+                token,
+                data: Some(json_bytes(&data)),
+                ..Config::default()
+            })
+            .http_headers([header(&http)])
+            .emulated_headers([header(&emulated)]),
+    );
+}
+
+#[when("their debug output is formatted")]
+fn their_debug_output(world: &mut ClientWorld) {
+    let builder = world.pending_builder.as_ref().expect("client options");
+    world.connect_data.debug = Some(format!("{builder:?}"));
+}
+
+#[then(regex = r#"^it names the header "([^"]+)" and shows the data as (\d+) bytes$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn it_names_the_header(world: &mut ClientWorld, name: String, bytes: usize) {
+    let debug = world.connect_data.debug.as_deref().expect("debug output");
+    assert!(debug.contains(&name), "{debug}");
+    assert!(debug.contains(&format!("<{bytes} bytes>")), "{debug}");
+}
+
+#[then(regex = r"^it contains none of (.+)$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn it_contains_none_of(world: &mut ClientWorld, secrets: String) {
+    let debug = world.connect_data.debug.as_deref().expect("debug output");
+    for secret in secrets.split('"').skip(1).step_by(2) {
+        assert!(!debug.contains(secret), "{secret} in {debug}");
+    }
 }

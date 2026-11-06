@@ -36,6 +36,8 @@ struct ProxyState {
     /// Emulation requests carrying an unsubscribe command that the server
     /// answered with success.
     unsubscribes_relayed: AtomicUsize,
+    /// The path and headers of every request received, in order.
+    requests: Mutex<Vec<(String, axum::http::HeaderMap)>>,
 }
 
 impl HttpProxy {
@@ -51,6 +53,7 @@ impl HttpProxy {
             rejected: AtomicBool::new(false),
             delay_next_unsubscribe: Mutex::new(None),
             unsubscribes_relayed: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -85,6 +88,29 @@ impl HttpProxy {
         self.state.unsubscribes_relayed.load(Ordering::SeqCst)
     }
 
+    /// The path of every request received, in order, with the value of its
+    /// header `name`, if any.
+    pub(crate) fn requests_with_header(&self, name: &str) -> Vec<(String, Option<String>)> {
+        self.state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, headers)| {
+                let value = headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                (path.clone(), value)
+            })
+            .collect()
+    }
+
+    /// Whether a rejection is programmed and not yet answered.
+    pub(crate) fn rejection_programmed(&self) -> bool {
+        self.state.reject_next_emulation.load(Ordering::SeqCst)
+    }
+
     /// Whether the programmed rejection happened.
     pub(crate) fn rejected(&self) -> bool {
         self.state.rejected.load(Ordering::SeqCst)
@@ -104,6 +130,11 @@ impl Drop for HttpProxy {
 
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response<Body> {
     let (parts, body) = request.into_parts();
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .push((parts.uri.path().to_owned(), parts.headers.clone()));
     if parts.uri.path() == "/emulation" && state.reject_next_emulation.swap(false, Ordering::SeqCst)
     {
         state.rejected.store(true, Ordering::SeqCst);

@@ -237,6 +237,12 @@ const IMPLEMENTED: &[&str] = &[
     "A client that has a token calls the data callback without the token callback",
     "Data returned with the connect reply is delivered",
     "The connected event carries the server's data exactly",
+    // Block 17, sub-increment 17b.
+    "HTTP headers reach the connect proxy over each transport",
+    "HTTP headers ride on every request of an emulated transport",
+    "Emulated headers reach the connect proxy",
+    "A header the transport sets is rejected",
+    "Client options do not show secrets",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",

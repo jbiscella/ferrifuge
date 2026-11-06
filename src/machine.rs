@@ -7,6 +7,7 @@
 //! Behaviour follows the Client SDK spec, with centrifuge-js as the
 //! implementation reference (`src/centrifuge.ts`).
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod calls;
@@ -921,6 +922,8 @@ pub struct Machine {
     pings: Option<Pings>,
     /// The connect data callback's state (Block 17).
     connect_data: ConnectData,
+    /// Emulated headers sent with every connect command (Block 17).
+    emulated_headers: BTreeMap<String, String>,
     actions: Vec<Action>,
 }
 
@@ -998,6 +1001,15 @@ impl Machine {
         self
     }
 
+    /// Sends `headers`, by name, with every connect command as
+    /// `ConnectRequest.headers`: the emulated headers the server forwards to
+    /// its proxies (Block 17).
+    #[must_use]
+    pub fn with_emulated_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        self.emulated_headers = headers;
+        self
+    }
+
     fn with_rng(config: Config, token_source: bool, rng: fastrand::Rng) -> Self {
         let backoff = Backoff::new(config.min_reconnect_delay, config.max_reconnect_delay);
         let tokens = Tokens::new(config.token.clone(), token_source);
@@ -1027,6 +1039,7 @@ impl Machine {
             pinged: false,
             pings: None,
             connect_data: ConnectData::default(),
+            emulated_headers: BTreeMap::new(),
             actions: Vec::new(),
         }
     }
@@ -1270,6 +1283,7 @@ impl Machine {
                 } else {
                     self.config.data.clone()
                 },
+                headers: self.emulated_headers.clone(),
                 name: self.config.name.clone(),
                 version: self.config.version.clone(),
                 subs: self.server_subscriptions_to_recover(),

@@ -70,6 +70,7 @@ impl From<&Command> for pb::Command {
             Method::Connect(ConnectRequest {
                 token,
                 data,
+                headers,
                 name,
                 version,
                 subs,
@@ -77,6 +78,10 @@ impl From<&Command> for pb::Command {
                 pb.connect = Some(pb::ConnectRequest {
                     token: token.clone(),
                     data: data.clone().unwrap_or_default(),
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect(),
                     name: name.clone(),
                     version: version.clone(),
                     subs: subs
@@ -625,6 +630,7 @@ mod tests {
                 method: Method::Connect(ConnectRequest {
                     token: "t".into(),
                     data: None,
+                    headers: std::collections::BTreeMap::new(),
                     name: "ferrifuge".into(),
                     version: "0.1.0".into(),
                     subs: [(

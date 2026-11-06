@@ -151,6 +151,8 @@ struct JsonConnectRequest<'a> {
     token: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<JsonData<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    headers: &'a BTreeMap<String, String>,
     #[serde(skip_serializing_if = "str::is_empty")]
     name: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -275,6 +277,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
             Method::Connect(ConnectRequest {
                 token,
                 data,
+                headers,
                 name,
                 version,
                 subs,
@@ -282,6 +285,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 json.connect = Some(JsonConnectRequest {
                     token,
                     data: data.as_deref().map(JsonData::new),
+                    headers,
                     name,
                     version,
                     subs: subs
@@ -799,6 +803,7 @@ mod tests {
             method: Method::Connect(ConnectRequest {
                 token: token.to_owned(),
                 data: None,
+                headers: BTreeMap::new(),
                 name: "ferrifuge".to_owned(),
                 version: "0.1.0".to_owned(),
                 subs: BTreeMap::new(),

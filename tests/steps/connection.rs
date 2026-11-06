@@ -274,11 +274,16 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
     assert_eq!(world.client().state(), State::Connecting);
 }
 
-#[then(regex = r#"^(?:then )?the client emits "connected" over transport "(\w+)"$"#)]
-async fn the_client_emits_connected_over(world: &mut ClientWorld, expected: String) {
+#[then(regex = r#"^(then )?the client emits "connected" over transport "(\w+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn the_client_emits_connected_over(world: &mut ClientWorld, then: String, expected: String) {
     // Failed attempts over other transports, or earlier ones over this one,
     // may come first when the client falls back (Block 8).
-    let event = next_event_after_transport_errors(world).await;
+    let mut event = next_event_after_transport_errors(world).await;
+    // Right after "connect is called", without an earlier "connecting" step.
+    if then.is_empty() && event.name() == "connecting" {
+        event = next_event_after_transport_errors(world).await;
+    }
     assert_eq!(event.name(), "connected", "{event:?}");
     let ClientEvent::Connected { transport, .. } = &event else {
         unreachable!("expect_event checked the name");

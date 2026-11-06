@@ -2462,7 +2462,7 @@ Feature: Validation harness
   - The HTTP proxy (Block 8) records the headers of each request it relays.
   - The fake server answers connects with given raw data, and the next connect with a given error.
 
-`VERIFY:` the two environment variables above on Centrifugo v6.10.1, and that the connect proxy receives the `http_headers` of an `http_stream` or sse stream request as it does those of a websocket upgrade.
+Verified (Centrifugo v6.10.1, the 17b @B scenarios, 2026-11-06): the two environment variables above take space-separated header names, and the connect proxy receives the listed `http_headers` of an `http_stream` or sse stream request as it does those of a websocket upgrade.
 
 **Sub-increments** (one branch and PR each, in this order):
 

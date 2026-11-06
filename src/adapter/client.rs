@@ -14,6 +14,7 @@ use futures_core::Stream;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 
@@ -375,6 +376,21 @@ pub struct ClientBuilder {
     get_token: Option<GetToken>,
     get_data: Option<GetConnectData>,
     emulation_endpoint: Option<String>,
+    /// Real HTTP headers, as given; checked by [`ClientBuilder::build`].
+    http_headers: Vec<(String, String)>,
+    /// Emulated headers, as given; checked by [`ClientBuilder::build`].
+    emulated_headers: Vec<(String, String)>,
+}
+
+/// Header names, without their values, which may be secrets.
+struct HeaderNames<'a>(&'a [(String, String)]);
+
+impl std::fmt::Debug for HeaderNames<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -385,6 +401,8 @@ impl std::fmt::Debug for ClientBuilder {
             .field("get_token", &self.get_token.is_some())
             .field("get_data", &self.get_data.is_some())
             .field("emulation_endpoint", &self.emulation_endpoint)
+            .field("http_headers", &HeaderNames(&self.http_headers))
+            .field("emulated_headers", &HeaderNames(&self.emulated_headers))
             .finish()
     }
 }
@@ -422,6 +440,49 @@ impl ClientBuilder {
         Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
     {
         self.get_data = Some(Arc::new(move || Box::pin(get_data())));
+        self
+    }
+
+    /// Adds real HTTP headers to the websocket upgrade request and to every
+    /// request of `http_stream` and sse, so that a gateway checking one
+    /// still admits a client that fell back (Block 17). Names are
+    /// case-insensitive, a later value replacing an earlier one. A name or
+    /// value that is not valid HTTP, or a header the transport sets itself
+    /// (`Host`, `Connection`, `Upgrade`, `Content-Length`,
+    /// `Transfer-Encoding`, `Content-Type`, `Accept`, `Sec-WebSocket-*`),
+    /// makes [`ClientBuilder::build`] fail.
+    #[must_use]
+    pub fn http_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.http_headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
+    /// Adds emulated headers, sent in every connect command
+    /// (`ConnectRequest.headers`), which the server forwards to its proxies
+    /// as HTTP headers when its `emulated_headers` lists them (centrifuge-js
+    /// `headers`). They are client-controlled input to those proxies. Names
+    /// and values must be valid HTTP, or [`ClientBuilder::build`] fails.
+    #[must_use]
+    pub fn emulated_headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.emulated_headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
         self
     }
 
@@ -484,6 +545,8 @@ impl Client {
             get_token: None,
             get_data: None,
             emulation_endpoint: None,
+            http_headers: Vec::new(),
+            emulated_headers: Vec::new(),
         }
     }
 
@@ -494,10 +557,14 @@ impl Client {
             get_token,
             get_data,
             emulation_endpoint,
+            http_headers,
+            emulated_headers,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
+        let http_headers = Arc::new(http_header_map(&http_headers)?);
+        let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
@@ -511,6 +578,7 @@ impl Client {
         } else {
             machine
         };
+        let machine = machine.with_emulated_headers(emulated_headers);
         let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
@@ -530,6 +598,7 @@ impl Client {
                 .collect(),
             subprotocol,
             emulation_endpoint,
+            http_headers,
             timeout,
             shared: Arc::clone(&shared),
             opening: None,
@@ -777,6 +846,8 @@ struct Driver {
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
     emulation_endpoint: Option<String>,
+    /// HTTP headers of every transport request.
+    http_headers: Arc<HeaderMap>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
@@ -953,38 +1024,11 @@ impl Driver {
     fn perform(&mut self, action: Action) {
         match action {
             Action::OpenTransport {
-                transport: id,
+                transport,
                 kind,
                 endpoint,
                 initial_frame,
-            } => {
-                let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
-                let subprotocol = self.subprotocol;
-                let timeout = self.timeout;
-                let opening: Opening = match kind {
-                    TransportKind::WebSocket => Box::pin(async move {
-                        WebSocket::open(&url, subprotocol, timeout)
-                            .await
-                            .map(|websocket| Transport::WebSocket(Box::new(websocket)))
-                    }),
-                    TransportKind::HttpStream | TransportKind::Sse => {
-                        let emulation = self.emulation_endpoint.clone();
-                        let request_timeout = self.timeout;
-                        Box::pin(async move {
-                            HttpTransport::open(
-                                kind,
-                                &url,
-                                initial_frame.unwrap_or_default(),
-                                emulation.as_deref(),
-                                request_timeout,
-                            )
-                            .await
-                            .map(|http| Transport::Http(Box::new(http)))
-                        })
-                    }
-                };
-                self.opening = Some((id, opening));
-            }
+            } => self.open_transport(transport, kind, endpoint, initial_frame),
             Action::CloseTransport(id) => {
                 if self
                     .opening
@@ -1061,6 +1105,45 @@ impl Driver {
 }
 
 impl Driver {
+    /// Starts opening transport `id`, of `kind`, at endpoint `endpoint`;
+    /// an emulated one sends `initial_frame`, its connect command.
+    fn open_transport(
+        &mut self,
+        id: TransportId,
+        kind: TransportKind,
+        endpoint: usize,
+        initial_frame: Option<Vec<u8>>,
+    ) {
+        let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
+        let subprotocol = self.subprotocol;
+        let timeout = self.timeout;
+        let headers = Arc::clone(&self.http_headers);
+        let opening: Opening = match kind {
+            TransportKind::WebSocket => Box::pin(async move {
+                WebSocket::open(&url, subprotocol, timeout, &headers)
+                    .await
+                    .map(|websocket| Transport::WebSocket(Box::new(websocket)))
+            }),
+            TransportKind::HttpStream | TransportKind::Sse => {
+                let emulation = self.emulation_endpoint.clone();
+                let request_timeout = self.timeout;
+                Box::pin(async move {
+                    HttpTransport::open(
+                        kind,
+                        &url,
+                        initial_frame.unwrap_or_default(),
+                        emulation.as_deref(),
+                        request_timeout,
+                        headers,
+                    )
+                    .await
+                    .map(|http| Transport::Http(Box::new(http)))
+                })
+            }
+        };
+        self.opening = Some((id, opening));
+    }
+
     fn fetch_connect_data(&mut self, fetch: FetchId) {
         // The machine asks only when it was built with a data source.
         let Some(get_data) = &self.get_data else {
@@ -1290,6 +1373,65 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
 }
 
 /// A read-ahead limit of 0 could never let a message in (Block 15).
+/// Headers a transport sets itself, which an application may not set.
+fn transport_header(name: &HeaderName) -> bool {
+    use reqwest::header::{
+        ACCEPT, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, UPGRADE,
+    };
+    [
+        HOST,
+        CONNECTION,
+        UPGRADE,
+        CONTENT_LENGTH,
+        TRANSFER_ENCODING,
+        CONTENT_TYPE,
+        ACCEPT,
+    ]
+    .contains(name)
+        || name.as_str().starts_with("sec-websocket-")
+}
+
+/// A configuration error about header `name`, never naming its value.
+fn header_error(name: &str, problem: &str) -> ClientError {
+    ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: format!("HTTP header {name:?} {problem}"),
+        transport: None,
+    }
+}
+
+/// The checked HTTP headers (Block 17).
+fn http_header_map(headers: &[(String, String)]) -> Result<HeaderMap, ClientError> {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        let header = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| header_error(name, "is not a valid header name"))?;
+        if transport_header(&header) {
+            return Err(header_error(name, "is set by the transport"));
+        }
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| header_error(name, "has a value that is not valid HTTP"))?;
+        map.insert(header, value);
+    }
+    Ok(map)
+}
+
+/// The checked emulated headers, by name (Block 17).
+fn emulated_header_map(
+    headers: &[(String, String)],
+) -> Result<std::collections::BTreeMap<String, String>, ClientError> {
+    let mut map = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| header_error(name, "is not a valid header name"))?;
+        HeaderValue::from_str(value)
+            .map_err(|_| header_error(name, "has a value that is not valid HTTP"))?;
+        map.insert(name.clone(), value.clone());
+    }
+    Ok(map)
+}
+
 fn check_limits(config: &Config) -> Result<(), ClientError> {
     let message = if config.read_ahead_messages == 0 || config.read_ahead_bytes == 0 {
         "the read-ahead limits must be at least 1"
@@ -1358,6 +1500,49 @@ mod tests {
 
     use super::*;
     use crate::adapter::SubscriptionBuilder;
+
+    fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn http_header_names_are_case_insensitive_and_a_later_value_wins() {
+        let map = http_header_map(&headers(&[("X-Device", "a"), ("x-device", "b")])).unwrap();
+
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["x-device"], "b");
+    }
+
+    #[test]
+    fn headers_the_transport_sets_are_refused_without_their_value() {
+        for name in ["Host", "upgrade", "Accept", "Sec-WebSocket-Protocol"] {
+            let error = http_header_map(&headers(&[(name, "v-secret")])).unwrap_err();
+
+            assert_eq!(error.kind, ErrorKind::Configuration);
+            assert!(error.message.contains(name), "{error:?}");
+            assert!(!error.message.contains("v-secret"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_headers_are_refused_without_their_value() {
+        let bad_value = headers(&[("X-Device", "line\nbreak-secret")]);
+        let bad_name = headers(&[("X Device", "v")]);
+
+        for checked in [
+            http_header_map(&bad_value).err(),
+            emulated_header_map(&bad_value).err(),
+            http_header_map(&bad_name).err(),
+            emulated_header_map(&bad_name).err(),
+        ] {
+            let error = checked.expect("refused");
+            assert_eq!(error.kind, ErrorKind::Configuration);
+            assert!(!error.message.contains("secret"), "{error:?}");
+        }
+    }
 
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]

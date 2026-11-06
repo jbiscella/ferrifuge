@@ -73,6 +73,7 @@ pub(super) fn server_url(server: &Centrifugo, kind: TransportKind) -> String {
 pub(super) fn configure(world: &mut ClientWorld, endpoints: Vec<(TransportKind, String)>) {
     world.transports = endpoints.iter().map(|(kind, _)| *kind).collect();
     let builder = Client::builder_with_transports(endpoints).config(world.client_config());
+    let builder = world.connect_data.build(builder);
     world.build_client(builder);
 }
 
@@ -256,6 +257,18 @@ async fn a_client_connected_over_sse_with_expiring_token(world: &mut ClientWorld
     r#"a client connected over transport "http_stream" through a proxy that rejects the next emulation request"#
 )]
 async fn a_client_behind_an_http_proxy(world: &mut ClientWorld) {
+    let http_proxy = pinging_server_behind_an_http_proxy(world).await;
+    let url = format!("http://{}/connection/http_stream", http_proxy.address());
+    configure(world, vec![(TransportKind::HttpStream, url)]);
+    connect_and_wait(world).await;
+    http_proxy.reject_next_emulation();
+    world.http_proxy = Some(http_proxy);
+}
+
+/// Restarts the @B server pinging every [`PING_INTERVAL`], so the client
+/// sends commands (its pongs) through the emulation endpoint, and puts an
+/// HTTP proxy in front of it.
+pub(super) async fn pinging_server_behind_an_http_proxy(world: &mut ClientWorld) -> HttpProxy {
     let proxy_env = world
         .proxy
         .as_ref()
@@ -273,20 +286,24 @@ async fn a_client_behind_an_http_proxy(world: &mut ClientWorld) {
         .collect();
     world.relay = None;
     world.server = Some(Centrifugo::start(&env).await);
-    let http_proxy = HttpProxy::start(server(world).address().to_owned()).await;
-    let url = format!("http://{}/connection/http_stream", http_proxy.address());
-    configure(world, vec![(TransportKind::HttpStream, url)]);
-    connect_and_wait(world).await;
-    http_proxy.reject_next_emulation();
-    world.http_proxy = Some(http_proxy);
+    HttpProxy::start(server(world).address().to_owned()).await
 }
 
-/// Its pong to the next server ping.
+/// Its pong to the next server ping: rejected when a rejection is
+/// programmed, relayed otherwise.
 #[when("the client sends a command")]
 async fn the_client_sends_a_command(world: &mut ClientWorld) {
     let proxy = world.http_proxy.as_ref().expect("an HTTP proxy");
+    let rejecting = proxy.rejection_programmed();
     let sent = tokio::time::timeout(PING_INTERVAL + TOLERANCE, async {
-        while !proxy.rejected() {
+        loop {
+            let relayed = proxy
+                .requests_with_header("")
+                .iter()
+                .any(|(path, _)| path == "/emulation");
+            if proxy.rejected() || (!rejecting && relayed) {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
