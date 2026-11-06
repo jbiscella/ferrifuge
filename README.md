@@ -565,8 +565,8 @@ version of `gungraun` in `Cargo.lock`
 operations against a simulated server, on a simulated clock, and checks
 the client's invariants after every step: legal state changes, at most one
 transport, liveness once faults stop, cleanup after `disconnect()`, calls
-that settle, exactly-once delivery on recoverable channels, and a bounded
-read-ahead. A seed fixes every choice, so a failure prints the command that
+that settle, exactly-once delivery on recoverable channels, a bounded
+read-ahead, and batches that hold their calls and respect the frame cap. A seed fixes every choice, so a failure prints the command that
 reruns it:
 
 ```sh

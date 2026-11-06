@@ -5,6 +5,7 @@
 
 // @P scenario: Seeded chaos on the tokio client keeps the invariants
 // @P scenario: The adapter runner reports a planted fault
+// @P scenario: Seeded chaos with batching on the tokio client keeps the invariants
 
 mod support;
 
@@ -76,6 +77,8 @@ fn chaos_config() -> Config {
         timeout: TIMEOUT,
         read_ahead_messages: 8,
         read_ahead_bytes: 4096,
+        // Batches split (Block 18, D9).
+        batch_frame_bytes: 1024,
         ..Config::default()
     }
 }
@@ -131,6 +134,11 @@ enum Op {
     Expire(usize),
     Close(u16),
     FailConnects(usize),
+    /// The application starts a batch (Block 18).
+    StartBatching,
+    /// It stops, or drops, its last batch.
+    StopBatching,
+    DropBatch,
 }
 
 impl Op {
@@ -153,8 +161,11 @@ impl Op {
             58..66 => Self::Pause(Duration::from_millis(rng.u64(50..=400))),
             66..82 => Self::Publish(channel, rng.u32(1..=5)),
             82..86 => Self::Expire(channel),
-            86..96 => Self::Close(CODES[rng.usize(..CODES.len())]),
-            _ => Self::FailConnects(rng.usize(1..=3)),
+            86..93 => Self::Close(CODES[rng.usize(..CODES.len())]),
+            93..95 => Self::FailConnects(rng.usize(1..=3)),
+            95..97 => Self::StartBatching,
+            97..99 => Self::StopBatching,
+            _ => Self::DropBatch,
         }
     }
 }
@@ -182,6 +193,8 @@ struct Run {
     /// The last offset published per channel.
     published: [u64; CHANNELS.len()],
     calls: Vec<JoinHandle<Duration>>,
+    /// Batches the application holds open.
+    batches: Vec<ferrifuge::Batch>,
     ops: Vec<String>,
     counts: BTreeMap<&'static str, usize>,
 }
@@ -233,6 +246,7 @@ impl Run {
             subs,
             published: [0; CHANNELS.len()],
             calls: Vec::new(),
+            batches: Vec::new(),
             ops: Vec::new(),
             counts: BTreeMap::new(),
         }
@@ -310,6 +324,22 @@ impl Run {
                 self.server.close_current(code, "chaos");
             }
             Op::FailConnects(count) => self.server.fail_connects(count),
+            Op::StartBatching => {
+                if self.batches.len() < 3 {
+                    self.batches.push(self.client.start_batching());
+                }
+            }
+            Op::StopBatching => {
+                if let Some(batch) = self.batches.pop() {
+                    batch.stop();
+                    self.count("batch stopped");
+                }
+            }
+            Op::DropBatch => {
+                if self.batches.pop().is_some() {
+                    self.count("batch dropped");
+                }
+            }
         }
         Ok(())
     }
@@ -445,6 +475,10 @@ impl Run {
     /// one connection is open (I3).
     async fn heal(&mut self) -> Step {
         self.server.fail_connects(0);
+        // Healed: every batch is stopped (Block 18, D9).
+        for batch in std::mem::take(&mut self.batches) {
+            batch.stop();
+        }
         let deadline = Instant::now() + QUIESCENCE;
         loop {
             // A terminal close the server sent before healing may be
@@ -583,6 +617,8 @@ async fn seeded_chaos_on_the_tokio_client_keeps_the_invariants() {
         "recovered true",
         "second events()",
         "cancelled read",
+        "batch stopped",
+        "batch dropped",
     ]
     .into_iter()
     .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
