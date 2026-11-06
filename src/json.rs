@@ -11,8 +11,8 @@ use serde_json::value::RawValue;
 
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, SubRefreshRequest, SubscribeRequest, SubscribeResult,
-    UnsubscribeRequest,
+    RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
+    SubscribeResult, UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -125,6 +125,8 @@ struct JsonCommand<'a> {
     unsubscribe: Option<JsonUnsubscribeRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sub_refresh: Option<JsonSubRefreshRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc: Option<JsonRpcRequest<'a>>,
 }
 
 #[derive(Serialize)]
@@ -186,6 +188,13 @@ struct JsonUnsubscribeRequest<'a> {
 struct JsonSubRefreshRequest<'a> {
     channel: &'a str,
     token: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonRpcRequest<'a> {
+    #[serde(skip_serializing_if = "str::is_empty")]
+    method: &'a str,
+    data: JsonData<'a>,
 }
 
 /// Application data, embedded as the JSON it is. Bytes that are not JSON
@@ -271,6 +280,12 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     token: &token.0,
                 });
             }
+            Method::Rpc(RpcRequest { method, data }) => {
+                json.rpc = Some(JsonRpcRequest {
+                    method,
+                    data: JsonData::new(data),
+                });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -336,6 +351,12 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                     expires: refresh.expires,
                     ttl: refresh.ttl,
                 }));
+            }
+            "rpc" => {
+                let rpc: JsonRpcResult = field(&value)?;
+                result = Some(ReplyResult::Rpc(
+                    rpc.data.as_deref().map(raw_bytes).unwrap_or_default(),
+                ));
             }
             "push" => result = Some(ReplyResult::Push(field::<JsonPush>(&value)?.into())),
             _ => unknown = true,
@@ -459,6 +480,12 @@ impl From<JsonSubscribeResult> for SubscribeResult {
 
 #[derive(Deserialize)]
 struct JsonUnsubscribeResult {}
+
+#[derive(Deserialize)]
+struct JsonRpcResult {
+    #[serde(default, deserialize_with = "present")]
+    data: Option<Box<RawValue>>,
+}
 
 #[derive(Deserialize)]
 struct JsonPush {
@@ -612,6 +639,30 @@ mod tests {
             String::from_utf8(frame).unwrap(),
             r#"{"id":1,"connect":{"name":"ferrifuge","version":"0.1.0","subs":{"alerts":{"recover":true,"epoch":"e","offset":5}}}}"#
         );
+    }
+
+    #[test]
+    fn encodes_an_rpc_with_its_data_embedded_and_decodes_its_result_exactly() {
+        let frame = encode(&[Command {
+            id: 4,
+            method: Method::Rpc(RpcRequest {
+                method: "echo".into(),
+                data: br#"{"n":1}"#.to_vec(),
+            }),
+        }]);
+        let replies =
+            decode(b"{\"id\":4,\"rpc\":{\"data\":{\"b\": 1.0,  \"a\":2}}}\n{\"id\":5,\"rpc\":{}}")
+                .unwrap();
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            r#"{"id":4,"rpc":{"method":"echo","data":{"n":1}}}"#
+        );
+        assert_eq!(
+            replies[0].result,
+            ReplyResult::Rpc(br#"{"b": 1.0,  "a":2}"#.to_vec())
+        );
+        assert_eq!(replies[1].result, ReplyResult::Rpc(Vec::new()));
     }
 
     #[test]
@@ -774,7 +825,7 @@ mod tests {
     #[test]
     fn unknown_results_and_pushes_are_unsupported_not_errors() {
         let replies =
-            decode(b"{\"id\":5,\"rpc\":{\"data\":{}}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}")
+            decode(b"{\"id\":5,\"presence\":{\"presence\":{}}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}")
                 .unwrap();
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);

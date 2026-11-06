@@ -9,8 +9,8 @@ use prost::Message as _;
 use crate::protocol as pb;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, SubRefreshRequest, SubscribeRequest, SubscribeResult,
-    UnsubscribeRequest,
+    RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
+    SubscribeResult, UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -133,6 +133,12 @@ impl From<&Command> for pb::Command {
                     ..pb::SubRefreshRequest::default()
                 });
             }
+            Method::Rpc(RpcRequest { method, data }) => {
+                pb.rpc = Some(pb::RpcRequest {
+                    data: data.clone(),
+                    method: method.clone(),
+                });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -193,6 +199,8 @@ impl From<pb::Reply> for Reply {
                 expires: refresh.expires,
                 ttl: refresh.ttl,
             })
+        } else if let Some(rpc) = reply.rpc {
+            ReplyResult::Rpc(rpc.data)
         } else if let Some(push) = reply.push {
             ReplyResult::Push(if let Some(publication) = push.r#pub {
                 Push::Publication {
@@ -247,7 +255,6 @@ fn has_other_result(reply: &pb::Reply) -> bool {
         || reply.presence_stats.is_some()
         || reply.history.is_some()
         || reply.ping.is_some()
-        || reply.rpc.is_some()
 }
 
 impl From<pb::Publication> for Publication {
@@ -289,6 +296,31 @@ mod tests {
             reply.encode_length_delimited(&mut frame).unwrap();
         }
         frame
+    }
+
+    #[test]
+    fn encodes_an_rpc_and_decodes_its_result_with_binary_data() {
+        let frame = encode(&[Command {
+            id: 4,
+            method: Method::Rpc(RpcRequest {
+                method: "bin".into(),
+                data: vec![0xff, 0x00, 0xfe],
+            }),
+        }]);
+        let replies = decode(&frame_of(&[pb::Reply {
+            id: 4,
+            rpc: Some(pb::RpcResult {
+                data: vec![0xfe, 0x00, 0xff],
+            }),
+            ..Default::default()
+        }]))
+        .unwrap();
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+        let rpc = command.rpc.unwrap();
+        assert_eq!((command.id, rpc.method.as_str()), (4, "bin"));
+        assert_eq!(rpc.data, [0xff, 0x00, 0xfe]);
+        assert_eq!(replies[0].result, ReplyResult::Rpc(vec![0xfe, 0x00, 0xff]));
     }
 
     #[test]
@@ -520,7 +552,7 @@ mod tests {
         let frame = frame_of(&[
             pb::Reply {
                 id: 5,
-                rpc: Some(pb::RpcResult::default()),
+                presence: Some(pb::PresenceResult::default()),
                 ..Default::default()
             },
             pb::Reply {

@@ -25,6 +25,7 @@ pub(crate) enum Method {
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     SubRefresh(SubRefreshRequest),
+    Rpc(RpcRequest),
     /// The empty command answering a server ping; sent with id 0.
     Pong,
 }
@@ -82,6 +83,15 @@ pub(crate) struct SubRefreshRequest {
     pub(crate) token: Secret,
 }
 
+/// `RPCRequest` of `client.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RpcRequest {
+    /// Routes the call; empty for none.
+    pub(crate) method: String,
+    /// Raw JSON with the JSON protocol, any bytes with Protobuf.
+    pub(crate) data: Vec<u8>,
+}
+
 /// A reply or push received from the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reply {
@@ -100,6 +110,9 @@ pub(crate) enum ReplyResult {
     Unsubscribe,
     /// `SubRefreshResult`, which has the fields of a `RefreshResult`.
     SubRefresh(RefreshResult),
+    /// `RPCResult.data`: raw JSON with the JSON protocol, any bytes with
+    /// Protobuf; empty when the server sent none.
+    Rpc(Vec<u8>),
     Push(Push),
     /// An empty reply: a server ping, or a reply carrying only an error.
     Empty,
