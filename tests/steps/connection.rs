@@ -33,6 +33,11 @@ fn a_client_with_unreachable_endpoint(world: &mut ClientWorld) {
 
 #[given("a connected client")]
 pub(super) async fn a_connected_client(world: &mut ClientWorld) {
+    // Without a server, an @E scenario: the sans-IO core (Block 18).
+    if world.relay.is_none() && world.server.is_none() {
+        super::batching::a_connected_core(world);
+        return;
+    }
     let endpoint = world.server_endpoint();
     world.new_client(endpoint);
     world.client().connect();
@@ -125,6 +130,10 @@ fn disconnect_is_called(world: &mut ClientWorld) {
     }
     if super::connect_data::drives_a_machine(world) {
         super::connect_data::disconnect(world);
+        return;
+    }
+    if super::batching::drives_a_machine(world) {
+        super::batching::disconnect(world);
         return;
     }
     world.client().disconnect();

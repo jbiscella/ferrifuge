@@ -23,7 +23,7 @@ mod wire;
 #[doc(hidden)]
 pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
-pub use adapter::{Client, ClientBuilder, Subscription, SubscriptionBuilder};
+pub use adapter::{Batch, Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use call::{
     CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, PresenceResult,
     PresenceStatsResult,

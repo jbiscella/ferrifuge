@@ -248,6 +248,18 @@ const IMPLEMENTED: &[&str] = &[
     "set_token does not skip the token callback after an expired token",
     "set_data applies from the next connection attempt",
     "set_emulated_headers applies from the next connection attempt",
+    // Block 18, sub-increment 18a.
+    "Calls made while batching go out in one frame when the batch ends",
+    "Subscriptions subscribed while batching send their subscribe commands in one frame",
+    "A batch over Protobuf is one binary frame",
+    "A batch is split at the frame cap",
+    "Held calls are admitted to the write queue one by one",
+    "A call held past the timeout fails and is never sent",
+    "A subscribe held past the timeout reconnects the client",
+    "The client's own commands and send are not held",
+    "Disconnect fails the calls a batch holds",
+    "A held call waits across a lost transport",
+    "Stopping one of two batches sends what is held",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",

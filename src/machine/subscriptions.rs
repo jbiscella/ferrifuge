@@ -40,6 +40,15 @@ pub(super) struct Subscriptions {
     sub_refreshes: HashMap<u32, SubscriptionId>,
 }
 
+/// Who started a subscribe (Block 18, D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartedBy {
+    /// The application's `subscribe()`.
+    Application,
+    /// A connect reply or a resubscribe backoff.
+    Client,
+}
+
 #[derive(Debug)]
 struct Subscription {
     channel: String,
@@ -59,6 +68,9 @@ struct Subscription {
     /// connection leaves the subscription to it (centrifuge-js
     /// `_resubscribeTimeout`).
     resubscribe_pending: bool,
+    /// Who started the subscribe in progress: an open batch holds the
+    /// command of one the application started (Block 18, D2).
+    started_by: StartedBy,
     /// Its subscription token, the fetch of a new one and the refresh
     /// command in flight (Block 5's token component).
     tokens: Tokens,
@@ -186,6 +198,7 @@ impl Machine {
                 waiting: false,
                 backoff,
                 resubscribe_pending: false,
+                started_by: StartedBy::Client,
                 tokens,
                 position,
                 recover,
@@ -230,6 +243,7 @@ impl Machine {
             return;
         }
         sub.state = SubscriptionState::Subscribing;
+        sub.started_by = StartedBy::Application;
         self.emit_subscription(
             id,
             SubscriptionEvent::Subscribing {
@@ -314,10 +328,13 @@ impl Machine {
             return;
         };
         let command_id = self.command_id();
+        let holding = self.holding();
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
         sub.subscribe_command = Some(command_id);
+        let started_by = std::mem::replace(&mut sub.started_by, StartedBy::Client);
+        let held = holding && started_by == StartedBy::Application;
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
@@ -336,8 +353,9 @@ impl Machine {
         self.subscriptions
             .subscribes
             .insert(command_id, (id, channel.clone()));
-        self.send(
+        self.send_or_hold(
             transport,
+            held,
             Command {
                 id: command_id,
                 method: Method::Subscribe(SubscribeRequest {
@@ -369,8 +387,10 @@ impl Machine {
         self.subscriptions
             .unsubscribes
             .insert(command_id, (id, channel.clone()));
-        self.send(
+        let held = self.batching.application_unsubscribe && self.holding();
+        self.send_or_hold(
             transport,
+            held,
             Command {
                 id: command_id,
                 method: Method::Unsubscribe(UnsubscribeRequest { channel }),
@@ -464,6 +484,7 @@ impl Machine {
             SubscriptionTimer::Resubscribe => {
                 if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
                     sub.resubscribe_pending = false;
+                    sub.started_by = StartedBy::Client;
                 }
                 // Not connected: the next connection subscribes it.
                 if self.state == State::Connected {
@@ -890,6 +911,9 @@ impl Machine {
             .map(|(id, _)| *id)
             .collect();
         for id in subscribing {
+            if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                sub.started_by = StartedBy::Client;
+            }
             self.start_subscribe(id);
         }
     }

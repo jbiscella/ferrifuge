@@ -54,6 +54,13 @@ pub struct Config {
     /// when none waits. The client's own commands are not counted. At least
     /// 1. Default 4 MiB.
     pub write_queue_bytes: usize,
+    /// Most bytes of a frame of several commands, as sent: a batch, or the
+    /// subscribe commands of a connect reply, is split in order to stay
+    /// within it, and a single larger command goes alone (Block 18). Keep
+    /// it below the server's `websocket.message_size_limit` and its HTTP
+    /// streaming `max_request_body_size` (both 64 KiB by default in
+    /// Centrifugo). At least 1. Default 16 KiB.
+    pub batch_frame_bytes: usize,
 }
 
 /// Encoding of the client protocol (`client.proto`).
@@ -95,6 +102,7 @@ impl Default for Config {
             read_ahead_messages: 256,
             read_ahead_bytes: 4 << 20,
             write_queue_bytes: 4 << 20,
+            batch_frame_bytes: 16 << 10,
         }
     }
 }
@@ -127,6 +135,7 @@ impl std::fmt::Debug for Config {
             .field("read_ahead_messages", &self.read_ahead_messages)
             .field("read_ahead_bytes", &self.read_ahead_bytes)
             .field("write_queue_bytes", &self.write_queue_bytes)
+            .field("batch_frame_bytes", &self.batch_frame_bytes)
             .finish()
     }
 }
