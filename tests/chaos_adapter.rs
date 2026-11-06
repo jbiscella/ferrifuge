@@ -468,6 +468,21 @@ impl Run {
                 ));
             }
         }
+        // The last publication of a subscribed channel was delivered too:
+        // no later offset would show it missing.
+        for (n, sub) in self.subs.iter().enumerate() {
+            if sub.last_state == SubscriptionState::Subscribed
+                && sub.delivered != Some(self.published[n])
+            {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{} delivered up to {:?} at quiescence, published up to {}",
+                        CHANNELS[n], sub.delivered, self.published[n]
+                    ),
+                ));
+            }
+        }
         for call in std::mem::take(&mut self.calls) {
             let took = call
                 .await
@@ -498,9 +513,11 @@ impl Run {
     /// I5: after `disconnect()`, no connection stays open and no new one
     /// is made.
     async fn after_disconnect(&mut self) -> Step {
+        // Counted before: a connection made and closed while the events
+        // are drained is one made after disconnect().
+        let connections = self.server.connections();
         self.client.disconnect();
         self.read_until_quiet(Instant::now() + QUIESCENCE).await?;
-        let connections = self.server.connections();
         let deadline = Instant::now() + AFTER_DISCONNECT;
         while Instant::now() < deadline {
             self.read_until_quiet(deadline).await?;
