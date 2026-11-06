@@ -140,6 +140,15 @@ impl Machine {
     /// Whether one of its publications was a delta, which is not delivered,
     /// nor any after it (Block 19, D8).
     fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) -> bool {
+        // Checked before any event is emitted, so that the reconnect
+        // withdraws none of the message being handled (Codex on PR #99).
+        if result
+            .publications
+            .iter()
+            .any(|publication| publication.delta)
+        {
+            return true;
+        }
         // A recoverable subscription's position: the stream's, or after a
         // recovery the one it recovers from. With publications, it is
         // reached once the last of them is taken (Block 15).
@@ -179,9 +188,6 @@ impl Machine {
         // once taken.
         let last = result.publications.len().saturating_sub(1);
         for (index, publication) in result.publications.into_iter().enumerate() {
-            if publication.delta {
-                return true;
-            }
             let reply = replied.as_ref().map(|position| (position, index == last));
             self.emit_server_publication(channel, publication, reply);
         }
