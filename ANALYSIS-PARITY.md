@@ -79,12 +79,15 @@ To record in Block 0 when the specs land. Each line becomes "reversed by the own
 | Block 6, out of scope and closing note | custom root certificates; "no custom-root API is added" | 2 |
 | Block 9, out of scope | delta compression; tag filters | 5, 6 |
 | Block 14, out of scope | HTTP proxy (CONNECT) support; sleep/resume behaviour | 1, 4 |
-| Block 15, out of scope | a callback-style handler API | 17 (recommended not adopted) |
-| Block 17, out of scope | replacing HTTP headers of a built client; a cookie jar | 14, 24 |
+| Block 15, out of scope | a callback-style handler API | 17 (adopted, Block 41) |
+| Block 17, out of scope | replacing HTTP headers of a built client; a cookie jar | 14, 24 (Block 43) |
 | Block 1, out of scope | `closed` state | 16 |
 | Blocks 11 and 16, out of scope | delta compression | 5 |
-| Block 16 and "Planned after Block 13" | trace replay "optional, later" | 20 (recommended dropped) |
-| Blocks 0 and 8, out of scope | browser-only options (fetch, EventSource shims, network events) | 24, 25 |
+| Block 16 and "Planned after Block 13" | trace replay "optional, later" | 20 (adopted, Block 42) |
+| Blocks 0 and 8, out of scope | browser-only options (fetch, EventSource shims, network events) | 25, 39 (Block 44) |
+| Block 8, decisions | Protobuf with an HTTP transport rejected at build time | 36, http_stream only (Block 27) |
+| Block 0, out of scope | webtransport; map and shared poll subscriptions; publish debouncing | 33, 29, 30, 32 (Blocks 48, 45, 47, 46) |
+| Block 18, out of scope | subscribes sent before the connect reply | 31 (Block 36) |
 | Block 18 | batching only on request, plus the connect reply's subscribes | 26 |
 
 ## Findings in the current code
@@ -605,7 +608,7 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 **Official SDK** (rust spec §5.1): no jar; "cookies are the app's": a session cookie goes in the real headers.
 
 **Designs.**
-- **A. A Ferrifuge `CookieJar` trait with a default in-memory jar.** `ClientBuilder::cookie_jar(Arc<dyn CookieJar>)`: the jar is asked for the cookies of each request's URL (the websocket upgrade, the http_stream and sse requests, every emulation request) and given the `Set-Cookie` headers of each response, the upgrade's included. The default `MemoryJar` parses and matches cookies with the maintained `cookie_store` crate (0.22.1, 2026-02, MIT OR Apache-2.0; Block 0 "Components": `Set-Cookie` is network input). The reqwest transports use it through reqwest's `cookie_provider`, adapted inside the adapter; the websocket path adds the `Cookie` header itself. A `Cookie` set in `http_headers` is sent as given, the jar's cookies appended.
+- **A. A Ferrifuge `CookieJar` trait with a default in-memory jar.** `ClientBuilder::cookie_jar(Arc<dyn CookieJar>)`: the jar is asked for the cookies of each request's URL (the websocket upgrade, the http_stream and sse requests, every emulation request) and given the `Set-Cookie` headers of each response, the upgrade's included. The default `MemoryJar` parses and matches cookies with the maintained `cookie_store` crate (0.22.1, 2026-02, MIT OR Apache-2.0; Block 0 "Components": `Set-Cookie` is network input). The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, without reqwest's `cookies` feature: reqwest 0.13.5 adds jar cookies only to a request without a `Cookie` header (`src/cookie.rs:242`), so a `Cookie` from `http_headers` would hide the jar. A `Cookie` set in `http_headers` and the jar's cookies are merged into one header (RFC 6265 §5.4). Opt-in, behind a non-default `cookies` feature, as reqwest and ureq do.
 - **B. Expose reqwest's cookie store** (`reqwest::cookie::Jar`) for the HTTP transports, applied by hand to the websocket upgrade.
 - **C. No jar**: `Cookie` in `http_headers` and `set_http_headers` (item 14) only.
 
@@ -618,7 +621,7 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 | Semver | additive | ties the public API to reqwest 0.x | none |
 | Cost | M | M | none |
 
-**Recommendation.** A. `withCredentials` stays a browser flag: item 25's browser adapter.
+**Recommendation.** A (reviewer, 2026-11-06, late; Block 43). `withCredentials` stays a browser flag: item 25's browser adapter.
 
 ## 17. Callback API, WeakClient, event-delivery modes, deadlock detection
 
@@ -629,7 +632,7 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 **Official SDK** (rust spec §4.4, §9.4, §9.5, §9.8): `on_*` handlers per event kind, on the builder or the client; a dedicated event thread per client by default, or inline delivery; `WeakClient` from `downgrade()`; a `WouldDeadlock` error from a thread-local or task-local marker set while a handler runs; a handler panic stops the client.
 
 **Designs.**
-- **A. Handlers as one more consumer of the same outbox.** `ClientBuilder::on_*` and `SubscriptionBuilder::on_*` closures per event kind (`FnMut(Event) + Send + 'static`), one per kind, registering again replacing it. An object with a handler has no stream: registering a handler takes over, as a second `events()` call does (Block 15), so the two models never split one object's events. An event counts as delivered when its handler returns, which keeps "delivered means taken" (a handler that returned has taken it) and exactly-once on recoverable channels. Delivery modes: `EventDelivery::Task` (default: the handlers of a client run one at a time on a tokio task of their own), `EventDelivery::Thread` (on an OS thread, for handlers that block), `EventDelivery::Inline` (on the driver, the cheapest; a handler must neither block nor wait). A handler that panics takes nothing (its event's position does not move) and stops the client with an error event, so recovery brings the event back on the next `connect()`. `WeakClient`: `Client` becomes `Clone` (clones share one connection, the last dropped one shutting it down, as dropping does today) and `Client::downgrade()` returns a `WeakClient` whose `upgrade()` gives a `Client` while one is alive. Deadlock detection: while a handler runs in `Thread` or `Inline` mode, a thread-local marker names its client; a call or `ready()` of that client that would have to wait for the loop the handler holds fails at its first poll with a new `CallError` kind, instead of reaching its timeout. In `Task` mode the handler is synchronous and cannot await, so the marker is set on that task too.
+- **A. Handlers as one more consumer of the same outbox.** `ClientBuilder::on_*` and `SubscriptionBuilder::on_*` closures per event kind (`FnMut(Event) + Send + 'static`), one per kind, registering again replacing it. An object with a handler has no stream: registering a handler takes over, as a second `events()` call does (Block 15), so the two models never split one object's events. An event counts as delivered when its handler returns, which keeps "delivered means taken" (a handler that returned has taken it) and exactly-once on recoverable channels. Delivery modes: `EventDelivery::Task` (default: the handlers of a client run one at a time on a tokio task of their own), `EventDelivery::Thread` (on an OS thread, for handlers that block), `EventDelivery::Inline` (on the driver, the cheapest; a handler must neither block nor wait). A handler that panics is caught (`catch_unwind`) and takes nothing (its event's position does not move); the client disconnects with code 2 "exception in event handler: <message>" and does not reconnect, as centrifuge-js 63ed73e does (README.md:1063-1072, `centrifuge.ts:1813`), so recovery brings the event back on the next `connect()`. `WeakClient`: `Client` becomes `Clone` (clones share one connection, the last dropped one shutting it down, as dropping does today) and `Client::downgrade()` returns a `WeakClient` whose `upgrade()` gives a `Client` while one is alive. Deadlock detection: while a handler runs in `Thread` or `Inline` mode, a thread-local marker names its client; a call or `ready()` of that client that would have to wait for the loop the handler holds fails at its first poll with a new `CallError` kind, instead of reaching its timeout. In `Task` mode the handler is synchronous and cannot await, so the marker is set on that task too.
 - **B. Handlers as a separate delivery path** in the adapter: outboxes call closures directly, beside the streams.
 - **C. A handler trait** (`ClientHandler` with a default no-op method per event), registered once, as rdkafka's contexts or russh's handlers.
 
@@ -642,7 +645,7 @@ A view without lifecycle events also hides a `Subscribed` event reporting `was_r
 | Semver | additive (`Client: Clone` is an addition; `CallError` and the events are `#[non_exhaustive]`) | additive | additive |
 | Cost | L | L | L |
 
-**Recommendation.** A. Whether to add C's trait as a second registration form is left to its block's spec.
+**Recommendation.** C's trait, with a blanket implementation for `FnMut(Event) + Send` closures, so one closure still works (reviewer, 2026-11-06, late; Block 41): state shared across event kinds lives in `&mut self` with no `Arc<Mutex>`, and one ordered consumer per object is Block 15's model (serenity `EventHandler`, russh `Handler`, rdkafka `ClientContext`). Methods are synchronous; async code uses the streams. A's delivery modes, `WeakClient` and delivery rule are kept: `Task` default, `Thread` started lazily, `Inline` documented as giving up "timers keep running while events are held" (Block 15). `close()` ends every clone. Deadlock detection: the thread-local marker is read at a call's or `ready()`'s first poll; under `Inline` the call fails with `WouldDeadlock` at once, under `Task` and `Thread` only when reading pauses on a full read-ahead while that handler still runs, the real wait-for cycle, so calls that would complete never fail.
 
 ## 20. Replay of their TLA+ model traces
 
@@ -767,7 +770,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 
 ## 29. Map subscriptions (map, map_clients, map_users; experimental)
 
-**Fit.** Outside a browser: yes, a protocol feature. Server: Centrifugo v6.10.1 supports it (`subscription_type`: stream, map, map_clients, map_users, shared_poll, `internal/configtypes/namespace.go:204-213`; needs ≥ 6.8.0, centrifuge-js README.md:891). Rust alternative: none. **Makes sense.**
+**Fit.** Outside a browser: yes, a protocol feature. Server: Centrifugo v6.10.1 supports it (`subscription_type`: stream, map, map_clients, map_users, shared_poll, `internal/configtypes/namespace.go:204-213`; needs ≥ 6.8.0, centrifuge-js README.md:887). Rust alternative: none. **Makes sense.**
 
 **Problem.** A channel whose state is a keyed map (presence lists, live dashboards, game lobbies): the client loads the state page by page, then receives updates per key, and resynchronises after a gap instead of recovering a stream.
 
@@ -813,7 +816,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 
 ## 31. Optimistic subscriptions
 
-**Fit.** Outside a browser: yes (saves a round trip per connection). Server: the client protocol carries several commands per frame; the server's handling of subscribes before the connect reply needs verifying on v6.10.1. Rust alternative: none. **Makes sense.**
+**Fit.** Outside a browser: yes (saves a round trip per connection). Server: the client protocol carries several commands per frame; verified (centrifuge 7ac0371, as in Centrifugo v6.10.1): the server handles a frame's commands in order (`handler_websocket.go:416-425`) and the connect synchronously (`client.go:2130-2131`); after a connect error it drops the rest of the frame unanswered and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`). Rust alternative: none. **Makes sense.**
 
 **Problem.** A client that subscribes at startup waits a full round trip for the connect reply before subscribing; on mobile links that doubles the time to the first publication.
 
@@ -832,13 +835,13 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 | Semver | none | additive |
 | Cost | M | M |
 
-**Recommendation.** A, after verifying the server's ordering on v6.10.1 (`VERIFY` in its block).
+**Recommendation.** A, over websocket and WebTransport, with no option (reviewer, 2026-11-06, late; Block 36): only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, which avoids the 3501 path, and subscribes still waiting for their callbacks wait for the connect reply.
 
 ## 32. Client publish debouncing
 
 **Fit.** Outside a browser: yes (fewer publishes from chatty producers). Server: `SubscribeResult.publish_debounce` is set by the centrifuge library from `ClientPublishDebounceInterval` (`client.go:5101-5102`, `client_map.go:1062`), which Centrifugo v6.10.1 OSS never sets: a Centrifugo PRO feature, as channel compaction. Rust alternative: none. **Makes sense** (PRO users), tested on @D as compaction (item 7).
 
-**centrifuge-js** (`subscription.ts:255-312`, `:573-575`, `:2626-2628`): with a debounce interval from the subscribe reply, publishes of a key within the interval are merged, the latest data sent when it ends.
+**centrifuge-js** (`subscription.ts:255-312`, `:573-575`, `:2626-2628`): with a debounce interval from the subscribe reply, publishes of a key within the interval are merged, the latest data sent when it ends; stream publishes are debounced too, with key "" (`subscription.ts:2880-2883`). A merged publish resolves `{}` at once and its errors are swallowed (`:255-299`): not ported.
 
 **Designs.**
 - **A. In the core**: a debounce timer per subscription and key, the latest data kept, @E-testable.
@@ -853,7 +856,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 | Semver | additive (a call outcome) | additive |
 | Cost | M | M |
 
-**Recommendation.** A, with item 29 (keys are map keys).
+**Recommendation.** A, for stream publishes (key "") and map keys (reviewer, 2026-11-06, late; Block 46): the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
 
 ## 33. WebTransport transport (experimental)
 
@@ -874,7 +877,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 | Semver | additive, feature-gated, marked unstable | same |
 | Cost | L | L |
 
-**Recommendation.** A (the components rule: maintained crates; cryptography stays in rustls).
+**Recommendation.** A (the components rule: maintained crates; cryptography stays in rustls; reviewer, 2026-11-06, late; Block 48, behind the `unstable` feature). Its `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`; web-transport-quinn also forces quinn's platform verifier, against item 2's rule that the fips build keeps webpki. `VERIFY:` that wtransport accepts the client's own `rustls::ClientConfig`.
 
 ## 34. SockJS transport
 
@@ -887,7 +890,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 **centrifuge-js** (`centrifuge.ts:1070-1100`): `websocket`, `fetch`, `readableStream`, `eventsource` constructor options.
 
 **Designs.**
-- **A. `ClientBuilder::connector`**: an async function from the endpoint URL to a connected byte stream (`AsyncRead + AsyncWrite + Send + Unpin`); Ferrifuge runs TLS (when the scheme asks) and the websocket handshake over it. It is also what item 22's in-memory server double plugs into.
+- **A. `ClientBuilder::connector`**: an async function from the endpoint URL to a connected byte stream (`AsyncRead + AsyncWrite + Send + Unpin`); Ferrifuge runs TLS (when the scheme asks) and the websocket handshake over it. It is also what item 22's in-memory server double plugs into. A `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures. Websocket only: reqwest's `connector_layer` can only wrap reqwest's own connector, whose `Conn` cannot be built from outside (`client.rs:2475-2481`), so a connector with an HTTP transport or proxy settings fails `build()`.
 - **B. A public `Transport` trait** applications implement end to end.
 
 | | A | B |
@@ -899,7 +902,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 | Semver | additive | additive, but every transport change breaks implementers |
 | Cost | M | L |
 
-**Recommendation.** A.
+**Recommendation.** A (reviewer, 2026-11-06, late; Block 37, with item 22).
 
 ## 36. Protobuf over http_stream
 
@@ -908,7 +911,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 **centrifuge-js** (`transport_http_stream.ts:107-119`, `:176-183`).
 
 **Designs.**
-- **A. Length-delimited Protobuf in the http_stream decoder**, split with prost's `decode_length_delimiter` (a maintained component) over a bounded buffer, fuzzed with the other decoders; sse stays JSON.
+- **A. Length-delimited Protobuf on http_stream**: the decoder splits with prost's `decode_length_delimiter` (a maintained component) over a bounded buffer, fuzzed with the other decoders; the stream request body and the emulation requests are Protobuf too (`EmulationRequest`, `client.proto:74`; centrifuge-js `transport_http_stream.ts:115-120`, `:180-187`); sse stays JSON.
 - **B. Keep rejecting it.**
 
 | | A | B |
@@ -924,7 +927,7 @@ Ferrifuge gets every centrifuge-js 63ed73e (5.8.0) feature it still lacks, but o
 
 ## 37. `hasRecoveredPublications` on the subscribed event
 
-**Fit.** Yes, client-only (metrics). **Makes sense.** centrifuge-js `types.ts:324-326`, `centrifuge.ts:2491`, `:2520`.
+**Fit.** Yes, client-only (metrics). **Makes sense.** centrifuge-js `types.ts:345-347` (client-side context; `:324-326` is the server-side one), filled by one helper for both (`centrifuge.ts:2484-2524`); Ferrifuge's shared `Subscribed` covers both.
 
 **Designs.** A: `Subscribed::has_recovered_publications: bool`. B: leave it to the application to count. **Recommendation.** A (one field, `Subscribed` is `#[non_exhaustive]`).
 
