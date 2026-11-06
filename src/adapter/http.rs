@@ -53,6 +53,8 @@ pub(crate) struct HttpTransport {
     /// Frames whose request was answered and not yet reported by
     /// [`HttpTransport::recv`].
     written: VecDeque<FrameId>,
+    /// The last report was of a frame written: a message comes first next.
+    read_next: bool,
 }
 
 impl HttpTransport {
@@ -121,6 +123,7 @@ impl HttpTransport {
             failed: None,
             requests: FuturesUnordered::new(),
             written: VecDeque::new(),
+            read_next: false,
         })
     }
 
@@ -176,16 +179,25 @@ impl HttpTransport {
     /// stream ended or failed, or an emulation request failed. Cancel-safe.
     pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
         loop {
-            if let Some(id) = self.written.pop_front() {
+            // Written reports and messages take turns, as on a websocket.
+            if !self.read_next
+                && let Some(id) = self.written.pop_front()
+            {
+                self.read_next = true;
                 return Inbound::Written(id);
             }
             if reading {
                 if let Some(frame) = self.frames.pop_front() {
+                    self.read_next = false;
                     return Inbound::Frame(frame);
                 }
                 if let Some(reason) = self.failed.take() {
                     return Inbound::Closed { code: None, reason };
                 }
+            }
+            if let Some(id) = self.written.pop_front() {
+                self.read_next = true;
+                return Inbound::Written(id);
             }
             tokio::select! {
                 // Not reading, the stream waits: a full read-ahead stops the

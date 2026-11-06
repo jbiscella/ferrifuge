@@ -8,7 +8,7 @@
 //! unsubscribed" when it is not or stops being (centrifuge-js
 //! `subscription.ts` `_methodCall`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{Action, CallId, CallTimer, FrameId, Machine, SubscriptionId};
 use crate::json;
@@ -50,6 +50,8 @@ pub(super) struct Calls {
     by_id: BTreeMap<CallId, Call>,
     /// The call each command sent and not yet answered belongs to.
     by_command: HashMap<u32, CallId>,
+    /// The calls waiting for room, in the order they were made.
+    room: BTreeSet<CallId>,
     /// Sizes of the calls' frames handed to the current transport and not
     /// yet written, whatever became of their calls.
     unwritten: HashMap<FrameId, usize>,
@@ -190,10 +192,7 @@ impl Machine {
     /// Whether a call waits for room in the write queue: later calls wait
     /// behind it, so that calls are sent in the order they were made.
     fn waits_for_room(&self) -> bool {
-        self.calls
-            .by_id
-            .values()
-            .any(|call| matches!(call.phase, Phase::Room))
+        !self.calls.room.is_empty()
     }
 
     /// Whether call `id` fits the write queue now: alone when nothing
@@ -207,10 +206,16 @@ impl Machine {
             })
     }
 
-    /// The size of the frame a call's command makes, its id aside.
+    /// The size of the frame a call's command makes, with the id it would
+    /// be sent with now.
     fn frame_size(&self, request: &CallRequest) -> usize {
+        let id = if matches!(request, CallRequest::Send { .. }) {
+            0
+        } else {
+            self.next_command.wrapping_add(1).max(1)
+        };
         let frame = self.codec.encode(&[Command {
-            id: 0,
+            id,
             method: method_of(request),
         }]);
         match &self.emulation {
@@ -233,6 +238,7 @@ impl Machine {
             _ => {}
         }
         call.phase = Phase::Room;
+        self.calls.room.insert(id);
         self.actions.push(Action::SetCallTimer(
             id,
             CallTimer::Room,
@@ -240,19 +246,13 @@ impl Machine {
         ));
     }
 
-    /// Sends the calls waiting for room, in order, while they fit.
+    /// Sends the calls waiting for room, in order, while they fit: each
+    /// waiter is looked at once it is first in line.
     fn admit_waiting(&mut self) {
         if !self.can_send() {
             return;
         }
-        let waiting: Vec<CallId> = self
-            .calls
-            .by_id
-            .iter()
-            .filter(|(_, call)| matches!(call.phase, Phase::Room))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in waiting {
+        while let Some(&id) = self.calls.room.first() {
             if !self.fits(id) {
                 return;
             }
@@ -283,6 +283,9 @@ impl Machine {
         };
         if let Some(timer) = call.phase.timer() {
             self.actions.push(Action::CancelCallTimer(id, timer));
+        }
+        if matches!(call.phase, Phase::Room) {
+            self.calls.room.remove(&id);
         }
         let method = method_of(&call.request);
         let send = matches!(call.request, CallRequest::Send { .. });
@@ -407,6 +410,7 @@ impl Machine {
     /// forgotten, and never sent if it was queued.
     pub(super) fn call_abandoned(&mut self, id: CallId) {
         if let Some(call) = self.calls.by_id.remove(&id) {
+            self.calls.room.remove(&id);
             if let Phase::Sent(command) = call.phase {
                 self.calls.by_command.remove(&command);
             }
@@ -509,6 +513,7 @@ impl Machine {
         let Some(call) = self.calls.by_id.remove(&id) else {
             return;
         };
+        self.calls.room.remove(&id);
         if let Phase::Sent(command) = call.phase {
             self.calls.by_command.remove(&command);
         }
@@ -1261,5 +1266,30 @@ mod tests {
             action,
             Action::Emit(_, ClientEvent::Message(data)) if data == br#"{"b": 1.0,  "a":2}"#
         )));
+    }
+
+    #[test]
+    fn the_admission_size_of_a_call_is_the_size_of_the_frame_it_sends() {
+        let (mut machine, _) = connected();
+        for _ in 0..10 {
+            // Command ids grow a digit along the way.
+            machine.command_id();
+        }
+        let request = CallRequest::Publish {
+            channel: "news".into(),
+            data: br#""x""#.to_vec(),
+        };
+        let estimated = machine.frame_size(&request);
+        let id = machine.add_call(request);
+
+        let actions = machine.handle(Input::Call(id));
+
+        assert_eq!(
+            sent_text(&actions)
+                .iter()
+                .map(String::len)
+                .collect::<Vec<_>>(),
+            [estimated]
+        );
     }
 }

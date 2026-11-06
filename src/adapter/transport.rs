@@ -36,6 +36,8 @@ pub(crate) struct WebSocket {
     writing: Option<(FrameId, Instant)>,
     /// Frames written and not yet reported by [`WebSocket::recv`].
     written: VecDeque<FrameId>,
+    /// The last report was of a frame written: a read comes first next.
+    read_next: bool,
     /// Fires [`WebSocket::timeout`] after the oldest frame not yet written
     /// was queued.
     deadline: Pin<Box<Sleep>>,
@@ -96,6 +98,7 @@ impl WebSocket {
             queue: VecDeque::new(),
             writing: None,
             written: VecDeque::new(),
+            read_next: false,
             deadline: Box::pin(tokio::time::sleep(timeout)),
             timeout,
         })
@@ -135,9 +138,6 @@ impl WebSocket {
         if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
             return Poll::Ready(lost);
         }
-        if let Some(id) = self.written.pop_front() {
-            return Poll::Ready(Inbound::Written(id));
-        }
         if let Some(queued) = self.oldest_unwritten() {
             let deadline = queued + self.timeout;
             if self.deadline.deadline() != deadline {
@@ -147,19 +147,41 @@ impl WebSocket {
                 return Poll::Ready(lost);
             }
         }
-        if !reading {
-            return Poll::Pending;
+        // Written reports and reads take turns: with a write queue that is
+        // always backlogged, each report admits another frame, which must
+        // not keep the server's messages waiting.
+        if !self.read_next
+            && let Some(id) = self.written.pop_front()
+        {
+            self.read_next = true;
+            return Poll::Ready(Inbound::Written(id));
         }
+        if reading && let Poll::Ready(inbound) = self.poll_read(cx) {
+            self.read_next = false;
+            return Poll::Ready(inbound.unwrap_or(lost));
+        }
+        if let Some(id) = self.written.pop_front() {
+            self.read_next = true;
+            return Poll::Ready(Inbound::Written(id));
+        }
+        Poll::Pending
+    }
+
+    /// The next frame or close from the server; `None` when the connection
+    /// was lost.
+    fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Option<Inbound>> {
         loop {
             let Some(Ok(message)) = ready!(self.stream.poll_next_unpin(cx)) else {
-                return Poll::Ready(lost);
+                return Poll::Ready(None);
             };
             match message {
                 Message::Text(text) => {
-                    return Poll::Ready(Inbound::Frame(text.as_bytes().to_vec()));
+                    return Poll::Ready(Some(Inbound::Frame(text.as_bytes().to_vec())));
                 }
-                Message::Binary(bytes) => return Poll::Ready(Inbound::Frame(bytes.to_vec())),
-                Message::Close(frame) => return Poll::Ready(closed(frame)),
+                Message::Binary(bytes) => {
+                    return Poll::Ready(Some(Inbound::Frame(bytes.to_vec())));
+                }
+                Message::Close(frame) => return Poll::Ready(Some(closed(frame))),
                 // Websocket-level keepalive is answered by tungstenite itself.
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
             }
@@ -428,6 +450,37 @@ mod tests {
                 reason: "shutdown".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_message_read_comes_before_the_next_written_report() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Echoes each message.
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                ws.send(message).await.unwrap();
+            }
+        });
+        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT)
+            .await
+            .unwrap();
+        ws.send(FrameId::for_tests(1), b"1".to_vec(), FrameType::Text)
+            .unwrap();
+        let first = ws.recv(true).await;
+        // Its echo arrives; then a second frame is written at once.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        ws.send(FrameId::for_tests(2), b"2".to_vec(), FrameType::Text)
+            .unwrap();
+
+        let next = ws.recv(true).await;
+        let after = ws.recv(true).await;
+
+        assert_eq!(first, Inbound::Written(FrameId::for_tests(1)));
+        assert_eq!(next, Inbound::Frame(b"1".to_vec()));
+        assert_eq!(after, Inbound::Written(FrameId::for_tests(2)));
     }
 
     #[tokio::test]
