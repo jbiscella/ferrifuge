@@ -727,8 +727,11 @@ async fn seeded_chaos_adapter_long_run() {
         Ok(_) => seeds(),
         Err(_) => start..start + count,
     };
-    println!("chaos: adapter seeds {}..{}", seeds.start, seeds.end);
     let delta = std::env::var("FERRIFUGE_CHAOS_DELTA").is_ok();
+    println!(
+        "chaos: adapter seeds {}..{}, delta {delta}",
+        seeds.start, seeds.end
+    );
     if let Err(violation) = run_seeds(seeds, false, delta).await {
         panic!("{violation}");
     }
