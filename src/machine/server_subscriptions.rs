@@ -62,7 +62,18 @@ impl Machine {
         &mut self,
         subs: BTreeMap<String, SubscribeResult>,
     ) -> bool {
-        let mut delta = false;
+        // The whole reply is checked before any event is emitted, so that
+        // the reconnect withdraws none of the message being handled (Codex
+        // on PR #99); the registry and its positions stay for the next
+        // connect to recover.
+        if subs.values().any(|result| {
+            result
+                .publications
+                .iter()
+                .any(|publication| publication.delta)
+        }) {
+            return true;
+        }
         let gone: Vec<String> = self
             .server_subscriptions
             .by_channel
@@ -71,7 +82,7 @@ impl Machine {
             .cloned()
             .collect();
         for (channel, result) in subs {
-            delta |= self.subscribe_server_side(&channel, result);
+            self.subscribe_server_side(&channel, result);
         }
         for channel in gone {
             self.server_subscriptions.by_channel.remove(&channel);
@@ -83,7 +94,7 @@ impl Machine {
                 },
             );
         }
-        delta
+        false
     }
 
     /// The server subscribed the connection to `channel` during the
@@ -347,7 +358,7 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::Config;
-    use crate::machine::{Action, Input, Timer, TransportId};
+    use crate::machine::{Action, EventId, Input, Timer, TransportId};
 
     /// A machine over a websocket that opened; the connect command is 1.
     fn opened() -> (Machine, TransportId) {
@@ -379,6 +390,49 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // Codex on PR #99: a delta in one server-side subscription of a
+    // connect reply must not leave another's publications, emitted by the
+    // same message and withdrawn by the reconnect, among the events the
+    // next connect reply waits for (Block 15).
+    #[test]
+    fn a_delta_in_a_connect_reply_does_not_hold_the_next_connect_reply() {
+        let (mut machine, transport) = opened();
+        machine.handle(Input::StreamOpened(None));
+        let replied = machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","subs":{"a":{"publications":[{"data":{}}]},"b":{"publications":[{"data":"1\n1:x0;","delta":true}]}}}}"#,
+        ));
+        let withdrawn: Vec<EventId> = replied
+            .iter()
+            .filter_map(|action| match action {
+                Action::Withdraw(ids) => Some(ids.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        for action in &replied {
+            if let Action::Emit(event, _) = action
+                && !withdrawn.contains(event)
+            {
+                machine.handle(Input::EventTaken(*event));
+            }
+        }
+        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let next = reconnecting
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a reconnect");
+        machine.handle(Input::TransportOpened(next));
+
+        machine.handle(reply(next, r#"{"id":2,"connect":{"client":"c"}}"#));
+
+        // Handled, not held behind a withdrawn publication.
+        assert_eq!(machine.read_ahead(), (0, 0), "{replied:?}");
     }
 
     #[test]
