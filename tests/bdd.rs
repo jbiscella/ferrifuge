@@ -262,6 +262,34 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     ),
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE", "10"),
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
+    // Clients publish to, and read the history and presence of, channels
+    // without namespace (Block 13b; option names from Centrifugo v6.10.1's
+    // configuration defaults).
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_PRESENCE", "true"),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_CLIENT",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_ANONYMOUS",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_HISTORY_FOR_CLIENT",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_HISTORY_FOR_ANONYMOUS",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PRESENCE_FOR_CLIENT",
+        "true",
+    ),
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PRESENCE_FOR_ANONYMOUS",
+        "true",
+    ),
     // Channels of the `private` namespace need a subscription token
     // (Block 10); an expired, unrefreshed one is ended after 1 s past the
     // server's periodic check (default 25 s). Those of the `rec` namespace

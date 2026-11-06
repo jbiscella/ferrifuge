@@ -1,6 +1,10 @@
 //! Calls the application makes over the client's connection and awaits
 //! (Block 13): their requests, results and errors.
 
+use std::collections::HashMap;
+
+use crate::{ClientInfo, Publication, StreamPosition};
+
 /// What a call asks the server. `#[non_exhaustive]`: later blocks add
 /// methods.
 #[derive(Clone, PartialEq, Eq)]
@@ -13,6 +17,32 @@ pub enum CallRequest {
         /// Raw JSON with the JSON protocol, any bytes with Protobuf.
         data: Vec<u8>,
     },
+    /// A publication to a channel (`client.proto`, `PublishRequest`).
+    Publish {
+        /// The channel.
+        channel: String,
+        /// Raw JSON with the JSON protocol, any bytes with Protobuf.
+        data: Vec<u8>,
+    },
+    /// A channel's history (`client.proto`, `HistoryRequest`).
+    History {
+        /// The channel.
+        channel: String,
+        /// Which publications to return.
+        options: HistoryOptions,
+    },
+    /// The clients subscribed to a channel (`client.proto`,
+    /// `PresenceRequest`).
+    Presence {
+        /// The channel.
+        channel: String,
+    },
+    /// How many clients and users are subscribed to a channel
+    /// (`client.proto`, `PresenceStatsRequest`).
+    PresenceStats {
+        /// The channel.
+        channel: String,
+    },
 }
 
 impl std::fmt::Debug for CallRequest {
@@ -24,8 +54,111 @@ impl std::fmt::Debug for CallRequest {
                 .field("method", method)
                 .field("data", &format_args!("<{} bytes>", data.len()))
                 .finish(),
+            Self::Publish { channel, data } => f
+                .debug_struct("Publish")
+                .field("channel", channel)
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+            Self::History { channel, options } => f
+                .debug_struct("History")
+                .field("channel", channel)
+                .field("options", options)
+                .finish(),
+            Self::Presence { channel } => f
+                .debug_struct("Presence")
+                .field("channel", channel)
+                .finish(),
+            Self::PresenceStats { channel } => f
+                .debug_struct("PresenceStats")
+                .field("channel", channel)
+                .finish(),
         }
     }
+}
+
+impl CallRequest {
+    /// The channel the request is about, if any.
+    pub(crate) fn channel_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Rpc { .. } => None,
+            Self::Publish { channel, .. }
+            | Self::History { channel, .. }
+            | Self::Presence { channel }
+            | Self::PresenceStats { channel } => Some(channel),
+        }
+    }
+}
+
+/// Which publications of a channel's history to return (`client.proto`,
+/// `HistoryRequest`). The default returns none, only the stream's current
+/// position, as centrifuge-js does without options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryOptions {
+    /// At most this many publications; 0 for none, -1 for all. The server
+    /// may cap it.
+    pub limit: i32,
+    /// Only the publications after this position, or before it with
+    /// `reverse`; from the start of the stream (its end with `reverse`)
+    /// when `None`.
+    pub since: Option<StreamPosition>,
+    /// Newest first.
+    pub reverse: bool,
+}
+
+impl HistoryOptions {
+    /// Returns at most `limit` publications: 0 for none, -1 for all.
+    #[must_use]
+    pub fn limit(mut self, limit: i32) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Returns the publications after `position` (before it with
+    /// [`HistoryOptions::reverse`]).
+    #[must_use]
+    pub fn since(mut self, position: StreamPosition) -> Self {
+        self.since = Some(position);
+        self
+    }
+
+    /// Returns the publications newest first.
+    #[must_use]
+    pub fn reverse(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
+    }
+}
+
+/// A channel's history (`client.proto`, `HistoryResult`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HistoryResult {
+    /// The publications asked for, with their exact data.
+    pub publications: Vec<Publication>,
+    /// The stream's current epoch.
+    pub epoch: String,
+    /// The stream's current top offset.
+    pub offset: u64,
+}
+
+/// The clients subscribed to a channel (`client.proto`, `PresenceResult`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PresenceResult {
+    /// The clients, by client id.
+    pub clients: HashMap<String, ClientInfo>,
+}
+
+/// How many clients and users are subscribed to a channel (`client.proto`,
+/// `PresenceStatsResult`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PresenceStatsResult {
+    /// Connections subscribed.
+    pub num_clients: u32,
+    /// Distinct users among them.
+    pub num_users: u32,
 }
 
 /// What a call returned. `#[non_exhaustive]`: later blocks add methods.
@@ -36,6 +169,14 @@ pub enum CallReply {
     /// with the JSON protocol, any bytes with Protobuf; empty when the
     /// server sent none.
     Rpc(Vec<u8>),
+    /// The publication was accepted.
+    Publish,
+    /// A channel's history.
+    History(HistoryResult),
+    /// The clients subscribed to a channel.
+    Presence(PresenceResult),
+    /// How many clients and users are subscribed to a channel.
+    PresenceStats(PresenceStatsResult),
 }
 
 impl std::fmt::Debug for CallReply {
@@ -46,6 +187,23 @@ impl std::fmt::Debug for CallReply {
                 .debug_tuple("Rpc")
                 .field(&format_args!("<{} bytes>", data.len()))
                 .finish(),
+            Self::Publish => f.write_str("Publish"),
+            // Publications and client infos are application data: only
+            // their number is shown.
+            Self::History(history) => f
+                .debug_struct("History")
+                .field(
+                    "publications",
+                    &format_args!("<{}>", history.publications.len()),
+                )
+                .field("epoch", &history.epoch)
+                .field("offset", &history.offset)
+                .finish(),
+            Self::Presence(presence) => f
+                .debug_struct("Presence")
+                .field("clients", &format_args!("<{}>", presence.clients.len()))
+                .finish(),
+            Self::PresenceStats(stats) => f.debug_tuple("PresenceStats").field(stats).finish(),
         }
     }
 }

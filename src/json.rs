@@ -253,6 +253,7 @@ impl<'a> JsonData<'a> {
 }
 
 impl<'a> From<&'a Command> for JsonCommand<'a> {
+    #[allow(clippy::too_many_lines)] // One arm per method.
     fn from(command: &'a Command) -> Self {
         let mut json = Self {
             id: command.id,

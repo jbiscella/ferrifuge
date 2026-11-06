@@ -282,7 +282,11 @@ pub enum SubscriptionTimer {
 /// Timers the machine sets for a call, one per phase: a timer of the phase
 /// the call has left is ignored when it fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CallTimer {
+    /// Deadline for a subscription-level call's subscription to be
+    /// subscribed, while the call waits for it.
+    Subscription,
     /// Deadline for the connection, while the call waits for it.
     Connection,
     /// Deadline for the reply, once the call is sent.

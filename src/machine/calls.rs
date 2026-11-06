@@ -3,18 +3,29 @@
 //! bounded by `Config::timeout`. A reply settles its call when it is read,
 //! ahead of the messages Block 15 holds. Losing the transport fails the
 //! calls sent on it with "connection closed"; entering `disconnected` fails
-//! every call with "disconnected".
+//! every call with "disconnected". A subscription-level call first waits
+//! for its subscription to be subscribed, and fails with "subscription
+//! unsubscribed" when it is not or stops being (centrifuge-js
+//! `subscription.ts` `_methodCall`).
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::{Action, CallId, CallTimer, Machine};
-use crate::wire::{Command, Error, Method, Reply, ReplyResult, RpcRequest};
-use crate::{CallError, CallReply, CallRequest, State, codes};
+use super::{Action, CallId, CallTimer, Machine, SubscriptionId};
+use crate::wire::{
+    ChannelRequest, Command, Error, HistoryRequest, Method, PublishRequest, Reply, ReplyResult,
+    RpcRequest,
+};
+use crate::{
+    CallError, CallReply, CallRequest, HistoryResult, PresenceResult, PresenceStatsResult, State,
+    SubscriptionState, codes,
+};
 
 #[derive(Debug)]
 enum Phase {
     /// Added, not yet started by [`super::Input::Call`].
     Added,
+    /// Waiting for its subscription to be subscribed.
+    Subscribing,
     /// Waiting for the connection.
     Queued,
     /// Sent as the command with this id, waiting for its reply.
@@ -24,6 +35,8 @@ enum Phase {
 #[derive(Debug)]
 struct Call {
     request: CallRequest,
+    /// The subscription of a subscription-level call.
+    subscription: Option<SubscriptionId>,
     phase: Phase,
 }
 
@@ -41,6 +54,7 @@ impl Phase {
     fn timer(&self) -> Option<CallTimer> {
         match self {
             Self::Added => None,
+            Self::Subscribing => Some(CallTimer::Subscription),
             Self::Queued => Some(CallTimer::Connection),
             Self::Sent(_) => Some(CallTimer::Reply),
         }
@@ -59,6 +73,35 @@ impl Machine {
     /// settles it with [`Action::CallSettled`], unless the owner abandons
     /// it with [`super::Input::CallAbandoned`].
     pub fn add_call(&mut self, request: CallRequest) -> CallId {
+        self.insert_call(request, None)
+    }
+
+    /// Adds a call of `subscription`, on its channel, which replaces the
+    /// request's: [`super::Input::Call`] starts it once the subscription is
+    /// subscribed, and it fails with code
+    /// [`codes::error::SUBSCRIPTION_UNSUBSCRIBED`] when the subscription is
+    /// or becomes unsubscribed before it is sent. The machine settles it
+    /// with [`Action::CallSettled`], unless the owner abandons it with
+    /// [`super::Input::CallAbandoned`].
+    pub fn add_subscription_call(
+        &mut self,
+        subscription: SubscriptionId,
+        mut request: CallRequest,
+    ) -> CallId {
+        if let (Some(channel), Some(subscribed)) = (
+            request.channel_mut(),
+            self.subscription_channel(subscription),
+        ) {
+            channel.clone_from(subscribed);
+        }
+        self.insert_call(request, Some(subscription))
+    }
+
+    fn insert_call(
+        &mut self,
+        request: CallRequest,
+        subscription: Option<SubscriptionId>,
+    ) -> CallId {
         let calls = &mut self.calls;
         let id = CallId(calls.next_id);
         calls.next_id += 1;
@@ -66,23 +109,55 @@ impl Machine {
             id,
             Call {
                 request,
+                subscription,
                 phase: Phase::Added,
             },
         );
         id
     }
 
-    /// Starts call `id`: sent at once when connected, otherwise queued
-    /// until the connection is there (centrifuge-js `_methodCall`). A
-    /// transport whose close is read but not yet handled counts as gone:
-    /// the call waits for the next one.
+    /// Starts call `id`. A subscription-level call waits for its
+    /// subscription to be subscribed, or fails at once when it is
+    /// unsubscribed (centrifuge-js `subscription.ts` `_methodCall`).
     pub(super) fn call(&mut self, id: CallId) {
-        let connected = self.state == State::Connected && !self.transport_closing();
-        let Some(call) = self.calls.by_id.get_mut(&id) else {
+        let Some(call) = self.calls.by_id.get(&id) else {
             return;
         };
         if !matches!(call.phase, Phase::Added) {
             return;
+        }
+        match call
+            .subscription
+            .map(|subscription| self.subscription_state(subscription))
+        {
+            None | Some(Some(SubscriptionState::Subscribed)) => self.start_call(id),
+            Some(Some(SubscriptionState::Subscribing)) => {
+                if let Some(call) = self.calls.by_id.get_mut(&id) {
+                    call.phase = Phase::Subscribing;
+                }
+                self.actions.push(Action::SetCallTimer(
+                    id,
+                    CallTimer::Subscription,
+                    self.config.timeout,
+                ));
+            }
+            // Unsubscribed, or removed from the registry.
+            Some(_) => self.settle_call(id, Err(subscription_unsubscribed())),
+        }
+    }
+
+    /// Starts call `id` as a client-level call: sent at once when
+    /// connected, otherwise queued until the connection is there
+    /// (centrifuge-js `_methodCall`). A transport whose close is read but
+    /// not yet handled counts as gone: the call waits for the next one.
+    fn start_call(&mut self, id: CallId) {
+        let connected = self.state == State::Connected && !self.transport_closing();
+        let Some(call) = self.calls.by_id.get_mut(&id) else {
+            return;
+        };
+        if matches!(call.phase, Phase::Subscribing) {
+            self.actions
+                .push(Action::CancelCallTimer(id, CallTimer::Subscription));
         }
         if connected {
             self.send_call(id);
@@ -115,6 +190,25 @@ impl Machine {
             CallRequest::Rpc { method, data } => Method::Rpc(RpcRequest {
                 method: method.clone(),
                 data: data.clone(),
+            }),
+            CallRequest::Publish { channel, data } => Method::Publish(PublishRequest {
+                channel: channel.clone(),
+                data: data.clone(),
+            }),
+            CallRequest::History { channel, options } => Method::History(HistoryRequest {
+                channel: channel.clone(),
+                limit: options.limit,
+                since: options
+                    .since
+                    .as_ref()
+                    .map(|position| (position.offset, position.epoch.clone())),
+                reverse: options.reverse,
+            }),
+            CallRequest::Presence { channel } => Method::Presence(ChannelRequest {
+                channel: channel.clone(),
+            }),
+            CallRequest::PresenceStats { channel } => Method::PresenceStats(ChannelRequest {
+                channel: channel.clone(),
             }),
         };
         self.calls.by_command.insert(command_id, id);
@@ -151,8 +245,38 @@ impl Machine {
         }
     }
 
-    /// A call's deadline passed: waiting for the connection or for the
-    /// reply, it fails with the timeout error, and a queued one is never
+    /// Subscription `id` is subscribed: its calls waiting for it start as
+    /// client-level calls, each phase with a fresh timeout (centrifuge-js
+    /// resolves `_methodCall`, then the client's call starts its own).
+    pub(super) fn subscription_calls_subscribed(&mut self, subscription: SubscriptionId) {
+        for id in self.waiting_calls(subscription) {
+            self.start_call(id);
+        }
+    }
+
+    /// Subscription `id` is unsubscribed: its calls waiting for it fail
+    /// with "subscription unsubscribed"; those already sent go on
+    /// (centrifuge-js `_setUnsubscribed`, `_rejectPromises`).
+    pub(super) fn subscription_calls_unsubscribed(&mut self, subscription: SubscriptionId) {
+        for id in self.waiting_calls(subscription) {
+            self.settle_call(id, Err(subscription_unsubscribed()));
+        }
+    }
+
+    /// The calls waiting for `subscription` to be subscribed, in order.
+    fn waiting_calls(&self, subscription: SubscriptionId) -> Vec<CallId> {
+        self.calls
+            .by_id
+            .iter()
+            .filter(|(_, call)| {
+                call.subscription == Some(subscription) && matches!(call.phase, Phase::Subscribing)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// A call's deadline passed: waiting for its subscription, for the
+    /// connection or for the reply, it fails with the timeout error, and a queued one is never
     /// sent. The timer of a phase the call has left is stale: it fired
     /// before the call moved on, and its input came after.
     pub(super) fn call_timer_fired(&mut self, id: CallId, timer: CallTimer) {
@@ -180,13 +304,17 @@ impl Machine {
     }
 
     /// A reply to a call's command, read or made up for a rejected request:
-    /// it settles the call. A reply without the call's result, error aside,
-    /// breaks the protocol.
+    /// it settles the call. A reply without the result of the call's
+    /// method, error aside, breaks the protocol; RPC and publish results
+    /// may be left out, as their result is empty.
     pub(super) fn call_reply(&mut self, reply: Reply) {
         let Some(&id) = self.calls.by_command.get(&reply.id) else {
             return;
         };
-        let result = match (reply.error, reply.result) {
+        let Some(call) = self.calls.by_id.get(&id) else {
+            return;
+        };
+        let result = match (reply.error, &call.request, reply.result) {
             (
                 Some(Error {
                     code,
@@ -194,11 +322,30 @@ impl Machine {
                     temporary,
                 }),
                 _,
+                _,
             ) => Err(CallError::new(code, message).temporary(temporary)),
-            (None, ReplyResult::Rpc(data)) => Ok(CallReply::Rpc(data)),
-            // An RPC without result data.
-            (None, ReplyResult::Empty) => Ok(CallReply::Rpc(Vec::new())),
-            (None, _) => {
+            (None, CallRequest::Rpc { .. }, ReplyResult::Rpc(data)) => Ok(CallReply::Rpc(data)),
+            (None, CallRequest::Rpc { .. }, ReplyResult::Empty) => Ok(CallReply::Rpc(Vec::new())),
+            (None, CallRequest::Publish { .. }, ReplyResult::Publish | ReplyResult::Empty) => {
+                Ok(CallReply::Publish)
+            }
+            (None, CallRequest::History { .. }, ReplyResult::History(history)) => {
+                Ok(CallReply::History(HistoryResult {
+                    publications: history.publications,
+                    epoch: history.epoch,
+                    offset: history.offset,
+                }))
+            }
+            (None, CallRequest::Presence { .. }, ReplyResult::Presence(clients)) => {
+                Ok(CallReply::Presence(PresenceResult { clients }))
+            }
+            (None, CallRequest::PresenceStats { .. }, ReplyResult::PresenceStats(stats)) => {
+                Ok(CallReply::PresenceStats(PresenceStatsResult {
+                    num_clients: stats.num_clients,
+                    num_users: stats.num_users,
+                }))
+            }
+            (None, _, _) => {
                 self.settle_call(id, Err(connection_closed()));
                 self.reconnect_after_transport_closed();
                 return;
@@ -217,8 +364,9 @@ impl Machine {
     }
 
     /// The client is entering, or stays in, `disconnected`: every call
-    /// started, queued or sent, fails with "disconnected" (Block 13,
-    /// exception for sent calls).
+    /// started, waiting or sent, fails with "disconnected" (Block 13,
+    /// exceptions for sent calls and calls waiting for their
+    /// subscription).
     pub(super) fn fail_calls_disconnected(&mut self) {
         let started: Vec<CallId> = self
             .calls
@@ -251,6 +399,13 @@ impl Machine {
 
 fn connection_closed() -> CallError {
     CallError::new(codes::error::CONNECTION_CLOSED, "connection closed")
+}
+
+fn subscription_unsubscribed() -> CallError {
+    CallError::new(
+        codes::error::SUBSCRIPTION_UNSUBSCRIBED,
+        "subscription unsubscribed",
+    )
 }
 
 #[cfg(test)]
@@ -674,5 +829,203 @@ mod tests {
             )]
         );
         assert_eq!(machine.state(), State::Connected);
+    }
+
+    /// A subscription to "news" on a connected client, its subscribe
+    /// command sent (id 2) and not answered.
+    fn subscribing() -> (Machine, TransportId, SubscriptionId) {
+        let (mut machine, transport) = connected();
+        let subscription = machine
+            .add_subscription(
+                "news".into(),
+                crate::machine::SubscriptionOptions::default(),
+            )
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        (machine, transport, subscription)
+    }
+
+    fn history(machine: &mut Machine, subscription: SubscriptionId) -> (CallId, Vec<Action>) {
+        let id = machine.add_subscription_call(
+            subscription,
+            CallRequest::History {
+                channel: "elsewhere".into(),
+                options: crate::HistoryOptions::default().limit(2),
+            },
+        );
+        let actions = machine.handle(Input::Call(id));
+        (id, actions)
+    }
+
+    #[test]
+    fn a_subscription_call_waits_until_subscribed_then_uses_its_channel() {
+        let (mut machine, transport, subscription) = subscribing();
+        let (id, waiting) = history(&mut machine, subscription);
+
+        let subscribed = machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        assert_eq!(sent_text(&waiting), Vec::<String>::new());
+        assert!(waiting.contains(&Action::SetCallTimer(id, CallTimer::Subscription, TIMEOUT)));
+        assert_eq!(
+            sent_text(&subscribed),
+            [r#"{"id":3,"history":{"channel":"news","limit":2}}"#]
+        );
+        assert!(subscribed.contains(&Action::CancelCallTimer(id, CallTimer::Subscription)));
+        assert!(subscribed.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
+    }
+
+    #[test]
+    fn a_subscription_call_on_an_unsubscribed_subscription_fails_at_once() {
+        let (mut machine, _) = connected();
+        let subscription = machine
+            .add_subscription(
+                "news".into(),
+                crate::machine::SubscriptionOptions::default(),
+            )
+            .unwrap();
+
+        let (id, actions) = history(&mut machine, subscription);
+
+        assert_eq!(sent_text(&actions), Vec::<String>::new());
+        assert_eq!(
+            settled(&actions),
+            [(
+                id,
+                Err(CallError::new(
+                    codes::error::SUBSCRIPTION_UNSUBSCRIBED,
+                    "subscription unsubscribed"
+                ))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_waiting_subscription_call_fails_when_the_subscribe_fails_for_good() {
+        let (mut machine, transport, subscription) = subscribing();
+        let (id, _) = history(&mut machine, subscription);
+
+        let failed = machine.handle(frame(
+            transport,
+            r#"{"id":2,"error":{"code":403,"message":"closed"}}"#,
+        ));
+
+        assert_eq!(sent_text(&failed), Vec::<String>::new());
+        assert_eq!(
+            error_code(&failed),
+            Some(codes::error::SUBSCRIPTION_UNSUBSCRIBED)
+        );
+        assert!(failed.contains(&Action::CancelCallTimer(id, CallTimer::Subscription)));
+    }
+
+    #[test]
+    fn a_subscription_call_sent_goes_on_when_the_subscription_ends() {
+        let (mut machine, transport, subscription) = subscribing();
+        machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+        let (id, _) = history(&mut machine, subscription);
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(subscription));
+        let replied = machine.handle(frame(
+            transport,
+            r#"{"id":3,"history":{"epoch":"e","offset":7}}"#,
+        ));
+
+        assert_eq!(settled(&unsubscribed), []);
+        assert_eq!(
+            settled(&replied),
+            [(
+                id,
+                Ok(CallReply::History(HistoryResult {
+                    publications: Vec::new(),
+                    epoch: "e".into(),
+                    offset: 7
+                }))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_subscription_call_waiting_too_long_times_out() {
+        let (mut machine, _, subscription) = subscribing();
+        let (id, _) = history(&mut machine, subscription);
+
+        let stale = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
+        let fired = machine.handle(Input::CallTimerFired(id, CallTimer::Subscription));
+
+        assert_eq!(stale, []);
+        assert_eq!(error_code(&fired), Some(codes::error::TIMEOUT));
+    }
+
+    #[test]
+    fn disconnect_fails_a_call_waiting_for_its_subscription() {
+        let (mut machine, _, subscription) = subscribing();
+        let (_, _) = history(&mut machine, subscription);
+
+        let actions = machine.handle(Input::Disconnect);
+
+        assert_eq!(error_code(&actions), Some(codes::error::DISCONNECTED));
+    }
+
+    #[test]
+    fn a_reply_with_another_method_s_result_breaks_the_protocol() {
+        let (mut machine, transport, subscription) = subscribing();
+        machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+        let (_, _) = history(&mut machine, subscription);
+
+        let actions = machine.handle(frame(transport, r#"{"id":3,"rpc":{"data":1}}"#));
+
+        assert_eq!(error_code(&actions), Some(codes::error::CONNECTION_CLOSED));
+        assert_eq!(machine.state(), State::Connecting);
+    }
+
+    #[test]
+    fn each_method_gets_its_own_result() {
+        let (mut machine, transport) = connected();
+        let calls: Vec<CallId> = [
+            CallRequest::Publish {
+                channel: "news".into(),
+                data: b"{}".to_vec(),
+            },
+            CallRequest::Presence {
+                channel: "news".into(),
+            },
+            CallRequest::PresenceStats {
+                channel: "news".into(),
+            },
+        ]
+        .into_iter()
+        .map(|request| {
+            let id = machine.add_call(request);
+            machine.handle(Input::Call(id));
+            id
+        })
+        .collect();
+
+        let actions = machine.handle(frame(
+            transport,
+            concat!(
+                r#"{"id":2,"publish":{}}"#,
+                "\n",
+                r#"{"id":3,"presence":{"presence":{"c":{"client":"c","user":"u"}}}}"#,
+                "\n",
+                r#"{"id":4,"presence_stats":{"num_clients":1,"num_users":1}}"#,
+            ),
+        ));
+
+        let settled = settled(&actions);
+        assert_eq!(settled[0], (calls[0], Ok(CallReply::Publish)));
+        let (_, Ok(CallReply::Presence(presence))) = &settled[1] else {
+            panic!("{settled:?}");
+        };
+        assert_eq!(presence.clients["c"].user, "u");
+        assert_eq!(
+            settled[2],
+            (
+                calls[2],
+                Ok(CallReply::PresenceStats(PresenceStatsResult {
+                    num_clients: 1,
+                    num_users: 1
+                }))
+            )
+        );
     }
 }
