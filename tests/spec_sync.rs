@@ -20,8 +20,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[];
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
     // Block 16, claimed by its runners as each sub-increment lands.
-    "Seeded chaos with subscriptions on the core keeps every invariant",
-    "The core runner reports a planted delivery fault",
     "Seeded chaos on the tokio client keeps the invariants",
     "The adapter runner reports a planted fault",
 ];
