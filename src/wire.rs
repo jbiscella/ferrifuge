@@ -30,6 +30,8 @@ pub(crate) enum Method {
     History(HistoryRequest),
     Presence(ChannelRequest),
     PresenceStats(ChannelRequest),
+    /// `SendRequest`; sent with id 0, as no reply follows.
+    Send(Vec<u8>),
     /// The empty command answering a server ping; sent with id 0.
     Pong,
 }
@@ -251,6 +253,9 @@ pub(crate) enum Push {
         code: u32,
         reason: String,
     },
+    /// An asynchronous message (`Message.data`): raw JSON with the JSON
+    /// protocol, any bytes with Protobuf.
+    Message(Vec<u8>),
     Unsupported,
 }
 

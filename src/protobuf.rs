@@ -174,6 +174,9 @@ impl From<&Command> for pb::Command {
                     channel: channel.clone(),
                 });
             }
+            Method::Send(data) => {
+                pb.send = Some(pb::SendRequest { data: data.clone() });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -287,6 +290,8 @@ impl From<pb::Reply> for Reply {
                     code,
                     reason,
                 }
+            } else if let Some(message) = push.message {
+                Push::Message(message.data)
             } else {
                 Push::Unsupported
             })
@@ -500,6 +505,32 @@ mod tests {
                 num_clients: 2,
                 num_users: 1
             })
+        );
+    }
+
+    #[test]
+    fn encodes_send_and_decodes_a_message_push_with_binary_data() {
+        let frame = encode(&[Command {
+            id: 0,
+            method: Method::Send(vec![0xff, 0x00, 0xfe]),
+        }]);
+        let replies = decode(&frame_of(&[pb::Reply {
+            push: Some(pb::Push {
+                message: Some(pb::Message {
+                    data: vec![0xff, 0x00, 0xfe],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]))
+        .unwrap();
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+        assert_eq!(command.id, 0);
+        assert_eq!(command.send.unwrap().data, [0xff, 0x00, 0xfe]);
+        assert_eq!(
+            replies[0].result,
+            ReplyResult::Push(Push::Message(vec![0xff, 0x00, 0xfe]))
         );
     }
 
