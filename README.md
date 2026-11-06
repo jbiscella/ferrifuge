@@ -138,7 +138,13 @@ still answered and commands still sent. The server's handling of slow
 clients then decides; on channels with history and recovery, recovery
 delivers what was missed, exactly once, within the server's recovery limit.
 On channels without recovery a slow consumer can lose publications, as with
-any disconnect. A stream holding 256 events not taken gets no further
+any disconnect. A recovery reply is queued whole on the server, so one larger
+than Centrifugo's `client.queue_max_size` (1 MiB by default) is answered with
+3008 "slow" however fast the client reads, and the client reconnects about
+every second until the backlog passes `client.recovery_max_publication_limit`
+or the history expires: keep `client.queue_max_size` above
+`client.recovery_max_publication_limit` times the largest publication,
+summed over the server-side subscriptions one connect recovers. A stream holding 256 events not taken gets no further
 `error` events, which change no state, so retries against a server that is
 down do not grow it; events caused by the application's own calls, such as
 cycling `connect()` and `disconnect()`, still go to it.
