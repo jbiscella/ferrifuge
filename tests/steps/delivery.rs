@@ -765,8 +765,11 @@ fn not_connecting_with(world: &mut ClientWorld, code: u32) {
             event,
             ClientEvent::Connecting { code: of, .. } if *of == code
         )),
-        "{:?}",
-        world.elapsed_events
+        // The new connections tell whether the reconnect happened in the
+        // interval or before it, its events read only in the interval.
+        "{:?}, {} new connections in the interval",
+        world.elapsed_events,
+        world.elapsed_new_connections
     );
 }
 
