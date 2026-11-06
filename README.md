@@ -62,13 +62,14 @@ Available now:
   subscription-level, which wait for the connection, and for the
   subscription, when made before them;
 - `send` to the server, and the server's asynchronous messages as
-  `Message` events.
+  `Message` events;
+- a bound on the bytes of calls waiting to be written
+  (`Config::write_queue_bytes`).
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| a size bound for calls waiting to be written | Block 13d |
 | join and leave events | Block 13e |
 
 ## Usage
@@ -357,11 +358,16 @@ flag, or with a client-side code:
 
 | Code | When |
 |---|---|
-| 1 `TIMEOUT` | the subscription not subscribed, no connection, or no reply, within `Config::timeout` |
+| 1 `TIMEOUT` | the subscription not subscribed, no connection, no room in the write queue, or no reply, within `Config::timeout` |
 | 3 `DISCONNECTED` | the client entered `disconnected`: `disconnect()`, a terminal disconnect code or a denied token |
 | 7 `SUBSCRIPTION_UNSUBSCRIBED` | a subscription's call, before it was sent: the subscription is or became unsubscribed |
 | 10 `TRANSPORT_WRITE` | the server refused the HTTP request carrying the call as too large (413) |
 | 11 `CONNECTION_CLOSED` | the transport the call was sent on closed before the reply |
+
+Calls go out in the order they were made, while their bytes fit
+`Config::write_queue_bytes` with those handed to the transport and not yet
+written; the others wait for room, so an application that calls faster than
+the connection writes is held back instead of growing the client's memory.
 
 A reply settles its call as soon as it is read, even while the application
 has not taken earlier events, so call results are not ordered with events.
@@ -444,6 +450,7 @@ server's asynchronous messages, exactly as received.
 | `reconnect_jitter_window` | 0 | Upper bound of a random delay added to the first reconnect after losing a connection, so that many clients disconnected at once do not reconnect at once |
 | `read_ahead_messages` | 256 | Most messages read and not yet handled while the application has not taken earlier events; then the client stops reading the connection, holding the server back instead of buffering |
 | `read_ahead_bytes` | 4 MiB | Most bytes of those messages; a single larger message is still read when none waits |
+| `write_queue_bytes` | 4 MiB | Most bytes of the application's calls handed to the transport and not yet written; a call that does not fit waits for room, for at most `timeout`, and a single larger call goes out when nothing waits. The client's own commands are not counted |
 
 ### Cargo features
 
