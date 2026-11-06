@@ -270,6 +270,13 @@ const IMPLEMENTED: &[&str] = &[
     "A call waiting for room keeps its deadline when the transport is lost",
     "A write queue limit of 0 is rejected",
     "Sends beyond the write queue go out as earlier ones are written",
+    // Block 13, sub-increment 13e: join and leave.
+    "Join and leave of other clients are delivered with the join_leave option",
+    "Without the join_leave option no join or leave event is delivered",
+    "The join_leave option is sent on subscribe and on resubscribe",
+    "Join and leave pushes of a server-side subscription are delivered",
+    "A join push for a subscription that is not subscribed is dropped",
+    "Join and leave events not taken before unsubscribe are withdrawn",
 ];
 
 /// Server configuration of @A scenarios.
@@ -300,6 +307,9 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // without namespace (Block 13b; option names from Centrifugo v6.10.1's
     // configuration defaults).
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_PRESENCE", "true"),
+    // Join and leave pushes, for clients that ask (Block 13e): not forced,
+    // and only to clients allowed to see presence.
+    ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_JOIN_LEAVE", "true"),
     (
         "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_CLIENT",
         "true",

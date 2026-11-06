@@ -239,6 +239,18 @@ fn the_fake_server_has_sent(world: &mut ClientWorld, list: String, channel: Stri
     }
 }
 
+/// They count as sent, for "the client holds them not yet taken".
+#[given(regex = r#"^the fake server has pushed a join and a leave for channel "(\w+)"$"#)]
+fn the_fake_server_has_pushed_a_join_and_a_leave(world: &mut ClientWorld, channel: String) {
+    for kind in ["join", "leave"] {
+        world.fake().send(
+            &serde_json::json!({"push": {"channel": channel, kind: {"info": {"client": "c2", "user": "u2"}}}})
+                .to_string(),
+        );
+        world.delivery.sent.push(0);
+    }
+}
+
 #[given(
     regex = r"^the application has taken only the publication at offset (\d+) from the subscription's stream$"
 )]
@@ -481,7 +493,9 @@ async fn no_server_side_publication_before_connected(world: &mut ClientWorld) {
     );
 }
 
-#[then(r#"the subscription's stream yields "unsubscribed" and no publication"#)]
+#[then(
+    regex = r#"^the subscription's stream yields "unsubscribed" and no (?:publication|"join" or "leave" event)$"#
+)]
 async fn yields_unsubscribed_and_no_publication(world: &mut ClientWorld) {
     let event = next_subscription_event(world).await;
     assert!(
@@ -495,7 +509,12 @@ async fn yields_unsubscribed_and_no_publication(world: &mut ClientWorld) {
         .expect("the subscription's stream");
     while let Ok(Some(event)) = tokio::time::timeout(QUIET, stream.next()).await {
         assert!(
-            !matches!(event, SubscriptionEvent::Publication(_)),
+            !matches!(
+                event,
+                SubscriptionEvent::Publication(_)
+                    | SubscriptionEvent::Join(_)
+                    | SubscriptionEvent::Leave(_)
+            ),
             "{event:?}"
         );
     }
