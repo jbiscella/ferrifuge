@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::wire::{
-    Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
+    ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, HistoryRequest,
+    HistoryResult, Method, PresenceStatsResult, PublishRequest, Push, RefreshRequest,
     RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
     SubscribeResult, UnsubscribeRequest,
 };
@@ -127,6 +128,14 @@ struct JsonCommand<'a> {
     sub_refresh: Option<JsonSubRefreshRequest<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rpc: Option<JsonRpcRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish: Option<JsonPublishRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<JsonHistoryRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence: Option<JsonChannelRequest<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_stats: Option<JsonChannelRequest<'a>>,
 }
 
 #[derive(Serialize)]
@@ -195,6 +204,36 @@ struct JsonRpcRequest<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
     method: &'a str,
     data: JsonData<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonPublishRequest<'a> {
+    channel: &'a str,
+    data: JsonData<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonHistoryRequest<'a> {
+    channel: &'a str,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    limit: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<JsonStreamPosition<'a>>,
+    #[serde(skip_serializing_if = "is_false")]
+    reverse: bool,
+}
+
+/// A `StreamPosition`: its offset is always sent, as centrifuge-js does.
+#[derive(Serialize)]
+struct JsonStreamPosition<'a> {
+    offset: u64,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    epoch: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonChannelRequest<'a> {
+    channel: &'a str,
 }
 
 /// Application data, embedded as the JSON it is. Bytes that are not JSON
@@ -286,6 +325,34 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     data: JsonData::new(data),
                 });
             }
+            Method::Publish(PublishRequest { channel, data }) => {
+                json.publish = Some(JsonPublishRequest {
+                    channel,
+                    data: JsonData::new(data),
+                });
+            }
+            Method::History(HistoryRequest {
+                channel,
+                limit,
+                since,
+                reverse,
+            }) => {
+                json.history = Some(JsonHistoryRequest {
+                    channel,
+                    limit: *limit,
+                    since: since.as_ref().map(|(offset, epoch)| JsonStreamPosition {
+                        offset: *offset,
+                        epoch,
+                    }),
+                    reverse: *reverse,
+                });
+            }
+            Method::Presence(ChannelRequest { channel }) => {
+                json.presence = Some(JsonChannelRequest { channel });
+            }
+            Method::PresenceStats(ChannelRequest { channel }) => {
+                json.presence_stats = Some(JsonChannelRequest { channel });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -295,6 +362,11 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
 fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+fn is_zero_i32(n: &i32) -> bool {
     *n == 0
 }
 
@@ -357,6 +429,40 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                 result = Some(ReplyResult::Rpc(
                     rpc.data.as_deref().map(raw_bytes).unwrap_or_default(),
                 ));
+            }
+            "publish" => {
+                // An object, even empty: `null` or a scalar is no result.
+                field::<JsonUnsubscribeResult>(&value)?;
+                result = Some(ReplyResult::Publish);
+            }
+            "history" => {
+                let history: JsonHistoryResult = field(&value)?;
+                result = Some(ReplyResult::History(HistoryResult {
+                    publications: history
+                        .publications
+                        .into_iter()
+                        .map(Publication::from)
+                        .collect(),
+                    epoch: history.epoch,
+                    offset: history.offset,
+                }));
+            }
+            "presence" => {
+                let presence: JsonPresenceResult = field(&value)?;
+                result = Some(ReplyResult::Presence(
+                    presence
+                        .presence
+                        .into_iter()
+                        .map(|(client, info)| (client, info.into()))
+                        .collect(),
+                ));
+            }
+            "presence_stats" => {
+                let stats: JsonPresenceStatsResult = field(&value)?;
+                result = Some(ReplyResult::PresenceStats(PresenceStatsResult {
+                    num_clients: stats.num_clients,
+                    num_users: stats.num_users,
+                }));
             }
             "push" => result = Some(ReplyResult::Push(field::<JsonPush>(&value)?.into())),
             _ => unknown = true,
@@ -482,6 +588,30 @@ impl From<JsonSubscribeResult> for SubscribeResult {
 struct JsonUnsubscribeResult {}
 
 #[derive(Deserialize)]
+struct JsonHistoryResult {
+    #[serde(default)]
+    publications: Vec<JsonPublication>,
+    #[serde(default)]
+    epoch: String,
+    #[serde(default)]
+    offset: u64,
+}
+
+#[derive(Deserialize)]
+struct JsonPresenceResult {
+    #[serde(default)]
+    presence: HashMap<String, JsonClientInfo>,
+}
+
+#[derive(Deserialize)]
+struct JsonPresenceStatsResult {
+    #[serde(default)]
+    num_clients: u32,
+    #[serde(default)]
+    num_users: u32,
+}
+
+#[derive(Deserialize)]
 struct JsonRpcResult {
     #[serde(default, deserialize_with = "present")]
     data: Option<Box<RawValue>>,
@@ -557,13 +687,19 @@ impl From<JsonPublication> for Publication {
                 .unwrap_or_default(),
             offset: (publication.offset > 0).then_some(publication.offset),
             tags: publication.tags,
-            info: publication.info.map(|info| ClientInfo {
-                client: info.client,
-                user: info.user,
-                conn_info: info.conn_info.as_deref().map(raw_bytes),
-                chan_info: info.chan_info.as_deref().map(raw_bytes),
-            }),
+            info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
+        }
+    }
+}
+
+impl From<JsonClientInfo> for ClientInfo {
+    fn from(info: JsonClientInfo) -> Self {
+        Self {
+            client: info.client,
+            user: info.user,
+            conn_info: info.conn_info.as_deref().map(raw_bytes),
+            chan_info: info.chan_info.as_deref().map(raw_bytes),
         }
     }
 }
@@ -663,6 +799,88 @@ mod tests {
             ReplyResult::Rpc(br#"{"b": 1.0,  "a":2}"#.to_vec())
         );
         assert_eq!(replies[1].result, ReplyResult::Rpc(Vec::new()));
+    }
+
+    #[test]
+    fn encodes_publish_history_presence_and_presence_stats() {
+        let commands = [
+            Method::Publish(PublishRequest {
+                channel: "news".into(),
+                data: br#"{"text":"hi"}"#.to_vec(),
+            }),
+            Method::History(HistoryRequest {
+                channel: "news".into(),
+                limit: 2,
+                since: Some((1, "e".into())),
+                reverse: true,
+            }),
+            Method::History(HistoryRequest {
+                channel: "news".into(),
+                ..HistoryRequest::default()
+            }),
+            Method::Presence(ChannelRequest {
+                channel: "news".into(),
+            }),
+            Method::PresenceStats(ChannelRequest {
+                channel: "news".into(),
+            }),
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(method, id)| Command { id, method })
+        .collect::<Vec<_>>();
+
+        let frame = String::from_utf8(encode(&commands)).unwrap();
+
+        assert_eq!(
+            frame.lines().collect::<Vec<_>>(),
+            [
+                r#"{"id":1,"publish":{"channel":"news","data":{"text":"hi"}}}"#,
+                r#"{"id":2,"history":{"channel":"news","limit":2,"since":{"offset":1,"epoch":"e"},"reverse":true}}"#,
+                r#"{"id":3,"history":{"channel":"news"}}"#,
+                r#"{"id":4,"presence":{"channel":"news"}}"#,
+                r#"{"id":5,"presence_stats":{"channel":"news"}}"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_publish_history_presence_and_presence_stats_results() {
+        let replies = decode(
+            concat!(
+                r#"{"id":1,"publish":{}}"#,
+                "\n",
+                r#"{"id":2,"history":{"publications":[{"data":{"b": 1.0,  "a":2},"offset":3}],"epoch":"e","offset":3}}"#,
+                "\n",
+                r#"{"id":3,"presence":{"presence":{"c1":{"user":"u1","client":"c1","conn_info":{"x":1},"chan_info":{"y":2}}}}}"#,
+                "\n",
+                r#"{"id":4,"presence_stats":{"num_clients":2,"num_users":1}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(replies[0].result, ReplyResult::Publish);
+        let ReplyResult::History(history) = &replies[1].result else {
+            panic!("{:?}", replies[1]);
+        };
+        assert_eq!((history.epoch.as_str(), history.offset), ("e", 3));
+        assert_eq!(history.publications[0].data, br#"{"b": 1.0,  "a":2}"#);
+        assert_eq!(history.publications[0].offset, Some(3));
+        let ReplyResult::Presence(presence) = &replies[2].result else {
+            panic!("{:?}", replies[2]);
+        };
+        let client = &presence["c1"];
+        assert_eq!((client.user.as_str(), client.client.as_str()), ("u1", "c1"));
+        assert_eq!(client.conn_info.as_deref(), Some(&br#"{"x":1}"#[..]));
+        assert_eq!(client.chan_info.as_deref(), Some(&br#"{"y":2}"#[..]));
+        assert_eq!(
+            replies[3].result,
+            ReplyResult::PresenceStats(PresenceStatsResult {
+                num_clients: 2,
+                num_users: 1
+            })
+        );
     }
 
     #[test]
@@ -825,8 +1043,7 @@ mod tests {
     #[test]
     fn unknown_results_and_pushes_are_unsupported_not_errors() {
         let replies =
-            decode(b"{\"id\":5,\"presence\":{\"presence\":{}}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}")
-                .unwrap();
+            decode(b"{\"id\":5,\"ping\":{}}\n{\"push\":{\"channel\":\"c\",\"join\":{}}}").unwrap();
 
         assert_eq!(replies[0].result, ReplyResult::Unsupported);
         assert_eq!(replies[1].result, ReplyResult::Push(Push::Unsupported));

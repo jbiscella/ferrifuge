@@ -8,7 +8,8 @@ use prost::Message as _;
 
 use crate::protocol as pb;
 use crate::wire::{
-    Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
+    ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, HistoryRequest,
+    HistoryResult, Method, PresenceStatsResult, PublishRequest, Push, RefreshRequest,
     RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
     SubscribeResult, UnsubscribeRequest,
 };
@@ -139,6 +140,39 @@ impl From<&Command> for pb::Command {
                     method: method.clone(),
                 });
             }
+            Method::Publish(PublishRequest { channel, data }) => {
+                pb.publish = Some(pb::PublishRequest {
+                    channel: channel.clone(),
+                    data: data.clone(),
+                    ..pb::PublishRequest::default()
+                });
+            }
+            Method::History(HistoryRequest {
+                channel,
+                limit,
+                since,
+                reverse,
+            }) => {
+                pb.history = Some(pb::HistoryRequest {
+                    channel: channel.clone(),
+                    limit: *limit,
+                    since: since.as_ref().map(|(offset, epoch)| pb::StreamPosition {
+                        offset: *offset,
+                        epoch: epoch.clone(),
+                    }),
+                    reverse: *reverse,
+                });
+            }
+            Method::Presence(ChannelRequest { channel }) => {
+                pb.presence = Some(pb::PresenceRequest {
+                    channel: channel.clone(),
+                });
+            }
+            Method::PresenceStats(ChannelRequest { channel }) => {
+                pb.presence_stats = Some(pb::PresenceStatsRequest {
+                    channel: channel.clone(),
+                });
+            }
             // A pong is the empty command: no request field.
             Method::Pong => {}
         }
@@ -201,6 +235,31 @@ impl From<pb::Reply> for Reply {
             })
         } else if let Some(rpc) = reply.rpc {
             ReplyResult::Rpc(rpc.data)
+        } else if reply.publish.is_some() {
+            ReplyResult::Publish
+        } else if let Some(history) = reply.history {
+            ReplyResult::History(HistoryResult {
+                publications: history
+                    .publications
+                    .into_iter()
+                    .map(Publication::from)
+                    .collect(),
+                epoch: history.epoch,
+                offset: history.offset,
+            })
+        } else if let Some(presence) = reply.presence {
+            ReplyResult::Presence(
+                presence
+                    .presence
+                    .into_iter()
+                    .map(|(client, info)| (client, info.into()))
+                    .collect(),
+            )
+        } else if let Some(stats) = reply.presence_stats {
+            ReplyResult::PresenceStats(PresenceStatsResult {
+                num_clients: stats.num_clients,
+                num_users: stats.num_users,
+            })
         } else if let Some(push) = reply.push {
             ReplyResult::Push(if let Some(publication) = push.r#pub {
                 Push::Publication {
@@ -250,11 +309,18 @@ impl From<pb::Reply> for Reply {
 /// Whether the reply carries a result of a method the client does not
 /// implement yet.
 fn has_other_result(reply: &pb::Reply) -> bool {
-    reply.publish.is_some()
-        || reply.presence.is_some()
-        || reply.presence_stats.is_some()
-        || reply.history.is_some()
-        || reply.ping.is_some()
+    reply.ping.is_some()
+}
+
+impl From<pb::ClientInfo> for ClientInfo {
+    fn from(info: pb::ClientInfo) -> Self {
+        Self {
+            client: info.client,
+            user: info.user,
+            conn_info: (!info.conn_info.is_empty()).then_some(info.conn_info),
+            chan_info: (!info.chan_info.is_empty()).then_some(info.chan_info),
+        }
+    }
 }
 
 impl From<pb::Publication> for Publication {
@@ -263,12 +329,7 @@ impl From<pb::Publication> for Publication {
             data: publication.data,
             offset: (publication.offset > 0).then_some(publication.offset),
             tags: publication.tags,
-            info: publication.info.map(|info| ClientInfo {
-                client: info.client,
-                user: info.user,
-                conn_info: (!info.conn_info.is_empty()).then_some(info.conn_info),
-                chan_info: (!info.chan_info.is_empty()).then_some(info.chan_info),
-            }),
+            info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
         }
     }
@@ -321,6 +382,123 @@ mod tests {
         assert_eq!((command.id, rpc.method.as_str()), (4, "bin"));
         assert_eq!(rpc.data, [0xff, 0x00, 0xfe]);
         assert_eq!(replies[0].result, ReplyResult::Rpc(vec![0xfe, 0x00, 0xff]));
+    }
+
+    #[test]
+    fn encodes_publish_history_presence_and_presence_stats_and_decodes_their_results() {
+        let frame = encode(&[
+            Command {
+                id: 1,
+                method: Method::Publish(PublishRequest {
+                    channel: "news".into(),
+                    data: vec![0xff, 0x00, 0xfe],
+                }),
+            },
+            Command {
+                id: 2,
+                method: Method::History(HistoryRequest {
+                    channel: "news".into(),
+                    limit: 2,
+                    since: Some((1, "e".into())),
+                    reverse: true,
+                }),
+            },
+            Command {
+                id: 3,
+                method: Method::Presence(ChannelRequest {
+                    channel: "news".into(),
+                }),
+            },
+            Command {
+                id: 4,
+                method: Method::PresenceStats(ChannelRequest {
+                    channel: "news".into(),
+                }),
+            },
+        ]);
+        let replies = decode(&frame_of(&[
+            pb::Reply {
+                id: 1,
+                publish: Some(pb::PublishResult::default()),
+                ..Default::default()
+            },
+            pb::Reply {
+                id: 2,
+                history: Some(pb::HistoryResult {
+                    publications: vec![pb::Publication {
+                        data: vec![0xfe, 0x00, 0xff],
+                        offset: 3,
+                        ..Default::default()
+                    }],
+                    epoch: "e".into(),
+                    offset: 3,
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                id: 3,
+                presence: Some(pb::PresenceResult {
+                    presence: [(
+                        "c1".to_owned(),
+                        pb::ClientInfo {
+                            user: "u1".into(),
+                            client: "c1".into(),
+                            conn_info: vec![1],
+                            chan_info: Vec::new(),
+                        },
+                    )]
+                    .into(),
+                }),
+                ..Default::default()
+            },
+            pb::Reply {
+                id: 4,
+                presence_stats: Some(pb::PresenceStatsResult {
+                    num_clients: 2,
+                    num_users: 1,
+                }),
+                ..Default::default()
+            },
+        ]))
+        .unwrap();
+
+        let mut rest = frame.as_slice();
+        let commands: Vec<pb::Command> = (0..4)
+            .map(|_| pb::Command::decode_length_delimited(&mut rest).unwrap())
+            .collect();
+        assert_eq!(
+            commands[0].publish.as_ref().unwrap().data,
+            [0xff, 0x00, 0xfe]
+        );
+        let history = commands[1].history.as_ref().unwrap();
+        assert_eq!((history.limit, history.reverse), (2, true));
+        assert_eq!(
+            history.since,
+            Some(pb::StreamPosition {
+                offset: 1,
+                epoch: "e".into()
+            })
+        );
+        assert_eq!(commands[2].presence.as_ref().unwrap().channel, "news");
+        assert_eq!(commands[3].presence_stats.as_ref().unwrap().channel, "news");
+        assert_eq!(replies[0].result, ReplyResult::Publish);
+        let ReplyResult::History(result) = &replies[1].result else {
+            panic!("{:?}", replies[1]);
+        };
+        assert_eq!(result.publications[0].data, [0xfe, 0x00, 0xff]);
+        assert_eq!((result.epoch.as_str(), result.offset), ("e", 3));
+        let ReplyResult::Presence(presence) = &replies[2].result else {
+            panic!("{:?}", replies[2]);
+        };
+        assert_eq!(presence["c1"].conn_info.as_deref(), Some(&[1][..]));
+        assert_eq!(presence["c1"].chan_info, None);
+        assert_eq!(
+            replies[3].result,
+            ReplyResult::PresenceStats(PresenceStatsResult {
+                num_clients: 2,
+                num_users: 1
+            })
+        );
     }
 
     #[test]
@@ -552,7 +730,7 @@ mod tests {
         let frame = frame_of(&[
             pb::Reply {
                 id: 5,
-                presence: Some(pb::PresenceResult::default()),
+                ping: Some(pb::PingResult::default()),
                 ..Default::default()
             },
             pb::Reply {
