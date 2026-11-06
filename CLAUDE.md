@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–13 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–15 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -177,7 +177,8 @@ Defaults (from centrifuge-js README): `minReconnectDelay` 500 ms, `maxReconnectD
 
 Verified (centrifuge-js `163dcba`, `src/utils.ts` `backoff`, `src/centrifuge.ts` `_getReconnectDelay`, `_startConnecting`, `_connectResponse`):
 - delay for attempt `n` (0-based, `n` capped at 31) = `min(max, min + rand(0, min(max, min * 2^n)))`, so a delay is never below `min`;
-- the attempt counter increments each time a delay is computed and resets to 0 when a connect reply arrives over websocket;
+- the attempt counter increments each time a delay is computed and resets to 0 when a connect reply arrives over websocket; Ferrifuge undoes that reset for a connection the server closes with 3008 "slow" before a server ping is read on it (Block 15, "Backoff after 3008"; diverges from centrifuge-js on purpose);
+- `connect()` resets the attempt counter to 0 (centrifuge-js 63ed73e, `centrifuge.ts:479`);
 - the first attempt after `connect()` is immediate; delays apply to reconnects.
 
 ```gherkin
@@ -1913,7 +1914,7 @@ Feature: Client commands
 
 ## Planned after Block 13 (owner decisions, 2026-11-04)
 
-Each becomes a block with its value clause and scenarios when its turn comes; the owner sets the order.
+The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (backoff after 3008), then the validation harness, then centrifuge-js parity, then the batching API. Each becomes a block with its value clause and scenarios when its turn comes.
 
 - **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js).
 - **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome.
@@ -2067,7 +2068,8 @@ Feature: Footprint, performance and fleet behaviour
 - **Delivered means taken.** A publication counts as delivered only when the `next()` of its stream returns it; only then does its stream position move, for client-side and server-side subscriptions alike (Blocks 11, 12). Exactly-once delivery follows on channels with history and recovery while the backlog stays within the server's recovery limit (Centrifugo `client.recovery_max_publication_limit`, default 300; past it recovery fails and `subscribed` reports `recovered` false).
 - **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command.
 - **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
-- **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads; the next connect asks for the same backlog, and a connect reply resets the backoff (Block 2), so the client reconnects about every second until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers (Centrifugo v6.10.1, `writer.go`).
+- **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads, and the queued reply is dropped (Centrifugo v6.10.1: centrifuge `writer.go` `enqueue`, `client.go` `writeEncodedCommandReply`; a 3008 close does not flush the queue). Each reconnect asks for the same backlog, so the client keeps reconnecting, its backoff growing up to `max_reconnect_delay` ("Backoff after 3008"; a connect reply that is itself dropped resets nothing), until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers.
+- **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.)
 - **Timers keep running** while the application holds events, with two pauses. The no-ping deadline pauses while the client has stopped reading because the read-ahead is full, and restarts in full when reading resumes; without this pause an application stuck with a full read-ahead would make the client reconnect with code 2 about every 35 s, recovering a full read-ahead each time. A reply deadline (connect, refresh, subscribe, unsubscribe, sub_refresh) pauses while its reply has been read but waits to be handled.
 - **One active stream per object.** The client and each subscription have one active stream. A second `events()` call ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
 - **No stream, no hold-up.** An object whose stream was never requested, or was dropped, takes its events at once: they count as delivered and positions move, events not yet taken included (centrifuge-rust §9.4: "a dropped stream acks like an unregistered handler"); so an application that needs every event, and exactly-once delivery on recoverable channels, takes the stream before calling connect() or subscribe(): events emitted before the first events() call count as delivered (documented, with the README examples in that order).
@@ -2085,6 +2087,7 @@ Feature: Footprint, performance and fleet behaviour
 | 15a | delivered means taken, withdrawal, one active stream | "Publications not taken before disconnect are recovered on the next connect", "Server-side publications not taken before disconnect are recovered on the next connect", "Publications not taken before unsubscribe are withdrawn", "A second events() call takes over the subscription's stream", "A second events() call takes over the client's stream", "A cancelled read loses no publication", "Publications of a subscription without a stream do not hold the connection" |
 | 15b | in-order handling, bounded read-ahead, timers while held | "The server closing the connection is handled only after the publications before it are taken", "A state change not taken holds the messages of the next connection", "A stream that is not read stops the client reading after 256 items", "The read-ahead also stops at 4 MiB", "An item larger than the read-ahead budget is still delivered", "A read-ahead limit of 0 is rejected", "Pings are answered while a stream is not read", "A full read-ahead does not make the client report missing pings", "A subscribe reply waiting behind a publication not taken does not time out", "The connection token is refreshed while a stream is not read", "A slow consumer on a channel with history and recovery loses no publication" |
 | 15c | errors past 256 | "A client stream not read keeps every state change but drops errors past 256 untaken events", "A subscription stream not read drops errors past 256 untaken events" |
+| 15d | backoff after 3008 | "Reconnect delays keep growing while the server closes each connection with 3008", "A Disconnect push with 3008 keeps the backoff growing over an emulated transport", "A server ping read before 3008 lets the reset stand", "A close with another code lets the reset stand" |
 
 Value clause: As an app developer on a device with limited memory, I want the client to hold the server back instead of buffering without limit when my code reads its events slowly, and to deliver each publication exactly once across reconnects, so that a slow or stalled consumer neither exhausts memory nor loses data on recoverable channels.
 
@@ -2262,4 +2265,45 @@ Feature: Event delivery and backpressure
     And the application then reads the subscription's stream until it has 8000 publications
     Then they are the offsets 1 to 8000, in order, each exactly once
     And between them the stream yielded "subscribing", then "subscribed" with recovered true
+
+  @E
+  Scenario Outline: Reconnect delays keep growing while the server closes each connection with 3008
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes <closes> connections in a row with code 3008 "slow", each after its connect reply and the subscribe reply for "chat", before any server ping
+    And the reconnect delay after the last of them is computed 1000 times
+    Then every computed delay is at most <bound> ms
+    And the largest computed delay is more than <above> ms
+
+    Examples:
+      | closes | above | bound |
+      | 2      | 1000  | 1500  |
+      | 3      | 1500  | 2500  |
+      | 4      | 2500  | 4500  |
+      | 5      | 4500  | 8500  |
+      | 6      | 8500  | 16500 |
+      | 7      | 16500 | 20000 |
+
+  @E
+  Scenario: A Disconnect push with 3008 keeps the backoff growing over an emulated transport
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over http_stream
+    When the server ends 4 connections in a row with a Disconnect push of code 3008 "slow", each after its connect reply and the subscribe reply for "chat", before any server ping
+    And the reconnect delay after the last of them is computed 1000 times
+    Then every computed delay is at most 4500 ms
+    And the largest computed delay is more than 2500 ms
+
+  @E
+  Scenario: A server ping read before 3008 lets the reset stand
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes 5 connections in a row with code 3008 "slow", each after its connect reply, before any server ping
+    And the next connection reads a server ping after its connect reply, then the server closes it with code 3008 "slow"
+    And the reconnect delay after that close is computed 1000 times
+    Then every computed delay is at most 1000 ms
+
+  @E
+  Scenario: A close with another code lets the reset stand
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes 5 connections in a row with code 3008 "slow", each after its connect reply, before any server ping
+    And the server closes the next connection with code 3001 "shutdown" after its connect reply, before any server ping
+    And the reconnect delay after that close is computed 1000 times
+    Then every computed delay is at most 1000 ms
 ```

@@ -171,3 +171,44 @@ Feature: Event delivery and backpressure
     And the application then reads the subscription's stream until it has 8000 publications
     Then they are the offsets 1 to 8000, in order, each exactly once
     And between them the stream yielded "subscribing", then "subscribed" with recovered true
+
+  @E
+  Scenario Outline: Reconnect delays keep growing while the server closes each connection with 3008
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes <closes> connections in a row with code 3008 "slow", each after its connect reply and the subscribe reply for "chat", before any server ping
+    And the reconnect delay after the last of them is computed 1000 times
+    Then every computed delay is at most <bound> ms
+    And the largest computed delay is more than <above> ms
+
+    Examples:
+      | closes | above | bound |
+      | 2      | 1000  | 1500  |
+      | 3      | 1500  | 2500  |
+      | 4      | 2500  | 4500  |
+      | 5      | 4500  | 8500  |
+      | 6      | 8500  | 16500 |
+      | 7      | 16500 | 20000 |
+
+  @E
+  Scenario: A Disconnect push with 3008 keeps the backoff growing over an emulated transport
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over http_stream
+    When the server ends 4 connections in a row with a Disconnect push of code 3008 "slow", each after its connect reply and the subscribe reply for "chat", before any server ping
+    And the reconnect delay after the last of them is computed 1000 times
+    Then every computed delay is at most 4500 ms
+    And the largest computed delay is more than 2500 ms
+
+  @E
+  Scenario: A server ping read before 3008 lets the reset stand
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes 5 connections in a row with code 3008 "slow", each after its connect reply, before any server ping
+    And the next connection reads a server ping after its connect reply, then the server closes it with code 3008 "slow"
+    And the reconnect delay after that close is computed 1000 times
+    Then every computed delay is at most 1000 ms
+
+  @E
+  Scenario: A close with another code lets the reset stand
+    Given a client with minReconnectDelay 500 ms and maxReconnectDelay 20000 ms, subscribed to channels "news" and "chat" over websocket
+    When the server closes 5 connections in a row with code 3008 "slow", each after its connect reply, before any server ping
+    And the server closes the next connection with code 3001 "shutdown" after its connect reply, before any server ping
+    And the reconnect delay after that close is computed 1000 times
+    Then every computed delay is at most 1000 ms
