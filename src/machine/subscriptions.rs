@@ -700,6 +700,10 @@ impl Machine {
                 if result.expires {
                     self.schedule_subscription_refresh(id, result.ttl);
                 }
+                // Rebuilt before any is emitted: a delta failure must not
+                // withdraw an event of the message being handled, which
+                // the next message would wait for (Codex on PR #99).
+                let publications = self.apply_deltas(id, result.publications);
                 self.emit_subscription(
                     id,
                     SubscriptionEvent::Subscribed(Subscribed {
@@ -714,19 +718,12 @@ impl Machine {
                 );
                 // Recovered publications, or initial ones, follow it and
                 // move the position once taken.
-                let last = result.publications.len().saturating_sub(1);
-                let mut built = 0usize;
-                for (index, publication) in result.publications.into_iter().enumerate() {
-                    let publication = match self.apply_delta(id, publication) {
-                        Ok(publication) => publication,
-                        Err(error) => return self.delta_failed(id, error),
-                    };
-                    // Together they cannot build more than one message
-                    // could carry whole (D6).
-                    built = built.saturating_add(publication.data.len());
-                    if built > MAX_MESSAGE_BYTES {
-                        return self.delta_failed(id, DeltaError::MessageTooLarge);
-                    }
+                let publications = match publications {
+                    Ok(publications) => publications,
+                    Err(error) => return self.delta_failed(id, error),
+                };
+                let last = publications.len().saturating_sub(1);
+                for (index, publication) in publications.into_iter().enumerate() {
                     let reply = replied.as_ref().map(|position| (position, index == last));
                     self.emit_publication(id, publication, reply);
                 }
@@ -929,6 +926,28 @@ impl Machine {
             Ok(publication) => self.emit_publication(id, publication, None),
             Err(error) => self.delta_failed(id, error),
         }
+    }
+
+    /// The publications of one subscribe reply of `id`, rebuilt in order;
+    /// together they cannot build more than one message could carry whole
+    /// (Block 19, D6).
+    fn apply_deltas(
+        &mut self,
+        id: SubscriptionId,
+        publications: Vec<Publication>,
+    ) -> Result<Vec<Publication>, DeltaError> {
+        let mut built = 0usize;
+        publications
+            .into_iter()
+            .map(|publication| {
+                let publication = self.apply_delta(id, publication)?;
+                built = built.saturating_add(publication.data.len());
+                if built > MAX_MESSAGE_BYTES {
+                    return Err(DeltaError::MessageTooLarge);
+                }
+                Ok(publication)
+            })
+            .collect()
     }
 
     /// The whole payload of a publication of `id`, rebuilt from a delta
@@ -1441,6 +1460,46 @@ mod tests {
             machine.read_ahead()
         );
         assert!(!machine.wants_frames());
+    }
+
+    // Codex on PR #99: a broken delta among a subscribe reply's
+    // publications must not leave an event the application can never take
+    // among those the next message waits for (Block 15).
+    #[test]
+    fn a_broken_delta_in_a_subscribe_reply_does_not_hold_the_next_message() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().delta(crate::DeltaFormat::Fossil));
+        machine.handle(Input::StreamOpened(Some(id)));
+        let subscribing = machine.handle(Input::Subscribe(id));
+        // A whole publication, then a delta whose checksum is wrong.
+        let replied = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{"delta":true,"publications":[{"data":"{}","offset":1},{"data":"2\n2:{}0;","offset":2,"delta":true}]}}"#.to_vec(),
+        });
+        let withdrawn: Vec<EventId> = replied
+            .iter()
+            .filter_map(|action| match action {
+                Action::Withdraw(ids) => Some(ids.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        for action in subscribing.iter().chain(&replied) {
+            if let Action::EmitSubscription(event, _, _) = action
+                && !withdrawn.contains(event)
+            {
+                machine.handle(Input::EventTaken(*event));
+            }
+        }
+
+        // The reply to the unsubscribe the failure sent.
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":3,"unsubscribe":{}}"#.to_vec(),
+        });
+
+        // Handled, not held behind the withdrawn publication.
+        assert_eq!(machine.read_ahead(), (0, 0), "{replied:?}");
     }
 
     #[test]
