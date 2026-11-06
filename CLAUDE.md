@@ -3074,3 +3074,43 @@ Feature: Fossil delta compression
 ```
 
 **Exceptions introduced:** divergences, each recorded above: from the Fossil document (the checksum modulus, a copy of count 0; D2); from centrifuge-js 63ed73e (a new chain at each subscribe, a delta without delta on fails, stricter parsing, and resubscribing or reconnecting instead of stopping the client on a delta failure; D3, D5, D8); the new codes (D8); and a subscription without the delta option now fails on a delta publication instead of delivering its bytes (D5).
+
+---
+
+## Planned after Block 19 (owner decision, 2026-11-06; decided by the reviewer by state of the art, delegated by the owner)
+
+The owner decided parity with centrifugal/centrifuge-rust and the listed community requests (`ANALYSIS-PARITY.md`, branch `analysis/parity`, items 1–28), under the clean-room rule, and delegated the open choices to the reviewer with the criterion "what would be state of the art" (mature, maintained Rust network clients: reqwest, hyper-util, tonic, aws-sdk-rust, async-nats, rumqttc, tokio-tungstenite, rustls; the Rust API Guidelines). Each item becomes a block with its value clause and scenarios when its turn comes, one spec PR then the implementation; each block records in Block 0 the exclusion it reverses.
+
+Decisions that bind the blocks:
+- **Items adopted** as the analysis recommends, except: item 1's CONNECT and SOCKS5 handshakes use hyper-util's maintained `Tunnel` and `SocksV5` connectors, not in-house code (Block 0, "Components"; reqwest 0.13.5 uses them), so a CONNECT failure reports 407 or "unsuccessful", not every status; item 2's raw `rustls::ClientConfig` is public without a semver-exempt feature (async-nats, tokio-tungstenite and rumqttc expose it), the fips build keeping webpki verification; items 11 and 12 land in one breaking release that also marks `Config` `#[non_exhaustive]` (as tungstenite's `WebSocketConfig`). Not adopted: items 17 (callback API, WeakClient, delivery modes, deadlock detection), 20 (TLA+ trace replay; Block 16's "optional, later" replay is dropped) and 24 (cookie jar). Item 25 is a wasm32 build check of the core only. Item 5 is Block 19.
+- **Proxies (item 1):** environment variables, then OS settings, by default, with an opt-out (reqwest 0.13.5 `system-proxy` default, aws-sdk-rust since behaviour version 2025-08-07, ureq 3).
+- **Logging (item 9):** `tracing` with its `log` feature, in the tokio adapter only, as a regular dependency of the `tokio` feature; DEBUG and TRACE, WARN for server anomalies; spans skip their fields, values go through the redacting `Debug`; no payload switch; a capture test; the docs warn that dependencies log secrets at TRACE through `log`.
+- **Release (item 21):** a tag-triggered `release.yml` with crates.io trusted publishing (`rust-lang/crates-io-auth-action`, environment `release`, version and `cargo-semver-checks` checked, actions pinned by SHA), a hand-written Keep a Changelog `CHANGELOG.md`, `SECURITY.md` pointing to GitHub private vulnerability reporting, docs.rs metadata, and an MSRV raised only in a minor version and only when needed. The account, first publish, trusted-publisher registration and repository settings are the owner's.
+- **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
+- **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by mime; the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
+
+Order of the blocks:
+
+| Block | Item(s) |
+|---|---|
+| 20 | 21: release setup |
+| 21 | 9: logging |
+| 22 | 2: platform TLS verifier, extra roots, raw rustls configuration |
+| 23 | 1: proxies |
+| 24 | 3: Android and iOS builds, mobile lifecycle |
+| 25 | 4: sleep, network changes, captive portals |
+| 26 | Block 5c drift refactor |
+| 27 | components: sse and http_stream decoders, content-type check |
+| 28 | 15: tokio runtime handle (fixes `Client::new` panicking outside a runtime) |
+| 29 | 11 and 12: handshake timeout, maximum incoming message size, `Config` `#[non_exhaustive]` |
+| 30 | 10: `ready()` |
+| 31 | 8: `statistics()` |
+| 32 | 14 and 27: `set_http_headers`, `Subscription::set_data` |
+| 33 | 16: `close()` |
+| 34 | 23: table of codes |
+| 35 | 6, 7 and 28: tag filters, channel compaction, `Publication.channel` |
+| 36 | 26: automatic command batching |
+| 37 | 19 and 22: test constructors, in-memory server double |
+| 38 | 18: typed JSON helpers |
+| 39 | 13: publications-only stream |
+| 40 | 25: wasm32 build check |
