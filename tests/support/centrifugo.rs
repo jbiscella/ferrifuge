@@ -12,6 +12,11 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 pub(crate) const IMAGE: &str = "centrifugo/centrifugo";
 pub(crate) const TAG: &str = "v6.10.1";
 pub(crate) const API_KEY: &str = "test-api-key";
+/// Label of the containers a test run starts, valued with the run's id
+/// ([`RUN_VARIABLE`]), so that the run can remove those it left behind.
+pub(crate) const RUN_LABEL: &str = "ferrifuge.bdd.run";
+/// Environment variable naming the test run, when one is set.
+pub(crate) const RUN_VARIABLE: &str = "FERRIFUGE_BDD_RUN";
 /// Name under which the container reaches the host, e.g. a proxy backend.
 pub(crate) const HOST_GATEWAY: &str = "host.docker.internal";
 
@@ -58,6 +63,7 @@ impl Centrifugo {
                     .with_expected_status_code(200u16),
             ))
             .with_cmd(["centrifugo"])
+            .with_label(RUN_LABEL, std::env::var(RUN_VARIABLE).unwrap_or_default())
             .with_host(HOST_GATEWAY, Host::HostGateway)
             .with_env_var("CENTRIFUGO_HTTP_API_KEY", API_KEY)
             .with_env_var("CENTRIFUGO_HEALTH_ENABLED", "true");
