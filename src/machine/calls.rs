@@ -254,11 +254,22 @@ impl Machine {
         }
     }
 
-    /// Subscription `id` is unsubscribed: its calls waiting for it fail
-    /// with "subscription unsubscribed"; those already sent go on
-    /// (centrifuge-js `_setUnsubscribed`, `_rejectPromises`).
+    /// Subscription `id` is unsubscribed: its calls not yet sent, waiting
+    /// for it or for the connection, fail with "subscription
+    /// unsubscribed"; those already sent go on (centrifuge-js
+    /// `_setUnsubscribed`, `_rejectPromises`).
     pub(super) fn subscription_calls_unsubscribed(&mut self, subscription: SubscriptionId) {
-        for id in self.waiting_calls(subscription) {
+        let unsent: Vec<CallId> = self
+            .calls
+            .by_id
+            .iter()
+            .filter(|(_, call)| {
+                call.subscription == Some(subscription)
+                    && matches!(call.phase, Phase::Subscribing | Phase::Queued)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in unsent {
             self.settle_call(id, Err(subscription_unsubscribed()));
         }
     }
@@ -941,6 +952,37 @@ mod tests {
                 }))
             )]
         );
+    }
+
+    #[test]
+    fn a_subscription_call_queued_for_the_connection_fails_when_unsubscribed() {
+        let (mut machine, transport) = connected();
+        let subscription = machine
+            .add_subscription(
+                "news".into(),
+                crate::machine::SubscriptionOptions::default(),
+            )
+            .unwrap();
+        // A stream that takes nothing: the `subscribed` event, not taken,
+        // holds the close read after it.
+        machine.handle(Input::StreamOpened(Some(subscription)));
+        machine.handle(Input::Subscribe(subscription));
+        machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let (id, queued) = history(&mut machine, subscription);
+        assert!(queued.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(subscription));
+
+        assert_eq!(
+            error_code(&unsubscribed),
+            Some(codes::error::SUBSCRIPTION_UNSUBSCRIBED)
+        );
+        assert!(unsubscribed.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
     }
 
     #[test]

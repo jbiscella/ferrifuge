@@ -70,7 +70,8 @@ enum Returned {
 type Settled = Result<Returned, CallError>;
 
 enum Outcome {
-    Pending(JoinHandle<Settled>),
+    /// The task awaiting the call; it gives the outcome and when it came.
+    Pending(JoinHandle<(Settled, Instant)>),
     Settled(Settled, Instant),
 }
 
@@ -104,7 +105,12 @@ fn track(
     world.calls.made.push(Call {
         method: name.to_owned(),
         made_at: Instant::now(),
-        outcome: Outcome::Pending(tokio::spawn(call)),
+        // When the call settled, not when a step looks: a loaded runner may
+        // run the next step late.
+        outcome: Outcome::Pending(tokio::spawn(async move {
+            let settled = call.await;
+            (settled, Instant::now())
+        })),
     });
 }
 
@@ -125,7 +131,7 @@ async fn outcome(
         None => world.calls.made.last_mut().expect("no call made"),
     };
     if let Outcome::Pending(task) = &mut call.outcome {
-        let result = tokio::time::timeout(limit, task)
+        let (result, at) = tokio::time::timeout(limit, task)
             .await
             .unwrap_or_else(|_| {
                 panic!(
@@ -134,7 +140,7 @@ async fn outcome(
                 )
             })
             .expect("the call's task panicked");
-        call.outcome = Outcome::Settled(result, Instant::now());
+        call.outcome = Outcome::Settled(result, at);
     }
     let Outcome::Settled(result, at) = &call.outcome else {
         unreachable!("settled above");
