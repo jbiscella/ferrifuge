@@ -44,6 +44,10 @@ pub(crate) struct Calls {
     published: Vec<StreamPosition>,
     /// The second client of a scenario with two.
     second: Option<Second>,
+    /// The write-queue limit of the scenario's client (Block 13d, @D).
+    pub(crate) write_queue_bytes: Option<usize>,
+    /// The sans-IO core of an @E write-queue scenario.
+    queue: Option<QueueRun>,
 }
 
 /// A second client, subscribed, with its subscription's events.
@@ -287,9 +291,14 @@ async fn the_call_fails_with_a_temporary_error(
 /// passed, not before.
 #[given("the call fails with a timeout error")]
 #[when("the call fails with a timeout error")]
+#[then("the call fails with a timeout error")]
 #[then("the call fails with a timeout error within the configured timeout plus tolerance")]
 #[then("the history call fails with a timeout error within the configured timeout plus tolerance")]
 async fn the_call_times_out(world: &mut ClientWorld) {
+    if let Some(run) = &world.calls.queue {
+        run.assert_failed(run.last(), codes::error::TIMEOUT);
+        return;
+    }
     let timeout = test_config().timeout;
     let (result, after) = outcome(world, None, timeout + TOLERANCE).await;
     let error = error(result);
@@ -1155,4 +1164,392 @@ async fn the_call_returns_the_protobuf_result(world: &mut ClientWorld, command: 
         }
         (command, returned) => panic!("{command}: unexpected {returned:?}"),
     }
+}
+
+/// An @E write-queue scenario: the sans-IO core, connected, its publishes
+/// and what they became. Timers fire when a step says so.
+struct QueueRun {
+    machine: ferrifuge::machine::Machine,
+    transport: ferrifuge::machine::TransportId,
+    /// Each publish: its size, call, fill character and frame once sent.
+    publishes: Vec<Publish>,
+    /// The actions of the last input.
+    last: Vec<ferrifuge::machine::Action>,
+    /// Calls settled so far, with their outcome.
+    settled: Vec<(
+        ferrifuge::machine::CallId,
+        Result<ferrifuge::CallReply, CallError>,
+    )>,
+}
+
+struct Publish {
+    size: usize,
+    call: ferrifuge::machine::CallId,
+    /// Fills its data, telling its frame apart.
+    fill: char,
+    frame: Option<ferrifuge::machine::FrameId>,
+}
+
+/// Bytes of a JSON publish frame besides its data's characters.
+const PUBLISH_OVERHEAD: usize = 50;
+
+impl QueueRun {
+    fn connected(write_queue_bytes: usize, pong: bool) -> Self {
+        use ferrifuge::machine::{Action, Input, Machine};
+        let mut machine = Machine::new(Config {
+            write_queue_bytes,
+            ..test_config()
+        });
+        let transport = machine
+            .handle(Input::Connect)
+            .into_iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(transport),
+                _ => None,
+            })
+            .expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        let mut run = Self {
+            machine,
+            transport,
+            publishes: Vec::new(),
+            last: Vec::new(),
+            settled: Vec::new(),
+        };
+        run.connect_reply(1, pong);
+        run
+    }
+
+    fn connect_reply(&mut self, id: u32, pong: bool) {
+        let reply = json!({"id": id, "connect": {"client": "c", "ping": 25, "pong": pong}});
+        self.frame(&reply.to_string());
+        assert_eq!(self.machine.state(), State::Connected);
+    }
+
+    fn handle(&mut self, input: ferrifuge::machine::Input) {
+        use ferrifuge::machine::Action;
+        self.last = self.machine.handle(input);
+        for action in &self.last {
+            if let Action::CallSettled { call, result } = action {
+                self.settled.push((*call, result.clone()));
+            }
+        }
+        let sent = self.sent();
+        for publish in &mut self.publishes {
+            if publish.frame.is_none() {
+                publish.frame = sent
+                    .iter()
+                    .find(|(_, text)| text.contains(&publish.fill.to_string().repeat(8)))
+                    .map(|(id, _)| *id);
+            }
+        }
+    }
+
+    fn frame(&mut self, text: &str) {
+        self.handle(ferrifuge::machine::Input::Frame {
+            transport: self.transport,
+            data: text.as_bytes().to_vec(),
+        });
+    }
+
+    /// The frames the last input sent, with their ids.
+    fn sent(&self) -> Vec<(ferrifuge::machine::FrameId, String)> {
+        self.last
+            .iter()
+            .filter_map(|action| match action {
+                ferrifuge::machine::Action::Send { id, frame, .. } => {
+                    Some((*id, String::from_utf8_lossy(frame).into_owned()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Publishes about `size` bytes, its data filled with the next letter.
+    fn publish(&mut self, size: usize) {
+        let fill = char::from(b'a' + u8::try_from(self.publishes.len()).unwrap());
+        let data = format!("\"{}\"", fill.to_string().repeat(size - PUBLISH_OVERHEAD));
+        let call = self.machine.add_call(ferrifuge::CallRequest::Publish {
+            channel: "news".into(),
+            data: data.into_bytes(),
+        });
+        self.publishes.push(Publish {
+            size,
+            call,
+            fill,
+            frame: None,
+        });
+        self.handle(ferrifuge::machine::Input::Call(call));
+    }
+
+    fn by_size(&self, size: usize) -> &Publish {
+        self.publishes
+            .iter()
+            .find(|publish| publish.size == size)
+            .unwrap_or_else(|| panic!("no publish of {size} bytes"))
+    }
+
+    fn last(&self) -> ferrifuge::machine::CallId {
+        self.publishes.last().expect("a publish").call
+    }
+
+    /// Whether the last input sent the publish of `size` bytes.
+    fn sent_now(&self, size: usize) -> bool {
+        let fill = self.by_size(size).fill.to_string().repeat(8);
+        self.sent().iter().any(|(_, text)| text.contains(&fill))
+    }
+
+    fn publishes_sent_now(&self) -> Vec<String> {
+        self.sent()
+            .into_iter()
+            .map(|(_, text)| text)
+            .filter(|text| text.contains("publish"))
+            .collect()
+    }
+
+    fn assert_failed(&self, call: ferrifuge::machine::CallId, code: u32) {
+        let outcome = self
+            .settled
+            .iter()
+            .find(|(settled, _)| *settled == call)
+            .unwrap_or_else(|| panic!("{call:?} not settled: {:?}", self.last));
+        assert!(
+            matches!(&outcome.1, Err(error) if error.code == code),
+            "{outcome:?}"
+        );
+    }
+
+    /// Fires the timer `timer` of `call`, which the machine must have set.
+    fn fire(&mut self, call: ferrifuge::machine::CallId, timer: ferrifuge::machine::CallTimer) {
+        self.handle(ferrifuge::machine::Input::CallTimerFired(call, timer));
+    }
+}
+
+fn queue(world: &mut ClientWorld) -> &mut QueueRun {
+    world
+        .calls
+        .queue
+        .as_mut()
+        .expect("an @E write-queue scenario")
+}
+
+#[given(
+    regex = r"^a connected client with a write queue of (\d+) bytes(, whose server expects pongs)?$"
+)]
+fn a_client_with_a_write_queue(world: &mut ClientWorld, bytes: usize, pongs: String) {
+    world.calls.queue = Some(QueueRun::connected(bytes, !pongs.is_empty()));
+}
+
+#[given(regex = r"^a publish of (\d+) bytes sent and not yet written$")]
+fn a_publish_sent(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    run.publish(size);
+    assert!(run.sent_now(size), "not sent: {:?}", run.last);
+}
+
+#[given(regex = r"^a publish of (\d+) bytes waiting for room$")]
+fn a_publish_waiting(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    run.publish(size);
+    assert_eq!(run.publishes_sent_now(), Vec::<String>::new());
+}
+
+#[when(regex = r"^the client publishes (\d+) bytes(?: and then (\d+) bytes)?$")]
+fn the_client_publishes_bytes(world: &mut ClientWorld, first: usize, second: String) {
+    let run = queue(world);
+    run.publish(first);
+    if !second.is_empty() {
+        let earlier = run.publishes_sent_now();
+        run.publish(second.parse().unwrap());
+        assert_eq!(earlier, Vec::<String>::new(), "the first publish was sent");
+    }
+}
+
+#[then(regex = r"^no command is sent for (?:it|either)$")]
+fn no_command_is_sent(world: &mut ClientWorld) {
+    let run = queue(world);
+    assert_eq!(
+        run.publishes_sent_now(),
+        Vec::<String>::new(),
+        "{:?}",
+        run.last
+    );
+}
+
+#[when("the transport reports the first publish written")]
+fn the_first_publish_is_written(world: &mut ClientWorld) {
+    let run = queue(world);
+    let frame = run.publishes[0].frame.expect("the first publish sent");
+    let transport = run.transport;
+    run.handle(ferrifuge::machine::Input::FrameWritten { transport, frame });
+}
+
+#[then("the second publish is sent")]
+fn the_second_publish_is_sent(world: &mut ClientWorld) {
+    let run = queue(world);
+    let size = run.publishes[1].size;
+    assert!(run.sent_now(size), "{:?}", run.last);
+}
+
+#[then(regex = r"^the (\d+)-byte publish is sent$")]
+fn the_publish_is_sent(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    assert!(run.sent_now(size), "{:?}", run.last);
+}
+
+#[then(regex = r"^the (\d+)-byte publish is sent before the (\d+)-byte one$")]
+fn sent_in_order(world: &mut ClientWorld, first: usize, second: usize) {
+    let run = queue(world);
+    let fills = [first, second].map(|size| run.by_size(size).fill.to_string().repeat(8));
+    let sent = run.publishes_sent_now();
+    let position = |fill: &String| sent.iter().position(|text| text.contains(fill));
+    let (first, second) = (position(&fills[0]), position(&fills[1]));
+    assert!(
+        first.is_some() && second.is_some() && first < second,
+        "{sent:?}"
+    );
+}
+
+#[when("the configured timeout elapses")]
+fn the_configured_timeout_elapses(world: &mut ClientWorld) {
+    let run = queue(world);
+    let call = run.last();
+    run.fire(call, ferrifuge::machine::CallTimer::Room);
+}
+
+#[when("the server sends a ping")]
+fn the_server_sends_a_ping(world: &mut ClientWorld) {
+    queue(world).frame("{}");
+}
+
+#[then("the client sends a pong at once")]
+fn the_client_sends_a_pong(world: &mut ClientWorld) {
+    let run = queue(world);
+    assert!(
+        run.sent().iter().any(|(_, text)| text == "{}"),
+        "{:?}",
+        run.last
+    );
+}
+
+#[when(regex = r"^the (\d+)-byte publish is abandoned$")]
+fn the_publish_is_abandoned(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    let call = run.by_size(size).call;
+    run.handle(ferrifuge::machine::Input::CallAbandoned(call));
+}
+
+#[when("the transport is lost")]
+fn the_transport_is_lost(world: &mut ClientWorld) {
+    let run = queue(world);
+    let transport = run.transport;
+    run.handle(ferrifuge::machine::Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    // Losing the transport keeps the waiting call's deadline: no new one.
+    let waiting = run.last();
+    assert!(
+        !run.last.iter().any(|action| matches!(
+            action,
+            ferrifuge::machine::Action::SetCallTimer(call, ..) if *call == waiting
+        )),
+        "{:?}",
+        run.last
+    );
+}
+
+#[then(r#"the first publish fails with a "connection closed" error"#)]
+fn the_first_publish_fails_closed(world: &mut ClientWorld) {
+    let run = queue(world);
+    run.assert_failed(run.publishes[0].call, codes::error::CONNECTION_CLOSED);
+}
+
+#[when(
+    regex = r"^the configured timeout elapses since the (\d+)-byte publish was made, the client still connecting$"
+)]
+fn the_timeout_elapses_while_connecting(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    assert_eq!(run.machine.state(), State::Connecting);
+    let call = run.by_size(size).call;
+    run.fire(call, ferrifuge::machine::CallTimer::Room);
+}
+
+#[then(regex = r"^the (\d+)-byte publish fails with a timeout error$")]
+fn the_publish_times_out(world: &mut ClientWorld, size: usize) {
+    let run = queue(world);
+    run.assert_failed(run.by_size(size).call, codes::error::TIMEOUT);
+}
+
+#[when("the client is connected again")]
+fn the_client_is_connected_again(world: &mut ClientWorld) {
+    use ferrifuge::machine::{Action, Input, Timer};
+    let run = queue(world);
+    run.handle(Input::TimerFired(Timer::Reconnect));
+    let transport = run
+        .last
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a new transport");
+    run.transport = transport;
+    run.handle(Input::TransportOpened(transport));
+    let connect: Value = run
+        .sent()
+        .iter()
+        .find_map(|(_, text)| serde_json::from_str::<Value>(text).ok())
+        .expect("a connect command");
+    let id = u32::try_from(connect["id"].as_u64().expect("a command id")).unwrap();
+    run.connect_reply(id, false);
+}
+
+#[given(regex = r"^a client with a write queue of (\d+) bytes? connected to the fake server$")]
+async fn a_client_with_a_small_write_queue(world: &mut ClientWorld, bytes: usize) {
+    world.calls.write_queue_bytes = Some(bytes);
+    a_connected_client(world).await;
+}
+
+#[when(r#"the client sends {"n":1}, {"n":2} and {"n":3} without awaiting them"#)]
+fn the_client_sends_three(world: &mut ClientWorld) {
+    for n in 1..=3 {
+        let send = world
+            .client()
+            .send(json!({"n": n}).to_string().into_bytes());
+        track(world, &format!("send {n}"), async move {
+            send.await.map(|()| Returned::Published)
+        });
+    }
+}
+
+#[then("every send completes before the configured timeout")]
+async fn every_send_completes(world: &mut ClientWorld) {
+    let timeout = test_config().timeout;
+    for n in 1..=3 {
+        let (result, after) = outcome(world, Some(&format!("send {n}")), EVENT_TIMEOUT).await;
+        assert!(result.is_ok(), "send {n}: {result:?}");
+        assert!(after < timeout, "send {n} took {after:?}");
+    }
+}
+
+#[then("the fake server received the 3 send commands in that order")]
+async fn the_fake_server_received_three_sends(world: &mut ClientWorld) {
+    let received = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let sends = world.fake().commands_with_times("send");
+            if sends.len() >= 3 {
+                return sends;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("3 send commands in time");
+    let data: Vec<Value> = received
+        .iter()
+        .map(|(command, _)| command["send"]["data"].clone())
+        .collect();
+    assert_eq!(data, [json!({"n": 1}), json!({"n": 2}), json!({"n": 3})]);
 }
