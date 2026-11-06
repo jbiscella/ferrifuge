@@ -117,8 +117,14 @@ impl From<&Command> for pb::Command {
                 recoverable,
                 flag,
                 join_leave,
+                delta,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
+                    delta: if *delta {
+                        crate::wire::FOSSIL.to_owned()
+                    } else {
+                        String::new()
+                    },
                     channel: channel.clone(),
                     token: token.0.clone(),
                     data: data.clone().unwrap_or_default(),
@@ -210,6 +216,7 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             offset: subscribe.offset,
             was_recovering: subscribe.was_recovering,
             recovered: subscribe.recovered,
+            delta: subscribe.delta,
         }
     }
 }
@@ -363,6 +370,7 @@ impl From<pb::Publication> for Publication {
             tags: publication.tags,
             info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
+            delta: publication.delta,
         }
     }
 }

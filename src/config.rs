@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+/// Largest message, and frame, accepted from the server on any transport,
+/// and largest payload a delta may build (Block 19, D6).
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 << 20;
+
 /// Options of a client. Defaults follow centrifuge-js.
 ///
 /// Its `Debug` output redacts the token and shows the connect data as its

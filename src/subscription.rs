@@ -111,6 +111,21 @@ pub struct Subscribed {
     /// recoverable: the top of the stream, or after a recovery the position
     /// the recovered publications follow.
     pub stream_position: Option<StreamPosition>,
+    /// The server sends this subscription's publications as deltas until
+    /// its next subscribe, as the [`delta`] option asked (Block 19). The
+    /// client rebuilds them: the application gets whole payloads.
+    ///
+    /// [`delta`]: crate::machine::SubscriptionOptions::delta
+    pub delta: bool,
+}
+
+/// A delta compression format a subscription can ask for (`client.proto`,
+/// `SubscribeRequest.delta`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeltaFormat {
+    /// Fossil deltas, the only format `client.proto` supports.
+    Fossil,
 }
 
 /// A position in a channel's stream (spec, "Subscription recovery state").
@@ -140,6 +155,10 @@ pub struct Publication {
     /// (`client.proto`, `Publication.epoch`): a position saved to resume
     /// from later is then this offset with this epoch.
     pub epoch: Option<String>,
+    /// The wire's `Publication.delta`: `data` is a Fossil delta against the
+    /// previous publication. Cleared once the delta is applied, so a
+    /// publication the application takes never has it (Block 19, D4).
+    pub(crate) delta: bool,
 }
 
 /// A client connection, as the server describes it (`client.proto`,

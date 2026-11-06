@@ -11,6 +11,8 @@ use super::delivery::{Commit, Owner};
 use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
 use crate::backoff::Backoff;
+use crate::config::MAX_MESSAGE_BYTES;
+use crate::fossil::{self, DeltaError};
 use crate::token::Secret;
 use crate::wire::{
     Command, Error, Method, REJECT_UNRECOVERED, Reply, ReplyResult, SubscribeRequest,
@@ -82,6 +84,20 @@ struct Subscription {
     /// The next subscribe asks to recover from `position`: the channel was
     /// recoverable, or `since` gave a position (centrifuge-js `_recover`).
     recover: bool,
+    /// Delta compression as the last subscribe reply set it.
+    delta: DeltaChain,
+}
+
+/// Whether a subscribe reply turned delta on (Block 19, D4), and what the
+/// next delta applies to: the data of the last publication handled since
+/// that reply (D5).
+#[derive(Debug, Default)]
+enum DeltaChain {
+    #[default]
+    Off,
+    On {
+        base: Option<Vec<u8>>,
+    },
 }
 
 /// Unsubscribe code by which the server invalidates a subscription's state
@@ -202,6 +218,7 @@ impl Machine {
                 tokens,
                 position,
                 recover,
+                delta: DeltaChain::Off,
             },
         );
         Ok(id)
@@ -338,10 +355,11 @@ impl Machine {
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
-        let (positioned, recoverable, join_leave) = (
+        let (positioned, recoverable, join_leave, delta) = (
             sub.options.positioned,
             sub.options.recoverable,
             sub.options.join_leave,
+            sub.options.delta.is_some(),
         );
         // With getState, a failed recovery reloads the state rather than
         // succeeding with publications missing.
@@ -369,6 +387,7 @@ impl Machine {
                     recoverable,
                     flag,
                     join_leave,
+                    delta,
                 }),
             },
         );
@@ -648,7 +667,16 @@ impl Machine {
             (Some(error), _) => self.subscribe_error(id, &error),
             (None, ReplyResult::Subscribe(result)) => {
                 sub.state = SubscriptionState::Subscribed;
+                // A delta failure during this subscribe takes the reset back
+                // (Block 19, D8), so only this one may be undone.
+                sub.backoff.keep_reset();
                 sub.backoff.reset();
+                // Each subscribe starts a new delta chain (D5).
+                sub.delta = if result.delta {
+                    DeltaChain::On { base: None }
+                } else {
+                    DeltaChain::Off
+                };
                 sub.tokens.connected();
                 // The server decides: a recoverable reply gives the position
                 // to recover from next; any other reply ends recovery, so a
@@ -681,12 +709,24 @@ impl Machine {
                         was_recovering: result.was_recovering,
                         recovered: result.recovered,
                         stream_position: reported,
+                        delta: result.delta,
                     }),
                 );
                 // Recovered publications, or initial ones, follow it and
                 // move the position once taken.
                 let last = result.publications.len().saturating_sub(1);
+                let mut built = 0usize;
                 for (index, publication) in result.publications.into_iter().enumerate() {
+                    let publication = match self.apply_delta(id, publication) {
+                        Ok(publication) => publication,
+                        Err(error) => return self.delta_failed(id, error),
+                    };
+                    // Together they cannot build more than one message
+                    // could carry whole (D6).
+                    built = built.saturating_add(publication.data.len());
+                    if built > MAX_MESSAGE_BYTES {
+                        return self.delta_failed(id, DeltaError::MessageTooLarge);
+                    }
                     let reply = replied.as_ref().map(|position| (position, index == last));
                     self.emit_publication(id, publication, reply);
                 }
@@ -879,11 +919,85 @@ impl Machine {
                 .get(id)
                 .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
         });
-        if let Some(id) = subscribed {
-            self.emit_publication(id, publication, None);
-        } else {
+        let Some(id) = subscribed else {
             self.server_publication(channel, publication);
+            return;
+        };
+        // Delta checks follow routing: a publication no subscribed
+        // subscription takes is dropped as before (Block 19, D5).
+        match self.apply_delta(id, publication) {
+            Ok(publication) => self.emit_publication(id, publication, None),
+            Err(error) => self.delta_failed(id, error),
         }
+    }
+
+    /// The whole payload of a publication of `id`, rebuilt from a delta
+    /// against the previous one when it carries one (Block 19, D5, D7).
+    fn apply_delta(
+        &mut self,
+        id: SubscriptionId,
+        mut publication: Publication,
+    ) -> Result<Publication, DeltaError> {
+        let codec = self.codec;
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return Ok(publication);
+        };
+        let DeltaChain::On { base } = &mut sub.delta else {
+            return if publication.delta {
+                Err(DeltaError::NotOn)
+            } else {
+                Ok(publication)
+            };
+        };
+        let payload = codec
+            .delta_payload(std::mem::take(&mut publication.data))
+            .ok_or(DeltaError::NotAString)?;
+        let data = if publication.delta {
+            let base = base.as_deref().ok_or(DeltaError::NoBase)?;
+            fossil::apply(base, &payload, MAX_MESSAGE_BYTES)?
+        } else {
+            payload
+        };
+        *base = Some(data.clone());
+        publication.data = data;
+        publication.delta = false;
+        Ok(publication)
+    }
+
+    /// A delta publication of `id` could not be applied: an error event,
+    /// then the subscription subscribes again after the resubscribe
+    /// backoff, recovering from its last publication taken; the backoff
+    /// reset of the subscribe that failed is taken back (Block 19, D8).
+    fn delta_failed(&mut self, id: SubscriptionId, error: DeltaError) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        sub.state = SubscriptionState::Subscribing;
+        sub.delta = DeltaChain::Off;
+        sub.backoff.undo_reset();
+        let channel = sub.channel.clone();
+        self.end_token_refresh(id);
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Error(ClientError {
+                kind: ErrorKind::Delta,
+                code: codes::error::DELTA,
+                message: error.to_string(),
+                transport: None,
+            }),
+        );
+        // Leaving subscribed withdraws the publications not yet taken.
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Subscribing {
+                code: codes::subscribing::DELTA_ERROR,
+                reason: "delta error".to_owned(),
+            },
+        );
+        // The server still holds the subscription: the next subscribe waits
+        // until it is undone (Block 9).
+        self.send_unsubscribe(id, channel);
+        self.schedule_resubscribe(id);
     }
 
     /// A join or leave push for `channel`, routed as a publication is: to

@@ -27,6 +27,7 @@ mod codes;
 mod connect_data;
 mod connection;
 mod delivery;
+mod delta;
 mod jitter;
 mod ping;
 mod protobuf;
@@ -160,6 +161,7 @@ pub(crate) struct ClientWorld {
     pub(crate) connect_data: connect_data::ConnectData,
     /// Batches of a Block 18 scenario.
     pub(crate) batching: batching::Batching,
+    pub(crate) delta: delta::Delta,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

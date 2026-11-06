@@ -2,7 +2,8 @@
 //! accepts: one per transport the client opens, so steps can assert that no
 //! further connection attempt was made. It can also stand in for a server
 //! that is down, or one that accepts connections but never answers, and it
-//! can stop reading what clients send.
+//! can stop reading what clients send. It counts the bytes it relays to
+//! clients, e.g. to see that publications came as deltas (Block 19).
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -27,6 +28,8 @@ pub(crate) enum Mode {
 pub(crate) struct CountingRelay {
     port: u16,
     accepted: Arc<AtomicUsize>,
+    /// Bytes relayed from the target to clients so far.
+    to_clients: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
     server: JoinHandle<()>,
     /// Connections held open in [`Mode::Silent`].
@@ -58,7 +61,12 @@ impl Gate {
 
 /// Relays `inbound` to `outbound` both ways until either side ends, reading
 /// from `inbound` only while `gate` is open.
-async fn forward(inbound: TcpStream, outbound: TcpStream, gate: Arc<Gate>) {
+async fn forward(
+    inbound: TcpStream,
+    outbound: TcpStream,
+    gate: Arc<Gate>,
+    to_clients: Arc<AtomicUsize>,
+) {
     let (mut from_client, mut to_client) = inbound.into_split();
     let (mut from_server, mut to_server) = outbound.into_split();
     let up = async {
@@ -72,7 +80,17 @@ async fn forward(inbound: TcpStream, outbound: TcpStream, gate: Arc<Gate>) {
             to_server.write_all(&buffer[..read]).await?;
         }
     };
-    let down = tokio::io::copy(&mut from_server, &mut to_client);
+    let down = async {
+        let mut buffer = vec![0; 64 << 10];
+        loop {
+            let read = from_server.read(&mut buffer).await?;
+            if read == 0 {
+                return to_client.shutdown().await;
+            }
+            to_client.write_all(&buffer[..read]).await?;
+            to_clients.fetch_add(read, Ordering::SeqCst);
+        }
+    };
     tokio::select! {
         _ = up => {}
         _ = down => {}
@@ -90,9 +108,11 @@ impl CountingRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
         let port = listener.local_addr().expect("relay address").port();
         let accepted = Arc::new(AtomicUsize::new(0));
+        let to_clients = Arc::new(AtomicUsize::new(0));
         let mode = Arc::new(AtomicU8::new(mode as u8));
         let held = Arc::new(Mutex::new(Vec::new()));
         let gates = Arc::new(Mutex::new(Vec::new()));
+        let relayed = Arc::clone(&to_clients);
         let (counter, current, holding, gating) = (
             Arc::clone(&accepted),
             Arc::clone(&mode),
@@ -109,9 +129,10 @@ impl CountingRelay {
                         let gate = Arc::new(Gate::default());
                         gating.lock().unwrap().push(Arc::downgrade(&gate));
                         let target = target.clone();
+                        let relayed = Arc::clone(&relayed);
                         tokio::spawn(async move {
                             if let Ok(outbound) = TcpStream::connect(&target).await {
-                                forward(inbound, outbound, gate).await;
+                                forward(inbound, outbound, gate, relayed).await;
                             }
                         });
                     }
@@ -121,11 +142,17 @@ impl CountingRelay {
         Self {
             port,
             accepted,
+            to_clients,
             mode,
             server,
             held,
             gates,
         }
+    }
+
+    /// Bytes relayed from the target to clients so far.
+    pub(crate) fn bytes_to_clients(&self) -> usize {
+        self.to_clients.load(Ordering::SeqCst)
     }
 
     /// Stops reading what clients send on the connections open now; later

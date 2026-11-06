@@ -323,6 +323,12 @@ const IMPLEMENTED: &[&str] = &[
     "Join and leave pushes of a server-side subscription are delivered",
     "A join push for a subscription that is not subscribed is dropped",
     "Join and leave events not taken before unsubscribe are withdrawn",
+    // Block 19, sub-increment 19a.
+    "Delta compression is negotiated with the server",
+    "Publications sent as deltas arrive whole",
+    "A delta publication is applied to the previous publication",
+    "The delta option is sent on subscribe and on resubscribe",
+    "With JSON, publications of a delta subscription arrive as their JSON text",
 ];
 
 /// Server configuration of @A scenarios.
@@ -383,10 +389,13 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // Channels of the `private` namespace need a subscription token
     // (Block 10); an expired, unrefreshed one is ended after 1 s past the
     // server's periodic check (default 25 s). Those of the `rec` namespace
-    // keep a history and are recoverable (Block 11).
+    // keep a history and are recoverable (Block 11). Those of the `delta`
+    // namespace are recoverable too, and send every publication as a fossil
+    // delta to subscriptions asking for one, which needs a positioned
+    // subscription (Block 19).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
+        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
     ),
     ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
 ];

@@ -2909,6 +2909,8 @@ Feature: Batching
 
 `VERIFY:` the environment variables of the Centrifugo v6.10.1 namespace options `allowed_delta_types` and `delta_publish` for the @A server (and the server API `publish` field `delta`, `api.proto:325`); whether a live delta needs channel history; that every v6.10.1 path writing a JSON publication to a delta subscriber wraps it as a string (the @A JSON row, live and recovered).
 
+Verified (Centrifugo v6.10.1, raw websocket client and server API, 2026-11-06, while implementing 19a): `CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOWED_DELTA_TYPES=fossil` (namespace option `allowed_delta_types`) makes the subscribe reply turn delta on; live publications go as deltas only to a positioned subscription (`force_positioning`, or recovery, which implies it), and whole with history alone; with `CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_DELTA_PUBLISH=true` (`delta_publish`) every publication after the first goes as a delta, whatever the server API `publish` field `delta`; with JSON every live publication of a delta subscription, whole or delta, arrives as a JSON string. The @A `delta` namespace therefore has history, `force_recovery`, `allowed_delta_types` and `delta_publish`; recovered publications are checked by 19c's scenario.
+
 Value clause: As an app developer shipping to devices on metered networks, I want a channel's publications sent as deltas against the previous one and rebuilt exactly by the client, so that large, slowly changing payloads cost a fraction of their bandwidth without my application ever seeing a corrupted payload.
 
 **Sub-increments** (one branch and PR each, in this order):

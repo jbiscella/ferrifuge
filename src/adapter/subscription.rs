@@ -295,6 +295,19 @@ impl SubscriptionBuilder {
         self
     }
 
+    /// Asks the server to send publications as deltas in `format` against
+    /// the previous one, on channels that allow it (Centrifugo
+    /// `allowed_delta_types`). The client rebuilds each one, so the
+    /// application always gets whole payloads; whether the server agreed is
+    /// [`crate::Subscribed::delta`]. A delta that cannot be applied makes
+    /// the subscription subscribe again, recovering on channels with
+    /// recovery (Block 19).
+    #[must_use]
+    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
+        self.options = self.options.delta(format);
+        self
+    }
+
     /// Sends `token`, a subscription token (JWT) for the channel, with the
     /// first subscribe command. With [`Self::get_token`] too, the callback
     /// is asked once it expires.

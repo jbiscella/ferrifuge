@@ -197,4 +197,8 @@ pub enum ErrorKind {
     /// The server answered a `sub_refresh` command with a temporary error,
     /// or not in time; the refresh is retried.
     SubscriptionRefresh,
+    /// A delta publication could not be applied: the subscription
+    /// subscribes again, or, for a server-side subscription, the client
+    /// reconnects (Block 19, D8).
+    Delta,
 }

@@ -21,10 +21,10 @@ use crate::machine::{FrameId, TransportKind};
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
 const JSON: &str = "application/json";
-/// Largest message accepted from a stream: the websocket transport's limit
-/// (tungstenite's default `max_message_size`). A server sending more without
-/// ending a message would otherwise grow the buffer without bound.
-const MAX_MESSAGE: usize = 64 << 20;
+/// Largest message accepted from a stream, as on websocket. A server
+/// sending more without ending a message would otherwise grow the buffer
+/// without bound.
+const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
 
 /// An emulation request in flight; its failure ends the transport.
 type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)> + Send>>;

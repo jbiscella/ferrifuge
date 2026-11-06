@@ -300,7 +300,7 @@ fn websocket_config() -> WebSocketConfig {
 }
 
 /// Largest message, and frame, accepted from the server.
-const MAX_MESSAGE: usize = 64 << 20;
+const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
 
 /// TLS settings of an HTTP client that only ever speaks plain `http://`:
 /// no root certificates, so it works on hosts without platform ones, and
