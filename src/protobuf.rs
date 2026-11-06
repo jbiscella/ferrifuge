@@ -265,36 +265,7 @@ impl From<pb::Reply> for Reply {
                 num_users: stats.num_users,
             })
         } else if let Some(push) = reply.push {
-            ReplyResult::Push(if let Some(publication) = push.r#pub {
-                Push::Publication {
-                    channel: push.channel,
-                    publication: publication.into(),
-                }
-            } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
-                Push::Disconnect(Disconnect { code, reason })
-            } else if let Some(subscribe) = push.subscribe {
-                Push::Subscribe {
-                    channel: push.channel,
-                    result: SubscribeResult {
-                        recoverable: subscribe.recoverable,
-                        epoch: subscribe.epoch,
-                        offset: subscribe.offset,
-                        positioned: subscribe.positioned,
-                        data: (!subscribe.data.is_empty()).then_some(subscribe.data),
-                        ..SubscribeResult::default()
-                    },
-                }
-            } else if let Some(pb::Unsubscribe { code, reason, .. }) = push.unsubscribe {
-                Push::Unsubscribe {
-                    channel: push.channel,
-                    code,
-                    reason,
-                }
-            } else if let Some(message) = push.message {
-                Push::Message(message.data)
-            } else {
-                Push::Unsupported
-            })
+            ReplyResult::Push(push.into())
         } else if has_other_result(&reply) {
             ReplyResult::Unsupported
         } else {
@@ -308,6 +279,41 @@ impl From<pb::Reply> for Reply {
                 temporary: e.temporary,
             }),
             result,
+        }
+    }
+}
+
+impl From<pb::Push> for Push {
+    fn from(push: pb::Push) -> Self {
+        if let Some(publication) = push.r#pub {
+            Push::Publication {
+                channel: push.channel,
+                publication: publication.into(),
+            }
+        } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
+            Push::Disconnect(Disconnect { code, reason })
+        } else if let Some(subscribe) = push.subscribe {
+            Push::Subscribe {
+                channel: push.channel,
+                result: SubscribeResult {
+                    recoverable: subscribe.recoverable,
+                    epoch: subscribe.epoch,
+                    offset: subscribe.offset,
+                    positioned: subscribe.positioned,
+                    data: (!subscribe.data.is_empty()).then_some(subscribe.data),
+                    ..SubscribeResult::default()
+                },
+            }
+        } else if let Some(pb::Unsubscribe { code, reason, .. }) = push.unsubscribe {
+            Push::Unsubscribe {
+                channel: push.channel,
+                code,
+                reason,
+            }
+        } else if let Some(message) = push.message {
+            Push::Message(message.data)
+        } else {
+            Push::Unsupported
         }
     }
 }
