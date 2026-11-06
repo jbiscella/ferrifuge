@@ -11,6 +11,7 @@ mod codec;
 pub mod codes;
 mod config;
 mod event;
+mod fossil;
 mod json;
 pub mod machine;
 mod protobuf;
@@ -22,6 +23,9 @@ mod wire;
 #[cfg(all(feature = "tokio", feature = "test-util"))]
 #[doc(hidden)]
 pub use adapter::stalled_websocket_writes;
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub use fossil::write as write_fossil_delta;
 #[cfg(feature = "tokio")]
 pub use adapter::{Batch, Client, ClientBuilder, Subscription, SubscriptionBuilder};
 pub use call::{
