@@ -251,6 +251,15 @@ const IMPLEMENTED: &[&str] = &[
     "A subscription command waits until the subscription is subscribed",
     "Presence lists the subscribed clients",
     "Presence stats count clients and users",
+    // Block 13, sub-increment 13c: send, the message push and the Protobuf
+    // round-trips.
+    "Binary publish over Protobuf keeps its bytes",
+    "Asynchronous server messages are delivered with their exact bytes",
+    "Asynchronous server messages over Protobuf keep binary data",
+    "Binary RPC over Protobuf keeps its bytes",
+    "Send delivers a message without a reply",
+    "Commands round-trip over Protobuf",
+    "Send over Protobuf is received without a reply",
 ];
 
 /// Server configuration of @A scenarios.
