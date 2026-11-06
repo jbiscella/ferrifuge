@@ -243,6 +243,11 @@ const IMPLEMENTED: &[&str] = &[
     "Emulated headers reach the connect proxy",
     "A header the transport sets is rejected",
     "Client options do not show secrets",
+    // Block 17, sub-increment 17c.
+    "set_token replaces an expired token when there is no token callback",
+    "set_token does not skip the token callback after an expired token",
+    "set_data applies from the next connection attempt",
+    "set_emulated_headers applies from the next connection attempt",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",

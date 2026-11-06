@@ -41,6 +41,8 @@ Available now:
 - HTTP headers on the websocket upgrade and on every `http_stream` and sse
   request, and emulated headers sent in the connect command, which the
   server forwards to its proxies;
+- `set_token`, `set_data` and `set_emulated_headers`, which apply from the
+  next connection attempt;
 - server pings: answered with pongs, and a connection whose pings stop is
   re-established;
 - an `error` event for every failed connection attempt;

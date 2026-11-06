@@ -34,14 +34,31 @@ pub(crate) struct ConnectData {
     emulated_headers: Vec<(String, String)>,
     /// The debug output of client options a step formatted.
     debug: Option<String>,
+    /// `Config::token` and `Config::min_reconnect_delay` of the client (17c).
+    token: Option<String>,
+    min_reconnect_delay: Option<Duration>,
+    /// Events a 17c step read before the scenario's next steps.
+    seen: Vec<ClientEvent>,
+    /// How many commands the fake server had received when `set_data` was
+    /// called.
+    received_at_set: Option<usize>,
     /// The sans-IO core of an @E scenario.
     pub(crate) run: Option<DataRun>,
+    /// The sans-IO core of the 17c token scenario.
+    token_run: Option<TokenRun>,
 }
 
 impl ConnectData {
     /// Applies the scenario's options to `config`.
     pub(crate) fn configure(&self, config: &mut Config) {
         config.data.clone_from(&self.data);
+        if let Some(token) = &self.token {
+            config.token.clone_from(token);
+        }
+        if let Some(delay) = self.min_reconnect_delay {
+            config.min_reconnect_delay = delay;
+            config.max_reconnect_delay = config.max_reconnect_delay.max(delay * 2);
+        }
     }
 
     /// Applies the scenario's data callback to `builder`.
@@ -679,4 +696,260 @@ fn it_contains_none_of(world: &mut ClientWorld, secrets: String) {
     for secret in secrets.split('"').skip(1).step_by(2) {
         assert!(!debug.contains(secret), "{secret} in {debug}");
     }
+}
+
+// 17c: set_token, set_data, set_emulated_headers.
+
+#[given(
+    regex = r#"^a client with token "(\w+)", no token callback and a minimum reconnect delay of (\d+) s, connected to the fake server$"#
+)]
+async fn a_client_with_a_fixed_token(world: &mut ClientWorld, token: String, delay: u64) {
+    world.connect_data.token = Some(token);
+    world.connect_data.min_reconnect_delay = Some(Duration::from_secs(delay));
+    super::connection::a_connected_client(world).await;
+}
+
+#[given(regex = r#"^the fake server will answer the next connect with error (\d+) "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_fake_server_fails_the_next_connect(world: &mut ClientWorld, code: u32, message: String) {
+    world.fake().fail_next_connect_with(code, &message);
+}
+
+#[when(
+    regex = r#"^set_token is called with "(\w+)" when the client emits the "error" event with code (\d+)$"#
+)]
+async fn set_token_on_the_error(world: &mut ClientWorld, token: String, code: u32) {
+    loop {
+        let event = world.next_event().await;
+        let matched = matches!(&event, ClientEvent::Error(error) if error.code == code);
+        world.connect_data.seen.push(event);
+        if matched {
+            break;
+        }
+    }
+    world.client().set_token(token);
+}
+
+/// The connect commands the fake server received, oldest first.
+fn connects(world: &ClientWorld) -> Vec<Value> {
+    world
+        .fake()
+        .received()
+        .into_iter()
+        .filter(|command| command["connect"].is_object())
+        .collect()
+}
+
+/// Waits for a connect command the fake server received after `after`
+/// commands of any method; the commands received from there to it.
+async fn next_connect_after(world: &ClientWorld, after: usize) -> Vec<Value> {
+    let found = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let received = world.fake().received();
+            let since: Vec<Value> = received.into_iter().skip(after).collect();
+            if let Some(index) = since
+                .iter()
+                .position(|command| command["connect"].is_object())
+            {
+                return since[..=index].to_vec();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    found.expect("a connect command")
+}
+
+#[then(regex = r#"^the next connect command carries token "(\w+)"$"#)]
+async fn the_next_connect_carries_token(world: &mut ClientWorld, token: String) {
+    let found = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(last) = connects(world).last()
+                && last["connect"]["token"] == token
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "{:?}", connects(world));
+}
+
+#[then(r#"the client emits no "error" event of kind configuration"#)]
+async fn no_configuration_error(world: &mut ClientWorld) {
+    // Events after "connected" too, within a moment.
+    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let event = world.next_event().await;
+            world.connect_data.seen.push(event);
+        }
+    })
+    .await;
+    assert!(
+        !world.connect_data.seen.iter().any(|event| matches!(
+            event,
+            ClientEvent::Error(error) if error.kind == ErrorKind::Configuration
+        )),
+        "{:?}",
+        world.connect_data.seen
+    );
+}
+
+#[given("a client using a token callback whose connect was answered with error 109")]
+fn a_connect_answered_with_109(world: &mut ClientWorld) {
+    let mut run = TokenRun {
+        machine: Machine::with_token_source(Config {
+            token: "old".to_owned(),
+            ..Config::default()
+        }),
+        actions: Vec::new(),
+    };
+    let transport = run.handle(Input::Connect);
+    run.handle(Input::TransportOpened(transport.expect("a transport")));
+    let id = run.connect_id().expect("a connect command");
+    run.handle(Input::Frame {
+        transport: transport.expect("a transport"),
+        data: format!(r#"{{"id":{id},"error":{{"code":109,"message":"token expired"}}}}"#)
+            .into_bytes(),
+    });
+    world.connect_data.token_run = Some(run);
+}
+
+/// The sans-IO core of the 17c token scenario.
+pub(crate) struct TokenRun {
+    machine: Machine,
+    actions: Vec<Action>,
+}
+
+impl TokenRun {
+    /// Handles `input`; the transport it opened, if any.
+    fn handle(&mut self, input: Input) -> Option<TransportId> {
+        let actions = self.machine.handle(input);
+        let opened = actions.iter().find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        });
+        self.actions.extend(actions);
+        opened
+    }
+
+    fn connect_id(&self) -> Option<u64> {
+        self.actions.iter().rev().find_map(|action| match action {
+            Action::Send { frame, .. } => serde_json::from_slice::<Value>(frame)
+                .ok()
+                .filter(|command| command["connect"].is_object())
+                .and_then(|command| command["id"].as_u64()),
+            _ => None,
+        })
+    }
+}
+
+#[when(regex = r#"^set_token is called with "(\w+)" before the next attempt$"#)]
+fn set_token_before_the_next_attempt(world: &mut ClientWorld, token: String) {
+    let run = world
+        .connect_data
+        .token_run
+        .as_mut()
+        .expect("a 17c token run");
+    run.handle(Input::SetToken(token));
+}
+
+#[then("the token callback is called before the next connect command")]
+fn the_token_callback_is_called_first(world: &mut ClientWorld) {
+    let run = world
+        .connect_data
+        .token_run
+        .as_mut()
+        .expect("a 17c token run");
+    let from = run.actions.len();
+    let transport = run.handle(Input::TimerFired(ferrifuge::machine::Timer::Reconnect));
+    let fetch = run.actions[from..]
+        .iter()
+        .find_map(|action| match action {
+            Action::FetchToken(fetch) => Some(*fetch),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no token fetch: {:?}", &run.actions[from..]));
+    assert_eq!(transport, None, "a transport opened before the token");
+    let transport = run.handle(Input::TokenFetched {
+        fetch,
+        result: Ok("fresh".to_owned()),
+    });
+    if let Some(transport) = transport {
+        run.handle(Input::TransportOpened(transport));
+    }
+    let connect = run.actions[from..]
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => serde_json::from_slice::<Value>(frame)
+                .ok()
+                .filter(|command| command["connect"].is_object()),
+            _ => None,
+        })
+        .expect("a connect command after the token");
+    assert_eq!(connect["connect"]["token"], "fresh", "{connect}");
+}
+
+#[given(regex = r"^a client with connect data (\{.*\}), connected to the fake server$")]
+async fn a_client_with_data_connected(world: &mut ClientWorld, data: String) {
+    world.connect_data.data = Some(json_bytes(&data));
+    super::connection::a_connected_client(world).await;
+}
+
+#[when(regex = r"^set_data is called with (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn set_data_is_called(world: &mut ClientWorld, data: String) {
+    world.connect_data.received_at_set = Some(world.fake().received().len());
+    world.client().set_data(json_bytes(&data));
+}
+
+#[then("the fake server received no command between set_data and the disconnect")]
+async fn no_command_after_set_data(world: &mut ClientWorld) {
+    let after = world
+        .connect_data
+        .received_at_set
+        .expect("set_data was called");
+    let since = next_connect_after(world, after).await;
+    assert_eq!(since.len(), 1, "commands before the reconnect: {since:?}");
+}
+
+#[then(regex = r"^the next connect command carries data (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn the_next_connect_carries_data(world: &mut ClientWorld, data: String) {
+    let after = world
+        .connect_data
+        .received_at_set
+        .expect("set_data was called");
+    let since = next_connect_after(world, after).await;
+    let connect = since.last().expect("a connect command");
+    let expected: Value = serde_json::from_str(&data).expect("JSON data");
+    assert_eq!(connect["connect"]["data"], expected, "{connect}");
+}
+
+#[given(regex = r#"^a connected client with emulated header "([^"]+)"$"#)]
+async fn a_connected_client_with_a_header(world: &mut ClientWorld, given: String) {
+    world.connect_data.emulated_headers.push(header(&given));
+    super::connection::a_connected_client(world).await;
+}
+
+#[when(regex = r#"^set_emulated_headers is called with "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn set_emulated_headers_is_called(world: &mut ClientWorld, given: String) {
+    world
+        .client()
+        .set_emulated_headers([header(&given)])
+        .expect("valid headers");
+}
+
+#[then(regex = r#"^the connect proxy received header "([^"]+)" then "([^"]+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_proxy_received_headers_in_turn(world: &mut ClientWorld, first: String, then: String) {
+    let (name, first) = header(&first);
+    let (_, then) = header(&then);
+    assert_eq!(
+        proxy(world).request_headers(&name),
+        [Some(first), Some(then)]
+    );
 }
