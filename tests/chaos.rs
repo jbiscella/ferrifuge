@@ -1414,6 +1414,9 @@ impl Run {
             if !self.checker.open.is_empty() {
                 return Err(self.violation("I5", "a transport open after disconnect()"));
             }
+            // A resubscribe backoff armed before disconnect() may elapse, and
+            // a subscription timer set since is reported where it is set
+            // (I5, Block 10).
             let timers: Vec<&Due> = self
                 .agenda
                 .values()
