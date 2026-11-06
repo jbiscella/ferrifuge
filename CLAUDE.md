@@ -1780,7 +1780,7 @@ Feature: Client commands
     Then it receives 2 clients and 2 users
 ```
 
-**Exceptions introduced:** `disconnect()` fails the calls already sent with "disconnected" (code 3), as the scenario "Disconnect fails a call already sent at once" states, where centrifuge-js 63ed73e fails them with "connection closed" (code 11, `centrifuge.ts:1987`).
+**Exceptions introduced:** `disconnect()` fails the calls already sent with "disconnected" (code 3), as the scenario "Disconnect fails a call already sent at once" states, where centrifuge-js 63ed73e fails them with "connection closed" (code 11, `centrifuge.ts:1987`). Entering `disconnected` also fails a subscription-level call still waiting for its subscription to be subscribed with "disconnected" (code 3), as the rule for pending calls above requires, where centrifuge-js 63ed73e rejects only the client's own waiting calls (`centrifuge.ts:1947`, `:1989`, `:2011`): its subscriptions stay in, or move to, `subscribing` (`:963-966`), so such a call ends with the timeout error (code 1) unless its subscription is subscribed or unsubscribed first.
 
 ---
 

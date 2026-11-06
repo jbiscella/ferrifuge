@@ -58,13 +58,14 @@ Available now:
 - server-side subscriptions, granted at connect or added and removed by the
   server later, with their events and publications, and recovery of the
   publications they missed across reconnects and `disconnect()`/`connect()`;
-- RPC calls, which wait for the connection when made before it.
+- RPC, publish, history, presence and presence stats calls, client-level and
+  subscription-level, which wait for the connection, and for the
+  subscription, when made before them.
 
 Not yet available:
 
 | Planned | Where |
 |---|---|
-| publish, history, presence, presence stats | Block 13b |
 | `send` and asynchronous server messages | Block 13c |
 | a size bound for calls waiting to be written | Block 13d |
 | join and leave events | Block 13e |
@@ -311,16 +312,41 @@ which reports `was_recovering` and `recovered`. On "state invalidated" (3014)
 the position becomes unmatchable, so the recovery fails and `subscribed`
 reports `recovered` false, as for client-side subscriptions.
 
-### RPC
+### Calls: RPC, publish, history, presence
 
-`client.rpc(method, data)` calls the server's RPC handler (with Centrifugo,
-its RPC proxy) and returns the result data: raw JSON with the JSON protocol,
-any bytes with Protobuf. The call is made when `rpc` returns, and the future
-borrows nothing from the client, so it can be spawned.
+The client's calls:
+
+| Call | Returns |
+|---|---|
+| `client.rpc(method, data)` | the result data of the server's RPC handler (with Centrifugo, its RPC proxy) |
+| `client.publish(channel, data)` | `()` once the server accepted the publication |
+| `client.history(channel, options)` | a `HistoryResult`: the publications `HistoryOptions` select (`limit`, `since`, `reverse`), and the stream's current `epoch` and `offset` |
+| `client.presence(channel)` | a `PresenceResult`: the subscribed clients by client id, with their user, connection info and channel info |
+| `client.presence_stats(channel)` | a `PresenceStatsResult`: `num_clients` and `num_users` |
+
+Data is raw JSON with the JSON protocol, any bytes with Protobuf. Each call
+is made when the method returns, and its future borrows nothing from the
+client, so it can be spawned.
 
 ```rust
+use ferrifuge::HistoryOptions;
+
 let result = client.rpc("echo", br#"{"n":1}"#.to_vec()).await?;
+client.publish("news", br#"{"text":"hi"}"#.to_vec()).await?;
+let history = client.history("news", HistoryOptions::default().limit(10)).await?;
 ```
+
+`HistoryOptions::default()` returns no publications, only the stream's
+position; `limit(-1)` asks for all of them, and the server may cap the number
+(Centrifugo `client.history_max_publication_limit`, 300 by default). Without `since`, a forward history
+starts at the oldest publication kept, so the newest ones come with
+`reverse(true)`, or `since` the position before them.
+
+A subscription has the same calls on its channel: `subscription.publish(data)`,
+`history(options)`, `presence()` and `presence_stats()`. While the
+subscription is subscribing, such a call waits for it, for at most
+`Config::timeout`; it fails with code 7 `SUBSCRIPTION_UNSUBSCRIBED` when the
+subscription is, or becomes, unsubscribed before the call is sent.
 
 A call made before the client is connected, `connect()` included, waits for
 the connection, then for its reply, each for at most `Config::timeout`. It
@@ -329,8 +355,9 @@ flag, or with a client-side code:
 
 | Code | When |
 |---|---|
-| 1 `TIMEOUT` | no connection, or no reply, within `Config::timeout` |
+| 1 `TIMEOUT` | the subscription not subscribed, no connection, or no reply, within `Config::timeout` |
 | 3 `DISCONNECTED` | the client entered `disconnected`: `disconnect()`, a terminal disconnect code or a denied token |
+| 7 `SUBSCRIPTION_UNSUBSCRIBED` | a subscription's call, before it was sent: the subscription is or became unsubscribed |
 | 10 `TRANSPORT_WRITE` | the server refused the HTTP request carrying the call as too large (413) |
 | 11 `CONNECTION_CLOSED` | the transport the call was sent on closed before the reply |
 
