@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–16 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–17 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -1916,7 +1916,7 @@ Feature: Client commands
 
 The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (backoff after 3008), then the validation harness, then centrifuge-js parity, then the batching API. Each becomes a block with its value clause and scenarios when its turn comes.
 
-- **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js).
+- **centrifuge-js parity, client options and methods:** connect data with a `get_data` callback, and the server's data on the `connected` event (spec, "Client common options"); headers in the websocket upgrade request (spec); `setToken` and `setData` (centrifuge-js). Specified as Block 17.
 - **Batching API:** several commands in one frame (centrifuge-js batching API). It must keep Block 8's HTTP 413 rule, which relies on one command per emulation request: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome.
 - **Validation harness:** seeded chaos against the fake server, checking invariants like I1–I8 of centrifugal/centrifuge-rust `docs/spec.md` §11.3, including "exactly once" across reconnects; read its §11.3 and §12 first. Replaying the traces of its TLA+ model is optional, later, keeping its MIT notice. Specified as Block 16.
 
@@ -2423,6 +2423,218 @@ Feature: Validation harness
     Given the adapter runner with a fake server whose recovery skips an offset
     When seeds 0 to 19 run
     Then the runner reports a violation of I8, naming the seed and the operations up to it
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 17 — centrifuge-js parity: connect data, headers, set_token, set_data
+
+**Goal:** an application sends its own data and headers with each connection attempt, fixed or from a callback, replaces the token, the data and the emulated headers used by later attempts, and reads the data the server returns at connect (owner decision, 2026-11-04, "Planned after Block 13"; order decided 2026-11-06).
+
+**Dependencies:** Blocks 1, 5 (token component), 8 (transports), 9 (data callbacks, `DataError`), 10 (token before data), 15 (event delivery).
+
+**Out of scope:**
+- replacing the HTTP headers of a built client (no `set_http_headers`): neither the spec nor centrifuge-js has it;
+- changing the current connection: every option and setter here applies from the next connection attempt and sends no command;
+- a timeout on the `get_data` callback (none in centrifuge-js, none in Block 9);
+- the other `ConnectRequest` and `ConnectResult` fields of the vendored `client.proto` (`flag`, `profile`, `dict`, `time`);
+- a cookie jar: a native client has none; an application sets `Cookie` as an HTTP header.
+
+**Decisions** (reviewer, 2026-11-06, delegated by the owner):
+- **Connect data.** `Config::data: Option<Vec<u8>>`, raw JSON with JSON, any bytes with Protobuf, encoded as subscription data is (Block 9), is sent as `ConnectRequest.data` with every connect command (spec, "Client common options": "option to set connect data"; `client.proto`, `ConnectRequest.data`). `ClientBuilder::get_data` sets an async callback returning `Result<Vec<u8>, DataError>` (Block 9's type); when set, it is called before every connection attempt, each transport of a fallback sequence included, and its result is sent instead of `data` (centrifuge-js 63ed73e `_startReconnecting`). It runs after the reconnect delay, never before it, so Block 14's jitter spreads a fleet's callback calls as it spreads its connects.
+- **Order with the token.** As Block 10 for subscriptions: when the attempt needs a token, the token callback runs first and `get_data` only once a token is obtained, so a denied, failed or empty token calls no `get_data` for that attempt; an attempt that needs no token calls `get_data` without the token callback (centrifuge-js `_startReconnecting`).
+- **get_data failures.** `DataError::Unauthorized` disconnects the client with code 1 "unauthorized", with no error event and no reconnect (centrifuge-js `_handleGetDataError`, `_failUnauthorized`). `DataError::Failed` emits an `error` event of the new kind `ErrorKind::ConnectData`, code 12 "bad configuration", carrying the callback's message, and retries after the reconnect backoff (Block 2) while the client stays `connecting` (centrifuge-js `_handleGetDataError`: type `connectData`, `errorCodes.badConfiguration`). A `disconnect()` while the callback runs abandons it: its answer is ignored and opens no transport (centrifuge-js `_attemptAborted`; Block 16 I5). `DataError`'s documentation and `Display` stop naming subscriptions only.
+- **Server data at connect.** `ClientEvent::Connected` gains `data: Option<Vec<u8>>`: `ConnectResult.data` exactly as received, never re-serialized, as `SubscribeResult.data` on `subscribed` (Block 9) (`client.proto`, `ConnectResult.data`; centrifuge-js `_connectResponse`, `ctx.data`; the spec does not mention it).
+- **Two kinds of headers**, named after the Centrifugo proxy options that forward them, which v6.9.0 split: v6.10.1 forwards an emulated value only when its name is in `emulated_headers`, never through `http_headers` (`internal/proxy/http.go`). No option is called just `headers`, a word meaning real headers in the spec and emulated ones in centrifuge-js (centrifuge-rust `docs/spec.md` §5.1, decision 12). Both are in scope as centrifuge-js parity (its `headers` option and `setHeaders` method), as the owner read "centrifuge-js parity" for the batching API (Block 13).
+  - `ClientBuilder::http_headers`: real HTTP headers on the websocket upgrade request (spec, "Client common options") and on every HTTP request of `http_stream` and sse, the stream request and the emulation requests, so that a gateway checking a header still admits a client that fell back (Block 8). Names are case-insensitive, one value each, a later value replacing an earlier one. A name or value that is not valid HTTP, or a header the transport sets (`Host`, `Connection`, `Upgrade`, `Content-Length`, `Transfer-Encoding`, `Content-Type`, `Accept`, any `Sec-WebSocket-*`), fails `build()` with a configuration error naming the header, never its value.
+  - `ClientBuilder::emulated_headers`: a name-to-value map sent as `ConnectRequest.headers` with every connect command, on every transport (`client.proto`; centrifuge-js `headers`; spec feature matrix, "headers emulation"). Names and values must be valid HTTP, since the server forwards them as HTTP headers; otherwise `build()` fails as above. They are client-controlled input to the server's proxies, as the Centrifugo proxy documentation warns.
+- **Setters.** `Client::set_token`, `Client::set_data` and `Client::set_emulated_headers` replace the value used from the next connection attempt and send nothing (centrifuge-js `setToken`, `setData`, `setHeaders`).
+  - `set_token`: without a token callback it also clears a pending "token expired" (error 109 to a connect), so the next attempt connects with the new token instead of failing with the configuration error and code 1; with a callback, a pending "token expired" still makes the next attempt call it, since the token set may be the expired one; a 109 answering a connect that carried an older token than the one set leaves nothing pending (centrifuge-js `setToken`, `_connectError`; Block 5's token component already compares them). A connected client's refresh still needs the token callback (Block 1). An empty token clears it: the next attempt carries none, or calls the callback when there is one.
+  - `set_data`: with `get_data` set, the callback's result still replaces it on every attempt (centrifuge-js `setData`).
+- **Secrets in `Debug`.** The `Debug` output of `Config`, `ClientBuilder` and the `machine` inputs and actions shows connect data as its length (as `SubscriptionOptions` does), headers by name without their values, and never a token.
+- **Sans-IO API.** `Machine::with_data_source` (as `with_token_source`), `Action::FetchConnectData`, `Action::CancelConnectData`, `Input::ConnectDataFetched`, `Machine::with_emulated_headers`, and an input per setter. HTTP headers stay in the adapter.
+- **Public API and version.** 17a adds a field to `Config` and to `ClientEvent::Connected` and variants to `ErrorKind`, `Input` and `Action`: breaking, version 0.11.0. The same release marks `ErrorKind`, `Input` and the `Connected` variant `#[non_exhaustive]`, so that later fields and variants are additions; `Action` stays exhaustive, so that an owner's `match` fails to compile when a new action needs performing. 17b and 17c only add items.
+- **Fixtures.**
+  - The @B connect proxy records each request's HTTP headers and can answer with result `data`.
+  - The @B server forwards `x-device-real` through `http_headers` and `x-device-emulated` through `emulated_headers` (`CENTRIFUGO_CLIENT_PROXY_CONNECT_HTTP_HEADERS`, `CENTRIFUGO_CLIENT_PROXY_CONNECT_EMULATED_HEADERS`, space-separated lists), so each header scenario fails when its header travels the other way.
+  - The HTTP proxy (Block 8) records the headers of each request it relays.
+  - The fake server answers connects with given raw data, and the next connect with a given error.
+
+`VERIFY:` the two environment variables above on Centrifugo v6.10.1, and that the connect proxy receives the `http_headers` of an `http_stream` or sse stream request as it does those of a websocket upgrade.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Scope | Scenarios |
+|---|---|---|
+| 17a | connect data, `get_data`, server data on `connected`; version 0.11.0 | "Connect data is sent on connect and on reconnect", "Connect data from a callback is renewed on every attempt", "A failing connect data callback is retried after the reconnect backoff", "A connect data callback denying access disconnects the client", "A disconnect while the data callback runs opens no transport", "The connect data callback runs only after a connection token is obtained", "The connection token is fetched before the connect data", "A client that has a token calls the data callback without the token callback", "Data returned with the connect reply is delivered", "The connected event carries the server's data exactly" |
+| 17b | `http_headers`, `emulated_headers` | "HTTP headers reach the connect proxy over each transport", "HTTP headers ride on every request of an emulated transport", "Emulated headers reach the connect proxy", "A header the transport sets is rejected", "Client options do not show secrets" |
+| 17c | `set_token`, `set_data`, `set_emulated_headers` | "set_token replaces an expired token when there is no token callback", "set_token does not skip the token callback after an expired token", "set_data applies from the next connection attempt", "set_emulated_headers applies from the next connection attempt" |
+
+Value clause: As an app developer shipping ferrifuge to fleets of devices, I want to send data and headers with each connection attempt, replace them and the token between attempts, and read the data the server returns at connect, so that my connect proxy and gateways can identify and authorize each device on every connect and reconnect, over every transport.
+
+```gherkin
+Feature: Connect data, headers, set_token and set_data
+
+  @B
+  Scenario: Connect data is sent on connect and on reconnect
+    Given a connect proxy recording requests
+    And a client with connect data {"device":"d1"}
+    When connect is called
+    And the server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then the connect proxy recorded data {"device":"d1"} on both connect requests
+
+  @B
+  Scenario: Connect data from a callback is renewed on every attempt
+    Given a connect proxy recording requests
+    And a client with connect data {"device":"d1"} and a data callback returning {"n":1} then {"n":2}
+    When connect is called
+    And the server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then the connect proxy recorded data {"n":1} then {"n":2}
+
+  @E
+  Scenario: A failing connect data callback is retried after the reconnect backoff
+    Given a client whose data callback fails once
+    When connect is called
+    Then the client emits an "error" event of kind connect data with code 12
+    And the client state is "connecting"
+    And the data callback is called again after the reconnect backoff delay
+    And the connect command carries the data the second call returned
+
+  @E
+  Scenario: A connect data callback denying access disconnects the client
+    Given a client whose data callback signals "unauthorized"
+    When connect is called
+    Then the client emits "disconnected" with code 1 and reason "unauthorized"
+    And no transport is opened
+    And no reconnect is scheduled
+
+  @E
+  Scenario: A disconnect while the data callback runs opens no transport
+    Given a client whose data callback has not answered since connect was called
+    When disconnect is called
+    And the data callback answers
+    Then the client state is "disconnected"
+    And no transport is opened
+
+  @E
+  Scenario Outline: The connect data callback runs only after a connection token is obtained
+    Given a client without an initial token, with a data callback whose token callback <outcome>
+    When connect is called
+    Then the data callback is not called for that attempt
+
+    Examples:
+      | outcome                      |
+      | signals "unauthorized"       |
+      | fails with a temporary error |
+      | returns an empty token       |
+
+  @E
+  Scenario: The connection token is fetched before the connect data
+    Given a client without an initial token, with a token callback and a data callback
+    When connect is called
+    Then the token callback is called before the data callback
+    And the connect command carries both the token and the data
+
+  @E
+  Scenario: A client that has a token calls the data callback without the token callback
+    Given a client with an initial token, a token callback and a data callback
+    When connect is called
+    Then the token callback is not called
+    And the connect command carries the initial token and the data
+
+  @B
+  Scenario: Data returned with the connect reply is delivered
+    Given the connect proxy answers with data {"welcome":true}
+    When connect is called
+    Then the client emits "connected" with data {"welcome":true}
+
+  @D
+  Scenario: The connected event carries the server's data exactly
+    Given a fake server answering connects with the non-canonical JSON data {"b": 1.0,  "a":2}
+    When a client connects to it
+    Then the client emits "connected" with data exactly those bytes
+
+  @B
+  Scenario Outline: HTTP headers reach the connect proxy over each transport
+    Given a connect proxy recording requests
+    And a server with http_stream and sse enabled
+    And a client with HTTP header "X-Device-Real: r1" configured with only the server's <transport> endpoint
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+    And the connect proxy received header "X-Device-Real: r1"
+
+    Examples:
+      | transport   |
+      | websocket   |
+      | http_stream |
+      | sse         |
+
+  @B
+  Scenario Outline: HTTP headers ride on every request of an emulated transport
+    Given a client with HTTP header "X-Device-Real: r1" connected over transport "<transport>" through the HTTP proxy
+    When the client sends a command
+    Then the HTTP proxy relayed the stream request and at least one emulation request
+    And every request it relayed carried header "X-Device-Real: r1"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  @B
+  Scenario: Emulated headers reach the connect proxy
+    Given a connect proxy recording requests
+    And a client with emulated header "X-Device-Emulated: e1"
+    When connect is called
+    Then the connect proxy received header "X-Device-Emulated: e1"
+
+  Scenario: A header the transport sets is rejected
+    Given client options with HTTP header "Sec-WebSocket-Key: k1"
+    When the client is built
+    Then building fails with a configuration error naming "Sec-WebSocket-Key" and not "k1"
+
+  Scenario: Client options do not show secrets
+    Given client options with token "tok-secret", connect data {"pin":"1234"}, HTTP header "Authorization: h-secret" and emulated header "Authorization: e-secret"
+    When their debug output is formatted
+    Then it names the header "Authorization" and shows the data as 14 bytes
+    And it contains none of "tok-secret", "1234", "h-secret" and "e-secret"
+
+  @D
+  Scenario: set_token replaces an expired token when there is no token callback
+    Given a client with token "old", no token callback and a minimum reconnect delay of 1 s, connected to the fake server
+    And the fake server will answer the next connect with error 109 "token expired"
+    When the fake server disconnects the client with a reconnect-advised code
+    And set_token is called with "new" when the client emits the "error" event with code 109
+    Then the next connect command carries token "new"
+    And the client emits "connected"
+    And the client emits no "error" event of kind configuration
+
+  @E
+  Scenario: set_token does not skip the token callback after an expired token
+    Given a client using a token callback whose connect was answered with error 109
+    When set_token is called with "new" before the next attempt
+    Then the token callback is called before the next connect command
+
+  @D
+  Scenario: set_data applies from the next connection attempt
+    Given a client with connect data {"v":1}, connected to the fake server
+    When set_data is called with {"v":2}
+    And the fake server disconnects the client with a reconnect-advised code
+    Then the fake server received no command between set_data and the disconnect
+    And the next connect command carries data {"v":2}
+
+  @B
+  Scenario: set_emulated_headers applies from the next connection attempt
+    Given a connect proxy recording requests
+    And a connected client with emulated header "X-Device-Emulated: e1"
+    When set_emulated_headers is called with "X-Device-Emulated: e2"
+    And the server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then the connect proxy received header "X-Device-Emulated: e1" then "X-Device-Emulated: e2"
 ```
 
 **Exceptions introduced:** none.
