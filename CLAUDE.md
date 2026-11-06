@@ -1778,6 +1778,85 @@ Feature: Client commands
     Given two clients of different users subscribed to a channel with presence
     When one of them requests the channel's presence stats
     Then it receives 2 clients and 2 users
+
+  @E
+  Scenario: A call that does not fit the write queue waits until earlier calls are written
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 800 bytes sent and not yet written
+    When the client publishes 400 bytes
+    Then no command is sent for it
+    When the transport reports the first publish written
+    Then the second publish is sent
+
+  @E
+  Scenario: A call waiting for room fails after the timeout and is never sent
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 800 bytes sent and not yet written
+    When the client publishes 400 bytes
+    And the configured timeout elapses
+    Then the call fails with a timeout error
+    When the transport reports the first publish written
+    Then no command is sent for it
+
+  @E
+  Scenario: A call larger than the write queue is sent once nothing waits to be written
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 100 bytes sent and not yet written
+    When the client publishes 4000 bytes
+    Then no command is sent for it
+    When the transport reports the first publish written
+    Then the 4000-byte publish is sent
+
+  @E
+  Scenario: The client's own commands are not held by a full write queue
+    Given a connected client with a write queue of 1000 bytes, whose server expects pongs
+    And a publish of 800 bytes sent and not yet written
+    And a publish of 400 bytes waiting for room
+    When the server sends a ping
+    Then the client sends a pong at once
+
+  @E
+  Scenario: Calls are admitted in the order they were made
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 800 bytes sent and not yet written
+    When the client publishes 400 bytes and then 100 bytes
+    Then no command is sent for either
+    When the transport reports the first publish written
+    Then the 400-byte publish is sent before the 100-byte one
+
+  @E
+  Scenario: A call behind one that stopped waiting is sent when it fits
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 800 bytes sent and not yet written
+    And a publish of 400 bytes waiting for room
+    When the client publishes 100 bytes
+    And the 400-byte publish is abandoned
+    Then the 100-byte publish is sent
+
+  @E
+  Scenario: A call waiting for room keeps its deadline when the transport is lost
+    Given a connected client with a write queue of 1000 bytes
+    And a publish of 800 bytes sent and not yet written
+    And a publish of 400 bytes waiting for room
+    When the transport is lost
+    Then the first publish fails with a "connection closed" error
+    When the configured timeout elapses since the 400-byte publish was made, the client still connecting
+    Then the 400-byte publish fails with a timeout error
+    When the client is connected again
+    Then no command is sent for it
+
+  @E
+  Scenario: A write queue limit of 0 is rejected
+    Given a Config whose write queue limit is 0
+    When a client is created
+    Then Client::new returns an error
+
+  @D
+  Scenario: Sends beyond the write queue go out as earlier ones are written
+    Given a client with a write queue of 1 byte connected to the fake server
+    When the client sends {"n":1}, {"n":2} and {"n":3} without awaiting them
+    Then every send completes before the configured timeout
+    And the fake server received the 3 send commands in that order
 ```
 
 **Exceptions introduced:** `disconnect()` fails the calls already sent with "disconnected" (code 3), as the scenario "Disconnect fails a call already sent at once" states, where centrifuge-js 63ed73e fails them with "connection closed" (code 11, `centrifuge.ts:1987`). Entering `disconnected` also fails a subscription-level call still waiting for its subscription to be subscribed with "disconnected" (code 3), as the rule for pending calls above requires, where centrifuge-js 63ed73e rejects only the client's own waiting calls (`centrifuge.ts:1947`, `:1989`, `:2011`): its subscriptions stay in, or move to, `subscribing` (`:963-966`), so such a call ends with the timeout error (code 1) unless its subscription is subscribed or unsubscribed first.
