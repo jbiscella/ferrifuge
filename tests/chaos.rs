@@ -8,6 +8,8 @@
 // @P scenario: The core runner reports a planted connection fault
 // @P scenario: Seeded chaos with subscriptions on the core keeps every invariant
 // @P scenario: The core runner reports a planted delivery fault
+// @P scenario: Seeded chaos with batching on the core keeps every invariant
+// @P scenario: The core runner reports a planted batching fault
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -33,7 +35,8 @@ const OPS: usize = 60;
 const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 /// Operations of each seed of the long run.
 const OPS_VARIABLE: &str = "FERRIFUGE_CHAOS_OPS";
-/// `0` runs the long run without subscriptions, as the connection runner.
+/// The long run's mode: `0` the connection alone, `1` with subscriptions,
+/// `2` (the default) with subscriptions and batches.
 const SUBSCRIPTIONS_VARIABLE: &str = "FERRIFUGE_CHAOS_SUBSCRIPTIONS";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -73,7 +76,34 @@ fn chaos_config() -> Config {
         timeout: TIMEOUT,
         read_ahead_messages: READ_AHEAD_MESSAGES,
         read_ahead_bytes: READ_AHEAD_BYTES,
+        batch_frame_bytes: BATCH_FRAME_BYTES,
         ..Config::default()
+    }
+}
+
+/// The frame cap of the chaos configuration, so that batches split
+/// (Block 18, D9).
+const BATCH_FRAME_BYTES: usize = 1024;
+
+/// What a runner exercises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The connection alone (16a).
+    Connection,
+    /// Subscriptions too (16b).
+    Subscriptions,
+    /// Subscriptions and batches (18d).
+    Batching,
+}
+
+impl Mode {
+    /// Its value of `FERRIFUGE_CHAOS_SUBSCRIPTIONS`.
+    fn variable(self) -> u8 {
+        match self {
+            Self::Connection => 0,
+            Self::Subscriptions => 1,
+            Self::Batching => 2,
+        }
     }
 }
 
@@ -103,6 +133,12 @@ enum Fault {
     /// `wants_frames()` reported true to the checker while the read-ahead
     /// is full (I9).
     WantsFramesWhenFull,
+    /// Two frames of several commands merged by the tap past the frame cap
+    /// (I10).
+    MergedFrames,
+    /// A batch stop reported to the checker one step after the client
+    /// handled it (I10).
+    LateStop,
 }
 
 /// An invariant a seed broke.
@@ -114,8 +150,8 @@ struct Violation {
     op: usize,
     /// Operations the seed runs.
     of: usize,
-    /// The runner had subscriptions.
-    subscriptions: bool,
+    /// What the runner exercised.
+    mode: Mode,
     detail: String,
     /// The operations up to it.
     ops: Vec<String>,
@@ -137,7 +173,7 @@ impl fmt::Display for Violation {
             self.detail,
             self.seed,
             self.of,
-            u8::from(self.subscriptions),
+            self.mode.variable(),
             self.ops.join("\n  "),
             self.tail.join("\n  ")
         )
@@ -166,6 +202,10 @@ enum Op {
     Drop,
     /// The server stops pinging this connection.
     PingGap,
+    /// The application starts a batch (18d).
+    StartBatching,
+    /// The application stops one of its batches.
+    StopBatching,
     /// Adds a client-side subscription to `CHANNELS[n]`.
     Add(usize),
     Subscribe(usize),
@@ -294,6 +334,8 @@ impl Op {
             Self::UnsubscribePush(_, code) => format!("unsubscribe push {code}"),
             Self::ServerSubscribe(_) => "server subscribe".to_owned(),
             Self::ServerUnsubscribe(_) => "server unsubscribe".to_owned(),
+            Self::StartBatching => "start batching".to_owned(),
+            Self::StopBatching => "stop batching".to_owned(),
             other => format!("{other:?}"),
         }
     }
@@ -435,6 +477,13 @@ struct Checker {
     delivered: BTreeMap<Sub, Option<u64>>,
     /// The current incarnation of each server-side subscription (I8).
     generations: BTreeMap<&'static str, u32>,
+    /// Batches open, as the checker knows (I10).
+    batches_open: usize,
+    /// Batch stops the checker knows of.
+    stops: u64,
+    /// Calls made while a batch was open, not yet sent, with the stops known
+    /// when they were made (I10).
+    held: BTreeMap<CallId, u64>,
 }
 
 /// One seed's run.
@@ -443,6 +492,17 @@ struct Run {
     fault: Option<Fault>,
     /// Whether the run uses subscriptions (16b) or the connection alone.
     subscriptions: bool,
+    mode: Mode,
+    /// Batches the application holds open (18d).
+    batches: usize,
+    /// A batch stop the checker learns of at the next operation
+    /// (`Fault::LateStop`).
+    late_stop: bool,
+    /// The length of the last frame of several commands sent during the
+    /// current operation (`Fault::MergedFrames`).
+    last_batch_frame: Option<usize>,
+    /// Frames of several commands sent while handling the current input.
+    batch_frames: usize,
     rng: fastrand::Rng,
     machine: Machine,
     now: Duration,
@@ -477,11 +537,16 @@ struct Run {
 type Step = Result<(), Violation>;
 
 impl Run {
-    fn new(seed: u64, fault: Option<Fault>, subscriptions: bool) -> Self {
+    fn new(seed: u64, fault: Option<Fault>, mode: Mode) -> Self {
         Self {
             seed,
             fault,
-            subscriptions,
+            subscriptions: mode != Mode::Connection,
+            mode,
+            batches: 0,
+            late_stop: false,
+            last_batch_frame: None,
+            batch_frames: 0,
             rng: fastrand::Rng::with_seed(seed ^ 0x5eed_c4a0_5000_0016),
             machine: Machine::with_token_source(chaos_config()).with_seed(seed),
             now: Duration::ZERO,
@@ -516,7 +581,21 @@ impl Run {
         self.of = ops;
         for op in 0..ops {
             self.op = op;
-            let next = Op::pick(&mut self.rng, self.subscriptions);
+            self.last_batch_frame = None;
+            if std::mem::take(&mut self.late_stop) {
+                self.checker.stops += 1;
+            }
+            // Drawn only with batching, so the other modes' seeds keep their
+            // operations.
+            let next = if self.mode == Mode::Batching && self.rng.u32(0..100) < 12 {
+                if self.rng.bool() {
+                    Op::StartBatching
+                } else {
+                    Op::StopBatching
+                }
+            } else {
+                Op::pick(&mut self.rng, self.subscriptions)
+            };
             self.trace.push(format!("op {op}: {next:?}"));
             self.count(next.name());
             self.apply(next)?;
@@ -525,6 +604,63 @@ impl Run {
         }
         self.op = ops;
         self.heal()
+    }
+
+    /// The application stops one of its batches: what all hold is sent.
+    fn stop_batch(&mut self) -> Step {
+        if self.batches == 0 {
+            return Ok(());
+        }
+        self.batches -= 1;
+        self.checker.batches_open -= 1;
+        if self.fault == Some(Fault::LateStop) {
+            self.late_stop = true;
+        } else {
+            self.checker.stops += 1;
+        }
+        self.count("batch stopped");
+        self.batch_frames = 0;
+        self.feed(Input::StopBatching)?;
+        if self.batch_frames >= 2 {
+            self.count("split batch");
+        }
+        Ok(())
+    }
+
+    /// I10: a call made while a batch was open is sent, its reply deadline
+    /// set, only after a batch stopped.
+    fn check_held_sent(&mut self, call: CallId, timer: CallTimer) -> Step {
+        if timer == CallTimer::Reply
+            && let Some(stops) = self.checker.held.remove(&call)
+            && self.checker.stops <= stops
+        {
+            return Err(self.violation(
+                "I10",
+                format!("{call:?} made while a batch was open, sent before any stop"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// I10: a frame of several commands stays within the frame cap.
+    fn check_frame(&mut self, frame: &[u8]) -> Step {
+        let commands = frame.split(|byte| *byte == b'\n').count();
+        if commands < 2 {
+            return Ok(());
+        }
+        self.count("frame of several commands");
+        self.batch_frames += 1;
+        let checked = match self.last_batch_frame.replace(frame.len()) {
+            Some(last) if self.fault == Some(Fault::MergedFrames) => last + 1 + frame.len(),
+            _ => frame.len(),
+        };
+        if checked > BATCH_FRAME_BYTES {
+            return Err(self.violation(
+                "I10",
+                format!("a frame of {commands} commands is {checked} bytes"),
+            ));
+        }
+        Ok(())
     }
 
     fn count(&mut self, name: impl Into<String>) {
@@ -537,7 +673,7 @@ impl Run {
             invariant,
             op: self.op,
             of: self.of,
-            subscriptions: self.subscriptions,
+            mode: self.mode,
             detail: detail.into(),
             ops: self
                 .trace
@@ -568,15 +704,19 @@ impl Run {
             }
             Op::Call(kind) => {
                 let channel = "news".to_owned();
+                // With batches, data of up to 600 bytes, so that a few calls
+                // fill a frame and batches split.
+                let data = if self.mode == Mode::Batching {
+                    format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes()
+                } else {
+                    b"{}".to_vec()
+                };
                 let id = self.machine.add_call(match kind {
                     CallKind::Rpc => CallRequest::Rpc {
                         method: "m".to_owned(),
-                        data: b"{}".to_vec(),
+                        data,
                     },
-                    CallKind::Publish => CallRequest::Publish {
-                        channel,
-                        data: b"{}".to_vec(),
-                    },
+                    CallKind::Publish => CallRequest::Publish { channel, data },
                     CallKind::History => CallRequest::History {
                         channel,
                         options: HistoryOptions::default(),
@@ -584,6 +724,10 @@ impl Run {
                     CallKind::Presence => CallRequest::Presence { channel },
                 });
                 self.checker.calls.insert(id, self.now);
+                if self.checker.batches_open > 0 {
+                    // Held: sent only after a batch stops (I10).
+                    self.checker.held.insert(id, self.checker.stops);
+                }
                 self.feed(Input::Call(id))
             }
             Op::TakeNext(target) => match self.of(target) {
@@ -630,6 +774,15 @@ impl Run {
                 self.server.pinging = false;
                 Ok(())
             }
+            Op::StartBatching => {
+                if self.batches == 3 {
+                    return Ok(());
+                }
+                self.batches += 1;
+                self.checker.batches_open += 1;
+                self.feed(Input::StartBatching)
+            }
+            Op::StopBatching => self.stop_batch(),
             subscription => self.apply_subscription(subscription),
         }
     }
@@ -744,6 +897,13 @@ impl Run {
     /// application's callbacks sent before healing has arrived.
     fn heal(&mut self) -> Step {
         self.trace.push("heal".to_owned());
+        // Healed: every batch is stopped (Block 18, D9).
+        while self.batches > 0 {
+            self.stop_batch()?;
+        }
+        if std::mem::take(&mut self.late_stop) {
+            self.checker.stops += 1;
+        }
         self.server.healed = true;
         self.server.pinging = true;
         self.reading = true;
@@ -1041,6 +1201,7 @@ impl Run {
             } => {
                 let after = self.latency();
                 self.schedule(after, Due::Written(transport, frame_id));
+                self.check_frame(&frame)?;
                 if self.server.current == Some(transport) {
                     let text = String::from_utf8(frame).expect("JSON frames");
                     for command in text.lines() {
@@ -1063,6 +1224,7 @@ impl Run {
                 }
             }
             Action::SetCallTimer(call, timer, delay) => {
+                self.check_held_sent(call, timer)?;
                 self.cancel(Key::Call(call, timer));
                 self.schedule(delay, Due::Timer(Key::Call(call, timer)));
             }
@@ -1089,8 +1251,12 @@ impl Run {
                         format!("{call:?} made at {made:?} settled at {:?}", self.now),
                     ));
                 }
+                let held = self.checker.held.remove(&call).is_some();
                 if matches!(&result, Err(error) if error.code == codes::error::TIMEOUT) {
                     self.count("call timeout");
+                    if held {
+                        self.count("held call timed out");
+                    }
                 }
             }
             other => self.act_application(other)?,
@@ -1695,11 +1861,11 @@ fn run_seeds(
     seeds: Range<u64>,
     ops: usize,
     fault: Option<Fault>,
-    subscriptions: bool,
+    mode: Mode,
 ) -> Result<BTreeMap<String, usize>, Violation> {
     let mut counts = BTreeMap::new();
     for seed in seeds {
-        let mut run = Run::new(seed, fault, subscriptions);
+        let mut run = Run::new(seed, fault, mode);
         run.run(ops)?;
         for (name, count) in run.counts {
             *counts.entry(name).or_default() += count;
@@ -1771,7 +1937,7 @@ fn connection_counts() -> Vec<String> {
 #[test]
 fn seeded_chaos_on_the_core_keeps_the_connection_invariants() {
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
-    let counts = run_seeds(seeds.clone(), OPS, None, false)
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Connection)
         .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds == SEEDS {
         assert_counted(&counts, &connection_counts());
@@ -1781,7 +1947,7 @@ fn seeded_chaos_on_the_core_keeps_the_connection_invariants() {
 #[test]
 fn a_seed_of_the_core_runner_reproduces_its_run() {
     let trace = |seed| {
-        let mut run = Run::new(seed, None, false);
+        let mut run = Run::new(seed, None, Mode::Connection);
         run.run(OPS)
             .unwrap_or_else(|violation| panic!("{violation}"));
         run.trace
@@ -1807,14 +1973,14 @@ fn a_seed_of_the_core_runner_reproduces_its_run() {
 
 /// Runs `fault` over the pull-request seeds: the first violation must be
 /// of `invariant`, and the same when its seed reruns alone.
-fn assert_reported(fault: Fault, invariant: &str, subscriptions: bool) {
-    let violation = run_seeds(SEEDS, OPS, Some(fault), subscriptions)
+fn assert_reported(fault: Fault, invariant: &str, mode: Mode) {
+    let violation = run_seeds(SEEDS, OPS, Some(fault), mode)
         .err()
         .unwrap_or_else(|| panic!("{fault:?} went unreported"));
     assert_eq!(violation.invariant, invariant, "{fault:?}: {violation}");
 
     let alone = seeds_from(Some(violation.seed.to_string()), SEEDS);
-    let again = run_seeds(alone, OPS, Some(fault), subscriptions).err();
+    let again = run_seeds(alone, OPS, Some(fault), mode).err();
 
     assert_eq!(again.as_ref(), Some(&violation), "{fault:?}");
 }
@@ -1828,18 +1994,24 @@ fn the_core_runner_reports_a_planted_connection_fault() {
         (Fault::KeepCancelledTimer, "I5"),
         (Fault::DropCallOutcome, "I6"),
     ] {
-        assert_reported(fault, invariant, false);
+        assert_reported(fault, invariant, Mode::Connection);
     }
 }
 
 #[test]
 fn seeded_chaos_with_subscriptions_on_the_core_keeps_every_invariant() {
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
-    let counts =
-        run_seeds(seeds.clone(), OPS, None, true).unwrap_or_else(|violation| panic!("{violation}"));
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Subscriptions)
+        .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
         return;
     }
+    assert_counted(&counts, &subscription_counts());
+}
+
+/// The operations, server behaviours and outcomes of the runner with
+/// subscriptions.
+fn subscription_counts() -> Vec<String> {
     let mut expected = connection_counts();
     expected.extend(
         [
@@ -1875,7 +2047,7 @@ fn seeded_chaos_with_subscriptions_on_the_core_keeps_every_invariant() {
         ]
         .map(str::to_owned),
     );
-    assert_counted(&counts, &expected);
+    expected
 }
 
 #[test]
@@ -1887,7 +2059,37 @@ fn the_core_runner_reports_a_planted_delivery_fault() {
         (Fault::DropSubscriptionStateEvent, "I1"),
         (Fault::WantsFramesWhenFull, "I9"),
     ] {
-        assert_reported(fault, invariant, true);
+        assert_reported(fault, invariant, Mode::Subscriptions);
+    }
+}
+
+#[test]
+fn seeded_chaos_with_batching_on_the_core_keeps_every_invariant() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Batching)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let mut expected = subscription_counts();
+    expected.extend(
+        [
+            "start batching",
+            "stop batching",
+            "batch stopped",
+            "frame of several commands",
+            "split batch",
+            "held call timed out",
+        ]
+        .map(str::to_owned),
+    );
+    assert_counted(&counts, &expected);
+}
+
+#[test]
+fn the_core_runner_reports_a_planted_batching_fault() {
+    for fault in [Fault::MergedFrames, Fault::LateStop] {
+        assert_reported(fault, "I10", Mode::Batching);
     }
 }
 
@@ -1901,7 +2103,7 @@ fn trace() {
     let ops = std::env::var(OPS_VARIABLE)
         .ok()
         .map_or(OPS, |value| value.trim().parse().expect("a number"));
-    let mut run = Run::new(seed, None, true);
+    let mut run = Run::new(seed, None, Mode::Batching);
     let outcome = run.run(ops);
     println!("{}", run.trace.join("\n"));
     if let Err(violation) = outcome {
@@ -1925,13 +2127,17 @@ fn seeded_chaos_long_run() {
     let start = number("FERRIFUGE_CHAOS_START", fastrand::u64(..u64::MAX / 2));
     let seeds = number("FERRIFUGE_CHAOS_SEEDS", 10_000);
     let ops = usize::try_from(number(OPS_VARIABLE, 200)).expect("a count");
-    let subscriptions = number(SUBSCRIPTIONS_VARIABLE, 1) != 0;
+    let mode = match number(SUBSCRIPTIONS_VARIABLE, 2) {
+        0 => Mode::Connection,
+        1 => Mode::Subscriptions,
+        _ => Mode::Batching,
+    };
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);
     println!(
-        "chaos: seeds {}..{} of {ops} operations, subscriptions {subscriptions}",
+        "chaos: seeds {}..{} of {ops} operations, mode {mode:?}",
         seeds.start, seeds.end
     );
-    if let Err(violation) = run_seeds(seeds, ops, None, subscriptions) {
+    if let Err(violation) = run_seeds(seeds, ops, None, mode) {
         panic!("{violation}");
     }
 }
