@@ -20,7 +20,7 @@ use tokio::time::Sleep;
 use super::http::HttpTransport;
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{
-    Action, CallId, CallTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
+    Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use crate::{
@@ -475,7 +475,7 @@ impl Client {
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
-        check_read_ahead(&config)?;
+        check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
         let machine = if get_token.is_some() {
@@ -886,6 +886,7 @@ impl Driver {
                 (id, inbound) = received(&mut self.transport, reading) => match inbound {
                     Inbound::Frame(data) => Input::Frame { transport: id, data },
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
+                    Inbound::Written(frame) => Input::FrameWritten { transport: id, frame },
                     Inbound::Closed { code, reason } => {
                         self.transport = None;
                         Input::TransportClosed { transport: id, code, reason }
@@ -968,12 +969,13 @@ impl Driver {
             }
             Action::Send {
                 transport,
+                id: frame_id,
                 frame,
                 frame_type,
             } => {
                 if let Some((id, open)) = &mut self.transport
                     && *id == transport
-                    && open.send(frame, frame_type).is_err()
+                    && open.send(frame_id, frame, frame_type).is_err()
                 {
                     self.transport = None;
                     self.shared.apply(Input::TransportClosed {
@@ -1167,12 +1169,12 @@ enum Transport {
 
 impl Transport {
     /// Queues `frame`; it is written while [`Transport::recv`] runs.
-    fn send(&mut self, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
+    fn send(&mut self, id: FrameId, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
         match self {
-            Self::WebSocket(websocket) => websocket.send(frame, frame_type),
+            Self::WebSocket(websocket) => websocket.send(id, frame, frame_type),
             // Failures end the transport through `recv`.
             Self::Http(http) => {
-                http.send(frame);
+                http.send(id, frame);
                 Ok(())
             }
         }
@@ -1235,14 +1237,18 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
 }
 
 /// A read-ahead limit of 0 could never let a message in (Block 15).
-fn check_read_ahead(config: &Config) -> Result<(), ClientError> {
-    if config.read_ahead_messages > 0 && config.read_ahead_bytes > 0 {
+fn check_limits(config: &Config) -> Result<(), ClientError> {
+    let message = if config.read_ahead_messages == 0 || config.read_ahead_bytes == 0 {
+        "the read-ahead limits must be at least 1"
+    } else if config.write_queue_bytes == 0 {
+        "the write queue limit must be at least 1"
+    } else {
         return Ok(());
-    }
+    };
     Err(ClientError {
         kind: ErrorKind::Configuration,
         code: codes::error::BAD_CONFIGURATION,
-        message: "the read-ahead limits must be at least 1".to_owned(),
+        message: message.to_owned(),
         transport: None,
     })
 }

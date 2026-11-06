@@ -97,6 +97,19 @@ impl EventId {
     }
 }
 
+/// Identifies a frame of [`Action::Send`], for its owner to report with
+/// [`Input::FrameWritten`] once the transport has written it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FrameId(u64);
+
+impl FrameId {
+    /// An id for the adapter's unit tests.
+    #[cfg(all(test, feature = "tokio"))]
+    pub(crate) fn for_tests(n: u64) -> Self {
+        Self(n)
+    }
+}
+
 /// Identifies a call the machine settles with [`Action::CallSettled`];
 /// [`Machine::add_call`] gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -289,6 +302,9 @@ pub enum CallTimer {
     Subscription,
     /// Deadline for the connection, while the call waits for it.
     Connection,
+    /// Deadline for room in the write queue, while the call waits for it
+    /// (`Config::write_queue_bytes`).
+    Room,
     /// Deadline for the reply, once the call is sent.
     Reply,
 }
@@ -380,6 +396,17 @@ pub enum Input {
         /// The frame, as the action carried it.
         frame: Vec<u8>,
     },
+    /// The transport wrote the frame of [`Action::Send`] `frame`: a
+    /// websocket flushed it to the socket, an emulated transport's request
+    /// carrying it was answered (HTTP 413 included). Owners may report
+    /// every frame; the machine counts only the application's calls
+    /// against [`Config::write_queue_bytes`].
+    FrameWritten {
+        /// The transport it was sent on.
+        transport: TransportId,
+        /// The frame.
+        frame: FrameId,
+    },
     /// A timer set by [`Action::SetTimer`] fired.
     TimerFired(Timer),
     /// The token callback answered a [`Action::FetchToken`].
@@ -468,10 +495,13 @@ pub enum Action {
     },
     /// Close the transport and report nothing more about it.
     CloseTransport(TransportId),
-    /// Send a frame over the transport.
+    /// Send a frame over the transport; report it with
+    /// [`Input::FrameWritten`] once written.
     Send {
         /// The transport to send on.
         transport: TransportId,
+        /// Identifies the frame in [`Input::FrameWritten`].
+        id: FrameId,
         /// Encoded commands.
         frame: Vec<u8>,
         /// How the frame travels on transports with typed frames.
@@ -588,6 +618,11 @@ impl std::fmt::Debug for Input {
                 .field("transport", transport)
                 .field("frame", &format_args!("<{} bytes>", frame.len()))
                 .finish(),
+            Self::FrameWritten { transport, frame } => f
+                .debug_struct("FrameWritten")
+                .field("transport", transport)
+                .field("frame", frame)
+                .finish(),
             Self::TimerFired(timer) => f.debug_tuple("TimerFired").field(timer).finish(),
             Self::TokenFetched { fetch, result } => f
                 .debug_struct("TokenFetched")
@@ -666,11 +701,13 @@ impl std::fmt::Debug for Action {
             Self::CloseTransport(id) => f.debug_tuple("CloseTransport").field(id).finish(),
             Self::Send {
                 transport,
+                id,
                 frame,
                 frame_type,
             } => f
                 .debug_struct("Send")
                 .field("transport", transport)
+                .field("id", id)
                 .field("frame", &format_args!("<{} bytes>", frame.len()))
                 .field("frame_type", frame_type)
                 .finish(),
@@ -798,6 +835,7 @@ pub struct Machine {
     next_transport: u64,
     next_command: u32,
     next_event: u64,
+    next_frame: u64,
     /// Publications emitted and not yet taken (Block 15).
     deliveries: delivery::Deliveries,
     /// Messages read and not yet handled (Block 15).
@@ -904,6 +942,7 @@ impl Machine {
             transport_open: false,
             next_transport: 0,
             next_event: 0,
+            next_frame: 0,
             deliveries: delivery::Deliveries::default(),
             inbound: inbound::Inbound::default(),
             next_command: 0,
@@ -960,6 +999,9 @@ impl Machine {
             }
             Input::SendRejected { transport, frame } if self.is_current(transport) => {
                 self.send_rejected(&frame);
+            }
+            Input::FrameWritten { transport, frame } if self.is_current(transport) => {
+                self.frame_written(frame);
             }
             Input::TimerFired(Timer::Reconnect) => {
                 if self.state == State::Connecting && self.transport.is_none() {
@@ -1026,7 +1068,8 @@ impl Machine {
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::Frame { .. }
-            | Input::SendRejected { .. } => {}
+            | Input::SendRejected { .. }
+            | Input::FrameWritten { .. } => {}
         }
         // Taken or withdrawn events may let held messages follow; a
         // transport gone drops its own (Block 15).
@@ -1617,16 +1660,22 @@ impl Machine {
     /// Sends `command` alone in its frame: over an emulated transport each
     /// command then has its own request, so a request the server refuses
     /// (HTTP 413) concerns that command only (see `send_rejected`).
-    fn send(&mut self, transport: TransportId, command: Command) {
+    /// Hands `command` to the owner; its frame's id and size.
+    fn send(&mut self, transport: TransportId, command: Command) -> (FrameId, usize) {
         let mut frame = self.codec.encode(&[command]);
         if let Some((session, node)) = &self.emulation {
             frame = json::emulation_request(session, node, &frame);
         }
+        let id = FrameId(self.next_frame);
+        self.next_frame += 1;
+        let size = frame.len();
         self.actions.push(Action::Send {
             transport,
+            id,
             frame,
             frame_type: self.codec.frame_type(),
         });
+        (id, size)
     }
 
     fn unauthorized(&mut self) {
@@ -2190,6 +2239,7 @@ mod tests {
                 Action::CancelTimer(Timer::Refresh),
                 Action::Send {
                     transport,
+                    id: FrameId(1),
                     frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec(),
                     frame_type: FrameType::Text,
                 },
@@ -2264,13 +2314,13 @@ mod tests {
 
         let actions = machine.handle(Input::TransportOpened(transport));
 
-        let Action::Send { frame, .. } = &actions[0] else {
+        let Action::Send { id, frame, .. } = &actions[0] else {
             panic!("{actions:?}");
         };
         assert_eq!(
             format!("{:?}", actions[0]),
             format!(
-                "Send {{ transport: {transport:?}, frame: <{} bytes>, frame_type: Text }}",
+                "Send {{ transport: {transport:?}, id: {id:?}, frame: <{} bytes>, frame_type: Text }}",
                 frame.len()
             )
         );
