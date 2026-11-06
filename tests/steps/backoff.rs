@@ -219,22 +219,34 @@ fn opened(actions: &[Action]) -> TransportId {
 }
 
 /// Ids of the `method` commands sent among `actions`.
-fn command_ids(actions: &[Action], method: &str) -> Vec<u64> {
+pub(crate) fn command_ids(actions: &[Action], method: &str) -> Vec<u64> {
     actions
         .iter()
         .filter_map(|action| match action {
             Action::Send { frame, .. } => Some(frame),
             _ => None,
         })
-        .flat_map(|frame| {
-            String::from_utf8(frame.clone())
-                .expect("JSON")
-                .lines()
-                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
-                .collect::<Vec<_>>()
-        })
-        .filter(|command| command.get(method).is_some())
-        .map(|command| command["id"].as_u64().expect("an id"))
+        .flat_map(|frame| frame_ids(frame, method))
+        .collect()
+}
+
+/// Ids of the `method` commands in a JSON `frame`, unwrapping an emulation
+/// request, which carries its commands as text in `data`.
+pub(crate) fn frame_ids(frame: &[u8], method: &str) -> Vec<u64> {
+    std::str::from_utf8(frame)
+        .expect("JSON")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
+        .flat_map(
+            |value| match value.get("data").and_then(|data| data.as_str()) {
+                Some(data) if value.get("session").is_some() => frame_ids(data.as_bytes(), method),
+                _ => value
+                    .get(method)
+                    .map(|_| value["id"].as_u64().expect("an id"))
+                    .into_iter()
+                    .collect(),
+            },
+        )
         .collect()
 }
 

@@ -30,6 +30,7 @@ mod ping;
 mod protobuf;
 mod recovery;
 mod server_subs;
+mod slow;
 mod sub_tokens;
 mod subscriptions;
 mod tls;
@@ -149,6 +150,8 @@ pub(crate) struct ClientWorld {
     pub(crate) server_side: server_subs::ServerSide,
     /// Streams a Block 15 scenario reads itself.
     pub(crate) delivery: delivery::Delivery,
+    /// The plan of a Block 15d scenario.
+    pub(crate) slow: Option<slow::SlowPlan>,
     /// Calls of a Block 13 scenario.
     pub(crate) calls: calls::Calls,
     /// The relay standing in for an unreachable websocket endpoint, and
