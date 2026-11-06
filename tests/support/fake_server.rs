@@ -130,6 +130,45 @@ struct State {
     /// Raw JSON the JSON connect replies carry as `data`, byte for byte
     /// (Block 17).
     connect_data: Option<String>,
+    /// Channels whose subscribes asking for fossil delta get it (Block 19).
+    delta_channels: std::collections::HashSet<String>,
+    /// Per channel with delta on for the latest connection, the payload the
+    /// next delta applies to; cleared at each subscribe and connection.
+    delta_chains: std::collections::HashMap<String, Option<String>>,
+    /// The next delta sent goes without the end of its trailer.
+    corrupt_next_delta: bool,
+    /// Deltas sent broken so far.
+    corrupted_deltas: usize,
+}
+
+impl State {
+    /// `publication` as the latest connection receives it: unchanged, or on
+    /// a channel with delta on its data as a JSON string holding the
+    /// payload or a delta against the previous one (Block 19).
+    fn with_delta(&mut self, channel: &str, mut publication: Value) -> Value {
+        let Some(base) = self.delta_chains.get(channel).cloned() else {
+            return publication;
+        };
+        let payload = publication["data"].to_string();
+        self.delta_chains
+            .insert(channel.to_owned(), Some(payload.clone()));
+        let Some(base) = base else {
+            publication["data"] = Value::String(payload);
+            return publication;
+        };
+        let mut delta = String::from_utf8(ferrifuge::write_fossil_delta(
+            base.as_bytes(),
+            payload.as_bytes(),
+        ))
+        .expect("an ASCII delta");
+        if std::mem::take(&mut self.corrupt_next_delta) {
+            delta.pop();
+            self.corrupted_deltas += 1;
+        }
+        publication["data"] = Value::String(delta);
+        publication["delta"] = json!(true);
+        publication
+    }
 }
 
 /// Epoch of the channels answered from their history.
@@ -182,6 +221,7 @@ impl FakeServer {
                     state.connections += 1;
                     state.current = Some(control);
                     state.out = Some(out.clone());
+                    state.delta_chains.clear();
                 }
                 let connection = Connection {
                     ws: Some(ws),
@@ -445,10 +485,33 @@ impl FakeServer {
             .push(publication.clone());
         // With the state locked: a subscribe answered from history is
         // queued before this push, or includes this publication.
-        if let Some(out) = &state.out {
+        if state.out.is_some() {
+            let publication = state.with_delta(channel, publication);
+            let out = state.out.as_ref().expect("checked above");
             let push = json!({"push": {"channel": channel, "pub": publication}});
             let _ = out.send(Outgoing::Message(Message::text(push.to_string())));
         }
+    }
+
+    /// Turns fossil delta on for the subscribes to `channel` asking for it
+    /// (Block 19).
+    pub(crate) fn delta_on(&self, channel: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .delta_channels
+            .insert(channel.to_owned());
+    }
+
+    /// Sends the next delta without the end of its trailer, so that the
+    /// client cannot apply it (Block 19).
+    pub(crate) fn corrupt_next_delta(&self) {
+        self.state.lock().unwrap().corrupt_next_delta = true;
+    }
+
+    /// Deltas sent broken so far.
+    pub(crate) fn corrupted_deltas(&self) -> usize {
+        self.state.lock().unwrap().corrupted_deltas
     }
 
     /// Answers the subscribes to `channel` as a server with history and
@@ -775,13 +838,27 @@ impl Connection {
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        let (result, from_history) = match state.subscribe_results.pop_front() {
+        let (mut result, from_history) = match state.subscribe_results.pop_front() {
             Some(result) => (result, false),
             None if state.recovering.contains(&channel) => {
                 (from_history(&state, &channel, &message["subscribe"]), true)
             }
             None => (json!({}), false),
         };
+        // Each subscribe starts a new delta chain (Block 19, D5).
+        if message["subscribe"]["delta"] == "fossil" && state.delta_channels.contains(&channel) {
+            state.delta_chains.insert(channel.clone(), None);
+            result["delta"] = json!(true);
+            if let Some(publications) = result["publications"].as_array().cloned() {
+                let encoded: Vec<Value> = publications
+                    .into_iter()
+                    .map(|publication| state.with_delta(&channel, publication))
+                    .collect();
+                result["publications"] = json!(encoded);
+            }
+        } else {
+            state.delta_chains.remove(&channel);
+        }
         state.subscribe_replies.push((channel, result.clone()));
         let reply = Message::text(json!({"id": message["id"], "subscribe": result}).to_string());
         if from_history {

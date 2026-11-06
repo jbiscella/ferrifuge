@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::ClientWorld;
 use super::connection::a_connected_client;
 use super::delivery::wait_until;
-use super::recovery::{FAKE_EPOCH, note_commands_before_disconnect};
+use super::recovery::{FAKE_EPOCH, next_subscribed, note_commands_before_disconnect};
 use super::server_subs::assert_next_connect_recovers;
 use super::subscriptions::{expect_subscription_event, next_publication, subscribe};
 use super::transports::server;
@@ -643,4 +643,26 @@ async fn next_connect_recovers_from_offset(world: &mut ClientWorld, channel: Str
         epoch: FAKE_EPOCH.to_owned(),
     };
     assert_next_connect_recovers(world, &channel, &from).await;
+}
+
+// Block 19c: recovery.
+
+#[given(
+    "a client subscribed with the fossil delta option to a channel with history and recovery allowing fossil delta and delta publishing"
+)]
+async fn subscribed_to_the_recoverable_delta_channel(world: &mut ClientWorld) {
+    a_connected_client(world).await;
+    world.recovery.channel = Some(DELTA_CHANNEL);
+    world.delta.negotiated = Some(subscribed_with_delta(world, DELTA_CHANNEL).await);
+}
+
+#[then(
+    r#"the subscription emits "subscribed" with was_recovering true and recovered true, reporting delta true"#
+)]
+async fn recovered_with_delta(world: &mut ClientWorld) {
+    let subscribed = next_subscribed(world).await;
+    assert!(
+        subscribed.was_recovering && subscribed.recovered && subscribed.delta,
+        "{subscribed:?}"
+    );
 }

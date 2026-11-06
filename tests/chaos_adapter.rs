@@ -6,6 +6,7 @@
 // @P scenario: Seeded chaos on the tokio client keeps the invariants
 // @P scenario: The adapter runner reports a planted fault
 // @P scenario: Seeded chaos with batching on the tokio client keeps the invariants
+// @P scenario: Seeded chaos with delta subscriptions on the tokio client keeps the invariants
 
 mod support;
 
@@ -16,8 +17,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ferrifuge::{
-    Client, ClientEvent, Config, HistoryOptions, State, Subscription, SubscriptionEvent,
-    SubscriptionState,
+    Client, ClientEvent, Config, DeltaFormat, HistoryOptions, State, Subscription,
+    SubscriptionEvent, SubscriptionState, codes,
 };
 use futures_util::{Stream, StreamExt};
 use support::fake_server::{Announce, FakeServer};
@@ -139,6 +140,8 @@ enum Op {
     /// It stops, or drops, its last batch.
     StopBatching,
     DropBatch,
+    /// The server sends its next delta broken (Block 19).
+    CorruptDelta,
 }
 
 impl Op {
@@ -192,6 +195,12 @@ struct Run {
     subs: Vec<Sub>,
     /// The last offset published per channel.
     published: [u64; CHANNELS.len()],
+    /// The padding of each publication made, by channel and offset: its
+    /// payload, which every delivery must carry (I11).
+    pads: BTreeMap<(usize, u64), usize>,
+    /// Subscriptions ask for fossil delta, and the server breaks some
+    /// deltas (Block 19).
+    delta: bool,
     calls: Vec<JoinHandle<Duration>>,
     /// Batches the application holds open.
     batches: Vec<ferrifuge::Batch>,
@@ -202,10 +211,13 @@ struct Run {
 type Step = Result<(), Violation>;
 
 impl Run {
-    async fn new(seed: u64, skip_recovered: bool) -> Self {
+    async fn new(seed: u64, skip_recovered: bool, delta: bool) -> Self {
         let server = FakeServer::start(Announce::default()).await;
         for channel in CHANNELS {
             server.recover_from_history(channel);
+            if delta {
+                server.delta_on(channel);
+            }
         }
         server.limit_recovery(RECOVERY_LIMIT);
         if skip_recovered {
@@ -219,14 +231,18 @@ impl Run {
         let subs = CHANNELS
             .iter()
             .map(|channel| {
-                let subscription = client
+                let builder = client
                     .subscription_builder(*channel)
                     .positioned(true)
                     .recoverable(true)
                     .min_resubscribe_delay(Duration::from_millis(50))
-                    .max_resubscribe_delay(Duration::from_millis(500))
-                    .build()
-                    .expect("a new channel");
+                    .max_resubscribe_delay(Duration::from_millis(500));
+                let builder = if delta {
+                    builder.delta(DeltaFormat::Fossil)
+                } else {
+                    builder
+                };
+                let subscription = builder.build().expect("a new channel");
                 let events: Events<SubscriptionEvent> = Box::new(subscription.events());
                 Sub {
                     subscription,
@@ -245,6 +261,8 @@ impl Run {
             last_state: State::Disconnected,
             subs,
             published: [0; CHANNELS.len()],
+            pads: BTreeMap::new(),
+            delta,
             calls: Vec::new(),
             batches: Vec::new(),
             ops: Vec::new(),
@@ -267,7 +285,13 @@ impl Run {
 
     async fn run(&mut self, ops: usize) -> Step {
         for n in 0..ops {
-            let op = Op::pick(&mut self.rng);
+            // Drawn only with delta, so the other runs' seeds keep their
+            // operations.
+            let op = if self.delta && self.rng.u32(0..100) < 8 {
+                Op::CorruptDelta
+            } else {
+                Op::pick(&mut self.rng)
+            };
             self.ops.push(format!("op {n}: {op:?}"));
             self.apply(op).await?;
             sleep(Duration::from_millis(self.rng.u64(0..=30))).await;
@@ -315,6 +339,7 @@ impl Run {
                 for _ in 0..count {
                     self.published[n] += 1;
                     let pad = self.rng.usize(0..=600);
+                    self.pads.insert((n, self.published[n]), pad);
                     self.server
                         .publish_sized(CHANNELS[n], self.published[n], pad);
                 }
@@ -340,6 +365,7 @@ impl Run {
                     self.count("batch dropped");
                 }
             }
+            Op::CorruptDelta => self.server.corrupt_next_delta(),
         }
         Ok(())
     }
@@ -409,7 +435,12 @@ impl Run {
     /// I1 and I8 for a subscription.
     fn subscription_event(&mut self, n: usize, event: &SubscriptionEvent) -> Step {
         let state = match event {
-            SubscriptionEvent::Subscribing { .. } => SubscriptionState::Subscribing,
+            SubscriptionEvent::Subscribing { code, .. } => {
+                if *code == codes::subscribing::DELTA_ERROR {
+                    self.count("delta resubscribe");
+                }
+                SubscriptionState::Subscribing
+            }
             SubscriptionEvent::Subscribed(subscribed) => {
                 if subscribed.was_recovering && subscribed.recovered {
                     self.count("recovered true");
@@ -425,6 +456,21 @@ impl Run {
                 let Some(offset) = publication.offset else {
                     return Ok(());
                 };
+                // I11: the payload the server published at that offset.
+                if let Some(pad) = self.pads.get(&(n, offset)) {
+                    let published =
+                        serde_json::json!({"n": offset, "pad": "x".repeat(*pad)}).to_string();
+                    if publication.data != published.as_bytes() {
+                        return Err(self.violation(
+                            "I11",
+                            format!(
+                                "{} offset {offset} carries {}",
+                                CHANNELS[n],
+                                String::from_utf8_lossy(&publication.data)
+                            ),
+                        ));
+                    }
+                }
                 let sub = &mut self.subs[n];
                 if let Some(last) = sub.delivered
                     && offset != last + 1
@@ -590,12 +636,14 @@ fn seeds() -> Range<u64> {
 async fn run_seeds(
     seeds: Range<u64>,
     skip_recovered: bool,
+    delta: bool,
 ) -> Result<BTreeMap<&'static str, usize>, Violation> {
     count_panics();
     let mut counts = BTreeMap::new();
     for seed in seeds {
-        let mut run = Run::new(seed, skip_recovered).await;
+        let mut run = Run::new(seed, skip_recovered, delta).await;
         run.run(OPS).await?;
+        *counts.entry("corrupted delta").or_default() += run.server.corrupted_deltas();
         for (name, count) in run.counts {
             *counts.entry(name).or_default() += count;
         }
@@ -606,7 +654,7 @@ async fn run_seeds(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_chaos_on_the_tokio_client_keeps_the_invariants() {
     let seeds = seeds();
-    let counts = run_seeds(seeds.clone(), false)
+    let counts = run_seeds(seeds.clone(), false, false)
         .await
         .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
@@ -631,7 +679,7 @@ async fn seeded_chaos_on_the_tokio_client_keeps_the_invariants() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_adapter_runner_reports_a_planted_fault() {
-    let violation = run_seeds(SEEDS, true)
+    let violation = run_seeds(SEEDS, true, false)
         .await
         .expect_err("a recovery skipping an offset went unreported");
     assert_eq!(violation.invariant, "I8", "{violation}");
@@ -641,6 +689,25 @@ async fn the_adapter_runner_reports_a_planted_fault() {
             .contains(&format!("seed {}", violation.seed))
     );
     assert!(!violation.ops.is_empty(), "{violation}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeded_chaos_with_delta_subscriptions_on_the_tokio_client_keeps_the_invariants() {
+    let seeds = seeds();
+    let counts = run_seeds(seeds.clone(), false, true)
+        .await
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let missing: Vec<_> = ["corrupted delta", "delta resubscribe"]
+        .into_iter()
+        .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "counted 0 times: {missing:?}; counts {counts:?}"
+    );
 }
 
 /// The main and nightly run (Block 16, "CI"): `FERRIFUGE_CHAOS_SEEDS` seeds
@@ -661,7 +728,8 @@ async fn seeded_chaos_adapter_long_run() {
         Err(_) => start..start + count,
     };
     println!("chaos: adapter seeds {}..{}", seeds.start, seeds.end);
-    if let Err(violation) = run_seeds(seeds, false).await {
+    let delta = std::env::var("FERRIFUGE_CHAOS_DELTA").is_ok();
+    if let Err(violation) = run_seeds(seeds, false, delta).await {
         panic!("{violation}");
     }
 }

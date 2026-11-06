@@ -54,6 +54,9 @@ pub(crate) struct Recovery {
     /// Connect commands the fake server had received when the scenario
     /// last disconnected the client.
     pub(super) connects_before: usize,
+    /// The channel the server API publishes to, when not [`RECOVERABLE`]:
+    /// e.g. one with fossil delta (Block 19).
+    pub(super) channel: Option<&'static str>,
     /// When the getState callback of the scenario's client was called.
     state_calls: Arc<Mutex<Vec<Instant>>>,
     /// The position it answers with.
@@ -71,6 +74,7 @@ impl Default for Recovery {
             position: None,
             subscribes_before: 0,
             connects_before: 0,
+            channel: None,
             state_calls: Arc::default(),
             state_answer: Arc::default(),
             state_gate: Arc::new(Semaphore::new(0)),
@@ -90,11 +94,12 @@ pub(super) fn position(offset: u64, epoch: &str) -> StreamPosition {
 async fn publish(world: &mut ClientWorld, count: usize) {
     for _ in 0..count {
         let data = json!({"n": world.recovery.published.len() + 1}).to_string();
+        let channel = world.recovery.channel.unwrap_or(RECOVERABLE);
         let result = server(world)
             .api()
             .call(
                 "publish",
-                json!({"channel": RECOVERABLE, "data": serde_json::from_str::<Value>(&data).unwrap()}),
+                json!({"channel": channel, "data": serde_json::from_str::<Value>(&data).unwrap()}),
             )
             .await
             .expect("publish");
@@ -153,7 +158,7 @@ pub(super) fn let_the_client_back(world: &ClientWorld) {
 
 /// The subscription's next "subscribed" event; state events may come
 /// first, a publication may not.
-async fn next_subscribed(world: &mut ClientWorld) -> Subscribed {
+pub(super) async fn next_subscribed(world: &mut ClientWorld) -> Subscribed {
     loop {
         match world.next_subscription_event(false).await {
             SubscriptionEvent::Subscribed(subscribed) => return subscribed,
@@ -323,7 +328,9 @@ async fn disconnected_with_a_reconnect_code(world: &mut ClientWorld) {
     disconnect_and_hold(world).await;
 }
 
-#[when("2 publications are made to the channel while the client reconnects")]
+#[when(
+    regex = r"^2 publications (?:that differ in a few bytes from it )?are made to the channel(?:, as deltas,)? while the client reconnects$"
+)]
 async fn publications_while_reconnecting(world: &mut ClientWorld) {
     publish(world, 2).await;
     let_the_client_back(world);
