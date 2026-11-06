@@ -321,3 +321,51 @@ Feature: Client commands
     When the client sends {"n":1}, {"n":2} and {"n":3} without awaiting them
     Then every send completes before the configured timeout
     And the fake server received the 3 send commands in that order
+
+  @A
+  Scenario: Join and leave of other clients are delivered with the join_leave option
+    Given a client subscribed with the join_leave option to a channel with join and leave events
+    When a second client subscribes to the channel
+    Then the subscription emits a "join" event naming the second client
+    When the second client unsubscribes from the channel
+    Then the subscription emits a "leave" event naming the second client
+
+  @A
+  Scenario: Without the join_leave option no join or leave event is delivered
+    Given a client subscribed without the join_leave option to a channel with join and leave events
+    And a second client subscribed to the channel with the join_leave option
+    When a third client subscribes to the channel and then unsubscribes
+    And the second client's subscription has emitted a "leave" event naming the third client
+    Then the first client's subscription has emitted no "join" or "leave" event
+
+  @D
+  Scenario: The join_leave option is sent on subscribe and on resubscribe
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the join_leave option is subscribed
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the fake server received 2 subscribe commands for "news", each requesting join_leave
+
+  @D
+  Scenario: Join and leave pushes of a server-side subscription are delivered
+    Given the fake server grants a server-side subscription to channel "alerts" at connect
+    And a client connected to the fake server
+    When the fake server pushes a join and then a leave of different clients for channel "alerts"
+    Then the client emits a server-side "join" event for channel "alerts" with the pushed client info
+    And then the client emits a server-side "leave" event for channel "alerts" with the pushed client info
+
+  @D
+  Scenario: A join push for a subscription that is not subscribed is dropped
+    Given a client connected to the fake server with an unsubscribed subscription to channel "news"
+    When the fake server pushes a join for channel "news"
+    And the subscription is subscribed
+    And the fake server pushes a leave for channel "news"
+    Then the subscription's stream yields "subscribing", "subscribed" and "leave", and no "join" event
+
+  @D
+  Scenario: Join and leave events not taken before unsubscribe are withdrawn
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has pushed a join and a leave for channel "news"
+    And the client holds them not yet taken
+    When unsubscribe is called on the subscription
+    Then the subscription's stream yields "unsubscribed" and no "join" or "leave" event
