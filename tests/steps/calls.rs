@@ -1,5 +1,8 @@
 //! Steps of Block 13: client commands.
 
+// cucumber passes captures by value.
+#![allow(clippy::needless_pass_by_value)]
+
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
@@ -9,8 +12,8 @@ use std::pin::Pin;
 
 use ferrifuge::{
     CallError, Client, ClientEvent, Config, ErrorKind, HistoryOptions, HistoryResult,
-    PresenceResult, PresenceStatsResult, State, StreamPosition, Subscription, SubscriptionEvent,
-    codes,
+    PresenceResult, PresenceStatsResult, Protocol, State, StreamPosition, Subscription,
+    SubscriptionEvent, codes,
 };
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
@@ -21,7 +24,8 @@ use super::subscriptions::{create, expect_subscription_event, has_json_data, sub
 use super::{
     ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, next_event_after_transport_errors, test_config,
 };
-use crate::support::fake_server::Rpc;
+use crate::support::fake_server::{Rpc, protobuf_results};
+use crate::support::protobuf;
 use crate::support::relay::Mode;
 use crate::support::token::{connection_token_with_info, subscription_token_with_info};
 
@@ -205,7 +209,6 @@ fn an_rpc_proxy(world: &mut ClientWorld) {
 #[when(
     regex = r#"^the client calls RPC "(\w+)"(?: with (\{.*\}))?(?: (before connect is called|before it is connected))?$"#
 )]
-#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn the_client_calls_rpc(world: &mut ClientWorld, method: String, data: String, when: String) {
     match when.as_str() {
         "before connect is called" => assert_eq!(world.client().state(), State::Disconnected),
@@ -221,7 +224,6 @@ fn the_client_calls_rpc(world: &mut ClientWorld, method: String, data: String, w
 }
 
 #[when(regex = r#"^the client calls RPC "(\w+)" and RPC "(\w+)" concurrently$"#)]
-#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn the_client_calls_two_rpcs(world: &mut ClientWorld, first: String, second: String) {
     call(world, &first, b"{}".to_vec());
     call(world, &second, b"{}".to_vec());
@@ -435,6 +437,7 @@ async fn connected_as(world: &mut ClientWorld, index: usize, info: bool) -> (Cli
     };
     let config = Config {
         token: connection_token_with_info(user, &conn_info),
+        protocol: world.protocol,
         ..test_config()
     };
     let client = Client::builder(world.server_endpoint())
@@ -902,4 +905,254 @@ async fn history_only_after_the_subscribe_answer(world: &mut ClientWorld) {
 #[then("the history call completes")]
 async fn the_history_call_completes(world: &mut ClientWorld) {
     history_returned(world).await;
+}
+
+fn hex_bytes(text: &str) -> Vec<u8> {
+    text.split_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).expect("hex byte"))
+        .collect()
+}
+
+/// Waits until the fake server has received a Protobuf command `matching`.
+async fn protobuf_command(
+    world: &ClientWorld,
+    matching: impl Fn(&protobuf::Command) -> bool,
+) -> protobuf::Command {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            if let Some(command) = world.fake().received_protobuf().into_iter().find(&matching) {
+                return command;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the command reached the fake server")
+}
+
+/// The fake server answers every Protobuf RPC with
+/// [`protobuf_results::RPC_DATA`], the bytes fe 00 ff.
+#[given(
+    r#"a client configured with the Protobuf protocol connected to the fake server that answers RPC "bin" with the bytes fe 00 ff"#
+)]
+async fn a_protobuf_client_and_a_fake_rpc(world: &mut ClientWorld) {
+    world.protocol = Protocol::Protobuf;
+    a_connected_client(world).await;
+}
+
+#[when(regex = r#"^the client calls RPC "(\w+)" with the bytes ([0-9a-f ]+)$"#)]
+fn the_client_calls_rpc_with_bytes(world: &mut ClientWorld, method: String, bytes: String) {
+    call(world, &method, hex_bytes(&bytes));
+}
+
+#[then(regex = r"^the fake server received a Protobuf RPC command with the bytes ([0-9a-f ]+)$")]
+async fn the_fake_server_received_protobuf_rpc(world: &mut ClientWorld, bytes: String) {
+    let command = protobuf_command(world, |command| command.rpc.is_some()).await;
+    let rpc = command.rpc.expect("an RPC command");
+    assert_eq!(rpc.data, hex_bytes(&bytes));
+    assert_eq!(rpc.method, "bin");
+}
+
+#[then(regex = r"^the call returns the bytes ([0-9a-f ]+)$")]
+async fn the_call_returns_bytes(world: &mut ClientWorld, bytes: String) {
+    let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
+    assert_eq!(data(result), hex_bytes(&bytes));
+}
+
+#[given(r#"two clients configured with the Protobuf protocol subscribed to channel "news""#)]
+async fn two_protobuf_clients(world: &mut ClientWorld) {
+    world.protocol = Protocol::Protobuf;
+    two_clients(world, false).await;
+}
+
+#[when(regex = r#"^the first client publishes the bytes ([0-9a-f ]+) to channel "(\w+)"$"#)]
+async fn the_first_client_publishes_bytes(world: &mut ClientWorld, bytes: String, channel: String) {
+    let publish = world.client().publish(channel, hex_bytes(&bytes));
+    track(world, "publish", async move {
+        publish.await.map(|()| Returned::Published)
+    });
+    let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
+    assert!(matches!(result, Ok(Returned::Published)), "{result:?}");
+}
+
+#[then(
+    regex = r"^the second client's subscription receives a publication with the bytes ([0-9a-f ]+)$"
+)]
+async fn the_second_receives_bytes(world: &mut ClientWorld, bytes: String) {
+    let publication = second_publication(world).await;
+    assert_eq!(publication.data, hex_bytes(&bytes));
+}
+
+#[when(regex = r"^the fake server sends a message push whose data is the non-canonical JSON (.*)$")]
+fn the_fake_server_sends_a_message(world: &mut ClientWorld, data: String) {
+    world
+        .fake()
+        .send(&format!(r#"{{"push":{{"message":{{"data":{data}}}}}}}"#));
+    world.last_raw_data = Some(data.into_bytes());
+}
+
+#[when(regex = r"^the fake server sends a Protobuf message push with the bytes ([0-9a-f ]+)$")]
+fn the_fake_server_sends_a_protobuf_message(world: &mut ClientWorld, bytes: String) {
+    world.fake().send_protobuf(&[protobuf::Reply {
+        push: Some(protobuf::Push {
+            message: Some(protobuf::Message {
+                data: hex_bytes(&bytes),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }]);
+}
+
+/// The data of the client's next "message" event.
+async fn next_message(world: &mut ClientWorld) -> Vec<u8> {
+    match world.next_event().await {
+        ClientEvent::Message(data) => data,
+        event => panic!("expected a message event, got {event:?}"),
+    }
+}
+
+#[then(r#"the client emits a "message" event whose data is exactly those bytes"#)]
+async fn the_client_emits_the_exact_message(world: &mut ClientWorld) {
+    let data = next_message(world).await;
+    assert_eq!(Some(data), world.last_raw_data);
+}
+
+#[then(regex = r#"^the client emits a "message" event with the bytes ([0-9a-f ]+)$"#)]
+async fn the_client_emits_a_binary_message(world: &mut ClientWorld, bytes: String) {
+    assert_eq!(next_message(world).await, hex_bytes(&bytes));
+}
+
+/// The call settles before the step ends.
+#[when(regex = r"^the client sends (?:the bytes ([0-9a-f ]+)|(\{.*\}))$")]
+async fn the_client_sends(world: &mut ClientWorld, bytes: String, json: String) {
+    let data = if json.is_empty() {
+        hex_bytes(&bytes)
+    } else {
+        json.into_bytes()
+    };
+    let send = world.client().send(data);
+    track(world, "send", async move {
+        send.await.map(|()| Returned::Published)
+    });
+    let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[then(regex = r"^the fake server received a send command with data (\{.*\}) and no command id$")]
+async fn the_fake_server_received_a_send(world: &mut ClientWorld, data: String) {
+    let received = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            if let Some((command, _)) = world.fake().commands_with_times("send").pop() {
+                return command;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a send command in time");
+    assert_eq!(received.get("id"), None, "{received}");
+    assert_eq!(
+        received["send"]["data"],
+        serde_json::from_str::<Value>(&data).unwrap()
+    );
+}
+
+#[then(
+    regex = r"^the fake server received a Protobuf send command with the bytes ([0-9a-f ]+) and no command id$"
+)]
+async fn the_fake_server_received_a_protobuf_send(world: &mut ClientWorld, bytes: String) {
+    let command = protobuf_command(world, |command| command.send.is_some()).await;
+    assert_eq!(command.id, 0);
+    assert_eq!(
+        command.send.expect("a send command").data,
+        hex_bytes(&bytes)
+    );
+}
+
+#[when(regex = r"^the client calls (rpc|history|presence|presence_stats)$")]
+fn the_client_calls(world: &mut ClientWorld, command: String) {
+    let client = world.client();
+    let call: Pin<Box<dyn Future<Output = Settled> + Send>> = match command.as_str() {
+        "rpc" => {
+            let call = client.rpc("bin", vec![0xff, 0x00, 0xfe]);
+            Box::pin(async move { call.await.map(Returned::Data) })
+        }
+        "history" => {
+            let call = client.history(CHANNEL, HistoryOptions::default().limit(1));
+            Box::pin(async move { call.await.map(Returned::History) })
+        }
+        "presence" => {
+            let call = client.presence(CHANNEL);
+            Box::pin(async move { call.await.map(Returned::Presence) })
+        }
+        _ => {
+            let call = client.presence_stats(CHANNEL);
+            Box::pin(async move { call.await.map(Returned::PresenceStats) })
+        }
+    };
+    track(world, &command, call);
+}
+
+#[then(
+    regex = r"^the fake server received the (rpc|history|presence|presence_stats) command in Protobuf$"
+)]
+async fn the_fake_server_received_the_command(world: &mut ClientWorld, command: String) {
+    let received = protobuf_command(world, |received| match command.as_str() {
+        "rpc" => received.rpc.is_some(),
+        "history" => received.history.is_some(),
+        "presence" => received.presence.is_some(),
+        _ => received.presence_stats.is_some(),
+    })
+    .await;
+    match command.as_str() {
+        "rpc" => assert_eq!(received.rpc.unwrap().data, [0xff, 0x00, 0xfe]),
+        "history" => {
+            let history = received.history.unwrap();
+            assert_eq!((history.channel.as_str(), history.limit), (CHANNEL, 1));
+        }
+        "presence" => assert_eq!(received.presence.unwrap().channel, CHANNEL),
+        _ => assert_eq!(received.presence_stats.unwrap().channel, CHANNEL),
+    }
+}
+
+#[then(
+    regex = r"^the call returns the fake server's Protobuf result for (rpc|history|presence|presence_stats)$"
+)]
+async fn the_call_returns_the_protobuf_result(world: &mut ClientWorld, command: String) {
+    match (command.as_str(), last_returned(world).await) {
+        ("rpc", Returned::Data(data)) => assert_eq!(data, protobuf_results::RPC_DATA),
+        ("history", Returned::History(history)) => {
+            let expected = protobuf_results::history();
+            let publication = &history.publications[0];
+            assert_eq!(history.publications.len(), 1);
+            assert_eq!(publication.data, expected.publications[0].data);
+            assert_eq!(publication.offset, Some(expected.publications[0].offset));
+            assert_eq!(
+                (history.epoch, history.offset),
+                (expected.epoch, expected.offset)
+            );
+        }
+        ("presence", Returned::Presence(presence)) => {
+            let expected = protobuf_results::presence();
+            assert_eq!(presence.clients.len(), expected.presence.len());
+            for (id, info) in expected.presence {
+                let client = &presence.clients[&id];
+                assert_eq!(
+                    (client.client.as_str(), client.user.as_str()),
+                    (info.client.as_str(), info.user.as_str())
+                );
+                assert_eq!(client.conn_info.as_deref(), Some(&info.conn_info[..]));
+                assert_eq!(client.chan_info.as_deref(), Some(&info.chan_info[..]));
+            }
+        }
+        ("presence_stats", Returned::PresenceStats(stats)) => {
+            let expected = protobuf_results::presence_stats();
+            assert_eq!(
+                (stats.num_clients, stats.num_users),
+                (expected.num_clients, expected.num_users)
+            );
+        }
+        (command, returned) => panic!("{command}: unexpected {returned:?}"),
+    }
 }
