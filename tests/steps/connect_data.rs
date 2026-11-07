@@ -29,7 +29,7 @@ pub(crate) struct ConnectData {
     /// The raw data the fake server's connect replies carry.
     raw: Option<String>,
     /// HTTP headers of the client (17b).
-    http_headers: Vec<(String, String)>,
+    pub(super) http_headers: Vec<(String, String)>,
     /// Emulated headers of the client (17b).
     emulated_headers: Vec<(String, String)>,
     /// The debug output of client options a step formatted.
@@ -531,7 +531,7 @@ async fn connected_with_exact_data(world: &mut ClientWorld) {
 // 17b: HTTP and emulated headers.
 
 /// A header given as `Name: value`.
-fn header(header: &str) -> (String, String) {
+pub(super) fn header(header: &str) -> (String, String) {
     let (name, value) = header.split_once(": ").expect("Name: value");
     (name.to_owned(), value.to_owned())
 }
@@ -540,7 +540,11 @@ fn header(header: &str) -> (String, String) {
     regex = r#"^a client with HTTP header "([^"]+)" configured with only the server's (\w+) endpoint$"#
 )]
 #[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
-fn a_client_with_an_http_header(world: &mut ClientWorld, given: String, transport: String) {
+pub(super) fn a_client_with_an_http_header(
+    world: &mut ClientWorld,
+    given: String,
+    transport: String,
+) {
     world.connect_data.http_headers.push(header(&given));
     let kind = super::transports::kind(&transport);
     let url = super::transports::server_url(super::transports::server(world), kind);
