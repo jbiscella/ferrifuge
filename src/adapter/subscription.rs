@@ -61,6 +61,24 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
+    /// What delta compression did on the subscription since it was created
+    /// (Block 31): zeros without negotiated delta, and once the
+    /// subscription is removed.
+    ///
+    /// ```no_run
+    /// # fn run(subscription: &ferrifuge::Subscription) {
+    /// let delta = subscription.delta_statistics();
+    /// println!("saved {:.0}%", delta.compression_ratio() * 100.0);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn delta_statistics(&self) -> crate::DeltaStatistics {
+        lock(&self.shared.core)
+            .machine
+            .delta_statistics(self.id)
+            .unwrap_or_default()
+    }
+
     /// Waits until the subscription is subscribed, without taking an event
     /// from its stream (Block 30). The wait starts when this method
     /// returns, and the future borrows nothing, so it can be spawned. It

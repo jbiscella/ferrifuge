@@ -58,6 +58,7 @@ impl Machine {
             self.reconnect_after_transport_closed();
             return;
         };
+        self.counters.messages_in += replies.len() as u64;
         if replies.is_empty() {
             return;
         }

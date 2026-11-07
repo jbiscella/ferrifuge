@@ -26,6 +26,9 @@ pub(super) struct Commit {
     epoch: Option<String>,
     /// From a subscribe reply: it applies even where no position is kept.
     pub(super) replaces: bool,
+    /// A publication, counted delivered once taken (Block 31); not a join
+    /// or a leave.
+    publication: bool,
 }
 
 /// Publications emitted and not yet taken, and the streams taking them.
@@ -107,6 +110,7 @@ impl Machine {
             offset,
             epoch,
             replaces,
+            publication: true,
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -124,6 +128,7 @@ impl Machine {
             offset: None,
             epoch: None,
             replaces: false,
+            publication: false,
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -202,6 +207,9 @@ impl Machine {
     }
 
     fn commit(&mut self, commit: Commit) {
+        if commit.publication {
+            self.counters.publications_delivered += 1;
+        }
         match commit.owner.clone() {
             Owner::Client(of) => self.commit_subscription_position(of, commit),
             Owner::Server(channel) => self.commit_server_subscription_position(&channel, commit),

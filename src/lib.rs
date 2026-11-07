@@ -72,6 +72,7 @@ mod json;
 pub mod machine;
 mod protobuf;
 pub(crate) mod protocol;
+mod statistics;
 mod subscription;
 mod token;
 mod wire;
@@ -101,6 +102,7 @@ pub use fossil::write as write_fossil_delta;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use rustls;
+pub use statistics::{DeltaStatistics, Statistics};
 pub use subscription::{
     ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,
     SubscriptionError, SubscriptionEvent, SubscriptionState,

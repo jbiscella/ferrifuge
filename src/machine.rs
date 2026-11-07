@@ -15,6 +15,8 @@ mod calls;
 mod delivery;
 mod inbound;
 mod server_subscriptions;
+#[cfg(test)]
+mod statistics_tests;
 mod subscriptions;
 mod tokens;
 mod transports;
@@ -1055,6 +1057,8 @@ const SLOW: u32 = 3008;
 pub struct Machine {
     config: Config,
     state: State,
+    /// Connection and traffic counters (Block 31).
+    counters: crate::statistics::Counters,
     backoff: Backoff,
     rng: fastrand::Rng,
     /// The transport opening or open, if any.
@@ -1194,6 +1198,7 @@ impl Machine {
         Self {
             config,
             state: State::Disconnected,
+            counters: crate::statistics::Counters::default(),
             backoff,
             rng,
             transport: None,
@@ -1228,6 +1233,26 @@ impl Machine {
         self.state
     }
 
+    /// The connection and traffic counters since the machine was built
+    /// (Block 31); `connected_since` is `None`, the core having no clock.
+    #[must_use]
+    pub fn statistics(&self) -> crate::Statistics {
+        crate::Statistics {
+            state: self.state,
+            transport: (self.state == State::Connected).then(|| self.transport_kind()),
+            connected_since: None,
+            connects: self.counters.connects,
+            failed_attempts: self.counters.failed_attempts,
+            bytes_in: self.counters.bytes_in,
+            bytes_out: self.counters.bytes_out,
+            messages_in: self.counters.messages_in,
+            messages_out: self.counters.messages_out,
+            publications_delivered: self.counters.publications_delivered,
+            subscriptions: self.subscription_count(),
+            server_subscriptions: self.server_subscription_count(),
+        }
+    }
+
     /// Reacts to `input`; the owner performs the returned actions in order.
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
         self.batching.application_unsubscribe =
@@ -1237,21 +1262,8 @@ impl Machine {
             Input::Reconnect => self.reconnect(),
             Input::StartBatching => self.start_batching(),
             Input::StopBatching => self.stop_batching(),
-            Input::Disconnect => self.disconnect(
-                codes::disconnected::DISCONNECT_CALLED,
-                "disconnect called",
-                false,
-            ),
-            Input::DriverDropped { panicked: false } => self.disconnect(
-                codes::disconnected::RUNTIME_SHUT_DOWN,
-                "runtime shut down",
-                false,
-            ),
-            Input::DriverDropped { panicked: true } => self.disconnect(
-                codes::disconnected::BAD_PROTOCOL,
-                "exception during message handling",
-                false,
-            ),
+            Input::Disconnect => self.disconnect_called(),
+            Input::DriverDropped { panicked } => self.driver_dropped(panicked),
             Input::TransportOpened(id) if self.is_current(id) => self.transport_opened(),
             Input::TransportFailed { transport, message } if self.is_current(transport) => {
                 self.transport_failed(message);
@@ -1281,12 +1293,14 @@ impl Machine {
                 }
             }
             Input::Frame { transport, data } if self.is_current(transport) => {
+                self.counters.bytes_in += data.len() as u64;
                 self.frame(transport, &data);
             }
             Input::SendRejected { transport, frame } if self.is_current(transport) => {
                 self.send_rejected(&frame);
             }
             Input::FrameWritten { transport, frame } if self.is_current(transport) => {
+                self.counters.written(frame);
                 self.frame_written(frame);
             }
             Input::TimerFired(timer) => self.timer_fired(timer),
@@ -1488,6 +1502,9 @@ impl Machine {
             let command = self.connect_command();
             self.codec.encode(&[command])
         });
+        if let Some(frame) = &initial_frame {
+            self.counters.opening(frame.len());
+        }
         self.actions.push(Action::OpenTransport {
             transport: id,
             kind,
@@ -1506,6 +1523,9 @@ impl Machine {
             return;
         };
         self.transport_open = true;
+        // An emulated transport's opening request carried its connect
+        // command (Block 31, D1).
+        self.counters.opened();
         // Opened: the connect reply, or a token fetched first, has `timeout`
         // from now, on every transport kind (Block 29, D1).
         self.actions
@@ -1776,6 +1796,7 @@ impl Machine {
             let size = request.len();
             let sent = FrameId(self.next_frame);
             self.next_frame += 1;
+            self.counters.sent(sent, size, 1);
             self.actions.push(Action::Send {
                 transport,
                 id: sent,
@@ -1844,6 +1865,7 @@ impl Machine {
             self.actions.push(Action::CancelTimer(Timer::Refresh));
         }
         self.state = State::Connected;
+        self.counters.connects += 1;
         self.pings = (result.ping > 0).then(|| Pings {
             interval: Duration::from_secs(result.ping.into()),
             pong: result.pong,
@@ -1916,7 +1938,38 @@ impl Machine {
     /// `reconnect()` (Block 25, D5, D6): a connected client reconnects
     /// after the jitter window only, a connecting one at once; a
     /// disconnected one is left alone, as one stopped on purpose.
+    /// `disconnect()`: the attempt in flight is not a failed one (Block
+    /// 31, D1).
+    fn disconnect_called(&mut self) {
+        self.counters.cancelling = true;
+        self.disconnect(
+            codes::disconnected::DISCONNECT_CALLED,
+            "disconnect called",
+            false,
+        );
+    }
+
+    /// The owner's task ended (Block 28, D3, D4).
+    fn driver_dropped(&mut self, panicked: bool) {
+        self.counters.cancelling = true;
+        if panicked {
+            self.disconnect(
+                codes::disconnected::BAD_PROTOCOL,
+                "exception during message handling",
+                false,
+            );
+        } else {
+            self.disconnect(
+                codes::disconnected::RUNTIME_SHUT_DOWN,
+                "runtime shut down",
+                false,
+            );
+        }
+    }
+
     fn reconnect(&mut self) {
+        // Not a failed attempt (Block 31, D1).
+        self.counters.cancelling = true;
         let Some(was_connected) = self.tear_down(
             codes::connecting::RECONNECT_CALLED,
             "reconnect called",
@@ -1939,6 +1992,7 @@ impl Machine {
     /// when `reconnect`, else `disconnected`; whether the client was
     /// connected, or `None` when it was disconnected already.
     fn tear_down(&mut self, code: u32, reason: &str, reconnect: bool) -> Option<bool> {
+        let cancelled = std::mem::take(&mut self.counters.cancelling);
         // "State invalidated" (Block 11): the connection token and every
         // subscription token, fixed ones too, are dropped and every stream
         // position is made unmatchable, whether a push or a close frame
@@ -1962,6 +2016,10 @@ impl Machine {
         self.fail_sent_calls();
         let was_connected = self.state == State::Connected;
         if let Some(transport) = self.transport.take() {
+            self.counters.transport_ended();
+            if !was_connected && !cancelled {
+                self.counters.failed_attempts += 1;
+            }
             self.actions.push(Action::CloseTransport(transport));
             if reconnect {
                 self.transports.attempt_failed();
@@ -2261,6 +2319,7 @@ impl Machine {
         let id = FrameId(self.next_frame);
         self.next_frame += 1;
         let size = frame.len();
+        self.counters.sent(id, size, commands.len());
         self.actions.push(Action::Send {
             transport,
             id,
