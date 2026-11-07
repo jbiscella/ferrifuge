@@ -462,6 +462,13 @@ impl Machine {
         let id = *id;
         sub.fetch = None;
         match result {
+            // A refresh that came due while the callback ran, e.g. after a
+            // sleep, needs a new token first; the data callback then runs
+            // again for it, as on any attempt that fetches one (Block 25,
+            // D3).
+            Ok(_) if sub.tokens.before_connect() == BeforeConnect::Fetch => {
+                self.fetch_subscription_token(id, FetchPurpose::Connect);
+            }
             Ok(data) => self.send_subscribe(id, Some(data)),
             // centrifuge-js `_handleGetDataError`.
             Err(DataError::Unauthorized) => {
@@ -1760,6 +1767,55 @@ mod tests {
         );
     }
 
+    // Codex, #120: the refresh came due while the data callback ran.
+    #[test]
+    fn a_refresh_due_during_the_data_callback_fetches_a_token_before_the_subscribe() {
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t1".into())
+                .token_source()
+                .data_source(),
+        );
+        let fetching = machine.handle(Input::Subscribe(id));
+        machine.handle(Input::SubscriptionDataFetched {
+            fetch: data_fetch(&fetching),
+            result: Ok(b"{}".to_vec()),
+        });
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3001),
+            reason: "closed by the test".into(),
+        });
+        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let transport = opened(&attempt).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        let resubscribing =
+            machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Refresh,
+        ));
+
+        let answered = machine.handle(Input::SubscriptionDataFetched {
+            fetch: data_fetch(&resubscribing),
+            result: Ok(b"{}".to_vec()),
+        });
+
+        // The token "t1" may have expired: none is sent with it.
+        assert!(sent(&answered).is_empty(), "{answered:?}");
+        assert!(
+            answered.iter().any(|action| matches!(
+                action,
+                Action::FetchSubscriptionToken { subscription, .. } if *subscription == id
+            )),
+            "{answered:?}"
+        );
+    }
+
     #[test]
     fn a_subscribe_reply_without_expiry_cancels_the_kept_refresh() {
         let (mut machine, id, _) = token_subscription_lost();
@@ -2876,6 +2932,16 @@ mod tests {
             sent(&refreshed),
             [r#"{"id":5,"sub_refresh":{"channel":"news","token":"u"}}"#]
         );
+    }
+
+    fn data_fetch(actions: &[Action]) -> FetchId {
+        actions
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionData { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .expect("a data fetch")
     }
 
     fn state_fetch(actions: &[Action]) -> Option<FetchId> {
