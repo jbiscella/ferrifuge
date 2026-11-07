@@ -236,10 +236,15 @@ async fn record_of(
 }
 
 /// Fails if any record kept shows one of `secrets`, as text or as the
-/// `Debug` list of its bytes.
+/// `Debug` list of its bytes, or is outside every client's span: each
+/// record is made in its span (D2), also on the application's tasks.
 fn no_record_shows(secrets: &[String]) {
     for record in logs::all() {
         let text = record.text();
+        assert!(
+            record.client().is_some(),
+            "a record outside any client's span: {text}"
+        );
         for secret in secrets {
             let bytes = format!("{:?}", secret.as_bytes());
             let bytes = bytes.trim_matches(['[', ']']);
