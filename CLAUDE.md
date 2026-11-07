@@ -2617,7 +2617,7 @@ Feature: Connect data, headers, set_token and set_data
 
   @D
   Scenario: set_token replaces an expired token when there is no token callback
-    Given a client with token "old", no token callback and a minimum reconnect delay of 1 s, connected to the fake server
+    Given a client with token "old", no token callback and a minimum reconnect delay of 2 s, connected to the fake server
     And the fake server will answer the next connect with error 109 "token expired"
     When the fake server disconnects the client with a reconnect-advised code
     And set_token is called with "new" when the client emits the "error" event with code 109
