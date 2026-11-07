@@ -2289,6 +2289,61 @@ mod tests {
         );
     }
 
+    /// Keeps the message and fields of each DEBUG record.
+    #[derive(Clone, Default)]
+    struct Records(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Records {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Text(String);
+            impl tracing::field::Visit for Text {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+            if *event.metadata().level() == tracing::Level::DEBUG {
+                let mut text = Text(String::new());
+                event.record(&mut text);
+                lock(&self.0).push(text.0);
+            }
+        }
+    }
+
+    // Block 25, D10.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_detected_sleep_is_logged_with_its_gap() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+        let records = Records::default();
+        let subscriber = tracing_subscriber::registry().with(records.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            slept(&mut core, Duration::from_secs(30));
+            client
+                .shared()
+                .handle(&mut core, Input::TimerFired(Timer::ServerPing));
+        });
+
+        let records = lock(&records.0);
+        let logged = records
+            .iter()
+            .find(|record| record.contains("system sleep detected"))
+            .unwrap_or_else(|| panic!("{records:?}"));
+        assert!(logged.contains(" gap=30."), "{logged}");
+    }
+
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
     async fn without_a_sleep_the_no_ping_deadline_reconnects() {

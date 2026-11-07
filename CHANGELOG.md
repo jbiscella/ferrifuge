@@ -11,6 +11,28 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-07
+
+### Added
+
+- `Input::Slept` and sleep detection in the tokio adapter (Block 25): a
+  wake from a system sleep restarts the no-ping window, or reconnects with
+  code 2 after a sleep the server gave up on, and moves every token refresh
+  earlier by the sleep.
+
+### Changed
+
+- `Action::ShortenTimer` and `Action::ShortenSubscriptionTimer`: an owner
+  of the machine must make the named timer fire earlier, at once when that
+  time has passed.
+- Token refresh timers keep running across a reconnect, until the next
+  connect or subscribe reply re-arms or cancels them; one that fires
+  meanwhile makes the next attempt fetch a new token first.
+
+### Fixed
+
+- A token that expired while the system slept is no longer sent.
+
 ## [0.16.0] - 2026-11-07
 
 ### Added
