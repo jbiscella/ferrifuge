@@ -140,6 +140,12 @@ struct State {
     /// The next JSON connect command is answered with a text message of
     /// this many bytes (Block 29).
     sized_connect: Option<usize>,
+    /// Bytes and JSON messages written to clients, and bytes and JSON
+    /// commands read from them (Block 31).
+    sent_traffic: (u64, u64),
+    received_traffic: (u64, u64),
+    /// When a test last asked the server to close the connection.
+    closed_at: Option<std::time::SystemTime>,
     /// Channels whose subscribes asking for fossil delta get it (Block 19).
     delta_channels: std::collections::HashSet<String>,
     /// Per channel with delta on for the latest connection, the payload the
@@ -301,7 +307,13 @@ impl FakeServer {
 
     /// Closes the current connection with `code` and `reason`.
     pub(crate) fn close(&self, code: u16, reason: &str) {
+        self.state.lock().unwrap().closed_at = Some(std::time::SystemTime::now());
         self.control(Control::Close(code, reason.to_owned()));
+    }
+
+    /// When a test last asked the server to close the connection.
+    pub(crate) fn closed_at(&self) -> Option<std::time::SystemTime> {
+        self.state.lock().unwrap().closed_at
     }
 
     /// Sends a raw text frame over the current connection.
@@ -401,6 +413,16 @@ impl FakeServer {
                 .expect("encoding into a Vec cannot fail");
         }
         self.send_binary(frame);
+    }
+
+    /// Bytes and JSON messages written to clients so far (Block 31).
+    pub(crate) fn sent_traffic(&self) -> (u64, u64) {
+        self.state.lock().unwrap().sent_traffic
+    }
+
+    /// Bytes and JSON commands read from clients so far (Block 31).
+    pub(crate) fn received_traffic(&self) -> (u64, u64) {
+        self.state.lock().unwrap().received_traffic
     }
 
     /// Connections accepted so far.
@@ -679,15 +701,20 @@ impl Connection {
         let (mut sink, mut stream) = self.ws.take().expect("not served yet").split();
         let out = self.out.clone();
         let mut queue = self.queue.take().expect("not served yet");
+        let counted = Arc::clone(&self.state);
         // Aborted when the connection ends: `State::out` keeps a sender, so
         // the writer would otherwise wait on its queue forever.
         let mut writer = AbortOnDrop(tokio::spawn(async move {
             while let Some(outgoing) = queue.recv().await {
                 match outgoing {
                     Outgoing::Message(message) => {
+                        let (bytes, messages) = json_size(&message);
                         if sink.send(message).await.is_err() {
                             return;
                         }
+                        let mut state = counted.lock().unwrap();
+                        state.sent_traffic.0 += bytes;
+                        state.sent_traffic.1 += messages;
                     }
                     Outgoing::Close(frame) => {
                         let _ = sink.send(Message::Close(Some(frame))).await;
@@ -702,6 +729,12 @@ impl Connection {
         loop {
             let outgoing = tokio::select! {
                 message = stream.next(), if reading => {
+                    if let Some(Ok(message)) = &message {
+                        let (bytes, commands) = json_size(message);
+                        let mut state = self.state.lock().unwrap();
+                        state.received_traffic.0 += bytes;
+                        state.received_traffic.1 += commands;
+                    }
                     let replies = match message {
                         Some(Ok(Message::Text(text))) => self.json_commands(&text),
                         Some(Ok(Message::Binary(frame))) => self.protobuf_commands(&frame),
@@ -1043,6 +1076,19 @@ fn protobuf_result(command: &protobuf::Command) -> Option<protobuf::Reply> {
         return None;
     }
     Some(reply)
+}
+
+/// The payload bytes of `message` and the JSON messages it holds, one per
+/// non-empty line; none for a binary or control frame (Block 31).
+fn json_size(message: &Message) -> (u64, u64) {
+    match message {
+        Message::Text(text) => (
+            text.len() as u64,
+            text.lines().filter(|line| !line.trim().is_empty()).count() as u64,
+        ),
+        Message::Binary(bytes) => (bytes.len() as u64, 0),
+        _ => (0, 0),
+    }
 }
 
 /// `prefix`, then `x` characters, then `suffix`: `size` bytes in all.

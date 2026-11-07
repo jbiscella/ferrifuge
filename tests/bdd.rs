@@ -418,6 +418,16 @@ const IMPLEMENTED: &[&str] = &[
     "A permanent subscribe error fails a waiting subscription ready",
     "Subscription ready made before connect waits for the connection",
     "Disconnect fails a waiting subscription ready",
+    // Block 31: statistics and delta statistics.
+    "A new client's statistics are zero",
+    "The core counts attempts, connects and publications taken",
+    "The core counts messages as read and as written",
+    "Statistics count a session's traffic as the fake server sees it",
+    "Statistics count failed attempts",
+    "Statistics count across reconnects",
+    "Only publications taken count as delivered",
+    "Delta statistics count full and delta payloads",
+    "Delta statistics stay zero unless delta is on",
 ];
 
 /// Server configuration of @A scenarios.
