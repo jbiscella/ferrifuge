@@ -1,6 +1,6 @@
 //! Client driven by tokio.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -399,8 +399,7 @@ impl Shared {
             // Already the application's: its position moves before the
             // sleep can withdraw it.
             Input::EventTaken(_) => {
-                self.feed(core, input);
-                self.feed(core, Input::Slept { gap });
+                self.feed_before_sleep(core, input, gap);
                 self.fire_due_refreshes(core);
             }
             // What the server did before the wake stands, a terminal close
@@ -410,8 +409,7 @@ impl Shared {
             // it (D3).
             Input::Frame { .. } | Input::TransportClosed { .. } => {
                 self.fire_due_refreshes(core);
-                self.feed(core, input);
-                self.feed(core, Input::Slept { gap });
+                self.feed_before_sleep(core, input, gap);
             }
             input => {
                 self.feed(core, Input::Slept { gap });
@@ -427,6 +425,37 @@ impl Shared {
         // A stream created or polled may be what revealed the sleep, with
         // no notification of its own.
         self.actions_queued.notify_one();
+    }
+
+    /// Gives the machine `input`, then the sleep of `gap` it revealed. The
+    /// timers `input` set lost no time to the sleep: the sleep does not
+    /// shorten them (Codex, #120).
+    fn feed_before_sleep(&self, core: &mut Core, input: Input, gap: Duration) {
+        let sets = core.armed.sets;
+        self.feed(core, input);
+        let fresh: HashSet<TimerKey> = core
+            .armed
+            .running
+            .iter()
+            .filter(|(_, set)| **set > sets)
+            .map(|(key, _)| *key)
+            .collect();
+        let from = core.actions.len();
+        self.feed(core, Input::Slept { gap });
+        if fresh.is_empty() {
+            return;
+        }
+        let answer: Vec<Action> = core.actions.drain(from..).collect();
+        core.actions.extend(answer.into_iter().filter(|action| {
+            let shortened = match action {
+                Action::ShortenTimer(timer, _) => TimerKey::Client(*timer),
+                Action::ShortenSubscriptionTimer(id, timer, _) => {
+                    TimerKey::Subscription(*id, *timer)
+                }
+                _ => return true,
+            };
+            !fresh.contains(&shortened)
+        }));
     }
 
     /// Gives the machine `input` unless it is a stale firing.
@@ -2838,6 +2867,54 @@ mod tests {
                 .rev()
                 .take_while(|action| !matches!(action, Action::CancelSubscriptionToken(_)))
                 .any(|action| matches!(action, Action::FetchSubscriptionToken { .. })),
+            "{:?}",
+            core.actions
+        );
+    }
+
+    // Codex, #120: the refresh timer a subscribe reply sets, read first
+    // after a sleep, lost no time to it and is not shortened.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timer_set_by_the_frame_revealing_a_sleep_is_not_shortened() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":120}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .token("s0")
+            .get_token(|_| async { Ok("s1".to_owned()) })
+            .build()
+            .unwrap();
+        let _events = subscription.events();
+        subscription.subscribe();
+        let mut core = lock(&client.shared().core);
+        core.actions.clear();
+
+        slept(&mut core, Duration::from_secs(30));
+        client.shared().handle(
+            &mut core,
+            Input::Frame {
+                transport,
+                data: br#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#.to_vec(),
+            },
+        );
+
+        assert!(
+            core.actions.iter().any(|action| matches!(
+                action,
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Refresh, _)
+            )),
+            "{:?}",
+            core.actions
+        );
+        assert!(
+            !core.actions.iter().any(|action| matches!(
+                action,
+                Action::ShortenSubscriptionTimer(_, SubscriptionTimer::Refresh, _)
+            )),
             "{:?}",
             core.actions
         );
