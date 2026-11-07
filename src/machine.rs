@@ -12,6 +12,8 @@ use std::time::Duration;
 
 mod batching;
 mod calls;
+#[cfg(test)]
+mod close_tests;
 mod delivery;
 mod inbound;
 mod server_subscriptions;
