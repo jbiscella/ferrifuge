@@ -2208,6 +2208,39 @@ mod tests {
         }
     }
 
+    // Block 25, D3: the refresh timer outlives a reconnect, until the next
+    // connect reply re-arms or cancels it.
+    #[test]
+    fn a_connect_reply_without_expiry_cancels_the_kept_refresh() {
+        let (mut machine, transport) = awaiting_connect_reply();
+        machine.handle(frame(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
+        ));
+        let lost = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        assert!(
+            !lost
+                .iter()
+                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            "{lost:?}"
+        );
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.handle(Input::TransportOpened(transport));
+
+        let connected = machine.handle(frame(transport, r#"{"id":2,"connect":{"client":"c"}}"#));
+
+        assert!(
+            connected
+                .iter()
+                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            "{connected:?}"
+        );
+    }
+
     #[test]
     fn each_failed_attempt_emits_exactly_one_error_and_schedules_a_retry() {
         let mut machine = machine();
