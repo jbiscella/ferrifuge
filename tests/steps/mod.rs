@@ -41,6 +41,7 @@ mod runtime;
 mod server_subs;
 mod sleep;
 mod slow;
+mod statistics;
 mod sub_tokens;
 mod subscriptions;
 mod tls;
@@ -182,6 +183,8 @@ pub(crate) struct ClientWorld {
     pub(crate) limits: limits::Limits,
     /// The `ready()` futures of a Block 30 scenario.
     pub(crate) ready: ready::Ready,
+    /// What a Block 31 scenario records.
+    pub(crate) stats: statistics::Stats,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

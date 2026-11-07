@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `Client::statistics` and `Machine::statistics` (Block 31): a
+  `Statistics` snapshot of the client's state, transport, connected-since
+  time, connects, failed attempts, bytes and messages each way,
+  publications delivered and registry sizes, never a round trip.
+  `Subscription::delta_statistics` and `Machine::delta_statistics`: a
+  `DeltaStatistics` of full and delta payloads and their bytes, with
+  `compression_ratio()`.
+
 - `Client::ready` and `Subscription::ready` (Block 30): wait until the
   client is connected or the subscription subscribed, without taking an
   event from their streams; they fail with code 3 "disconnected" or code 7

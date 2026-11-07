@@ -551,6 +551,15 @@ client handles messages, each after the events of earlier ones are taken: a
 task that holds a stream with events not taken, and awaits `ready()` without
 reading it, waits until the stream is read or dropped.
 
+`client.statistics()` returns a snapshot of counters since the client was
+built, for status displays, support tickets and telemetry: the state, the
+transport and when the client connected, connects and failed attempts,
+bytes and messages each way (as read and as written, without transport
+framing), publications delivered (as taken from the streams) and the
+registry sizes. `subscription.delta_statistics()` reports what delta
+compression did: full and delta payloads, their bytes as received and as
+rebuilt, and `compression_ratio()`.
+
 ### Configuration
 
 | `Config` field | Default | Meaning |

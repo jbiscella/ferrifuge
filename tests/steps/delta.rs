@@ -40,7 +40,7 @@ pub(crate) struct Delta {
     /// whose size a step measures.
     bytes_before: usize,
     /// Whether the last `subscribed` event reported delta on.
-    negotiated: Option<bool>,
+    pub(super) negotiated: Option<bool>,
 }
 
 /// Subscribes the scenario's subscription to `channel` with the fossil
@@ -70,6 +70,7 @@ async fn subscribed_on_the_fake_server(world: &mut ClientWorld) {
     a_connected_client(world).await;
     world.fake().answer_a_subscribe_with(json!({"delta": true}));
     assert!(subscribed_with_delta(world, CHANNEL).await);
+    world.delta.negotiated = Some(true);
 }
 
 /// The data of a publication of a subscription with delta on, with the
