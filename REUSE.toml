@@ -1,0 +1,33 @@
+# Licensing of every file, in machine-readable form (https://reuse.software,
+# specification 3.3). LICENSE states the same for readers; the last matching
+# table wins.
+version = 1
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Jacopo Biscella"
+SPDX-License-Identifier = "0BSD"
+
+[[annotations]]
+path = "proto/client.proto"
+precedence = "override"
+SPDX-FileCopyrightText = "2023 Centrifugal Labs LTD"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "tests/fixtures/fossil-vectors/*/*"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Centrifugal Labs LTD",
+    "2020 Ruslan Sokolov",
+    "2016 Endel Dreyer",
+    "2014 Dmitry Chestnykh",
+    "2007 D. Richard Hipp",
+]
+SPDX-License-Identifier = "BSD-2-Clause"
+
+[[annotations]]
+path = ".claude/skills/solidifier/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Fernando José Rodríguez Ramírez"
+SPDX-License-Identifier = "MIT"

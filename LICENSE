@@ -12,3 +12,37 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
 OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
 TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
 THIS SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+EXCEPTIONS
+
+The license above covers ferrifuge except for the files listed below, which
+keep their own licenses and copyright notices. REUSE.toml in the repository
+states the same in machine-readable form (https://reuse.software). Because the
+crate ships proto/client.proto, its license expression is "0BSD AND MIT".
+
+Shipped in the crates.io package:
+
+  proto/client.proto
+    Copied unchanged from https://github.com/centrifugal/protocol, commit
+    4455d8ea79cfd62206cc4ee6f32025da63fa1654.
+    Copyright (c) 2023 Centrifugal Labs LTD. MIT license: proto/LICENSE.
+    Every build of ferrifuge compiles Rust code generated from this file.
+
+In the repository only:
+
+  tests/fixtures/fossil-vectors/1/ to 5/
+    Copied unchanged from https://github.com/centrifugal/fdelta, commit
+    9e224621660280b6ab1c3fc2931cedabd26e0a87. BSD 2-Clause license, with the
+    copyright notices of Centrifugal Labs LTD, Ruslan Sokolov, Endel Dreyer,
+    Dmitry Chestnykh and D. Richard Hipp: tests/fixtures/fossil-vectors/LICENSE.
+
+  .claude/skills/solidifier/
+    From https://github.com/FernandoJRR/solidifier, commit 71fd5a9, with the
+    local changes listed in its SOURCE.md. Copyright (c) 2026 Fernando José
+    Rodríguez Ramírez. MIT license: .claude/skills/solidifier/LICENSE.
+
+Dependencies are not part of this repository and keep their own licenses.
+Binaries that link ferrifuge must carry the notices those licenses require:
+see README.md, "License".

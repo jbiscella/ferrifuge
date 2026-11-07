@@ -11,6 +11,12 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Changed
+
+- The crate's license expression is `0BSD AND MIT`: `proto/client.proto`,
+  which the crate ships, is under the MIT license. `LICENSE` lists every
+  file not under 0BSD; `REUSE.toml` states the same per file.
+
 ## [0.17.0] - 2026-11-07
 
 ### Added

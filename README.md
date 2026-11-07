@@ -851,10 +851,21 @@ on pull requests. cargo-deny also runs daily.
 
 ## License
 
-[0BSD](LICENSE). [`proto/client.proto`](proto/client.proto) is copied from
-[centrifugal/protocol](https://github.com/centrifugal/protocol) and keeps its
-MIT license ([`proto/LICENSE`](proto/LICENSE)).
+[0BSD](LICENSE), except for the files listed under "Exceptions" in
+[LICENSE](LICENSE), which keep their own licenses; [REUSE.toml](REUSE.toml)
+states the same per file. The crate ships
+[`proto/client.proto`](proto/client.proto), copied from
+[centrifugal/protocol](https://github.com/centrifugal/protocol) under the MIT
+license ([`proto/LICENSE`](proto/LICENSE)), so its license expression is
+`0BSD AND MIT`.
 
-Builds with the `aws-lc-rs` or `fips` feature include AWS-LC, which is
-partly under the OpenSSL license. That license requires its attribution
-notice in advertising and in redistributions of the built binaries.
+Binaries that link ferrifuge must carry the notices of what they link: the
+MIT notice of `proto/client.proto` and those of the dependencies (MIT, ISC,
+Apache-2.0, BSD, Unicode-3.0), which `cargo about` can generate for the
+features built.
+Builds with the `fips` feature also include AWS-LC-FIPS, partly under the
+OpenSSL and SSLeay licenses: their notices go with every redistribution, and
+advertising and documentation must state "This product includes software
+developed by the OpenSSL Project for use in the OpenSSL Toolkit.
+(http://www.openssl.org/)" and "This product includes cryptographic software
+written by Eric Young (eay@cryptsoft.com)".
