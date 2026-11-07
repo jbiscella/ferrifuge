@@ -200,8 +200,17 @@ async fn a_client_subscribed_to_news(world: &mut ClientWorld) {
     a_client_subscribed(world).await;
 }
 
-#[given(regex = r#"^a client connected over transport "(\w+)" and subscribed to channel "news"$"#)]
-async fn a_client_over_a_transport_subscribed(world: &mut ClientWorld, transport: String) {
+#[given(
+    regex = r#"^a client (configured with the Protobuf protocol )?connected over transport "(\w+)" and subscribed to channel "news"$"#
+)]
+async fn a_client_over_a_transport_subscribed(
+    world: &mut ClientWorld,
+    protobuf: String,
+    transport: String,
+) {
+    if !protobuf.is_empty() {
+        world.protocol = Protocol::Protobuf;
+    }
     let kind = super::transports::kind(&transport);
     let url = super::transports::server_url(server(world), kind);
     configure(world, vec![(kind, url)]);

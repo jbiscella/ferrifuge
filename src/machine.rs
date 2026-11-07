@@ -1102,8 +1102,10 @@ impl Machine {
         if kinds.is_empty() {
             return Err(configuration_error("no transport configured", None));
         }
+        // Centrifugo's sse carries JSON only; Protobuf goes over websocket
+        // and http_stream (Block 27, D3).
         if self.config.protocol == Protocol::Protobuf
-            && let Some(kind) = kinds.iter().find(|kind| kind.is_emulated())
+            && let Some(kind) = kinds.iter().find(|kind| **kind == TransportKind::Sse)
         {
             return Err(configuration_error(
                 &format!(

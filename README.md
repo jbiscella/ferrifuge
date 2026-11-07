@@ -52,8 +52,8 @@ Available now:
 - an `error` event for every failed connection attempt;
 - websocket transport (`ws://` and `wss://`) with the JSON or the
   Protobuf protocol;
-- http_stream and sse transports (`http://` and `https://`, JSON), tried
-  in order when websocket cannot connect;
+- http_stream (JSON or Protobuf) and sse (JSON) transports (`http://` and
+  `https://`), tried in order when websocket cannot connect;
 - the TLS crypto provider chosen at build time: ring, aws-lc-rs, or
   aws-lc-rs in FIPS mode;
 - client-side subscriptions: states and events, publications delivered
@@ -479,8 +479,10 @@ let client = Client::builder_with_transports([
 The server must enable them (`http_stream.enabled` and `sse.enabled` in
 Centrifugo). Their commands go to the server's emulation endpoint,
 `/emulation` on the same host by default; set another with
-`ClientBuilder::emulation_endpoint`, e.g. behind a path prefix. They carry JSON only: building a client with the Protobuf
-protocol and one of them fails with a configuration error.
+`ClientBuilder::emulation_endpoint`, e.g. behind a path prefix. http_stream
+carries JSON or Protobuf; sse carries JSON only, as in Centrifugo, so
+building a client with the Protobuf protocol and an sse endpoint fails with
+a configuration error.
 
 ### Connection tokens
 
@@ -852,8 +854,9 @@ cargo semver-checks --default-features --baseline-rev main               # publi
 ```
 
 The interop test needs Docker and Node. The fuzz targets (`fuzz_*` tests
-next to the JSON, Protobuf, http_stream and sse decoders) run on random
-inputs under `cargo test`, and coverage-guided with
+next to the JSON and Protobuf decoders and the http_stream and sse
+splitters, Protobuf's included) run on random inputs under `cargo test`,
+and coverage-guided with
 [cargo-bolero](https://crates.io/crates/cargo-bolero) and a nightly
 toolchain. A breaking change to the public API needs a version bump.
 

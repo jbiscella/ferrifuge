@@ -13,6 +13,10 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Protobuf over http_stream (Block 27): a client with the Protobuf
+  protocol can fall back to http_stream when websocket is blocked; its
+  stream and emulation requests are `application/octet-stream`.
+
 - `Client::reconnect` and `Input::Reconnect` (Block 25): reconnect at once
   on the platform's wake or network-change notification, with connecting
   code 6 "reconnect called" (`codes::connecting::RECONNECT_CALLED`); the
@@ -20,6 +24,9 @@ repository held while it carried that version, from the blocks of
   a disconnected client is left alone.
 
 ### Changed
+
+- Building a client refuses the Protobuf protocol only with an sse
+  endpoint; with http_stream it is now accepted (Block 27).
 
 - Maintained components parse what the server streams (Block 27):
   sse-core the sse events, tokio-util the http_stream JSON lines, and

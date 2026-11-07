@@ -27,6 +27,10 @@ use crate::machine::{FrameId, TransportKind};
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
 const JSON: &str = "application/json";
+/// The media type of Protobuf requests and streams, exactly: Centrifugo
+/// compares the whole value (Block 27, D3; centrifuge
+/// `handler_http_stream.go:73`, `emulation.go:72`).
+const PROTOBUF: &str = "application/octet-stream";
 /// Largest message accepted from a stream, as on websocket. A server
 /// sending more without ending a message would otherwise grow the buffer
 /// without bound.
@@ -52,6 +56,8 @@ pub(crate) struct HttpTransport {
     request_timeout: Duration,
     /// The application's HTTP headers, on every request (Block 17).
     headers: Arc<HeaderMap>,
+    /// The media type of emulation requests: JSON's or Protobuf's.
+    content_type: &'static str,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
     decoder: Decoder,
     /// Messages decoded but not received yet.
@@ -70,6 +76,7 @@ impl HttpTransport {
     /// Opens the stream at `url`, sending `initial_frame`, the encoded
     /// connect command, with the request. Commands then go to
     /// `emulation_endpoint`, by default `/emulation` on the stream's server.
+    #[allow(clippy::too_many_arguments)] // Each is the transport's own.
     pub(crate) async fn open(
         kind: TransportKind,
         url: &str,
@@ -78,6 +85,7 @@ impl HttpTransport {
         request_timeout: Duration,
         headers: Arc<HeaderMap>,
         network: &Network,
+        protobuf: bool,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
         let emulation_url = emulation_url(&url, emulation_endpoint)?;
@@ -88,6 +96,9 @@ impl HttpTransport {
         network.decide(&emulation_url)?;
         let http = network.http_client(url.scheme() == "https")?;
         let sse = kind == TransportKind::Sse;
+        // Protobuf only over http_stream: building refuses it with sse
+        // (Block 27, D3).
+        let requests_type = if protobuf { PROTOBUF } else { JSON };
         let request = if sse {
             url.query_pairs_mut()
                 .append_pair("cf_connect", &String::from_utf8_lossy(&initial_frame));
@@ -97,8 +108,8 @@ impl HttpTransport {
         } else {
             http.post(url)
                 .headers((*headers).clone())
-                .header(ACCEPT, JSON)
-                .header(CONTENT_TYPE, JSON)
+                .header(ACCEPT, requests_type)
+                .header(CONTENT_TYPE, requests_type)
                 .body(initial_frame)
         };
         // Without the URL: the sse one carries the connect command, token
@@ -144,8 +155,13 @@ impl HttpTransport {
             emulation_url,
             request_timeout,
             headers,
+            content_type: requests_type,
             body,
-            decoder: Decoder::new(sse, MAX_MESSAGE),
+            decoder: if protobuf {
+                Decoder::protobuf(MAX_MESSAGE)
+            } else {
+                Decoder::new(sse, MAX_MESSAGE)
+            },
             frames: VecDeque::new(),
             failed: None,
             requests: FuturesUnordered::new(),
@@ -164,7 +180,7 @@ impl HttpTransport {
             .emulation_http
             .post(self.emulation_url.clone())
             .headers((*self.headers).clone())
-            .header(CONTENT_TYPE, JSON)
+            .header(CONTENT_TYPE, self.content_type)
             .body(frame);
         let timeout = self.request_timeout;
         self.requests.push(Box::pin(async move {
@@ -351,6 +367,10 @@ enum Decoder {
     Sse(sse_core::SseDecoder),
     /// tokio-util's lines, bounded, and the bytes not yet split.
     Lines(AnyDelimiterCodec, BytesMut),
+    /// Protobuf replies, each after its uvarint length (Block 27, D3): the
+    /// bytes not yet split, and the largest reply. In-house, as no
+    /// maintained component splits uvarint-delimited streams (Block 0).
+    Varint(Vec<u8>, usize),
 }
 
 impl std::fmt::Debug for Decoder {
@@ -358,6 +378,7 @@ impl std::fmt::Debug for Decoder {
         f.write_str(match self {
             Self::Sse(_) => "Decoder::Sse",
             Self::Lines(..) => "Decoder::Lines",
+            Self::Varint(..) => "Decoder::Varint",
         })
     }
 }
@@ -374,6 +395,12 @@ impl Decoder {
                 BytesMut::new(),
             )
         }
+    }
+
+    /// The splitter of a Protobuf `http_stream`, whose replies are at most
+    /// `limit` bytes each.
+    fn protobuf(limit: usize) -> Self {
+        Self::Varint(Vec::new(), limit)
     }
 
     /// Adds `chunk`, appending each message it completes to `messages`.
@@ -417,9 +444,45 @@ impl Decoder {
                     }
                 }
             }
+            Self::Varint(buffer, limit) => {
+                buffer.extend_from_slice(chunk);
+                let mut start = 0;
+                while let Some(end) = next_reply(&buffer[start..], *limit)? {
+                    // With its prefix: a one-reply frame for the codec.
+                    messages.push_back(buffer[start..start + end].to_vec());
+                    start += end;
+                }
+                buffer.drain(..start);
+            }
         }
         Ok(())
     }
+}
+
+/// Where the first reply of `bytes`, a Protobuf stream, ends, its uvarint
+/// length prefix included; `None` while more bytes are needed (Block 27,
+/// D3). A zero length is an empty reply, the server's ping.
+///
+/// # Errors
+///
+/// When the prefix is not a uvarint, or announces more than `limit` bytes.
+fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, String> {
+    // At most 10 bytes; all but the last have the continuation bit.
+    let Some(last) = bytes.iter().take(10).position(|byte| byte & 0x80 == 0) else {
+        return if bytes.len() < 10 {
+            Ok(None)
+        } else {
+            Err("a reply length that is not a varint".to_owned())
+        };
+    };
+    let prefix = &bytes[..=last];
+    let length = prost::decode_length_delimiter(prefix)
+        .map_err(|_| "a reply length that is not a varint".to_owned())?;
+    if length > limit {
+        return Err(super::transport::TOO_LARGE.to_owned());
+    }
+    let end = prefix.len() + length;
+    Ok((bytes.len() >= end).then_some(end))
 }
 
 #[cfg(test)]
@@ -468,6 +531,42 @@ mod tests {
     /// same messages and outcome as in one chunk, and never panics.
     /// Coverage-guided with `cargo bolero test
     /// adapter::http::tests::fuzz_http_stream_decoder --engine libfuzzer`.
+    /// What a Protobuf stream splitter of a small limit gives for `body`
+    /// cut at `cuts`.
+    fn split_chunked(body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), String>) {
+        let mut decoder = Decoder::protobuf(256);
+        let mut messages = VecDeque::new();
+        let mut rest = body;
+        for cut in cuts {
+            let (chunk, after) = rest.split_at(usize::from(*cut).min(rest.len()));
+            rest = after;
+            if let Err(error) = decoder.push(chunk, &mut messages) {
+                return (messages.into(), Err(error));
+            }
+        }
+        let result = decoder.push(rest, &mut messages);
+        (messages.into(), result)
+    }
+
+    // Block 27, D3: the in-house splitter, fuzzed as Block 0 requires.
+    #[test]
+    fn fuzz_protobuf_stream_decoder() {
+        bolero::check!()
+            .with_type::<(Vec<u8>, Vec<u16>)>()
+            .for_each(|(body, cuts)| {
+                let split = split_chunked(body, cuts);
+                assert_eq!(split, split_chunked(body, &[]));
+                // Each message is one reply with its prefix, within the
+                // limit.
+                for message in &split.0 {
+                    let mut bytes = &message[..];
+                    let length = prost::decode_length_delimiter(&mut bytes).expect("a prefix");
+                    assert_eq!(bytes.len(), length);
+                    assert!(length <= 256);
+                }
+            });
+    }
+
     #[test]
     fn fuzz_http_stream_decoder() {
         bolero::check!()
@@ -533,6 +632,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await;
 
@@ -582,6 +682,141 @@ mod tests {
 
         // A later mark is part of the line: the field is unknown.
         assert_eq!(messages, ["{}"]);
+    }
+
+    /// The messages `chunks` give a Protobuf stream splitter of `limit`.
+    fn split_protobuf(chunks: &[&[u8]], limit: usize) -> (Vec<Vec<u8>>, Result<(), String>) {
+        let mut decoder = Decoder::protobuf(limit);
+        let mut messages = VecDeque::new();
+        for chunk in chunks {
+            if let Err(error) = decoder.push(chunk, &mut messages) {
+                return (messages.into(), Err(error));
+            }
+        }
+        (messages.into(), Ok(()))
+    }
+
+    // Block 27, D3.
+    #[test]
+    fn protobuf_replies_split_over_chunks_inside_their_prefix_too() {
+        // A 300-byte reply: its length takes two bytes, 0xac 0x02.
+        let reply: Vec<u8> = [0xac, 0x02].into_iter().chain([7; 300]).collect();
+
+        let (messages, result) = split_protobuf(
+            &[&reply[..1], &reply[1..2], &reply[2..150], &reply[150..]],
+            1000,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(messages, [reply]);
+    }
+
+    // Block 27, D3: a zero length is the server's ping, never skipped.
+    #[test]
+    fn several_protobuf_replies_in_one_chunk_a_ping_among_them() {
+        let (messages, result) =
+            split_protobuf(&[&[0x01, 0x08, 0x00, 0x02, 0x08, 0x05, 0x03]], 1000);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            messages,
+            [vec![0x01, 0x08], vec![0x00], vec![0x02, 0x08, 0x05]]
+        );
+    }
+
+    // Block 27, D3: the length is checked before its bytes arrive.
+    #[test]
+    fn a_protobuf_reply_over_the_limit_fails_before_its_bytes() {
+        let (messages, result) = split_protobuf(&[&[0x01, 0x08, 0x09]], 8);
+
+        assert_eq!(messages, [vec![0x01, 0x08]]);
+        assert_eq!(result, Err(super::super::transport::TOO_LARGE.to_owned()));
+    }
+
+    // Block 27, D3: a prefix still continuing waits; one too long fails.
+    #[test]
+    fn a_protobuf_length_waits_for_its_bytes_and_fails_when_too_long() {
+        let (waiting, pending) = split_protobuf(&[&[0x80; 9]], usize::MAX);
+        let (failed, too_long) = split_protobuf(&[&[0x80; 9], &[0x80]], usize::MAX);
+
+        assert!(waiting.is_empty() && pending.is_ok());
+        assert!(failed.is_empty() && too_long.is_err());
+    }
+
+    /// Serves every request: an endless stream to the stream request, 204
+    /// to the others; sends each request's head.
+    async fn capture_requests() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/connection/http_stream",
+            listener.local_addr().unwrap()
+        );
+        let (heads, received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let heads = heads.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&request).to_lowercase();
+                    let answer: &[u8] = if head.starts_with("post /connection") {
+                        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
+                    } else {
+                        b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n"
+                    };
+                    let _ = heads.send(head);
+                    let _ = socket.write_all(answer).await;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+            }
+        });
+        (url, received)
+    }
+
+    // Block 27, D3: Centrifugo compares the media type exactly.
+    #[tokio::test]
+    async fn requests_name_their_encoding_exactly() {
+        for (protobuf, media_type) in [(false, JSON), (true, PROTOBUF)] {
+            let (url, mut heads) = capture_requests().await;
+            let mut transport = HttpTransport::open(
+                TransportKind::HttpStream,
+                &url,
+                b"connect".to_vec(),
+                None,
+                TIMEOUT,
+                Arc::default(),
+                &Network::default(),
+                protobuf,
+            )
+            .await
+            .expect("an open stream");
+            let stream = heads.recv().await.expect("the stream request");
+
+            transport.send(FrameId::for_tests(1), b"command".to_vec());
+            let emulation = tokio::select! {
+                head = heads.recv() => head.expect("the emulation request"),
+                _ = transport.recv(true) => panic!("the transport ended"),
+            };
+
+            for head in [&stream, &emulation] {
+                assert!(
+                    head.contains(&format!("content-type: {media_type}\r\n")),
+                    "{head}"
+                );
+            }
+            assert!(
+                stream.contains(&format!("accept: {media_type}\r\n")),
+                "{stream}"
+            );
+        }
     }
 
     // Block 27, D1 and D5: what the maintained sse decoder changes.
@@ -678,6 +913,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await
         .unwrap();
@@ -724,6 +960,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await
         .unwrap();
@@ -766,6 +1003,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await
         .unwrap();
@@ -809,6 +1047,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await
         .unwrap();
@@ -850,6 +1089,7 @@ mod tests {
             Duration::from_secs(60),
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await
         .unwrap();
@@ -919,6 +1159,7 @@ mod tests {
                     TIMEOUT,
                     Arc::default(),
                     &Network::default(),
+                    false,
                 )
                 .await;
 
@@ -951,6 +1192,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await;
 
@@ -977,6 +1219,7 @@ mod tests {
             TIMEOUT,
             Arc::default(),
             &Network::default(),
+            false,
         )
         .await;
 

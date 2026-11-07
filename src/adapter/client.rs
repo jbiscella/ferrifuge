@@ -924,7 +924,7 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// A [`crate::ErrorKind::Configuration`] error when the options cannot
-    /// work together, e.g. the Protobuf protocol with an HTTP transport.
+    /// work together, e.g. the Protobuf protocol with the sse transport.
     ///
     /// # Panics
     ///
@@ -1829,6 +1829,7 @@ impl Driver {
             TransportKind::HttpStream | TransportKind::Sse => {
                 let emulation = self.emulation_endpoint.clone();
                 let request_timeout = self.timeout;
+                let protobuf = self.subprotocol.is_some();
                 Box::pin(async move {
                     HttpTransport::open(
                         kind,
@@ -1838,6 +1839,7 @@ impl Driver {
                         request_timeout,
                         headers,
                         &network,
+                        protobuf,
                     )
                     .await
                     .map(|http| Transport::Http(Box::new(http)))
@@ -2435,8 +2437,8 @@ mod tests {
     async fn a_build_error_is_a_standard_error() {
         fn build() -> Result<Client, Box<dyn std::error::Error>> {
             let client = Client::builder_with_transports([(
-                TransportKind::HttpStream,
-                "http://127.0.0.1:1/connection/http_stream".to_owned(),
+                TransportKind::Sse,
+                "http://127.0.0.1:1/connection/sse".to_owned(),
             )])
             .config(Config {
                 protocol: crate::Protocol::Protobuf,
@@ -2446,12 +2448,12 @@ mod tests {
             Ok(client)
         }
 
-        let error = build().expect_err("Protobuf over http_stream is refused");
+        let error = build().expect_err("Protobuf over sse is refused");
 
         let client_error = error.downcast_ref::<ClientError>().expect("a ClientError");
         assert_eq!(
             error.to_string(),
-            format!("{} (code 12) over http_stream", client_error.message)
+            format!("{} (code 12) over sse", client_error.message)
         );
     }
 
