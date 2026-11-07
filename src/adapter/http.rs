@@ -153,7 +153,9 @@ impl HttpTransport {
                 let response = tokio::time::timeout(timeout, request.send())
                     .await
                     .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
-                    .map_err(|e| format!("emulation request failed: {e}"))?;
+                    // Without its URL: the error message is logged, and an
+                    // emulation URL may carry a credential (Block 21, D5).
+                    .map_err(|e| format!("emulation request failed: {}", e.without_url()))?;
                 let status = response.status();
                 // A server without the session's node (404) or failing (5xx)
                 // cannot answer the command; other statuses reject only it
@@ -352,7 +354,7 @@ impl Decoder {
             }
             let pending = self.line.len() + self.data.as_ref().map_or(0, Vec::len);
             if pending > self.limit {
-                return Err(format!("message larger than {} bytes", self.limit));
+                return Err(super::transport::TOO_LARGE.to_owned());
             }
         }
         Ok(())

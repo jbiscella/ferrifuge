@@ -371,6 +371,7 @@ impl SubscriptionBuilder {
         let id = core
             .machine
             .add_subscription(self.channel.clone(), self.options)?;
+        self.shared.log.subscription(id, &self.channel);
         if self.get_data.is_some() || self.get_token.is_some() || self.get_state.is_some() {
             lock(&self.shared.callbacks).0.insert(
                 id,
@@ -466,6 +467,7 @@ impl Client {
         self.shared()
             .apply(Input::RemoveSubscription(subscription.id));
         lock(&self.shared().callbacks).0.remove(&subscription.id);
+        self.shared().log.subscription_removed(subscription.id);
         // The final events were queued by the call above: its streams end
         // once they have yielded them.
         let mut outboxes = lock(&self.shared().outboxes);

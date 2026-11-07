@@ -44,6 +44,8 @@ pub(crate) enum Rpc {
     Reverse,
     /// Never.
     Ignore,
+    /// Each at once, with the data it carried (Block 21).
+    Echo,
 }
 
 /// An instruction for the current connection.
@@ -775,6 +777,10 @@ impl Connection {
                         None => state.held_rpc = Some(message.clone()),
                     },
                     Rpc::Ignore => {}
+                    Rpc::Echo => replies.push(Message::text(
+                        json!({"id": message["id"], "rpc": {"data": message["rpc"]["data"]}})
+                            .to_string(),
+                    )),
                 }
             } else if message["history"].is_object() {
                 replies.push(Message::text(

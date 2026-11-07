@@ -17,9 +17,11 @@ use futures_util::{FutureExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
+use tracing::Instrument;
 
 use super::http::HttpTransport;
-use super::transport::{Inbound, WebSocket};
+use super::log::{self, Log};
+use super::transport::{self as websocket, Inbound, WebSocket};
 use crate::machine::{
     Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
@@ -29,6 +31,7 @@ use crate::{
     HistoryOptions, HistoryResult, PresenceResult, PresenceStatsResult, State, StateError,
     StreamPosition, SubscriptionEvent, TokenError, codes,
 };
+use tracing::{debug, trace, warn};
 
 /// Centrifugo client running on tokio.
 ///
@@ -46,6 +49,9 @@ impl std::fmt::Debug for Client {
     }
 }
 
+/// Websocket close code "message too big" (RFC 6455).
+const MESSAGE_TOO_BIG: u16 = 1009;
+
 /// What the client handle, its subscriptions and its driver task share.
 #[derive(Debug)]
 pub(super) struct Shared {
@@ -61,6 +67,8 @@ pub(super) struct Shared {
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
+    /// Spans and records of this client (Block 21).
+    pub(super) log: Log,
 }
 
 /// Events waiting for their streams (Block 15). Locked after
@@ -163,9 +171,14 @@ impl Shared {
     /// Feeds `input` to the machine: events go to their outboxes, taken at
     /// once where no stream takes them, other actions to the driver.
     pub(super) fn handle(&self, core: &mut Core, input: Input) {
+        // Application calls and stream reads feed the machine too, on the
+        // application's tasks.
+        let _entered = self.log.span.enter();
         let mut inputs = VecDeque::from([input]);
         while let Some(input) = inputs.pop_front() {
+            self.log.input(&input);
             for action in core.machine.handle(input) {
+                self.log.action(&action);
                 let mut outboxes = lock(&self.outboxes);
                 let taken = match action {
                     Action::Emit(id, event) => outboxes.client.offer(id, event),
@@ -207,10 +220,12 @@ impl Shared {
             if self.closed.load(Ordering::Acquire) {
                 None
             } else {
+                let kind = request.name();
                 let id = match subscription {
                     Some(subscription) => core.machine.add_subscription_call(subscription, request),
                     None => core.machine.add_call(request),
                 };
+                self.log.call(id, kind);
                 lock(&self.calls).insert(id, sender);
                 self.handle(&mut core, Input::Call(id));
                 Some(PendingCall {
@@ -382,6 +397,21 @@ pub struct ClientBuilder {
     emulated_headers: Vec<(String, String)>,
 }
 
+/// Endpoints as they may be logged (Block 21, D5).
+struct Endpoints<'a>(&'a [(TransportKind, String)]);
+
+impl std::fmt::Debug for Endpoints<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(kind, endpoint)| (kind, log::endpoint(endpoint))),
+            )
+            .finish()
+    }
+}
+
 /// Header names, without their values, which may be secrets.
 struct HeaderNames<'a>(&'a [(String, String)]);
 
@@ -396,11 +426,14 @@ impl std::fmt::Debug for HeaderNames<'_> {
 impl std::fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientBuilder")
-            .field("endpoints", &self.endpoints)
+            .field("endpoints", &Endpoints(&self.endpoints))
             .field("config", &self.config)
             .field("get_token", &self.get_token.is_some())
             .field("get_data", &self.get_data.is_some())
-            .field("emulation_endpoint", &self.emulation_endpoint)
+            .field(
+                "emulation_endpoint",
+                &self.emulation_endpoint.as_deref().map(log::endpoint),
+            )
             .field("http_headers", &HeaderNames(&self.http_headers))
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
             .finish()
@@ -590,6 +623,7 @@ impl Client {
             calls: Mutex::new(HashMap::new()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
+            log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
         });
         let driver = Driver {
             endpoints: endpoints
@@ -603,6 +637,8 @@ impl Client {
             shared: Arc::clone(&shared),
             opening: None,
             transport: None,
+            kind: TransportKind::WebSocket,
+            reading: true,
             get_token,
             get_data,
             fetching: None,
@@ -613,12 +649,22 @@ impl Client {
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
         };
-        tokio::spawn(driver.run());
+        let span = shared.log.span.clone();
+        tokio::spawn(driver.run().instrument(span));
         Ok(Self { shared })
     }
 
     pub(super) fn shared(&self) -> &Arc<Shared> {
         &self.shared
+    }
+
+    /// The number of this client in its log records' `client` field
+    /// (Block 21), for tests.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn log_number(&self) -> u64 {
+        self.shared.log.number
     }
 
     /// Current connection state.
@@ -940,6 +986,11 @@ struct Driver {
     shared: Arc<Shared>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
+    /// The kind of the transport opening or open, for the records.
+    kind: TransportKind,
+    /// Whether the transport was read on the last turn, for the records of
+    /// the read-ahead filling and draining (Block 21).
+    reading: bool,
     get_token: Option<GetToken>,
     get_data: Option<GetConnectData>,
     fetching: Option<(FetchId, Fetching)>,
@@ -1057,6 +1108,14 @@ impl Driver {
             // slow clients acts instead (Block 15). Taking an event wakes
             // the loop.
             let reading = lock(&self.shared.core).machine.wants_frames();
+            if reading != self.reading {
+                self.reading = reading;
+                if reading {
+                    debug!("read-ahead drained: reading resumes");
+                } else {
+                    debug!("read-ahead full: reading stops");
+                }
+            }
             let input = tokio::select! {
                 // Queued by an API call; performed at the top of the loop.
                 () = self.shared.actions_queued.notified() => continue,
@@ -1064,18 +1123,31 @@ impl Driver {
                     self.opening = None;
                     match result {
                         Ok(transport) => {
+                            debug!(transport = self.kind.name(), "transport opened");
                             self.transport = Some((id, transport));
                             Input::TransportOpened(id)
                         }
-                        Err(message) => Input::TransportFailed { transport: id, message },
+                        Err(message) => {
+                            debug!(transport = self.kind.name(), reason = %message, "transport failed");
+                            Input::TransportFailed { transport: id, message }
+                        }
                     }
                 }
                 (id, inbound) = received(&mut self.transport, reading) => match inbound {
-                    Inbound::Frame(data) => Input::Frame { transport: id, data },
+                    Inbound::Frame(data) => {
+                        trace!(
+                            transport = self.kind.name(),
+                            frame_type = ?self.frame_type(),
+                            bytes = data.len(),
+                            "frame received"
+                        );
+                        Input::Frame { transport: id, data }
+                    }
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Written(frame) => Input::FrameWritten { transport: id, frame },
                     Inbound::Closed { code, reason } => {
                         self.transport = None;
+                        self.closed(code, &reason);
                         Input::TransportClosed { transport: id, code, reason }
                     }
                 },
@@ -1133,6 +1205,12 @@ impl Driver {
                 frame,
                 frame_type,
             } => {
+                trace!(
+                    transport = self.kind.name(),
+                    frame_type = ?frame_type,
+                    bytes = frame.len(),
+                    "frame sent"
+                );
                 if let Some((id, open)) = &mut self.transport
                     && *id == transport
                     && open.send(frame_id, frame, frame_type).is_err()
@@ -1147,6 +1225,7 @@ impl Driver {
             }
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
+            // Logged by `Shared::handle`, as every action.
             Action::Anomaly(_) => {}
             // Shared::handle routes them to the outboxes.
             Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
@@ -1192,6 +1271,34 @@ impl Driver {
 }
 
 impl Driver {
+    /// How frames travel with the configured encoding.
+    fn frame_type(&self) -> FrameType {
+        if self.subprotocol.is_some() {
+            FrameType::Binary
+        } else {
+            FrameType::Text
+        }
+    }
+
+    /// Records the close of the open transport: a message too large for
+    /// either side is a server anomaly.
+    fn closed(&self, code: Option<u16>, reason: &str) {
+        let transport = self.kind.name();
+        if code == Some(MESSAGE_TOO_BIG) {
+            warn!(
+                client = self.shared.log.number,
+                transport, code, "the server closed the websocket: message too big"
+            );
+        } else if reason == websocket::TOO_LARGE {
+            warn!(
+                client = self.shared.log.number,
+                transport, "a message from the server is larger than the size limit"
+            );
+        } else {
+            debug!(transport, code, reason, "transport closed");
+        }
+    }
+
     /// Starts opening transport `id`, of `kind`, at endpoint `endpoint`;
     /// an emulated one sends `initial_frame`, its connect command.
     fn open_transport(
@@ -1202,6 +1309,7 @@ impl Driver {
         initial_frame: Option<Vec<u8>>,
     ) {
         let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
+        self.kind = kind;
         let subprotocol = self.subprotocol;
         let timeout = self.timeout;
         let headers = Arc::clone(&self.http_headers);
@@ -1352,15 +1460,19 @@ fn guarded<T: Send + 'static, E: Send + 'static>(
     callback: impl FnOnce() -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
     panicked: fn() -> E,
 ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>> {
-    match std::panic::catch_unwind(AssertUnwindSafe(callback)) {
-        Ok(future) => Box::pin(async move {
-            AssertUnwindSafe(future)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err(panicked()))
-        }),
-        Err(_) => Box::pin(std::future::ready(Err(panicked()))),
-    }
+    let Ok(future) = std::panic::catch_unwind(AssertUnwindSafe(callback)) else {
+        debug!("callback panicked");
+        return Box::pin(std::future::ready(Err(panicked())));
+    };
+    Box::pin(async move {
+        AssertUnwindSafe(future)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                debug!("callback panicked");
+                Err(panicked())
+            })
+    })
 }
 
 fn token_callback_panicked() -> TokenError {

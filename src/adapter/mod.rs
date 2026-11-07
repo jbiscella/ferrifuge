@@ -2,6 +2,7 @@
 
 mod client;
 mod http;
+mod log;
 mod outbox;
 mod subscription;
 mod transport;
