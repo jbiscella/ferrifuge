@@ -25,6 +25,7 @@ mod batching;
 mod calls;
 mod close;
 mod codes;
+mod codes_table;
 mod connect_data;
 mod connection;
 mod delivery;
@@ -191,6 +192,8 @@ pub(crate) struct ClientWorld {
     pub(crate) runtime_headers: runtime_headers::RuntimeHeaders,
     /// How long the last `close()` took (Block 33).
     pub(crate) close: close::Closing,
+    /// The codes and their tables (Block 34).
+    pub(crate) codes_table: codes_table::CodesTable,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

@@ -458,15 +458,10 @@ subscription is, or becomes, unsubscribed before the call is sent.
 A call made before the client is connected, `connect()` included, waits for
 the connection, then for its reply, each for at most `Config::timeout`. It
 fails with a `CallError` carrying the server's code, message and `temporary`
-flag, or with a client-side code:
-
-| Code | When |
-|---|---|
-| 1 `TIMEOUT` | the subscription not subscribed, no connection, no room in the write queue, or no reply, within `Config::timeout` |
-| 3 `DISCONNECTED` | the client entered `disconnected`: `disconnect()`, a terminal disconnect code or a denied token |
-| 7 `SUBSCRIPTION_UNSUBSCRIBED` | a subscription's call, before it was sent: the subscription is or became unsubscribed |
-| 10 `TRANSPORT_WRITE` | the server refused the HTTP request carrying the call as too large (413) |
-| 11 `CONNECTION_CLOSED` | the transport the call was sent on closed before the reply |
+flag, or with a client-side code, among them 1 "timeout", 3 "disconnected",
+4 "client closed", 7 "subscription unsubscribed", 10 "transport write error"
+and 11 "connection closed": see [Codes](#codes) for each one's cause and
+whether a retry can succeed.
 
 Calls go out in the order they were made, while their bytes fit
 `Config::write_queue_bytes` with those handed to the transport and not yet
@@ -533,7 +528,8 @@ retried.
 The client is `Disconnected`, `Connecting` or `Connected`. Each change emits
 `Connecting`, `Connected` or `Disconnected`. `Connecting` and `Disconnected`
 carry a numeric `code` and a `reason`. Client-side codes are in
-`ferrifuge::codes`, and their values follow centrifuge-js. `Error` events
+`ferrifuge::codes`, and their values follow centrifuge-js; [Codes](#codes)
+says what each means and what the client does next. `Error` events
 report problems that do not change the state, such as a failed attempt
 while the client keeps reconnecting. `Message` events carry the data of the
 server's asynchronous messages, exactly as received.
@@ -567,6 +563,109 @@ framing), publications delivered (as taken from the streams) and the
 registry sizes. `subscription.delta_statistics()` reports what delta
 compression did: full and delta payloads, their bytes as received and as
 rebuilt, and `compression_ratio()`.
+
+### Codes
+
+How to read a code: a code means something only with the event or error
+that carries it: 1 is "transport closed" in `Connecting` and "timeout" in
+an error. The same fields also carry server codes, in their own ranges
+(the last table). The client's logs show the state, code and reason
+(Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
+adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and
+error 15; error 14 is centrifuge-js's shared-poll code, unused until
+Block 47. Blocks are those of the repository's `CLAUDE.md`.
+
+#### `connecting`
+
+`ClientEvent::Connecting`: the client lost or has not yet made its connection and is trying again.
+
+| Code | Constant | Reason or message | Cause | Then |
+|---|---|---|---|---|
+| 0 | `codes::connecting::CONNECT_CALLED` | `"connect called"` | `connect()` was called (Block 1) | at once |
+| 1 | `codes::connecting::TRANSPORT_CLOSED` | `"transport closed"` | the transport failed or closed, an undecodable frame included (Blocks 1, 8) | the next transport of a first fallback sequence at once, else after the reconnect backoff (and the jitter window when it was connected) |
+| 2 | `codes::connecting::NO_PING` | `"no ping"` | no data from the server within its ping interval plus `max_server_ping_delay`, or a system sleep longer than that (Blocks 4, 25) | after the reconnect backoff |
+| 3 | `codes::connecting::SUBSCRIBE_TIMEOUT` | `"subscribe timeout"` | a subscribe got no reply within `Config::timeout`, so the server's state is unknown (Block 9) | after the reconnect backoff |
+| 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
+| 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
+| 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
+
+#### `disconnected`
+
+`ClientEvent::Disconnected`: the client stopped trying.
+
+| Code | Constant | Reason or message | Cause | Then |
+|---|---|---|---|---|
+| 0 | `codes::disconnected::DISCONNECT_CALLED` | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped (Blocks 1, 33) | never, until `connect()`; never after `close()` |
+| 1 | `codes::disconnected::UNAUTHORIZED` | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback (Blocks 1, 5, 17) | never, until `connect()` |
+| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"` | the task running the client panicked (Block 28, D4) | never: the client is closed |
+| 3 | `codes::disconnected::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected (Blocks 3, 8, 29) | never, until `connect()` |
+| 4 | `codes::disconnected::RUNTIME_SHUT_DOWN` | `"runtime shut down"` | the tokio runtime the client ran on shut down (Block 28, D3) | never: the client is closed |
+
+#### `subscribing`
+
+`SubscriptionEvent::Subscribing`: the subscription is not subscribed now and will be again.
+
+| Code | Constant | Reason or message | Cause | Then |
+|---|---|---|---|---|
+| 0 | `codes::subscribing::SUBSCRIBE_CALLED` | `"subscribe called"` | `subscribe()` was called (Block 9) | at once when connected, else when the client connects |
+| 1 | `codes::subscribing::TRANSPORT_CLOSED` | `"transport closed"` | the client lost its connection, or `disconnect()` was called (Block 9) | when the client connects |
+| 2 | `codes::subscribing::DELTA_ERROR` | `"delta error"` | a delta publication could not be applied (Block 19, D8) | after the resubscribe backoff, recovering from the last publication taken |
+
+#### `unsubscribed`
+
+`SubscriptionEvent::Unsubscribed`, and a server-side subscription's `Unsubscribed`: the subscription stopped.
+
+| Code | Constant | Reason or message | Cause | Then |
+|---|---|---|---|---|
+| 0 | `codes::unsubscribed::UNSUBSCRIBE_CALLED` | `"unsubscribe called"` | `unsubscribe()` was called, or the subscription was removed (Block 9) | never, until `subscribe()` |
+| 1 | `codes::unsubscribed::UNAUTHORIZED` | `"unauthorized"` | a subscription token or data callback denied access, or returned an empty token, or error 109 came without a token callback (Blocks 9, 10) | never, until `subscribe()` |
+| 2 | `codes::unsubscribed::CLIENT_CLOSED` | `"client closed"` | the client was closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | never: the client is closed |
+| 3 | `codes::unsubscribed::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server refused a subscribe or `sub_refresh` with HTTP 413 (Block 8) | never, until `subscribe()` |
+| 4 | `codes::unsubscribed::NOT_GRANTED_ON_RECONNECT` | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
+
+#### `error`
+
+`ClientError` (in `Error` events and build errors) and `CallError` (failed calls).
+
+| Code | Constant | Reason or message | Cause | Then |
+|---|---|---|---|---|
+| 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription (Block 13) | a call fails and may succeed when retried; a refresh is retried |
+| 2 | `codes::error::TRANSPORT_CLOSED` | the transport's own message | a transport failed to open or closed while connecting (Blocks 1, 8) | an `Error` event; the client keeps trying |
+| 3 | `codes::error::DISCONNECTED` | `"disconnected"` | the client entered `disconnected` while a call was pending, or a `ready()` waited (Blocks 13, 30) | the call fails; a retry can succeed after `connect()` |
+| 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | the call fails; a retry never succeeds |
+| 5 | `codes::error::CONNECT_TOKEN` | the token callback's message | the token callback failed while getting a token to connect with (Block 1) | an `Error` event; the attempt is retried after the reconnect backoff |
+| 6 | `codes::error::REFRESH_TOKEN` | the token callback's message | the token callback failed while getting a token to refresh with (Block 5) | an `Error` event; the refresh is retried after 5 to 10 s |
+| 7 | `codes::error::SUBSCRIPTION_UNSUBSCRIBED` | `"subscription unsubscribed"` | a subscription-level call or `ready()` met an unsubscribed subscription (Blocks 13, 30) | the call fails; a retry can succeed after `subscribe()` |
+| 8 | `codes::error::SUBSCRIPTION_SUBSCRIBE_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to subscribe with (Block 10) | an `Error` event; the subscribe is retried after the resubscribe backoff |
+| 9 | `codes::error::SUBSCRIPTION_REFRESH_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to refresh with (Block 10) | an `Error` event; the refresh is retried after 10 to 20 s |
+| 10 | `codes::error::TRANSPORT_WRITE` | `"transport write error"` | an emulation request carrying the call was answered with HTTP 413 (Block 8) | the call fails; a retry with the same data never succeeds |
+| 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
+| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
+| 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
+| 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
+
+#### Server codes
+
+| Codes | Carried by | Then |
+|---|---|---|
+| disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` (Block 3) |
+| disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff (Block 3) |
+| disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15) |
+| disconnect 3014 | `Connecting` | drops the tokens, makes every stream position unmatchable, then reconnects (Block 11) |
+| websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()` (Block 3); other close codes below 3000 give `Connecting` 1 |
+| unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed (Block 10) |
+| unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); any code ends a server-side subscription (Block 12) |
+| connect error, temporary or below 100, or 109 | `Error`, then `Connecting` | reconnects after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12, then `Disconnected` 1 (Blocks 1, 5, 17) |
+| connect error, any other | `Disconnected` | with the error's code, until `connect()` (Block 1) |
+| refresh error, temporary or below 100 | `Error` | retried after 5 to 10 s (Block 5) |
+| refresh error, any other | `Disconnected` | with the error's code (Block 5) |
+| subscribe error 109 | `Error` or `Unsubscribed` 1 | a new token, then resubscribes; without a token callback, error 12, then `Unsubscribed` 1 (Block 10) |
+| subscribe error 112 with getState | none | the state is reloaded and the subscription resubscribes after the backoff (Block 11) |
+| subscribe error, temporary or below 100 | `Error` | resubscribes after the resubscribe backoff (Block 9) |
+| subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
+| `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
+| `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
+| call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |
 
 ### Configuration
 

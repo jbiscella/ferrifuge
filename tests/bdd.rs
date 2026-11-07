@@ -442,6 +442,11 @@ const IMPLEMENTED: &[&str] = &[
     "Dropping the client unsubscribes its subscriptions with code 2",
     "close on a disconnected client resolves at once",
     "A closed client stays closed",
+    // Block 34: the table of codes.
+    "Every code constant has one row with its value",
+    "The table names no code the crate lacks",
+    "The README's table is the documentation's",
+    "Every quoted reason is one the client sends",
 ];
 
 /// Server configuration of @A scenarios.
