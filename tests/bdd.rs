@@ -447,6 +447,12 @@ const IMPLEMENTED: &[&str] = &[
     "The table names no code the crate lacks",
     "The README's table is the documentation's",
     "Every quoted reason is one the client sends",
+    // Block 35a: tag filters.
+    "A tag filter delivers only matching publications",
+    "The tag filter is sent on subscribe and on resubscribe",
+    "A tag filter set on a subscription is sent from the next subscribe",
+    "A tag filter with delta is refused",
+    "A tag filter the server would reject is refused",
 ];
 
 /// Server configuration of @A scenarios.

@@ -352,6 +352,29 @@ let subscription = client
     .build()?;
 ```
 
+### Tag filters
+
+A subscription can ask the server to send only the publications whose tags
+match a filter, on channels with `allow_tags_filter` (Centrifugo from
+v6.4.0). It saves bandwidth; it is not access control.
+
+```rust
+use ferrifuge::TagFilter;
+
+let subscription = client
+    .subscription_builder("prices")
+    .tag_filter(TagFilter::is_in("ticker", ["BTC", "ETH"]).and(!TagFilter::eq("venue", "test")))
+    .build()?;
+subscription.subscribe();
+// From the next subscribe command on.
+subscription.set_tag_filter(Some(TagFilter::eq("ticker", "SOL")))?;
+```
+
+A filter the server would refuse (a comparison with an empty key, a set
+comparison with no value) and a filter with delta compression are refused
+when built or set, with `SubscriptionError::InvalidTagFilter` and
+`TagFilterWithDelta`.
+
 ### Delta compression
 
 A subscription built with `.delta(DeltaFormat::Fossil)` asks the server to
