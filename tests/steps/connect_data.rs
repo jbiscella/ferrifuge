@@ -718,6 +718,11 @@ fn the_fake_server_fails_the_next_connect(world: &mut ClientWorld, code: u32, me
 #[when(
     regex = r#"^set_token is called with "(\w+)" when the client emits the "error" event with code (\d+)$"#
 )]
+/// `set_token` must land before the reconnect timer, at least the minimum
+/// reconnect delay after the 109: the core then finds the token expired
+/// with no callback and stops, before any transport opens. The scenario's
+/// 2 s keeps both attempts (2–4 s, then 2–6 s) under the 10 s step
+/// timeouts while doubling the time a loaded runner has to get here.
 async fn set_token_on_the_error(world: &mut ClientWorld, token: String, code: u32) {
     loop {
         let event = world.next_event().await;
