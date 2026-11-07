@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–29 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–30 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -4116,3 +4116,145 @@ Feature: Handshake timeout and maximum incoming message size
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 30 — Waiting until ready
+
+**Goal:** an app can wait until the client is connected, or a subscription subscribed, without taking events from their one active stream (Block 15) to watch for it, and learns at once when that will not happen (parity item 10; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A).
+
+**Dependencies:** Blocks 1 (client states), 9 (subscription states, subscribing before `connect()`), 10 (unsubscribe codes, subscription tokens), 13 (calls waiting for the connection, codes 3 and 7, `CallError`, its Exceptions introduced), 15 (in-order handling, one active stream, `state()` ahead of the stream), 28 (a closed client, the drop guard, futures awaitable on any executor).
+
+**Out of scope:**
+- a timeout parameter (the analysis's design B): the caller wraps the future in `tokio::time::timeout` or its executor's equivalent, as the methods' documentation shows;
+- a stream of state changes (design C);
+- `ready()` for server-side subscriptions, which have no handle (Block 12);
+- whether `ready()` resolves only after an event handler returned (centrifuge-js 63ed73e `subscription.ts:597-602`; centrifuge-rust `docs/spec.md:1087`, commit 88d6edf): Block 41's handlers;
+- `close()` and its "client closed" error (Block 33, which revisits the code a closed client's waiters get); a `closed` state (Block 0).
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Client.** `Client::ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + 'static`. The wait starts when the method returns: the closed flag and the state are judged, and the waiter registered, in one section under the core lock, as `Shared::call` makes a call. The future borrows nothing from the client, so it can be spawned, as `Client::rpc`'s can.
+  - A closed client (its runtime shut down or its driver panicked, Block 28 D3, D4) fails at once with code 3 "disconnected", whatever `state()` reports.
+  - Connected: it resolves at once.
+  - Disconnected: it fails at once with code 3 "disconnected" (`codes::error::DISCONNECTED`), also on a client whose `connect()` was never called. A call made then waits instead (Block 13). Sources: centrifuge-js 63ed73e `centrifuge.ts:440-463`, whose message here is "client disconnected" (Ferrifuge keeps its calls' "disconnected": one message per code); centrifuge-rust `docs/spec.md:353`, "`ready()` is different: it fails at once in `disconnected`".
+  - Connecting: it waits, across failed attempts and reconnects, until the client is connected, and then resolves. If instead the client enters `disconnected` for any reason, it fails with code 3, as the calls waiting for the connection do (Block 13; centrifuge-js `_rejectPromises`, `centrifuge.ts:1947`, `:1989`, `:2011`). The reasons are `disconnect()`, a terminal disconnect code or connect error, a denied token, the `Client` dropped, its runtime shut down, or its driver panicked.
+  - `Config::timeout` does not bound it.
+- **D2 Subscription.** `Subscription::ready(&self)`, with the same signature, starts its wait the same way.
+  - When its client is closed, it fails at once with code 3 "disconnected", whatever its state, as its calls do then (Block 28 D3).
+  - Subscribed: it resolves at once.
+  - Unsubscribed: it fails at once with code 7 "subscription unsubscribed" (`codes::error::SUBSCRIPTION_UNSUBSCRIBED`, the message of its calls; centrifuge-js `subscription.ts:209-231`, whose message is "unsubscribed"). This includes a removed subscription, whose `state()` reports `unsubscribed`.
+  - Subscribing: it waits, also while the client is disconnected or connecting (a subscription subscribed before `connect()`, Block 9) and across the client's reconnects, which keep it subscribing. It resolves once the subscription is subscribed. It fails with code 7 when the subscription becomes `unsubscribed` for any reason: `unsubscribe()`, removal, a permanent subscribe error, a denied token or data callback, a server unsubscribe code below 2500, or an oversized message (Blocks 9, 10, 29; centrifuge-js `subscription.ts:1100`). It fails with code 3 when its client enters `disconnected` or is closed, as a subscription-level call waiting for its subscription does (Block 13, Exceptions introduced; see below).
+- **D3 Error type.** `CallError`, the error of the calls `ready()` gates, so `client.ready().await?` and the calls after it share one error type. Precedents: hyper's `SendRequest::ready()` returns `hyper::Error`, and tower's `Service::poll_ready` returns the service's error. Codes 3 and 7 are already `CallError` codes, it is `#[non_exhaustive]`, and it carries centrifuge-js's `{code, message}` (`centrifuge.ts:443`, `subscription.ts:211`). A `ReadyError` enum (the analysis's sketch) would duplicate those codes. Each method has an `# Errors` section.
+- **D4 State, not events.**
+  - `ready()` follows the states `state()` reports, not the events taken. Waiters are settled under the core lock when the adapter sees the state after an input it gives the machine (`Shared::handle_fired`), not when the future is polled. So a waiter released by `connected` stays resolved even if the client is connecting again before the future is polled. A state that lasts only within one input, such as a connect reply followed by a disconnect push in the same frame, is not seen, as `state()` never reports it.
+  - `ready()` can resolve before the `connected` or `subscribed` event is taken, since `state()` can be ahead of the stream (Block 15). It takes no event and opens no stream: a second `events()` call would end the application's stream.
+  - The state moves only as messages are handled, and a message is handled only after every event of earlier messages has been taken, on any stream of the client (Block 15, "In order", "Head-of-line"). So a task that holds a stream with such events and awaits `ready()` without reading the stream waits until the stream is read or dropped (centrifuge-rust `docs/spec.md:1094` says the same).
+  - The documentation of both methods states all of this.
+- **D5 Futures.**
+  - Any number of `ready()` futures may wait at once; each is settled once.
+  - They are cancel-safe: dropping one removes its waiter.
+  - They wait on `tokio::sync` primitives only, so any executor can await them (Block 28). On a runtime that is not driven (Block 28 D2) they wait as calls do.
+  - The drop guard of Block 28 D3 and D4 fails every waiter with code 3, also when the poisoned core lock leaves the machine unfed.
+  - Cost: the client's state is compared after each input, and subscription states are read only for subscriptions that have a waiter, so without waiters the cost per message is unchanged (Block 14 @P gates).
+  - There is no new `Input` or `Action`. An owner of the machine does the same with `Machine::state` and `Machine::subscription_state` after each input.
+- **D6 Version.** No bump: the two methods are additive. `Unreleased` entry: "Added" `Client::ready` and `Subscription::ready`.
+
+Value clause: As an app developer, I want to wait until the client is connected or a subscription subscribed without reading their event streams, so that start-up code can await readiness and learn at once when it will not come.
+
+**Structural acceptance:**
+- Adapter unit tests:
+  - a dropped `ready()` future leaves no waiter;
+  - several futures waiting at once all settle;
+  - a waiter released by `connected` stays resolved when the client reconnects before the future is polled;
+  - a subscription's waiter keeps waiting across a client reconnect and fails with code 7 when the subscription is removed;
+  - after the `Client` is dropped, a subscription's `ready()` fails at once with code 3, and one already waiting fails with code 3;
+  - a runtime shut down while a client `ready()` and a subscription `ready()` wait fails both with code 3, also with the core lock poisoned (Block 28 D4);
+  - a `ready()` future awaited with `futures-executor` 0.3's `block_on` (a new dev-dependency, from the same project as `futures-core` and `futures-util`) on a plain thread outside any runtime fails with code 3 when another thread calls `disconnect()`.
+- The steps "ready is awaited on ..." start the future on a task and record its outcome and time, as the call steps do (`track`, `outcome`).
+- The Block 14 @P gates and the chaos adapter runner pass.
+
+```gherkin
+Feature: Waiting until ready
+
+  @D
+  Scenario: Client ready resolves on the state, before the "connected" event is taken
+    Given a client whose stream was taken before connect is called and is not read, configured with the fake server's endpoint
+    When connect is called
+    And ready is awaited on the client
+    Then ready on the client resolves
+    And when the application reads the client's stream, it yields "connecting", "connected"
+
+  Scenario: Client ready on a disconnected client fails at once
+    Given a new client
+    When ready is awaited on the client
+    Then ready on the client fails at once with a "disconnected" error
+
+  Scenario: Disconnect fails a waiting client ready
+    Given a client configured with an unreachable endpoint
+    When connect is called
+    And ready is awaited on the client
+    And disconnect is called
+    Then ready on the client fails with a "disconnected" error
+
+  @D
+  Scenario: Client ready keeps waiting across failed attempts
+    Given the fake server answers the first 2 connect commands with a temporary error
+    And a client whose stream was taken before connect is called and is not read, configured with the fake server's endpoint
+    When connect is called
+    And ready is awaited on the client
+    Then 1 s later the client's state is "connecting"
+    And ready on the client is still waiting
+    And when the application reads the client's stream, it yields "connecting", "error", "error", "connected"
+    And ready on the client resolves
+
+  @B
+  Scenario: A terminal connect failure fails a waiting client ready
+    Given the connect proxy answers after 1 s with disconnect code 4500
+    And a new client
+    When connect is called
+    And ready is awaited on the client
+    Then the client emits "disconnected" with code 4500
+    And ready on the client fails with a "disconnected" error before the configured timeout
+
+  @D
+  Scenario: Subscription ready resolves on the state, before the "subscribed" event is taken
+    Given a client connected to the fake server
+    And a subscription to channel "news" whose stream was taken and is not read
+    When subscribe is called on the subscription
+    And ready is awaited on the subscription
+    Then ready on the subscription resolves
+    And when the application reads the subscription's stream, it yields "subscribing", "subscribed"
+
+  Scenario: Subscription ready on an unsubscribed subscription fails at once
+    Given a new client
+    When a subscription to channel "news" is created
+    And ready is awaited on the subscription
+    Then ready on the subscription fails at once with a "subscription unsubscribed" error
+
+  @D
+  Scenario: A permanent subscribe error fails a waiting subscription ready
+    Given a client connected to the fake server that answers subscribe commands after 1 s with a permanent error
+    When a subscription to channel "news" is subscribed
+    And ready is awaited on the subscription
+    Then the subscription emits "unsubscribed"
+    And ready on the subscription fails with a "subscription unsubscribed" error before the configured timeout
+
+  @A
+  Scenario: Subscription ready made before connect waits for the connection
+    Given a new client
+    When a subscription to channel "news" is created and subscribed
+    And ready is awaited on the subscription
+    And connect is called
+    Then ready on the subscription resolves
+
+  Scenario: Disconnect fails a waiting subscription ready
+    Given a client configured with an unreachable endpoint
+    When connect is called
+    And a subscription to channel "news" is created and subscribed
+    And ready is awaited on the subscription
+    And disconnect is called
+    Then ready on the subscription fails with a "disconnected" error
+    And the subscription state is "subscribing"
+```
+
+**Exceptions introduced:** a subscription's `ready()` that is waiting fails with "disconnected" (code 3) when its client enters `disconnected`, as Block 13's subscription-level calls waiting for their subscription do. centrifuge-js 63ed73e rejects a subscription's `ready()` promises only on `unsubscribed` (`subscription.ts:1100`): its subscriptions move to, or stay in, `subscribing` (`centrifuge.ts:963-966`), so such a wait lasts until the next connection or the caller's timeout. centrifuge-rust `docs/spec.md:439` keeps waiting too.
