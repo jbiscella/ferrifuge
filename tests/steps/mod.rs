@@ -23,6 +23,7 @@ use crate::support::relay::CountingRelay;
 mod backoff;
 mod batching;
 mod calls;
+mod close;
 mod codes;
 mod connect_data;
 mod connection;
@@ -188,6 +189,8 @@ pub(crate) struct ClientWorld {
     pub(crate) stats: statistics::Stats,
     /// What a Block 32 scenario records.
     pub(crate) runtime_headers: runtime_headers::RuntimeHeaders,
+    /// How long the last `close()` took (Block 33).
+    pub(crate) close: close::Closing,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
@@ -313,6 +316,21 @@ impl ClientWorld {
             .await
             .unwrap_or_else(|_| panic!("no subscription event within {EVENT_TIMEOUT:?}"))
             .expect("subscription event stream ended")
+    }
+
+    /// The next item of the scenario's subscription stream, `None` once it
+    /// ended, within [`EVENT_TIMEOUT`] (Block 33).
+    pub(crate) async fn next_subscription_item(&mut self) -> Option<SubscriptionEvent> {
+        if let Some(event) = self.put_back.pop_front() {
+            return Some(event);
+        }
+        let events = self
+            .subscription_events
+            .as_mut()
+            .expect("no subscription created yet");
+        tokio::time::timeout(EVENT_TIMEOUT, events.next())
+            .await
+            .unwrap_or_else(|_| panic!("no subscription item within {EVENT_TIMEOUT:?}"))
     }
 
     /// Subscription events arriving within `period`.
