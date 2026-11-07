@@ -37,6 +37,25 @@
 //! The TLS crypto provider is chosen at build time: `ring` (default),
 //! `aws-lc-rs`, or `fips`. The repository's README covers configuration,
 //! tokens, transports, recovery and the examples.
+//!
+//! # Logging
+//!
+//! The tokio adapter logs through [`tracing`](https://docs.rs/tracing),
+//! under targets starting with `ferrifuge`: WARN for server anomalies,
+//! DEBUG for state changes, transport attempts, retries, callbacks and
+//! failed calls, TRACE for every input and action of the core and every
+//! frame, by length. Each client logs in a `client` span, whose `client`
+//! field is a number unique in the process, and each subscription in a
+//! `subscription` span with its `channel`. No record holds a token, a
+//! payload, connection or channel info, or a header value. Without a
+//! `tracing` subscriber the records go to the `log` crate, with no span
+//! fields. The core logs nothing: it reports the protocol breaches only it
+//! sees as [`machine::Action::Anomaly`].
+//!
+//! Ferrifuge's dependencies log on their own, through `log`. At TRACE,
+//! tungstenite logs the websocket upgrade request with its header values and
+//! every frame, the connect frame and its token included: keep them at INFO
+//! or above in production, e.g. `RUST_LOG=info,ferrifuge=trace`.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 

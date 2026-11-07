@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.12"
+ferrifuge = "0.13"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -549,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.12", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.13", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -564,6 +564,44 @@ module's status on the NIST CMVP list before relying on it for compliance.
 Without default features, ferrifuge has no runtime or network dependency.
 `ferrifuge::machine::Machine` then takes inputs (API calls, transport
 activity, timers) and returns the actions to perform.
+
+### Logging
+
+The tokio adapter logs through [`tracing`](https://docs.rs/tracing); the
+sans-IO core logs nothing and reports the protocol breaches only it sees as
+`Action::Anomaly`. Every record's target starts with `ferrifuge`:
+
+| Level | What |
+|---|---|
+| WARN | Server anomalies: a frame that is not client protocol data, a reply without its command's result, a delta that cannot be applied, a message over the size limit, a websocket closed with 1009 |
+| DEBUG | Each state change of the client and of its subscriptions, with its code and reason; each transport attempt, its opening, failure and close; the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback started and how it ended; the read-ahead filling and draining; each call that fails |
+| TRACE | Every input given to the core and every action it returns; each frame sent or received, by length |
+
+Each client logs in a `client` span whose `client` field is a number unique
+in the process, and each subscription in a `subscription` span with its
+`channel`. Values are fields (`state`, `code`, `reason`, `transport`,
+`endpoint`, `channel`, `bytes`, `delay`, `kind`). No record holds a token,
+any payload, connection or channel info, or a header value: data shows as
+its length and endpoints without userinfo, query or fragment.
+
+With `tracing-subscriber`:
+
+```rust,ignore
+tracing_subscriber::fmt()
+    .with_env_filter("info,ferrifuge=debug")
+    .init();
+```
+
+Without a `tracing` subscriber, the records go to the `log` crate, e.g.
+`env_logger` with `RUST_LOG=info,ferrifuge=debug`. Through `log` they carry
+no span fields; WARN records carry their own `client` field, and span
+entries and exits show at TRACE under the target `tracing::span::active`.
+
+Keep Ferrifuge's dependencies at INFO or above in production: they log on
+their own, through `log`. At TRACE, tungstenite 0.30 logs the whole
+websocket upgrade request, its query and header values included, and every
+frame sent and received, the connect frame with its token. A `tracing`
+application sees those dependency records only through `tracing-log`.
 
 ## Development
 

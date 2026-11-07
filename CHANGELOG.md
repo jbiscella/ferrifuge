@@ -11,8 +11,28 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- Logging (Block 21): the tokio adapter logs through `tracing`, its records
+  reaching `log` when no `tracing` subscriber is set; a `client` span per
+  client and a `subscription` span per subscription; WARN for server
+  anomalies, DEBUG for state changes, transport attempts, retries,
+  callbacks and failed calls, TRACE for inputs, actions and frames. No
+  record holds a token, a payload or a header value.
+- `Action::Anomaly` and `machine::Anomaly`: the core reports a frame that
+  is not client protocol data and a reply without its command's result.
+
+### Changed
+
+- `Action::Anomaly` is a new variant of the exhaustive `Action` (breaking).
+- The `Debug` output of `ClientEvent`, `SubscriptionEvent`,
+  `ServerSubscriptionEvent`, `Subscribed`, `Publication` and `ClientInfo`
+  shows data, connection and channel info as their length and tags by
+  name.
+
 ### Fixed
 
+- The error of a failed emulation request no longer carries its URL.
 - A no-ping timer that fires at the moment the read-ahead fills no longer
   ends the connection with code 2: the deadline is paused while the
   read-ahead is full (Block 15).

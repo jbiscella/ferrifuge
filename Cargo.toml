@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"
@@ -110,6 +110,10 @@ required-features = ["tokio"]
 
 [[test]]
 name = "adapter_tokens"
+required-features = ["tokio"]
+
+[[test]]
+name = "log_facade"
 required-features = ["tokio"]
 
 [[test]]
