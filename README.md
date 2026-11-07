@@ -530,6 +530,27 @@ report problems that do not change the state, such as a failed attempt
 while the client keeps reconnecting. `Message` events carry the data of the
 server's asynchronous messages, exactly as received.
 
+To wait until the client is connected, or a subscription subscribed,
+without reading their streams, await `ready()`. A disconnected client fails
+it at once with code 3 "disconnected". While connecting, it waits across
+failed attempts and fails with code 3 if the client gives up. A
+subscription's fails with code 7 "subscription unsubscribed" once the
+subscription is unsubscribed, and with code 3 if its client becomes
+disconnected while it waits. No timeout applies; wrap it in one:
+
+```rust
+use std::time::Duration;
+
+client.connect();
+tokio::time::timeout(Duration::from_secs(10), client.ready()).await??;
+```
+
+`ready()` follows `state()`, not the events taken, so it can resolve before
+the `Connected` or `Subscribed` event is read. The state moves only as the
+client handles messages, each after the events of earlier ones are taken: a
+task that holds a stream with events not taken, and awaits `ready()` without
+reading it, waits until the stream is read or dropped.
+
 ### Configuration
 
 | `Config` field | Default | Meaning |

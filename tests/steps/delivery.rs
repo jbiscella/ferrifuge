@@ -130,7 +130,7 @@ async fn next_client_event(world: &mut ClientWorld) -> ClientEvent {
 
 /// Builds the scenario's client without the world's recorded stream, and
 /// takes its stream, as an application does before `connect()`.
-fn a_client_with_its_stream(world: &mut ClientWorld) {
+pub(super) fn a_client_with_its_stream(world: &mut ClientWorld) {
     let client = Client::builder(world.server_endpoint())
         .config(world.client_config())
         .build()
