@@ -60,6 +60,14 @@ Feature: Sleep, network changes, captive portals
     Then the call's reply deadline is 3 s from now
 
   @E
+  Scenario: A token due during a sleep in a reconnect delay is fetched before the next connect
+    Given a connected machine with minReconnectDelay 10000 ms whose connection token refresh is due in 50 s
+    And its transport was lost a moment ago
+    When it is told it slept for 60 s
+    And its next attempt starts
+    Then it asks for a new connection token before opening a transport
+
+  @E
   Scenario: A sleep while connecting keeps the reconnect delay
     Given a machine with minReconnectDelay 10000 ms whose first connection attempt failed
     And 6 s have elapsed
