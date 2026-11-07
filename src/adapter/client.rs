@@ -15,12 +15,14 @@ use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use rustls::pki_types::CertificateDer;
 use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
 
 use super::http::HttpTransport;
 use super::log::{self, Log};
+use super::tls::{Tls, Trust, unparsable_root};
 use super::transport::{self as websocket, Inbound, WebSocket};
 use crate::machine::{
     Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
@@ -395,6 +397,10 @@ pub struct ClientBuilder {
     http_headers: Vec<(String, String)>,
     /// Emulated headers, as given; checked by [`ClientBuilder::build`].
     emulated_headers: Vec<(String, String)>,
+    /// Extra root certificates, as given; checked by [`ClientBuilder::build`].
+    root_certificates: Vec<CertificateDer<'static>>,
+    /// The application's TLS configuration, if any.
+    tls_config: Option<Arc<rustls::ClientConfig>>,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -436,6 +442,9 @@ impl std::fmt::Debug for ClientBuilder {
             )
             .field("http_headers", &HeaderNames(&self.http_headers))
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
+            // Their number, and whether one is set: never their content.
+            .field("root_certificates", &self.root_certificates.len())
+            .field("tls_config", &self.tls_config.is_some())
             .finish()
     }
 }
@@ -473,6 +482,52 @@ impl ClientBuilder {
         Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
     {
         self.get_data = Some(Arc::new(move || Box::pin(get_data())));
+        self
+    }
+
+    /// Trusts `roots`, certificate authorities, in addition to the
+    /// platform's, for `wss://` and every `https://` request (Block 22);
+    /// they add to the roots of earlier calls. A certificate that is not a
+    /// valid root makes [`ClientBuilder::build`] fail, naming its index.
+    ///
+    /// PEM files parse with [`rustls::pki_types::pem::PemObject`]:
+    ///
+    /// ```no_run
+    /// use ferrifuge::Client;
+    /// use ferrifuge::rustls::pki_types::CertificateDer;
+    /// use ferrifuge::rustls::pki_types::pem::PemObject;
+    ///
+    /// # fn run(pem: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    /// let roots = CertificateDer::pem_slice_iter(pem).collect::<Result<Vec<_>, _>>()?;
+    /// let client = Client::builder("wss://example.com/connection/websocket")
+    ///     .root_certificates(roots)
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Each client given extra roots holds its own TLS settings: many
+    /// clients should rather share one [`ClientBuilder::tls_config`].
+    #[must_use]
+    pub fn root_certificates(
+        mut self,
+        roots: impl IntoIterator<Item = CertificateDer<'static>>,
+    ) -> Self {
+        self.root_certificates.extend(roots);
+        self
+    }
+
+    /// Uses `config` for `wss://` and every `https://` request, instead of
+    /// the platform's trust (Block 22): its roots, verifier, provider and
+    /// client certificates are the application's. Ferrifuge only replaces
+    /// its ALPN list with `http/1.1`, the one protocol of its transports.
+    /// [`ClientBuilder::build`] fails when extra root certificates are also
+    /// given, and, in the `fips` build, when `config.fips()` is false.
+    ///
+    /// The configuration is shared as given, so many clients can use one.
+    #[must_use]
+    pub fn tls_config(mut self, config: Arc<rustls::ClientConfig>) -> Self {
+        self.tls_config = Some(config);
         self
     }
 
@@ -580,6 +635,8 @@ impl Client {
             emulation_endpoint: None,
             http_headers: Vec::new(),
             emulated_headers: Vec::new(),
+            root_certificates: Vec::new(),
+            tls_config: None,
         }
     }
 
@@ -592,10 +649,13 @@ impl Client {
             emulation_endpoint,
             http_headers,
             emulated_headers,
+            root_certificates,
+            tls_config,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
+        let trust = trust(root_certificates, tls_config)?;
         let http_headers = Arc::new(http_header_map(&http_headers)?);
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
@@ -633,6 +693,7 @@ impl Client {
             subprotocol,
             emulation_endpoint,
             http_headers,
+            tls: Arc::new(Tls::new(trust)),
             timeout,
             shared: Arc::clone(&shared),
             opening: None,
@@ -980,6 +1041,8 @@ struct Driver {
     emulation_endpoint: Option<String>,
     /// HTTP headers of every transport request.
     http_headers: Arc<HeaderMap>,
+    /// Its TLS settings (Block 22).
+    tls: Arc<Tls>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
@@ -1316,9 +1379,10 @@ impl Driver {
         let subprotocol = self.subprotocol;
         let timeout = self.timeout;
         let headers = Arc::clone(&self.http_headers);
+        let tls = Arc::clone(&self.tls);
         let opening: Opening = match kind {
             TransportKind::WebSocket => Box::pin(async move {
-                WebSocket::open(&url, subprotocol, timeout, &headers)
+                WebSocket::open(&url, subprotocol, timeout, &headers, &tls)
                     .await
                     .map(|websocket| Transport::WebSocket(Box::new(websocket)))
             }),
@@ -1333,6 +1397,7 @@ impl Driver {
                         emulation.as_deref(),
                         request_timeout,
                         headers,
+                        &tls,
                     )
                     .await
                     .map(|http| Transport::Http(Box::new(http)))
@@ -1634,6 +1699,39 @@ fn emulated_header_map(
     Ok(map)
 }
 
+/// Whom the client trusts, from its extra roots and raw configuration,
+/// checked (Block 22, D2 and D3).
+fn trust(
+    roots: Vec<CertificateDer<'static>>,
+    raw: Option<Arc<rustls::ClientConfig>>,
+) -> Result<Trust, ClientError> {
+    let message = match (roots.is_empty(), raw) {
+        (true, None) => return Ok(Trust::Platform),
+        (true, Some(raw)) => {
+            if cfg!(feature = "fips") && !raw.fips() {
+                "the fips build needs a TLS configuration whose fips() is true".to_owned()
+            } else {
+                return Ok(Trust::Raw(raw));
+            }
+        }
+        (false, Some(_)) => {
+            "extra root certificates and a TLS configuration cannot be given together: \
+             put the roots in the TLS configuration"
+                .to_owned()
+        }
+        (false, None) => match unparsable_root(&roots) {
+            Some(index) => format!("extra root certificate {index} is not a valid root"),
+            None => return Ok(Trust::ExtraRoots(roots.into())),
+        },
+    };
+    Err(ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message,
+        transport: None,
+    })
+}
+
 fn check_limits(config: &Config) -> Result<(), ClientError> {
     let message = if config.read_ahead_messages == 0 || config.read_ahead_bytes == 0 {
         "the read-ahead limits must be at least 1"
@@ -1884,6 +1982,31 @@ mod tests {
         assert!(
             matches!(first, Some(ClientEvent::Disconnected { .. })),
             "{first:?}"
+        );
+    }
+
+    /// The fips build never connects with non-FIPS cryptography: a raw
+    /// configuration whose `fips()` is false fails `build()` (Block 22, D3).
+    #[cfg(feature = "fips")]
+    #[test]
+    fn the_fips_build_refuses_a_raw_configuration_that_is_not_fips() {
+        let mut raw = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::default_fips_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        assert!(raw.fips());
+        raw.require_ems = false;
+
+        let built = Client::builder("wss://localhost/connection/websocket")
+            .tls_config(Arc::new(raw))
+            .build();
+
+        assert!(
+            matches!(&built, Err(error) if error.message.contains("fips")),
+            "{built:?}"
         );
     }
 

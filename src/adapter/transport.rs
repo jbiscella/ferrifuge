@@ -2,17 +2,14 @@
 
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use rustls::crypto::CryptoProvider;
-use rustls::{ClientConfig, RootCertStore};
-use rustls_native_certs::load_native_certs;
 use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 
+use super::tls::Tls;
 use crate::machine::{FrameId, FrameType};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -69,13 +66,14 @@ impl WebSocket {
         subprotocol: Option<&str>,
         timeout: Duration,
         headers: &reqwest::header::HeaderMap,
+        tls: &Tls,
     ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
             .get(..6)
             .is_some_and(|s| s.eq_ignore_ascii_case("wss://"));
         let connector = if secure {
-            Connector::Rustls(tls_config()?)
+            Connector::Rustls(tls.config()?)
         } else {
             Connector::Plain
         };
@@ -313,106 +311,6 @@ pub(super) const TOO_LARGE: &str = "message larger than the size limit";
 /// Largest message, and frame, accepted from the server.
 const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
 
-/// TLS settings of an HTTP client that only ever speaks plain `http://`:
-/// no root certificates, so it works on hosts without platform ones, and
-/// still the build's provider, as the HTTP client takes no default one.
-pub(super) fn plain_tls_config() -> ClientConfig {
-    ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("the provider supports the default protocol versions")
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth()
-}
-
-#[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
-compile_error!(
-    "the tokio adapter needs a TLS crypto provider: enable the `ring` (default), `aws-lc-rs` or `fips` feature"
-);
-
-/// The crypto provider chosen by the build's features (Block 6). Features
-/// are additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
-#[cfg(feature = "fips")]
-fn crypto_provider() -> CryptoProvider {
-    rustls::crypto::default_fips_provider()
-}
-
-#[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
-fn crypto_provider() -> CryptoProvider {
-    rustls::crypto::aws_lc_rs::default_provider()
-}
-
-#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
-fn crypto_provider() -> CryptoProvider {
-    rustls::crypto::ring::default_provider()
-}
-
-/// TLS settings for `wss://` and `https://`, built once per process.
-///
-/// The crypto provider is set explicitly rather than taken from the process
-/// default: when another crate also enables another rustls provider, rustls
-/// cannot pick a default and panics.
-pub(super) fn tls_config() -> Result<Arc<ClientConfig>, String> {
-    tls_setup().map(|(config, _)| config)
-}
-
-/// [`tls_config`], and whether it is kept: a read of the platform's root
-/// certificates that reported errors serves the attempt but is read again
-/// by the next one (Block 6, review item C7).
-pub(super) fn tls_setup() -> Result<(Arc<ClientConfig>, bool), String> {
-    static CONFIG: BuildOnce<Arc<ClientConfig>> = BuildOnce::new();
-    CONFIG.get(|| {
-        let found = load_native_certs();
-        roots_config(found.certs, found.errors.is_empty())
-    })
-}
-
-/// The TLS settings trusting `certs`, kept when `complete`: read without
-/// errors. Unreadable certificates are skipped, as browsers do.
-fn roots_config(
-    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
-    complete: bool,
-) -> Result<(Arc<ClientConfig>, bool), String> {
-    let mut roots = RootCertStore::empty();
-    let (added, _) = roots.add_parsable_certificates(certs);
-    if added == 0 {
-        return Err("no platform root certificates found".to_owned());
-    }
-    let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok((Arc::new(config), complete))
-}
-
-/// A value built at first use and shared by the process; a build that
-/// fails, or that its builder says not to keep, is not kept, so the next use
-/// builds again (Block 6, review item C7).
-pub(super) struct BuildOnce<T>(OnceLock<T>);
-
-impl<T: Clone> BuildOnce<T> {
-    pub(super) const fn new() -> Self {
-        Self(OnceLock::new())
-    }
-
-    /// The value, and whether it is kept: built by `build`, which also says
-    /// whether to keep it, unless an earlier build was kept. Two first uses
-    /// racing may both build; one value is kept.
-    pub(super) fn get(
-        &self,
-        build: impl FnOnce() -> Result<(T, bool), String>,
-    ) -> Result<(T, bool), String> {
-        if let Some(value) = self.0.get() {
-            return Ok((value.clone(), true));
-        }
-        let (value, keep) = build()?;
-        if !keep {
-            return Ok((value, false));
-        }
-        Ok((self.0.get_or_init(|| value).clone(), true))
-    }
-}
-
 fn closed(frame: Option<CloseFrame>) -> Inbound {
     match frame {
         Some(frame) => Inbound::Closed {
@@ -468,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new())
+        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Tls::default())
             .await
             .unwrap();
 
@@ -506,9 +404,15 @@ mod tests {
                 ws.send(message).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await
+        .unwrap();
         ws.send(FrameId::for_tests(1), b"1".to_vec(), FrameType::Text)
             .unwrap();
         let first = ws.recv(true).await;
@@ -542,9 +446,15 @@ mod tests {
                 ws.send(Message::text(kind)).await.unwrap();
             }
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await
+        .unwrap();
 
         ws.send(FrameId::for_tests(2), b"{}".to_vec(), FrameType::Text)
             .unwrap();
@@ -577,9 +487,15 @@ mod tests {
             }
         });
         let timeout = Duration::from_millis(200);
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout, &HeaderMap::new())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            timeout,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await
+        .unwrap();
         // Frames are queued until one is not written in time: how much the
         // system buffers varies (Windows took a single 32 MiB frame whole).
         let mut queued = 0;
@@ -630,9 +546,15 @@ mod tests {
             None
         });
         let timeout = Duration::from_millis(100);
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, timeout, &HeaderMap::new())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            timeout,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await
+        .unwrap();
         ws.send(FrameId::for_tests(5), b"late".to_vec(), FrameType::Text)
             .unwrap();
         // The client is not polled until the frame is overdue, while the
@@ -665,9 +587,15 @@ mod tests {
             ws.send(Message::text("x".repeat(20 << 20))).await.unwrap();
             let _ = ws.next().await;
         });
-        let mut ws = WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await
+        .unwrap();
 
         let received = ws.recv(true).await;
 
@@ -684,110 +612,15 @@ mod tests {
         let address = listener.local_addr().unwrap();
         drop(listener);
 
-        let result =
-            WebSocket::open(&format!("ws://{address}"), None, TIMEOUT, &HeaderMap::new()).await;
+        let result = WebSocket::open(
+            &format!("ws://{address}"),
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Tls::default(),
+        )
+        .await;
 
         assert!(result.is_err());
-    }
-
-    // Review item C7: a transient failure (a CA bundle being replaced, no
-    // file descriptor left) must not break every later secure connection.
-    #[test]
-    fn a_failed_tls_setup_is_retried() {
-        let setup = BuildOnce::new();
-
-        let failed = setup.get(|| Err("no platform root certificates found".to_owned()));
-        let retried = setup.get(|| Ok((1, true)));
-
-        assert!(failed.is_err());
-        assert_eq!(retried, Ok((1, true)));
-    }
-
-    #[test]
-    fn a_tls_setup_its_builder_does_not_keep_is_built_again() {
-        let setup = BuildOnce::new();
-
-        let first = setup.get(|| Ok((1, false)));
-        let second = setup.get(|| Ok((2, true)));
-        let third = setup.get(|| Ok((3, true)));
-
-        assert_eq!(
-            (first, second, third),
-            (Ok((1, false)), Ok((2, true)), Ok((2, true)))
-        );
-    }
-
-    #[test]
-    fn root_certificates_read_with_errors_serve_the_attempt_but_are_not_kept() {
-        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
-            .unwrap()
-            .cert
-            .der()
-            .clone();
-
-        let partial = roots_config(vec![certificate.clone()], false);
-        let complete = roots_config(vec![certificate], true);
-
-        assert!(matches!(partial, Ok((_, false))));
-        assert!(matches!(complete, Ok((_, true))));
-    }
-
-    #[test]
-    fn a_built_tls_setup_is_reused() {
-        let setup = BuildOnce::new();
-        let builds = std::cell::Cell::new(0);
-        let build = || {
-            builds.set(builds.get() + 1);
-            Ok((builds.get(), true))
-        };
-
-        let first = setup.get(build);
-        let second = setup.get(build);
-
-        assert_eq!(
-            (first, second, builds.get()),
-            (Ok((1, true)), Ok((1, true)), 1)
-        );
-    }
-
-    #[test]
-    fn tls_config_builds_even_with_several_rustls_providers_enabled() {
-        // Test builds enable aws-lc-rs too (through reqwest), which made the
-        // process-default provider ambiguous and panic.
-        let config = tls_config();
-
-        assert!(config.is_ok(), "{config:?}");
-    }
-
-    /// The build's strongest provider feature selects the provider
-    /// (Block 6): fips > aws-lc-rs > ring.
-    #[test]
-    fn tls_config_uses_the_build_provider() {
-        let config = tls_config().expect("TLS configuration");
-
-        let key_provider = format!("{:?}", config.crypto_provider().key_provider);
-
-        let expected = if cfg!(feature = "aws-lc-rs") {
-            "AwsLcRs"
-        } else {
-            "Ring"
-        };
-        assert_eq!(key_provider, expected);
-        // rustls also checks TLS-level FIPS requirements here, beyond the
-        // provider's primitives.
-        assert_eq!(config.fips(), cfg!(feature = "fips"));
-    }
-
-    /// A dependency update must not switch the FIPS build to another
-    /// module generation unnoticed (Block 6: AWS-LC-FIPS 4.x).
-    #[cfg(feature = "fips")]
-    #[test]
-    fn fips_build_links_the_4x_fips_module() {
-        // The FIPS module generation, not the AWS-LC release
-        // (`awslc_version`), which aws-lc-rs documents as unfit for it.
-        let generation = aws_lc_rs::fips_version();
-
-        assert_eq!(generation, Some(4), "FIPS module generation");
-        assert!(aws_lc_rs::try_fips_mode().is_ok(), "not in FIPS mode");
     }
 }
