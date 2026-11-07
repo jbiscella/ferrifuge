@@ -80,8 +80,7 @@ const IMPLEMENTED: &[&str] = &[
     "A transport that worked is kept on reconnect",
     "Commands work over an emulated transport",
     "A failed emulation request makes the client reconnect",
-    // Block 29 changes "An HTTP stream that never answers the handshake
-    // falls back": its steps come with Block 29's implementation.
+    "An HTTP stream that never answers the handshake falls back",
     // Brief C3: an opened websocket is chosen only when the server answers.
     "A websocket that never answers the handshake falls back",
     "An opened websocket without a connect reply falls back",
@@ -401,6 +400,13 @@ const IMPLEMENTED: &[&str] = &[
     "Building outside a runtime without a handle fails",
     "A client built outside a runtime with a handle connects",
     "The client ends when its runtime shuts down",
+    // Block 29: the handshake timeout and the maximum message size.
+    "An open that never completes is bounded by the handshake timeout",
+    "The connect reply keeps the timeout after the open",
+    "A message over the limit ends a connected client",
+    "A message at the limit is delivered",
+    "A message over the limit before the connect reply fails the attempt",
+    "A maximum message size of 0 is rejected",
 ];
 
 /// Server configuration of @A scenarios.

@@ -137,6 +137,9 @@ struct State {
     /// Raw JSON the JSON connect replies carry as `data`, byte for byte
     /// (Block 17).
     connect_data: Option<String>,
+    /// The next JSON connect command is answered with a text message of
+    /// this many bytes (Block 29).
+    sized_connect: Option<usize>,
     /// Channels whose subscribes asking for fossil delta get it (Block 19).
     delta_channels: std::collections::HashSet<String>,
     /// Per channel with delta on for the latest connection, the payload the
@@ -366,6 +369,12 @@ impl FakeServer {
     /// JSON connect replies carry `raw` as their `data`, byte for byte.
     pub(crate) fn answer_connects_with_data(&self, raw: &str) {
         self.state.lock().unwrap().connect_data = Some(raw.to_owned());
+    }
+
+    /// Answers the next JSON connect command with a connect reply padded to
+    /// a websocket message of exactly `size` bytes (Block 29).
+    pub(crate) fn answer_next_connect_sized(&self, size: usize) {
+        self.state.lock().unwrap().sized_connect = Some(size);
     }
 
     /// Answers the next connect command with error `code` and `message`.
@@ -735,6 +744,46 @@ impl Connection {
         }
     }
 
+    /// The reply to the JSON connect command `message`.
+    fn connect_reply(&mut self, message: &Value) -> Message {
+        if let Some(size) = self.state.lock().unwrap().sized_connect.take() {
+            let prefix = format!(
+                r#"{{"id":{},"connect":{{"client":"c","data":""#,
+                message["id"]
+            );
+            return Message::text(sized_json(&prefix, "\"}}", size));
+        }
+        let client = self.next_client();
+        let (subs, data) = {
+            let mut state = self.state.lock().unwrap();
+            let default = state.server_subscriptions.clone();
+            let subs = state
+                .next_server_subscriptions
+                .pop_front()
+                .unwrap_or(default);
+            (subs, state.connect_data.clone())
+        };
+        let connect = json!({
+            "client": client,
+            "version": "fake",
+            "ping": self.announce.ping,
+            "pong": self.announce.pong,
+            "expires": self.announce.ttl > 0,
+            "ttl": self.announce.ttl,
+            "subs": subs,
+        })
+        .to_string();
+        // Raw data goes in as given, never re-serialized.
+        let connect = match data {
+            Some(raw) => format!("{},\"data\":{raw}}}", &connect[..connect.len() - 1]),
+            None => connect,
+        };
+        Message::text(format!(
+            "{{\"id\":{},\"connect\":{connect}}}",
+            message["id"]
+        ))
+    }
+
     /// Records the JSON commands of a text frame; the replies to send.
     fn json_commands(&mut self, text: &str) -> Vec<Message> {
         let mut replies = Vec::new();
@@ -760,35 +809,7 @@ impl Connection {
                     json!({"id": message["id"], "error": error}).to_string(),
                 ));
             } else if message["connect"].is_object() {
-                let client = self.next_client();
-                let (subs, data) = {
-                    let mut state = self.state.lock().unwrap();
-                    let default = state.server_subscriptions.clone();
-                    let subs = state
-                        .next_server_subscriptions
-                        .pop_front()
-                        .unwrap_or(default);
-                    (subs, state.connect_data.clone())
-                };
-                let connect = json!({
-                    "client": client,
-                    "version": "fake",
-                    "ping": self.announce.ping,
-                    "pong": self.announce.pong,
-                    "expires": self.announce.ttl > 0,
-                    "ttl": self.announce.ttl,
-                    "subs": subs,
-                })
-                .to_string();
-                // Raw data goes in as given, never re-serialized.
-                let connect = match data {
-                    Some(raw) => format!("{},\"data\":{raw}}}", &connect[..connect.len() - 1]),
-                    None => connect,
-                };
-                replies.push(Message::text(format!(
-                    "{{\"id\":{},\"connect\":{connect}}}",
-                    message["id"]
-                )));
+                replies.push(self.connect_reply(&message));
             } else if message["subscribe"].is_object() {
                 replies.extend(self.subscribe_answer(&message));
             } else if message["rpc"].is_object() {
@@ -1015,10 +1036,21 @@ fn protobuf_result(command: &protobuf::Command) -> Option<protobuf::Reply> {
         reply.presence = Some(protobuf_results::presence());
     } else if command.presence_stats.is_some() {
         reply.presence_stats = Some(protobuf_results::presence_stats());
+    } else if command.subscribe.is_some() {
+        // Granted, without position or publications (Block 29).
+        reply.subscribe = Some(protobuf::SubscribeResult::default());
     } else {
         return None;
     }
     Some(reply)
+}
+
+/// `prefix`, then `x` characters, then `suffix`: `size` bytes in all.
+pub(crate) fn sized_json(prefix: &str, suffix: &str, size: usize) -> String {
+    let padding = size
+        .checked_sub(prefix.len() + suffix.len())
+        .expect("a size that holds the prefix and suffix");
+    format!("{prefix}{}{suffix}", "x".repeat(padding))
 }
 
 /// The answer to the JSON RPC command `rpc`.
