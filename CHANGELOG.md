@@ -21,6 +21,11 @@ repository held while it carried that version, from the blocks of
 
 ### Changed
 
+- An attempt answered by a captive portal's page (a redirect, HTTP 511, or
+  `text/html` served as a success) fails with an error whose message ends
+  with "; a captive portal may be answering" (Block 25); an `http_stream`
+  open answered with `text/html` was read as frames and is now a failed
+  attempt with an error event.
 - `reconnect()` starts the transport round again from the first transport,
   and makes every client's next attempt read the environment's and the
   operating system's proxy settings again, rebuilding the HTTP clients

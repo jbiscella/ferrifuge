@@ -104,21 +104,28 @@ impl HttpTransport {
         if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
             return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
         }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let portal = captive_portal(status.as_u16(), content_type);
         if !status.is_success() {
-            return Err(format!("HTTP status {status}"));
+            return Err(with_portal(format!("HTTP status {status}"), portal));
+        }
+        // A web page instead of the stream (Block 25, D8): read as frames,
+        // it would only make the client reconnect, without an error.
+        if portal {
+            return Err(with_portal(
+                format!("HTTP status {status}, content type {content_type:?}"),
+                true,
+            ));
         }
         // What EventSource accepts (WHATWG HTML, "Server-sent events").
-        if sse {
-            let content_type = response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default();
-            if status != reqwest::StatusCode::OK || !is_event_stream(content_type) {
-                return Err(format!(
-                    "not an event stream: HTTP status {status}, content type {content_type:?}"
-                ));
-            }
+        if sse && (status != reqwest::StatusCode::OK || !is_event_stream(content_type)) {
+            return Err(format!(
+                "not an event stream: HTTP status {status}, content type {content_type:?}"
+            ));
         }
         let body = response
             .bytes_stream()
@@ -252,6 +259,30 @@ impl HttpTransport {
                 else => std::future::pending::<()>().await,
             }
         }
+    }
+}
+
+/// What an error message about an open ends with when a captive portal may
+/// have answered it (Block 25, D8).
+pub(super) const CAPTIVE_PORTAL: &str = "; a captive portal may be answering";
+
+/// Whether an open answered with `status` and `content_type`, instead of
+/// the transport's, looks like a captive portal's web page (Block 25, D8):
+/// a redirect, 511 "Network Authentication Required", or a page served as
+/// a success.
+pub(super) fn captive_portal(status: u16, content_type: &str) -> bool {
+    let essence = content_type.split(';').next().unwrap_or_default().trim();
+    (300..400).contains(&status)
+        || status == 511
+        || ((200..300).contains(&status) && essence.eq_ignore_ascii_case("text/html"))
+}
+
+/// `message`, saying that a captive portal may be answering when `portal`.
+pub(super) fn with_portal(message: String, portal: bool) -> String {
+    if portal {
+        message + CAPTIVE_PORTAL
+    } else {
+        message
     }
 }
 
@@ -818,6 +849,55 @@ mod tests {
         );
 
         assert_eq!(messages, ["2", "3", "4"]);
+    }
+
+    /// Answers of a captive portal, and one that is not (Block 25, D8).
+    const PORTAL_ANSWERS: [(&[u8], bool); 4] = [
+        (
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 13\r\n\r\n<html></html>",
+            true,
+        ),
+        (
+            b"HTTP/1.1 302 Found\r\nlocation: http://portal.example/\r\ncontent-length: 0\r\n\r\n",
+            true,
+        ),
+        (
+            b"HTTP/1.1 511 Network Authentication Required\r\ncontent-type: text/html\r\ncontent-length: 0\r\n\r\n",
+            true,
+        ),
+        (
+            b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/html\r\ncontent-length: 0\r\n\r\n",
+            false,
+        ),
+    ];
+
+    #[tokio::test]
+    async fn an_open_answered_by_a_web_page_names_a_captive_portal() {
+        for kind in [TransportKind::HttpStream, TransportKind::Sse] {
+            for (answer, portal) in PORTAL_ANSWERS {
+                let url = serve_once(answer, "/connection/stream", Duration::ZERO).await;
+
+                let result = HttpTransport::open(
+                    kind,
+                    &url,
+                    b"{}".to_vec(),
+                    None,
+                    TIMEOUT,
+                    Arc::default(),
+                    &Network::default(),
+                )
+                .await;
+
+                let Err(message) = result else {
+                    panic!("{kind:?} opened on {}", String::from_utf8_lossy(answer));
+                };
+                assert_eq!(
+                    message.ends_with(CAPTIVE_PORTAL),
+                    portal,
+                    "{kind:?}: {message}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

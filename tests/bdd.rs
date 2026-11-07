@@ -390,6 +390,8 @@ const IMPLEMENTED: &[&str] = &[
     "reconnect() does nothing to a disconnected client",
     "reconnect() reconnects at once without \"disconnected\"",
     "Publications not taken before reconnect() are recovered once",
+    // Block 25, sub-increment 25c: captive portals.
+    "A captive portal answering the websocket upgrade is reported",
 ];
 
 /// Server configuration of @A scenarios.
