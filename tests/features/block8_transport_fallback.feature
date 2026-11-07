@@ -53,9 +53,9 @@ Feature: Transport fallback
   @A
   Scenario: An HTTP stream that never answers the handshake falls back
     Given a server with http_stream and sse enabled, whose http_stream endpoint is behind a relay that accepts but never answers
-    And a client configured with an unreachable websocket endpoint, the relayed http_stream endpoint and the server's sse endpoint
+    And a client with a handshake timeout of 2 s, configured with an unreachable websocket endpoint, the relayed http_stream endpoint and the server's sse endpoint
     When connect is called
-    Then within the configured timeout plus tolerance the client emits "connected" over transport "sse"
+    Then within the configured handshake timeout plus tolerance the client emits "connected" over transport "sse"
 
   @B
   Scenario: A websocket that never answers the handshake falls back

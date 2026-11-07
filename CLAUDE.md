@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–28 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–29 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -593,9 +593,9 @@ Feature: Transport fallback
   @A
   Scenario: An HTTP stream that never answers the handshake falls back
     Given a server with http_stream and sse enabled, whose http_stream endpoint is behind a relay that accepts but never answers
-    And a client configured with an unreachable websocket endpoint, the relayed http_stream endpoint and the server's sse endpoint
+    And a client with a handshake timeout of 2 s, configured with an unreachable websocket endpoint, the relayed http_stream endpoint and the server's sse endpoint
     When connect is called
-    Then within the configured timeout plus tolerance the client emits "connected" over transport "sse"
+    Then within the configured handshake timeout plus tolerance the client emits "connected" over transport "sse"
 
   @B
   Scenario: A websocket that never answers the handshake falls back
@@ -4013,3 +4013,106 @@ Feature: Tokio runtime handle
 ```
 
 **Exceptions introduced:** none (the codes 2 and 4 are recorded in `src/codes.rs`; Block 34 tabulates them).
+
+---
+
+## Block 29 — Handshake timeout, maximum incoming message size
+
+**Goal:** an app on a slow link or behind a proxy gets time to open a transport without lengthening every command's timeout, an app on a device with little memory bounds the largest message the server may send it, and `Config` can gain options without breaking the applications that build one (parity items 11 and 12, finding F3; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A for both, in one breaking release that marks `Config` `#[non_exhaustive]`).
+
+**Dependencies:** Blocks 3 (close code 1009, code 3 "message size limit exceeded"), 7 (several Protobuf messages in one websocket frame), 8 (the fallback, `Config::timeout`, the relay scenarios), 13 (calls bounded by `timeout`), 15 (the read-ahead admits one larger message alone), 17 (`Input` is `#[non_exhaustive]`), 19 (D6, the delta bounds), 21 (the WARN record of an oversized message), 23 (the proxy handshake counts in the open), 25 (D1, a replaced timer's firing; D3, a token fetched after the open), 27 (D3, the decoders' bounds).
+
+**Out of scope:**
+- a separate timeout per command kind, or for writes and closing: `timeout` keeps bounding them (Block 8);
+- a size limit on what the client sends: `write_queue_bytes` and `batch_frame_bytes` (Blocks 13, 18) and the server's own limits (close code 1009, HTTP 413) stay as they are;
+- deriving the cap from `read_ahead_bytes` (the analysis's design B for item 12), or one timer for open plus reply (design B for item 11): not adopted;
+- an `error` event beside `disconnected` code 3 (centrifuge-rust `docs/spec.md` §5.3 emits one): the outcome stays Block 3's for close code 1009;
+- a separate `ConfigBuilder`;
+- `#[non_exhaustive]` on other public structs.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
+- **D2 Maximum incoming message size.** `Config::max_message_bytes`, default 64 MiB (today's fixed `MAX_MESSAGE_BYTES`, which it replaces), is at least 1, or `build()` and `Client::new` return a configuration error naming it, as the read-ahead limits do (Block 15). It bounds what a transport delivers as one message: a websocket message whole, even when it holds several JSON or Protobuf replies (Block 7), and each of its frames (tungstenite's `max_message_size` and `max_frame_size`); an http_stream JSON line; an http_stream Protobuf reply, by its length prefix (Block 27 D3); an sse event's data. It is also the core's bound of Block 19 D6 (a delta target, and the decoded publications of one subscribe reply), which keeps its outcome. The read-ahead keeps admitting one message larger than `read_ahead_bytes` alone (Block 15), so this field is the per-message memory bound; the documentation says so for devices with little memory. `Config`'s `Debug` shows both new fields.
+- **D3 An oversized message.** The adapter refuses a message once it is known to exceed `max_message_bytes`, holding at most the limit and one read (tungstenite checks a frame from its header and a message as its frames arrive; the line and sse decoders once the part buffered exceeds the limit; the Protobuf splitter from the length prefix). It ends the transport and reports it with a new `Input::MessageTooLarge(TransportId)` instead of `Input::TransportClosed` (additive: `Input` is `#[non_exhaustive]`, Block 17).
+  - Before the connect reply on that transport, the attempt fails as a refused one (Block 8), with an error event whose message is "message larger than the size limit": before the server has answered, the bytes may not be Centrifugo's (centrifuge-rust `docs/spec.md` §5.3, "an HTML page read as a varint").
+  - Once the client is connected on it, the client ends: `disconnected` with code 3 "message size limit exceeded" and no reconnect, as for close code 1009 (Block 3, review item C4; centrifuge-rust §5.3: "never a silent reconnect loop"), since a reconnect would ask for the same data again. The field's documentation says that the application decides when to connect again, and that the limit must exceed the largest reply it expects (history, recovery).
+  - The rule is the adapter's: the core does not compare an `Input::Frame`'s length with the field. The frame is in memory by then, and an http_stream Protobuf frame carries its length prefix, so the core would refuse a reply at the limit that the splitter accepted. Mature clients bound size where the bytes are read: tungstenite `max_message_size`, tonic `max_decoding_message_size`, tokio-util `AnyDelimiterCodec` `max_length`. An owner's own adapter applies the rule as the field and `Input::MessageTooLarge` document.
+  - The WARN record of an oversized message (Block 21) stays.
+- **D4 `Config` `#[non_exhaustive]`.** `Config` is marked `#[non_exhaustive]`, so later options are additions (plan; tungstenite's `WebSocketConfig`). Outside the crate a struct literal, `..Config::default()` included, no longer compiles; an application starts from `Config::default()`. It sets fields either by assigning the public fields, which stay public, or through chainable setters, one per field and named after it, as tungstenite's `WebSocketConfig` offers since 0.25.0: `Config::default().timeout(Duration::from_secs(3)).token(token)`. Each setter takes `self`, returns it and is `#[must_use]`. It takes the field's type, except that `name`, `version` and `token` take `impl Into<String>`, and `data` takes `impl Into<Vec<u8>>` and sets `Some`, as `Client::set_token` and `Client::set_data` do. Values are still checked by `build()`. The README's examples, the doc tests, the integration tests and the chaos and perf runners change accordingly.
+- **D5 Version.** 0.18.0: a new field of an exhaustive `Config` and `#[non_exhaustive]` break the public API, `timeout` no longer bounds the open, and an oversized message after the connect reply ends the client instead of reconnecting. `Unreleased` entries:
+  - "Added": `Config::handshake_timeout`, `Config::max_message_bytes`, the `Config` setters, `Input::MessageTooLarge`.
+  - "Changed": `Config` is `#[non_exhaustive]`; `timeout` bounds the connect reply and no longer the open, as does `Timer::ConnectTimeout` once the transport is open; a message over the limit after the connect reply ends the client with code 3 instead of reconnecting with code 1, and one before it fails the attempt with an error event instead of reconnecting without one.
+
+This block amends Block 19 D6 and D10 (the limit is no longer a constant) and one Block 8 scenario.
+
+**Changed scenario (Block 8).** In "An HTTP stream that never answers the handshake falls back", the client has a handshake timeout of 2 s and the client must emit "connected" over sse within the configured handshake timeout plus tolerance (the text is in Block 8). Its relay never answers the stream request, so the open never completes; its handshake timeout is shorter than the default `timeout`, so a client that kept bounding the open with `timeout` fails it. The scenario leaves `IMPLEMENTED` in `tests/bdd.rs` until this block's implementation adds its steps. "A websocket that never answers the handshake falls back" and "An opened websocket without a connect reply falls back" exercise the connect reply and keep `timeout`.
+
+Value clause: As an app developer shipping to devices on slow links or with little memory, I want to bound the opening of a transport apart from its replies and to cap the size of a message from the server, so that a slow open does not slow down every command's timeout and a single oversized message cannot exhaust the device's memory.
+
+**Structural acceptance:**
+- @E unit tests on the core:
+  - `Timer::ConnectTimeout` is set with `handshake_timeout` at `OpenTransport` and with `timeout` at `TransportOpened`, for websocket and for http_stream;
+  - the error messages are "handshake timeout" and "connect timeout";
+  - `Input::MessageTooLarge` before the connect reply emits the error event and opens the next transport; after it, the client disconnects with code 3 and sets no reconnect timer;
+  - a frame longer than `max_message_bytes` given as `Input::Frame` is handled as any frame;
+  - the delta bound follows the field.
+- A unit test: each setter sets its field, as assigning it does.
+- Adapter unit tests: the websocket reader, the http_stream JSON and Protobuf splitters and the sse decoder each refuse a message one byte over a small limit and accept one at the limit; a refused message is reported as `Input::MessageTooLarge`.
+- New test support:
+  - a websocket endpoint behind the relay in `Mode::Silent`;
+  - the fake server pads a push, or the first connect reply, to an exact websocket message size in both encodings, the Protobuf length prefixes included.
+- The chaos runners and the Block 14 @P gates pass.
+
+```gherkin
+Feature: Handshake timeout and maximum incoming message size
+
+  Scenario: An open that never completes is bounded by the handshake timeout
+    Given a client with a handshake timeout of 1 s and a timeout of 10 s, configured with a websocket endpoint behind a relay that accepts but never answers
+    When connect is called
+    Then within 1 s plus tolerance the client emits an "error" event for the failed transport attempt whose message ends with "handshake timeout"
+
+  @E
+  Scenario: The connect reply keeps the timeout after the open
+    Given a client with a handshake timeout of 1 s and a timeout of 3 s, configured with websocket and http_stream endpoints
+    When the websocket opens after 900 ms and no connect reply arrives
+    Then 2.9 s after it opened the websocket attempt has not failed
+    And 3 s after it opened the next attempt opens the http_stream transport
+
+  @D
+  Scenario Outline: A message over the limit ends a connected client
+    Given a client with a maximum message size of 1024 bytes and the <protocol> protocol, connected to the fake server
+    When the fake server sends a publication push in a websocket message of 1025 bytes
+    Then the client emits "disconnected" with code 3 and reason "message size limit exceeded"
+    And the client makes no new connection attempt
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario Outline: A message at the limit is delivered
+    Given a client with a maximum message size of 1024 bytes and the <protocol> protocol, subscribed to channel "news" on the fake server
+    When the fake server sends a publication on channel "news" in a websocket message of exactly 1024 bytes
+    Then the subscription receives that publication
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario: A message over the limit before the connect reply fails the attempt
+    Given a client with a maximum message size of 1024 bytes, configured with the fake server's endpoint
+    And the fake server answers the first connect command with a websocket message of 1025 bytes
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt whose message ends with "message larger than the size limit"
+    And then the client emits "connected"
+
+  Scenario: A maximum message size of 0 is rejected
+    Given client options with a maximum message size of 0
+    When the client is built
+    Then building fails with a configuration error naming the maximum message size
+```
+
+**Exceptions introduced:** none.
