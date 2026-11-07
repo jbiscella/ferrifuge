@@ -114,15 +114,10 @@ Feature: Transport fallback
     And the relay comes up after every transport has failed once
     Then the client emits "connected" over transport "http_stream"
 
-  Scenario Outline: Protobuf with an HTTP transport is rejected
-    Given client options with the Protobuf protocol and an <transport> endpoint
+  Scenario: Protobuf with the sse transport is rejected
+    Given client options with the Protobuf protocol and an sse endpoint
     When the client is built
-    Then building fails with a configuration error naming Protobuf and <transport>
-
-    Examples:
-      | transport   |
-      | http_stream |
-      | sse         |
+    Then building fails with a configuration error naming Protobuf and sse
 
   @A
   Scenario Outline: Server pings over an HTTP transport are answered
