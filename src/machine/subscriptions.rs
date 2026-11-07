@@ -821,7 +821,13 @@ impl Machine {
 
     /// Moves a subscription to unsubscribed; with `send`, a server-side
     /// subscription is undone with an unsubscribe command.
-    fn set_unsubscribed(&mut self, id: SubscriptionId, code: u32, reason: &str, send: bool) {
+    pub(super) fn set_unsubscribed(
+        &mut self,
+        id: SubscriptionId,
+        code: u32,
+        reason: &str,
+        send: bool,
+    ) {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };

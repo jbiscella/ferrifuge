@@ -62,6 +62,10 @@ pub mod unsubscribed {
     pub const UNSUBSCRIBE_CALLED: u32 = 0;
     /// A callback denied access.
     pub const UNAUTHORIZED: u32 = 1;
+    /// The client was closed: `close()`, dropped, its runtime shut down or
+    /// its driver panicked (Block 33; centrifuge-js
+    /// `unsubscribedCodes.clientClosed`).
+    pub const CLIENT_CLOSED: u32 = 2;
     /// The server refused a subscribe or `sub_refresh` command as too large
     /// (an emulation request answered with HTTP 413); retrying it would fail
     /// the same way. 3, as the disconnect code of the same cause.
@@ -82,6 +86,10 @@ pub mod error {
     /// The client entered `disconnected` while a call was pending
     /// (centrifuge-js `clientDisconnected`).
     pub const DISCONNECTED: u32 = 3;
+    /// The client is closed: `close()`, dropped, its runtime shut down or
+    /// its driver panicked; retrying cannot succeed (Block 33; centrifuge-js
+    /// `clientClosed`).
+    pub const CLIENT_CLOSED: u32 = 4;
     /// The token callback failed while getting a token to connect with.
     pub const CONNECT_TOKEN: u32 = 5;
     /// The token callback failed while getting a token to refresh with.

@@ -620,6 +620,18 @@ impl Machine {
         }
     }
 
+    /// The client is closed (Block 33, D2): every call not settled, added,
+    /// waiting or sent, fails with "client closed".
+    pub(super) fn fail_calls_closed(&mut self) {
+        let calls: Vec<CallId> = self.calls.by_id.keys().copied().collect();
+        for id in calls {
+            self.settle_call(
+                id,
+                Err(CallError::new(codes::error::CLIENT_CLOSED, "client closed")),
+            );
+        }
+    }
+
     fn settle_call(&mut self, id: CallId, result: Result<CallReply, CallError>) {
         let Some(call) = self.calls.by_id.remove(&id) else {
             return;

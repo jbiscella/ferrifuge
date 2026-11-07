@@ -70,6 +70,10 @@ pub(super) struct Shared {
     calls: Mutex<HashMap<CallId, oneshot::Sender<Result<CallReply, CallError>>>>,
     /// The waiting `ready()` futures (Block 30). Locked after `core`.
     pub(super) ready: Mutex<Waiters>,
+    /// Set, and `driver_ended` notified, when the driver's task has ended
+    /// (Block 33, D1).
+    driver_gone: AtomicBool,
+    driver_ended: Notify,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
@@ -371,17 +375,33 @@ impl Shared {
         self.actions_queued.notify_one();
     }
 
-    /// The client's final disconnect, closing it in the same locked
-    /// section: an API call either runs before and is shut down with the
-    /// rest, or after and sees the client closed.
-    fn shut_down(&self) {
+    /// Closes the client (Block 33, D1), in one locked section: an API
+    /// call either runs before and is closed with the rest, or after and
+    /// sees the client closed. The `ready()` waiters fail with "client
+    /// closed" before the machine's new states would judge them.
+    pub(super) fn shut_down(&self) {
         let mut core = lock(&self.core);
         if !self.closed.load(Ordering::Acquire) {
-            self.handle(&mut core, Input::Disconnect);
+            lock(&self.ready).close();
+            self.handle(&mut core, Input::Close);
             self.closed.store(true, Ordering::Release);
         }
         drop(core);
         self.actions_queued.notify_one();
+    }
+
+    /// Resolves once the driver's task has ended, however it ended (Block
+    /// 33, D1).
+    pub(super) async fn ended(&self) {
+        loop {
+            // Registered before the check: a notification in between is
+            // kept (tokio `Notify::notify_waiters`).
+            let notified = self.driver_ended.notified();
+            if self.driver_gone.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Feeds `input` to the machine: events go to their outboxes, taken at
@@ -579,18 +599,19 @@ impl Shared {
         self.actions_queued.notify_one();
         async move {
             let Some(mut pending) = pending else {
-                return Err(disconnected());
+                return Err(client_closed());
             };
             let result = receiver.await;
             pending.settled = true;
             // The sender was dropped unsettled only when the driver stopped.
-            result.unwrap_or_else(|_| Err(disconnected()))
+            result.unwrap_or_else(|_| Err(client_closed()))
         }
     }
 }
 
-fn disconnected() -> CallError {
-    CallError::new(codes::error::DISCONNECTED, "disconnected")
+/// The error of a call on a closed client (Block 33, D4).
+pub(super) fn client_closed() -> CallError {
+    CallError::new(codes::error::CLIENT_CLOSED, "client closed")
 }
 
 /// The result `extract` takes from the reply of `call`.
@@ -1079,6 +1100,8 @@ impl Client {
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
             calls: Mutex::new(HashMap::new()),
             ready: Mutex::new(Waiters::default()),
+            driver_gone: AtomicBool::new(false),
+            driver_ended: Notify::new(),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
@@ -1097,6 +1120,7 @@ impl Client {
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
+            closing: None,
             opening: None,
             transport: None,
             kind: TransportKind::WebSocket,
@@ -1139,6 +1163,41 @@ impl Client {
     #[must_use]
     pub fn state(&self) -> State {
         lock(&self.shared.core).machine.state()
+    }
+
+    /// Closes the client for good (Block 33): every pending call and
+    /// `ready()` fails with code 4 "client closed", every subscription emits
+    /// `unsubscribed` with code 2 "client closed" (server-side ones too),
+    /// then the client emits `disconnected` with code 0 unless it was
+    /// disconnected; no unsubscribe command is sent. Later calls fail at
+    /// once with code 4, `connect()` and the setters do nothing, and
+    /// `new_subscription` returns [`crate::SubscriptionError::ClientClosed`].
+    ///
+    /// Closing starts when this returns; the future resolves once the
+    /// driver has stopped: the transport closed (within `Config::timeout`)
+    /// and every stream ended after the events already queued. Dropping the
+    /// future, or never awaiting it, still closes the client. A second call
+    /// changes nothing. Dropping the client closes it the same way, without
+    /// waiting.
+    ///
+    /// ```no_run
+    /// # async fn run(client: ferrifuge::Client) {
+    /// client.close().await;
+    /// assert!(client.is_closed());
+    /// # }
+    /// ```
+    pub fn close(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.shared.shut_down();
+        let shared = Arc::clone(&self.shared);
+        async move { shared.ended().await }
+    }
+
+    /// Whether the client is closed: by [`Client::close`], its runtime shut
+    /// down or its driver panicked (Block 33). A closed client reports
+    /// `disconnected` from [`Client::state`].
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.shared.closed.load(Ordering::Acquire)
     }
 
     /// A snapshot of the client's connection and traffic counters since it
@@ -1579,6 +1638,8 @@ struct Driver {
     runtime: Handle,
     /// Ends the client however the driver's task ends (Block 28, D3).
     _ending: Ending,
+    /// The closing of the last transport closed, if it may still run.
+    closing: Option<tokio::task::JoinHandle<()>>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     /// The kind of the transport opening or open, for the records.
@@ -1714,7 +1775,12 @@ impl Driver {
                 self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
-                // The guard ends the streams as the driver goes.
+                // The last transport's close is awaited, so that `close()`
+                // resolves after it (Block 33, D1); the guard then ends the
+                // streams as the driver goes.
+                if let Some(closing) = self.closing.take() {
+                    let _ = closing.await;
+                }
                 return;
             }
             // A full read-ahead stops the reading: the server's handling of
@@ -1833,7 +1899,7 @@ impl Driver {
                     self.opening = None;
                 }
                 if let Some((_, transport)) = self.transport.take_if(|(open, _)| *open == id) {
-                    transport.close(&self.runtime);
+                    self.closing = Some(transport.close(&self.runtime));
                 }
             }
             Action::Send {
@@ -2185,14 +2251,13 @@ impl Transport {
         }
     }
 
-    fn close(self, runtime: &Handle) {
+    /// Closes the transport on a task of its own, bounded by
+    /// `Config::timeout` (Block 8); the task, which the driver awaits when it
+    /// stops (Block 33, D1).
+    fn close(self, runtime: &Handle) -> tokio::task::JoinHandle<()> {
         match self {
-            Self::WebSocket(websocket) => {
-                runtime.spawn(websocket.close());
-            }
-            Self::Http(http) => {
-                runtime.spawn(http.close());
-            }
+            Self::WebSocket(websocket) => runtime.spawn(websocket.close()),
+            Self::Http(http) => runtime.spawn(http.close()),
         }
     }
 }
@@ -2251,6 +2316,9 @@ impl Drop for Ending {
                 // once.
                 if !shared.closed.load(Ordering::Acquire) {
                     let panicked = std::thread::panicking();
+                    // "Client closed" before the new states would judge them
+                    // (Block 33, D3).
+                    lock(&shared.ready).close();
                     shared.handle(&mut core, Input::DriverDropped { panicked });
                     shared.closed.store(true, Ordering::Release);
                 }
@@ -2272,9 +2340,12 @@ impl Drop for Ending {
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
         // The final disconnect settled the calls it could; any other future
-        // gets "disconnected" rather than waiting forever.
+        // gets "client closed" rather than waiting forever (Block 33).
         lock(&shared.calls).clear();
         lock(&shared.ready).clear();
+        // Releases the `close()` futures (Block 33, D1).
+        shared.driver_gone.store(true, Ordering::Release);
+        shared.driver_ended.notify_waiters();
     }
 }
 
@@ -2734,7 +2805,7 @@ mod tests {
         );
         assert!(ended, "the stream ends");
         let failed = call.now_or_never().expect("settled").unwrap_err();
-        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
     }
 
     #[test]
@@ -2787,7 +2858,7 @@ mod tests {
             .now_or_never()
             .expect("fails at once")
             .unwrap_err();
-        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
     }
 
     #[test]
@@ -2813,7 +2884,7 @@ mod tests {
             .now_or_never()
             .expect("fails at once")
             .unwrap_err();
-        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
         assert_eq!(
             client.new_subscription("news").err(),
             Some(crate::SubscriptionError::ClientClosed)
@@ -2875,7 +2946,7 @@ mod tests {
         assert!(taken.is_empty(), "{taken:?}");
         assert!(ended, "the stream ends");
         let failed = call.now_or_never().expect("settled").unwrap_err();
-        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
         drop(client);
         drop(runtime);
     }
