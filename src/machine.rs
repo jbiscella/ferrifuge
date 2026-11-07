@@ -393,6 +393,13 @@ pub enum Input {
     Reconnect,
     /// The application called `disconnect()`.
     Disconnect,
+    /// The owner's task performing the actions ended before the client was
+    /// closed: its runtime shut down, or, when `panicked`, the task panicked
+    /// (Block 28, D3, D4). The client disconnects for good.
+    DriverDropped {
+        /// Whether the task ended by a panic.
+        panicked: bool,
+    },
     /// The transport opened.
     TransportOpened(TransportId),
     /// The transport could not be opened.
@@ -719,6 +726,10 @@ impl std::fmt::Debug for Input {
             Self::StartBatching => f.write_str("StartBatching"),
             Self::StopBatching => f.write_str("StopBatching"),
             Self::Disconnect => f.write_str("Disconnect"),
+            Self::DriverDropped { panicked } => f
+                .debug_struct("DriverDropped")
+                .field("panicked", panicked)
+                .finish(),
             Self::TransportOpened(id) => f.debug_tuple("TransportOpened").field(id).finish(),
             Self::TransportFailed { transport, message } => f
                 .debug_struct("TransportFailed")
@@ -1214,6 +1225,16 @@ impl Machine {
             Input::Disconnect => self.disconnect(
                 codes::disconnected::DISCONNECT_CALLED,
                 "disconnect called",
+                false,
+            ),
+            Input::DriverDropped { panicked: false } => self.disconnect(
+                codes::disconnected::RUNTIME_SHUT_DOWN,
+                "runtime shut down",
+                false,
+            ),
+            Input::DriverDropped { panicked: true } => self.disconnect(
+                codes::disconnected::BAD_PROTOCOL,
+                "exception during message handling",
                 false,
             ),
             Input::TransportOpened(id) if self.is_current(id) => self.transport_opened(),
