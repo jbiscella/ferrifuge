@@ -3040,9 +3040,15 @@ mod tests {
 
         client.connect();
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = vec![0; 4096];
-        let read = socket.read(&mut request).await.unwrap();
-        let request = String::from_utf8_lossy(&request[..read]).to_lowercase();
+        // The whole head: TCP may deliver it in several reads.
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "the connection ended before the request's head");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let request = String::from_utf8_lossy(&request).to_lowercase();
 
         assert!(request.contains("x-device-real: r2\r\n"), "{request}");
         assert!(!request.contains("r1"), "{request}");
