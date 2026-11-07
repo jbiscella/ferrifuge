@@ -69,22 +69,21 @@ impl Network {
     }
 
     /// A new connection attempt starts: a setting given since the last one
-    /// takes effect, with new HTTP clients, and endpoints are decided again.
+    /// takes effect, endpoints are decided again, and the client's own HTTP
+    /// clients are built again. Their pools are keyed by destination, not by
+    /// proxy, so a connection through the last attempt's proxy would be
+    /// reused when a proxy function now chooses another (Codex, #115).
     pub(super) fn new_attempt(&self) {
         let pending = lock(&self.pending).take();
         let mut current = lock(&self.current);
-        match pending {
-            Some(proxy) => {
-                *current = Current {
-                    decisions: Arc::new(Mutex::new(Decisions {
-                        proxy,
-                        decided: HashMap::new(),
-                    })),
-                    clients: Arc::default(),
-                };
-            }
-            None => lock(&current.decisions).decided.clear(),
-        }
+        let proxy = pending.unwrap_or_else(|| lock(&current.decisions).proxy.clone());
+        *current = Current {
+            decisions: Arc::new(Mutex::new(Decisions {
+                proxy,
+                decided: HashMap::new(),
+            })),
+            clients: Arc::default(),
+        };
     }
 
     /// The proxy for `url` under the setting in use (Block 23, D2),
@@ -220,5 +219,21 @@ mod tests {
 
         assert_eq!(before, Ok(None));
         assert_eq!(after, Ok(Some(target)));
+    }
+
+    /// Each attempt gets new HTTP clients, whose pools hold no connection
+    /// through the last attempt's proxy (Codex, #115).
+    #[test]
+    fn each_attempt_gets_new_http_clients() {
+        let network = Network::new(Tls::default(), Proxy::none());
+        network.http_client(false).expect("an HTTP client");
+        let first = Arc::downgrade(&lock(&network.current).clients);
+
+        network.new_attempt();
+
+        assert!(
+            first.upgrade().is_none(),
+            "the last attempt's clients are kept"
+        );
     }
 }
