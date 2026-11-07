@@ -3052,6 +3052,149 @@ mod tests {
         drop(batch);
     }
 
+    /// An `http_stream` server on `listener`: the stream request gets a
+    /// connect reply and stays open; an emulation request is read and never
+    /// answered, so closing the transport waits for it.
+    async fn stalling_http_stream(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut held = Vec::new();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            if String::from_utf8_lossy(&request[..read]).starts_with("POST /connection/") {
+                let reply =
+                    "{\"id\":1,\"connect\":{\"client\":\"c\",\"session\":\"s\",\"node\":\"n\"}}\n";
+                let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n";
+                let chunk = format!("{response}{:x}\r\n{reply}\r\n", reply.len());
+                let _ = socket.write_all(chunk.as_bytes()).await;
+            }
+            held.push(socket);
+        }
+    }
+
+    // Block 33, D1: close() resolves once the driver has ended, the
+    // transport's close awaited (here an emulation request in flight, up
+    // to the timeout): no task of the client is left.
+    #[test]
+    fn close_resolves_once_no_task_of_the_client_is_left() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = tokio::runtime::Runtime::new().unwrap();
+        let listener = server
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!(
+            "http://{}/connection/http_stream",
+            listener.local_addr().unwrap()
+        );
+        server.spawn(stalling_http_stream(listener));
+        let timeout = Duration::from_millis(400);
+        let client = Client::builder_with_transports([(TransportKind::HttpStream, url)])
+            .config(Config::default().timeout(timeout))
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        client.connect();
+        let ready = client.ready();
+        let connected =
+            runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), ready).await });
+        assert_eq!(connected.ok(), Some(Ok(())));
+        // An emulation request the server never answers.
+        let call = client.rpc("slow", b"{}".to_vec());
+        std::thread::sleep(Duration::from_millis(100));
+
+        let started = std::time::Instant::now();
+        runtime.block_on(client.close());
+        let took = started.elapsed();
+        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while runtime.metrics().num_alive_tasks() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(took >= timeout / 2, "the close was not awaited: {took:?}");
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
+        assert!(client.is_closed());
+        let failed = runtime.block_on(call).unwrap_err();
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
+        runtime.shutdown_background();
+        server.shutdown_background();
+    }
+
+    // Block 33, D1: dropping the future still closes; a second close()
+    // resolves; the stream yields what it held, then ends.
+    #[tokio::test]
+    async fn a_dropped_close_future_still_closes_and_a_second_one_resolves() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut events = client.events();
+        client.connect();
+        let call = client.rpc("echo", b"{}".to_vec());
+
+        drop(client.close());
+
+        assert!(client.is_closed());
+        assert_eq!(client.state(), State::Disconnected);
+        tokio::time::timeout(Duration::from_secs(5), client.close())
+            .await
+            .expect("a second close resolves");
+        let failed = call.await.unwrap_err();
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
+        let mut names = Vec::new();
+        while let Some(event) = events.next().await {
+            names.push(event.name());
+        }
+        assert_eq!(names, ["connecting", "disconnected"]);
+    }
+
+    // Block 33, D3: waiting ready() futures fail with code 4.
+    #[tokio::test]
+    async fn close_fails_waiting_ready_futures_with_code_4() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let subscription = client.new_subscription("news").unwrap();
+        subscription.subscribe();
+        client.connect();
+        let of_client = client.ready();
+        let of_subscription = subscription.ready();
+
+        client.close().await;
+
+        assert_eq!(
+            of_client.await.unwrap_err().code,
+            codes::error::CLIENT_CLOSED
+        );
+        assert_eq!(
+            of_subscription.await.unwrap_err().code,
+            codes::error::CLIENT_CLOSED
+        );
+        assert_eq!(subscription.state(), crate::SubscriptionState::Unsubscribed);
+        assert_eq!(
+            subscription.ready().await.unwrap_err().code,
+            codes::error::CLIENT_CLOSED
+        );
+    }
+
+    // Block 33, D1: a runtime shut down closes the client too.
+    #[test]
+    fn a_runtime_shut_down_closes_the_client() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        assert!(!client.is_closed());
+
+        drop(runtime);
+
+        assert!(client.is_closed());
+        assert_eq!(client.close().now_or_never(), Some(()));
+    }
+
     // Block 31, D2: set when connected is seen, cleared otherwise.
     #[test]
     fn connected_since_follows_the_state() {
