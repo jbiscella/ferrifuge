@@ -44,7 +44,10 @@ Available now:
   request, and emulated headers sent in the connect command, which the
   server forwards to its proxies;
 - `set_token`, `set_data` and `set_emulated_headers`, which apply from the
-  next connection attempt;
+  next connection attempt; `set_http_headers`, which applies to every HTTP
+  request started after it, the emulation requests of an open `http_stream`
+  or sse transport included; and `Subscription::set_data`, which applies to
+  the subscription's next subscribe commands;
 - batches (`start_batching`): calls and subscriptions sent together in
   frames of at most `Config::batch_frame_bytes`;
 - server pings: answered with pongs, and a connection whose pings stop is

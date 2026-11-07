@@ -13,6 +13,13 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `Client::set_http_headers` (Block 32): replaces the real HTTP headers,
+  validated as at build, for every HTTP request started after the call:
+  the next attempt's upgrade or stream request, and the emulation requests
+  of an open `http_stream` or sse transport. `Subscription::set_data` and
+  `Input::SetSubscriptionData`: the data of the subscription's next
+  subscribe commands, a data callback still replacing it.
+
 - `Client::statistics` and `Machine::statistics` (Block 31): a
   `Statistics` snapshot of the client's state, transport, connected-since
   time, connects, failed attempts, bytes and messages each way,
