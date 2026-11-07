@@ -2777,7 +2777,10 @@ mod tests {
             if path.extension().is_none_or(|extension| extension != "rs") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).expect("a source file");
+            // Line endings normalised: a Windows checkout has CRLF.
+            let text = std::fs::read_to_string(&path)
+                .expect("a source file")
+                .replace("\r\n", "\n");
             // Code before the test module only.
             let code = text
                 .split("#[cfg(test)]\nmod tests")
