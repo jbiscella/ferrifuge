@@ -1181,6 +1181,39 @@ fn the_data_callback_is_called_again(world: &mut ClientWorld) {
     assert!(delay >= Duration::from_millis(500), "{delay:?}");
 }
 
+#[given(regex = r"^a subscription whose data callback returns (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn a_data_callback_returning(world: &mut ClientWorld, data: String) {
+    world.subscription_machine = Some(MachineRun::new(vec![Ok(data.into_bytes())]));
+}
+
+/// Block 32: on the @E machine when there is one, else on the handle.
+#[when(regex = r"^set_data is called on the subscription with (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn set_data_is_called(world: &mut ClientWorld, data: String) {
+    if let Some(run) = world.subscription_machine.as_mut() {
+        let subscription = run.subscription;
+        run.handle(Input::SetSubscriptionData(subscription, data.into_bytes()));
+        return;
+    }
+    world.subscription().set_data(data.into_bytes());
+}
+
+#[then(regex = r"^the subscribe command carries data (\{.*\})$")]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn the_subscribe_command_carries(world: &mut ClientWorld, data: String) {
+    let run = world.subscription_machine.as_ref().expect("@E machine");
+    let subscribes: Vec<_> = run
+        .sent()
+        .into_iter()
+        .filter(|frame| frame.contains(r#""subscribe""#))
+        .collect();
+    assert_eq!(subscribes.len(), 1, "{subscribes:?}");
+    let command: Value = serde_json::from_str(&subscribes[0]).expect("JSON command");
+    let expected: Value = serde_json::from_str(&data).expect("JSON data");
+    assert_eq!(command["subscribe"]["data"], expected, "{command}");
+}
+
 #[then("the subscribe command carries the data the second call returned")]
 fn the_subscribe_command_carries_the_data(world: &mut ClientWorld) {
     let run = world.subscription_machine.as_ref().expect("@E machine");

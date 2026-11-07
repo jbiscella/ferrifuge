@@ -428,6 +428,12 @@ const IMPLEMENTED: &[&str] = &[
     "Only publications taken count as delivered",
     "Delta statistics count full and delta payloads",
     "Delta statistics stay zero unless delta is on",
+    // Block 32: runtime HTTP headers and subscription data.
+    "set_http_headers applies from the next connection attempt",
+    "set_http_headers applies to the emulation requests of the open transport",
+    "set_http_headers refuses a header the transport sets",
+    "Subscription set_data applies from the next resubscribe",
+    "A subscription data callback takes precedence over set_data",
 ];
 
 /// Server configuration of @A scenarios.

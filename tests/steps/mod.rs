@@ -38,6 +38,7 @@ mod ready;
 mod recovery;
 mod release;
 mod runtime;
+mod runtime_headers;
 mod server_subs;
 mod sleep;
 mod slow;
@@ -185,6 +186,8 @@ pub(crate) struct ClientWorld {
     pub(crate) ready: ready::Ready,
     /// What a Block 31 scenario records.
     pub(crate) stats: statistics::Stats,
+    /// What a Block 32 scenario records.
+    pub(crate) runtime_headers: runtime_headers::RuntimeHeaders,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
