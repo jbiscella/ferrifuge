@@ -57,6 +57,23 @@ pub(crate) enum Inbound {
     Written(FrameId),
 }
 
+/// The message of a failed upgrade, naming a captive portal when its page
+/// answered instead of the server (Block 25, D8).
+fn handshake_error(error: &tokio_tungstenite::tungstenite::Error) -> String {
+    let portal = match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            super::http::captive_portal(response.status().as_u16(), content_type)
+        }
+        _ => false,
+    };
+    super::http::with_portal(error.to_string(), portal)
+}
+
 impl WebSocket {
     /// Opens a connection to `url` (`ws://` or `wss://`), asking for
     /// `subprotocol` if any. A frame not written within `timeout` of being
@@ -100,7 +117,7 @@ impl WebSocket {
             Some(connector),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| handshake_error(&error))?;
         Ok(Self {
             stream,
             queue: VecDeque::new(),
@@ -609,6 +626,58 @@ mod tests {
             "{:?}",
             std::mem::discriminant(&received)
         );
+    }
+
+    /// Answers the next connection's upgrade with `answer`, raw.
+    async fn answer_upgrade(answer: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0; 4096]).await;
+            let _ = socket.write_all(answer).await;
+            let _ = socket.shutdown().await;
+        });
+        format!("ws://{address}/connection/websocket")
+    }
+
+    // Block 25, D8.
+    #[tokio::test]
+    async fn an_upgrade_answered_by_a_web_page_names_a_captive_portal() {
+        let answers: [(&'static [u8], bool); 4] = [
+            (
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 13\r\n\r\n<html></html>",
+                true,
+            ),
+            (
+                b"HTTP/1.1 302 Found\r\nlocation: http://portal.example/\r\ncontent-length: 0\r\n\r\n",
+                true,
+            ),
+            (
+                b"HTTP/1.1 511 Network Authentication Required\r\ncontent-type: text/html\r\ncontent-length: 0\r\n\r\n",
+                true,
+            ),
+            (
+                b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/html\r\ncontent-length: 0\r\n\r\n",
+                false,
+            ),
+        ];
+        for (answer, portal) in answers {
+            let url = answer_upgrade(answer).await;
+
+            let result =
+                WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Network::default()).await;
+
+            let Err(message) = result else {
+                panic!("upgraded on {}", String::from_utf8_lossy(answer));
+            };
+            assert_eq!(
+                message.ends_with(super::super::http::CAPTIVE_PORTAL),
+                portal,
+                "{message}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -675,3 +675,45 @@ async fn never_disconnected(world: &mut ClientWorld) {
         "{later:?}"
     );
 }
+
+#[given(
+    regex = r"^a fake server answering every websocket upgrade with HTTP status (\d+) and an HTML page$"
+)]
+fn a_portal(world: &mut ClientWorld, status: u16) {
+    world
+        .fake
+        .as_ref()
+        .expect("this step needs the fake server: tag the scenario @D")
+        .answer_upgrades_as_a_portal(status);
+}
+
+#[then(
+    regex = r#"^the client emits an "error" event for the failed transport attempt whose message ends with "([^"]+)"$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn a_portal_error(world: &mut ClientWorld, ending: String) {
+    let connecting = world.next_event().await;
+    assert!(
+        matches!(connecting, ClientEvent::Connecting { .. }),
+        "{connecting:?}"
+    );
+    let event = world.next_event().await;
+    let ClientEvent::Error(error) = &event else {
+        panic!("{event:?}");
+    };
+    assert!(error.message.ends_with(&ending), "{event:?}");
+}
+
+#[then("the client makes another connection attempt")]
+async fn another_attempt(world: &mut ClientWorld) {
+    let fake = world.fake.as_ref().expect("the fake server");
+    let deadline = tokio::time::Instant::now() + super::EVENT_TIMEOUT;
+    while fake.portal_answers() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no second attempt within {:?}",
+            super::EVENT_TIMEOUT
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

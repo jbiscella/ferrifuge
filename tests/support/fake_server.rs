@@ -75,6 +75,11 @@ struct State {
     connections: usize,
     /// Connections whose end the server has seen.
     closed: usize,
+    /// Answers every websocket upgrade with this HTTP status and a web
+    /// page, as a captive portal does (Block 25, D8).
+    portal_status: Option<u16>,
+    /// Upgrades answered so.
+    portal_answers: usize,
     /// Every JSON message received from clients, in order.
     received: Vec<Value>,
     /// The frame each message of `received` arrived in, numbered from 0
@@ -196,6 +201,16 @@ impl FakeServer {
                 // Replies go out at once rather than waiting on the
                 // client's delayed acknowledgement (Nagle's algorithm).
                 let _ = tcp.set_nodelay(true);
+                // Written on the stream itself: tungstenite's server
+                // refuses a 2xx error response.
+                let portal = {
+                    let mut state = shared.lock().unwrap();
+                    state.portal_status.inspect(|_| state.portal_answers += 1)
+                };
+                if let Some(status) = portal {
+                    tokio::spawn(answer_as_a_portal(tcp, status));
+                    continue;
+                }
                 let mut protobuf = false;
                 // The callback's error type is tungstenite's, not ours.
                 #[allow(clippy::result_large_err)]
@@ -382,6 +397,17 @@ impl FakeServer {
     /// Connections accepted so far.
     pub(crate) fn connections(&self) -> usize {
         self.state.lock().unwrap().connections
+    }
+
+    /// Answers every websocket upgrade from now on with `status` and a web
+    /// page, as a captive portal does.
+    pub(crate) fn answer_upgrades_as_a_portal(&self, status: u16) {
+        self.state.lock().unwrap().portal_status = Some(status);
+    }
+
+    /// Upgrades answered as a captive portal so far.
+    pub(crate) fn portal_answers(&self) -> usize {
+        self.state.lock().unwrap().portal_answers
     }
 
     /// Connections whose end the server has seen so far.
@@ -1042,4 +1068,36 @@ fn from_history(state: &State, channel: &str, subscribe: &Value) -> Value {
         result["publications"] = json!(publications);
     }
     result
+}
+
+/// Reads the upgrade request on `tcp` and answers it with `status` and a
+/// sign-in page, then closes.
+async fn answer_as_a_portal(mut tcp: tokio::net::TcpStream, status: u16) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut request = Vec::new();
+    let mut buffer = [0; 4096];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        match tcp.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&buffer[..read]),
+        }
+    }
+    let reason = match status {
+        200 => "OK",
+        302 => "Found",
+        511 => "Network Authentication Required",
+        _ => "Portal",
+    };
+    let page = "<html><body>Sign in to use this network</body></html>";
+    let location = if (300..400).contains(&status) {
+        "location: http://portal.example/login\r\n"
+    } else {
+        ""
+    };
+    let answer = format!(
+        "HTTP/1.1 {status} {reason}\r\n{location}content-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
+        page.len()
+    );
+    let _ = tcp.write_all(answer.as_bytes()).await;
+    let _ = tcp.shutdown().await;
 }

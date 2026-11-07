@@ -719,6 +719,13 @@ next connection recovers what the old one had not delivered. A disconnected
 client stays disconnected: `connect()` starts it. To fail waiting calls
 instead, call `disconnect()`, then `connect()`.
 
+A network behind a captive portal answers the client's attempts with its
+sign-in page. Such an attempt fails like any other, retried after the
+backoff, and its `error` event's message ends with "; a captive portal may
+be answering": a redirect, HTTP 511, or a web page served as a success, in
+place of the websocket upgrade, the HTTP stream or the event stream. An app
+can tell its user to sign in to the network.
+
 ### Logging
 
 The tokio adapter logs through [`tracing`](https://docs.rs/tracing); the
