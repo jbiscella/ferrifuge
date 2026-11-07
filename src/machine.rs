@@ -1450,10 +1450,28 @@ impl Machine {
             // proves the transport (centrifuge-js `onOpen`).
             return;
         }
+        // A refresh came due while it opened, e.g. during a sleep: the
+        // connect waits on it for a new token, within the connect timeout
+        // (Block 25, D3).
+        if self.tokens.before_connect() == BeforeConnect::Fetch {
+            self.fetch_token(FetchPurpose::Connect);
+            return;
+        }
         // Open is not enough to keep a websocket: a server answer is (see
         // `server_answered`), so one that never answers falls back.
         let command = self.connect_command();
         self.send(transport, command);
+    }
+
+    /// The websocket that opened and waits for a token to send its connect
+    /// command (see `transport_opened`).
+    fn awaiting_token(&self) -> Option<TransportId> {
+        self.transport.filter(|_| {
+            self.state == State::Connecting
+                && self.transport_open
+                && self.connect_command.is_none()
+                && !self.transport_kind().is_emulated()
+        })
     }
 
     /// A new connect command, now the one awaiting its reply.
@@ -1975,7 +1993,10 @@ impl Machine {
                 self.tokens.store(token, purpose);
                 match purpose {
                     FetchPurpose::Connect => {
-                        if self.state == State::Connecting && self.transport.is_none() {
+                        if let Some(transport) = self.awaiting_token() {
+                            let command = self.connect_command();
+                            self.send(transport, command);
+                        } else if self.state == State::Connecting && self.transport.is_none() {
                             self.token_ready();
                         }
                     }
@@ -1991,8 +2012,13 @@ impl Machine {
                         message,
                         transport: None,
                     }));
-                    let delay = self.backoff.next_delay(&mut self.rng);
-                    self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                    if self.awaiting_token().is_some() {
+                        // The open websocket is closed as the attempt ends.
+                        self.reconnect_after_transport_closed();
+                    } else {
+                        let delay = self.backoff.next_delay(&mut self.rng);
+                        self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                    }
                 }
                 // Reconnecting: the next connection gets its own refresh timer.
                 FetchPurpose::Refresh if self.state != State::Connected => {}
@@ -2213,6 +2239,78 @@ mod tests {
             transport,
             data: json.as_bytes().to_vec(),
         }
+    }
+
+    // Codex, #120: the refresh came due while the websocket opened.
+    #[test]
+    fn a_refresh_due_while_the_websocket_opens_fetches_a_token_for_its_connect() {
+        let (mut machine, transport, _) = connected_with_token(60);
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.handle(Input::TimerFired(Timer::Refresh));
+
+        let opened = machine.handle(Input::TransportOpened(transport));
+        let fetch = fetch_requested(&opened);
+        let connecting = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+
+        assert!(
+            !opened
+                .iter()
+                .any(|action| matches!(action, Action::Send { .. })),
+            "{opened:?}"
+        );
+        let sent: Vec<String> = connecting
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send {
+                    transport: on,
+                    frame,
+                    ..
+                } if *on == transport => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sent.iter().any(|frame| frame.contains(r#""token":"t1""#)),
+            "{connecting:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_token_for_an_open_websocket_closes_it_and_retries_later() {
+        let (mut machine, transport, _) = connected_with_token(60);
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.handle(Input::TimerFired(Timer::Refresh));
+        let fetch = fetch_requested(&machine.handle(Input::TransportOpened(transport)));
+
+        let failed = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Err(TokenError::Failed("unavailable".into())),
+        });
+
+        assert!(
+            failed.contains(&Action::CloseTransport(transport)),
+            "{failed:?}"
+        );
+        assert!(
+            failed
+                .iter()
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+            "{failed:?}"
+        );
+        assert_eq!(machine.state(), State::Connecting);
     }
 
     // Codex, #120: the refresh came due while the connect data callback
