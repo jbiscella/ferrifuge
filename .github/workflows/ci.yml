@@ -391,6 +391,13 @@ jobs:
           cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests --no-default-features --features tokio,aws-lc-rs -- -D warnings
           cargo ndk --target arm64-v8a --platform 22 test --lib --no-run --no-default-features --features tokio,aws-lc-rs
 
+      # ferrifuge::android is documented for Android only: the host's
+      # rustdoc never sees it (Block 24, D6).
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo ndk --target arm64-v8a --platform 22 doc --no-deps
+
   ios:
     runs-on: macos-latest
     timeout-minutes: 30
