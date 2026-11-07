@@ -299,8 +299,10 @@ fn is_event_stream(content_type: &str) -> bool {
 /// `subty`, whatever their case and parameters (Block 27, D4: mediatype,
 /// RFC 9110 section 8.3); a value that does not parse is neither.
 fn is_media_type(content_type: &str, ty: Name<'_>, subty: Name<'_>) -> bool {
-    MediaType::parse(content_type.trim())
-        .is_ok_and(|media_type| media_type.ty == ty && media_type.subty == subty)
+    MediaType::parse(content_type.trim()).is_ok_and(|media_type| {
+        // `text/event-stream+json` is another media type (Codex, #127).
+        media_type.ty == ty && media_type.subty == subty && media_type.suffix.is_none()
+    })
 }
 
 /// The message of a failed request, without its URL, which may carry the
@@ -640,6 +642,9 @@ mod tests {
         assert!(!is_event_stream("text/event-stream; charset"));
         assert!(captive_portal(200, "Text/HTML; charset=iso-8859-1"));
         assert!(!captive_portal(200, "not a media type"));
+        // A structured suffix makes another media type (Codex, #127).
+        assert!(!is_event_stream("text/event-stream+json"));
+        assert!(!captive_portal(200, "text/html+json"));
     }
 
     #[test]
