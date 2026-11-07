@@ -1696,6 +1696,83 @@ mod tests {
         }
     }
 
+    /// A subscription with a token callback, subscribed over `transport`
+    /// with a token whose refresh is scheduled, then the transport lost
+    /// with a reconnect-advised code: the actions of the loss.
+    fn token_subscription_lost() -> (Machine, SubscriptionId, Vec<Action>) {
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t1".into())
+                .token_source(),
+        );
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        let lost = machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3001),
+            reason: "closed by the test".into(),
+        });
+        (machine, id, lost)
+    }
+
+    fn cancels_refresh(actions: &[Action], id: SubscriptionId) -> bool {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::CancelSubscriptionTimer(of, SubscriptionTimer::Refresh) if *of == id
+            )
+        })
+    }
+
+    // Block 25, D3: a sleep during the reconnect still finds the timer.
+    #[test]
+    fn a_reconnect_keeps_the_subscription_refresh_timer() {
+        let (_, id, lost) = token_subscription_lost();
+
+        assert!(!cancels_refresh(&lost, id), "{lost:?}");
+    }
+
+    #[test]
+    fn a_refresh_due_while_resubscribing_fetches_a_token_before_the_subscribe() {
+        let (mut machine, id, _) = token_subscription_lost();
+        machine.handle(Input::SubscriptionTimerFired(
+            id,
+            SubscriptionTimer::Refresh,
+        ));
+        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let transport = opened(&attempt).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+
+        let resubscribing =
+            machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        // The token "t1" may have expired: none is sent with it.
+        assert!(sent(&resubscribing).is_empty(), "{resubscribing:?}");
+        assert!(
+            resubscribing.iter().any(|action| matches!(
+                action,
+                Action::FetchSubscriptionToken { subscription, .. } if *subscription == id
+            )),
+            "{resubscribing:?}"
+        );
+    }
+
+    #[test]
+    fn a_subscribe_reply_without_expiry_cancels_the_kept_refresh() {
+        let (mut machine, id, _) = token_subscription_lost();
+        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let transport = opened(&attempt).expect("a reconnect attempt");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+
+        let subscribed = machine.handle(reply(transport, r#"{"id":4,"subscribe":{}}"#));
+
+        assert!(cancels_refresh(&subscribed, id), "{subscribed:?}");
+    }
+
     #[test]
     fn a_state_invalidated_disconnect_keeps_a_sentinel_position() {
         let (mut machine, transport, id) = connected();
