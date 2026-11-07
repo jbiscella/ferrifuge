@@ -523,7 +523,11 @@ fn holds_trace_records(world: &mut ClientWorld) {
 
 #[then("no record contains any of those secrets, as text or as the Debug list of its bytes")]
 fn no_record_contains_the_secrets(world: &mut ClientWorld) {
-    assert_eq!(world.logging.secrets.len(), 10, "the secrets of the scenario");
+    assert_eq!(
+        world.logging.secrets.len(),
+        10,
+        "the secrets of the scenario"
+    );
     no_record_shows(&world.logging.secrets);
 }
 
