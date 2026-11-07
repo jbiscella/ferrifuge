@@ -116,6 +116,9 @@ pub(super) struct Core {
     pub(super) refreshes: Refreshes,
     /// The timers set and not cancelled, to drop a stale firing.
     pub(super) armed: Armed,
+    /// When the client was seen to become connected, while it is (Block
+    /// 31, D2).
+    pub(super) connected_since: Option<SystemTime>,
 }
 
 impl Core {
@@ -531,6 +534,10 @@ impl Shared {
         }
         // On the states, not the events taken (Block 30, D4).
         ready::settle(core, &mut lock(&self.ready));
+        let connected = core.machine.state() == State::Connected;
+        if connected != core.connected_since.is_some() {
+            core.connected_since = connected.then(SystemTime::now);
+        }
     }
 
     fn next_action(&self) -> Option<Action> {
@@ -1062,6 +1069,7 @@ impl Client {
                 clock: Clock::default(),
                 refreshes: Refreshes::default(),
                 armed: Armed::default(),
+                connected_since: None,
             }),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
@@ -1127,6 +1135,24 @@ impl Client {
     #[must_use]
     pub fn state(&self) -> State {
         lock(&self.shared.core).machine.state()
+    }
+
+    /// A snapshot of the client's connection and traffic counters since it
+    /// was built (Block 31), never a round trip. A closed client keeps its
+    /// last counters.
+    ///
+    /// ```no_run
+    /// # fn run(client: &ferrifuge::Client) {
+    /// let statistics = client.statistics();
+    /// println!("{:?} over {:?}", statistics.state, statistics.transport);
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn statistics(&self) -> crate::Statistics {
+        let core = lock(&self.shared.core);
+        let mut statistics = core.machine.statistics();
+        statistics.connected_since = core.connected_since;
+        statistics
     }
 
     /// Waits until the client is connected, without taking an event from
@@ -2813,6 +2839,70 @@ mod tests {
         assert_eq!(failed.code, codes::error::DISCONNECTED);
         drop(client);
         drop(runtime);
+    }
+
+    // Block 31, D2: set when connected is seen, cleared otherwise.
+    #[test]
+    fn connected_since_follows_the_state() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        assert_eq!(client.statistics().connected_since, None);
+
+        let before = SystemTime::now();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c"}}"#);
+        drop(core);
+        let after = SystemTime::now();
+        let first = client.statistics().connected_since.expect("connected");
+        assert!(before <= first && first <= after);
+
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        shared.handle(
+            &mut core,
+            Input::TransportClosed {
+                transport,
+                code: None,
+                reason: String::new(),
+            },
+        );
+        drop(core);
+        assert_eq!(client.statistics().connected_since, None);
+
+        client.disconnect();
+        assert_eq!(client.statistics().connected_since, None);
+        assert_eq!(client.statistics().connects, 1);
+    }
+
+    // Block 31, D2: a closed client, its core lock poisoned too, keeps its
+    // counters.
+    #[test]
+    fn a_closed_client_keeps_its_counters() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        drop(connected_core(
+            &client,
+            r#"{"id":1,"connect":{"client":"c"}}"#,
+        ));
+        let shared = Arc::clone(client.shared());
+
+        drop(runtime);
+        let poisoned = std::thread::spawn(move || {
+            let _core = shared.core.lock().unwrap();
+            panic!("poisons the core lock");
+        })
+        .join();
+
+        assert!(poisoned.is_err());
+        let statistics = client.statistics();
+        assert_eq!(statistics.connects, 1);
+        assert_eq!(statistics.state, State::Disconnected);
     }
 
     #[test]

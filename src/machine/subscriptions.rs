@@ -86,6 +86,8 @@ struct Subscription {
     recover: bool,
     /// Delta compression as the last subscribe reply set it.
     delta: DeltaChain,
+    /// What delta did since the subscription was created (Block 31).
+    delta_statistics: crate::DeltaStatistics,
 }
 
 /// Whether a subscribe reply turned delta on (Block 19, D4), and what the
@@ -219,6 +221,7 @@ impl Machine {
                 position,
                 recover,
                 delta: DeltaChain::Off,
+                delta_statistics: crate::DeltaStatistics::default(),
             },
         );
         Ok(id)
@@ -249,6 +252,21 @@ impl Machine {
             .iter()
             .map(|(id, sub)| (*id, sub.channel.clone()))
             .collect()
+    }
+
+    /// How many subscriptions the registry holds (Block 31).
+    pub(super) fn subscription_count(&self) -> usize {
+        self.subscriptions.by_id.len()
+    }
+
+    /// What delta compression did on subscription `id` since it was
+    /// created (Block 31, D3); `None` for an id not in the registry.
+    #[must_use]
+    pub fn delta_statistics(&self, id: SubscriptionId) -> Option<crate::DeltaStatistics> {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .map(|sub| sub.delta_statistics)
     }
 
     /// `subscribe()` was called.
@@ -981,12 +999,17 @@ impl Machine {
         let payload = codec
             .delta_payload(std::mem::take(&mut publication.data))
             .ok_or(DeltaError::NotAString)?;
+        let received = payload.len();
         let data = if publication.delta {
             let base = base.as_deref().ok_or(DeltaError::NoBase)?;
             fossil::apply(base, &payload, limit)?
         } else {
             payload
         };
+        // As carried and as rebuilt, a failed delta not counted (Block 31,
+        // D3).
+        sub.delta_statistics
+            .count(publication.delta, received, data.len());
         *base = Some(data.clone());
         publication.data = data;
         publication.delta = false;

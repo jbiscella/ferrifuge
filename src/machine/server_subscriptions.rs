@@ -37,6 +37,11 @@ struct ServerSubscription {
 }
 
 impl Machine {
+    /// How many server-side subscriptions the registry holds (Block 31).
+    pub(super) fn server_subscription_count(&self) -> usize {
+        self.server_subscriptions.by_channel.len()
+    }
+
     /// The channels of the server-side subscriptions in the registry, in
     /// channel order.
     #[must_use]
