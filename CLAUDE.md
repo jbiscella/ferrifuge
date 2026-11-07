@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–21 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–22 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -72,6 +72,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 16, out of scope; "Planned after Block 13" | trace replay "optional, later" | same (item 20) | 42 |
 | "Planned after Block 19" | items 17, 20, 24 not adopted | same | 41–43 |
 | Block 17, out of scope | a cookie jar | same (item 24) | 43 |
+| Block 6, out of scope | custom root certificates | owner, 2026-11-06 (item 2) | 22 |
 
 ### Test layers
 
@@ -424,7 +425,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 **Dependencies:** Block 1 (websocket transport).
 
-**Out of scope:** client certificates; custom root certificates; HTTPS, which uses the same configuration once Block 8 adds it.
+**Out of scope:** client certificates; custom root certificates (reversed by the owner decision of 2026-11-06: Block 22); HTTPS, which uses the same configuration once Block 8 adds it.
 
 **Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). aws-lc-rs is not pinned (owner decision, Block 6 implementation): from 1.18 its `fips` feature builds AWS-LC-FIPS 4.x, submitted to NIST but not yet certified, while 1.17.x ships the FIPS 140-3 validated 3.x module (CMVP certificates #5314 static, #5298 dynamic), but pinning `<1.18` forces rustls `<= 0.23.43` and rustls-webpki `< 0.103.16` on every build (rustls 0.23.44+ and rustls-webpki 0.103.16 require aws-lc-rs 1.18), and those carry RUSTSEC-2026-0285 and RUSTSEC-2026-0346, fixed in rustls 0.23.45 and 0.23.46 only; a FIPS build therefore uses the 4.x module, and the README states that its certification is pending; revisit when 4.x is certified (the module check below then needs no change) or if rustls supports aws-lc-rs 1.17 again. The supported operating environments are those of the module's security policy. Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
 
@@ -3315,3 +3316,104 @@ Feature: Logging
 The secrets are distinct random strings per scenario, so a match cannot be a coincidence of the scenario's text or of another scenario's. "Says" in a Then step means the record's fields (D3), not the wording of its message. The fake server gains an RPC mode answering with the data it received. The @E scenarios are unit tests of the machine.
 
 **Exceptions introduced:** `tests/log_facade.rs` runs outside cucumber (D7): once a process sets a `tracing` dispatcher, `tracing` sends nothing more to `log`, so the facade check needs its own binary.
+
+---
+
+## Block 22 — Platform TLS verifier, extra roots, raw rustls configuration
+
+**Goal:** a client trusts what the operating system trusts, and the private certificate authorities the application gives it, and an application can give its own TLS configuration, so that it connects through corporate TLS inspection and private PKI without turning verification off (parity item 2; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art).
+
+**Dependencies:** Blocks 6 (crypto provider, the one-place TLS build, review item C7), 8 (HTTPS for http_stream and sse), 17 (`ClientBuilder`), 20 (changelog), 21 (redacting `Debug`, the dependencies' records).
+
+**Out of scope:**
+- Android: the platform verifier there needs the application to initialise it through JNI (rustls-platform-verifier 0.7.1 `src/android.rs:90` panics otherwise) and takes no extra roots; Block 24 (item 3) decides Android's verifier. Until then Android keeps today's path, extra roots included;
+- a switch accepting invalid certificates: not offered (the analysis, item 2); the raw configuration covers development needs;
+- client certificates (mutual TLS): the raw configuration carries them; no dedicated API;
+- certificate pinning, revocation settings: the raw configuration, or the operating system's own;
+- proxies (Block 23).
+
+This block reverses Block 6's exclusion of custom root certificates; Block 0's "Reversed exclusions" gains the row | Block 6, out of scope | custom root certificates | owner, 2026-11-06 (item 2) | 22 |.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Verifier per build and platform.** Chosen in one function, Block 6's one-place TLS build.
+  - ring and aws-lc-rs builds on macOS, iOS and Windows: `rustls-platform-verifier` 0.7.1, given the build's crypto provider (it forces none). The operating system makes the trust decision: its store, its distrust settings, name constraints, revocation and intermediate fetching as it does them. `SSL_CERT_FILE` and `SSL_CERT_DIR` are no longer read there (rustls-native-certs 0.8.5 `lib.rs:118-124` reads them on every platform today).
+  - Linux and the other Unix systems but Apple and Android: webpki over `rustls-native-certs`, built by Ferrifuge as today, with the extra roots added. The platform verifier there is the same verification (0.7.1 `src/verification/others.rs:85-111`), but it only logs a root read's errors (`:98-100`), so its caller cannot tell an errored read from a complete one and C7 could not hold.
+  - The fips build, on every platform: webpki over the platform's root certificates and the extra roots, as today. The platform verifier checks chains inside the operating system, outside the AWS-LC FIPS module, while `ClientConfig::fips()` would still report true (rustls 0.23.46 `client_conn.rs:396-409`) (plan "Planned after Block 19").
+  - On the webpki path, a read finding no platform certificate builds with the extra roots alone (as `others.rs:102-107`); with none, it fails as today.
+- **D2 Extra root certificates.** `ClientBuilder::root_certificates(roots)`, `roots` an `IntoIterator<Item = rustls::pki_types::CertificateDer<'static>>`, adding to earlier calls as `http_headers` does: the shape of reqwest 0.13.5 `tls_certs_merge`, tonic's `trust_anchors` and the platform verifier's `new_with_extra_roots`; no Ferrifuge certificate type, since rustls is public (D3). The documentation shows PEM parsing with `rustls::pki_types::pem::PemObject::pem_slice_iter`. They are trusted in addition to the platform's, on every platform and build. `build()` checks each with webpki and fails with a configuration error naming the first that does not parse by its index. An empty list is no extra roots.
+- **D3 Raw configuration.** `ClientBuilder::tls_config(Arc<rustls::ClientConfig>)` (tokio-tungstenite's `Connector::Rustls`, rumqttc): used for `wss://` and every `https://` request of http_stream and sse, with no root, provider or verifier of Ferrifuge's. Ferrifuge only sets the ALPN list of its copy to `http/1.1`, as its transports speak HTTP/1.1 only and a configuration offering `h2` would fail them (hyper-rustls rewrites ALPN the same way). `ferrifuge::rustls` re-exports rustls (as tokio-rustls does). Public, not behind a semver-exempt feature (plan). `build()` fails with a configuration error when both `tls_config` and extra roots are given, naming both, and, in the fips build, when the configuration's `fips()` is false. The verifier of a raw configuration is the application's: the README says so for the fips build.
+- **D4 Sharing and C7.** A client without extra roots or a raw configuration keeps the process-wide TLS settings and HTTP clients of Blocks 6 and 8. A client with extra roots builds its own at its first secure attempt, with C7's rules where roots are read (a failed build is not kept; a read with errors serves the attempt and is read again next time); on the webpki path it holds its own root store, so the README tells an application with many clients to give them one raw configuration. A raw configuration is shared as given; its HTTP clients are built once per client, a failed build not kept. The Block 14 @P gates pass unchanged.
+- **D5 Logging.** `ClientBuilder`'s `Debug` shows the number of extra roots and whether a raw configuration is set, never their content (Block 21, D5). The README's list of dependencies logging on their own (Block 21, D6) adds rustls-platform-verifier: each failed verification at ERROR through `log`, with no secret.
+- **D6 Version and changelog.** 0.14.0: verification on macOS, iOS and Windows changes, and rustls 0.23 enters the public API. `Unreleased` entries: "Added" `root_certificates`, `tls_config`, `ferrifuge::rustls`; "Changed" the operating system's verifier on macOS, iOS and Windows, where `SSL_CERT_FILE` and `SSL_CERT_DIR` are no longer read. The README states that moving to another rustls 0.x line is a breaking release of Ferrifuge, and where `SSL_CERT_FILE` still applies.
+
+Value clause: As an app developer whose clients run behind corporate TLS inspection or on a private PKI, I want the client to trust what the operating system trusts and the certificate authorities I give it, and to supply my own TLS configuration when I need more, so that it connects without my turning certificate verification off.
+
+**Structural acceptance:** the verifier is chosen in one function; `rustls-platform-verifier` is a direct dependency at reqwest's version, named only there (`cargo tree -d` shows one copy); a unit test per build reports the verifier kind: platform on macOS and Windows, webpki on Linux and in the fips build, with `fips() == true` there; a unit test runs the chosen verifier on a chain from the second test CA: accepted with that CA as an extra root, refused as an unknown issuer without; a unit test checks that the copies of a raw configuration the transports use offer ALPN `http/1.1` only; in the fips build, a unit test checks that a raw configuration with `require_ems` false fails `build()`; the `test` job runs these on Linux, `providers` in the aws-lc-rs and fips builds, `portability` on macOS and Windows.
+
+`VERIFY:` that the second test CA's chain (serverAuth EKU, a SAN, validity under 398 days) passes Apple's and Windows' checks on the runners; that Centrifugo offers `h2` over TLS, so the raw configuration's ALPN in the scenario matters.
+
+```gherkin
+Feature: TLS verification
+
+  @A
+  Scenario: A private certificate authority given as an extra root is trusted
+    Given a server serving TLS with a certificate from a private CA the platform does not trust
+    And a client configured with the server's wss endpoint and that CA as an extra root certificate
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected"
+
+  @A
+  Scenario: A server whose CA is not trusted is refused
+    Given a server serving TLS with a certificate from a private CA the platform does not trust
+    And a client configured with the server's wss endpoint and no extra root certificate
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt, saying the server's certificate is not trusted
+    And the client state is "connecting"
+
+  @A
+  Scenario Outline: Extra roots also apply to HTTPS transports
+    Given a server serving TLS with a certificate from a private CA the platform does not trust, with http_stream and sse enabled
+    And a client configured with an unreachable websocket endpoint, only the server's https <transport> endpoint, and that CA as an extra root certificate
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  @A
+  Scenario Outline: A raw rustls configuration is used as given
+    Given a server serving TLS with a certificate from a private CA the platform does not trust, with http_stream and sse enabled
+    And a client configured with only the server's <transport> endpoint and a raw rustls configuration trusting only that CA, offering ALPN "h2" and "http/1.1"
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+
+    Examples:
+      | transport   |
+      | websocket   |
+      | http_stream |
+
+  @A
+  Scenario: A raw rustls configuration replaces the platform's trust
+    Given a server serving TLS with a certificate from the test CA
+    And a client configured with the server's wss endpoint and a raw rustls configuration trusting only a private CA the platform does not trust
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt, saying the server's certificate is not trusted
+    And the client state is "connecting"
+
+  Scenario: Extra roots and a raw configuration together are rejected
+    Given client options with an extra root certificate and a raw rustls configuration
+    When the client is built
+    Then building fails with a configuration error naming both
+
+  Scenario: An extra root that does not parse is rejected
+    Given client options with a valid extra root certificate followed by one whose bytes are not a certificate
+    When the client is built
+    Then building fails with a configuration error naming extra root certificate 1
+```
+
+The private CA is a second test CA, never in `SSL_CERT_FILE`, so the platform does not trust it on the Linux runners; the second scenario guards the first three by showing that, the fifth shows that a raw configuration does not fall back to Ferrifuge's settings. "Not trusted" in a Then step means the error names rustls's invalid peer certificate. The scenarios' raw configurations are built with the build's provider, so they pass the fips check.
+
+**Exceptions introduced:** the trust decisions of macOS and Windows (distrust, revocation, intermediate fetching) are the operating system's and are not scenarios: the @A scenarios run on Linux only (Docker), where the verifier is webpki; on macOS and Windows the unit tests of the structural acceptance check that the platform verifier is chosen, trusts an extra root and refuses an unknown issuer. The fips rejection of a non-FIPS raw configuration is a unit test of the fips build.
