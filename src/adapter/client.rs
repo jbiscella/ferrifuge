@@ -1802,9 +1802,12 @@ fn android_gate(
         })
     };
     let emulated = endpoints.iter().any(|(kind, _)| kind.is_emulated());
-    let needed = endpoints.iter().any(|(_, url)| secure(url))
-        || (emulated && emulation_endpoint.is_some_and(secure))
-        || proxy.is_https_for_all();
+    let emulation = emulation_endpoint.filter(|_| emulated);
+    let needed = endpoints
+        .iter()
+        .map(|(_, url)| url.as_str())
+        .chain(emulation)
+        .any(|url| secure(url) || proxy.is_https_proxy_for(url));
     if !needed {
         return Ok(());
     }
@@ -2134,6 +2137,21 @@ mod tests {
                 "{endpoints:?} {emulation:?}: {gated:?}"
             );
         }
+    }
+
+    /// A no-proxy list excluding every endpoint leaves them direct, with no
+    /// verifier needed (Codex, #118).
+    #[test]
+    fn android_accepts_endpoints_an_https_proxy_excludes_before_the_setup() {
+        let proxy =
+            Proxy::all(crate::ProxyTarget::new("https://proxy.example:3128").expect("a proxy"))
+                .no_proxy("*");
+        let plain = [(
+            TransportKind::WebSocket,
+            "ws://example.com/connection/websocket".to_owned(),
+        )];
+
+        assert!(android_gate(true, &Trust::Platform, &plain, None, &proxy).is_ok());
     }
 
     #[test]
