@@ -140,6 +140,9 @@ bolero = "0.13.7"
 time = { version = "0.3.47", default-features = false, features = ["std"] }
 # The TLS listener of the https:// test proxy (Block 23).
 tokio-rustls = { version = "0.26.6", default-features = false }
+# Awaits a ready() future outside any runtime (Block 30, D5); already in
+# the lock file, from the project of futures-core and futures-util.
+futures-executor = { version = "0.3.34", default-features = false, features = ["std"] }
 # The log capture of the Block 21 scenarios and of tests/log_facade.rs.
 log = { version = "0.4.35", features = ["std"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
