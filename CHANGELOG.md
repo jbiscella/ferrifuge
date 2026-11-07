@@ -5,11 +5,28 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-Versions up to 0.13.0 were never published: each section records what the
+Versions up to 0.14.0 were never published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-11-07
+
+### Added
+
+- TLS verification (Block 22): `ClientBuilder::root_certificates` trusts
+  extra certificate authorities in addition to the platform's;
+  `ClientBuilder::tls_config` takes a whole `rustls::ClientConfig`, used as
+  given but for its ALPN list (`http/1.1`); `ferrifuge::rustls` re-exports
+  rustls, which is now part of the public API.
+
+### Changed
+
+- On macOS, iOS and Windows, the ring and aws-lc-rs builds verify servers
+  with the operating system's verifier (`rustls-platform-verifier`), so
+  `SSL_CERT_FILE` and `SSL_CERT_DIR` are no longer read there. Linux and
+  the fips build keep webpki over the system's root certificates.
 
 ## [0.13.0] - 2026-11-07
 
