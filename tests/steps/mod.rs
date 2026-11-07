@@ -29,6 +29,7 @@ mod connection;
 mod delivery;
 mod delta;
 mod jitter;
+mod logging;
 mod ping;
 mod protobuf;
 mod recovery;
@@ -164,6 +165,7 @@ pub(crate) struct ClientWorld {
     pub(crate) batching: batching::Batching,
     pub(crate) delta: delta::Delta,
     pub(crate) release: release::Release,
+    pub(crate) logging: logging::Logging,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

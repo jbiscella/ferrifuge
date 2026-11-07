@@ -22,7 +22,7 @@ use super::ClientWorld;
 #[derive(Default)]
 pub(crate) struct Batching {
     /// The sans-IO core of an @E scenario.
-    run: Option<BatchRun>,
+    pub(super) run: Option<BatchRun>,
     /// The open batches of a @D scenario, by name ("" for the only one).
     batches: BTreeMap<String, Batch>,
     /// Calls of a @D or @B scenario, in the order they were made, each
@@ -43,16 +43,16 @@ enum Key {
 /// A connected machine on a simulated clock.
 pub(crate) struct BatchRun {
     machine: Machine,
-    transport: Option<TransportId>,
+    pub(super) transport: Option<TransportId>,
     now: Duration,
     timers: Vec<(Duration, Key)>,
     /// Every action, in order.
-    actions: Vec<Action>,
+    pub(super) actions: Vec<Action>,
     /// Where the actions of the current batch start.
     mark: usize,
     /// Calls by name, in the order they were made.
     calls: Vec<(String, CallId)>,
-    settled: BTreeMap<CallId, Result<CallReply, CallError>>,
+    pub(super) settled: BTreeMap<CallId, Result<CallReply, CallError>>,
     subscriptions: Vec<SubscriptionId>,
     /// Transports closed so far.
     closed: Vec<TransportId>,
@@ -79,7 +79,7 @@ impl BatchRun {
         }
     }
 
-    fn handle(&mut self, input: Input) {
+    pub(super) fn handle(&mut self, input: Input) {
         for action in self.machine.handle(input) {
             match &action {
                 Action::OpenTransport { transport, .. } => self.transport = Some(*transport),
@@ -166,7 +166,7 @@ impl BatchRun {
     }
 
     /// The frames sent after action `from`, each with its commands.
-    fn frames_since(&self, from: usize) -> Vec<(TransportId, Vec<Value>)> {
+    pub(super) fn frames_since(&self, from: usize) -> Vec<(TransportId, Vec<Value>)> {
         self.actions[from..]
             .iter()
             .filter_map(|action| match action {
@@ -190,7 +190,7 @@ impl BatchRun {
         id
     }
 
-    fn rpc(&mut self, name: &str) -> CallId {
+    pub(super) fn rpc(&mut self, name: &str) -> CallId {
         self.call(
             name,
             CallRequest::Rpc {
@@ -227,14 +227,14 @@ fn commands_of(frame: &[u8]) -> Vec<Value> {
     }
 }
 
-fn connected_run(config: Config) -> BatchRun {
+pub(super) fn connected_run(config: Config) -> BatchRun {
     let mut run = BatchRun::new(config, false);
     run.handle(Input::Connect);
     run.connect(&json!({"client": "c"}));
     run
 }
 
-fn run(world: &mut ClientWorld) -> &mut BatchRun {
+pub(super) fn run(world: &mut ClientWorld) -> &mut BatchRun {
     world
         .batching
         .run

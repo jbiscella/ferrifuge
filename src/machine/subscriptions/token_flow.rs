@@ -254,7 +254,7 @@ impl Machine {
                 }
             }
             // A reply to sub_refresh without its result breaks the protocol.
-            (None, _) => self.reconnect_after_transport_closed(),
+            (None, _) => self.reply_without_result("sub_refresh"),
         }
     }
 

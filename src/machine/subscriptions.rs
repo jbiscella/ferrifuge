@@ -730,7 +730,7 @@ impl Machine {
                 self.subscription_calls_subscribed(id);
             }
             // A reply to subscribe without its result breaks the protocol.
-            (None, _) => self.reconnect_after_transport_closed(),
+            (None, _) => self.reply_without_result("subscribe"),
         }
     }
 

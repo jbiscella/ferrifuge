@@ -577,9 +577,10 @@ impl Machine {
                     num_users: stats.num_users,
                 }))
             }
-            (None, _, _) => {
+            (None, request, _) => {
+                let command = command_name(request);
                 self.settle_call(id, Err(connection_closed()));
-                self.reconnect_after_transport_closed();
+                self.reply_without_result(command);
                 return;
             }
         };
@@ -674,6 +675,18 @@ fn subscription_unsubscribed() -> CallError {
         codes::error::SUBSCRIPTION_UNSUBSCRIBED,
         "subscription unsubscribed",
     )
+}
+
+/// The name `client.proto` gives the request of a call's command.
+fn command_name(request: &CallRequest) -> &'static str {
+    match request {
+        CallRequest::Rpc { .. } => "rpc",
+        CallRequest::Publish { .. } => "publish",
+        CallRequest::History { .. } => "history",
+        CallRequest::Presence { .. } => "presence",
+        CallRequest::PresenceStats { .. } => "presence_stats",
+        CallRequest::Send { .. } => "send",
+    }
 }
 
 #[cfg(test)]

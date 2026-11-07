@@ -641,6 +641,35 @@ pub enum Action {
         /// What the server returned, or why the call failed.
         result: Result<CallReply, CallError>,
     },
+    /// The server broke the client protocol in a way only the machine sees:
+    /// the actions that follow reconnect, with code 1 "transport closed",
+    /// as for a lost transport (Block 21). For the owner's logs; nothing
+    /// needs performing.
+    Anomaly(Anomaly),
+}
+
+/// A breach of the client protocol by the server, reported with
+/// [`Action::Anomaly`]. It carries no payload bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Anomaly {
+    /// A frame that is not client protocol data, e.g. from a misconfigured
+    /// proxy.
+    UndecodableFrame {
+        /// The transport it came on.
+        transport: TransportId,
+        /// Its length.
+        bytes: usize,
+    },
+    /// A reply without the result of the command it answers, and without
+    /// an error.
+    ReplyWithoutResult {
+        /// The transport it came on.
+        transport: TransportId,
+        /// The kind of command it answers, as `client.proto` names its
+        /// request: `"connect"`, `"rpc"`, `"sub_refresh"`...
+        command: &'static str,
+    },
 }
 
 impl Input {
@@ -889,6 +918,7 @@ impl std::fmt::Debug for Action {
                 .field("call", call)
                 .field("result", result)
                 .finish(),
+            Self::Anomaly(anomaly) => f.debug_tuple("Anomaly").field(anomaly).finish(),
         }
     }
 }
@@ -1442,6 +1472,19 @@ impl Machine {
         }
     }
 
+    /// A reply to a `command` command without its result breaks the
+    /// protocol: reported, then handled as a lost transport.
+    pub(super) fn reply_without_result(&mut self, command: &'static str) {
+        if let Some(transport) = self.transport {
+            self.actions
+                .push(Action::Anomaly(Anomaly::ReplyWithoutResult {
+                    transport,
+                    command,
+                }));
+        }
+        self.reconnect_after_transport_closed();
+    }
+
     fn reconnect_after_transport_closed(&mut self) {
         self.disconnect(
             codes::connecting::TRANSPORT_CLOSED,
@@ -1621,7 +1664,7 @@ impl Machine {
                 (Some(error), _) => self.refresh_error(&error),
                 (None, ReplyResult::Refresh(result)) => self.refreshed(&result),
                 // A reply to refresh without its result breaks the protocol.
-                (None, _) => self.reconnect_after_transport_closed(),
+                (None, _) => self.reply_without_result("refresh"),
             }
             return;
         }
@@ -1633,7 +1676,7 @@ impl Machine {
             (Some(error), _) => self.connect_error(&error),
             (None, ReplyResult::Connect(result)) => self.connected(result),
             // A reply to connect without its result breaks the protocol.
-            (None, _) => self.reconnect_after_transport_closed(),
+            (None, _) => self.reply_without_result("connect"),
         }
     }
 
