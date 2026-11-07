@@ -574,6 +574,15 @@ fn token_callback(
     world: &ClientWorld,
 ) -> impl Fn(String) -> std::future::Ready<Result<String, TokenError>> + Clone + Send + Sync + 'static
 {
+    token_callback_for(world, TOKEN_LIFETIME)
+}
+
+/// As [`token_callback`], with tokens of `lifetime`.
+fn token_callback_for(
+    world: &ClientWorld,
+    lifetime: Duration,
+) -> impl Fn(String) -> std::future::Ready<Result<String, TokenError>> + Clone + Send + Sync + 'static
+{
     let calls = Arc::clone(&world.token_calls);
     let denied = Arc::clone(&world.token_denied);
     move |channel: String| {
@@ -582,7 +591,7 @@ fn token_callback(
             Err(TokenError::Unauthorized)
         } else {
             // Anonymous connections have the empty user.
-            Ok(subscription_token("", &channel, TOKEN_LIFETIME))
+            Ok(subscription_token("", &channel, lifetime))
         })
     }
 }
@@ -639,7 +648,9 @@ fn refreshed_at_least_twice(world: &mut ClientWorld) {
 )]
 async fn subscriptions_with_one_token_callback(world: &mut ClientWorld, a: String, b: String) {
     a_connected_client(world).await;
-    let callback = token_callback(world);
+    // Tokens that outlive the scenario: a refresh, due at 80 % of a short
+    // lifetime, would call the callback again on a slow runner.
+    let callback = token_callback_for(world, Duration::from_secs(60));
     for name in [a, b] {
         let subscription = world
             .client()
