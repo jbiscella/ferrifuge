@@ -417,9 +417,7 @@ async fn expect_event(world: &mut ClientWorld, expected: &str) -> ClientEvent {
 
 /// Short reconnect delays keep scenarios fast.
 pub(crate) fn test_config() -> Config {
-    Config {
-        min_reconnect_delay: Duration::from_millis(50),
-        max_reconnect_delay: Duration::from_millis(200),
-        ..Config::default()
-    }
+    Config::default()
+        .min_reconnect_delay(Duration::from_millis(50))
+        .max_reconnect_delay(Duration::from_millis(200))
 }

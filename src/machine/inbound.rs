@@ -20,6 +20,8 @@ enum Item {
         code: Option<u16>,
         reason: String,
     },
+    /// The transport ended on a message over the size limit (Block 29).
+    TooLarge,
 }
 
 #[derive(Debug)]
@@ -97,6 +99,14 @@ impl Machine {
         self.handle_inbound();
     }
 
+    /// The transport ended on a message over the size limit: handled after
+    /// the messages read before it, as a close.
+    pub(super) fn message_too_large_in_order(&mut self, transport: TransportId) {
+        self.hold(transport, Item::TooLarge, 0);
+        self.actions.push(Action::CancelTimer(Timer::ServerPing));
+        self.handle_inbound();
+    }
+
     fn hold(&mut self, transport: TransportId, item: Item, size: usize) {
         self.inbound.bytes += size;
         self.inbound.held.push_back(Held {
@@ -156,6 +166,7 @@ impl Machine {
             match held.item {
                 Item::Reply(reply) => self.reply(*reply),
                 Item::Closed { code, reason } => self.transport_closed(code, &reason),
+                Item::TooLarge => self.message_too_large(),
             }
             let waiting: Vec<EventId> = self.actions[start..]
                 .iter()
@@ -246,14 +257,15 @@ impl Machine {
                 .inbound
                 .held
                 .iter()
-                .any(|held| matches!(held.item, Item::Closed { .. }))
+                .any(|held| matches!(held.item, Item::Closed { .. } | Item::TooLarge))
     }
 
     /// Whether the server's close of the current transport is read and
     /// waits behind earlier messages: nothing sent on it now would arrive.
     pub(super) fn transport_closing(&self) -> bool {
         self.inbound.held.iter().any(|held| {
-            Some(held.transport) == self.transport && matches!(held.item, Item::Closed { .. })
+            Some(held.transport) == self.transport
+                && matches!(held.item, Item::Closed { .. } | Item::TooLarge)
         })
     }
 

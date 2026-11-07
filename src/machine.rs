@@ -339,7 +339,9 @@ pub enum CallTimer {
 pub enum Timer {
     /// Delay before the next connection attempt.
     Reconnect,
-    /// Deadline for a connection attempt to get its connect reply.
+    /// Deadline for a connection attempt: for its transport to open, after
+    /// `Config::handshake_timeout`, then for its connect reply, after
+    /// `Config::timeout` (Block 29, D1).
     ConnectTimeout,
     /// When the connection token must be refreshed.
     Refresh,
@@ -409,6 +411,14 @@ pub enum Input {
         /// Why, for the error event.
         message: String,
     },
+    /// The transport received a message larger than
+    /// `Config::max_message_bytes` and was ended (Block 29, D3). The owner
+    /// refuses the message where its bytes are read, holding at most the
+    /// limit and one read, and reports it with this input instead of
+    /// [`Input::TransportClosed`]. Before the connect reply the attempt
+    /// fails; after it the client disconnects with code 3 "message size
+    /// limit exceeded", without reconnecting.
+    MessageTooLarge(TransportId),
     /// The transport closed after opening.
     TransportClosed {
         /// The transport that closed.
@@ -736,6 +746,7 @@ impl std::fmt::Debug for Input {
                 .field("transport", transport)
                 .field("message", message)
                 .finish(),
+            Self::MessageTooLarge(id) => f.debug_tuple("MessageTooLarge").field(id).finish(),
             Self::TransportClosed {
                 transport,
                 code,
@@ -988,6 +999,10 @@ const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// Websocket close code "message too big" (RFC 6455).
 const MESSAGE_TOO_BIG: u32 = 1009;
+
+/// The error event's message for a message over `Config::max_message_bytes`
+/// before the connect reply (Block 29, D3).
+const MESSAGE_TOO_LARGE: &str = "message larger than the size limit";
 
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
@@ -1256,6 +1271,15 @@ impl Machine {
                     self.transport_closed(code, &reason);
                 }
             }
+            Input::MessageTooLarge(transport) if self.is_current(transport) => {
+                self.fail_sent_calls();
+                // After the messages read before it, as a close (Block 15).
+                if self.holds_messages_of(transport) || self.events_hold_inbound() {
+                    self.message_too_large_in_order(transport);
+                } else {
+                    self.message_too_large();
+                }
+            }
             Input::Frame { transport, data } if self.is_current(transport) => {
                 self.frame(transport, &data);
             }
@@ -1305,6 +1329,7 @@ impl Machine {
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
+            | Input::MessageTooLarge(_)
             | Input::Frame { .. }
             | Input::SendRejected { .. }
             | Input::FrameWritten { .. } => {}
@@ -1366,7 +1391,12 @@ impl Machine {
             }
             Timer::ConnectTimeout => {
                 if self.state == State::Connecting && self.transport.is_some() {
-                    self.transport_failed("connect timeout".to_owned());
+                    let message = if self.transport_open {
+                        "connect timeout"
+                    } else {
+                        "handshake timeout"
+                    };
+                    self.transport_failed(message.to_owned());
                 }
             }
             Timer::Refresh => {
@@ -1464,8 +1494,11 @@ impl Machine {
             endpoint: self.transports.index(),
             initial_frame,
         });
-        self.actions
-            .push(Action::SetTimer(Timer::ConnectTimeout, self.config.timeout));
+        // The open first, then the connect reply (Block 29, D1).
+        self.actions.push(Action::SetTimer(
+            Timer::ConnectTimeout,
+            self.config.handshake_timeout,
+        ));
     }
 
     fn transport_opened(&mut self) {
@@ -1473,6 +1506,10 @@ impl Machine {
             return;
         };
         self.transport_open = true;
+        // Opened: the connect reply, or a token fetched first, has `timeout`
+        // from now, on every transport kind (Block 29, D1).
+        self.actions
+            .push(Action::SetTimer(Timer::ConnectTimeout, self.config.timeout));
         if self.transport_kind().is_emulated() {
             // The connect command went with the request; only its reply
             // proves the transport (centrifuge-js `onOpen`).
@@ -1571,6 +1608,22 @@ impl Machine {
                 }));
         }
         self.reconnect_after_transport_closed();
+    }
+
+    /// A message over `Config::max_message_bytes` ended the transport
+    /// (Block 29, D3): before the connect reply the bytes may not be the
+    /// server's, so the attempt fails; after it a reconnect would get the
+    /// same data again, so the client ends, as for close code 1009.
+    fn message_too_large(&mut self) {
+        if self.state == State::Connecting {
+            self.transport_failed(MESSAGE_TOO_LARGE.to_owned());
+        } else {
+            self.disconnect(
+                codes::disconnected::MESSAGE_SIZE_LIMIT,
+                subscriptions::MESSAGE_SIZE_LIMIT_REASON,
+                false,
+            );
+        }
     }
 
     fn reconnect_after_transport_closed(&mut self) {
@@ -2817,6 +2870,132 @@ mod tests {
         assert_eq!(machine.state(), State::Disconnected);
     }
 
+    /// The durations `actions` set `Timer::ConnectTimeout` to.
+    fn connect_timeouts(actions: &[Action]) -> Vec<Duration> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::SetTimer(Timer::ConnectTimeout, after) => Some(*after),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The kind of the transport `actions` open, if any.
+    fn opened_kind(actions: &[Action]) -> Option<TransportKind> {
+        actions.iter().find_map(|action| match action {
+            Action::OpenTransport { kind, .. } => Some(*kind),
+            _ => None,
+        })
+    }
+
+    // Block 29, D1: the open has the handshake timeout, the connect reply
+    // `timeout`, on every transport kind.
+    #[test]
+    fn the_open_has_the_handshake_timeout_and_the_connect_reply_the_timeout() {
+        for kind in [TransportKind::WebSocket, TransportKind::HttpStream] {
+            let config = Config::default()
+                .handshake_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(3));
+            let mut machine = Machine::new(config).with_transports(vec![kind]).unwrap();
+
+            let connect = machine.handle(Input::Connect);
+            let transport = opened_transport(&connect);
+            let opened = machine.handle(Input::TransportOpened(transport));
+
+            assert_eq!(
+                connect_timeouts(&connect),
+                [Duration::from_secs(1)],
+                "{kind:?}"
+            );
+            assert_eq!(
+                connect_timeouts(&opened),
+                [Duration::from_secs(3)],
+                "{kind:?}"
+            );
+        }
+    }
+
+    // Block 29, D1: the error names which deadline passed.
+    #[test]
+    fn an_open_that_times_out_is_a_handshake_timeout() {
+        let mut machine = machine();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+
+        let actions = machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+
+        assert!(actions.contains(&Action::CloseTransport(transport)));
+        assert!(matches!(
+            events(&actions)[..],
+            [ClientEvent::Error(ClientError { message, .. })] if message == "handshake timeout"
+        ));
+        assert_eq!(machine.state(), State::Connecting);
+    }
+
+    // Block 29, D3: before the connect reply, the attempt fails and the
+    // next transport is tried.
+    #[test]
+    fn a_message_too_large_before_the_connect_reply_fails_the_attempt() {
+        let mut machine = Machine::new(Config::default())
+            .with_transports(vec![TransportKind::WebSocket, TransportKind::HttpStream])
+            .unwrap();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+
+        let actions = machine.handle(Input::MessageTooLarge(transport));
+
+        assert!(
+            matches!(
+                events(&actions)[..],
+                [ClientEvent::Error(ClientError { message, .. })]
+                    if message == "message larger than the size limit"
+            ),
+            "{actions:?}"
+        );
+        // Within the first sequence, at once.
+        assert!(actions.contains(&Action::SetTimer(Timer::Reconnect, Duration::ZERO)));
+        let next = machine.handle(Input::TimerFired(Timer::Reconnect));
+        assert_eq!(opened_kind(&next), Some(TransportKind::HttpStream));
+        assert_eq!(machine.state(), State::Connecting);
+    }
+
+    // Block 29, D3: once connected, the client ends as for close code 1009.
+    #[test]
+    fn a_message_too_large_after_the_connect_reply_ends_the_client() {
+        let (mut machine, transport) = awaiting_connect_reply();
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        let actions = machine.handle(Input::MessageTooLarge(transport));
+
+        assert_eq!(
+            events(&actions),
+            [&ClientEvent::Disconnected {
+                code: codes::disconnected::MESSAGE_SIZE_LIMIT,
+                reason: "message size limit exceeded".into()
+            }]
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+            "{actions:?}"
+        );
+        assert_eq!(machine.state(), State::Disconnected);
+    }
+
+    // Block 29, D3: the rule is the adapter's; the core handles a frame of
+    // any length.
+    #[test]
+    fn a_frame_over_the_limit_given_to_the_core_is_handled() {
+        let mut machine = Machine::new(Config::default().max_message_bytes(8));
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+
+        assert_eq!(machine.state(), State::Connected);
+    }
+
     #[test]
     fn reconnect_advice_follows_the_spec_ranges() {
         let advised: Vec<_> = [3000, 3499, 3500, 3999, 4000, 4499, 4500, 4999, 5000, 6000]
@@ -3048,11 +3227,14 @@ mod tests {
 
         let actions = machine.handle(Input::TransportOpened(transport));
 
-        let Action::Send { id, frame, .. } = &actions[0] else {
+        let Some(send @ Action::Send { id, frame, .. }) = actions
+            .iter()
+            .find(|action| matches!(action, Action::Send { .. }))
+        else {
             panic!("{actions:?}");
         };
         assert_eq!(
-            format!("{:?}", actions[0]),
+            format!("{send:?}"),
             format!(
                 "Send {{ transport: {transport:?}, id: {id:?}, frame: <{} bytes>, frame_type: Text }}",
                 frame.len()
@@ -3321,7 +3503,7 @@ mod tests {
         let sent = machine.handle(Input::TransportOpened(transport));
 
         assert!(
-            matches!(&sent[..], [Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
+            matches!(&sent[..], [Action::SetTimer(Timer::ConnectTimeout, _), Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
             "{sent:?}"
         );
     }

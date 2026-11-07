@@ -144,11 +144,9 @@ async fn marginal_cost_of_a_subscription() {
 async fn memory_stays_flat_across_reconnects() {
     let mut server = ChildServer::start();
     // Reconnects at once, so that 10000 cycles take seconds, not hours.
-    let config = Config {
-        min_reconnect_delay: Duration::from_millis(1),
-        max_reconnect_delay: Duration::from_millis(2),
-        ..Config::default()
-    };
+    let config = Config::default()
+        .min_reconnect_delay(Duration::from_millis(1))
+        .max_reconnect_delay(Duration::from_millis(2));
     let client = connected(&server, config).await;
     let mut events = client.events();
     let subscriptions = subscribe(&client, 0..10);

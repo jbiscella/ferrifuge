@@ -235,10 +235,7 @@ fn fleet_delays(
 #[test]
 fn reconnects_of_a_fleet_are_spread_over_the_jitter_window() {
     const WINDOW: Duration = Duration::from_secs(100);
-    let config = Config {
-        reconnect_jitter_window: WINDOW,
-        ..Config::default()
-    };
+    let config = Config::default().reconnect_jitter_window(WINDOW);
 
     // A disconnect code from the server that advises reconnecting (Block 3).
     let lose_connection = |simulation: &mut Simulation| {

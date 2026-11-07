@@ -73,15 +73,13 @@ const MAX_DELAY: Duration = Duration::from_millis(500);
 
 /// Block 16, "Chaos configuration".
 fn chaos_config() -> Config {
-    Config {
-        min_reconnect_delay: MIN_DELAY,
-        max_reconnect_delay: MAX_DELAY,
-        timeout: TIMEOUT,
-        read_ahead_messages: READ_AHEAD_MESSAGES,
-        read_ahead_bytes: READ_AHEAD_BYTES,
-        batch_frame_bytes: BATCH_FRAME_BYTES,
-        ..Config::default()
-    }
+    Config::default()
+        .min_reconnect_delay(MIN_DELAY)
+        .max_reconnect_delay(MAX_DELAY)
+        .timeout(TIMEOUT)
+        .read_ahead_messages(READ_AHEAD_MESSAGES)
+        .read_ahead_bytes(READ_AHEAD_BYTES)
+        .batch_frame_bytes(BATCH_FRAME_BYTES)
 }
 
 /// The frame cap of the chaos configuration, so that batches split

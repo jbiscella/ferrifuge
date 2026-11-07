@@ -22,10 +22,7 @@ pub(crate) struct JitterRun {
 
 impl JitterRun {
     fn new(window: Duration) -> Self {
-        let config = Config {
-            reconnect_jitter_window: window,
-            ..Config::default()
-        };
+        let config = Config::default().reconnect_jitter_window(window);
         Self {
             machine: Machine::new(config.clone()),
             config,

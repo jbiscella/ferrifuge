@@ -12,7 +12,6 @@ use super::delivery::{Commit, Owner};
 use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
 use crate::backoff::Backoff;
-use crate::config::MAX_MESSAGE_BYTES;
 use crate::fossil::{self, DeltaError};
 use crate::token::Secret;
 use crate::wire::{
@@ -945,13 +944,14 @@ impl Machine {
         id: SubscriptionId,
         publications: Vec<Publication>,
     ) -> Result<Vec<Publication>, DeltaError> {
+        let limit = self.config.max_message_bytes;
         let mut built = 0usize;
         publications
             .into_iter()
             .map(|publication| {
                 let publication = self.apply_delta(id, publication)?;
                 built = built.saturating_add(publication.data.len());
-                if built > MAX_MESSAGE_BYTES {
+                if built > limit {
                     return Err(DeltaError::MessageTooLarge);
                 }
                 Ok(publication)
@@ -967,6 +967,7 @@ impl Machine {
         mut publication: Publication,
     ) -> Result<Publication, DeltaError> {
         let codec = self.codec;
+        let limit = self.config.max_message_bytes;
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return Ok(publication);
         };
@@ -982,7 +983,7 @@ impl Machine {
             .ok_or(DeltaError::NotAString)?;
         let data = if publication.delta {
             let base = base.as_deref().ok_or(DeltaError::NoBase)?;
-            fossil::apply(base, &payload, MAX_MESSAGE_BYTES)?
+            fossil::apply(base, &payload, limit)?
         } else {
             payload
         };
@@ -1542,6 +1543,38 @@ mod tests {
             machine.read_ahead()
         );
         assert!(!machine.wants_frames());
+    }
+
+    // Block 29, D2: the publications of one reply are bounded by
+    // `Config::max_message_bytes`.
+    #[test]
+    fn the_delta_bound_follows_the_maximum_message_size() {
+        let reply = br#"{"id":2,"subscribe":{"delta":true,"publications":[{"data":"abcd","offset":1},{"data":"efgh","offset":2}]}}"#;
+        let failed = |limit: usize| {
+            let mut machine = Machine::new(Config::default().max_message_bytes(limit));
+            let transport = connect(&mut machine, Input::Connect, 1);
+            let id = machine
+                .add_subscription(
+                    "news".into(),
+                    SubscriptionOptions::default().delta(crate::DeltaFormat::Fossil),
+                )
+                .unwrap();
+            machine.handle(Input::Subscribe(id));
+            let replied = machine.handle(Input::Frame {
+                transport,
+                data: reply.to_vec(),
+            });
+            replied.iter().any(|action| {
+                matches!(
+                    action,
+                    Action::EmitSubscription(_, _, SubscriptionEvent::Error(ClientError { message, .. }))
+                        if message.contains("exceed the inbound message limit")
+                )
+            })
+        };
+
+        assert!(failed(7));
+        assert!(!failed(8));
     }
 
     // Codex on PR #99: a broken delta among a subscribe reply's

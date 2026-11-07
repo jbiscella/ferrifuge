@@ -46,10 +46,7 @@ async fn records_reach_a_log_logger_without_the_token() {
     let server = FakeServer::start(Announce::default()).await;
     let token = "tok-1f9e-log-facade";
     let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
-        .config(Config {
-            token: token.to_owned(),
-            ..Config::default()
-        })
+        .config(Config::default().token(token.to_owned()))
         .build()
         .expect("a valid client");
     let mut events = client.events();

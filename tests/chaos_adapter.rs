@@ -72,16 +72,13 @@ fn count_panics() {
 
 /// Block 16, "Chaos configuration".
 fn chaos_config() -> Config {
-    Config {
-        min_reconnect_delay: Duration::from_millis(50),
-        max_reconnect_delay: Duration::from_millis(500),
-        timeout: TIMEOUT,
-        read_ahead_messages: 8,
-        read_ahead_bytes: 4096,
-        // Batches split (Block 18, D9).
-        batch_frame_bytes: 1024,
-        ..Config::default()
-    }
+    Config::default()
+        .min_reconnect_delay(Duration::from_millis(50))
+        .max_reconnect_delay(Duration::from_millis(500))
+        .timeout(TIMEOUT)
+        .read_ahead_messages(8)
+        .read_ahead_bytes(4096)
+        .batch_frame_bytes(1024)
 }
 
 /// An invariant a seed broke.

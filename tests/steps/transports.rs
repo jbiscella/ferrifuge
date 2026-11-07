@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::{Action, Input, Machine, Timer, TransportKind};
-use ferrifuge::{
-    Client, ClientEvent, Config, ErrorKind, Protocol, SubscriptionState, TokenError, codes,
-};
+use ferrifuge::{Client, ClientEvent, ErrorKind, Protocol, SubscriptionState, TokenError, codes};
 use serde_json::json;
 
 use super::tls::a_tls_server;
@@ -585,10 +583,7 @@ fn the_same_transport_after_backoff(world: &mut ClientWorld) {
 fn client_options_with_protobuf(world: &mut ClientWorld, transport: String) {
     world.pending_builder = Some(
         Client::builder_with_transports([(kind(&transport), UNREACHABLE_HTTP_STREAM.to_owned())])
-            .config(Config {
-                protocol: Protocol::Protobuf,
-                ..test_config()
-            }),
+            .config(test_config().protocol(Protocol::Protobuf)),
     );
 }
 
