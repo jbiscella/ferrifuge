@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–23 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–24 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3327,7 +3327,7 @@ The secrets are distinct random strings per scenario, so a match cannot be a coi
 **Dependencies:** Blocks 6 (crypto provider, the one-place TLS build, review item C7), 8 (HTTPS for http_stream and sse), 17 (`ClientBuilder`), 20 (changelog), 21 (redacting `Debug`, the dependencies' records).
 
 **Out of scope:**
-- Android: the platform verifier there needs the application to initialise it through JNI (rustls-platform-verifier 0.7.1 `src/android.rs:90` panics otherwise) and takes no extra roots; Block 24 (item 3) decides Android's verifier. Until then Android keeps today's path, extra roots included;
+- Android: the platform verifier there needs the application to initialise it through JNI (rustls-platform-verifier 0.7.1 `src/android.rs:90` panics otherwise) and takes no extra roots; Block 24 (item 3) decides Android's verifier. Until then Android keeps today's path, extra roots included (decided by Block 24: the platform verifier after one setup call, extra roots refused there);
 - a switch accepting invalid certificates: not offered (the analysis, item 2); the raw configuration covers development needs;
 - client certificates (mutual TLS): the raw configuration carries them; no dedicated API;
 - certificate pinning, revocation settings: the raw configuration, or the operating system's own;
@@ -3585,3 +3585,58 @@ Feature: Proxies
 "Saying proxy authentication is required" means the error message contains "proxy authentication required" (D5).
 
 **Exceptions introduced:** `tests/proxy_env.rs` runs outside cucumber, since environment variables are process-wide. The tests read the operating system's proxy settings but do not change them: the `portability` jobs check only that reading them works with none set.
+
+---
+
+## Block 24 — Android and iOS builds, mobile lifecycle
+
+**Goal:** CI proves Ferrifuge builds for Android and iOS, an Android app verifies servers with the operating system's trust after one setup call, and a mobile app knows how to keep its streams across backgrounding, so that fleets of phones run the same client as desktops (parity item 3; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A, emulator CI deferred).
+
+**Dependencies:** Blocks 6 (providers, the one-place TLS build), 8 (failed attempts), 11 (recovery), 15 (delivery), 16 (CI layout), 20 (MSRV, docs.rs, examples, changelog), 22 (the platform verifier, Android left to this block), 23 (proxies: on mobile the environment applies).
+
+**Out of scope:**
+- emulator and simulator CI running a client against Centrifugo (the analysis's design C, deferred);
+- the fips build on Android and iOS (AWS-LC-FIPS's supported operating environments): not built in CI; the README says it is unsupported there;
+- extra roots on Android (D3);
+- sleep, network changes and captive portals (Block 25, item 4), which the lifecycle guide only points to;
+- Android and iOS proxy settings (Block 23: the environment applies; hyper-util 0.1.21 reads system settings on macOS and Windows only);
+- other Android ABIs, the iOS simulator and Mac Catalyst: the same code paths as the two targets built;
+- packaging for app stores, Gradle or Xcode project templates.
+
+This block amends Block 22: D1's platform verifier also covers Android, and D2's extra roots apply everywhere but Android (D3). Today Android verifies with webpki over `rustls-native-certs`, which finds no system certificate there (openssl-probe 0.2.1 probes `/etc/ssl/certs` and a Termux path, not `/system/etc/security/cacerts`), so a `wss://` client on Android works only with extra roots or `SSL_CERT_FILE`.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 CI builds.** The `portability` set, on pull requests, gains two jobs. Each runs `cargo clippy --lib --tests -- -D warnings` and `cargo test --lib --no-run` with the default features (ring) and with `--no-default-features --features tokio,aws-lc-rs`. Nothing runs on a device (out of scope above).
+  - `android` on `ubuntu-latest`: target `aarch64-linux-android` through cargo-ndk at a pinned version, API level 22 (`--platform 22`), which takes the compiler, archiver and linker from the runner's NDK (`ANDROID_NDK_HOME`, NDK 27.3 on the 2026-11 image), as rustls-platform-verifier's own CI does. API 22 is the floor of the stack: the verifier's Kotlin component has `minSdk 22` (v/0.7.1).
+  - `ios` on `macos-latest`: target `aarch64-apple-ios`, with Xcode's SDK.
+  - The examples are not built for mobile: they are command-line programs, and Block 20 D8's "every OS" means the host systems.
+  - `VERIFY:` that the dev-dependencies build for both targets; if one does not, that step becomes `cargo build --lib`.
+- **D2 Android verifier.** In the ring and aws-lc-rs builds on Android, a client trusting the platform alone verifies with `rustls-platform-verifier` 0.7.1, given the build's provider, as on macOS, iOS and Windows (Block 22, D1). The app's Gradle build includes the verifier's Kotlin component, its version identical to `rustls-platform-verifier-android` in `Cargo.lock` and kept by the ProGuard rule of the verifier's README, and the app initialises it once per process (D4).
+- **D3 Extra roots on Android.** The platform verifier there takes no extra roots (0.7.1 has no `new_with_extra_roots` on Android). `build()` fails with a configuration error saying so and naming `tls_config`, as reqwest 0.13.5 (`async_impl/client.rs:776-781`) and the official SDK (centrifuge-rust `docs/spec.md` §5.2, 88d6edf) do. Dropping them would break Block 22 D2's "in addition to the platform's"; a webpki fallback would trust the extra roots alone. An app needing them gives its own `tls_config`.
+- **D4 Initialisation.** `ferrifuge::android`, compiled on Android only, wraps the verifier's `init_with_env`, `init_with_refs` and `init_with_runtime`, and re-exports `jni` (0.22, a direct Android-only dependency at the verifier's version) and the verifier's `Runtime` trait, so that the setup reaches the copy of the verifier Ferrifuge links. The module is exempt from semver, and its documentation says so, because those types are pre-1.0 (the official SDK). It needs no unsafe code. The verifier exposes no "initialised" query (0.7.1 `src/android.rs`: `GLOBAL` is private), so Ferrifuge records, process-wide, that one of its wrappers succeeded. The verifier keeps the first setup and ignores later ones, so an app that set the verifier up another way still calls a wrapper once.
+- **D5 Without the initialisation.** Until a wrapper succeeded:
+  - `build()` fails with a configuration error naming `ferrifuge::android::init_with_env` when a connection known at build uses the platform verifier: a `wss://` or `https://` endpoint, an `https://` emulation endpoint with an HTTP transport, or `Proxy::all` with an `https://` target. A raw `tls_config` is the application's and is not checked.
+  - Every other TLS use (a proxy from the environment, a proxy function, `set_proxy`) reaches Ferrifuge's verifier, which wraps the platform one and fails the handshake with the same message before delegating: a failed transport attempt (Block 8), so a setup made after `build()` applies from the next attempt. The platform verifier would otherwise panic at its first check (`src/android.rs:87-91`), ending the client's task without an event.
+  - Ferrifuge's verifier also turns a panic of the platform verifier into a failed handshake, as Ferrifuge guards its callbacks: a Kotlin component of another version, or one ProGuard stripped, panics there, where panics unwind. A missing Kotlin component is already an error ("failed to call native verifier").
+- **D6 Lifecycle guide.** A README "Mobile" section:
+  - disconnect when the app goes to the background and connect when it returns, or keep running only where the OS allows it;
+  - recovery (Block 11) and delivery (Block 15) make a background gap lossless on recoverable channels within the server's history size and TTL;
+  - a suspended device's monotonic clock stops, so the no-ping deadline and token refresh run late after a resume until Block 25; disconnecting in the background avoids it, and a connect answered with error 109 gets a new token from the token callback;
+  - the Android setup: the Gradle component, the ProGuard rule, one call to `ferrifuge::android::init_with_env` before any client is built, extra roots through `tls_config`, revocation checks from API 24;
+  - iOS needs no setup: its platform verifier is Security.framework, extra roots included;
+  - on both, only the environment's proxy applies, and the fips build is unsupported.
+  The TLS verification table gains Android, and the "Continuous integration" section names the mobile jobs. docs.rs stays on Linux (Block 20, D7): the module is documented in the README and by `cargo doc --target aarch64-linux-android`.
+- **D7 Version and changelog.** 0.16.0: verification on Android changes, and extra roots there now fail `build()`. `Unreleased` entries: "Added" `ferrifuge::android` (Android only, exempt from semver), the Android and iOS CI builds; "Changed" the operating system's verifier on Android, its setup required, extra roots refused there; "Fixed" Android finding no system certificate.
+
+Value clause: As an app developer shipping Ferrifuge in Android and iOS apps, I want CI to prove the client builds for both, the Android build to verify servers with the device's trust after one setup call, and a guide to backgrounding, so that my phones verify servers as the device does, a missing setup is reported instead of stopping the client silently, and recoverable channels lose nothing across a background gap within the server's history.
+
+**Structural acceptance:**
+- the `android` and `ios` jobs pass on pull requests;
+- the verifier is still chosen in one function; the `VERIFIER` unit test gains the Android row (platform, but webpki in the fips build), compiled by the `android` job;
+- `jni` is a direct dependency on Android only, at the verifier's version; `cargo tree -d --target aarch64-linux-android` shows one copy;
+- host unit tests, the gate being functions of the options and an "initialised" flag:
+  - without the setup, `build()` refuses a `wss://` endpoint, an `https://` stream endpoint, an `https://` emulation endpoint and `Proxy::all` with an `https://` target, naming the call, and accepts a `ws://` endpoint and a raw configuration;
+  - on Android, extra roots fail `build()`, naming `tls_config`;
+  - Ferrifuge's verifier, around a stub verifier, fails the handshake naming the call without the setup, delegates with it, and turns the stub's panic into an error.
+
+**Exceptions introduced:** no Gherkin scenario: the behaviour exists only on Android devices, and nothing runs on a device or emulator in CI (design C deferred). The host unit tests above cover the gate; the mobile jobs only build.
