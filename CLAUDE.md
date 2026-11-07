@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–22 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–23 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -37,7 +37,7 @@ Markers used below:
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only; the OpenSSL license is allowed globally (owner decision: needed by aws-lc, no on/off variant to maintain) | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
 | TLS crypto provider | Chosen at build time by cargo features: `ring` (a default feature), `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode). A non-ring build disables default features, so ring is not linked; when several are enabled the strongest wins (`fips` > `aws-lc-rs` > `ring`) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring builds with a C compiler alone, the FIPS build also needs CMake and Go |
-| HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider` and `stream`, given the client's own TLS configuration | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
+| HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider`, `stream` and `socks` (`socks` from Block 23), given the client's own TLS configuration | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
 | Publication payload type | Raw bytes (`Vec<u8>`): raw JSON text with the JSON protocol, any bytes with Protobuf | Every official SDK uses bytes (Go, Java, Swift, Dart) and so does tokio-centrifuge |
 | Protocol selection | A `Config` option, JSON by default, fixed when the client is created | Every SDK fixes it at creation (Go constructors, centrifuge-js builds); tokio-centrifuge uses a config enum |
 | Request/response API | `async fn` returning `Result` | Every SDK returns a result or an error (Go, Dart, Swift, tokio-centrifuge) |
@@ -73,6 +73,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | "Planned after Block 19" | items 17, 20, 24 not adopted | same | 41–43 |
 | Block 17, out of scope | a cookie jar | same (item 24) | 43 |
 | Block 6, out of scope | custom root certificates | owner, 2026-11-06 (item 2) | 22 |
+| Block 14, out of scope | HTTP proxy (CONNECT) support | owner, 2026-11-06 (item 1) | 23 |
 
 ### Test layers
 
@@ -1942,7 +1943,7 @@ The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (
 **Dependencies:** Blocks 2, 4, 5, 9. Subscription-token refresh jitter applies once Block 10 is implemented.
 
 **Out of scope:**
-- HTTP proxy (CONNECT) support;
+- HTTP proxy (CONNECT) support (reversed by the owner decision of 2026-11-06: Block 23);
 - sleep/resume behaviour;
 - server load testing (the server side has its own tooling);
 - the event-buffer policy for slow consumers (Block 15);
@@ -2459,7 +2460,7 @@ Feature: Validation harness
 - **get_data failures.** `DataError::Unauthorized` disconnects the client with code 1 "unauthorized", with no error event and no reconnect (centrifuge-js `_handleGetDataError`, `_failUnauthorized`). `DataError::Failed` emits an `error` event of the new kind `ErrorKind::ConnectData`, code 12 "bad configuration", carrying the callback's message, and retries after the reconnect backoff (Block 2) while the client stays `connecting` (centrifuge-js `_handleGetDataError`: type `connectData`, `errorCodes.badConfiguration`). A `disconnect()` while the callback runs abandons it: its answer is ignored and opens no transport (centrifuge-js `_attemptAborted`; Block 16 I5). `DataError`'s documentation and `Display` stop naming subscriptions only.
 - **Server data at connect.** `ClientEvent::Connected` gains `data: Option<Vec<u8>>`: `ConnectResult.data` exactly as received, never re-serialized, as `SubscribeResult.data` on `subscribed` (Block 9) (`client.proto`, `ConnectResult.data`; centrifuge-js `_connectResponse`, `ctx.data`; the spec does not mention it).
 - **Two kinds of headers**, named after the Centrifugo proxy options that forward them, which v6.9.0 split: v6.10.1 forwards an emulated value only when its name is in `emulated_headers`, never through `http_headers` (`internal/proxy/http.go`). No option is called just `headers`, a word meaning real headers in the spec and emulated ones in centrifuge-js (centrifuge-rust `docs/spec.md` §5.1, decision 12). Both are in scope as centrifuge-js parity (its `headers` option and `setHeaders` method), as the owner read "centrifuge-js parity" for the batching API (Block 13).
-  - `ClientBuilder::http_headers`: real HTTP headers on the websocket upgrade request (spec, "Client common options") and on every HTTP request of `http_stream` and sse, the stream request and the emulation requests, so that a gateway checking a header still admits a client that fell back (Block 8). Names are case-insensitive, one value each, a later value replacing an earlier one. A name or value that is not valid HTTP, or a header the transport sets (`Host`, `Connection`, `Upgrade`, `Content-Length`, `Transfer-Encoding`, `Content-Type`, `Accept`, any `Sec-WebSocket-*`), fails `build()` with a configuration error naming the header, never its value.
+  - `ClientBuilder::http_headers`: real HTTP headers on the websocket upgrade request (spec, "Client common options") and on every HTTP request of `http_stream` and sse, the stream request and the emulation requests, so that a gateway checking a header still admits a client that fell back (Block 8). Names are case-insensitive, one value each, a later value replacing an earlier one. A name or value that is not valid HTTP, or a header the transport sets (`Host`, `Connection`, `Upgrade`, `Content-Length`, `Transfer-Encoding`, `Content-Type`, `Accept`, any `Sec-WebSocket-*`, and `Proxy-Authorization` from Block 23), fails `build()` with a configuration error naming the header, never its value.
   - `ClientBuilder::emulated_headers`: a name-to-value map sent as `ConnectRequest.headers` with every connect command, on every transport (`client.proto`; centrifuge-js `headers`; spec feature matrix, "headers emulation"). Names and values must be valid HTTP, since the server forwards them as HTTP headers; otherwise `build()` fails as above. They are client-controlled input to the server's proxies, as the Centrifugo proxy documentation warns.
 - **Setters.** `Client::set_token`, `Client::set_data` and `Client::set_emulated_headers` replace the value used from the next connection attempt and send nothing (centrifuge-js `setToken`, `setData`, `setHeaders`).
   - `set_token`: without a token callback it also clears a pending "token expired" (error 109 to a connect), so the next attempt connects with the new token instead of failing with the configuration error and code 1; with a callback, a pending "token expired" still makes the next attempt call it, since the token set may be the expired one; a 109 answering a connect that carried an older token than the one set leaves nothing pending (centrifuge-js `setToken`, `_connectError`; Block 5's token component already compares them). A connected client's refresh still needs the token callback (Block 1). An empty token clears it: the next attempt carries none, or calls the callback when there is one.
@@ -3419,3 +3420,168 @@ Feature: TLS verification
 The private CA is a second test CA, never in `SSL_CERT_FILE`, so the platform does not trust it on the Linux runners; the second scenario guards the first three by showing that, the fifth shows that a raw configuration does not fall back to Ferrifuge's settings. "Not trusted" in a Then step means the error names rustls's invalid peer certificate. The scenarios' raw configurations are built with the build's provider, so they pass the fips check.
 
 **Exceptions introduced:** the trust decisions of macOS and Windows (distrust, revocation, intermediate fetching) are the operating system's and are not scenarios: the @A scenarios run on Linux only (Docker), where the verifier is webpki; on macOS and Windows the unit tests of the structural acceptance check that the platform verifier is chosen, trusts an extra root and refuses an unknown issuer. The fips rejection of a non-FIPS raw configuration is a unit test of the fips build.
+
+---
+
+## Block 23 — Proxies
+
+**Goal:** a client reaches Centrifugo through the HTTP, HTTPS or SOCKS5 proxy its network requires, found where the shell and the operating system configure it or given by the application, with one decision for every transport, so that a fleet on corporate networks connects without per-device code (parity item 1; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art).
+
+**Dependencies:** Blocks 8 (transports, fallback, the emulation endpoint), 17 (`ClientBuilder`, setters applying from the next attempt, the headers the transport sets), 20 (changelog), 21 (logging, redaction of endpoints), 22 (per-client TLS settings and HTTPS clients).
+
+**Out of scope:**
+- PAC files and WPAD; NTLM, Negotiate and Kerberos proxy authentication: documented, with the local-helper workaround (Px, Cntlm), as the official SDK does (centrifuge-rust `docs/spec.md` §5.2, 88d6edf);
+- SOCKS4 and SOCKS4a (the official SDK has neither);
+- the settings hyper-util 0.1.21 does not read: macOS's exceptions list and SOCKS proxy, Linux desktop settings, iOS and Android system settings (there the environment applies);
+- reading the settings again during the process (network changes, Block 25);
+- the handshake timeout (Block 29), which will count the proxy handshake.
+
+This block reverses Block 14's exclusion of HTTP proxy (CONNECT) support; Block 0's "Reversed exclusions" gains the row | Block 14, out of scope | HTTP proxy (CONNECT) support | owner, 2026-11-06 (item 1) | 23 |. Block 0's "HTTP client" row gains reqwest's `socks` feature. It fixes the analysis's finding F2: websocket dials directly while the HTTP client of http_stream and sse applies the environment's proxy, so behind such a proxy websocket fails and the client falls back by accident.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Setting.** `ferrifuge::Proxy`, opaque and `Clone`, set with `ClientBuilder::proxy`:
+  - `Proxy::system()`, the `Default`: the environment, then the operating system's settings, as hyper-util 0.1.21 `Matcher::from_system` reads them: `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, upper case before lower case, none of them when `REQUEST_METHOD` is set (a CGI process); then macOS `SCDynamicStore` HTTP and HTTPS proxies, and Windows `Internet Settings` `ProxyEnable`, `ProxyServer`, `ProxyOverride` (plan: reqwest 0.13.5 `system-proxy` default, aws-sdk-rust since behaviour version 2025-08-07, ureq 3);
+  - `Proxy::from_env()`: the environment only (`Matcher::from_env`);
+  - `Proxy::none()`: direct;
+  - `Proxy::all(target)`: one proxy for every endpoint;
+  - `Proxy::custom(f)`, `f: Fn(&str) -> Option<ProxyTarget> + Send + Sync + 'static`: given each endpoint as `scheme://host:port` (`ws`, `wss`, `http` or `https`, the port always written), it returns the endpoint's proxy, or `None` for direct; it is called once per endpoint per connection attempt (the official SDK's `ProxyConfig::custom`, reqwest's `Proxy::custom`);
+  - `no_proxy(list)`, for `all` and `custom`: a host in the list, in `NO_PROXY` syntax (a domain and its subdomains, an IP address, a CIDR range, `*`), is reached directly, without calling `f`; `system` and `from_env` ignore it and take `NO_PROXY` and the system's exceptions.
+  - `ProxyTarget::new(url)` takes `http://`, `https://` (TLS to the proxy), `socks5://` (DNS by the client) or `socks5h://` (DNS by the proxy), with optional `user:password@`, percent-encoded; `basic_auth(user, password)` sets them unencoded: Basic for an HTTP proxy, username and password for SOCKS5. A URL that does not parse, or of another scheme, fails at once with a configuration error naming the scheme, never the credentials; `build()` and `set_proxy` then cannot fail on a proxy.
+  - `Client::set_proxy(proxy)` replaces the setting from the next connection attempt, as Block 17's setters; the current connection is kept. The setting stays in the adapter; the sans-IO core does not change.
+- **D2 One decision.** One function decides, for each URL a transport opens (websocket upgrade, http_stream or sse stream request, emulation request), direct or which proxy, from the setting and the URL; `ws` and `wss` are asked as `http` and `https`, the only schemes hyper-util's matcher knows. `system` and `from_env` are read once per process, at the first attempt that needs them, and shared by every client, as reqwest reads them when a client is built. Both transports use that decision, so a proxy from the environment or the system now applies to websocket too (F2). A proxy found in the environment or the system with a scheme `ProxyTarget` refuses (`socks4`, `socks4a`) fails the attempt on every transport, with an error naming the scheme, and never connects directly.
+- **D3 Websocket executor.** Ferrifuge opens the stream and tokio-tungstenite runs over it (`client_async_tls_with_config`):
+  - direct TCP; or hyper-util's `Tunnel` (HTTP CONNECT, with `Proxy-Authorization: Basic` from the credentials), over TCP or, for an `https://` proxy, over TLS to the proxy through hyper-rustls's `HttpsConnector`, with the client's TLS settings (Block 22) and no ALPN, as reqwest does; or hyper-util's `SocksV5`, with username and password when given;
+  - then TLS to Centrifugo for `wss://`, verifying Centrifugo's certificate, then the websocket handshake.
+  - Plain `ws://` also goes through CONNECT (RFC 6455 §4.1; the official SDK). The destination given to `Tunnel` and `SocksV5` always carries its port, 80 for `ws` and 443 for `wss`, since both default to 443. For `socks5://` Ferrifuge resolves the host itself, without blocking, and gives `SocksV5` the address, as reqwest does: `SocksV5::local_dns` resolves with a blocking call. `TCP_NODELAY` stays set.
+  - No handshake is written in Ferrifuge (Block 0, "Components"; plan).
+- **D4 HTTP executor.** The HTTP clients of http_stream and sse are built with `no_proxy()`, so reqwest reads nothing itself, then `Proxy::custom` calling D2's function; reqwest's `socks` feature carries SOCKS5. reqwest 0.13.5 runs CONNECT and SOCKS5 with the same hyper-util `Tunnel` and `SocksV5` (`connect.rs:811`, `:856`, `:1957`), and TLS to an `https://` proxy with the client's TLS settings. It tunnels `https://` requests with CONNECT. It sends plain `http://` requests to an HTTP proxy in absolute form with `Proxy-Authorization`, as curl does, and unlike the official SDK, so a proxy allowing CONNECT only to TLS ports (Squid's default) still carries them. The README says that such a proxy sees these requests in full, including the sse connect command in the URL, and recommends `https://`.
+- **D5 Failures.** A failed proxy handshake is a failed transport attempt, as for an unreachable endpoint (Block 8: error event, fallback, backoff). The error says "proxy authentication required" for hyper-util's `TunnelError::ProxyAuthRequired` (a CONNECT answered 407) and for a 407 answering a forwarded request. Another failed CONNECT reports hyper-util's message ("tunnel error: unsuccessful"), not the status, which `TunnelError` does not carry (plan). The error messages of the HTTP transports include their sources' messages, since reqwest's own stops at "error sending request". No error message carries the proxy's userinfo or credentials.
+- **D6 Sharing.** A client with the default setting and the platform's trust keeps the process-wide HTTP clients. Any other client builds its own (Block 22, D4) at the first attempt needing one, and again at the first attempt after `set_proxy`. The Block 14 @P gates pass unchanged.
+- **D7 Logging and redaction.** The DEBUG record of each transport attempt (Block 21) gains a field `proxy`: the proxy as scheme, host and port, or `direct`. The `Debug` of `Proxy`, `ProxyTarget` and `ClientBuilder` shows the kind, the proxy as scheme, host and port, and whether credentials are set, with `custom` as `Custom(..)`; it never shows userinfo or credentials. `http_headers` and its checks refuse `Proxy-Authorization`, now one of the headers the transport sets (Block 17): proxy credentials go through `ProxyTarget` only, so they never travel through a tunnel to Centrifugo.
+- **D8 Version and changelog.** 0.15.0: websocket now follows the environment, every transport follows the macOS and Windows settings, error messages change, and `http_headers` refuses a header it used to take. `Unreleased` entries:
+  - "Added": `Proxy`, `ProxyTarget`, `ClientBuilder::proxy`, `Client::set_proxy`, HTTP, HTTPS and SOCKS5 proxies;
+  - "Changed": the environment's and the system's proxies on every transport, HTTP transport errors naming their cause, `Proxy-Authorization` refused in `http_headers`;
+  - "Fixed": websocket ignoring the environment's proxy (F2).
+
+Value clause: As an app developer whose clients run on corporate networks, I want each client to reach Centrifugo through the proxy the network requires, found where the system and the shell configure it or given by my code, so that it connects over every transport without per-device code of mine.
+
+**Structural acceptance:**
+- the proxy decision is one function used by both executors; no proxy handshake is written in `src/`;
+- hyper-util is a direct dependency at reqwest's version, with `client-legacy`, `client-proxy`, `client-proxy-system` and `tokio`; hyper-rustls is one at reqwest's version, without a provider of its own; reqwest gains `socks`; `cargo tree -d` shows one copy of each;
+- a unit test sends credentials holding reserved characters, from a proxy URL in the environment's syntax, through the decision, and gets the same credentials for both executors;
+- `tests/proxy_env.rs` runs in its own binary, since environment variables are process-wide:
+  - with `ALL_PROXY` set, a websocket client connects to the fake server through the proxy, and an http_stream attempt to `http://centrifugo.invalid` reaches the proxy in absolute form;
+  - a host in `NO_PROXY` is reached directly;
+  - `Proxy::none()` ignores both;
+  - with `ALL_PROXY` set to a `socks4://` URL, websocket and http_stream attempts fail, naming the scheme;
+- a unit test reads the operating system's settings, and the `portability` jobs run it on macOS and Windows (none set on the runners: direct).
+
+```gherkin
+Feature: Proxies
+
+  @D
+  Scenario Outline: A websocket goes through a proxy with credentials
+    Given a <proxy> proxy requiring credentials in front of the fake server
+    And a client configured with a websocket endpoint only that proxy can reach, and that proxy with its credentials, its log records captured
+    When connect is called
+    Then the client emits "connected" over transport "websocket"
+    And the proxy tunnelled the client's connection to that endpoint's host and port, with the credentials
+    And a DEBUG record in the client's span names the attempt's proxy by scheme, host and port
+    And no record contains the proxy's password, as text or in its Basic encoding
+
+    Examples:
+      | proxy   |
+      | http    |
+      | https   |
+      | socks5  |
+      | socks5h |
+
+  @A
+  Scenario Outline: Secure endpoints go through a proxy, with TLS to Centrifugo
+    Given a server serving TLS with a certificate from the test CA, with http_stream and sse enabled
+    And a <proxy> proxy requiring credentials in front of it
+    And a client configured with only a <transport> endpoint only that proxy can reach, and that proxy with its credentials
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+    And the proxy tunnelled every connection of the client to that endpoint's host and port, with the credentials
+
+    Examples:
+      | transport   | proxy   |
+      | websocket   | http    |
+      | http_stream | http    |
+      | sse         | http    |
+      | http_stream | https   |
+      | http_stream | socks5h |
+
+  @A
+  Scenario Outline: Plain HTTP transports go through an HTTP proxy in absolute form
+    Given a server with http_stream and sse enabled
+    And an HTTP proxy requiring credentials in front of it
+    And a client configured with only an http <transport> endpoint only that proxy can reach, and that proxy with its credentials
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+    And the proxy forwarded every request of the client to the server, with the credentials
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  Scenario Outline: A proxy refusing the credentials fails the attempt
+    Given an HTTP proxy answering every request with 407
+    And a client configured with only the <transport> endpoint "<endpoint>" and that proxy with the password "pw-3e9a", its log records captured
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt, saying proxy authentication is required
+    And the client state is "connecting"
+    And no record or error contains "pw-3e9a", as text or in its Basic encoding
+
+    Examples:
+      | transport   | endpoint                                             |
+      | websocket   | ws://centrifugo.invalid:8000/connection/websocket    |
+      | http_stream | http://centrifugo.invalid:8000/connection/http_stream |
+      | http_stream | https://centrifugo.invalid:8443/connection/http_stream |
+
+  @D
+  Scenario: An endpoint in the no-proxy list is reached directly
+    Given an HTTP proxy in front of the fake server
+    And a client configured with the fake server's websocket endpoint and that proxy, the fake server's host in its no-proxy list
+    When connect is called
+    Then the client emits "connected"
+    And the proxy carried nothing
+
+  @D
+  Scenario: A proxy function decides per endpoint
+    Given an HTTP proxy in front of the fake server
+    And a client configured with a websocket endpoint only that proxy can reach, and a proxy function choosing that proxy for it
+    When connect is called
+    Then the client emits "connected"
+    And the proxy function was asked once, for that endpoint's scheme, host and port
+    And the proxy tunnelled the client's connection to that endpoint's host and port
+
+  @D
+  Scenario: A proxy set at run time applies from the next attempt
+    Given an HTTP proxy in front of the fake server
+    And a client connected directly to the fake server, with no proxy
+    When set_proxy is called with that proxy
+    And the fake server disconnects the client with a reconnect-advised code
+    Then the client emits "connected"
+    And the proxy tunnelled exactly one connection, the client's new one, to the fake server
+
+  Scenario Outline: A proxy URL of another scheme is refused
+    When a proxy target is made from "<url>"
+    Then it fails with a configuration error naming the scheme "<scheme>"
+    And the error does not contain "pw-1d5b"
+
+    Examples:
+      | url                           | scheme |
+      | ftp://u:pw-1d5b@proxy:21      | ftp    |
+      | socks4://u:pw-1d5b@proxy:1080 | socks4 |
+```
+
+"An endpoint only that proxy can reach" has the host `centrifugo.invalid`, which never resolves (RFC 6761). For `socks5`, whose DNS is the client's, it is a port of 127.0.0.1 where nothing listens. The test proxies connect every tunnel or forwarded request to the server, whatever the destination, and record the destination asked for, how it was carried (tunnel or absolute form) and the credentials received. The test server's certificate gains the name `centrifugo.invalid`. The test doubles in `tests/support`:
+- an HTTP proxy: CONNECT, absolute-form forwarding, a 407 mode, and a TLS listener with a certificate from the test CA for the `https` rows, the test CA given to the client as an extra root;
+- a SOCKS5 server with username and password.
+
+"Saying proxy authentication is required" means the error message contains "proxy authentication required" (D5).
+
+**Exceptions introduced:** `tests/proxy_env.rs` runs outside cucumber, since environment variables are process-wide. The tests read the operating system's proxy settings but do not change them: the `portability` jobs check only that reading them works with none set.
