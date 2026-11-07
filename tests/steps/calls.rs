@@ -97,24 +97,25 @@ impl Drop for Calls {
 
 /// Makes an RPC call now, awaited by a task of its own.
 fn call(world: &mut ClientWorld, method: &str, data: Vec<u8>) {
+    let made_at = Instant::now();
     let future = world.client().rpc(method, data);
-    track(
-        world,
-        method,
-        async move { future.await.map(Returned::Data) },
-    );
+    track(world, method, made_at, async move {
+        future.await.map(Returned::Data)
+    });
 }
 
-/// Keeps a call just made, `name`d for the steps, awaited by a task of its
-/// own.
+/// Keeps a call made at `made_at`, `name`d for the steps, awaited by a
+/// task of its own. `made_at` is read before the call is made: the driver,
+/// on another thread, may arm its timeout before the call method returns.
 fn track(
     world: &mut ClientWorld,
     name: &str,
+    made_at: Instant,
     call: impl Future<Output = Settled> + Send + 'static,
 ) {
     world.calls.made.push(Call {
         method: name.to_owned(),
-        made_at: Instant::now(),
+        made_at,
         // When the call settled, not when a step looks: a loaded runner may
         // run the next step late.
         outcome: Outcome::Pending(tokio::spawn(async move {
@@ -545,8 +546,9 @@ async fn two_clients_without_info(world: &mut ClientWorld) {
 /// The call settles before the step ends.
 #[when(regex = r#"^the (?:first )?client publishes (\{.*\}) to channel "(\w+)"$"#)]
 async fn the_client_publishes(world: &mut ClientWorld, data: String, channel: String) {
+    let made_at = Instant::now();
     let publish = world.client().publish(channel, data.into_bytes());
-    track(world, "publish", async move {
+    track(world, "publish", made_at, async move {
         publish.await.map(|()| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
@@ -555,8 +557,9 @@ async fn the_client_publishes(world: &mut ClientWorld, data: String, channel: St
 
 #[when(regex = r"^the first client's subscription publishes (\{.*\})$")]
 async fn the_subscription_publishes(world: &mut ClientWorld, data: String) {
+    let made_at = Instant::now();
     let publish = world.subscription().publish(data.into_bytes());
-    track(world, "publish", async move {
+    track(world, "publish", made_at, async move {
         publish.await.map(|()| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
@@ -607,6 +610,7 @@ async fn the_second_receives_the_publisher(world: &mut ClientWorld) {
 /// Makes a call of `kind` on the first client's subscription, or on the
 /// client for [`CHANNEL`] when `on_client`, and returns its result.
 async fn ask(world: &mut ClientWorld, kind: &str, on_client: bool) -> Returned {
+    let made_at = Instant::now();
     let call: Pin<Box<dyn Future<Output = Settled> + Send>> = match (kind, on_client) {
         ("history", false) => {
             let call = world
@@ -632,7 +636,7 @@ async fn ask(world: &mut ClientWorld, kind: &str, on_client: bool) -> Returned {
         }
         other => unreachable!("no call {other:?}"),
     };
-    track(world, kind, call);
+    track(world, kind, made_at, call);
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     result.unwrap_or_else(|error| panic!("the {kind} call failed: {error}"))
 }
@@ -736,8 +740,9 @@ async fn a_channel_with_history(world: &mut ClientWorld, count: u64) {
 /// Requests the history of [`CHANNEL`] from a client connected for it.
 async fn request_history(world: &mut ClientWorld, options: HistoryOptions) {
     a_connected_client(world).await;
+    let made_at = Instant::now();
     let call = world.client().history(CHANNEL, options);
-    track(world, "history", async move {
+    track(world, "history", made_at, async move {
         call.await.map(Returned::History)
     });
 }
@@ -871,8 +876,9 @@ async fn a_fake_server_and_an_unsubscribed_subscription(world: &mut ClientWorld)
 
 #[when(regex = r"^its history is requested(?: at once)?$")]
 fn its_history_is_requested(world: &mut ClientWorld) {
+    let made_at = Instant::now();
     let call = world.subscription().history(HistoryOptions::default());
-    track(world, "history", async move {
+    track(world, "history", made_at, async move {
         call.await.map(Returned::History)
     });
 }
@@ -985,8 +991,9 @@ async fn two_protobuf_clients(world: &mut ClientWorld) {
 
 #[when(regex = r#"^the first client publishes the bytes ([0-9a-f ]+) to channel "(\w+)"$"#)]
 async fn the_first_client_publishes_bytes(world: &mut ClientWorld, bytes: String, channel: String) {
+    let made_at = Instant::now();
     let publish = world.client().publish(channel, hex_bytes(&bytes));
-    track(world, "publish", async move {
+    track(world, "publish", made_at, async move {
         publish.await.map(|()| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
@@ -1049,8 +1056,9 @@ async fn the_client_sends(world: &mut ClientWorld, bytes: String, json: String) 
     } else {
         json.into_bytes()
     };
+    let made_at = Instant::now();
     let send = world.client().send(data);
-    track(world, "send", async move {
+    track(world, "send", made_at, async move {
         send.await.map(|()| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
@@ -1091,6 +1099,7 @@ async fn the_fake_server_received_a_protobuf_send(world: &mut ClientWorld, bytes
 #[when(regex = r"^the client calls (rpc|history|presence|presence_stats)$")]
 fn the_client_calls(world: &mut ClientWorld, command: String) {
     let client = world.client();
+    let made_at = Instant::now();
     let call: Pin<Box<dyn Future<Output = Settled> + Send>> = match command.as_str() {
         "rpc" => {
             let call = client.rpc("bin", vec![0xff, 0x00, 0xfe]);
@@ -1109,7 +1118,7 @@ fn the_client_calls(world: &mut ClientWorld, command: String) {
             Box::pin(async move { call.await.map(Returned::PresenceStats) })
         }
     };
-    track(world, &command, call);
+    track(world, &command, made_at, call);
 }
 
 #[then(
@@ -1525,10 +1534,11 @@ async fn a_client_with_a_small_write_queue(world: &mut ClientWorld, bytes: usize
 #[when(r#"the client sends {"n":1}, {"n":2} and {"n":3} without awaiting them"#)]
 fn the_client_sends_three(world: &mut ClientWorld) {
     for n in 1..=3 {
+        let made_at = Instant::now();
         let send = world
             .client()
             .send(json!({"n": n}).to_string().into_bytes());
-        track(world, &format!("send {n}"), async move {
+        track(world, &format!("send {n}"), made_at, async move {
             send.await.map(|()| Returned::Published)
         });
     }
