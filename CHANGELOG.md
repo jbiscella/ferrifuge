@@ -21,6 +21,13 @@ repository held while it carried that version, from the blocks of
 
 ### Changed
 
+- Maintained components parse what the server streams (Block 27):
+  sse-core the sse events, tokio-util the http_stream JSON lines, and
+  mediatype the content types. sse data that is not UTF-8 now arrives with
+  U+FFFD replacement characters, as browsers' EventSource decodes it; a
+  content type with a parameter that has no value is no longer an event
+  stream; a long sse comment or unknown field no longer ends the transport.
+
 - An attempt answered by a captive portal's page (a redirect, HTTP 511, or
   `text/html` served as a success) fails with an error whose message ends
   with "; a captive portal may be answering" (Block 25); an `http_stream`
