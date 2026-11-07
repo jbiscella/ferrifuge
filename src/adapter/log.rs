@@ -169,6 +169,18 @@ impl Log {
         }
     }
 
+    /// How many callbacks the log tracks, for tests.
+    #[cfg(test)]
+    pub(super) fn tracked_fetches(&self) -> usize {
+        lock(&self.state).fetches.len()
+    }
+
+    /// The driver dropped fetch `fetch` unanswered, as a stale token
+    /// callback replaced by a newer stale one: no input will end it.
+    pub(super) fn fetch_dropped(&self, fetch: FetchId) {
+        lock(&self.state).fetches.remove(&fetch);
+    }
+
     fn callback_started(
         &self,
         fetch: FetchId,
