@@ -149,8 +149,21 @@ fn the_client_state_is(world: &mut ClientWorld, expected: String) {
     assert_eq!(world.client().state().as_str(), expected);
 }
 
-#[then(regex = r#"^(?:then )?the client emits "(\w+)"$"#)]
-async fn the_client_emits(world: &mut ClientWorld, expected: String) {
+#[then(regex = r#"^(then )?the client emits "(\w+)"$"#)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+async fn the_client_emits(world: &mut ClientWorld, then: String, expected: String) {
+    // "And then ..." is the next event; a bare "Then the client emits
+    // "connected"" may follow the "connecting" of the attempt (Block 23).
+    if then.is_empty() && expected == "connected" {
+        loop {
+            let event = world.next_event().await;
+            match event.name() {
+                "connected" => return,
+                "connecting" => {}
+                _ => panic!("{event:?}"),
+            }
+        }
+    }
     expect_event(world, &expected).await;
 }
 

@@ -569,3 +569,123 @@ fn tunnel_error(error: impl fmt::Display) -> String {
 /// The message of a failed attempt the proxy refused credentials for
 /// (Block 23, D5).
 pub(super) const PROXY_AUTHENTICATION_REQUIRED: &str = "proxy authentication required";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    fn url(text: &str) -> Url {
+        Url::parse(text).expect("a URL")
+    }
+
+    /// Credentials holding reserved characters, from a proxy URL in the
+    /// environment's syntax, reach both executors unchanged (Block 23,
+    /// structural acceptance): the websocket's handshake and reqwest's URL.
+    /// An HTTP proxy's user has no `:`, which Basic cannot carry (RFC 7617,
+    /// section 2); a SOCKS5 one may.
+    #[test]
+    fn credentials_with_reserved_characters_survive_the_decision() {
+        for (proxy, user) in [
+            ("http://us%40er:p%40ss%2Fw%3Ard@proxy.example:3128", "us@er"),
+            (
+                "socks5h://us%3Aer:p%40ss%2Fw%3Ard@proxy.example:1080",
+                "us:er",
+            ),
+        ] {
+            let matcher = Matcher::builder().all(proxy).build();
+            let intercept = matcher
+                .intercept(&"https://centrifugo.example/".parse().expect("a URI"))
+                .expect("intercepted");
+
+            let target = ProxyTarget::from_intercept(&intercept).expect("a target");
+            let reqwest_url = target.url().expect("a URL");
+
+            assert_eq!(
+                target.credentials,
+                Some((user.to_owned(), "p@ss/w:rd".to_owned())),
+                "{proxy}"
+            );
+            assert_eq!(decoded(reqwest_url.username()), user);
+            assert_eq!(decoded(reqwest_url.password().unwrap_or("")), "p@ss/w:rd");
+        }
+    }
+
+    #[test]
+    fn websocket_endpoints_are_asked_as_http_and_https() {
+        let proxy = Proxy(Setting::Custom(
+            Arc::new(|endpoint| {
+                (endpoint == "wss://centrifugo.example:443")
+                    .then(|| ProxyTarget::new("http://proxy.example:3128").expect("a proxy"))
+            }),
+            None,
+        ));
+        let matcher = Proxy(Setting::All(
+            ProxyTarget::new("http://proxy.example:3128").expect("a proxy"),
+            None,
+        ))
+        .no_proxy("centrifugo.example");
+
+        let chosen = proxy.decide(&url("wss://centrifugo.example/connection/websocket"));
+        let excluded = matcher.decide(&url("ws://centrifugo.example:8000/connection/websocket"));
+
+        assert_eq!(
+            chosen.map(|target| target.map(|t| t.shown())),
+            Ok(Some("http://proxy.example:3128".to_owned()))
+        );
+        assert_eq!(excluded, Ok(None));
+    }
+
+    /// Reading the operating system's settings works on every platform
+    /// the portability jobs run (Block 23): none are set there.
+    #[test]
+    fn the_systems_settings_are_read() {
+        let decided = Proxy::system().decide(&url("wss://centrifugo.example/connection/websocket"));
+
+        println!("system proxy: {decided:?}");
+        assert!(decided.is_ok(), "{decided:?}");
+    }
+
+    #[test]
+    fn neither_debug_nor_errors_show_credentials() {
+        let target = ProxyTarget::new("http://user:pw-9f1c@proxy.example:3128")
+            .expect("a proxy")
+            .basic_auth("user", "pw-9f1c");
+        let refused = ProxyTarget::new("ftp://user:pw-9f1c@proxy.example:21");
+
+        let shown = format!("{:?} {:?} {refused:?}", target, Proxy::all(target.clone()));
+
+        assert!(!shown.contains("pw-9f1c"), "{shown}");
+        assert!(shown.contains("http://proxy.example:3128"), "{shown}");
+    }
+
+    /// A CONNECT answered 407 says so: pins hyper-util's message the
+    /// mapping relies on (`tunnel.rs:241`).
+    #[tokio::test]
+    async fn a_connect_answered_407_asks_for_proxy_authentication() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut tcp, &mut buffer).await;
+            let _ = tcp
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await;
+        });
+        let target = ProxyTarget::new(&format!("http://{address}")).expect("a proxy");
+
+        let result = dial(
+            &url("ws://centrifugo.invalid:8000/connection/websocket"),
+            Some(&target),
+            &Tls::default(),
+        )
+        .await;
+
+        assert_eq!(result.err().as_deref(), Some(PROXY_AUTHENTICATION_REQUIRED));
+    }
+}

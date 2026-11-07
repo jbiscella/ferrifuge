@@ -362,6 +362,15 @@ const IMPLEMENTED: &[&str] = &[
     "A raw rustls configuration replaces the platform's trust",
     "Extra roots and a raw configuration together are rejected",
     "An extra root that does not parse is rejected",
+    // Block 23: proxies.
+    "A websocket goes through a proxy with credentials",
+    "Secure endpoints go through a proxy, with TLS to Centrifugo",
+    "Plain HTTP transports go through an HTTP proxy in absolute form",
+    "A proxy refusing the credentials fails the attempt",
+    "An endpoint in the no-proxy list is reached directly",
+    "A proxy function decides per endpoint",
+    "A proxy set at run time applies from the next attempt",
+    "A proxy URL of another scheme is refused",
 ];
 
 /// Server configuration of @A scenarios.

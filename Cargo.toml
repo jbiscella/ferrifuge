@@ -121,6 +121,8 @@ bolero = "0.13.7"
 # Short validity of the test certificates, as Apple's verifier wants
 # (Block 22).
 time = { version = "0.3.47", default-features = false, features = ["std"] }
+# The TLS listener of the https:// test proxy (Block 23).
+tokio-rustls = { version = "0.26.6", default-features = false }
 # The log capture of the Block 21 scenarios and of tests/log_facade.rs.
 log = { version = "0.4.35", features = ["std"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
@@ -136,6 +138,11 @@ required-features = ["tokio"]
 
 [[test]]
 name = "log_facade"
+required-features = ["tokio"]
+
+[[test]]
+name = "proxy_env"
+harness = false
 required-features = ["tokio"]
 
 [[test]]
