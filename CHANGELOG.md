@@ -11,7 +11,15 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-07
+
 ### Added
+
+- `Client::close` and `Client::is_closed` (Block 33): close a client for
+  good, also from a shared reference, and await the end, the transport
+  closed and every stream ended; `Input::Close`; unsubscribed code 2 and
+  error code 4 "client closed" (`codes::unsubscribed::CLIENT_CLOSED`,
+  `codes::error::CLIENT_CLOSED`).
 
 - `Client::set_http_headers` (Block 32): replaces the real HTTP headers,
   validated as at build, for every HTTP request started after the call:
@@ -32,6 +40,15 @@ repository held while it carried that version, from the blocks of
   client is connected or the subscription subscribed, without taking an
   event from their streams; they fail with code 3 "disconnected" or code 7
   "subscription unsubscribed" (`CallError`) when that will not come.
+
+### Changed
+
+- Dropping a client, or its runtime shutting down, closes it as `close()`
+  does (Block 33): its subscriptions, server-side ones included, emit
+  `unsubscribed` with code 2 "client closed" before `disconnected`, and a
+  closed client's calls and `ready()` futures, those of its leftover
+  subscriptions included, fail with code 4 "client closed" instead of 3
+  "disconnected", as `Input::DriverDropped` now does too.
 
 ## [0.18.0] - 2026-11-07
 

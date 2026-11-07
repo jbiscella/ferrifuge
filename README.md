@@ -95,7 +95,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.18"
+ferrifuge = "0.19"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -192,8 +192,13 @@ summed over the server-side subscriptions one connect recovers. A stream holding
 down do not grow it; events caused by the application's own calls, such as
 cycling `connect()` and `disconnect()`, still go to it.
 A stream borrows nothing from the client, so it can be kept beside it, e.g.
-in the same struct. Dropping the client disconnects it
-and ends its streams. `Client::new` and a builder that cannot work return a
+in the same struct. `client.close().await` closes the client for good and
+waits until the transport is closed and every stream has ended: its
+subscriptions emit `Unsubscribed` with code 2 "client closed", then the
+client emits `Disconnected`, and later calls, those of leftover
+`Subscription` handles included, fail with code 4 "client closed".
+`is_closed()` tells a closed client apart, as it reports `Disconnected`.
+Dropping the client closes it the same way, without waiting. `Client::new` and a builder that cannot work return a
 `ClientError`, which implements `std::error::Error`: for instance an empty
 endpoint, or an `http://` or `https://` one for websocket, which needs
 `ws://` or `wss://` (`http(s)://` is right for http_stream and sse).
@@ -608,7 +613,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.18", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.19", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then

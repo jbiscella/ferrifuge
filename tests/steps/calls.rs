@@ -321,7 +321,7 @@ async fn the_call_times_out(world: &mut ClientWorld) {
 }
 
 #[then(
-    regex = r#"^the call fails with a "(disconnected|connection closed|subscription unsubscribed)" error( before the configured timeout)?$"#
+    regex = r#"^the call fails with a "(disconnected|connection closed|subscription unsubscribed|client closed)" error( before the configured timeout)?$"#
 )]
 async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: String) {
     let timeout = test_config().timeout;
@@ -330,6 +330,7 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
     let code = match message.as_str() {
         "disconnected" => codes::error::DISCONNECTED,
         "connection closed" => codes::error::CONNECTION_CLOSED,
+        "client closed" => codes::error::CLIENT_CLOSED,
         _ => codes::error::SUBSCRIPTION_UNSUBSCRIBED,
     };
     // The time tells a slow runner (a call made more than the timeout

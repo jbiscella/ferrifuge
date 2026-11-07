@@ -399,8 +399,7 @@ const IMPLEMENTED: &[&str] = &[
     // Block 28: the tokio runtime handle.
     "Building outside a runtime without a handle fails",
     "A client built outside a runtime with a handle connects",
-    // Block 33 changes "The client ends when its runtime shuts down" (code
-    // 4 "client closed"): it returns with Block 33's implementation.
+    "The client ends when its runtime shuts down",
     // Block 29: the handshake timeout and the maximum message size.
     "An open that never completes is bounded by the handshake timeout",
     "The connect reply keeps the timeout after the open",
@@ -435,6 +434,14 @@ const IMPLEMENTED: &[&str] = &[
     "set_http_headers refuses a header the transport sets",
     "Subscription set_data applies from the next resubscribe",
     "A subscription data callback takes precedence over set_data",
+    // Block 33: closing a client.
+    "close waits until the connection is closed and the stream ends",
+    "close unsubscribes every subscription with code 2 and sends no unsubscribe command",
+    "close ends a server-side subscription before the client's \"disconnected\"",
+    "A call pending at close fails with \"client closed\"",
+    "Dropping the client unsubscribes its subscriptions with code 2",
+    "close on a disconnected client resolves at once",
+    "A closed client stays closed",
 ];
 
 /// Server configuration of @A scenarios.

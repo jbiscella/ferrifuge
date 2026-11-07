@@ -112,6 +112,7 @@ fn client_side_subscribes(world: &mut ClientWorld) {
     world.subscription().subscribe();
 }
 
+#[given(regex = r#"^(?:then )?the client emits a server-side "(\w+)" event for channel "(\w+)"$"#)]
 #[then(regex = r#"^(?:then )?the client emits a server-side "(\w+)" event for channel "(\w+)"$"#)]
 async fn emits_server_side_event(world: &mut ClientWorld, name: String, channel: String) {
     next_server_side_event(world, &channel, |event| event.name() == name).await;
