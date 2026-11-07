@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 
 use tokio::sync::oneshot;
 
-use super::client::{Core, Shared, lock};
+use super::client::{Core, Shared, client_closed, lock};
 use crate::machine::SubscriptionId;
 use crate::{CallError, State, SubscriptionState, codes};
 
@@ -46,11 +46,20 @@ impl Default for Waiters {
 }
 
 impl Waiters {
-    /// Fails every waiter with "disconnected": the driver stopped (Block
-    /// 28, D3, D4).
+    /// Fails every waiter with "client closed": the driver stopped (Block
+    /// 28, D3, D4; Block 33, D4), the dropped senders mapping to it.
     pub(super) fn clear(&mut self) {
         self.client.clear();
         self.subscriptions.clear();
+    }
+
+    /// Fails every waiter with "client closed": the client is closing
+    /// (Block 33, D3).
+    pub(super) fn close(&mut self) {
+        send_all(&mut self.client, &Err(client_closed()));
+        for mut subscription in std::mem::take(&mut self.subscriptions).into_values() {
+            send_all(&mut subscription, &Err(client_closed()));
+        }
     }
 
     fn remove(&mut self, of: Of, id: u64) {
@@ -150,7 +159,7 @@ pub(super) fn ready(
     let start = {
         let core = lock(&shared.core);
         if shared.closed.load(Ordering::Acquire) {
-            Start::Settled(Err(disconnected()))
+            Start::Settled(Err(client_closed()))
         } else {
             let at_once = match of {
                 Of::Client => match core.machine.state() {
@@ -199,8 +208,8 @@ pub(super) fn ready(
                 let result = receiver.await;
                 drop(registered);
                 // The sender was dropped unsettled only when the driver
-                // stopped (Block 28).
-                result.unwrap_or_else(|_| Err(disconnected()))
+                // stopped (Block 28): the client is closed (Block 33).
+                result.unwrap_or_else(|_| Err(client_closed()))
             }
         }
     }
@@ -359,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn after_the_client_is_dropped_subscription_ready_fails_with_code_3() {
+    fn after_the_client_is_dropped_subscription_ready_fails_with_code_4() {
         let runtime = idle_runtime();
         let client = client_on(&runtime);
         let subscription = client.new_subscription("news").unwrap();
@@ -370,16 +379,17 @@ mod tests {
 
         drop(client);
 
-        assert_eq!(subscription.state(), SubscriptionState::Subscribing);
-        assert_eq!(code(waiting.now_or_never()), codes::error::DISCONNECTED);
+        // Unsubscribed with code 2 (Block 33, D4).
+        assert_eq!(subscription.state(), SubscriptionState::Unsubscribed);
+        assert_eq!(code(waiting.now_or_never()), codes::error::CLIENT_CLOSED);
         assert_eq!(
             code(subscription.ready().now_or_never()),
-            codes::error::DISCONNECTED
+            codes::error::CLIENT_CLOSED
         );
     }
 
     #[test]
-    fn a_runtime_shut_down_fails_the_waiters_with_code_3() {
+    fn a_runtime_shut_down_fails_the_waiters_with_code_4() {
         let runtime = idle_runtime();
         let client = client_on(&runtime);
         let subscription = client.new_subscription("news").unwrap();
@@ -391,16 +401,16 @@ mod tests {
 
         drop(runtime);
 
-        assert_eq!(code(of_client.now_or_never()), codes::error::DISCONNECTED);
+        assert_eq!(code(of_client.now_or_never()), codes::error::CLIENT_CLOSED);
         assert_eq!(
             code(of_subscription.now_or_never()),
-            codes::error::DISCONNECTED
+            codes::error::CLIENT_CLOSED
         );
     }
 
     // Block 28, D4: the machine is not fed, the waiters still end.
     #[test]
-    fn the_guard_with_the_core_poisoned_fails_the_waiters_with_code_3() {
+    fn the_guard_with_the_core_poisoned_fails_the_waiters_with_code_4() {
         let runtime = idle_runtime();
         let client = client_on(&runtime);
         let transport = connecting(&client);
@@ -421,10 +431,10 @@ mod tests {
         .join();
 
         assert!(panicked.is_err());
-        assert_eq!(code(of_client.now_or_never()), codes::error::DISCONNECTED);
+        assert_eq!(code(of_client.now_or_never()), codes::error::CLIENT_CLOSED);
         assert_eq!(
             code(of_subscription.now_or_never()),
-            codes::error::DISCONNECTED
+            codes::error::CLIENT_CLOSED
         );
         drop(client);
         drop(runtime);

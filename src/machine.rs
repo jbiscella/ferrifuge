@@ -397,6 +397,11 @@ pub enum Input {
     Reconnect,
     /// The application called `disconnect()`.
     Disconnect,
+    /// The application called `close()`, or dropped the client (Block 33):
+    /// every call fails with code 4 "client closed", every subscription
+    /// is unsubscribed with code 2 "client closed", then the client
+    /// disconnects for good. Nothing is fed after it.
+    Close,
     /// The owner's task performing the actions ended before the client was
     /// closed: its runtime shut down, or, when `panicked`, the task panicked
     /// (Block 28, D3, D4). The client disconnects for good.
@@ -748,6 +753,7 @@ impl std::fmt::Debug for Input {
             Self::StartBatching => f.write_str("StartBatching"),
             Self::StopBatching => f.write_str("StopBatching"),
             Self::Disconnect => f.write_str("Disconnect"),
+            Self::Close => f.write_str("Close"),
             Self::DriverDropped { panicked } => f
                 .debug_struct("DriverDropped")
                 .field("panicked", panicked)
@@ -1009,6 +1015,9 @@ struct Pings {
 /// The smallest gap between the wall and monotonic clocks taken for a
 /// system sleep (Block 25, D1).
 const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// The reason of the `unsubscribed` events of a closed client (Block 33).
+const CLIENT_CLOSED_REASON: &str = "client closed";
 
 /// Websocket close code "message too big" (RFC 6455).
 const MESSAGE_TOO_BIG: u32 = 1009;
@@ -1274,6 +1283,7 @@ impl Machine {
             Input::StartBatching => self.start_batching(),
             Input::StopBatching => self.stop_batching(),
             Input::Disconnect => self.disconnect_called(),
+            Input::Close => self.close(codes::disconnected::DISCONNECT_CALLED, "disconnect called"),
             Input::DriverDropped { panicked } => self.driver_dropped(panicked),
             Input::TransportOpened(id) if self.is_current(id) => self.transport_opened(),
             Input::TransportFailed { transport, message } if self.is_current(transport) => {
@@ -1964,22 +1974,43 @@ impl Machine {
         );
     }
 
-    /// The owner's task ended (Block 28, D3, D4).
+    /// The owner's task ended (Block 28, D3, D4): closed as by `close()`,
+    /// with its own disconnect code (Block 33, D4).
     fn driver_dropped(&mut self, panicked: bool) {
-        self.counters.cancelling = true;
         if panicked {
-            self.disconnect(
+            self.close(
                 codes::disconnected::BAD_PROTOCOL,
                 "exception during message handling",
-                false,
             );
         } else {
-            self.disconnect(
-                codes::disconnected::RUNTIME_SHUT_DOWN,
-                "runtime shut down",
+            self.close(codes::disconnected::RUNTIME_SHUT_DOWN, "runtime shut down");
+        }
+    }
+
+    /// Closes the client for good (Block 33, D2): every call fails with
+    /// "client closed", every subscription, client-side and server-side,
+    /// is unsubscribed with code 2 and no command, then the client
+    /// disconnects with `code`. The attempt it ends is not a failed one.
+    fn close(&mut self, code: u32, reason: &str) {
+        self.counters.cancelling = true;
+        self.fail_calls_closed();
+        let ids: Vec<SubscriptionId> = self.subscriptions().into_iter().map(|(id, _)| id).collect();
+        for id in ids {
+            self.set_unsubscribed(
+                id,
+                codes::unsubscribed::CLIENT_CLOSED,
+                CLIENT_CLOSED_REASON,
                 false,
             );
         }
+        for channel in self.server_subscriptions() {
+            self.server_subscription_unsubscribed(
+                &channel,
+                codes::unsubscribed::CLIENT_CLOSED,
+                CLIENT_CLOSED_REASON,
+            );
+        }
+        self.disconnect(code, reason, false);
     }
 
     fn reconnect(&mut self) {
