@@ -212,6 +212,39 @@ struct JsonSubscribeRequest<'a> {
     join_leave: bool,
     #[serde(skip_serializing_if = "str::is_empty")]
     delta: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tf: Option<JsonFilter<'a>>,
+}
+
+/// A tag filter as `client.proto` `FilterNode` in JSON (Block 35a).
+struct JsonFilter<'a>(&'a crate::tag_filter::Node);
+
+impl Serialize for JsonFilter<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let node = self.0;
+        let mut map = serializer.serialize_map(None)?;
+        if !node.op.is_empty() {
+            map.serialize_entry("op", node.op)?;
+        }
+        if !node.key.is_empty() {
+            map.serialize_entry("key", &node.key)?;
+        }
+        if !node.cmp.is_empty() {
+            map.serialize_entry("cmp", node.cmp)?;
+        }
+        if !node.val.is_empty() {
+            map.serialize_entry("val", &node.val)?;
+        }
+        if !node.vals.is_empty() {
+            map.serialize_entry("vals", &node.vals)?;
+        }
+        if !node.nodes.is_empty() {
+            let nodes: Vec<JsonFilter<'_>> = node.nodes.iter().map(JsonFilter).collect();
+            map.serialize_entry("nodes", &nodes)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Serialize)]
@@ -335,6 +368,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 flag,
                 join_leave,
                 delta,
+                tag_filter,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
                     delta: if *delta { FOSSIL } else { "" },
@@ -348,6 +382,7 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     recoverable: *recoverable,
                     flag: *flag,
                     join_leave: *join_leave,
+                    tf: tag_filter.as_ref().map(|filter| JsonFilter(&filter.0)),
                 });
             }
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
@@ -1267,6 +1302,31 @@ mod tests {
                 "\n",
                 r#"{"id":3,"unsubscribe":{"channel":"news"}}"#,
             )
+        );
+    }
+
+    // Block 35a: a nested filter as `client.proto` `FilterNode` in JSON,
+    // fields left empty skipped.
+    #[test]
+    fn encodes_a_tag_filter_as_a_filter_node() {
+        let filter = crate::TagFilter::is_in("ticker", ["BTC", "ETH"])
+            .and(!crate::TagFilter::eq("venue", "test"));
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                tag_filter: Some(filter),
+                ..SubscribeRequest::default()
+            }),
+        }]);
+
+        let json: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(
+            json["subscribe"]["tf"],
+            serde_json::json!({"op": "and", "nodes": [
+                {"key": "ticker", "cmp": "in", "vals": ["BTC", "ETH"]},
+                {"op": "not", "nodes": [{"key": "venue", "cmp": "eq", "val": "test"}]},
+            ]})
         );
     }
 

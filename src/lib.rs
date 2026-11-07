@@ -74,6 +74,7 @@ mod protobuf;
 pub(crate) mod protocol;
 mod statistics;
 mod subscription;
+mod tag_filter;
 mod token;
 mod wire;
 
@@ -107,4 +108,5 @@ pub use subscription::{
     ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,
     SubscriptionError, SubscriptionEvent, SubscriptionState,
 };
+pub use tag_filter::TagFilter;
 pub use token::TokenError;
