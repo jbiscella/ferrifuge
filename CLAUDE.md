@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–33 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–34 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -4674,3 +4674,95 @@ Feature: Closing a client
 ```
 
 **Exceptions introduced:** none. centrifuge-js 63ed73e has no `close()`, and the absent `closed` state is Block 0's decision.
+
+---
+
+## Block 34 — Table of codes
+
+**Goal:** an operator who reads a code in a log, an event or an error finds in one table what it means and what the client does next, in the crate documentation and in the README, kept complete by a test (parity item 23, centrifuge-js #264; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A).
+
+**Dependencies:** Blocks 1–5, 8–13, 15, 17–19, 25, 28, 29 and 33 (where each code and each reaction is decided), 20 (README, changelog, the docs-rs job), 21 (logs carry state, code and reason).
+
+**Out of scope:**
+- changing any code, reason or behaviour: this block documents them; a row found wrong against the code is fixed in the row, a behaviour found wrong goes to its block;
+- public constants for server codes and an `is_reconnect_code` function (centrifuge-rust `docs/spec.md` §10): new API, not item 23;
+- the server's error codes one by one (Centrifugo's documentation lists them);
+- a separate `docs/codes.md` (the analysis's design B).
+
+This block reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Tables.** The `codes` module documentation (centrifuge-rust `docs/spec.md` §6.5, §10, commit 88d6edf) opens by saying how to read a code:
+  - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
+  - the same field also carries server codes, in their own ranges (the last table);
+  - the client's logs show the state, code and reason (Block 21);
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and error 15; error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+
+  Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
+  - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
+  - Cause: from the constant's documentation, with the block that decides it (blocks of the repository's `CLAUDE.md`);
+  - Then, for an event kind: whether and when the client tries again by itself. The options are: at once (`connecting` 0; 6, after the jitter window when it was connected); after the reconnect backoff; when the client connects (`subscribing` 1); after the resubscribe backoff (`subscribing` 2); never, until `connect()` or `subscribe()`;
+  - Then, for `error`: what the client does (it keeps retrying, or the call fails), and whether a retry can succeed. It never can for 4 "client closed", only after `connect()` for 3, and never with the same data for 10.
+
+  Each row stays on one line, with identifiers in backticks.
+
+  A last table, "Server codes" (Codes | Carried by | Then), has these rows:
+  - disconnect 3500–3999 and 4500–4999: `disconnected`, stays disconnected until `connect()` (Block 3);
+  - every other disconnect code (3000–3499, 4000–4499, from 5000): `connecting`, reconnects after the backoff (Block 3);
+  - 3008: as above; before the first server ping on that connection, the backoff keeps growing (Block 15);
+  - 3014: tokens dropped and stream positions made unmatchable, then reconnects (Block 11);
+  - websocket close 1009: `disconnected` code 3 (Block 3); other close codes below 3000: `connecting` code 1;
+  - unsubscribe below 2500: `unsubscribed`, stays unsubscribed;
+  - unsubscribe from 2500: `subscribing`, subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); any code ends a server-side subscription (Block 12);
+  - connect error that is temporary, below 100, or 109: an `error` event, then `connecting`, reconnecting after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12 and then `disconnected` code 1 (Blocks 1, 5, 17);
+  - any other connect error: `disconnected` with its code;
+  - refresh error that is temporary or below 100: an `error` event, retried after 5 to 10 s; any other: `disconnected` with its code (Block 5);
+  - subscribe errors:
+    - 109: a new token, then resubscribes; without a token callback, error 12 and then `unsubscribed` code 1 (Block 10);
+    - 112 with getState: the state is reloaded and the subscription resubscribes after the backoff, with no `error` event (Block 11);
+    - temporary or below 100: an `error` event, then resubscribes after the backoff;
+    - any other: `unsubscribed` with its code (Block 9);
+  - sub_refresh error that is temporary or below 100: an `error` event, retried after 10 to 20 s; any other: `unsubscribed` with its code (Block 10);
+  - call error: a `CallError` with the server's code, message and `temporary`; the client never retries a call (Block 13).
+- **D2 README.** A "Codes" section after "States and events" mirrors every table row for row. The client-side code table in "Calls" is replaced by a pointer to it, as it lacks code 4. The "States and events" sentence on `ferrifuge::codes` points to it too.
+- **D3 Test.** Steps read `src/codes.rs` and `README.md` from the repository, as Block 20's do, with no new dependency:
+  - **Constants.** Inside `pub mod <kind> {`, each line `pub const <NAME>: u32 = <value>;` is one constant. Any other line holding `pub const` or `pub static`, or a constant outside a kind, fails the step.
+  - **Rows.** A row is a line starting with `|`, in the module documentation (`//!`) or in the README's "Codes" section, other than a delimiter row.
+  - **Code rows.** A code row's Constant cell is exactly `` [`kind::NAME`] `` in the documentation (an intra-doc link) or `` `codes::kind::NAME` `` in the README. Its Code cell is the value.
+  - **Checks:**
+    - each constant has exactly one code row, with its value;
+    - every code row names a constant;
+    - the code rows of one table name constants of one kind;
+    - the README's rows equal the documentation's, in order and cell for cell, once each Constant cell is normalised to `kind::NAME`;
+    - every string literal a reason cell quotes occurs as that literal in a `.rs` file under `src/` other than `codes.rs`.
+- **D4 Version.** No bump: documentation and a test. `Unreleased` entry under "Added": a table of codes, with the client's reaction to each and the server codes it reacts to, in the `codes` documentation and the README.
+
+Value clause: As an operator reading a code in a production log, I want one table saying what each code means and what the client does next, so that I can tell a transient reconnect from a terminal stop without reading the source.
+
+**Structural acceptance:**
+- `cargo doc` in `lint` and in the docs-rs job, with warnings denied, resolves every Constant link of the tables;
+- the steps parse as D3;
+- each scenario is seen failing once on a mutation (a constant without a row, a wrong value, a README cell changed, a misspelt reason), recorded in the PR.
+
+```gherkin
+Feature: Table of codes
+
+  Scenario: Every code constant has one row with its value
+    Given the crate's codes module
+    Then the codes documentation has exactly one row for each code constant, giving its value
+
+  Scenario: The table names no code the crate lacks
+    Given the crate's codes module
+    Then every constant a row of the codes documentation or the README names is a code constant of the crate
+    And the rows of each table name constants of one kind
+
+  Scenario: The README's table is the documentation's
+    Given the crate's codes module and its README
+    Then the README's rows are the rows of the codes documentation, in the same order and cell for cell
+
+  Scenario: Every quoted reason is one the client sends
+    Given the crate's codes module
+    Then every reason a row quotes occurs as a string literal in the crate's source outside the codes module
+```
+
+**Exceptions introduced:** none.
