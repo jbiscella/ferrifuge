@@ -1228,6 +1228,7 @@ dependencies = [
  "fastrand",
  "ferrifuge",
  "futures-core",
+ "futures-executor",
  "futures-util",
  "gungraun",
  "hmac",

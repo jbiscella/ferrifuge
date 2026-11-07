@@ -25,6 +25,7 @@ use super::http::HttpTransport;
 use super::log::{self, Log};
 use super::net::Network;
 use super::proxy::Proxy;
+use super::ready::{self, Of, Waiters};
 use super::tls::{self, Tls, Trust, unparsable_root};
 use super::transport::{Inbound, WebSocket};
 use crate::machine::{
@@ -67,6 +68,8 @@ pub(super) struct Shared {
     pub(super) callbacks: Mutex<SubscriptionCallbacks>,
     /// Where the outcome of each call goes, by call (Block 13).
     calls: Mutex<HashMap<CallId, oneshot::Sender<Result<CallReply, CallError>>>>,
+    /// The waiting `ready()` futures (Block 30). Locked after `core`.
+    pub(super) ready: Mutex<Waiters>,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// Set when the client handle is dropped: the driver stops once the
@@ -526,6 +529,8 @@ impl Shared {
                 inputs.extend(taken.map(Input::EventTaken));
             }
         }
+        // On the states, not the events taken (Block 30, D4).
+        ready::settle(core, &mut lock(&self.ready));
     }
 
     fn next_action(&self) -> Option<Action> {
@@ -1061,6 +1066,7 @@ impl Client {
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
             calls: Mutex::new(HashMap::new()),
+            ready: Mutex::new(Waiters::default()),
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
@@ -1121,6 +1127,43 @@ impl Client {
     #[must_use]
     pub fn state(&self) -> State {
         lock(&self.shared.core).machine.state()
+    }
+
+    /// Waits until the client is connected, without taking an event from
+    /// its stream (Block 30). The wait starts when this method returns, and
+    /// the future borrows nothing from the client, so it can be spawned.
+    ///
+    /// It follows the state [`Client::state`] reports, not the events
+    /// taken: it can resolve before the `connected` event is taken, and a
+    /// state that lasts only within one message is not seen. The state moves
+    /// only as the client handles messages, each after the events of earlier
+    /// ones were taken (Block 15), so a task holding the client's stream with
+    /// events not taken, and awaiting this without reading it, waits until
+    /// the stream is read or dropped. No timeout applies; wrap the future in
+    /// one:
+    ///
+    /// ```no_run
+    /// # async fn run(client: ferrifuge::Client) {
+    /// use std::time::Duration;
+    ///
+    /// client.connect();
+    /// match tokio::time::timeout(Duration::from_secs(10), client.ready()).await {
+    ///     Ok(Ok(())) => println!("connected"),
+    ///     Ok(Err(error)) => println!("will not connect: {error}"),
+    ///     Err(_) => println!("still connecting"),
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Code 3 "disconnected" (`codes::error::DISCONNECTED`) at once when the
+    /// client is disconnected, `connect()` never called included, or closed
+    /// (its runtime shut down); and when the client enters `disconnected`
+    /// while connecting: `disconnect()`, a terminal code, a denied token,
+    /// the client dropped.
+    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
+        ready::ready(&self.shared, Of::Client)
     }
 
     /// Events from now on. An event counts as delivered once this stream
@@ -2131,7 +2174,7 @@ fn runtime_error(message: &str) -> ClientError {
 /// panic (Block 28, D3, D4), which would otherwise leave calls and
 /// streams pending forever, even after the client is dropped (as hyper's
 /// dispatch callback fails its request when its task is dropped).
-struct Ending(Arc<Shared>);
+pub(super) struct Ending(pub(super) Arc<Shared>);
 
 impl Drop for Ending {
     fn drop(&mut self) {
@@ -2166,6 +2209,7 @@ impl Drop for Ending {
         // The final disconnect settled the calls it could; any other future
         // gets "disconnected" rather than waiting forever.
         lock(&shared.calls).clear();
+        lock(&shared.ready).clear();
     }
 }
 

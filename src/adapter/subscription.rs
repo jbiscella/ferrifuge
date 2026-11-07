@@ -61,6 +61,31 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
+    /// Waits until the subscription is subscribed, without taking an event
+    /// from its stream (Block 30). The wait starts when this method
+    /// returns, and the future borrows nothing, so it can be spawned. It
+    /// waits across the client's reconnects, and while the client is not
+    /// connected yet: a subscription subscribed before `connect()` included.
+    ///
+    /// As [`Client::ready`], it follows the state
+    /// [`Subscription::state`] reports, not the events taken, so it can
+    /// resolve before the `subscribed` event is taken; and a task holding
+    /// a stream of the client with events not taken waits until it is read
+    /// or dropped (Block 15). No timeout applies; wrap the future in one.
+    ///
+    /// # Errors
+    ///
+    /// Code 7 "subscription unsubscribed"
+    /// (`codes::error::SUBSCRIPTION_UNSUBSCRIBED`) at once when the
+    /// subscription is unsubscribed or removed, and when it becomes
+    /// unsubscribed while waiting. Code 3 "disconnected" at once when the
+    /// client is closed (dropped, or its runtime shut down), and when the
+    /// client enters `disconnected` while it waits, as its calls waiting for
+    /// it do.
+    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
+        super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
+    }
+
     /// Events of the subscription queued for its streams and not yet
     /// taken, so that tests can wait for them. Only with the `test-util`
     /// feature.

@@ -8,6 +8,7 @@ mod log;
 mod net;
 mod outbox;
 mod proxy;
+mod ready;
 mod subscription;
 mod tls;
 mod transport;
