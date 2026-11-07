@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.13"
+ferrifuge = "0.14"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -540,7 +540,7 @@ server's asynchronous messages, exactly as received.
 
 | Feature | Default | Adds |
 |---|---|---|
-| `tokio` | yes | `Client`, the websocket, http_stream and sse transports, TLS through rustls with the platform's root certificates |
+| `tokio` | yes | `Client`, the websocket, http_stream and sse transports, TLS through rustls verified as the platform does (see TLS verification) |
 | `ring` | yes | ring as the TLS crypto provider; builds with a C compiler |
 | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
@@ -549,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.13", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.14", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -564,6 +564,41 @@ module's status on the NIST CMVP list before relying on it for compliance.
 Without default features, ferrifuge has no runtime or network dependency.
 `ferrifuge::machine::Machine` then takes inputs (API calls, transport
 activity, timers) and returns the actions to perform.
+
+### TLS verification
+
+How a `wss://` or `https://` server is verified depends on the build and
+the platform:
+
+| Build | macOS, iOS, Windows | Linux and other Unix systems |
+|---|---|---|
+| `ring`, `aws-lc-rs` | the operating system's verifier (`rustls-platform-verifier`): its store, its distrust settings, revocation and intermediate fetching | webpki over the system's root certificates (`rustls-native-certs`, which reads `SSL_CERT_FILE` and `SSL_CERT_DIR`) |
+| `fips` | webpki over the system's root certificates, so that chains are checked inside the FIPS module | the same |
+
+`SSL_CERT_FILE` and `SSL_CERT_DIR` apply only where webpki verifies: on
+Linux, and in the `fips` build. Android keeps webpki for now; its setup
+comes in a later release.
+
+A private certificate authority, such as a corporate TLS inspection proxy's,
+is trusted in addition to the platform's with `root_certificates`:
+
+```rust,ignore
+use ferrifuge::rustls::pki_types::CertificateDer;
+use ferrifuge::rustls::pki_types::pem::PemObject;
+
+let roots = CertificateDer::pem_slice_iter(pem).collect::<Result<Vec<_>, _>>()?;
+let client = Client::builder(endpoint).root_certificates(roots).build()?;
+```
+
+`tls_config` takes a whole `rustls::ClientConfig` instead, for client
+certificates, pinning or a verifier of your own: its roots, verifier and
+provider are used as given, and Ferrifuge only sets its ALPN list to
+`http/1.1`. It cannot be combined with `root_certificates`; in the `fips`
+build, its `fips()` must be true, and its verifier is yours to choose. Each
+client given extra roots holds its own TLS settings, so many clients should
+share one `tls_config` instead. `ferrifuge::rustls` re-exports the rustls
+version Ferrifuge uses: moving to another rustls 0.x line is a breaking
+release of Ferrifuge. No setting accepts invalid certificates.
 
 ### Logging
 
@@ -600,8 +635,10 @@ entries and exits show at TRACE under the target `tracing::span::active`.
 Keep Ferrifuge's dependencies at INFO or above in production: they log on
 their own, through `log`. At TRACE, tungstenite 0.30 logs the whole
 websocket upgrade request, its query and header values included, and every
-frame sent and received, the connect frame with its token. A `tracing`
-application sees those dependency records only through `tracing-log`.
+frame sent and received, the connect frame with its token.
+rustls-platform-verifier logs each failed verification at ERROR, with no
+secret. A `tracing` application sees those dependency records only through
+`tracing-log`.
 
 ## Development
 

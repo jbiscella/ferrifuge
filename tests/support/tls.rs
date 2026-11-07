@@ -1,9 +1,10 @@
 //! Test certificate authority for the encrypted scenarios (Block 6).
 //!
-//! The client trusts the platform's root certificates only. `rustls-native-certs`
-//! reads them from the file named by `SSL_CERT_FILE` when it is set, so the
-//! runner points it at this CA (see `trust_test_ca` in `bdd.rs`): no
-//! custom-root API is needed.
+//! On Linux the client verifies with webpki over the platform's root
+//! certificates, which `rustls-native-certs` reads from the file named by
+//! `SSL_CERT_FILE` when it is set, so the runner points it at this CA (see
+//! `trust_test_ca` in `bdd.rs`). A second, private CA, never in that file,
+//! tests the extra roots and raw configurations of Block 22.
 
 use std::fs;
 use std::path::PathBuf;
