@@ -120,6 +120,8 @@ enum Target {
 enum Op {
     Connect,
     Disconnect,
+    /// `reconnect()` (Block 25, D5).
+    Reconnect,
     Subscribe(usize),
     Unsubscribe(usize),
     Call(usize),
@@ -153,7 +155,8 @@ impl Op {
             Target::Subscription(channel)
         };
         match rng.u32(0..100) {
-            0..8 => Self::Connect,
+            0..7 => Self::Connect,
+            7..8 => Self::Reconnect,
             8..12 => Self::Disconnect,
             12..20 => Self::Subscribe(channel),
             20..24 => Self::Unsubscribe(channel),
@@ -308,6 +311,7 @@ impl Run {
         match op {
             Op::Connect => self.client.connect(),
             Op::Disconnect => self.client.disconnect(),
+            Op::Reconnect => self.client.reconnect(),
             Op::Subscribe(n) => self.subs[n].subscription.subscribe(),
             Op::Unsubscribe(n) => self.subs[n].subscription.unsubscribe(),
             Op::Call(kind) => self.call(kind),

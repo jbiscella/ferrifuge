@@ -20,6 +20,8 @@ pub mod connecting {
     /// A server-side subscription received a delta publication, which the
     /// client never asks for there (Block 19, D8).
     pub const DELTA_ERROR: u32 = 5;
+    /// `reconnect()` was called (Block 25, D5).
+    pub const RECONNECT_CALLED: u32 = 6;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].

@@ -195,6 +195,8 @@ impl fmt::Display for Violation {
 enum Op {
     Connect,
     Disconnect,
+    /// The application calls `reconnect()` (Block 25, D5).
+    Reconnect,
     Call(CallKind),
     /// Takes the next event of the client's stream, or of a subscription's.
     TakeNext(Target),
@@ -282,7 +284,8 @@ impl Op {
             return Self::pick_subscription(rng);
         }
         match rng.u32(0..100) {
-            0..8 => Self::Connect,
+            0..7 => Self::Connect,
+            7..8 => Self::Reconnect,
             8..13 => Self::Disconnect,
             13..28 => Self::Call(match rng.u32(0..4) {
                 0 => CallKind::Rpc,
@@ -754,6 +757,8 @@ impl Run {
                 self.checker.disconnected = true;
                 self.feed(Input::Disconnect)
             }
+            // A stopped client stays stopped.
+            Op::Reconnect => self.feed(Input::Reconnect),
             Op::Call(kind) => {
                 // Inside a batch, a burst of calls, so that the batch fills
                 // more than one frame and splits (Block 18, D5).
@@ -2039,6 +2044,7 @@ fn connection_counts() -> Vec<String> {
     let mut expected: Vec<String> = [
         Op::Connect,
         Op::Disconnect,
+        Op::Reconnect,
         Op::TakeNext(Target::Client),
         Op::Hold,
         Op::Read,

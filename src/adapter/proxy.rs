@@ -4,7 +4,8 @@
 
 use std::fmt;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use base64::Engine as _;
@@ -48,7 +49,8 @@ impl Proxy {
     /// `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (upper case before lower
     /// case, none of them in a CGI process, where `REQUEST_METHOD` is set),
     /// then macOS's HTTP and HTTPS proxies and Windows' Internet settings.
-    /// Read once per process. The default.
+    /// Read once per process, and again by every client's next attempt
+    /// after a [`crate::Client::reconnect`]. The default.
     #[must_use]
     pub fn system() -> Self {
         Self(Setting::System)
@@ -136,10 +138,16 @@ impl Proxy {
                 return Ok(choose(&endpoint.display()));
             }
         };
-        match matcher.intercept(&endpoint.as_http()) {
-            Some(intercept) => ProxyTarget::from_intercept(&intercept).map(Some),
-            None => Ok(None),
-        }
+        intercepted(&matcher, &endpoint)
+    }
+
+    /// The decision of the system setting under the settings read now,
+    /// for an HTTP client built on them: its requests keep them, as its
+    /// pool keeps their connections (Block 25, D7).
+    pub(super) fn system_decider()
+    -> impl Fn(&Url) -> Result<Option<ProxyTarget>, String> + Send + Sync + 'static {
+        let matcher = system_matcher();
+        move |url: &Url| intercepted(&matcher, &endpoint(url)?)
     }
 }
 
@@ -162,14 +170,53 @@ impl fmt::Debug for Proxy {
     }
 }
 
-fn system_matcher() -> &'static Matcher {
-    static SYSTEM: OnceLock<Matcher> = OnceLock::new();
-    SYSTEM.get_or_init(Matcher::from_system)
+fn intercepted(matcher: &Matcher, endpoint: &Endpoint) -> Result<Option<ProxyTarget>, String> {
+    match matcher.intercept(&endpoint.as_http()) {
+        Some(intercept) => ProxyTarget::from_intercept(&intercept).map(Some),
+        None => Ok(None),
+    }
 }
 
-fn env_matcher() -> &'static Matcher {
-    static ENV: OnceLock<Matcher> = OnceLock::new();
-    ENV.get_or_init(Matcher::from_env)
+/// How many times the environment's and the operating system's proxy
+/// settings were asked to be read again (Block 25, D7).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The environment's and the operating system's proxy settings are read
+/// again by the next attempt of every client, and the HTTP clients built
+/// on them are built again (Block 25, D7).
+pub(super) fn read_settings_again() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The generation of the settings to use (see [`read_settings_again`]).
+pub(super) fn settings_generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+type Cached = Mutex<Option<(u64, Arc<Matcher>)>>;
+
+fn system_matcher() -> Arc<Matcher> {
+    static SYSTEM: Cached = Mutex::new(None);
+    cached(&SYSTEM, Matcher::from_system)
+}
+
+fn env_matcher() -> Arc<Matcher> {
+    static ENV: Cached = Mutex::new(None);
+    cached(&ENV, Matcher::from_env)
+}
+
+/// The settings `read` gives, read once per generation.
+fn cached(cell: &Cached, read: fn() -> Matcher) -> Arc<Matcher> {
+    let generation = settings_generation();
+    let mut cached = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    match &*cached {
+        Some((read_in, matcher)) if *read_in == generation => Arc::clone(matcher),
+        _ => {
+            let matcher = Arc::new(read());
+            *cached = Some((generation, Arc::clone(&matcher)));
+            matcher
+        }
+    }
 }
 
 fn is_excluded(excluded: Option<&Matcher>, endpoint: &Endpoint) -> bool {
@@ -602,6 +649,18 @@ pub(super) const PROXY_AUTHENTICATION_REQUIRED: &str = "proxy authentication req
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Block 25, D7: after `reconnect()`, the next decision reads the
+    // system's proxy settings again.
+    #[test]
+    fn the_system_settings_are_read_again_after_a_reconnect() {
+        let first = system_matcher();
+
+        read_settings_again();
+        let again = system_matcher();
+
+        assert!(!Arc::ptr_eq(&first, &again), "read once only");
+    }
     use tokio::io::AsyncWriteExt;
 
     fn url(text: &str) -> Url {

@@ -1,11 +1,12 @@
-//! Steps of Block 25: system sleep (@E). They drive the sans-IO core on the
-//! simulated clock of Block 18's steps.
+//! Steps of Block 25: system sleep and `reconnect()`. The @E steps drive the
+//! sans-IO core on the simulated clock of Block 18's steps.
 
 use std::time::Duration;
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::{
-    Action, CallId, CallTimer, Input, SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer,
+    Action, CallId, CallTimer, Input, Machine, SubscriptionId, SubscriptionOptions,
+    SubscriptionTimer, Timer, TransportKind,
 };
 use ferrifuge::{ClientEvent, Config, State};
 use serde_json::{Value, json};
@@ -23,6 +24,21 @@ pub(crate) struct Sleep {
     reconnect_due: Option<Duration>,
     call: Option<CallId>,
     subscription: Option<SubscriptionId>,
+    /// The machines of a fleet scenario, each with where its actions of
+    /// the step under test start.
+    fleet: Vec<(BatchRun, usize)>,
+    /// The minimum reconnect delay of a @D scenario's client.
+    min_reconnect_delay: Option<Duration>,
+}
+
+impl Sleep {
+    /// Applies the scenario's options to a @D client's `config`.
+    pub(crate) fn configure(&self, config: &mut Config) {
+        if let Some(delay) = self.min_reconnect_delay {
+            config.min_reconnect_delay = delay;
+            config.max_reconnect_delay = config.max_reconnect_delay.max(delay);
+        }
+    }
 }
 
 fn sleep(world: &mut ClientWorld) -> &mut Sleep {
@@ -425,4 +441,237 @@ fn its_reconnect_timer_is_unchanged(world: &mut ClientWorld) {
         "{actions:?}"
     );
     assert_eq!(run(world).due(Key::Client(Timer::Reconnect)), before);
+}
+
+#[given(
+    regex = r"^(\d+) connected machines with different seeds, minReconnectDelay (\d+) ms and a reconnect jitter window of (\d+) ms$"
+)]
+fn a_fleet(world: &mut ClientWorld, count: u64, min: u64, window: u64) {
+    let config = Config {
+        min_reconnect_delay: Duration::from_millis(min),
+        max_reconnect_delay: Duration::from_millis(min * 4),
+        reconnect_jitter_window: Duration::from_millis(window),
+        ..Config::default()
+    };
+    sleep(world).fleet = (0..count)
+        .map(|seed| {
+            let mut run = BatchRun::of(Machine::new(config.clone()).with_seed(seed));
+            run.handle(Input::Connect);
+            run.connect(&json!({"client": "c"}));
+            (run, 0)
+        })
+        .collect();
+}
+
+#[given(
+    regex = r"^a machine with minReconnectDelay (\d+) ms whose first connection attempt failed, with an RPC call waiting for the connection$"
+)]
+fn a_failed_machine_with_a_call(world: &mut ClientWorld, min: u64) {
+    a_machine_whose_attempt_failed(world, min);
+    let run = run(world);
+    let call = run.rpc("waiting");
+    assert!(
+        run.due(Key::Call(call, CallTimer::Connection)).is_some(),
+        "the call waits for the connection"
+    );
+    sleep(world).call = Some(call);
+}
+
+#[given(
+    "a machine with transports websocket and http_stream, connected over http_stream after websocket failed"
+)]
+fn a_machine_connected_over_the_fallback(world: &mut ClientWorld) {
+    let machine = Machine::new(Config::default())
+        .with_transports(vec![TransportKind::WebSocket, TransportKind::HttpStream])
+        .expect("two transports");
+    let mut run = BatchRun::of(machine);
+    run.handle(Input::Connect);
+    let websocket = run.transport.expect("a websocket attempt");
+    run.handle(Input::TransportFailed {
+        transport: websocket,
+        message: "refused".into(),
+    });
+    let delay = run
+        .due(Key::Client(Timer::Reconnect))
+        .expect("the next transport of the round");
+    run.advance(delay);
+    assert!(
+        run.actions.iter().rev().any(|action| matches!(
+            action,
+            Action::OpenTransport {
+                kind: TransportKind::HttpStream,
+                ..
+            }
+        )),
+        "{:?}",
+        run.actions
+    );
+    run.connect(&json!({"client": "c"}));
+    assert_eq!(run.machine.state(), State::Connected);
+    sleep(world).run = Some(run);
+}
+
+#[given("a machine disconnected by an explicit disconnect call")]
+fn a_disconnected_machine(world: &mut ClientWorld) {
+    let mut run = connected(Config::default(), false, &json!({"client": "c"}));
+    run.handle(Input::Disconnect);
+    sleep(world).run = Some(run);
+}
+
+#[given(regex = r"^a client with minReconnectDelay (\d+) ms connected to the fake server$")]
+async fn a_slow_reconnecting_client(world: &mut ClientWorld, min: u64) {
+    sleep(world).min_reconnect_delay = Some(Duration::from_millis(min));
+    super::connection::a_connected_client(world).await;
+}
+
+#[when("reconnect is called")]
+#[when("reconnect is called on each")]
+fn reconnect_is_called(world: &mut ClientWorld) {
+    let sleep = sleep(world);
+    if !sleep.fleet.is_empty() {
+        for (run, mark) in &mut sleep.fleet {
+            *mark = run.actions.len();
+            run.handle(Input::Reconnect);
+        }
+        return;
+    }
+    if let Some(run) = sleep.run.as_mut() {
+        sleep.mark = run.actions.len();
+        run.handle(Input::Reconnect);
+        return;
+    }
+    world.client().reconnect();
+}
+
+#[then(
+    regex = r#"^each closes its transport and emits "connecting" with code (\d+) and reason "([^"]*)"$"#
+)]
+#[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
+fn each_reconnects(world: &mut ClientWorld, code: u32, reason: String) {
+    for (run, mark) in &world.sleep.fleet {
+        let actions = &run.actions[*mark..];
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::CloseTransport(_))),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::Emit(_, ClientEvent::Connecting { code: c, reason: r })
+                    if *c == code && *r == reason
+            )),
+            "{actions:?}"
+        );
+    }
+}
+
+/// The delay of each fleet machine's next attempt.
+fn fleet_delays(world: &ClientWorld) -> Vec<Duration> {
+    world
+        .sleep
+        .fleet
+        .iter()
+        .map(|(run, mark)| {
+            run.actions[*mark..]
+                .iter()
+                .find_map(|action| match action {
+                    Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                    _ => None,
+                })
+                .expect("a next attempt")
+        })
+        .collect()
+}
+
+#[then(regex = r"^every next attempt is delayed by at most (\d+) ms$")]
+fn every_delay_is_at_most(world: &mut ClientWorld, most: u64) {
+    let delays = fleet_delays(world);
+    assert!(
+        delays
+            .iter()
+            .all(|delay| *delay <= Duration::from_millis(most)),
+        "{delays:?}"
+    );
+}
+
+#[then("the delays are not all equal")]
+fn the_delays_differ(world: &mut ClientWorld) {
+    let delays = fleet_delays(world);
+    assert!(
+        delays.windows(2).any(|pair| pair[0] != pair[1]),
+        "{delays:?}"
+    );
+}
+
+#[then("it starts an attempt at once")]
+fn it_starts_an_attempt_at_once(world: &mut ClientWorld) {
+    let actions = since(world);
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::OpenTransport { .. })),
+        "{actions:?}"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+        "{actions:?}"
+    );
+}
+
+#[then("it emits no event")]
+fn it_emits_no_event(world: &mut ClientWorld) {
+    let actions = since(world);
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Emit(..))),
+        "{actions:?}"
+    );
+}
+
+#[then("the call is still waiting")]
+fn the_call_is_still_waiting(world: &mut ClientWorld) {
+    let call = world.sleep.call.expect("a call");
+    let run = run(world);
+    assert!(!run.settled.contains_key(&call), "{:?}", run.settled);
+    assert!(run.due(Key::Call(call, CallTimer::Connection)).is_some());
+}
+
+#[then("its next attempt opens a websocket transport")]
+fn its_next_attempt_opens_a_websocket(world: &mut ClientWorld) {
+    let run = run(world);
+    if let Some(delay) = run.due(Key::Client(Timer::Reconnect)) {
+        run.advance(delay);
+    }
+    let opened = since(world)
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .expect("a next attempt");
+    assert_eq!(opened, TransportKind::WebSocket);
+}
+
+#[then(regex = r#"^then within (\d+) s the client emits "connected"$"#)]
+async fn connected_within(world: &mut ClientWorld, seconds: u64) {
+    let event = tokio::time::timeout(Duration::from_secs(seconds), world.next_event())
+        .await
+        .unwrap_or_else(|_| panic!("not connected within {seconds} s"));
+    assert!(matches!(event, ClientEvent::Connected { .. }), "{event:?}");
+}
+
+#[then(r#"the client never emitted "disconnected""#)]
+async fn never_disconnected(world: &mut ClientWorld) {
+    let later = world.events_during(super::QUIET_PERIOD).await;
+    assert!(
+        !later
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Disconnected { .. })),
+        "{later:?}"
+    );
 }
