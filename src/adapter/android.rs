@@ -8,7 +8,7 @@
 //!
 //! The app's Gradle build must include the verifier's Kotlin component, at
 //! the version of `rustls-platform-verifier-android` in `Cargo.lock`, kept
-//! by the ProGuard rule of the verifier's README. Call one of these once per
+//! by the `ProGuard` rule of the verifier's README. Call one of these once per
 //! process, before building a client that uses TLS: until then such a
 //! client fails `build()`, or its handshakes fail, naming this call.
 

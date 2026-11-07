@@ -104,10 +104,18 @@ impl Proxy {
         matches!(self.0, Setting::System)
     }
 
-    /// Whether every endpoint goes through one `https://` proxy: a TLS
-    /// connection known when the client is built (Block 24, D5).
-    pub(super) fn is_https_for_all(&self) -> bool {
-        matches!(&self.0, Setting::All(target, _) if target.scheme == Scheme::Https)
+    /// Whether `url` goes through one `https://` proxy for every endpoint,
+    /// its no-proxy list applied: a TLS connection known when the client is
+    /// built (Block 24, D5).
+    pub(super) fn is_https_proxy_for(&self, url: &str) -> bool {
+        let Setting::All(target, excluded) = &self.0 else {
+            return false;
+        };
+        target.scheme == Scheme::Https
+            && Url::parse(url)
+                .ok()
+                .and_then(|url| endpoint(&url).ok())
+                .is_some_and(|endpoint| !is_excluded(excluded.as_deref(), &endpoint))
     }
 
     /// The proxy for `url`, or `None` for a direct connection (Block 23,
