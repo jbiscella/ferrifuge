@@ -404,10 +404,16 @@ impl Shared {
         // starts fetches a new token, and one it tears down makes the next
         // attempt fetch one (D3). While connecting, the sleep changes only
         // the refresh timers and goes first, so that a connect reply is not
-        // judged by a sleep it did not live through.
+        // judged by a sleep it did not live through. A `reconnect()` while
+        // connected also goes first, so that it keeps its code and jitter
+        // window rather than finding the client already reconnecting for
+        // the sleep (D5; Codex, #122).
         let connected = core.machine.state() == State::Connected;
         match input {
-            Input::EventTaken(_) | Input::Frame { .. } | Input::TransportClosed { .. }
+            Input::EventTaken(_)
+            | Input::Frame { .. }
+            | Input::TransportClosed { .. }
+            | Input::Reconnect
                 if connected =>
             {
                 self.fire_due_refreshes(core);
@@ -3110,6 +3116,55 @@ mod tests {
             shared.actions_queued.notified().now_or_never().is_some(),
             "the driver is not woken"
         );
+    }
+
+    // Codex, #122: reconnect() called on the wake notification, first after
+    // a sleep longer than the no-ping window, keeps its code and jitter.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reconnect_revealing_a_long_sleep_keeps_its_code_and_jitter() {
+        use futures_util::FutureExt as _;
+        let client = Client::new(
+            "ws://127.0.0.1:1/connection/websocket",
+            Config {
+                reconnect_jitter_window: Duration::from_secs(10),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let mut events = client.events();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+
+        slept(&mut core, Duration::from_secs(70));
+        client.shared().handle(&mut core, Input::Reconnect);
+
+        assert_eq!(core.machine.state(), State::Connecting);
+        assert!(
+            !core
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::OpenTransport { .. })),
+            "no attempt at once: {:?}",
+            core.actions
+        );
+        assert_eq!(
+            core.actions
+                .iter()
+                .filter(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _)))
+                .count(),
+            1,
+            "{:?}",
+            core.actions
+        );
+        drop(core);
+        let mut codes = Vec::new();
+        while let Some(Some(event)) = events.next().now_or_never() {
+            if let ClientEvent::Connecting { code, .. } = event {
+                codes.push(code);
+            }
+        }
+        // `connect()`'s, then `reconnect()`'s.
+        assert_eq!(codes, [0, codes::connecting::RECONNECT_CALLED]);
     }
 
     // Block 25, D7.

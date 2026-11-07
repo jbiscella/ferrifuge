@@ -3,7 +3,9 @@
 //! from both.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use hyper_util::client::proxy::matcher::Matcher;
 
 use reqwest::Url;
 use rustls::ClientConfig;
@@ -30,6 +32,10 @@ struct Current {
     /// The client's own HTTP clients. Kept apart from the decisions their
     /// proxy function holds, which would otherwise own them in a cycle.
     clients: Arc<Clients>,
+    /// The process-wide HTTP clients this attempt took first, kept for
+    /// all its requests, whoever asks for the proxy settings to be read
+    /// again meanwhile (Block 25, D7).
+    shared: Arc<OnceLock<Arc<Clients>>>,
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +45,8 @@ struct Decisions {
     /// is asked once per endpoint per attempt (Block 23, D1), though the
     /// HTTP client asks for each request.
     decided: HashMap<String, Option<ProxyTarget>>,
+    /// The environment's or the system's settings, read once per attempt.
+    pinned: Arc<OnceLock<Arc<Matcher>>>,
 }
 
 #[derive(Debug, Default)]
@@ -56,8 +64,10 @@ impl Network {
                 decisions: Arc::new(Mutex::new(Decisions {
                     proxy,
                     decided: HashMap::new(),
+                    pinned: Arc::default(),
                 })),
                 clients: Arc::default(),
+                shared: Arc::default(),
             }),
         }
     }
@@ -81,8 +91,10 @@ impl Network {
             decisions: Arc::new(Mutex::new(Decisions {
                 proxy,
                 decided: HashMap::new(),
+                pinned: Arc::default(),
             })),
             clients: Arc::default(),
+            shared: Arc::default(),
         };
     }
 
@@ -101,23 +113,29 @@ impl Network {
         // Built again once the system's proxy settings are read again
         // (Block 25, D7).
         static SHARED: Mutex<Option<(u64, Arc<Clients>)>> = Mutex::new(None);
-        let (decisions, own) = {
+        let (decisions, own, pinned) = {
             let current = lock(&self.current);
-            (Arc::clone(&current.decisions), Arc::clone(&current.clients))
+            (
+                Arc::clone(&current.decisions),
+                Arc::clone(&current.clients),
+                Arc::clone(&current.shared),
+            )
         };
         let system = lock(&decisions).proxy.is_system();
         let shared = system && self.tls.is_platform();
         let process = shared.then(|| {
-            let generation = proxy::settings_generation();
-            let mut cached = lock(&SHARED);
-            match &*cached {
-                Some((built_in, clients)) if *built_in == generation => Arc::clone(clients),
-                _ => {
-                    let clients = Arc::<Clients>::default();
-                    *cached = Some((generation, Arc::clone(&clients)));
-                    clients
+            Arc::clone(pinned.get_or_init(|| {
+                let generation = proxy::settings_generation();
+                let mut cached = lock(&SHARED);
+                match &*cached {
+                    Some((built_in, clients)) if *built_in == generation => Arc::clone(clients),
+                    _ => {
+                        let clients = Arc::<Clients>::default();
+                        *cached = Some((generation, Arc::clone(&clients)));
+                        clients
+                    }
                 }
-            }
+            }))
         });
         let clients = process.as_ref().unwrap_or(&own);
         let once = if secure {
@@ -163,15 +181,15 @@ fn decide_once(decisions: &Mutex<Decisions>, url: &Url) -> Result<Option<ProxyTa
         url.host_str().unwrap_or_default(),
         url.port_or_known_default().unwrap_or_default()
     );
-    let proxy = {
+    let (proxy, pinned) = {
         let decisions = lock(decisions);
         if let Some(decided) = decisions.decided.get(&key) {
             return Ok(decided.clone());
         }
-        decisions.proxy.clone()
+        (decisions.proxy.clone(), Arc::clone(&decisions.pinned))
     };
     // Outside the lock: a proxy function is the application's code.
-    let decided = proxy.decide(url)?;
+    let decided = proxy.decide_pinned(url, &pinned)?;
     lock(decisions).decided.insert(key, decided.clone());
     Ok(decided)
 }
@@ -215,6 +233,35 @@ mod tests {
             decisions.upgrade().is_none(),
             "the decisions outlive the network"
         );
+    }
+
+    /// An attempt keeps the process-wide HTTP clients it took first, though
+    /// another client's `reconnect()` asks for the proxy settings to be
+    /// read again; the next attempt takes those of the new settings
+    /// (Block 25, D7; Codex, #122).
+    #[test]
+    fn an_attempt_keeps_its_shared_http_clients() {
+        let network = Network::new(Tls::default(), Proxy::system());
+        let shared = |network: &Network| {
+            Arc::clone(
+                lock(&network.current)
+                    .shared
+                    .get()
+                    .expect("the process-wide clients"),
+            )
+        };
+        network.http_client(false).expect("an HTTP client");
+        let first = shared(&network);
+
+        proxy::read_settings_again();
+        network.http_client(true).expect("an HTTP client");
+        let same_attempt = shared(&network);
+        network.new_attempt();
+        network.http_client(false).expect("an HTTP client");
+        let next_attempt = shared(&network);
+
+        assert!(Arc::ptr_eq(&first, &same_attempt));
+        assert!(!Arc::ptr_eq(&first, &next_attempt));
     }
 
     /// A setting given while a transport runs keeps its decisions until the

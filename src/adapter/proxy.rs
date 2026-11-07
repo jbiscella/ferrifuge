@@ -5,7 +5,7 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 
 use base64::Engine as _;
@@ -139,6 +139,23 @@ impl Proxy {
             }
         };
         intercepted(&matcher, &endpoint)
+    }
+
+    /// As [`Proxy::decide`], the environment's or the system's settings
+    /// read once into `pinned`, which one attempt shares, so its requests
+    /// keep them whoever asks for them to be read again meanwhile (Block
+    /// 25, D7).
+    pub(super) fn decide_pinned(
+        &self,
+        url: &Url,
+        pinned: &OnceLock<Arc<Matcher>>,
+    ) -> Result<Option<ProxyTarget>, String> {
+        let matcher = match &self.0 {
+            Setting::System => pinned.get_or_init(system_matcher),
+            Setting::Env => pinned.get_or_init(env_matcher),
+            _ => return self.decide(url),
+        };
+        intercepted(matcher, &endpoint(url)?)
     }
 
     /// The decision of the system setting under the settings read now,
