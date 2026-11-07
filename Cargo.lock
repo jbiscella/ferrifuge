@@ -1221,6 +1221,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bolero",
+ "bytes",
  "criterion",
  "cucumber",
  "dhat",
@@ -1235,6 +1236,7 @@ dependencies = [
  "hyper-util",
  "jni",
  "log",
+ "mediatype",
  "percent-encoding",
  "prost",
  "prost-build",
@@ -1247,11 +1249,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sse-core",
  "testcontainers",
  "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
  "tower-service",
  "tracing",
  "tracing-subscriber",
@@ -2231,6 +2235,12 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mediatype"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0695a693e38d35838dd34bc3ab19911395f6837ccf55c7271189cfb12cb8b57f"
 
 [[package]]
 name = "memchr"
@@ -3512,6 +3522,17 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sse-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f4c044039e70ba5724b7e9dacf9fb610394773d15df2bb629170ca30391c88"
+dependencies = [
+ "bytes",
+ "memchr",
+ "thiserror",
 ]
 
 [[package]]

@@ -6,14 +6,18 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::BytesMut;
 use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, FuturesUnordered};
+use mediatype::{MediaType, Name, names};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
+use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
 use super::net::Network;
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
@@ -271,10 +275,9 @@ pub(super) const CAPTIVE_PORTAL: &str = "; a captive portal may be answering";
 /// a redirect, 511 "Network Authentication Required", or a page served as
 /// a success.
 pub(super) fn captive_portal(status: u16, content_type: &str) -> bool {
-    let essence = content_type.split(';').next().unwrap_or_default().trim();
     (300..400).contains(&status)
         || status == 511
-        || ((200..300).contains(&status) && essence.eq_ignore_ascii_case("text/html"))
+        || ((200..300).contains(&status) && is_media_type(content_type, names::TEXT, names::HTML))
 }
 
 /// `message`, saying that a captive portal may be answering when `portal`.
@@ -289,8 +292,15 @@ pub(super) fn with_portal(message: String, portal: bool) -> String {
 /// Whether `content_type` is the event-stream media type, whatever its case
 /// and parameters.
 fn is_event_stream(content_type: &str) -> bool {
-    let essence = content_type.split(';').next().unwrap_or_default().trim();
-    essence.eq_ignore_ascii_case("text/event-stream")
+    is_media_type(content_type, names::TEXT, names::EVENT_STREAM)
+}
+
+/// Whether `content_type` parses as a media type of type `ty` and subtype
+/// `subty`, whatever their case and parameters (Block 27, D4: mediatype,
+/// RFC 9110 section 8.3); a value that does not parse is neither.
+fn is_media_type(content_type: &str, ty: Name<'_>, subty: Name<'_>) -> bool {
+    MediaType::parse(content_type.trim())
+        .is_ok_and(|media_type| media_type.ty == ty && media_type.subty == subty)
 }
 
 /// The message of a failed request, without its URL, which may carry the
@@ -330,30 +340,37 @@ fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> 
 /// Splits a response body into the messages it carries: one JSON reply per
 /// line for `http_stream`, the data of each event for sse. Network chunks
 /// do not follow message boundaries, so a partial line waits for the next.
-#[derive(Debug, Default)]
-struct Decoder {
-    sse: bool,
-    /// Largest message, in bytes.
-    limit: usize,
-    /// The line being received.
-    line: Vec<u8>,
-    /// Data lines of the sse event being received, newline-separated.
-    data: Option<Vec<u8>>,
-    /// Type of the sse event being received, when named.
-    event: Option<Vec<u8>>,
-    /// The last byte was a CR ending an sse line.
-    after_cr: bool,
-    /// A line was ended already: the stream's first line may start with a
-    /// byte order mark.
-    past_first_line: bool,
+/// Both are maintained components, bounded by the largest message (Block
+/// 27, D1, D2); their first error ends the transport, as they are not asked
+/// to resynchronise.
+enum Decoder {
+    /// sse-core: events with data, of the default type, reach the client
+    /// (centrifuge-js `onmessage`, WHATWG "dispatch the event").
+    Sse(sse_core::SseDecoder),
+    /// tokio-util's lines, bounded, and the bytes not yet split.
+    Lines(AnyDelimiterCodec, BytesMut),
+}
+
+impl std::fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Sse(_) => "Decoder::Sse",
+            Self::Lines(..) => "Decoder::Lines",
+        })
+    }
 }
 
 impl Decoder {
     fn new(sse: bool, limit: usize) -> Self {
-        Self {
-            sse,
-            limit,
-            ..Self::default()
+        if sse {
+            Self::Sse(sse_core::SseDecoder::with_limit(
+                NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN),
+            ))
+        } else {
+            Self::Lines(
+                AnyDelimiterCodec::new_with_max_length(b"\n".to_vec(), b"\n".to_vec(), limit),
+                BytesMut::new(),
+            )
         }
     }
 
@@ -364,90 +381,42 @@ impl Decoder {
     /// When a message grows past the limit; the messages completed before
     /// it are appended still.
     fn push(&mut self, chunk: &[u8], messages: &mut VecDeque<Vec<u8>>) -> Result<(), String> {
-        for &byte in chunk {
-            // The LF of a CRLF whose CR ended an sse line already.
-            let after_cr = std::mem::take(&mut self.after_cr);
-            match byte {
-                // An event stream may end lines with CR, LF or CRLF (WHATWG
-                // HTML, "Parsing an event stream").
-                b'\r' if self.sse => {
-                    let line = std::mem::take(&mut self.line);
-                    self.end_line(line, messages);
-                    self.after_cr = true;
-                }
-                b'\n' if after_cr => {}
-                b'\n' => {
-                    let mut line = std::mem::take(&mut self.line);
-                    if line.last() == Some(&b'\r') {
-                        line.pop();
+        match self {
+            Self::Sse(decoder) => {
+                let mut rest = chunk;
+                while let Some(event) = decoder.next(&mut rest) {
+                    match event {
+                        Ok(sse_core::SseEvent::Message(message)) => {
+                            let default = message.event.is_empty() || message.event == "message";
+                            if default && !message.data.is_empty() {
+                                messages.push_back(message.data.into_bytes());
+                            }
+                        }
+                        // The client keeps its own reconnect delays.
+                        Ok(sse_core::SseEvent::Retry(_)) => {}
+                        Err(_) => return Err(super::transport::TOO_LARGE.to_owned()),
                     }
-                    self.end_line(line, messages);
                 }
-                _ => self.line.push(byte),
             }
-            let pending = self.line.len() + self.data.as_ref().map_or(0, Vec::len);
-            if pending > self.limit {
-                return Err(super::transport::TOO_LARGE.to_owned());
+            Self::Lines(codec, buffer) => {
+                buffer.extend_from_slice(chunk);
+                loop {
+                    match codec.decode(buffer) {
+                        Ok(Some(line)) => {
+                            let line = line.strip_suffix(b"\r").unwrap_or(&line);
+                            // Blank lines carry nothing, e.g. keep-alives of
+                            // an intermediary (centrifuge-js `decodeReplies`).
+                            if !line.iter().all(u8::is_ascii_whitespace) {
+                                messages.push_back(line.to_vec());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => return Err(super::transport::TOO_LARGE.to_owned()),
+                    }
+                }
             }
         }
         Ok(())
-    }
-
-    fn end_line(&mut self, mut line: Vec<u8>, messages: &mut VecDeque<Vec<u8>>) {
-        // One leading byte order mark is ignored (WHATWG HTML, "Parsing an
-        // event stream").
-        if self.sse && !std::mem::replace(&mut self.past_first_line, true) {
-            line = line
-                .strip_prefix(b"\xEF\xBB\xBF")
-                .map_or(line.clone(), <[u8]>::to_vec);
-        }
-        if !self.sse {
-            // Blank lines carry nothing, e.g. keep-alives of an intermediary
-            // (centrifuge-js `decodeReplies`).
-            if !line.iter().all(u8::is_ascii_whitespace) {
-                messages.push_back(line);
-            }
-            return;
-        }
-        // Event stream format (WHATWG HTML, "Interpreting an event stream"):
-        // a blank line ends an event; a line starting with a colon is a
-        // comment; otherwise the field name ends at the first colon, and a
-        // line without one is a field with an empty value. Of the fields,
-        // data and event matter; id and retry carry nothing for the client.
-        if line.is_empty() {
-            let event = self.event.take();
-            let data = self.data.take();
-            // Only events of the default type, with data, reach the
-            // reference transport (centrifuge-js `onmessage`, WHATWG
-            // "dispatch the event").
-            if event.is_none_or(|event| event.is_empty() || event == b"message")
-                && let Some(data) = data.filter(|data| !data.is_empty())
-            {
-                messages.push_back(data);
-            }
-            return;
-        }
-        if line.first() == Some(&b':') {
-            return;
-        }
-        let (field, value) = match line.iter().position(|&byte| byte == b':') {
-            Some(colon) => {
-                let value = &line[colon + 1..];
-                (&line[..colon], value.strip_prefix(b" ").unwrap_or(value))
-            }
-            None => (&line[..], &[][..]),
-        };
-        match field {
-            b"event" => self.event = Some(value.to_vec()),
-            b"data" => match &mut self.data {
-                Some(data) => {
-                    data.push(b'\n');
-                    data.extend_from_slice(value);
-                }
-                None => self.data = Some(value.to_vec()),
-            },
-            _ => {}
-        }
     }
 }
 
@@ -611,6 +580,66 @@ mod tests {
 
         // A later mark is part of the line: the field is unknown.
         assert_eq!(messages, ["{}"]);
+    }
+
+    // Block 27, D1 and D5: what the maintained sse decoder changes.
+    #[test]
+    fn sse_data_that_is_not_utf8_arrives_with_replacement_characters() {
+        let mut decoder = Decoder::new(true, 256);
+        let mut messages = VecDeque::new();
+
+        decoder
+            .push(b"data: {\"a\":\"\xff\"}\n\n", &mut messages)
+            .expect("an event");
+
+        assert_eq!(messages, ["{\"a\":\"\u{fffd}\"}".as_bytes().to_vec()]);
+    }
+
+    // Block 27, D1 and D5: comment and unknown-field lines are skipped
+    // without being buffered.
+    #[test]
+    fn a_long_sse_comment_or_unknown_field_does_not_end_the_transport() {
+        let mut decoder = Decoder::new(true, 16);
+        let mut messages = VecDeque::new();
+        let long = "x".repeat(1000);
+
+        let comment = decoder.push(format!(":{long}\n").as_bytes(), &mut messages);
+        let unknown = decoder.push(format!("note: {long}\n").as_bytes(), &mut messages);
+        let event = decoder.push(b"data: {}\n\n", &mut messages);
+
+        assert!(comment.is_ok() && unknown.is_ok() && event.is_ok());
+        assert_eq!(messages, [b"{}".to_vec()]);
+    }
+
+    // Block 27, D1 and D2: the bounds still hold.
+    #[test]
+    fn a_message_over_the_limit_still_ends_the_transport() {
+        let long = "x".repeat(100);
+        for (sse, body) in [
+            (true, format!("data: {long}\n\n")),
+            (false, format!("{long}\n")),
+            // A line that never ends.
+            (false, long.clone()),
+        ] {
+            let mut decoder = Decoder::new(sse, 16);
+            let mut messages = VecDeque::new();
+
+            let pushed = decoder.push(body.as_bytes(), &mut messages);
+
+            assert!(pushed.is_err(), "sse {sse}: {body}");
+            assert!(messages.is_empty());
+        }
+    }
+
+    // Block 27, D4 and D5: RFC 9110 media types, parsed by mediatype.
+    #[test]
+    fn media_types_are_parsed_as_rfc_9110_writes_them() {
+        assert!(is_event_stream("text/event-stream ; charset=utf-8"));
+        assert!(is_event_stream("TEXT/Event-Stream"));
+        // A parameter without a value, which RFC 9110 forbids.
+        assert!(!is_event_stream("text/event-stream; charset"));
+        assert!(captive_portal(200, "Text/HTML; charset=iso-8859-1"));
+        assert!(!captive_portal(200, "not a media type"));
     }
 
     #[test]
