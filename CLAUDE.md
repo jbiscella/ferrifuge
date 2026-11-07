@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–25 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–26 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3872,3 +3872,28 @@ Feature: Sleep, network changes, captive portals
 ```
 
 **Exceptions introduced:** detection (D1) is checked by unit tests of the adapter's comparison, not by a real system sleep in CI; the http_stream and sse portal cases are checked by unit tests, since the fake server speaks websocket only (Block 15).
+
+---
+
+## Block 26 — Codec seam for the emulation envelope (Block 5c drift)
+
+**Goal:** the machine reaches every encoding of the client protocol through `Codec`, the emulation envelope and the split of a frame into its commands included, as Block 5c requires ("`machine.rs` calls no codec module directly"), so that Block 27 enables Protobuf over http_stream without editing the machine; observable behaviour does not change.
+
+**Dependencies:** Blocks 5 (5c codec seam), 8 (bidirectional emulation), 13d (write-queue sizes of emulation requests), 18 (batch frames, the 413 resend).
+
+**Out of scope:**
+- enabling Protobuf over http_stream (Block 27, item 36): Block 8's build check stays, the adapter keeps sending `application/json`, and the Protobuf envelope is verified against Centrifugo there;
+- the in-house decoders and the content-type check (Block 27);
+- replacing `Codec::command_ids` or `Codec::split_commands` with a maintained parser: they read frames the client encoded itself, not network input (Block 0, "Components").
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Seam.** `Codec` gains `emulation_request(self, session: &str, node: &str, frame: &[u8]) -> Vec<u8>`, `emulation_frame(self, body: &[u8]) -> Option<Vec<u8>>` (`None` for a body that is not an envelope) and `split_commands(self, frame: &[u8]) -> Vec<&[u8]>` (each command's encoding in a frame `encode` made, each itself a one-command frame). JSON keeps today's envelope and its newline split. Protobuf, in `src/protobuf.rs`, encodes `protocol::EmulationRequest` (as centrifuge-js 63ed73e's `encodeEmulationRequest`, `transport_http_stream.ts` `send`) and splits on the length prefixes. The Protobuf arms cannot be reached through the public API until Block 27 (Block 8's build check), but they are correct and unit-tested; no arm panics.
+- **D2 Call sites.** The four direct calls move to the seam, and the `use crate::json;` lines in `src/machine.rs` and `src/machine/calls.rs` go: in `src/machine.rs`, `send_rejected` (the 413 read-back), `resend_alone` (each command's emulation request, and its newline split, which becomes `split_commands`) and `frame_of`; in `src/machine/calls.rs`, the emulation request's size for the write queue (Block 13d). The test uses in `src/machine/batching.rs` and `src/machine/subscriptions.rs` call `Codec::Json.emulation_frame` instead.
+- **D3 Check.** A unit test in `src/codec.rs` reads `src/machine.rs` and every `.rs` file under `src/machine/` (from `CARGO_MANIFEST_DIR`). It fails, naming the file and line, when a line holds `json::` or `protobuf::` not preceded by an identifier character, or is a `use` naming `json` or `protobuf` as a whole word. Test code is included.
+- **D4 Version.** None: the codec is crate-private and nothing observable changes; no changelog entry.
+
+Value clause: As a maintainer, I want the machine to reach the emulation envelope and the split of a frame into its commands through `Codec`, so that Protobuf over http_stream (Block 27) adds no codec knowledge to the machine.
+
+**Structural acceptance:** no file under `src/machine*` names the `json` or `protobuf` module (D3's test) or splits a frame itself; every scenario and test passes unchanged; the `Codec` unit tests cover, in both encodings, the envelope's round trip (`emulation_frame` reads back what `emulation_request` made, and a body that is not an envelope gives `None`) and the split (each piece of a two-command frame is a one-command frame with its id); the JSON envelope's bytes stay those of `emulation_request_carries_the_frame_as_a_string`.
+
+**Exceptions introduced:** no scenario, as for 5a: the codec is crate-private and its emulation envelope is not observable through the public API beyond what Blocks 8, 13d and 18 already exercise.
