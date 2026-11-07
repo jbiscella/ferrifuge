@@ -401,6 +401,11 @@ jobs:
   ios:
     runs-on: macos-latest
     timeout-minutes: 30
+    # One deployment target for rustc and the C builds (cc reads it too):
+    # without it aws-lc's C objects target the SDK's newest iOS while rustc
+    # links for 10.0, and ___chkstk_darwin, from iOS 13, goes missing.
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v7
 
