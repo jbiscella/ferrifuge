@@ -24,7 +24,7 @@ use super::http::HttpTransport;
 use super::log::{self, Log};
 use super::net::Network;
 use super::proxy::Proxy;
-use super::tls::{Tls, Trust, unparsable_root};
+use super::tls::{self, Tls, Trust, unparsable_root};
 use super::transport::{self as websocket, Inbound, WebSocket};
 use crate::machine::{
     Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
@@ -673,7 +673,15 @@ impl Client {
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
-        let trust = trust(root_certificates, tls_config)?;
+        let android = cfg!(target_os = "android");
+        let trust = trust(root_certificates, tls_config, android)?;
+        android_gate(
+            android && !tls::android_ready(),
+            &trust,
+            &endpoints,
+            emulation_endpoint.as_deref(),
+            &proxy,
+        )?;
         let http_headers = Arc::new(http_header_map(&http_headers)?);
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
@@ -1738,8 +1746,14 @@ fn emulated_header_map(
 fn trust(
     roots: Vec<CertificateDer<'static>>,
     raw: Option<Arc<rustls::ClientConfig>>,
+    android: bool,
 ) -> Result<Trust, ClientError> {
     let message = match (roots.is_empty(), raw) {
+        // Android's verifier takes no extra roots (Block 24, D3).
+        (false, None) if android => {
+            "extra root certificates are not supported on Android: give a tls_config trusting them"
+                .to_owned()
+        }
         (true, None) => return Ok(Trust::Platform),
         (true, Some(raw)) => {
             if cfg!(feature = "fips") && !raw.fips() {
@@ -1762,6 +1776,42 @@ fn trust(
         kind: ErrorKind::Configuration,
         code: codes::error::BAD_CONFIGURATION,
         message,
+        transport: None,
+    })
+}
+
+/// On Android before the verifier's setup (`unready`), refuses a client
+/// whose connections known now need the platform verifier (Block 24, D5):
+/// a `wss://` or `https://` endpoint, an `https://` emulation endpoint with
+/// an HTTP transport, an `https://` proxy for every endpoint. Any other TLS
+/// use fails its handshake instead; a raw configuration is the
+/// application's.
+fn android_gate(
+    unready: bool,
+    trust: &Trust,
+    endpoints: &[(TransportKind, String)],
+    emulation_endpoint: Option<&str>,
+    proxy: &Proxy,
+) -> Result<(), ClientError> {
+    if !unready || !matches!(trust, Trust::Platform) {
+        return Ok(());
+    }
+    let secure = |url: &str| {
+        url.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("wss") || scheme.eq_ignore_ascii_case("https")
+        })
+    };
+    let emulated = endpoints.iter().any(|(kind, _)| kind.is_emulated());
+    let needed = endpoints.iter().any(|(_, url)| secure(url))
+        || (emulated && emulation_endpoint.is_some_and(secure))
+        || proxy.is_https_for_all();
+    if !needed {
+        return Ok(());
+    }
+    Err(ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: tls::ANDROID_SETUP_MISSING.to_owned(),
         transport: None,
     })
 }
@@ -2017,6 +2067,118 @@ mod tests {
             matches!(first, Some(ClientEvent::Disconnected { .. })),
             "{first:?}"
         );
+    }
+
+    fn raw_config() -> Arc<rustls::ClientConfig> {
+        Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(tls::crypto_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("protocol versions")
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        )
+    }
+
+    /// Before Android's setup, a connection known now to need the platform
+    /// verifier is refused, naming the call (Block 24, D5).
+    #[test]
+    fn android_refuses_tls_known_at_build_before_the_setup() {
+        // Endpoints, the emulation endpoint, the proxy.
+        type Case<'a> = (&'a [(TransportKind, &'a str)], Option<&'a str>, Proxy);
+        let proxy =
+            Proxy::all(crate::ProxyTarget::new("https://proxy.example:3128").expect("a proxy"));
+        let cases: [Case<'_>; 4] = [
+            (
+                &[(
+                    TransportKind::WebSocket,
+                    "wss://example.com/connection/websocket",
+                )],
+                None,
+                Proxy::none(),
+            ),
+            (
+                &[(
+                    TransportKind::HttpStream,
+                    "https://example.com/connection/http_stream",
+                )],
+                None,
+                Proxy::none(),
+            ),
+            (
+                &[(
+                    TransportKind::HttpStream,
+                    "http://example.com/connection/http_stream",
+                )],
+                Some("https://example.com/emulation"),
+                Proxy::none(),
+            ),
+            (
+                &[(
+                    TransportKind::WebSocket,
+                    "ws://example.com/connection/websocket",
+                )],
+                None,
+                proxy,
+            ),
+        ];
+        for (endpoints, emulation, proxy) in cases {
+            let endpoints: Vec<_> = endpoints
+                .iter()
+                .map(|(kind, url)| (*kind, (*url).to_owned()))
+                .collect();
+
+            let gated = android_gate(true, &Trust::Platform, &endpoints, emulation, &proxy);
+
+            assert!(
+                matches!(&gated, Err(error) if error.message.contains("ferrifuge::android::init_with_env")),
+                "{endpoints:?} {emulation:?}: {gated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn android_accepts_plain_endpoints_and_raw_configurations_before_the_setup() {
+        let plain = [(
+            TransportKind::WebSocket,
+            "ws://example.com/connection/websocket".to_owned(),
+        )];
+        let secure = [(
+            TransportKind::WebSocket,
+            "wss://example.com/connection/websocket".to_owned(),
+        )];
+
+        assert!(android_gate(true, &Trust::Platform, &plain, None, &Proxy::none()).is_ok());
+        assert!(
+            android_gate(
+                true,
+                &Trust::Raw(raw_config()),
+                &secure,
+                None,
+                &Proxy::none()
+            )
+            .is_ok()
+        );
+        assert!(android_gate(false, &Trust::Platform, &secure, None, &Proxy::none()).is_ok());
+    }
+
+    /// Android's verifier takes no extra roots (Block 24, D3).
+    #[test]
+    fn android_refuses_extra_roots_naming_tls_config() {
+        let root = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("a certificate")
+            .cert
+            .der()
+            .clone();
+
+        let refused = trust(vec![root.clone()], None, true);
+        let elsewhere = trust(vec![root], None, false);
+
+        assert!(
+            matches!(&refused, Err(error) if error.message.contains("tls_config")),
+            "{:?}",
+            refused.err()
+        );
+        assert!(elsewhere.is_ok());
     }
 
     /// The fips build never connects with non-FIPS cryptography: a raw
