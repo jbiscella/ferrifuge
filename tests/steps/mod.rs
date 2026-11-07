@@ -109,6 +109,9 @@ pub(crate) struct ClientWorld {
     /// Between the client and the server's HTTP endpoints, for @B scenarios
     /// that make an emulation request fail.
     pub(crate) http_proxy: Option<HttpProxy>,
+    /// The scenario's HTTP proxy was told to reject the next emulation
+    /// request.
+    pub(crate) emulation_rejection: bool,
     /// A client being configured by a step, built by a later one.
     pub(crate) pending_builder: Option<ClientBuilder>,
     /// Why building the pending client failed.

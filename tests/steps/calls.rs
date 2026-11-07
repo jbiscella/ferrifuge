@@ -227,6 +227,14 @@ fn the_client_calls_rpc(world: &mut ClientWorld, method: String, data: String, w
     } else {
         data
     };
+    // A pong, sent every ping interval, could take a rejection programmed
+    // for "the next emulation request" before the call: the call's own
+    // request is the one rejected.
+    if world.emulation_rejection
+        && let Some(proxy) = world.http_proxy.as_ref()
+    {
+        proxy.reject_next_emulation_carrying(b"rpc");
+    }
     call(world, &method, data.into_bytes());
 }
 

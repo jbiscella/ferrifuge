@@ -263,6 +263,7 @@ async fn a_client_behind_an_http_proxy(world: &mut ClientWorld) {
     connect_and_wait(world).await;
     http_proxy.reject_next_emulation();
     world.http_proxy = Some(http_proxy);
+    world.emulation_rejection = true;
 }
 
 /// Restarts the @B server pinging every [`PING_INTERVAL`], so the client

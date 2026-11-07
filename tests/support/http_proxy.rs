@@ -29,6 +29,8 @@ struct ProxyState {
     target: String,
     http: reqwest::Client,
     reject_next_emulation: AtomicBool,
+    /// Rejects the next emulation request whose body holds these bytes.
+    reject_carrying: Mutex<Option<&'static [u8]>>,
     /// Set once a programmed rejection was answered.
     rejected: AtomicBool,
     /// Delay for the next emulation request carrying an unsubscribe command.
@@ -55,6 +57,7 @@ impl HttpProxy {
             target,
             http: reqwest::Client::new(),
             reject_next_emulation: AtomicBool::new(false),
+            reject_carrying: Mutex::new(None),
             rejected: AtomicBool::new(false),
             delay_next_unsubscribe: Mutex::new(None),
             unsubscribes_relayed: AtomicUsize::new(0),
@@ -81,6 +84,17 @@ impl HttpProxy {
         self.state
             .reject_next_emulation
             .store(true, Ordering::SeqCst);
+    }
+
+    /// Answers the next emulation request whose body holds `bytes` with 503
+    /// instead of relaying it, in place of a [`HttpProxy::reject_next_emulation`]
+    /// still programmed: requests without them, such as pongs, pass.
+    pub(crate) fn reject_next_emulation_carrying(&self, bytes: &'static [u8]) {
+        self.state.rejected.store(false, Ordering::SeqCst);
+        self.state
+            .reject_next_emulation
+            .store(false, Ordering::SeqCst);
+        *self.state.reject_carrying.lock().unwrap() = Some(bytes);
     }
 
     /// Relays the next emulation request carrying an unsubscribe command
@@ -161,6 +175,14 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let Ok(body) = axum::body::to_bytes(body, MAX_BODY).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    if parts.uri.path() == "/emulation" {
+        let mut carrying = state.reject_carrying.lock().unwrap();
+        if carrying.is_some_and(|bytes| body.windows(bytes.len()).any(|window| window == bytes)) {
+            *carrying = None;
+            state.rejected.store(true, Ordering::SeqCst);
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
     let limit = *state.refuse_over.lock().unwrap();
     if parts.uri.path() == "/emulation" && limit.is_some_and(|limit| body.len() > limit) {
         state.refused.lock().unwrap().push(body.to_vec());
