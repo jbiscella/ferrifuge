@@ -11,6 +11,12 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- A table of codes (Block 34): every client-side code with its reason, cause
+  and what the client does next, and the server codes the client reacts to,
+  in the `codes` documentation and the README's "Codes" section.
+
 ## [0.19.0] - 2026-11-07
 
 ### Added
