@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–24 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–25 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -74,6 +74,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 17, out of scope | a cookie jar | same (item 24) | 43 |
 | Block 6, out of scope | custom root certificates | owner, 2026-11-06 (item 2) | 22 |
 | Block 14, out of scope | HTTP proxy (CONNECT) support | owner, 2026-11-06 (item 1) | 23 |
+| Block 14, out of scope | sleep/resume behaviour | owner, 2026-11-06 (item 4) | 25 |
 
 ### Test layers
 
@@ -1944,7 +1945,7 @@ The order is decided (reviewer, 2026-11-06, delegated by the owner): Block 15d (
 
 **Out of scope:**
 - HTTP proxy (CONNECT) support (reversed by the owner decision of 2026-11-06: Block 23);
-- sleep/resume behaviour;
+- sleep/resume behaviour (reversed by the owner decision of 2026-11-06: Block 25);
 - server load testing (the server side has its own tooling);
 - the event-buffer policy for slow consumers (Block 15);
 - per-platform behaviour beyond running the existing suites on Windows and macOS.
@@ -3640,3 +3641,204 @@ Value clause: As an app developer shipping Ferrifuge in Android and iOS apps, I 
   - Ferrifuge's verifier, around a stub verifier, fails the handshake naming the call without the setup, delegates with it, and turns the stub's panic into an error.
 
 **Exceptions introduced:** no Gherkin scenario: the behaviour exists only on Android devices, and nothing runs on a device or emulator in CI (design C deferred). The host unit tests above cover the gate; the mobile jobs only build.
+
+---
+
+## Block 25 — System sleep, network changes, captive portals
+
+**Goal:** a client waking from a system sleep sends no token that expired while it slept, keeps a connection whose pings the sleep only delayed, and drops one the server gave up on at its first timer or I/O after the wake; an app told by its platform that the device woke or changed network reconnects the client at once with `reconnect()`; a captive portal answering an attempt is named in its error; so that laptops and phones resume their streams promptly and recover what they missed (parity item 4; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A, with the reconnect jitter kept).
+
+**Dependencies:** Blocks 2 (backoff), 4 (no-ping deadline), 5b and 10 (token components, refresh timers), 8 (transports, fallback, failed opens), 11 (recovery), 13 (calls), 14 (the jitter window, the idle-client gate), 15 (withdrawal, the paused no-ping deadline), 16 (chaos runners), 17 (`Input` non-exhaustive, `Action` exhaustive), 21 (logging), 23 (proxy settings), 24 (the mobile guide).
+
+**Out of scope:**
+- built-in OS sleep and network watchers (the analysis's design B, not adopted): apps get these notifications from their platform and call `reconnect()` (D9);
+- a periodic wake to notice a sleep sooner (D1);
+- a captive portal behind a websocket that opened (a lost transport, Block 21 D4) or one that breaks TLS (a certificate error);
+- emulation requests answered by a portal: Block 8's handling stays;
+- a real system sleep in CI.
+
+This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "Reversed exclusions" gains the row | Block 14, out of scope | sleep/resume behaviour | owner, 2026-11-06 (item 4) | 25 |. It amends Block 8 (D6, D8), Block 14 (D5: the jitter window), Block 21 (D10: the field `gap`), Block 23 (D7) and Block 24 (D9).
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Detection, in the adapter.** Before each input it gives the core (a timer, a transport event, a callback answer, an application call), the adapter compares how far the wall clock (`SystemTime`) and the monotonic clock (`Instant`) moved since the previous input. When the wall clock moved further by at least 2 s, it first gives the core `Input::Slept { gap }`, `gap` being the difference.
+  - `Instant` is `CLOCK_MONOTONIC` on Linux and Android and `CLOCK_UPTIME_RAW` on macOS and iOS; neither counts a suspend (std `Instant` documentation; clock_gettime(2)), so tokio's timers resume with the time they had left. The official SDK compares the same clocks (centrifuge-rust `docs/spec.md` §9.7, 88d6edf).
+  - No periodic wake: a sleep is seen at the first input after the wake, at the latest the no-ping deadline, as in the official SDK (§13). A periodic check would break Block 14's "An idle client wakes only for pings and refreshes". An app wanting an immediate reconnect calls `reconnect()`.
+  - No `CLOCK_BOOTTIME`: std does not expose it, `libc`'s call is unsafe (Block 0 lints), and `rustix` would be a new dependency.
+  - A wall clock set forward by 2 s or more counts as a sleep, with D2 and D3's safe consequences; one set backward is ignored.
+  - The core ignores a gap under 2 s, so another owner may report every gap it measures.
+  - The check reads two clocks and allocates nothing; the Block 14 @P gates pass unchanged.
+  - `VERIFY:` whether `Instant` (QueryPerformanceCounter) counts a suspend on Windows. If it does, no gap is seen there and the timers fire at the wake as if they counted it; the README says which.
+- **D2 The connection, in the core.** On `Slept { gap }` while connected:
+  - when `gap` is at least the no-ping window (Block 4: the ping interval plus `max_server_ping_delay`, neither 0), the core closes the transport and reconnects with code 2 "no ping", as when the no-ping deadline fires: Block 2's delay and Block 14's jitter window apply, so a fleet waking on a schedule does not reconnect at once (diverges on purpose from the official SDK's immediate reconnect, §9.7);
+  - when `gap` is shorter, the no-ping deadline restarts in full from the wake, unless a full read-ahead pauses it (Block 15), so pings queued during the sleep cause no reconnect;
+  - without a no-ping window, the transport is kept.
+  While connecting, the attempt in flight keeps its connect timeout and the backoff its delay; only D3 applies.
+- **D3 Refresh timers.** On `Slept { gap }`, the core shortens by `gap` every token refresh timer running, the connection's and each subscription's, with two new actions, `Action::ShortenTimer(Timer, Duration)` and `Action::ShortenSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration)`: the owner makes the timer fire that much earlier, at once if that time has passed, and ignores a timer not running. The core holds no clock (Block 0); only the owner knows how long each timer has left.
+  - A refresh that came due during the sleep starts at the wake.
+  - A reconnect caused by a sleep (D2) keeps the refresh timers running until the next connect or subscribe reply re-arms or cancels them. One that fires while the client is connecting makes the next attempt fetch a new connection token first; one that fires while its subscription is subscribing makes its next subscribe fetch a new token first. So a token that expired during the sleep is not sent, and no error 109 round trip is needed (the official SDK keeps expiry as wall time, §6.6).
+- **D4 Timers a sleep leaves alone.** Reply deadlines (connect, refresh, subscribe, unsubscribe, `sub_refresh`), call timers, and the reconnect and resubscribe delays. The monotonic clock stopped during the sleep, so it used none of their time. Shortening the delays would make a fleet that slept together reconnect together.
+- **D5 `Client::reconnect()`.** It mirrors `connect()`; in the core it is `Input::Reconnect`. The client goes to, or stays in, `connecting`, never `disconnected`:
+  - connected: the transport closes and the client emits "connecting" with code 6 "reconnect called" (`codes::connecting::RECONNECT_CALLED`);
+  - connecting: the attempt in flight, if any, closes, and no event is emitted (Block 15: one event per state change);
+  - the next attempt has no backoff delay, and the attempt counter restarts, as after `connect()` (Block 2);
+  - the jitter window applies when the client was connected (amends Block 14, which applies it to lost connections only), so a building-wide network change does not synchronise a fleet;
+  - disconnected: nothing. `connect()` starts a stopped client, and a handler calling `reconnect()` on every client must not revive one stopped on purpose (precedent for the call: async-nats 0.52.0 `Client::force_reconnect`).
+  Calls waiting for the connection keep waiting; calls sent on the closed transport fail with code 11 "connection closed" (Block 13). Subscriptions resubscribe as after any reconnect. Publications not taken are withdrawn (Block 15: a client-side reason) and recovered by the next connect (Block 11), so delivery stays exactly once on recoverable channels.
+- **D6 Transport round.** `reconnect()` also starts the transport round again from the first transport (amends Block 8, which keeps a chosen transport for the client's life): a new network may allow websocket again. The official SDK plans the same on the app's network signal (§5.8, "Fallback reset"). A sleep does not restart the round.
+- **D7 Proxy settings.** `reconnect()` makes the next attempt of every client read the environment's and the operating system's proxy settings again, and rebuild the HTTP clients built from them (amends Block 23 D2, which reads them once per process and left network changes to this block).
+- **D8 Captive portals.** An open answered by a web page is a failed attempt whose error message ends with "; a captive portal may be answering", retried like any failed open (Block 8: error event, fallback, backoff):
+  - websocket: the upgrade answered with a 3xx, a 511, or a `text/html` body instead of 101;
+  - http_stream: the stream request answered with a 3xx (not followed), a 511, or a 2xx `text/html` body; the 2xx case is new, as today the page is read as frames and the client reconnects without an error event (Block 21 D4);
+  - sse: the same, beside the existing `text/event-stream` check.
+  Other statuses keep their messages. The media type's essence is compared case-insensitively, as the sse check does.
+- **D9 Documentation.** A README section "Sleep and network changes" covers what D1–D4 do and when a sleep is noticed. It names `reconnect()` as the call for the platform's notifications (macOS `NSWorkspace.didWakeNotification`, Windows `WM_POWERBROADCAST`, systemd-logind `PrepareForSleep`, Android `ConnectivityManager.NetworkCallback`, iOS `NWPathMonitor`), and `disconnect()` then `connect()` as the calls when waiting calls should fail. In Block 24's "Mobile" section, the bullet on the stopped monotonic clock is replaced by a pointer to that section.
+- **D10 Logging.** The adapter logs a detected sleep at DEBUG, "system sleep detected", with a field `gap` (added to Block 21 D3's fields). `reconnect()`'s state change and attempt are logged like any other. `Input::Slept` and the new actions show at TRACE through their `Debug`.
+- **D11 Version and changelog.** 0.17.0: the two actions are breaking for owners of the machine (`Action` is exhaustive, Block 17), as `Action::Anomaly` was (Block 21 D9). `Unreleased` entries:
+  - "Added": `Client::reconnect`, `Input::Reconnect`, `Input::Slept`, connecting code 6, sleep detection;
+  - "Changed": `Action::ShortenTimer` and `Action::ShortenSubscriptionTimer`; captive-portal error messages; an http_stream open answered with `text/html` is now a failed attempt with an error event; `reconnect()` restarts the transport round and reads the proxy settings again;
+  - "Fixed": a token that expired during a sleep is no longer sent.
+
+Value clause: As an app developer whose clients run on laptops and phones that sleep and change networks, I want the client to handle a wake without sending an expired token, to reconnect at once when I call `reconnect()` on my platform's wake or network notification, and to name a captive portal in its error, so that my users' streams resume promptly and recover what they missed, without the fleet reconnecting at once.
+
+**Structural acceptance:**
+- a unit test of the adapter's comparison: a wall clock ahead by 2 s gives a gap; ahead by 1999 ms, or behind, gives none;
+- unit tests of the open checks: a websocket upgrade answered with 200 `text/html`, 302 or 511 names a captive portal, and one answered with 403 does not; http_stream and sse the same, against `src/adapter/http.rs`'s one-shot server;
+- a unit test: after `reconnect()`, the delay after a failed attempt stays within Block 2's bound for attempt 0, drawn 1000 times;
+- a unit test: after `reconnect()`, the next attempt reads the system proxy settings again;
+- the fake server can answer websocket upgrades with a raw HTTP response, written on the TCP stream itself (tungstenite's server refuses a 2xx error response);
+- `tests/chaos.rs` gains the operations `reconnect()` and a sleep of 0 to 120 s, and `tests/chaos_adapter.rs` gains `reconnect()`; I1–I11 hold;
+- the Block 14 @P gates pass unchanged.
+
+```gherkin
+Feature: Sleep, network changes, captive portals
+
+  @E
+  Scenario: A sleep as long as the no-ping window reconnects after the backoff and jitter
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s and a reconnect jitter window of 10 s
+    When it is told it slept for 35 s
+    Then it closes the transport and emits "connecting" with code 2 and reason "no ping"
+    And its next attempt is delayed by at least 500 ms and at most 11000 ms
+
+  @E
+  Scenario: A shorter sleep keeps the connection and restarts the no-ping window
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s
+    And 10 s have elapsed since its last ping
+    When it is told it slept for 34 s
+    Then it keeps the transport
+    And its no-ping deadline is 35 s from now
+
+  @E
+  Scenario: Without pings a sleep keeps the connection
+    Given a connected machine whose server sends no pings
+    When it is told it slept for 600 s
+    Then it keeps the transport
+
+  @E
+  Scenario: A gap under 2 s changes nothing
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s, and whose connection token refresh is due in 1 s
+    When it is told it slept for 1999 ms
+    Then it returns no action
+
+  @E
+  Scenario: A refresh due during a short sleep starts at the wake
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s, and whose connection token refresh is due in 20 s
+    When it is told it slept for 30 s
+    Then it keeps the transport
+    And it asks for a new connection token at once
+
+  @E
+  Scenario: A refresh not yet due moves earlier by the sleep
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s, and whose connection token refresh is due in 50 s
+    When it is told it slept for 30 s
+    Then its connection token refresh is due in 20 s
+
+  @E
+  Scenario: A token due during a long sleep is fetched before the next connect
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s, and whose connection token refresh is due in 50 s
+    When it is told it slept for 60 s
+    And its next attempt starts
+    Then it asks for a new connection token before opening a transport
+
+  @E
+  Scenario: A subscription token due during a short sleep is refreshed at the wake
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s, subscribed to "news" with a token whose refresh is due in 20 s
+    When it is told it slept for 30 s
+    Then it asks for a new token for "news" at once
+
+  @E
+  Scenario: A sleep leaves reply deadlines alone
+    Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s and timeout 5 s, with an RPC call sent 2 s ago and not answered
+    When it is told it slept for 30 s
+    Then the call's reply deadline is 3 s from now
+
+  @E
+  Scenario: A sleep while connecting keeps the reconnect delay
+    Given a machine with minReconnectDelay 10000 ms whose first connection attempt failed
+    And 6 s have elapsed
+    When it is told it slept for 60 s
+    Then its reconnect timer is unchanged
+
+  @E
+  Scenario: reconnect() while connected skips the backoff but keeps the jitter window
+    Given 100 connected machines with different seeds, minReconnectDelay 5000 ms and a reconnect jitter window of 1000 ms
+    When reconnect is called on each
+    Then each closes its transport and emits "connecting" with code 6 and reason "reconnect called"
+    And every next attempt is delayed by at most 1000 ms
+    And the delays are not all equal
+
+  @E
+  Scenario: reconnect() while connecting starts an attempt at once and keeps waiting calls
+    Given a machine with minReconnectDelay 10000 ms whose first connection attempt failed, with an RPC call waiting for the connection
+    When reconnect is called
+    Then it starts an attempt at once
+    And it emits no event
+    And the call is still waiting
+
+  @E
+  Scenario: reconnect() tries the first transport again
+    Given a machine with transports websocket and http_stream, connected over http_stream after websocket failed
+    When reconnect is called
+    Then its next attempt opens a websocket transport
+
+  @E
+  Scenario: reconnect() does nothing to a disconnected client
+    Given a machine disconnected by an explicit disconnect call
+    When reconnect is called
+    Then it returns no action
+
+  @D
+  Scenario: reconnect() reconnects at once without "disconnected"
+    Given a client with minReconnectDelay 5000 ms connected to the fake server
+    When reconnect is called
+    Then the client emits "connecting" with code 6 and reason "reconnect called"
+    And then within 3 s the client emits "connected"
+    And the client never emitted "disconnected"
+
+  @D
+  Scenario: Publications not taken before reconnect() are recovered once
+    Given a client subscribed to recoverable channel "news" on the fake server, whose subscription's stream has been read up to "subscribed"
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the application has taken only the publication at offset 1 from the subscription's stream
+    And the client holds the publications at offsets 2 and 3 not yet taken
+    When reconnect is called
+    And the fake server answers the subscribe command with the publications at offsets 2 and 3 recovered
+    Then that subscribe command asked to recover from offset 1
+    And the subscription's stream yields, in order, "subscribing", "subscribed", and the publications at offsets 2 and 3
+    And no publication is yielded twice
+
+  @D
+  Scenario Outline: A captive portal answering the websocket upgrade is reported
+    Given a fake server answering every websocket upgrade with HTTP status <status> and an HTML page
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt whose message ends with "a captive portal may be answering"
+    And the client state is "connecting"
+    And the client makes another connection attempt
+
+    Examples:
+      | status |
+      | 200    |
+      | 302    |
+      | 511    |
+```
+
+**Exceptions introduced:** detection (D1) is checked by unit tests of the adapter's comparison, not by a real system sleep in CI; the http_stream and sse portal cases are checked by unit tests, since the fake server speaks websocket only (Block 15).
