@@ -4816,6 +4816,7 @@ This block reverses two exclusions: Block 0's "channel compaction (Centrifugo PR
   - **Debug.** Shows keys and operators, never values (Block 21, D5: tags by name only).
   - **Verified** (centrifugal.dev, read 2026-11-08): the channel option `allow_tags_filter` (default false, "Available since Centrifugo v6.4.0"), so v6.10.1 honours `tf` and the delivery scenario is @A. Recovery returns only matching publications.
   - `VERIFY:` that `CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_TAGS_FILTER=true` allows it on channels without a namespace (the documentation speaks of namespaces), by a raw client run as Block 19 did. If it does not, the @A server gains a namespace with `allow_tags_filter`; the scenario stays @A.
+  - Verified (Centrifugo v6.10.1, the 35a @A scenario, 2026-11-08): with `CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_TAGS_FILTER=true` a channel without a namespace honours `tf`, over JSON and Protobuf: a filter `ticker in BTC, ETH` delivers the BTC and ETH publications and not the XRP one.
 - **D2 Channel compaction (35b).**
   - **Option.** `SubscriptionBuilder::channel_compaction(bool)` and `SubscriptionOptions::channel_compaction`, default off (analysis design A, opt-in like `join_leave`). It sets `SubscribeRequest.flag` bit 0 beside bit 1 (`REJECT_UNRECOVERED`) on every subscribe. A server without compaction ignores the bit; the @A scenario checks v6.10.1.
   - **Map.** The core keeps a map from id to subscription for the connection (Block 14's O(1) dispatch).

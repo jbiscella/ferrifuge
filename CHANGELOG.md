@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `TagFilter` (Block 35a): server-side filtering of a subscription's
+  publications by their tags (Centrifugo `allow_tags_filter`, from v6.4.0),
+  built from comparisons and `and`, `or`, `!`;
+  `SubscriptionBuilder::tag_filter`, `Subscription::set_tag_filter`,
+  `SubscriptionOptions::tag_filter`, `Machine::check_subscription_tag_filter`,
+  `Input::SetSubscriptionTagFilter`, and `SubscriptionError::InvalidTagFilter`
+  and `TagFilterWithDelta`.
+
 - A table of codes (Block 34): every client-side code with its reason, cause
   and what the client does next, and the server codes the client reacts to,
   in the `codes` documentation and the README's "Codes" section.

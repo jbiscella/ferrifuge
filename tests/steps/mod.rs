@@ -47,6 +47,7 @@ mod slow;
 mod statistics;
 mod sub_tokens;
 mod subscriptions;
+mod tag_filters;
 mod tls;
 mod token;
 mod transports;
@@ -194,6 +195,8 @@ pub(crate) struct ClientWorld {
     pub(crate) close: close::Closing,
     /// The codes and their tables (Block 34).
     pub(crate) codes_table: codes_table::CodesTable,
+    /// The tag filter of a Block 35a scenario.
+    pub(crate) tag_filters: tag_filters::TagFilters,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

@@ -106,7 +106,12 @@ pub(super) async fn next_publication(world: &mut ClientWorld, new: bool) -> Publ
 
 /// Publishes `data` (JSON) to `channel` through the server API; the
 /// offset the server reports is kept.
-async fn publish(world: &mut ClientWorld, channel: &str, data: &str, tags: Option<Value>) {
+pub(super) async fn publish(
+    world: &mut ClientWorld,
+    channel: &str,
+    data: &str,
+    tags: Option<Value>,
+) {
     let mut params = json!({
         "channel": channel,
         "data": serde_json::from_str::<Value>(data).expect("JSON data"),
