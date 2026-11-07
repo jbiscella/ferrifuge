@@ -106,9 +106,10 @@ pub(super) struct Core {
     pub(super) actions: VecDeque<Action>,
     /// The clocks at the last input, to notice a system sleep (Block 25).
     pub(super) clock: Clock,
-    /// The input that revealed a sleep, and those after it, until the
-    /// driver has performed the core's answer to the sleep (Block 25, D1).
-    pub(super) after_wake: VecDeque<Input>,
+    /// When each token refresh timer the driver runs comes due, so that a
+    /// sleep's refreshes are given before the input revealing it (Block
+    /// 25, D1).
+    pub(super) refreshes: Refreshes,
 }
 
 /// The wall-clock and monotonic times of the last input given the machine.
@@ -168,6 +169,77 @@ impl Rearmed {
             }
             _ => false,
         }
+    }
+}
+
+/// The deadlines of the token refresh timers the driver runs, by
+/// subscription (`None` for the connection's), kept beside the core: an
+/// application task that reveals a sleep cannot reach the driver's
+/// timers (Block 25, D1, D3).
+#[derive(Debug, Default)]
+pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, tokio::time::Instant>);
+
+impl Refreshes {
+    /// Follows `action`, which the driver will perform.
+    fn note(&mut self, action: &Action) {
+        match action {
+            Action::SetTimer(Timer::Refresh, delay) => self.set(None, *delay),
+            Action::SetSubscriptionTimer(id, SubscriptionTimer::Refresh, delay) => {
+                self.set(Some(*id), *delay);
+            }
+            Action::CancelTimer(Timer::Refresh) => {
+                self.0.remove(&None);
+            }
+            Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh) => {
+                self.0.remove(&Some(*id));
+            }
+            Action::ShortenTimer(Timer::Refresh, by) => self.shorten(None, *by),
+            Action::ShortenSubscriptionTimer(id, SubscriptionTimer::Refresh, by) => {
+                self.shorten(Some(*id), *by);
+            }
+            _ => {}
+        }
+    }
+
+    fn set(&mut self, key: Option<SubscriptionId>, delay: Duration) {
+        self.0.insert(key, tokio::time::Instant::now() + delay);
+    }
+
+    fn shorten(&mut self, key: Option<SubscriptionId>, by: Duration) {
+        if let Some(deadline) = self.0.get_mut(&key) {
+            *deadline = deadline
+                .checked_sub(by)
+                .unwrap_or_else(tokio::time::Instant::now);
+        }
+    }
+
+    /// `input` is the firing of a refresh timer: it no longer runs.
+    fn fired(&mut self, input: &Input) {
+        match input {
+            Input::TimerFired(Timer::Refresh) => {
+                self.0.remove(&None);
+            }
+            Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh) => {
+                self.0.remove(&Some(*id));
+            }
+            _ => {}
+        }
+    }
+
+    /// Removes the refresh timers due now, and names them.
+    fn due(&mut self) -> Vec<Option<SubscriptionId>> {
+        let now = tokio::time::Instant::now();
+        let mut due: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now)
+            .map(|(key, _)| *key)
+            .collect();
+        due.sort_unstable();
+        for key in &due {
+            self.0.remove(key);
+        }
+        due
     }
 }
 
@@ -232,8 +304,6 @@ impl Shared {
     fn shut_down(&self) {
         let mut core = lock(&self.core);
         if !self.closed.load(Ordering::Acquire) {
-            // Inputs waiting behind a sleep go first: the driver stops.
-            self.wake(&mut core, Vec::new());
             self.handle(&mut core, Input::Disconnect);
             self.closed.store(true, Ordering::Release);
         }
@@ -247,37 +317,44 @@ impl Shared {
         // Application calls and stream reads feed the machine too, on the
         // application's tasks.
         let _entered = self.log.span.enter();
-        if !core.after_wake.is_empty() {
-            // In order, behind the input that revealed a sleep.
-            core.after_wake.push_back(input);
-            return;
-        }
+        core.refreshes.fired(&input);
         // A sleep since the last input is the machine's first news of the
         // wake (Block 25, D1).
-        if let Some(gap) = core.clock.tick() {
-            debug!(gap = ?gap, "system sleep detected");
-            let rearmed = self.feed(core, Input::Slept { gap });
-            if !rearmed.makes_stale(&input) {
-                // Given once the driver has shortened the refresh timers and
-                // fired those now due, so that an attempt or a subscribe the
-                // input starts fetches a new token first (D3).
-                core.after_wake.push_back(input);
-                self.actions_queued.notify_one();
-            }
-            return;
-        }
-        self.feed(core, input);
-    }
-
-    /// Gives the machine the firings of the timers `due` once a sleep's
-    /// shortening is performed, then the inputs that waited for it
-    /// (Block 25, D1).
-    pub(super) fn wake(&self, core: &mut Core, due: Vec<Input>) {
-        let _entered = self.log.span.enter();
-        for input in due {
+        let Some(gap) = core.clock.tick() else {
             self.feed(core, input);
+            return;
+        };
+        debug!(gap = ?gap, "system sleep detected");
+        // An event taken is already the application's: its position moves
+        // before the sleep can withdraw it.
+        let input = match input {
+            Input::EventTaken(_) => {
+                self.feed(core, input);
+                None
+            }
+            input => Some(input),
+        };
+        let rearmed = self.feed(core, Input::Slept { gap });
+        // The refreshes the sleep made due go before the input, so that an
+        // attempt or a subscribe it starts fetches a new token first (D3);
+        // the driver's timers for them are cancelled.
+        for of in core.refreshes.due() {
+            let (cancel, fired) = match of {
+                None => (
+                    Action::CancelTimer(Timer::Refresh),
+                    Input::TimerFired(Timer::Refresh),
+                ),
+                Some(id) => (
+                    Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh),
+                    Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh),
+                ),
+            };
+            core.actions.push_back(cancel);
+            self.feed(core, fired);
         }
-        while let Some(input) = core.after_wake.pop_front() {
+        if let Some(input) = input
+            && !rearmed.makes_stale(&input)
+        {
             self.feed(core, input);
         }
     }
@@ -292,6 +369,7 @@ impl Shared {
             for action in core.machine.handle(input) {
                 self.log.action(&action);
                 rearmed.note(&action);
+                core.refreshes.note(&action);
                 let mut outboxes = lock(&self.outboxes);
                 let taken = match action {
                     Action::Emit(id, event) => outboxes.client.offer(id, event),
@@ -812,7 +890,7 @@ impl Client {
                 machine,
                 actions: VecDeque::new(),
                 clock: Clock::default(),
-                after_wake: VecDeque::new(),
+                refreshes: Refreshes::default(),
             }),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
@@ -1239,21 +1317,6 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
         }
     }
 
-    /// Removes the timers whose deadline has passed, and names them.
-    fn due(&mut self) -> Vec<K> {
-        let now = tokio::time::Instant::now();
-        let due: Vec<K> = self
-            .0
-            .iter()
-            .filter(|(_, sleep)| sleep.deadline() <= now)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in &due {
-            self.0.remove(key);
-        }
-        due
-    }
-
     /// Resolves with the first timer to fire, which is removed; never while
     /// none is set. Cancel-safe.
     async fn fired(&mut self) -> K {
@@ -1305,22 +1368,6 @@ impl Timers {
         }
     }
 
-    /// Clears the timers whose deadline has passed, and names them.
-    fn due(&mut self) -> Vec<Timer> {
-        let now = tokio::time::Instant::now();
-        Timer::ALL
-            .into_iter()
-            .filter(|timer| {
-                let slot = &mut self.0[timer.index()];
-                let due = slot.as_ref().is_some_and(|sleep| sleep.deadline() <= now);
-                if due {
-                    *slot = None;
-                }
-                due
-            })
-            .collect()
-    }
-
     /// Resolves with the first timer to fire, which is cleared; never while
     /// none is set. Cancel-safe: unfired timers keep running.
     async fn fired(&mut self) -> Timer {
@@ -1360,24 +1407,6 @@ impl Driver {
                 // gets "disconnected" rather than waiting forever.
                 lock(&self.shared.calls).clear();
                 return;
-            }
-            if !lock(&self.shared.core).after_wake.is_empty() {
-                // The sleep's shortening is performed: the refreshes now due
-                // go first (Block 25, D1, D3).
-                let due = self
-                    .timers
-                    .due()
-                    .into_iter()
-                    .map(Input::TimerFired)
-                    .chain(
-                        self.subscription_timers
-                            .due()
-                            .into_iter()
-                            .map(|(id, timer)| Input::SubscriptionTimerFired(id, timer)),
-                    )
-                    .collect();
-                self.shared.wake(&mut lock(&self.shared.core), due);
-                continue;
             }
             // A full read-ahead stops the reading: the server's handling of
             // slow clients acts instead (Block 15). Taking an event wakes
@@ -2309,18 +2338,6 @@ mod tests {
         (core, transport)
     }
 
-    /// The driver's part after a sleep: performs the shortening on
-    /// `timers`, then wakes the core with the timers now due.
-    fn woken(client: &Client, core: &mut Core, timers: &mut Timers) {
-        for action in std::mem::take(&mut core.actions) {
-            if let Action::ShortenTimer(timer, by) = action {
-                timers.shorten(timer, by);
-            }
-        }
-        let due = timers.due().into_iter().map(Input::TimerFired).collect();
-        client.shared().wake(core, due);
-    }
-
     /// Makes the core's next input reveal a sleep of `gap`.
     fn slept(core: &mut Core, gap: Duration) {
         core.clock = Clock(Some((SystemTime::now() - gap, std::time::Instant::now())));
@@ -2376,7 +2393,6 @@ mod tests {
         client
             .shared()
             .handle(&mut core, Input::TimerFired(Timer::Refresh));
-        woken(&client, &mut core, &mut Timers::default());
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
@@ -2464,8 +2480,6 @@ mod tests {
             &client,
             r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
         );
-        let mut timers = Timers::default();
-        timers.set(Timer::Refresh, Duration::from_secs(50));
         client.shared().handle(
             &mut core,
             Input::TransportClosed {
@@ -2480,7 +2494,6 @@ mod tests {
         client
             .shared()
             .handle(&mut core, Input::TimerFired(Timer::Reconnect));
-        woken(&client, &mut core, &mut timers);
 
         let fetch = core
             .actions
@@ -2491,10 +2504,105 @@ mod tests {
             .iter()
             .position(|action| matches!(action, Action::OpenTransport { .. }));
         assert!(fetch.is_some(), "{:?}", core.actions);
+        // The driver's timer for that refresh would fire it a second time.
+        assert!(
+            core.actions
+                .iter()
+                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            "{:?}",
+            core.actions
+        );
         assert!(
             open.is_none_or(|open| fetch.is_some_and(|fetch| fetch < open)),
             "{:?}",
             core.actions
+        );
+    }
+
+    // Codex, #120: an event the stream returns as a sleep is noticed is
+    // already the application's, so its position moves although the sleep
+    // drops the connection.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_publication_taken_as_a_sleep_is_noticed_moves_its_position() {
+        use futures_util::FutureExt as _;
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .recoverable(true)
+            .build()
+            .unwrap();
+        let mut events = subscription.events();
+        subscription.subscribe();
+        let frame = |data: &str| Input::Frame {
+            transport,
+            data: data.as_bytes().to_vec(),
+        };
+        {
+            let mut core = lock(&client.shared().core);
+            let shared = client.shared();
+            shared.handle(
+                &mut core,
+                frame(r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":0}}"#),
+            );
+            shared.handle(
+                &mut core,
+                frame(r#"{"push":{"channel":"news","pub":{"data":{"n":1},"offset":1}}}"#),
+            );
+        }
+        for _ in ["subscribing", "subscribed"] {
+            events
+                .next()
+                .now_or_never()
+                .expect("an event")
+                .expect("a stream");
+        }
+
+        slept(&mut lock(&client.shared().core), Duration::from_secs(70));
+        let taken = events.next().now_or_never().expect("an event");
+
+        assert!(
+            matches!(taken, Some(SubscriptionEvent::Publication(_))),
+            "{taken:?}"
+        );
+        let mut core = lock(&client.shared().core);
+        assert_eq!(core.machine.state(), State::Connecting);
+        let shared = client.shared();
+        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect));
+        let again = core
+            .actions
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a reconnect attempt");
+        core.actions.clear();
+        shared.handle(&mut core, Input::TransportOpened(again));
+        shared.handle(
+            &mut core,
+            Input::Frame {
+                transport: again,
+                data: br#"{"id":3,"connect":{"client":"c"}}"#.to_vec(),
+            },
+        );
+        let sent: Vec<String> = core
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sent.iter()
+                .any(|frame| frame.contains(r#""recover":true"#) && frame.contains(r#""offset":1"#)),
+            "{sent:?}"
         );
     }
 
