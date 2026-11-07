@@ -106,6 +106,9 @@ pub(super) struct Core {
     pub(super) actions: VecDeque<Action>,
     /// The clocks at the last input, to notice a system sleep (Block 25).
     pub(super) clock: Clock,
+    /// The input that revealed a sleep, and those after it, until the
+    /// driver has performed the core's answer to the sleep (Block 25, D1).
+    pub(super) after_wake: VecDeque<Input>,
 }
 
 /// The wall-clock and monotonic times of the last input given the machine.
@@ -229,6 +232,8 @@ impl Shared {
     fn shut_down(&self) {
         let mut core = lock(&self.core);
         if !self.closed.load(Ordering::Acquire) {
+            // Inputs waiting behind a sleep go first: the driver stops.
+            self.wake(&mut core, Vec::new());
             self.handle(&mut core, Input::Disconnect);
             self.closed.store(true, Ordering::Release);
         }
@@ -242,16 +247,39 @@ impl Shared {
         // Application calls and stream reads feed the machine too, on the
         // application's tasks.
         let _entered = self.log.span.enter();
+        if !core.after_wake.is_empty() {
+            // In order, behind the input that revealed a sleep.
+            core.after_wake.push_back(input);
+            return;
+        }
         // A sleep since the last input is the machine's first news of the
         // wake (Block 25, D1).
         if let Some(gap) = core.clock.tick() {
             debug!(gap = ?gap, "system sleep detected");
             let rearmed = self.feed(core, Input::Slept { gap });
-            if rearmed.makes_stale(&input) {
-                return;
+            if !rearmed.makes_stale(&input) {
+                // Given once the driver has shortened the refresh timers and
+                // fired those now due, so that an attempt or a subscribe the
+                // input starts fetches a new token first (D3).
+                core.after_wake.push_back(input);
+                self.actions_queued.notify_one();
             }
+            return;
         }
         self.feed(core, input);
+    }
+
+    /// Gives the machine the firings of the timers `due` once a sleep's
+    /// shortening is performed, then the inputs that waited for it
+    /// (Block 25, D1).
+    pub(super) fn wake(&self, core: &mut Core, due: Vec<Input>) {
+        let _entered = self.log.span.enter();
+        for input in due {
+            self.feed(core, input);
+        }
+        while let Some(input) = core.after_wake.pop_front() {
+            self.feed(core, input);
+        }
     }
 
     /// Gives the machine `input`, and the inputs its events cause; the
@@ -784,6 +812,7 @@ impl Client {
                 machine,
                 actions: VecDeque::new(),
                 clock: Clock::default(),
+                after_wake: VecDeque::new(),
             }),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
@@ -1210,6 +1239,21 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
         }
     }
 
+    /// Removes the timers whose deadline has passed, and names them.
+    fn due(&mut self) -> Vec<K> {
+        let now = tokio::time::Instant::now();
+        let due: Vec<K> = self
+            .0
+            .iter()
+            .filter(|(_, sleep)| sleep.deadline() <= now)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in &due {
+            self.0.remove(key);
+        }
+        due
+    }
+
     /// Resolves with the first timer to fire, which is removed; never while
     /// none is set. Cancel-safe.
     async fn fired(&mut self) -> K {
@@ -1261,6 +1305,22 @@ impl Timers {
         }
     }
 
+    /// Clears the timers whose deadline has passed, and names them.
+    fn due(&mut self) -> Vec<Timer> {
+        let now = tokio::time::Instant::now();
+        Timer::ALL
+            .into_iter()
+            .filter(|timer| {
+                let slot = &mut self.0[timer.index()];
+                let due = slot.as_ref().is_some_and(|sleep| sleep.deadline() <= now);
+                if due {
+                    *slot = None;
+                }
+                due
+            })
+            .collect()
+    }
+
     /// Resolves with the first timer to fire, which is cleared; never while
     /// none is set. Cancel-safe: unfired timers keep running.
     async fn fired(&mut self) -> Timer {
@@ -1300,6 +1360,24 @@ impl Driver {
                 // gets "disconnected" rather than waiting forever.
                 lock(&self.shared.calls).clear();
                 return;
+            }
+            if !lock(&self.shared.core).after_wake.is_empty() {
+                // The sleep's shortening is performed: the refreshes now due
+                // go first (Block 25, D1, D3).
+                let due = self
+                    .timers
+                    .due()
+                    .into_iter()
+                    .map(Input::TimerFired)
+                    .chain(
+                        self.subscription_timers
+                            .due()
+                            .into_iter()
+                            .map(|(id, timer)| Input::SubscriptionTimerFired(id, timer)),
+                    )
+                    .collect();
+                self.shared.wake(&mut lock(&self.shared.core), due);
+                continue;
             }
             // A full read-ahead stops the reading: the server's handling of
             // slow clients acts instead (Block 15). Taking an event wakes
@@ -2199,6 +2277,14 @@ mod tests {
     /// with the actions so far performed. The caller holds the core, so the
     /// driver task does not run until it is dropped.
     fn connected_core<'a>(client: &'a Client, reply: &str) -> std::sync::MutexGuard<'a, Core> {
+        connected_core_over(client, reply).0
+    }
+
+    /// As [`connected_core`], with the transport.
+    fn connected_core_over<'a>(
+        client: &'a Client,
+        reply: &str,
+    ) -> (std::sync::MutexGuard<'a, Core>, TransportId) {
         let shared = client.shared();
         let mut core = lock(&shared.core);
         shared.handle(&mut core, Input::Connect);
@@ -2220,7 +2306,19 @@ mod tests {
         );
         assert_eq!(core.machine.state(), State::Connected);
         core.actions.clear();
-        core
+        (core, transport)
+    }
+
+    /// The driver's part after a sleep: performs the shortening on
+    /// `timers`, then wakes the core with the timers now due.
+    fn woken(client: &Client, core: &mut Core, timers: &mut Timers) {
+        for action in std::mem::take(&mut core.actions) {
+            if let Action::ShortenTimer(timer, by) = action {
+                timers.shorten(timer, by);
+            }
+        }
+        let due = timers.due().into_iter().map(Input::TimerFired).collect();
+        client.shared().wake(core, due);
     }
 
     /// Makes the core's next input reveal a sleep of `gap`.
@@ -2278,6 +2376,7 @@ mod tests {
         client
             .shared()
             .handle(&mut core, Input::TimerFired(Timer::Refresh));
+        woken(&client, &mut core, &mut Timers::default());
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
@@ -2341,7 +2440,62 @@ mod tests {
             .iter()
             .find(|record| record.contains("system sleep detected"))
             .unwrap_or_else(|| panic!("{records:?}"));
-        assert!(logged.contains(" gap=30."), "{logged}");
+        // The monotonic clock moves a little meanwhile.
+        assert!(
+            logged.contains(" gap=29.9") || logged.contains(" gap=30."),
+            "{logged}"
+        );
+    }
+
+    // Codex, #120: the reconnect timer revealing the sleep must not start
+    // an attempt with the token that expired meanwhile.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sleep_seen_at_the_reconnect_timer_fetches_a_token_before_the_attempt() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .config(Config {
+                token: "t".to_owned(),
+                ..Config::default()
+            })
+            .get_token(|| async { Ok("t2".to_owned()) })
+            .build()
+            .unwrap();
+        let (mut core, transport) = connected_core_over(
+            &client,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
+        );
+        let mut timers = Timers::default();
+        timers.set(Timer::Refresh, Duration::from_secs(50));
+        client.shared().handle(
+            &mut core,
+            Input::TransportClosed {
+                transport,
+                code: None,
+                reason: String::new(),
+            },
+        );
+        core.actions.clear();
+
+        slept(&mut core, Duration::from_secs(70));
+        client
+            .shared()
+            .handle(&mut core, Input::TimerFired(Timer::Reconnect));
+        woken(&client, &mut core, &mut timers);
+
+        let fetch = core
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::FetchToken(_)));
+        let open = core
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::OpenTransport { .. }));
+        assert!(fetch.is_some(), "{:?}", core.actions);
+        assert!(
+            open.is_none_or(|open| fetch.is_some_and(|fetch| fetch < open)),
+            "{:?}",
+            core.actions
+        );
     }
 
     // Single-threaded runtime: the driver task cannot run in between.
