@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.15"
+ferrifuge = "0.16"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -549,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.15", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.16", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -570,14 +570,15 @@ activity, timers) and returns the actions to perform.
 How a `wss://` or `https://` server is verified depends on the build and
 the platform:
 
-| Build | macOS, iOS, Windows | Linux and other Unix systems |
+| Build | macOS, iOS, Windows, Android | Linux and other Unix systems |
 |---|---|---|
-| `ring`, `aws-lc-rs` | the operating system's verifier (`rustls-platform-verifier`): its store, its distrust settings, revocation and intermediate fetching | webpki over the system's root certificates (`rustls-native-certs`, which reads `SSL_CERT_FILE` and `SSL_CERT_DIR`) |
-| `fips` | webpki over the system's root certificates, so that chains are checked inside the FIPS module | the same |
+| `ring`, `aws-lc-rs` | the operating system's verifier (`rustls-platform-verifier`): its store, its distrust settings, revocation and intermediate fetching; on Android after one setup call (see Mobile) | webpki over the system's root certificates (`rustls-native-certs`, which reads `SSL_CERT_FILE` and `SSL_CERT_DIR`) |
+| `fips` | webpki over the system's root certificates, so that chains are checked inside the FIPS module (unsupported on Android and iOS) | the same |
 
 `SSL_CERT_FILE` and `SSL_CERT_DIR` apply only where webpki verifies: on
-Linux, and in the `fips` build. Android keeps webpki for now; its setup
-comes in a later release.
+Linux, and in the `fips` build. On Android, `root_certificates` is refused:
+the platform verifier there takes no extra roots, so give a `tls_config`
+trusting them instead.
 
 A private certificate authority, such as a corporate TLS inspection proxy's,
 is trusted in addition to the platform's with `root_certificates`:
@@ -641,6 +642,39 @@ authentication (a local helper such as Px or Cntlm can bridge them), SOCKS4,
 and the settings hyper-util does not read (macOS's exceptions list and SOCKS
 proxy, Linux desktop settings, iOS and Android system settings, where the
 environment applies).
+
+### Mobile
+
+Ferrifuge builds for Android (`aarch64-linux-android`, API level 22 and up)
+and iOS (`aarch64-apple-ios`); CI builds both, without running on a device.
+
+**Backgrounding.** Mobile systems suspend an app's sockets in the
+background. Disconnect when the app goes to the background and connect when
+it returns, or keep the client running only where the system allows it.
+Recovery and in-order delivery make the gap lossless on channels with
+history and recovery, within the server's history size and TTL: the next
+subscribe asks for what was missed. A suspended device's clock stops, so
+the no-ping deadline and the token refresh run late after a resume;
+disconnecting in the background avoids that, and a connect answered with an
+expired token (109) gets a new one from the token callback.
+
+**Android setup.** The operating system's certificate verifier needs:
+
+- the Kotlin component of `rustls-platform-verifier` in the app's Gradle
+  build, at the version of `rustls-platform-verifier-android` in your
+  `Cargo.lock`, kept by the ProGuard rule of the verifier's README;
+- one call to `ferrifuge::android::init_with_env` (or `init_with_refs`,
+  `init_with_runtime`) per process, before building a client that uses TLS.
+  Until then such a client fails `build()`, or its handshakes fail, naming
+  the call. `ferrifuge::android` exposes `jni` 0.22 types and is exempt from
+  semver.
+
+Revocation is checked from API level 24. Extra roots go through a
+`tls_config`.
+
+**iOS** needs no setup: its verifier is Security.framework, and
+`root_certificates` works there. On both, only the environment's proxy
+applies (see Proxies), and the `fips` build is unsupported.
 
 ### Logging
 
@@ -781,7 +815,8 @@ and cargo-deny. It also builds and tests with the aws-lc-rs and fips
 providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
 build. It runs the unit tests, the scenarios that need no server and the
-chaos seeds on Windows and macOS, the interop test, each fuzz target for
+chaos seeds on Windows and macOS, builds the library and its unit tests for
+Android and iOS, the interop test, each fuzz target for
 30 s (10 min nightly) and the semver check. The perf, wall-clock, fuzz and long chaos jobs
 run on merges to `main`, nightly and on demand (`workflow_dispatch`), not
 on pull requests. cargo-deny also runs daily.

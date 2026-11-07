@@ -5,11 +5,30 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-Versions up to 0.15.0 were never published: each section records what the
+Versions up to 0.16.0 were never published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.16.0] - 2026-11-07
+
+### Added
+
+- `ferrifuge::android` (Android only, exempt from semver): the setup call
+  of the operating system's certificate verifier (Block 24).
+- Android and iOS builds in CI.
+
+### Changed
+
+- On Android, the ring and aws-lc-rs builds verify servers with the
+  operating system's verifier, after one setup call; extra root
+  certificates are refused there (give a `tls_config` instead).
+
+### Fixed
+
+- Android found no system root certificate, so `wss://` and `https://`
+  failed there without extra roots or `SSL_CERT_FILE`.
 
 ## [0.15.0] - 2026-11-07
 
