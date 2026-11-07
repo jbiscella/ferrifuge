@@ -3668,6 +3668,7 @@ This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "R
   - The core ignores a gap under 2 s, so another owner may report every gap it measures.
   - The check reads two clocks and allocates nothing; the Block 14 @P gates pass unchanged.
   - When the input that revealed the sleep is the firing of a timer that the core's answer to `Slept` re-arms (`Action::SetTimer` or `Action::SetSubscriptionTimer` for that timer), the adapter drops that firing: it belongs to the deadline the core just replaced, so a sleep first seen at the no-ping deadline does not reconnect when D2 keeps the transport. Otherwise it delivers that input after `Slept`, so a refresh whose firing revealed the sleep still runs although `ShortenTimer` finds that timer no longer running (Codex, #119).
+  - The same holds when another task handled the core between the driver taking a firing and giving it: the core and the driver number each setting of a timer alike, the driver performing the actions in order, and a firing whose timer was set again or cancelled since its setting is dropped (Codex, #120).
   - Between `Slept` and that input, the adapter gives the core the firing of every token refresh timer the sleep made due, and stops its own timer for it, so that an attempt or subscribe the input starts fetches a new token first (D3). It keeps each refresh timer's deadline beside the core, under the same lock, since an application call that reveals a sleep cannot reach the driver's timers. Every input still takes effect before its call returns (Codex, #120).
   - When the input is an event taken from a stream (`Input::EventTaken`), it goes before `Slept`: the event is already the application's, so its position moves even when the sleep drops the connection, and recovery does not deliver it again (Codex, #120).
   - `VERIFY:` whether `Instant` (QueryPerformanceCounter) counts a suspend on Windows. If it does, no gap is seen there and the timers fire at the wake as if they counted it; the README says which.
@@ -3715,6 +3716,7 @@ Value clause: As an app developer whose clients run on laptops and phones that s
 **Structural acceptance:**
 - a unit test of the adapter's comparison: a wall clock ahead by 2 s gives a gap; ahead by 1999 ms, or behind, gives none;
 - an adapter unit test: a sleep revealed by the no-ping timer's firing, shorter than the no-ping window, drops that firing and keeps the transport;
+- an adapter unit test: a no-ping firing the driver took before another task handled a short sleep is dropped, and one of the running setting is delivered;
 - an adapter unit test: a sleep first seen at a refresh timer's firing still refreshes the token;
 - an adapter unit test: a sleep first seen at the reconnect timer's firing, the transport lost before it, fetches a new token before the attempt opens a transport;
 - an adapter unit test: a publication taken from its stream as a sleep longer than the no-ping window is noticed moves its position, so the next subscribe recovers from it;
