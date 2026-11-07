@@ -188,7 +188,7 @@ fn a_client_falling_back_to_sse(world: &mut ClientWorld) {
 #[given(
     regex = r"^a client configured with an unreachable websocket endpoint, the relayed http_stream endpoint and (the server's|an unreachable) sse endpoint$"
 )]
-fn a_client_with_a_relayed_http_stream(world: &mut ClientWorld, sse: String) {
+pub(super) fn a_client_with_a_relayed_http_stream(world: &mut ClientWorld, sse: String) {
     let sse = if sse == "the server's" {
         server(world).sse_url()
     } else {
@@ -334,7 +334,16 @@ async fn the_client_sends_a_command(world: &mut ClientWorld) {
     regex = r#"^within the configured timeout plus tolerance the client emits "connected" over transport "(\w+)"$"#
 )]
 async fn within_the_timeout_connected_over(world: &mut ClientWorld, transport: String) {
-    let limit = test_config().timeout + TOLERANCE;
+    connected_over_within(world, &transport, test_config().timeout + TOLERANCE).await;
+}
+
+/// Waits at most `limit` for "connected" over `transport`, past failed
+/// attempts.
+pub(super) async fn connected_over_within(
+    world: &mut ClientWorld,
+    transport: &str,
+    limit: Duration,
+) {
     let event = tokio::time::timeout(limit, async {
         loop {
             match world.next_event().await {
@@ -351,7 +360,7 @@ async fn within_the_timeout_connected_over(world: &mut ClientWorld, transport: S
     let ClientEvent::Connected { transport: got, .. } = &event else {
         panic!("expected connected, got {event:?}");
     };
-    assert_eq!(got, &transport);
+    assert_eq!(got, transport);
 }
 
 #[when("the relay comes up after every transport has failed once")]

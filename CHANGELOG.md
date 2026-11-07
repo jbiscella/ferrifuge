@@ -11,7 +11,22 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-07
+
 ### Added
+
+- `Config::handshake_timeout` (Block 29): the time allowed for opening a
+  transport (DNS, TCP, the proxy handshake, TLS, the websocket upgrade, or
+  an HTTP stream's response headers), 5 s by default; an open that takes
+  longer fails the attempt with "handshake timeout".
+
+- `Config::max_message_bytes` (Block 29): the largest message accepted
+  from the server, 64 MiB by default, on every transport and for the
+  payloads deltas build; and `Input::MessageTooLarge`, by which an owner of
+  the machine reports a larger one.
+
+- A chainable setter per `Config` field, named after it (Block 29):
+  `Config::default().timeout(..).token(..)`.
 
 - `ClientBuilder::runtime` (Block 28): the tokio runtime the client runs
   on, for building it where none is current, such as a Tauri setup hook.
@@ -30,6 +45,19 @@ repository held while it carried that version, from the blocks of
   a disconnected client is left alone.
 
 ### Changed
+
+- `Config` is `#[non_exhaustive]` (Block 29): outside the crate it is
+  built from `Config::default()`, with its setters or by assigning its
+  fields, and no longer with a struct literal.
+
+- `Config::timeout` bounds the connect reply once the transport is open,
+  and no longer the open itself, as does `Timer::ConnectTimeout` (Block
+  29); one attempt can take both timeouts, 10 s by default.
+
+- A message from the server over the size limit after the connect reply
+  ends the client with `disconnected` code 3 "message size limit exceeded"
+  instead of reconnecting with code 1; one before it fails the attempt with
+  an error event instead of reconnecting without one (Block 29).
 
 - `SubscriptionError::ClientClosed` reads "the client is closed": the client
   was dropped, or its runtime shut down (Block 28); the client's and the

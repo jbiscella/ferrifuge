@@ -29,6 +29,7 @@ mod connection;
 mod delivery;
 mod delta;
 mod jitter;
+mod limits;
 mod logging;
 mod ping;
 mod protobuf;
@@ -176,6 +177,8 @@ pub(crate) struct ClientWorld {
     pub(crate) proxies: proxies::Proxies,
     /// The separate runtime of a Block 28 scenario.
     pub(crate) runtime: runtime::Separate,
+    /// Timeouts and the size limit of a Block 29 scenario.
+    pub(crate) limits: limits::Limits,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
@@ -235,6 +238,7 @@ impl ClientWorld {
         config.protocol = self.protocol;
         self.connect_data.configure(&mut config);
         self.sleep.configure(&mut config);
+        self.limits.configure(&mut config);
         config
     }
 

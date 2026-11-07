@@ -122,7 +122,7 @@ async fn publish(world: &mut ClientWorld, channel: &str, data: &str, tags: Optio
     world.published_offset = result["offset"].as_u64();
 }
 
-async fn a_client_subscribed(world: &mut ClientWorld) {
+pub(super) async fn a_client_subscribed(world: &mut ClientWorld) {
     let connected = world
         .client
         .as_ref()

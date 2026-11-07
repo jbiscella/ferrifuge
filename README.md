@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.17"
+ferrifuge = "0.18"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -363,7 +363,7 @@ recovering from its last publication taken on channels with recovery. A
 delta publication on a server-side subscription, which the client never asks
 for, makes the client reconnect (`connecting` code 5). A rebuilt payload, and
 the publications of one message together, are capped by the inbound message
-limit (64 MiB); a recovery larger than that fails on every resubscribe, as an
+limit (`Config::max_message_bytes`, 64 MiB by default); a recovery larger than that fails on every resubscribe, as an
 oversized recovery reply does without delta.
 
 ```rust
@@ -536,7 +536,8 @@ server's asynchronous messages, exactly as received.
 |---|---|---|
 | `min_reconnect_delay` | 500 ms | Lower bound of the reconnect delay |
 | `max_reconnect_delay` | 20 s | Upper bound of the reconnect delay |
-| `timeout` | 5 s | Time allowed from opening the transport to the connect reply, for a websocket frame to be written (a server that stops reading then counts as a lost connection), for closing a websocket, and for a call to get the connection, then its reply |
+| `timeout` | 5 s | Time allowed for the connect reply once the transport is open, for a websocket frame to be written (a server that stops reading then counts as a lost connection), for closing a websocket, and for a call to get the connection, then its reply |
+| `handshake_timeout` | 5 s | Time allowed for opening a transport: DNS, TCP, the proxy handshake, TLS and the websocket upgrade, or an HTTP stream's response headers. One attempt can take both timeouts (10 s by default, 30 s for a first fallback over three transports); set both to 2.5 s to keep 5 s per attempt. A call made while connecting still waits for the connection for at most `timeout`, so on a slow open it can fail first |
 | `name` | `ferrifuge` | Client name reported to the server |
 | `version` | crate version | Client version reported to the server |
 | `token` | empty | Connection token sent with the first connect |
@@ -546,6 +547,20 @@ server's asynchronous messages, exactly as received.
 | `read_ahead_messages` | 256 | Most messages read and not yet handled while the application has not taken earlier events; then the client stops reading the connection, holding the server back instead of buffering |
 | `read_ahead_bytes` | 4 MiB | Most bytes of those messages; a single larger message is still read when none waits |
 | `write_queue_bytes` | 4 MiB | Most bytes of the application's calls handed to the transport and not yet written; a call that does not fit waits for room, for at most `timeout`, and a single larger call goes out when nothing waits. The client's own commands are not counted |
+| `batch_frame_bytes` | 16 KiB | Most bytes of a frame of several commands; keep it below the server's message and request size limits |
+| `max_message_bytes` | 64 MiB | Largest message accepted from the server, on every transport: the client's memory bound per message, as the read-ahead takes one larger message alone. Lower it on devices with little memory, above the largest history or recovery reply expected. A larger message before the connect reply fails the attempt; after it the client ends with `disconnected` code 3 "message size limit exceeded" and does not reconnect, since the server would send the same data again |
+
+`Config` is `#[non_exhaustive]`: start from `Config::default()`, then use
+the setter named after each field, or assign the fields.
+
+```rust
+use std::time::Duration;
+use ferrifuge::Config;
+
+let config = Config::default()
+    .handshake_timeout(Duration::from_secs(10))
+    .max_message_bytes(4 << 20);
+```
 
 ### Cargo features
 
@@ -560,7 +575,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.17", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.18", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
