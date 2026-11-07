@@ -505,10 +505,7 @@ that returns a new one:
 use ferrifuge::{Client, Config, TokenError};
 
 let client = Client::builder("ws://localhost:8000/connection/websocket")
-    .config(Config {
-        token: initial_token,
-        ..Config::default()
-    })
+    .config(Config::default().token(initial_token))
     .get_token(|| async {
         // Ask your backend for a new token.
         fetch_token().await.map_err(|e| TokenError::Failed(e.to_string()))

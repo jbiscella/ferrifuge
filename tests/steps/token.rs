@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use cucumber::{given, when};
-use ferrifuge::{Client, ClientBuilder, ClientEvent, Config, TokenError};
+use ferrifuge::{Client, ClientBuilder, ClientEvent, TokenError};
 
 use super::{ClientWorld, expect_event, test_config};
 use crate::support::token::connection_token;
@@ -32,10 +32,7 @@ async fn a_connected_client_with_expiring_token(world: &mut ClientWorld) {
 pub(super) fn with_expiring_token(world: &ClientWorld, builder: ClientBuilder) -> ClientBuilder {
     let denied = Arc::clone(&world.token_denied);
     builder
-        .config(Config {
-            token: connection_token(USER, TOKEN_LIFETIME),
-            ..test_config()
-        })
+        .config(test_config().token(connection_token(USER, TOKEN_LIFETIME)))
         .get_token(move || {
             let denied = denied.load(Ordering::SeqCst);
             async move {

@@ -63,10 +63,7 @@ fn secs(seconds: u64) -> Duration {
 /// also has a token callback.
 fn connected(config: Config, token: bool, reply: &Value) -> BatchRun {
     let config = if token {
-        Config {
-            token: "t0".to_owned(),
-            ..config
-        }
+        config.token("t0".to_owned())
     } else {
         config
     };
@@ -77,10 +74,7 @@ fn connected(config: Config, token: bool, reply: &Value) -> BatchRun {
 }
 
 fn pinging(max_server_ping_delay: u64) -> Config {
-    Config {
-        max_server_ping_delay: secs(max_server_ping_delay),
-        ..Config::default()
-    }
+    Config::default().max_server_ping_delay(secs(max_server_ping_delay))
 }
 
 /// A token ttl whose refresh, at 80% to 90% of it (Block 14), comes after
@@ -131,10 +125,7 @@ fn a_pinged_machine_with_a_jitter_window(
     delay: u64,
     window: u64,
 ) {
-    let config = Config {
-        reconnect_jitter_window: secs(window),
-        ..pinging(delay)
-    };
+    let config = pinging(delay).reconnect_jitter_window(secs(window));
     sleep(world).run = Some(connected(
         config,
         false,
@@ -205,10 +196,7 @@ fn a_pinged_machine_with_a_call(
     timeout: u64,
     ago: u64,
 ) {
-    let config = Config {
-        timeout: secs(timeout),
-        ..pinging(delay)
-    };
+    let config = pinging(delay).timeout(secs(timeout));
     let mut run = connected(config, false, &json!({"client": "c", "ping": ping}));
     let call = run.rpc("slow");
     assert!(
@@ -230,10 +218,7 @@ fn a_machine_without_pings(world: &mut ClientWorld) {
     regex = r"^a connected machine with minReconnectDelay (\d+) ms whose connection token refresh is due in (\d+) s$"
 )]
 fn a_machine_with_a_token(world: &mut ClientWorld, min: u64, due: u64) {
-    let config = Config {
-        min_reconnect_delay: Duration::from_millis(min),
-        ..Config::default()
-    };
+    let config = Config::default().min_reconnect_delay(Duration::from_millis(min));
     let mut run = connected(
         config,
         true,
@@ -260,10 +245,7 @@ fn its_transport_was_lost(world: &mut ClientWorld) {
 )]
 fn a_machine_whose_attempt_failed(world: &mut ClientWorld, min: u64) {
     let mut run = BatchRun::new(
-        Config {
-            min_reconnect_delay: Duration::from_millis(min),
-            ..Config::default()
-        },
+        Config::default().min_reconnect_delay(Duration::from_millis(min)),
         false,
     );
     run.handle(Input::Connect);
@@ -447,12 +429,10 @@ fn its_reconnect_timer_is_unchanged(world: &mut ClientWorld) {
     regex = r"^(\d+) connected machines with different seeds, minReconnectDelay (\d+) ms and a reconnect jitter window of (\d+) ms$"
 )]
 fn a_fleet(world: &mut ClientWorld, count: u64, min: u64, window: u64) {
-    let config = Config {
-        min_reconnect_delay: Duration::from_millis(min),
-        max_reconnect_delay: Duration::from_millis(min * 4),
-        reconnect_jitter_window: Duration::from_millis(window),
-        ..Config::default()
-    };
+    let config = Config::default()
+        .min_reconnect_delay(Duration::from_millis(min))
+        .max_reconnect_delay(Duration::from_millis(min * 4))
+        .reconnect_jitter_window(Duration::from_millis(window));
     sleep(world).fleet = (0..count)
         .map(|seed| {
             let mut run = BatchRun::of(Machine::new(config.clone()).with_seed(seed));

@@ -26,7 +26,7 @@ use super::log::{self, Log};
 use super::net::Network;
 use super::proxy::Proxy;
 use super::tls::{self, Tls, Trust, unparsable_root};
-use super::transport::{self as websocket, Inbound, WebSocket};
+use super::transport::{Inbound, WebSocket};
 use crate::machine::{
     Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
@@ -1036,6 +1036,7 @@ impl Client {
         check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
+        let max_message = config.max_message_bytes;
         let machine = if get_token.is_some() {
             Machine::with_token_source(config)
         } else {
@@ -1048,15 +1049,7 @@ impl Client {
         };
         let machine = machine.with_emulated_headers(emulated_headers);
         let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
-        let runtime = match runtime {
-            Some(runtime) => runtime,
-            None => Handle::try_current().map_err(|_| {
-                runtime_error(
-                    "no tokio runtime is current: build the client inside one, or give \
-                     one with ClientBuilder::runtime",
-                )
-            })?,
-        };
+        let runtime = runtime_or_current(runtime)?;
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
                 machine,
@@ -1082,6 +1075,7 @@ impl Client {
             emulation_endpoint,
             http_headers,
             timeout,
+            max_message,
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
@@ -1471,6 +1465,8 @@ struct Driver {
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
+    /// Largest message accepted from the server (`Config::max_message_bytes`).
+    max_message: usize,
     shared: Arc<Shared>,
     /// The runtime the driver runs on, for every spawn (Block 28, D1).
     runtime: Handle,
@@ -1662,6 +1658,15 @@ impl Driver {
                         self.closed(code, &reason);
                         Input::TransportClosed { transport: id, code, reason }
                     }
+                    Inbound::TooLarge => {
+                        self.transport = None;
+                        warn!(
+                            client = self.shared.log.number,
+                            transport = self.kind.name(),
+                            "a message from the server is larger than the size limit"
+                        );
+                        Input::MessageTooLarge(id)
+                    }
                 },
                 (timer, set) = self.timers.fired() => {
                     fired = Some(set);
@@ -1820,18 +1825,14 @@ impl Driver {
     }
 
     /// Records the close of the open transport: a message too large for
-    /// either side is a server anomaly.
+    /// the server is an anomaly (one too large for the client, see
+    /// `Inbound::TooLarge`, too).
     fn closed(&self, code: Option<u16>, reason: &str) {
         let transport = self.kind.name();
         if code == Some(MESSAGE_TOO_BIG) {
             warn!(
                 client = self.shared.log.number,
                 transport, code, "the server closed the websocket: message too big"
-            );
-        } else if reason == websocket::TOO_LARGE {
-            warn!(
-                client = self.shared.log.number,
-                transport, "a message from the server is larger than the size limit"
             );
         } else {
             debug!(transport, code, reason, "transport closed");
@@ -1851,6 +1852,7 @@ impl Driver {
         self.kind = kind;
         let subprotocol = self.subprotocol;
         let timeout = self.timeout;
+        let max_message = self.max_message;
         let headers = Arc::clone(&self.http_headers);
         let network = Arc::clone(&self.shared.network);
         // The attempt's proxy, decided once (Block 23, D1); the transport
@@ -1862,7 +1864,7 @@ impl Driver {
         self.shared.log.attempt(kind, endpoint, &decision);
         let opening: Opening = match kind {
             TransportKind::WebSocket => Box::pin(async move {
-                WebSocket::open(&url, subprotocol, timeout, &headers, &network)
+                WebSocket::open(&url, subprotocol, timeout, &headers, &network, max_message)
                     .await
                     .map(|websocket| Transport::WebSocket(Box::new(websocket)))
             }),
@@ -1880,6 +1882,7 @@ impl Driver {
                         headers,
                         &network,
                         protobuf,
+                        max_message,
                     )
                     .await
                     .map(|http| Transport::Http(Box::new(http)))
@@ -2101,6 +2104,19 @@ async fn opened(
 /// `http(s)://` is right for `http_stream` and sse (owner decision,
 /// 2026-11-04). The message leaves the endpoint out: it may carry a token.
 /// An error of building a client without a runtime to run on (Block 28).
+/// The runtime given, else the current one (Block 28, D1).
+fn runtime_or_current(runtime: Option<Handle>) -> Result<Handle, ClientError> {
+    match runtime {
+        Some(runtime) => Ok(runtime),
+        None => Handle::try_current().map_err(|_| {
+            runtime_error(
+                "no tokio runtime is current: build the client inside one, or give one \
+                 with ClientBuilder::runtime",
+            )
+        }),
+    }
+}
+
 fn runtime_error(message: &str) -> ClientError {
     ClientError {
         kind: ErrorKind::Configuration,
@@ -2323,6 +2339,8 @@ fn check_limits(config: &Config) -> Result<(), ClientError> {
         "the write queue limit must be at least 1"
     } else if config.batch_frame_bytes == 0 {
         "the batch frame limit must be at least 1"
+    } else if config.max_message_bytes == 0 {
+        "the maximum message size (max_message_bytes) must be at least 1"
     } else {
         return Ok(());
     };

@@ -106,10 +106,7 @@ pub(crate) struct DataRun {
 
 impl DataRun {
     fn new(initial_token: Option<&str>, token: Option<TokenAnswer>) -> Self {
-        let config = Config {
-            token: initial_token.unwrap_or_default().to_owned(),
-            ..Config::default()
-        };
+        let config = Config::default().token(initial_token.unwrap_or_default().to_owned());
         let machine = if token.is_some() {
             Machine::with_token_source(config)
         } else {
@@ -665,11 +662,7 @@ fn client_options_with_secrets(
 ) {
     world.pending_builder = Some(
         ferrifuge::Client::builder(super::UNREACHABLE_ENDPOINT)
-            .config(Config {
-                token,
-                data: Some(json_bytes(&data)),
-                ..Config::default()
-            })
+            .config(Config::default().token(token).data(json_bytes(&data)))
             .http_headers([header(&http)])
             .emulated_headers([header(&emulated)]),
     );
@@ -804,10 +797,7 @@ async fn no_configuration_error(world: &mut ClientWorld) {
 #[given("a client using a token callback whose connect was answered with error 109")]
 fn a_connect_answered_with_109(world: &mut ClientWorld) {
     let mut run = TokenRun {
-        machine: Machine::with_token_source(Config {
-            token: "old".to_owned(),
-            ..Config::default()
-        }),
+        machine: Machine::with_token_source(Config::default().token("old".to_owned())),
         actions: Vec::new(),
     };
     let transport = run.handle(Input::Connect);

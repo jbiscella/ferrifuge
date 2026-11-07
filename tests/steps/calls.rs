@@ -11,9 +11,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use ferrifuge::{
-    CallError, Client, ClientEvent, Config, ErrorKind, HistoryOptions, HistoryResult,
-    PresenceResult, PresenceStatsResult, Protocol, State, StreamPosition, Subscription,
-    SubscriptionEvent, codes,
+    CallError, Client, ClientEvent, ErrorKind, HistoryOptions, HistoryResult, PresenceResult,
+    PresenceStatsResult, Protocol, State, StreamPosition, Subscription, SubscriptionEvent, codes,
 };
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
@@ -456,11 +455,9 @@ async fn connected_as(world: &mut ClientWorld, index: usize, info: bool) -> (Cli
     } else {
         Value::Null
     };
-    let config = Config {
-        token: connection_token_with_info(user, &conn_info),
-        protocol: world.protocol,
-        ..test_config()
-    };
+    let config = test_config()
+        .token(connection_token_with_info(user, &conn_info))
+        .protocol(world.protocol);
     let client = Client::builder(world.server_endpoint())
         .config(config)
         .build()
@@ -1208,10 +1205,7 @@ const PUBLISH_OVERHEAD: usize = 50;
 impl QueueRun {
     fn connected(write_queue_bytes: usize, pong: bool) -> Self {
         use ferrifuge::machine::{Action, Input, Machine};
-        let mut machine = Machine::new(Config {
-            write_queue_bytes,
-            ..test_config()
-        });
+        let mut machine = Machine::new(test_config().write_queue_bytes(write_queue_bytes));
         let transport = machine
             .handle(Input::Connect)
             .into_iter()

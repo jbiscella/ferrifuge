@@ -161,11 +161,9 @@ fn plan(world: &mut ClientWorld) -> &mut SlowPlan {
 )]
 #[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn a_subscribed_client(world: &mut ClientWorld, min: u64, max: u64, transport: String) {
-    let config = Config {
-        min_reconnect_delay: Duration::from_millis(min),
-        max_reconnect_delay: Duration::from_millis(max),
-        ..Config::default()
-    };
+    let config = Config::default()
+        .min_reconnect_delay(Duration::from_millis(min))
+        .max_reconnect_delay(Duration::from_millis(max));
     world.backoff = Some(UnderTest::Reconnect(config.clone()));
     world.slow = Some(SlowPlan {
         config,

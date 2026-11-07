@@ -49,6 +49,9 @@ pub(crate) enum Inbound {
     Frame(Vec<u8>),
     /// The connection ended; `code` is absent when no close frame was received.
     Closed { code: Option<u16>, reason: String },
+    /// The server sent a message over the size limit, which was refused;
+    /// the connection is to be dropped (Block 29, D3).
+    TooLarge,
     /// An emulation request carrying this frame was rejected with HTTP 413:
     /// only its commands failed, the transport stays open.
     Rejected(Vec<u8>),
@@ -78,12 +81,15 @@ impl WebSocket {
     /// Opens a connection to `url` (`ws://` or `wss://`), asking for
     /// `subprotocol` if any. A frame not written within `timeout` of being
     /// queued ends the connection, and closing it takes at most `timeout`.
+    /// A message or frame over `max_message` bytes ends it too, reported as
+    /// [`Inbound::TooLarge`].
     pub(crate) async fn open(
         url: &str,
         subprotocol: Option<&str>,
         timeout: Duration,
         headers: &reqwest::header::HeaderMap,
         network: &Network,
+        max_message: usize,
     ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
@@ -113,7 +119,7 @@ impl WebSocket {
         let (stream, _) = tokio_tungstenite::client_async_tls_with_config(
             request,
             stream,
-            Some(websocket_config()),
+            Some(websocket_config(max_message)),
             Some(connector),
         )
         .await
@@ -198,12 +204,7 @@ impl WebSocket {
         loop {
             let message = match ready!(self.stream.poll_next_unpin(cx)) {
                 Some(Ok(message)) => message,
-                Some(Err(Error::Capacity(_))) => {
-                    return Poll::Ready(Some(Inbound::Closed {
-                        code: None,
-                        reason: TOO_LARGE.to_owned(),
-                    }));
-                }
+                Some(Err(Error::Capacity(_))) => return Poll::Ready(Some(Inbound::TooLarge)),
                 _ => return Poll::Ready(None),
             };
             match message {
@@ -316,22 +317,19 @@ fn note_stall<T>(poll: &Poll<T>) {
 fn note_stall<T>(_: &Poll<T>) {}
 
 /// Limits of a websocket connection: a frame may be as large as a message
-/// (64 MiB, tungstenite's default and the HTTP transports' limit), since
+/// (`Config::max_message_bytes`, also the HTTP transports' limit), since
 /// Centrifugo sends each reply, a recovery's included, as one frame;
 /// tungstenite's default frame limit of 16 MiB would refuse a large one
 /// and close the connection on every attempt.
-fn websocket_config() -> WebSocketConfig {
+fn websocket_config(max_message: usize) -> WebSocketConfig {
     WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_MESSAGE))
+        .max_message_size(Some(max_message))
+        .max_frame_size(Some(max_message))
 }
 
-/// The reason of [`Inbound::Closed`] when the server sent a message larger
-/// than the size limit, on any transport (Block 21: a server anomaly).
+/// The error of an HTTP transport's decoder when the server sent a message
+/// larger than the size limit, reported as [`Inbound::TooLarge`].
 pub(super) const TOO_LARGE: &str = "message larger than the size limit";
-
-/// Largest message, and frame, accepted from the server.
-const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
 
 fn closed(frame: Option<CloseFrame>) -> Inbound {
     match frame {
@@ -355,6 +353,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const LIMIT: usize = 64 << 20;
 
     /// Starts a server that echoes one text message, then closes with `code`.
     async fn echo_then_close(code: u16, reason: &'static str) -> String {
@@ -388,9 +387,16 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Network::default())
-            .await
-            .unwrap();
+        let mut ws = WebSocket::open(
+            &url,
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Network::default(),
+            LIMIT,
+        )
+        .await
+        .unwrap();
 
         ws.send(
             FrameId::for_tests(1),
@@ -414,6 +420,45 @@ mod tests {
         );
     }
 
+    /// A server sending one text message of each length in `lengths`.
+    async fn sending(lengths: &'static [usize]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            for length in lengths {
+                let _ = ws.send(Message::text("x".repeat(*length))).await;
+            }
+            // Kept open: only the limit ends the connection.
+            let _ = ws.next().await;
+        });
+        format!("ws://{address}")
+    }
+
+    // Block 29, D2, D3: a message at the limit is read, one over it is
+    // refused and reported as too large.
+    #[tokio::test]
+    async fn a_message_over_the_limit_is_refused_and_one_at_it_read() {
+        let url = sending(&[16, 17]).await;
+        let mut ws = WebSocket::open(
+            &url,
+            None,
+            TIMEOUT,
+            &HeaderMap::new(),
+            &Network::default(),
+            16,
+        )
+        .await
+        .unwrap();
+
+        let at = next_inbound(&mut ws).await;
+        let over = next_inbound(&mut ws).await;
+
+        assert_eq!(at, Inbound::Frame(vec![b'x'; 16]));
+        assert_eq!(over, Inbound::TooLarge);
+    }
+
     #[tokio::test]
     async fn a_message_read_comes_before_the_next_written_report() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -432,6 +477,7 @@ mod tests {
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await
         .unwrap();
@@ -474,6 +520,7 @@ mod tests {
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await
         .unwrap();
@@ -515,6 +562,7 @@ mod tests {
             timeout,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await
         .unwrap();
@@ -574,6 +622,7 @@ mod tests {
             timeout,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await
         .unwrap();
@@ -615,6 +664,7 @@ mod tests {
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await
         .unwrap();
@@ -666,8 +716,15 @@ mod tests {
         for (answer, portal) in answers {
             let url = answer_upgrade(answer).await;
 
-            let result =
-                WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Network::default()).await;
+            let result = WebSocket::open(
+                &url,
+                None,
+                TIMEOUT,
+                &HeaderMap::new(),
+                &Network::default(),
+                LIMIT,
+            )
+            .await;
 
             let Err(message) = result else {
                 panic!("upgraded on {}", String::from_utf8_lossy(answer));
@@ -692,6 +749,7 @@ mod tests {
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
+            LIMIT,
         )
         .await;
 

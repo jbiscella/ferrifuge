@@ -319,36 +319,26 @@ fn sizes(list: &str) -> Vec<usize> {
 
 #[given(regex = r"^a connected client with a batch frame cap of (\d+) bytes$")]
 fn a_client_with_a_frame_cap(world: &mut ClientWorld, cap: usize) {
-    world.batching.run = Some(connected_run(Config {
-        batch_frame_bytes: cap,
-        ..Config::default()
-    }));
+    world.batching.run = Some(connected_run(Config::default().batch_frame_bytes(cap)));
 }
 
 #[given(regex = r"^a connected client with a write queue of (\d+) bytes and nothing unwritten$")]
 fn a_client_with_a_write_queue(world: &mut ClientWorld, bytes: usize) {
-    world.batching.run = Some(connected_run(Config {
-        write_queue_bytes: bytes,
-        ..Config::default()
-    }));
+    world.batching.run = Some(connected_run(Config::default().write_queue_bytes(bytes)));
 }
 
 #[given(regex = r"^a connected client with a timeout of (\d+) s$")]
 fn a_client_with_a_timeout(world: &mut ClientWorld, seconds: u64) {
-    world.batching.run = Some(connected_run(Config {
-        timeout: Duration::from_secs(seconds),
-        ..Config::default()
-    }));
+    world.batching.run = Some(connected_run(
+        Config::default().timeout(Duration::from_secs(seconds)),
+    ));
 }
 
 #[given(
     regex = r"^a connected client with a timeout of (\d+) s and a subscription not subscribed$"
 )]
 fn a_client_with_a_subscription(world: &mut ClientWorld, seconds: u64) {
-    let mut run = connected_run(Config {
-        timeout: Duration::from_secs(seconds),
-        ..Config::default()
-    });
+    let mut run = connected_run(Config::default().timeout(Duration::from_secs(seconds)));
     let id = run
         .machine
         .add_subscription("news".to_owned(), SubscriptionOptions::default())
@@ -361,13 +351,7 @@ fn a_client_with_a_subscription(world: &mut ClientWorld, seconds: u64) {
     "a connected client with a token callback, whose connect reply asked for pongs and whose connection token expires"
 )]
 fn a_client_with_a_token_callback(world: &mut ClientWorld) {
-    let mut run = BatchRun::new(
-        Config {
-            token: "t0".to_owned(),
-            ..Config::default()
-        },
-        true,
-    );
+    let mut run = BatchRun::new(Config::default().token("t0".to_owned()), true);
     run.handle(Input::Connect);
     run.connect(&json!({"client": "c", "ping": 25, "pong": true, "expires": true, "ttl": 10}));
     world.batching.run = Some(run);
@@ -1244,13 +1228,7 @@ fn subscription_of_size(run: &mut BatchRun, id: u64, size: usize) {
     regex = r"^a client with a batch frame cap of (\d+) bytes and five subscriptions whose subscribe commands encode to (\d+) bytes each$"
 )]
 fn five_subscriptions_of_size(world: &mut ClientWorld, cap: usize, size: usize) {
-    let mut run = BatchRun::new(
-        Config {
-            batch_frame_bytes: cap,
-            ..Config::default()
-        },
-        false,
-    );
+    let mut run = BatchRun::new(Config::default().batch_frame_bytes(cap), false);
     // The connect command is 1, the subscribe commands 2 to 6.
     for id in 2..7 {
         subscription_of_size(&mut run, id, size);

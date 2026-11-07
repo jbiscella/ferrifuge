@@ -26,10 +26,7 @@ async fn a_late_refresh_denial_disconnects_after_the_new_connection_refreshed() 
     let denied = Arc::new(Mutex::new(Some(denied)));
     let calls = Arc::new(AtomicUsize::new(0));
     let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
-        .config(Config {
-            token: "t0".into(),
-            ..Config::default()
-        })
+        .config(Config::default().token("t0"))
         .get_token({
             let calls = Arc::clone(&calls);
             move || {

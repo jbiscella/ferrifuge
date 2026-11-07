@@ -75,10 +75,7 @@ async fn subscriber(
     Subscription,
     impl Stream<Item = SubscriptionEvent> + Unpin + use<>,
 ) {
-    let config = Config {
-        protocol,
-        ..Config::default()
-    };
+    let config = Config::default().protocol(protocol);
     let client = Client::new(server.websocket_url(), config).expect("a valid endpoint");
     let mut events = client.events();
     client.connect();

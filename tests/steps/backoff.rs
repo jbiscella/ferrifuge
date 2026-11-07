@@ -283,11 +283,11 @@ pub(crate) fn frame_ids(frame: &[u8], method: &str) -> Vec<u64> {
 
 #[given(regex = r"^a client with minReconnectDelay (\d+) ms and maxReconnectDelay (\d+) ms$")]
 fn a_client_with_backoff_options(world: &mut ClientWorld, min: u64, max: u64) {
-    world.backoff = Some(UnderTest::Reconnect(Config {
-        min_reconnect_delay: Duration::from_millis(min),
-        max_reconnect_delay: Duration::from_millis(max),
-        ..Config::default()
-    }));
+    world.backoff = Some(UnderTest::Reconnect(
+        Config::default()
+            .min_reconnect_delay(Duration::from_millis(min))
+            .max_reconnect_delay(Duration::from_millis(max)),
+    ));
 }
 
 #[given("a client with fixed backoff options")]

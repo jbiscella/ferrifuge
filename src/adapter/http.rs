@@ -31,11 +31,6 @@ const JSON: &str = "application/json";
 /// compares the whole value (Block 27, D3; centrifuge
 /// `handler_http_stream.go:73`, `emulation.go:72`).
 const PROTOBUF: &str = "application/octet-stream";
-/// Largest message accepted from a stream, as on websocket. A server
-/// sending more without ending a message would otherwise grow the buffer
-/// without bound.
-const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
-
 /// An emulation request in flight; its failure ends the transport.
 type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)> + Send>>;
 
@@ -86,6 +81,7 @@ impl HttpTransport {
         headers: Arc<HeaderMap>,
         network: &Network,
         protobuf: bool,
+        max_message: usize,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
         let emulation_url = emulation_url(&url, emulation_endpoint)?;
@@ -158,9 +154,9 @@ impl HttpTransport {
             content_type: requests_type,
             body,
             decoder: if protobuf {
-                Decoder::protobuf(MAX_MESSAGE)
+                Decoder::protobuf(max_message)
             } else {
-                Decoder::new(sse, MAX_MESSAGE)
+                Decoder::new(sse, max_message)
             },
             frames: VecDeque::new(),
             failed: None,
@@ -239,6 +235,10 @@ impl HttpTransport {
                     return Inbound::Frame(frame);
                 }
                 if let Some(reason) = self.failed.take() {
+                    // Over `Config::max_message_bytes` (Block 29, D3).
+                    if reason == super::transport::TOO_LARGE {
+                        return Inbound::TooLarge;
+                    }
                     return Inbound::Closed { code: None, reason };
                 }
             }
@@ -490,6 +490,7 @@ mod tests {
     use super::*;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const LIMIT: usize = 64 << 20;
 
     /// Serves `response`, after `delay`, to the first request, then keeps
     /// the connection open; the URL of `path` on it.
@@ -593,7 +594,7 @@ mod tests {
     }
 
     fn decode(sse: bool, chunks: &[&[u8]]) -> Vec<String> {
-        let mut decoder = Decoder::new(sse, MAX_MESSAGE);
+        let mut decoder = Decoder::new(sse, LIMIT);
         let mut messages = VecDeque::new();
         for chunk in chunks {
             decoder.push(chunk, &mut messages).unwrap();
@@ -633,6 +634,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await;
 
@@ -795,6 +797,7 @@ mod tests {
                 Arc::default(),
                 &Network::default(),
                 protobuf,
+                LIMIT,
             )
             .await
             .expect("an open stream");
@@ -914,6 +917,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await
         .unwrap();
@@ -961,6 +965,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await
         .unwrap();
@@ -1004,6 +1009,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await
         .unwrap();
@@ -1048,6 +1054,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await
         .unwrap();
@@ -1090,6 +1097,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await
         .unwrap();
@@ -1160,6 +1168,7 @@ mod tests {
                     Arc::default(),
                     &Network::default(),
                     false,
+                    LIMIT,
                 )
                 .await;
 
@@ -1193,6 +1202,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await;
 
@@ -1220,6 +1230,7 @@ mod tests {
             Arc::default(),
             &Network::default(),
             false,
+            LIMIT,
         )
         .await;
 
@@ -1253,6 +1264,75 @@ mod tests {
             assert!(result.is_err(), "sse {sse}");
             assert_eq!(messages, [b"{}".to_vec()], "sse {sse}");
         }
+    }
+
+    /// A decoder's name, a new one, a message at its limit and one over it.
+    type DecoderCase = (&'static str, fn() -> Decoder, Vec<u8>, Vec<u8>);
+
+    // Block 29, D2: each decoder takes a message at the limit and refuses
+    // one byte more.
+    #[test]
+    fn each_decoder_takes_a_message_at_the_limit_and_refuses_one_over() {
+        let at = "x".repeat(16);
+        let over = "x".repeat(17);
+        let at_reply: Vec<u8> = [16].into_iter().chain([7; 16]).collect();
+        let over_reply: Vec<u8> = [17].into_iter().chain([7; 17]).collect();
+        let cases: [DecoderCase; 3] = [
+            (
+                "lines",
+                || Decoder::new(false, 16),
+                format!("{at}\n").into(),
+                format!("{over}\n").into(),
+            ),
+            (
+                "sse",
+                || Decoder::new(true, 16),
+                format!("data: {at}\n\n").into(),
+                format!("data: {over}\n\n").into(),
+            ),
+            ("protobuf", || Decoder::protobuf(16), at_reply, over_reply),
+        ];
+        for (name, decoder, at, over) in cases {
+            let mut taken = VecDeque::new();
+            let mut refused = VecDeque::new();
+
+            let at_limit = decoder().push(&at, &mut taken);
+            let over_limit = decoder().push(&over, &mut refused);
+
+            assert!(at_limit.is_ok() && taken.len() == 1, "{name}: {at_limit:?}");
+            assert_eq!(
+                over_limit,
+                Err(super::super::transport::TOO_LARGE.to_owned()),
+                "{name}"
+            );
+            assert!(refused.is_empty(), "{name}");
+        }
+    }
+
+    // Block 29, D3: a message over the limit ends the stream as too large.
+    #[tokio::test]
+    async fn a_stream_message_over_the_limit_is_reported_as_too_large() {
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n13\r\n{\"a\":\"0123456789\"}\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            Arc::default(),
+            &Network::default(),
+            false,
+            8,
+        )
+        .await
+        .expect("an open stream");
+
+        assert_eq!(transport.recv(true).await, Inbound::TooLarge);
     }
 
     #[test]
