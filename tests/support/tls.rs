@@ -13,7 +13,9 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, 
 
 /// Names the server certificate is valid for: the host testcontainers
 /// reports for a local Docker daemon, by name and by address.
-const SERVER_NAMES: [&str; 2] = ["localhost", "127.0.0.1"];
+/// `centrifugo.invalid`, which never resolves (RFC 6761), is an endpoint only
+/// a test proxy can reach (Block 23).
+const SERVER_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "centrifugo.invalid"];
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-ca")
@@ -103,4 +105,44 @@ pub(crate) fn private() -> &'static Private {
             key_pem: server_key.serialize_pem(),
         }
     })
+}
+
+/// The test CA's certificate, in DER, for a client trusting it explicitly.
+pub(crate) fn ca_der() -> rustls::pki_types::CertificateDer<'static> {
+    use rustls::pki_types::pem::PemObject;
+    rustls::pki_types::CertificateDer::from_pem_file(ca_path()).expect("the test CA")
+}
+
+/// The server certificate and key of the test CA, for a TLS listener of
+/// the tests.
+pub(crate) fn server_config() -> std::sync::Arc<rustls::ServerConfig> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let chain =
+        vec![CertificateDer::from_pem_file(server_cert_path()).expect("server certificate")];
+    let key = PrivateKeyDer::from_pem_file(server_key_path()).expect("server key");
+    std::sync::Arc::new(
+        rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+            .expect("server configuration"),
+    )
+}
+
+/// The build's crypto provider, as the library chooses it (Block 6).
+#[cfg(feature = "fips")]
+pub(crate) fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::default_fips_provider()
+}
+
+#[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
+pub(crate) fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::aws_lc_rs::default_provider()
+}
+
+#[cfg(not(feature = "aws-lc-rs"))]
+pub(crate) fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::ring::default_provider()
 }

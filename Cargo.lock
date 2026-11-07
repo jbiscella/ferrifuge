@@ -1249,6 +1249,7 @@ dependencies = [
  "testcontainers",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tower-service",
  "tracing",
