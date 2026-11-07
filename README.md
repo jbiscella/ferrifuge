@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.14"
+ferrifuge = "0.15"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -549,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.14", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.15", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -599,6 +599,48 @@ client given extra roots holds its own TLS settings, so many clients should
 share one `tls_config` instead. `ferrifuge::rustls` re-exports the rustls
 version Ferrifuge uses: moving to another rustls 0.x line is a breaking
 release of Ferrifuge. No setting accepts invalid certificates.
+
+### Proxies
+
+Every transport takes the same proxy decision for each URL it opens. By
+default (`Proxy::system()`) it follows the environment, then the operating
+system: `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (upper case
+before lower case, ignored when `REQUEST_METHOD` is set), then macOS's HTTP
+and HTTPS proxies and Windows' Internet settings. `ws://` endpoints follow
+the HTTP proxy, `wss://` ones the HTTPS proxy. The settings are read once per
+process.
+
+```rust,ignore
+use ferrifuge::{Client, Proxy, ProxyTarget};
+
+let proxy = ProxyTarget::new("http://proxy.corp.example:3128")?.basic_auth("user", "password");
+let client = Client::builder(endpoint)
+    .proxy(Proxy::all(proxy).no_proxy("localhost, .internal.example"))
+    .build()?;
+```
+
+`Proxy::from_env()` reads the environment only, `Proxy::none()` connects
+directly, `Proxy::all` uses one proxy, and `Proxy::custom` lets a function
+choose per endpoint (given as `scheme://host:port`). A `ProxyTarget` is
+`http://`, `https://` (TLS to the proxy, verified with the client's TLS
+settings), `socks5://` (the client resolves names) or `socks5h://` (the
+proxy does), with Basic or SOCKS5 username and password credentials.
+`Client::set_proxy` applies from the next connection attempt.
+
+Websocket and `https://` requests go through a CONNECT tunnel, or SOCKS5,
+with TLS to Centrifugo inside it. Plain `http://` requests of http_stream
+and sse go to an HTTP proxy in absolute form, as curl sends them: such a
+proxy sees them in full, including the sse connect command and its token in
+the URL, so prefer `https://` endpoints behind a proxy. A proxy refusing the
+credentials makes the attempt fail with "proxy authentication required". No
+record, error or `Debug` output shows the credentials, and `http_headers`
+refuses `Proxy-Authorization`.
+
+Not supported: PAC files and WPAD, NTLM, Negotiate and Kerberos proxy
+authentication (a local helper such as Px or Cntlm can bridge them), SOCKS4,
+and the settings hyper-util does not read (macOS's exceptions list and SOCKS
+proxy, Linux desktop settings, iOS and Android system settings, where the
+environment applies).
 
 ### Logging
 

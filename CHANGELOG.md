@@ -5,11 +5,34 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-Versions up to 0.14.0 were never published: each section records what the
+Versions up to 0.15.0 were never published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.15.0] - 2026-11-07
+
+### Added
+
+- Proxies (Block 23): `Proxy` (`system`, the default, `from_env`, `none`,
+  `all`, `custom`, with `no_proxy` lists), `ProxyTarget` (HTTP, HTTPS and
+  SOCKS5 proxies with credentials), `ClientBuilder::proxy` and
+  `Client::set_proxy`.
+
+### Changed
+
+- Every transport follows the environment's proxy and, on macOS and
+  Windows, the system's proxy settings; `Proxy::none()` turns that off.
+- The errors of the HTTP transports name their cause; a proxy refusing the
+  credentials reports "proxy authentication required".
+- `http_headers` refuses `Proxy-Authorization`.
+
+### Fixed
+
+- The websocket transport ignored a proxy set in the environment, which the
+  HTTP transports followed, so the client fell back to http_stream by
+  accident.
 
 ## [0.14.0] - 2026-11-07
 
