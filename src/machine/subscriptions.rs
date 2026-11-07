@@ -6,6 +6,7 @@ mod state_flow;
 mod token_flow;
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use super::delivery::{Commit, Owner};
 use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
@@ -697,9 +698,7 @@ impl Machine {
                     sub.position = Some(Machine::reply_baseline(replied, &result.publications));
                 }
                 self.withdraw(&Owner::Client(id));
-                if result.expires {
-                    self.schedule_subscription_refresh(id, result.ttl);
-                }
+                self.rearm_subscription_refresh(id, result.expires, result.ttl);
                 // Rebuilt before any is emitted: a delta failure must not
                 // withdraw an event of the message being handled, which
                 // the next message would wait for (Codex on PR #99).
@@ -1071,10 +1070,44 @@ impl Machine {
         self.send_connect_subscribes();
     }
 
+    /// A subscribe reply sets the subscription's refresh timer, or cancels
+    /// one kept from the last connection (Block 25, D3).
+    fn rearm_subscription_refresh(&mut self, id: SubscriptionId, expires: bool, ttl: u32) {
+        if expires {
+            self.schedule_subscription_refresh(id, ttl);
+        } else {
+            self.actions.push(Action::CancelSubscriptionTimer(
+                id,
+                SubscriptionTimer::Refresh,
+            ));
+        }
+    }
+
+    /// Every subscription using a token has its refresh timer shortened by
+    /// a sleep's `gap` (Block 25, D3); the owner ignores one not running.
+    pub(super) fn shorten_subscription_refreshes(&mut self, gap: Duration) {
+        let ids: Vec<SubscriptionId> = self
+            .subscriptions
+            .by_id
+            .iter()
+            .filter(|(_, sub)| sub.uses_token() && sub.state != SubscriptionState::Unsubscribed)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.actions.push(Action::ShortenSubscriptionTimer(
+                id,
+                SubscriptionTimer::Refresh,
+                gap,
+            ));
+        }
+    }
+
     /// The connection is torn down: commands in flight will get no reply,
     /// and subscribed subscriptions subscribe again on the next connection
-    /// (spec, "Subscription states").
-    pub(super) fn subscriptions_disconnected(&mut self) {
+    /// (spec, "Subscription states"); `reconnect` when the client
+    /// reconnects, which keeps each subscription's refresh timer (Block 25,
+    /// D3).
+    pub(super) fn subscriptions_disconnected(&mut self, reconnect: bool) {
         for (id, _) in self
             .subscriptions
             .subscribes
@@ -1113,9 +1146,13 @@ impl Machine {
                 if let Some(fetch) = sub.tokens.abandon() {
                     self.actions.push(Action::CancelSubscriptionToken(fetch));
                 }
+                // The refresh timer outlives a reconnect, until the next
+                // subscribe reply re-arms or cancels it (Block 25, D3).
                 for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
-                    self.actions
-                        .push(Action::CancelSubscriptionTimer(*id, timer));
+                    if !(reconnect && timer == SubscriptionTimer::Refresh) {
+                        self.actions
+                            .push(Action::CancelSubscriptionTimer(*id, timer));
+                    }
                 }
             }
             sub.waiting = false;
