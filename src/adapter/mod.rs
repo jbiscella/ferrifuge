@@ -3,12 +3,15 @@
 mod client;
 mod http;
 mod log;
+mod net;
 mod outbox;
+mod proxy;
 mod subscription;
 mod tls;
 mod transport;
 
 pub use client::{Batch, Client, ClientBuilder};
+pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};
 #[cfg(feature = "test-util")]
 pub use transport::stalled_websocket_writes;

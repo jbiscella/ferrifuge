@@ -22,6 +22,8 @@ use tracing::Instrument;
 
 use super::http::HttpTransport;
 use super::log::{self, Log};
+use super::net::Network;
+use super::proxy::Proxy;
 use super::tls::{Tls, Trust, unparsable_root};
 use super::transport::{self as websocket, Inbound, WebSocket};
 use crate::machine::{
@@ -71,6 +73,8 @@ pub(super) struct Shared {
     pub(super) closed: AtomicBool,
     /// Spans and records of this client (Block 21).
     pub(super) log: Log,
+    /// Its TLS and proxy settings and HTTP clients (Blocks 22, 23).
+    pub(super) network: Arc<Network>,
 }
 
 /// Events waiting for their streams (Block 15). Locked after
@@ -401,6 +405,7 @@ pub struct ClientBuilder {
     root_certificates: Vec<CertificateDer<'static>>,
     /// The application's TLS configuration, if any.
     tls_config: Option<Arc<rustls::ClientConfig>>,
+    proxy: Proxy,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -445,6 +450,7 @@ impl std::fmt::Debug for ClientBuilder {
             // Their number, and whether one is set: never their content.
             .field("root_certificates", &self.root_certificates.len())
             .field("tls_config", &self.tls_config.is_some())
+            .field("proxy", &self.proxy)
             .finish()
     }
 }
@@ -528,6 +534,16 @@ impl ClientBuilder {
     #[must_use]
     pub fn tls_config(mut self, config: Arc<rustls::ClientConfig>) -> Self {
         self.tls_config = Some(config);
+        self
+    }
+
+    /// Sets how the client reaches the server's hosts (Block 23): through
+    /// the system's proxy by default ([`Proxy::system`]), the environment's,
+    /// none, one proxy, or one chosen per endpoint. Every transport takes
+    /// the same decision for each URL it opens.
+    #[must_use]
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxy = proxy;
         self
     }
 
@@ -637,6 +653,7 @@ impl Client {
             emulated_headers: Vec::new(),
             root_certificates: Vec::new(),
             tls_config: None,
+            proxy: Proxy::default(),
         }
     }
 
@@ -651,6 +668,7 @@ impl Client {
             emulated_headers,
             root_certificates,
             tls_config,
+            proxy,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
@@ -684,6 +702,7 @@ impl Client {
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
+            network: Arc::new(Network::new(Tls::new(trust), proxy)),
         });
         let driver = Driver {
             endpoints: endpoints
@@ -693,7 +712,6 @@ impl Client {
             subprotocol,
             emulation_endpoint,
             http_headers,
-            tls: Arc::new(Tls::new(trust)),
             timeout,
             shared: Arc::clone(&shared),
             opening: None,
@@ -837,6 +855,13 @@ impl Client {
         let headers = emulated_header_map(&headers)?;
         self.shared.apply(Input::SetEmulatedHeaders(headers));
         Ok(())
+    }
+
+    /// Replaces the proxy setting from the next connection attempt
+    /// (Block 23), as the other setters do; the current connection is
+    /// kept.
+    pub fn set_proxy(&self, proxy: Proxy) {
+        self.shared.network.set_proxy(proxy);
     }
 
     /// Calls the server's RPC `method` with `data`; the future gives the
@@ -1041,8 +1066,6 @@ struct Driver {
     emulation_endpoint: Option<String>,
     /// HTTP headers of every transport request.
     http_headers: Arc<HeaderMap>,
-    /// Its TLS settings (Block 22).
-    tls: Arc<Tls>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
@@ -1379,10 +1402,17 @@ impl Driver {
         let subprotocol = self.subprotocol;
         let timeout = self.timeout;
         let headers = Arc::clone(&self.http_headers);
-        let tls = Arc::clone(&self.tls);
+        let network = Arc::clone(&self.shared.network);
+        // The attempt's proxy, decided once (Block 23, D1); the transport
+        // opening it gets the same decision.
+        network.new_attempt();
+        let decision = reqwest::Url::parse(&url)
+            .map_err(|e| e.to_string())
+            .and_then(|parsed| network.decide(&parsed));
+        self.shared.log.attempt(kind, endpoint, &decision);
         let opening: Opening = match kind {
             TransportKind::WebSocket => Box::pin(async move {
-                WebSocket::open(&url, subprotocol, timeout, &headers, &tls)
+                WebSocket::open(&url, subprotocol, timeout, &headers, &network)
                     .await
                     .map(|websocket| Transport::WebSocket(Box::new(websocket)))
             }),
@@ -1397,7 +1427,7 @@ impl Driver {
                         emulation.as_deref(),
                         request_timeout,
                         headers,
-                        &tls,
+                        &network,
                     )
                     .await
                     .map(|http| Transport::Http(Box::new(http)))
@@ -1640,10 +1670,13 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
 }
 
 /// A read-ahead limit of 0 could never let a message in (Block 15).
-/// Headers a transport sets itself, which an application may not set.
+/// Headers a transport sets itself, which an application may not set:
+/// proxy credentials go through `ProxyTarget` only, never through a tunnel
+/// to the server (Block 23, D7).
 fn transport_header(name: &HeaderName) -> bool {
     use reqwest::header::{
-        ACCEPT, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, UPGRADE,
+        ACCEPT, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHORIZATION,
+        TRANSFER_ENCODING, UPGRADE,
     };
     [
         HOST,
@@ -1653,6 +1686,7 @@ fn transport_header(name: &HeaderName) -> bool {
         TRANSFER_ENCODING,
         CONTENT_TYPE,
         ACCEPT,
+        PROXY_AUTHORIZATION,
     ]
     .contains(name)
         || name.as_str().starts_with("sec-websocket-")

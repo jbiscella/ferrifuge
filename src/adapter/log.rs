@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{Span, debug, debug_span, trace, warn};
 
 use super::client::lock;
+use super::proxy::ProxyTarget;
 use crate::machine::{
     Action, Anomaly, CallId, FetchId, Input, SubscriptionId, SubscriptionTimer, Timer,
     TransportKind,
@@ -121,13 +122,11 @@ impl Log {
         match action {
             Action::Emit(_, event) => self.client_event(event),
             Action::EmitSubscription(_, id, event) => self.subscription_event(*id, event),
-            Action::OpenTransport { kind, endpoint, .. } => {
+            Action::OpenTransport { kind, .. } => {
                 let previous = lock(&self.state).attempt.replace(*kind);
                 if previous.is_some_and(|previous| previous != *kind) {
                     debug!(transport = kind.name(), "trying the next transport");
                 }
-                let endpoint = self.endpoints.get(*endpoint).map_or("", String::as_str);
-                debug!(transport = kind.name(), endpoint, "opening transport");
             }
             Action::SetTimer(Timer::Reconnect, delay) => {
                 debug!(delay = ?delay, "reconnect scheduled");
@@ -179,6 +178,27 @@ impl Log {
     /// callback replaced by a newer stale one: no input will end it.
     pub(super) fn fetch_dropped(&self, fetch: FetchId) {
         lock(&self.state).fetches.remove(&fetch);
+    }
+
+    /// The record of a transport attempt (Block 21), made where it opens:
+    /// its endpoint and its proxy, as scheme, host and port, or `direct`
+    /// (Block 23, D7).
+    pub(super) fn attempt(
+        &self,
+        kind: TransportKind,
+        endpoint: usize,
+        proxy: &Result<Option<ProxyTarget>, String>,
+    ) {
+        let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
+        let proxy = match proxy {
+            Ok(Some(target)) => target.shown(),
+            Ok(None) => "direct".to_owned(),
+            Err(_) => "unusable".to_owned(),
+        };
+        debug!(
+            transport = kind.name(),
+            endpoint, proxy, "opening transport"
+        );
     }
 
     fn callback_started(

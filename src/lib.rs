@@ -81,7 +81,9 @@ mod wire;
 pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
-pub use adapter::{Batch, Client, ClientBuilder, Subscription, SubscriptionBuilder};
+pub use adapter::{
+    Batch, Client, ClientBuilder, Proxy, ProxyTarget, Subscription, SubscriptionBuilder,
+};
 pub use call::{
     CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, PresenceResult,
     PresenceStatsResult,
