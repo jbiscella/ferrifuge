@@ -194,6 +194,14 @@ async fn http_proxy(
                   Proxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 0\r\n\r\n",
             )
             .await;
+        // A graceful close: one with unread data resets the connection,
+        // which can reach the client before the 407 (seen on Windows).
+        let _ = client.shutdown().await;
+        let mut rest = [0u8; 1024];
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while client.read(&mut rest).await.is_ok_and(|read| read > 0) {}
+        })
+        .await;
         return;
     }
     let Ok(mut server) = TcpStream::connect(target).await else {

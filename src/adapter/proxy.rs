@@ -178,15 +178,21 @@ fn endpoint(url: &Url) -> Result<Endpoint, String> {
         .ok_or_else(|| format!("an endpoint without a port: {}", url.scheme()))?;
     Ok(Endpoint {
         scheme: url.scheme().to_owned(),
-        host: host.to_owned(),
+        // Unbracketed: an IPv6 literal must reach the socket as an address.
+        host: host.trim_matches(['[', ']']).to_owned(),
         port,
     })
 }
 
 impl Endpoint {
+    /// The host as written in a URL: an IPv6 literal in brackets.
+    fn authority_host(&self) -> String {
+        bracketed(&self.host)
+    }
+
     /// `scheme://host:port`, as [`Proxy::custom`] gets it.
     fn display(&self) -> String {
-        format!("{}://{}:{}", self.scheme, self.host, self.port)
+        format!("{}://{}:{}", self.scheme, self.authority_host(), self.port)
     }
 
     /// The URI hyper-util's matcher asks about: `ws` and `wss` as `http`
@@ -197,7 +203,7 @@ impl Endpoint {
             "wss" => "https",
             other => other,
         };
-        format!("{scheme}://{}:{}/", self.host, self.port)
+        format!("{scheme}://{}:{}/", self.authority_host(), self.port)
             .parse()
             .unwrap_or_else(|_| http::Uri::from_static("http://invalid/"))
     }
@@ -282,7 +288,9 @@ impl ProxyTarget {
         });
         Ok(Self {
             scheme,
-            host: host.to_owned(),
+            // Without the brackets of an IPv6 literal, which the URLs built
+            // from it add back.
+            host: host.trim_matches(['[', ']']).to_owned(),
             port: parsed.port().unwrap_or(scheme.default_port()),
             credentials,
         })
@@ -330,11 +338,7 @@ impl ProxyTarget {
     }
 
     fn host_for_url(&self) -> String {
-        if self.host.contains(':') {
-            format!("[{}]", self.host)
-        } else {
-            self.host.clone()
-        }
+        bracketed(&self.host)
     }
 
     /// The proxy's URI, without credentials, as hyper-util's connectors
@@ -354,8 +358,10 @@ impl ProxyTarget {
     pub(super) fn url(&self) -> Option<Url> {
         let mut url = Url::parse(&self.shown()).ok()?;
         if let Some((user, password)) = &self.credentials {
-            url.set_username(user).ok()?;
-            url.set_password(Some(password)).ok()?;
+            // The setters encode reserved characters but keep `%`, which
+            // reqwest decodes: a literal one must arrive as `%25`.
+            url.set_username(&user.replace('%', "%25")).ok()?;
+            url.set_password(Some(&password.replace('%', "%25"))).ok()?;
         }
         Some(url)
     }
@@ -377,6 +383,15 @@ impl fmt::Debug for ProxyTarget {
             .field("proxy", &self.shown())
             .field("credentials", &self.credentials.is_some())
             .finish()
+    }
+}
+
+/// `host` as written in a URL: an IPv6 literal in brackets.
+fn bracketed(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
     }
 }
 
@@ -492,7 +507,7 @@ pub(super) async fn dial(
     connector.set_nodelay(true);
     // The destination always carries its port: both connectors default
     // to 443.
-    let destination: http::Uri = format!("http://{}:{}", endpoint.host, endpoint.port)
+    let destination: http::Uri = format!("http://{}:{}", endpoint.authority_host(), endpoint.port)
         .parse()
         .map_err(|_| "an endpoint that does not parse".to_owned())?;
     match proxy.scheme {
@@ -587,9 +602,12 @@ mod tests {
     #[test]
     fn credentials_with_reserved_characters_survive_the_decision() {
         for (proxy, user) in [
-            ("http://us%40er:p%40ss%2Fw%3Ard@proxy.example:3128", "us@er"),
             (
-                "socks5h://us%3Aer:p%40ss%2Fw%3Ard@proxy.example:1080",
+                "http://us%40er:p%40ss%2Fw%3Ard%2540@proxy.example:3128",
+                "us@er",
+            ),
+            (
+                "socks5h://us%3Aer:p%40ss%2Fw%3Ard%2540@proxy.example:1080",
                 "us:er",
             ),
         ] {
@@ -603,11 +621,15 @@ mod tests {
 
             assert_eq!(
                 target.credentials,
-                Some((user.to_owned(), "p@ss/w:rd".to_owned())),
+                // `%2540` is a literal `%40`, which must not become `@`.
+                Some((user.to_owned(), "p@ss/w:rd%40".to_owned())),
                 "{proxy}"
             );
             assert_eq!(decoded(reqwest_url.username()), user);
-            assert_eq!(decoded(reqwest_url.password().unwrap_or("")), "p@ss/w:rd");
+            assert_eq!(
+                decoded(reqwest_url.password().unwrap_or("")),
+                "p@ss/w:rd%40"
+            );
         }
     }
 
@@ -634,6 +656,19 @@ mod tests {
             Ok(Some("http://proxy.example:3128".to_owned()))
         );
         assert_eq!(excluded, Ok(None));
+    }
+
+    /// IPv6 literals keep one pair of brackets in URLs and none at the
+    /// socket (Codex, #115).
+    #[test]
+    fn ipv6_hosts_are_written_once_bracketed() {
+        let target = ProxyTarget::new("http://[::1]:3128").expect("a proxy");
+        let endpoint = endpoint(&url("ws://[::1]:8000/connection/websocket")).expect("an endpoint");
+
+        assert_eq!(target.shown(), "http://[::1]:3128");
+        assert!(target.url().is_some());
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.display(), "ws://[::1]:8000");
     }
 
     /// Reading the operating system's settings works on every platform
