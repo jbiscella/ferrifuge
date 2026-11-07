@@ -395,19 +395,21 @@ impl Shared {
         debug!(gap = ?gap, "system sleep detected");
         // As the core shortens every running refresh timer (D3).
         core.refreshes.shorten_all(gap);
+        // While connected, the sleep may drop the connection: what the
+        // server did before the wake stands, a terminal close or disconnect
+        // push included, and an event taken is already the application's,
+        // its position moving before the sleep can withdraw it. The
+        // refreshes now due go first, also before the held messages taking
+        // an event releases, so that a connect or subscribe the input
+        // starts fetches a new token, and one it tears down makes the next
+        // attempt fetch one (D3). While connecting, the sleep changes only
+        // the refresh timers and goes first, so that a connect reply is not
+        // judged by a sleep it did not live through.
+        let connected = core.machine.state() == State::Connected;
         match input {
-            // Already the application's: its position moves before the
-            // sleep can withdraw it.
-            Input::EventTaken(_) => {
-                self.feed_before_sleep(core, input, gap);
-                self.fire_due_refreshes(core);
-            }
-            // What the server did before the wake stands, a terminal close
-            // or disconnect push included. The refreshes now due go first,
-            // so that a subscribe or connect the input starts fetches a new
-            // token; one the input tears down makes the next attempt fetch
-            // it (D3).
-            Input::Frame { .. } | Input::TransportClosed { .. } => {
+            Input::EventTaken(_) | Input::Frame { .. } | Input::TransportClosed { .. }
+                if connected =>
+            {
                 self.fire_due_refreshes(core);
                 self.feed_before_sleep(core, input, gap);
             }
@@ -2915,6 +2917,126 @@ mod tests {
                 action,
                 Action::ShortenSubscriptionTimer(_, SubscriptionTimer::Refresh, _)
             )),
+            "{:?}",
+            core.actions
+        );
+    }
+
+    // Codex, #120: the connect reply read first after a sleep the attempt
+    // lived through keeps its connection.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_connect_reply_read_after_a_sleep_while_connecting_keeps_the_connection() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        shared.handle(&mut core, Input::Connect);
+        let transport = core
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("an attempt");
+        shared.handle(&mut core, Input::TransportOpened(transport));
+        core.actions.clear();
+
+        slept(&mut core, Duration::from_secs(70));
+        shared.handle(
+            &mut core,
+            Input::Frame {
+                transport,
+                data: br#"{"id":1,"connect":{"client":"c","ping":25}}"#.to_vec(),
+            },
+        );
+
+        assert_eq!(core.machine.state(), State::Connected);
+        assert!(
+            !core
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::CloseTransport(_))),
+            "{:?}",
+            core.actions
+        );
+    }
+
+    // Codex, #120: taking an event releases the messages held behind it; a
+    // resubscribe push among them, after a sleep past the subscription
+    // token's refresh, resubscribes with a new token.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resubscribe_push_released_by_taking_an_event_after_a_sleep_fetches_a_new_token() {
+        use futures_util::FutureExt as _;
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":120}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .token("s0")
+            .get_token(|_| async { Ok("s1".to_owned()) })
+            .build()
+            .unwrap();
+        let mut events = subscription.events();
+        subscription.subscribe();
+        let frame = |data: &str| Input::Frame {
+            transport,
+            data: data.as_bytes().to_vec(),
+        };
+        {
+            let mut core = lock(&client.shared().core);
+            let shared = client.shared();
+            shared.handle(
+                &mut core,
+                frame(r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#),
+            );
+            // Held until the subscribe reply's events are taken.
+            shared.handle(
+                &mut core,
+                frame(
+                    r#"{"push":{"channel":"news","unsubscribe":{"code":2500,"reason":"resubscribe"}}}"#,
+                ),
+            );
+        }
+        events
+            .next()
+            .now_or_never()
+            .expect("an event")
+            .expect("a stream");
+        let mut core = lock(&client.shared().core);
+        core.actions.clear();
+        slept(&mut core, Duration::from_secs(70));
+        drop(core);
+
+        events
+            .next()
+            .now_or_never()
+            .expect("an event")
+            .expect("a stream");
+
+        let core = lock(&client.shared().core);
+        let sent: Vec<String> = core
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !sent.iter().any(|frame| frame.contains(r#""token":"s0""#)),
+            "{sent:?}"
+        );
+        assert!(
+            core.actions
+                .iter()
+                .rev()
+                .take_while(|action| !matches!(action, Action::CancelSubscriptionToken(_)))
+                .any(|action| matches!(action, Action::FetchSubscriptionToken { .. })),
             "{:?}",
             core.actions
         );
