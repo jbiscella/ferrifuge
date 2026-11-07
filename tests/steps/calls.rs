@@ -332,9 +332,12 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
         "connection closed" => codes::error::CONNECTION_CLOSED,
         _ => codes::error::SUBSCRIPTION_UNSUBSCRIBED,
     };
+    // The time tells a slow runner (a call made more than the timeout
+    // before the step that settles it) from a client failing to settle it.
     assert_eq!(
         (error.code, error.message.as_str()),
-        (code, message.as_str())
+        (code, message.as_str()),
+        "settled {after:?} after the call was made"
     );
     if !early.is_empty() {
         assert!(after < timeout, "failed after {after:?}");
@@ -394,6 +397,15 @@ async fn the_fake_server_has_received_the_rpc(world: &mut ClientWorld) {
     })
     .await;
     assert!(received.is_ok(), "no RPC command reached the fake server");
+    // The later steps need the call still pending: a runner so slow that
+    // the call timed out by now cannot run the scenario (seen on Windows).
+    if let Some(call) = world.calls.made.last() {
+        let elapsed = call.made_at.elapsed();
+        assert!(
+            elapsed < test_config().timeout,
+            "the RPC command reached the fake server {elapsed:?} after the call"
+        );
+    }
 }
 
 #[given(regex = r"^the connect proxy answers after (\d+) s with disconnect code (\d+)$")]
