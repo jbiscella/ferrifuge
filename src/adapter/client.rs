@@ -114,6 +114,20 @@ pub(super) struct Core {
     pub(super) armed: Armed,
 }
 
+impl Core {
+    /// `input`, unless it is the firing of a timer set again or cancelled
+    /// since the setting `set`, by any task (see [`Armed`]); a timer whose
+    /// firing is accepted no longer runs.
+    fn accepted(&mut self, input: Input, set: Option<u64>) -> Option<Input> {
+        if self.armed.superseded(&input, set) {
+            return None;
+        }
+        self.armed.fired(&input);
+        self.refreshes.fired(&input);
+        Some(input)
+    }
+}
+
 /// The wall-clock and monotonic times of the last input given the machine.
 #[derive(Debug, Default)]
 pub(super) struct Clock(Option<(SystemTime, std::time::Instant)>);
@@ -238,10 +252,6 @@ impl Refreshes {
             Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh) => {
                 self.0.remove(&Some(*id));
             }
-            Action::ShortenTimer(Timer::Refresh, by) => self.shorten(None, *by),
-            Action::ShortenSubscriptionTimer(id, SubscriptionTimer::Refresh, by) => {
-                self.shorten(Some(*id), *by);
-            }
             _ => {}
         }
     }
@@ -250,8 +260,10 @@ impl Refreshes {
         self.0.insert(key, tokio::time::Instant::now() + delay);
     }
 
-    fn shorten(&mut self, key: Option<SubscriptionId>, by: Duration) {
-        if let Some(deadline) = self.0.get_mut(&key) {
+    /// Every refresh comes due `by` earlier, as the core's shortening of
+    /// all of them on a sleep will make the driver's timers do.
+    fn shorten_all(&mut self, by: Duration) {
+        for deadline in self.0.values_mut() {
             *deadline = deadline
                 .checked_sub(by)
                 .unwrap_or_else(tokio::time::Instant::now);
@@ -376,28 +388,56 @@ impl Shared {
         let _entered = self.log.span.enter();
         // A sleep since the last input is the machine's first news of the
         // wake (Block 25, D1).
-        let gap = core.clock.tick();
-        let mut input = Some(input);
-        if let Some(gap) = gap {
-            debug!(gap = ?gap, "system sleep detected");
-            // An event taken is already the application's: its position
-            // moves before the sleep can withdraw it.
-            if let Some(taken) = input.take_if(|input| matches!(input, Input::EventTaken(_))) {
-                self.feed(core, taken);
+        let Some(gap) = core.clock.tick() else {
+            self.give(core, input, set);
+            return;
+        };
+        debug!(gap = ?gap, "system sleep detected");
+        // As the core shortens every running refresh timer (D3).
+        core.refreshes.shorten_all(gap);
+        match input {
+            // Already the application's: its position moves before the
+            // sleep can withdraw it.
+            Input::EventTaken(_) => {
+                self.feed(core, input);
+                self.feed(core, Input::Slept { gap });
+                self.fire_due_refreshes(core);
             }
-            self.feed(core, Input::Slept { gap });
+            // What the server did before the wake stands, a terminal close
+            // or disconnect push included. While connecting, the refreshes
+            // now due go first, so that the subscribes a connect reply
+            // starts fetch new tokens; while connected, after, so that no
+            // refresh the input then tears down is left half done.
+            Input::Frame { .. } | Input::TransportClosed { .. } => {
+                let connecting = core.machine.state() == State::Connecting;
+                if connecting {
+                    self.fire_due_refreshes(core);
+                }
+                self.feed(core, input);
+                self.feed(core, Input::Slept { gap });
+                if !connecting {
+                    self.fire_due_refreshes(core);
+                }
+            }
+            input => {
+                self.feed(core, Input::Slept { gap });
+                // A firing whose timer the answer to the sleep set again is
+                // stale; a refresh firing is given once.
+                let input = core.accepted(input, set);
+                self.fire_due_refreshes(core);
+                if let Some(input) = input {
+                    self.feed(core, input);
+                }
+            }
         }
-        // A firing whose timer was set again or cancelled since, by the
-        // answer to the sleep or by another task, is stale.
-        let input = input.filter(|input| !core.armed.superseded(input, set));
-        if let Some(input) = &input {
-            core.armed.fired(input);
-            core.refreshes.fired(input);
-        }
-        if gap.is_some() {
-            self.fire_due_refreshes(core);
-        }
-        if let Some(input) = input {
+        // A stream created or polled may be what revealed the sleep, with
+        // no notification of its own.
+        self.actions_queued.notify_one();
+    }
+
+    /// Gives the machine `input` unless it is a stale firing.
+    fn give(&self, core: &mut Core, input: Input, set: Option<u64>) {
+        if let Some(input) = core.accepted(input, set) {
             self.feed(core, input);
         }
     }
@@ -2595,9 +2635,10 @@ mod tests {
             .iter()
             .find(|record| record.contains("system sleep detected"))
             .unwrap_or_else(|| panic!("{records:?}"));
-        // The monotonic clock moves a little meanwhile.
+        // The monotonic clock may move a little meanwhile: 30s, 30.0…s or
+        // 29.9…s.
         assert!(
-            logged.contains(" gap=29.9") || logged.contains(" gap=30."),
+            logged.contains(" gap=29.9") || logged.contains(" gap=30"),
             "{logged}"
         );
     }
@@ -2742,6 +2783,51 @@ mod tests {
             sent.iter()
                 .any(|frame| frame.contains(r#""recover":true"#) && frame.contains(r#""offset":1"#)),
             "{sent:?}"
+        );
+    }
+
+    // Codex, #120: the server's terminal close, read first after a sleep
+    // longer than the no-ping window, still ends the client.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_terminal_close_read_after_a_long_sleep_disconnects() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (mut core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+
+        slept(&mut core, Duration::from_secs(70));
+        client.shared().handle(
+            &mut core,
+            Input::TransportClosed {
+                transport,
+                code: Some(3500),
+                reason: "banned".into(),
+            },
+        );
+
+        assert_eq!(core.machine.state(), State::Disconnected);
+    }
+
+    // Codex, #120: creating a stream may be what reveals the sleep, and it
+    // wakes the driver for the actions the sleep queued.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sleep_revealed_by_creating_a_stream_wakes_the_driver() {
+        use futures_util::FutureExt as _;
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+        slept(&mut core, Duration::from_secs(30));
+        drop(core);
+        let shared = client.shared();
+        let _ = shared.actions_queued.notified().now_or_never();
+
+        let _events = client.events();
+
+        assert!(
+            shared.actions_queued.notified().now_or_never().is_some(),
+            "the driver is not woken"
         );
     }
 
