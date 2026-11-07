@@ -230,7 +230,18 @@ impl Log {
     }
 
     fn subscription_event(&self, id: SubscriptionId, event: &SubscriptionEvent) {
-        let (span, channel) = self.subscription_of(id);
+        // Publications, joins and leaves show at TRACE only, as actions: no
+        // work for them here, logging off or on (D8).
+        if !matches!(
+            event,
+            SubscriptionEvent::Subscribing { .. }
+                | SubscriptionEvent::Subscribed(_)
+                | SubscriptionEvent::Unsubscribed { .. }
+                | SubscriptionEvent::Error(_)
+        ) {
+            return;
+        }
+        let span = self.span_of(id);
         match event {
             SubscriptionEvent::Subscribing { code, reason } => debug!(
                 parent: &span,
@@ -252,17 +263,18 @@ impl Log {
                 reason,
                 "subscription state changed"
             ),
-            SubscriptionEvent::Error(error) => self.error(error, Some((&span, channel.as_deref()))),
+            SubscriptionEvent::Error(error) => self.error(error, Some(id)),
             _ => {}
         }
     }
 
-    /// An error event, of the client or of the subscription whose span is
-    /// given. A delta that cannot be applied is a server anomaly.
-    fn error(&self, error: &ClientError, subscription: Option<(&Span, Option<&str>)>) {
-        let (span, channel) = subscription.unwrap_or((&self.span, None));
+    /// An error event, of the client or of `subscription`. A delta that
+    /// cannot be applied is a server anomaly.
+    fn error(&self, error: &ClientError, subscription: Option<SubscriptionId>) {
+        let span = &self.parent(subscription);
         let kind = format_args!("{:?}", error.kind);
         if error.kind == ErrorKind::Delta {
+            let channel = subscription.and_then(|id| self.subscription_of(id).1);
             warn!(
                 parent: span,
                 client = self.number,
