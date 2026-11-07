@@ -1781,6 +1781,13 @@ impl Driver {
                 self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
+                // The close queued its actions before setting the flag, under
+                // the core lock: performed now, its transport's close among
+                // them, even when it came after the queue was last emptied
+                // (Codex, #141).
+                while let Some(action) = self.shared.next_action() {
+                    self.perform(action);
+                }
                 // Every transport's close is awaited, so that `close()`
                 // resolves after it (Block 33, D1); the guard then ends the
                 // streams as the driver goes.
