@@ -27,7 +27,6 @@ use tokens::{
 use crate::backoff::{self, Backoff};
 use crate::codec::Codec;
 use crate::config::Protocol;
-use crate::json;
 use crate::token::Secret;
 use crate::wire::{
     Command, ConnectRequest, ConnectResult, Disconnect, Error, Method, Push, RefreshRequest,
@@ -1622,7 +1621,7 @@ impl Machine {
         // Over an emulated transport the commands are inside the request.
         let unwrapped;
         let frame = if self.emulation.is_some() {
-            let Some(inner) = json::emulation_frame(frame) else {
+            let Some(inner) = self.codec.emulation_frame(frame) else {
                 return;
             };
             unwrapped = inner;
@@ -1683,7 +1682,7 @@ impl Machine {
         let Some(transport) = self.transport else {
             return;
         };
-        for line in frame.split(|byte| *byte == b'\n') {
+        for line in self.codec.split_commands(frame) {
             let Some(&id) = self.codec.command_ids(line).first() else {
                 continue;
             };
@@ -1697,7 +1696,7 @@ impl Machine {
                 continue;
             }
             let (session, node) = self.emulation.clone().unwrap_or_default();
-            let request = json::emulation_request(&session, &node, line);
+            let request = self.codec.emulation_request(&session, &node, line);
             let size = request.len();
             let sent = FrameId(self.next_frame);
             self.next_frame += 1;
@@ -2175,7 +2174,7 @@ impl Machine {
     fn frame_of(&self, commands: &[Command]) -> Vec<u8> {
         let frame = self.codec.encode(commands);
         match &self.emulation {
-            Some((session, node)) => json::emulation_request(session, node, &frame),
+            Some((session, node)) => self.codec.emulation_request(session, node, &frame),
             None => frame,
         }
     }

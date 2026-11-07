@@ -40,6 +40,49 @@ pub(crate) fn command_ids(mut frame: &[u8]) -> Vec<u32> {
     ids
 }
 
+/// Body of a request to the emulation endpoint carrying `frame` for the
+/// emulated connection `session` on `node` (`client.proto`,
+/// `EmulationRequest`; centrifuge-js 63ed73e `encodeEmulationRequest`):
+/// the commands as raw bytes.
+pub(crate) fn emulation_request(session: &str, node: &str, frame: &[u8]) -> Vec<u8> {
+    pb::EmulationRequest {
+        node: node.to_owned(),
+        session: session.to_owned(),
+        data: frame.to_vec(),
+    }
+    .encode_to_vec()
+}
+
+/// The frame an [`emulation_request`] body carries; `None` for a body that
+/// is not one.
+pub(crate) fn emulation_frame(body: &[u8]) -> Option<Vec<u8>> {
+    pb::EmulationRequest::decode(body)
+        .ok()
+        .map(|request| request.data)
+}
+
+/// The commands of `frame`, one this client encoded, each with its length
+/// prefix, so each is itself a one-command frame; a truncated end is left
+/// out.
+pub(crate) fn split_commands(frame: &[u8]) -> Vec<&[u8]> {
+    let mut commands = Vec::new();
+    let mut rest = frame;
+    while !rest.is_empty() {
+        let mut cursor = rest;
+        let Ok(length) = prost::decode_length_delimiter(&mut cursor) else {
+            break;
+        };
+        let prefix = rest.len() - cursor.len();
+        let Some(end) = prefix.checked_add(length).filter(|end| *end <= rest.len()) else {
+            break;
+        };
+        let (command, after) = rest.split_at(end);
+        commands.push(command);
+        rest = after;
+    }
+    commands
+}
+
 #[cfg(test)]
 pub(crate) fn decode(frame: &[u8]) -> Result<Vec<Reply>, prost::DecodeError> {
     Ok(decode_sized(frame)?

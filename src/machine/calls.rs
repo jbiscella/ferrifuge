@@ -11,7 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{Action, CallId, CallTimer, FrameId, Machine, SubscriptionId};
-use crate::json;
 use crate::wire::{
     ChannelRequest, Command, Error, HistoryRequest, Method, PublishRequest, Reply, ReplyResult,
     RpcRequest,
@@ -318,7 +317,7 @@ impl Machine {
             method: method_of(request),
         }]);
         match &self.emulation {
-            Some((session, node)) => json::emulation_request(session, node, &frame).len(),
+            Some((session, node)) => self.codec.emulation_request(session, node, &frame).len(),
             None => frame.len(),
         }
     }
