@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–30 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–31 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -4258,3 +4258,171 @@ Feature: Waiting until ready
 ```
 
 **Exceptions introduced:** a subscription's `ready()` that is waiting fails with "disconnected" (code 3) when its client enters `disconnected`, as Block 13's subscription-level calls waiting for their subscription do. centrifuge-js 63ed73e rejects a subscription's `ready()` promises only on `unsubscribed` (`subscription.ts:1100`): its subscriptions move to, or stay in, `subscribing` (`centrifuge.ts:963-966`), so such a wait lasts until the next connection or the caller's timeout. centrifuge-rust `docs/spec.md:439` keeps waiting too.
+
+---
+
+## Block 31 — Statistics
+
+**Goal:** support staff and fleet telemetry read a client's connection and traffic counters, and an operator reads what delta compression saves on a subscription, without a round trip and without reading the event streams (parity items 8 and 38; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A for both).
+
+**Dependencies:** Blocks 1 (states), 5d (transport kind), 8 (attempts, fallback, emulated transports, HTTP 413), 9 (subscription registry), 12 (server-side subscriptions), 13 (calls), 14 (@P gates), 15 (delivered means taken, withdrawal, in-order handling), 18 (several commands per frame), 19 (delta), 28 (a closed client, the poisoned core lock), 29 (`max_message_bytes`), 30 (the adapter watching the state after each input).
+
+**Out of scope:**
+- a metrics facade (the analysis's design B for item 8): an application can feed one from the snapshot;
+- per-channel traffic counters beyond delta statistics;
+- delta statistics of server-side subscriptions, which have no handle and no delta (Blocks 12, 19);
+- resetting counters.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Snapshot.** `Client::statistics(&self) -> Statistics`, sync, `#[must_use]`, never a round trip (centrifuge-rust `docs/spec.md` §4.3, commit 88d6edf). `Statistics` is a `#[non_exhaustive]` struct with public fields, deriving `Debug`, `Clone`, `PartialEq` and `Eq` (not `Copy`, so that it can gain any field). It holds counters since the client was built. Fields:
+  - `state: State`, as `state()` reports it.
+  - `transport: Option<TransportKind>`: the transport while connected, `None` otherwise.
+  - `connected_since: Option<SystemTime>`: when the adapter saw the client become connected, `None` while it is not connected (D2).
+  - `connects: u64`: the times the client became `connected`, reconnects included. This counts one too when a disconnect push follows the connect reply in the same frame.
+  - `failed_attempts: u64`: attempts that ended without the client becoming connected.
+    - An attempt is a transport the client opens to connect (`Action::OpenTransport`), each fallback transport being one.
+    - It fails when its opening fails, when it closes or exceeds the size limit before the connect reply, on a handshake or connect timeout, on a connect error reply (temporary or terminal), on a disconnect push or close code before connecting, or on a token denied during it.
+    - An attempt ended by `disconnect()`, `reconnect()` or the client's closing (Block 28) is not counted.
+    - A failure before any transport is opened (a connect data or token callback failing) is not an attempt.
+    - Not every failure emits a transport `error` event (a connect error reply's is `ErrorKind::Connect`), so the counter follows attempts, not events. The name says what it counts, unlike centrifuge-rust's `reconnect_attempts`, which also counts the first connect's failures; async-nats 0.52.0 `Statistics` names its counter `connects` too.
+  - `bytes_in: u64`: bytes of the frames the core reads on the current transport (`Input::Frame` data), an undecodable frame included.
+  - `bytes_out: u64`: bytes of the frames the core hands over once they are written. These are `Action::Send` frames reported with `Input::FrameWritten` on the current transport, and an emulated transport's connect command (`OpenTransport.initial_frame`), counted when the transport opens.
+    - On emulated transports a frame is the emulation request body.
+    - Transport framing is not counted: websocket and HTTP headers, http_stream delimiters and length prefixes, sse fields.
+    - A frame the transport ends before it is reported written is not counted.
+    - A request refused with HTTP 413 is written, so it counts once; each command then sent again alone counts again (Block 8).
+  - `messages_in: u64`: replies and pushes decoded from those frames when read, pings included, and those later dropped included (messages after a disconnect push, messages of a transport that ended while they were held, Block 15).
+  - `messages_out: u64`: commands in the frames counted in `bytes_out`, pongs included, each command of a batch frame counted (Block 18).
+  - `publications_delivered: u64`: publications of client-side and server-side subscriptions once they count as taken under Block 15. That means taken from a stream, emitted while no stream is open, or left in a stream the application dropped. A withdrawn publication never counts.
+  - `subscriptions: usize`: the client-side registry's size. `server_subscriptions: usize`: the server-side registry's size (`Machine::server_subscriptions`, Block 12).
+- **D2 Where the counters live.**
+  - Every counter but `connected_since` lives in the core: `Machine::statistics(&self) -> Statistics`, deterministic and @E-testable. It reports `connected_since: None`, as the core has no clock; its owner sets that public field.
+  - The tokio adapter's `Client::statistics` reads the machine's snapshot under the core lock, also when the lock is poisoned (Block 28 D4). It sets `connected_since` from `SystemTime::now()` when it sees the state become `connected` after an input, where Block 30 D4 settles waiters, and clears it when it sees any other state.
+  - A closed client keeps its last counters (Block 28).
+  - Cost: plain `u64` additions on inputs and actions the core already handles. The only addition is that the core keeps each sent frame's size and command count until it is reported written, and drops the entries of a transport that ends. The Block 14 @P gates hold, "Memory stays flat across reconnects" among them.
+- **D3 Delta statistics.**
+  - `Subscription::delta_statistics(&self) -> DeltaStatistics`, a `#[non_exhaustive]` struct (`Debug`, `Clone`, `PartialEq`, `Eq`), and `Machine::delta_statistics(&self, SubscriptionId) -> Option<DeltaStatistics>`, `None` for an id not in the registry (centrifuge-js 63ed73e `subscription.ts:388-400`, `types.ts:818-831`).
+  - Fields:
+    - `publications: u64`;
+    - `full_payloads: u64`;
+    - `delta_payloads: u64`;
+    - `bytes_received: u64`: each payload as carried, a delta or a full payload, after the JSON protocol's string unwrapping, as centrifuge-js `src/json.ts:19-39` measures it; Protobuf payloads as they are;
+    - `bytes_decoded: u64`: each payload after the delta is applied.
+  - A publication counts when its payload is rebuilt while delta is negotiated (Block 19), recovered ones included, as centrifuge-js counts in `_handlePublication` (`subscription.ts:1110-1140`; its other sites, `:1225-1250` and `:2578-2587`, are map subscriptions', Block 45). This happens before delivery, since the counters measure the wire, so a publication withdrawn later still counts. A delta that fails to apply does not.
+  - Counted since the subscription was created, across resubscribes and delta errors.
+  - `compression_ratio(&self) -> f64`, `#[must_use]`: `1 - bytes_received / bytes_decoded`, 0 when nothing was decoded, negative when deltas carried more than they built (documented).
+  - A subscription without negotiated delta reports zeros.
+  - A removed subscription reports zeros: its handle has no registry entry, as its `state()` reports `unsubscribed` (Block 30). centrifuge-js keeps the counters on the object.
+- **D4 Version.** No bump: methods and types are additive. `Unreleased` entries under "Added": `Client::statistics`, `Machine::statistics`, `Statistics`; `Subscription::delta_statistics`, `Machine::delta_statistics`, `DeltaStatistics`.
+
+Value clause: As an operator of a fleet, I want each client's connection and traffic counters, and what delta compression saves per subscription, so that support tickets and telemetry show how a client behaves without extra logging.
+
+**Structural acceptance:**
+- @E unit tests on the core, one counter per assertion after scripted inputs:
+  - a failed attempt of each ending in D1;
+  - an attempt ended by `disconnect()` or `reconnect()`, not counted;
+  - a reconnect;
+  - a ping and its pong;
+  - a frame of an abandoned transport, not counted;
+  - an undecodable frame, counting bytes and no message;
+  - messages after a disconnect push in one frame, counted in;
+  - a frame whose transport ends before it is reported written, counted nowhere and its entry dropped;
+  - a batch frame of 3 commands, counting 3 out and its bytes once;
+  - an emulated transport's connect command, counted when it opens;
+  - an HTTP 413 refusal and the commands sent again alone;
+  - publications taken, withdrawn (not counted), emitted with no stream, left in a dropped stream, and server-side.
+- Delta unit tests:
+  - recovered publications counted;
+  - a failed delta not counted;
+  - JSON and Protobuf sizes;
+  - counters kept across a resubscribe and a delta error;
+  - a removed subscription reporting zeros;
+  - a negative ratio.
+- Adapter unit tests:
+  - `connected_since` is `None` before connect, between the times before and after `connected`, `None` after `disconnect()`, and a new time after a reconnect;
+  - a client whose runtime shut down, with the core lock poisoned too, keeps its counters.
+- The fake server counts the bytes and messages it sends (at its writer) and receives (at its reader).
+- The Block 14 @P gates and the chaos adapter runner pass. Each method has a doc example; `compression_ratio` carries an `#[expect(clippy::cast_precision_loss)]` with its reason.
+
+```gherkin
+Feature: Statistics
+
+  Scenario: A new client's statistics are zero
+    Given a new client
+    Then its statistics report state "disconnected", no transport, no connected-since time and every counter 0
+
+  @E
+  Scenario: The core counts attempts, connects and publications taken
+    Given a client core configured with websocket and http_stream endpoints
+    When connect is called and the websocket attempt fails
+    And the http_stream attempt connects
+    And the server pushes 2 publications on a subscribed channel, which the application takes
+    Then the core's statistics report 1 connect, 1 failed attempt and 2 publications delivered
+    And they report transport "http_stream" and no connected-since time
+
+  @E
+  Scenario: The core counts messages as read and as written
+    Given a client core connected over websocket, whose server expects pongs
+    When the core reads a frame holding a ping and a publication push
+    And it sends the pong, which the transport has not yet reported written
+    Then the core's statistics report 2 more messages in, the frame's bytes in, and nothing more out
+    And when the transport reports the pong written, they report 1 more message out and the pong's bytes out
+
+  @D
+  Scenario: Statistics count a session's traffic as the fake server sees it
+    Given a client subscribed to channel "news" on the fake server
+    When the fake server pushes 3 publications on channel "news"
+    And the subscription receives them
+    And the client publishes {"text":"hi"} to channel "news"
+    Then the client's statistics report 1 connect, 0 failed attempts, 3 publications delivered, 1 subscription and transport "websocket"
+    And they report as many bytes and messages in as the fake server sent, and as many bytes and commands out as it received
+
+  @D
+  Scenario: Statistics count failed attempts
+    Given the fake server answers the first 2 connect commands with a temporary error
+    And a client whose stream was taken before connect is called and is not read, configured with the fake server's endpoint
+    When connect is called
+    Then when the application reads the client's stream, it yields "connecting", "error", "error", "connected"
+    And the client's statistics report 1 connect and 2 failed attempts
+
+  @D
+  Scenario: Statistics count across reconnects
+    Given a client connected to the fake server
+    When the fake server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then the client's statistics report 2 connects and 0 failed attempts
+    And they report a connected-since time after the fake server's disconnect
+
+  @D
+  Scenario: Only publications taken count as delivered
+    Given a client subscribed to recoverable channel "news" on the fake server, whose subscription's stream has been read up to "subscribed"
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the application has taken only the publication at offset 1 from the subscription's stream
+    And the client holds the publications at offsets 2 and 3 not yet taken
+    When unsubscribe is called on the subscription
+    Then the subscription's stream yields "unsubscribed" and no publication
+    And the client's statistics report 1 publication delivered
+
+  @D
+  Scenario: Delta statistics count full and delta payloads
+    Given a client subscribed with the fossil delta option to channel "news" on the fake server, which turned delta on
+    When the fake server pushes 3 publications of 1 KiB that differ in a few bytes to "news"
+    And the subscription receives them
+    Then its delta statistics report 3 publications, 1 full payload and 2 delta payloads
+    And they report as bytes received the full payload's size plus the 2 deltas' sizes, and as bytes decoded the 3 payloads' sizes
+    And they report a compression ratio above 0.5
+
+  @D
+  Scenario Outline: Delta statistics stay zero unless delta is on
+    Given a client subscribed to channel "news" on the fake server <option>
+    When the fake server pushes 3 publications of 1 KiB that differ in a few bytes to "news"
+    And the subscription receives them
+    Then its delta statistics report every counter 0 and a compression ratio of 0
+
+    Examples:
+      | option                                                    |
+      | with the fossil delta option, which did not turn delta on |
+      | without the delta option                                  |
+```
+
+**Exceptions introduced:** none.
