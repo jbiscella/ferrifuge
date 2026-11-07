@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–27 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–28 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3955,3 +3955,61 @@ Feature: Protobuf over http_stream
 Block 8's outline "Protobuf with an HTTP transport is rejected" is replaced in place by the scenario "Protobuf with the sse transport is rejected" (amends Block 8).
 
 **Exceptions introduced:** 27a has no scenario, as Block 26: its observable changes concern malformed input only (D5) and are unit-tested in `src/adapter/http.rs`.
+
+---
+
+## Block 28 — Tokio runtime handle
+
+**Goal:** an application can build a client where no tokio runtime is current, such as a Tauri setup hook, a plugin's initialisation or synchronous start-up code, by giving the runtime the client runs on; building without one returns an error instead of panicking; and a client whose runtime shuts down fails its calls and ends its streams instead of leaving them pending (parity item 15 and finding F1; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A).
+
+**Dependencies:** Blocks 0 (tokio adapter), 1 (client states), 3 (client-side disconnect codes), 9 (the subscription registry), 13 (pending calls, code 3), 15 (one event per state change, streams ending), 16 (invariant I2, the chaos adapter runner), 21 (state changes logged), 26 (D3, the source check).
+
+**Out of scope:**
+- other executors: the adapter is tokio by design (Block 0); a spawner trait (the analysis's design B) is not adopted;
+- a blocking facade owning a runtime (centrifuge-rust `docs/spec.md`, "Blocking facade", phase 2): not in the plan;
+- the futures and streams the application awaits: they already need no runtime (tokio `sync` primitives and the outboxes' wakers; the call timers are the driver's), so any executor can await them; this block keeps that; the application's token, data and getState callbacks run on the client's runtime;
+- detecting at build a runtime without time or I/O: tokio offers no query (D4 covers the panic it causes);
+- `close()` (Block 33), the delivery modes' threads (Block 41), a `closed` state (Block 0).
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Option.** `ClientBuilder::runtime(tokio::runtime::Handle)`: the client's driver runs on that runtime. Without it, `build()` takes `Handle::try_current()`; with neither, `build()` and `Client::new` return an `ErrorKind::Configuration` error saying that no tokio runtime is current and naming `ClientBuilder::runtime`, and start nothing (centrifuge-rust `docs/spec.md` §4.1 line 236 and `docs/api.md` line 71, commit 88d6edf). A given handle wins over the current runtime. The client keeps the handle, and every spawn of the adapter goes through it (`Handle::spawn`), the transports' closing included (`Transport::close`), so that none depends on the context it runs in (analysis item 15, design A); the dependencies' own spawns (hyper-util's `TokioExecutor`, DNS lookups in `spawn_blocking`) happen while the driver polls them, so on its runtime. The runtime needs time and I/O enabled (`enable_all`), as today; the option's documentation says so. The `# Panics` sections of `build()` and `Client::new` go, and the README's "`Client::new` must be called inside a tokio runtime" becomes the option, with a Tauri setup hook (`tauri::async_runtime::handle()`) as its example.
+- **D2 Runtime not driven.** A current-thread runtime runs the client only while a thread is inside its `Runtime::block_on` (tokio `runtime` module, "Driving the runtime": `Handle::block_on` does not drive it); meanwhile calls and streams wait and no timeout runs, the timers being the driver's. Documented on the option, as tokio documents `Handle::spawn`.
+- **D3 Runtime shut down.** A `Handle` does not keep its runtime alive (tokio `Runtime`, "Sharing"), and a runtime shutting down drops its tasks without running them to the end (`Runtime`, "Shutdown"); today the driver's cleanup then never runs: calls wait forever and streams never end, even after the client is dropped. The driver gets a drop guard, as hyper's dispatch callback fails its request when the runtime drops the dispatch task (hyper 1.12.0 `src/client/dispatch.rs:242-271`, "runtime dropped the dispatch task"). When the driver's task is dropped before the client was closed, the client ends as when it is dropped, with its own code: it emits `disconnected` with code 4 "runtime shut down" (`codes::disconnected::RUNTIME_SHUT_DOWN`, through a new `Input::DriverDropped { panicked: false }`; no event when it was `disconnected` already, as no state changes), the SDK spec letting client implementations use codes below 3000 for client-side reasons ("Disconnect codes"). Pending calls fail with "disconnected" (code 3); every stream, the subscriptions' included, yields the events already queued and ends; later calls fail at once with code 3, `connect()` does nothing and `new_subscription` returns `SubscriptionError::ClientClosed`. The guard checks and sets the closed flag under the core lock, as `Shared::shut_down` does, so a client dropped while its runtime shuts down ends once, with the code of whichever came first; after a normal stop it runs again with no effect. It spawns nothing and does no I/O: the transport is dropped, and the server sees the connection close without a close frame.
+- **D4 Driver panic.** A driver task dropped while panicking (`std::thread::panicking()`: a bug, which invariant I2 forbids, or a runtime without time or I/O) is not a runtime shutdown (hyper 1.12.0 reports "user code panicked" then, same file): the client ends as in D3 with code 2 "exception during message handling" (`codes::disconnected::BAD_PROTOCOL`; centrifuge-js 63ed73e `codes.ts` `badProtocol`, `centrifuge.ts:1816-1822`; Block 41's "exception in event handler" uses the same code), through `Input::DriverDropped { panicked: true }`. When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed and no event is emitted, while the calls and streams still end.
+- **D5 Runtime already shut down.** Spawning on a runtime that has shut down drops the task at once (tokio 1.54.1 `src/runtime/task/list.rs:140-143`), so the guard closes the client before `build()` returns; `build()` then returns an `ErrorKind::Configuration` error saying that the tokio runtime has shut down, instead of a client that can never connect.
+- **D6 Version.** No bump: `ClientBuilder::runtime`, the two codes and `Input::DriverDropped` (`Input` is `#[non_exhaustive]`, Block 17) are additive, and a build that panicked now returns an error (Block 27 D5). `Unreleased` entries: "Added" `ClientBuilder::runtime`; disconnected codes 2 "exception during message handling" and 4 "runtime shut down" (`codes::disconnected::BAD_PROTOCOL`, `RUNTIME_SHUT_DOWN`); `Input::DriverDropped`. "Fixed" building outside a runtime returning an error instead of panicking; a client whose runtime shut down, or whose driver panicked, failing its calls and ending its streams instead of leaving them pending. "Changed" `SubscriptionError::ClientClosed` reads "the client is closed" (dropped, or its runtime shut down), and the `events()` documentation says that the streams also end then.
+
+Value clause: As an app developer whose start-up code runs outside a tokio runtime, I want to give the client the runtime it runs on, so that building it never panics and its calls and streams end when that runtime does.
+
+**Structural acceptance:** unit tests in the adapter, on current-thread runtimes that are not driven unless stated: `Client::new` on a plain thread returns D1's error (no panic, no `catch_unwind`, as `client_new_returns_an_endpoint_error_instead_of_panicking`); with a handle given inside another runtime, the driver is a task of the given one (`RuntimeMetrics::num_alive_tasks`, stable since tokio 1.39, goes from 0 to 1 there and is unchanged on the current one); dropping the given runtime while the client is `connecting` emits `disconnected` code 4 and fails a call waiting for the connection with code 3; dropping it while `disconnected` emits nothing and ends the stream; dropping the client and then its runtime ends the streams after `disconnected` code 0, and a subscription's call fails with code 3; after a shutdown a call fails at once, `connect()` emits nothing and `state()` is `disconnected`; a runtime built without `enable_all`, driven, makes `connect()` end the client with code 2; the guard dropped during a panic with the core's lock poisoned emits nothing and still ends the calls and streams; building with the handle of a runtime already shut down returns D5's error. A source check, like Block 26 D3: no `tokio::spawn` or `tokio::task::spawn` in non-test code under `src/adapter/`. The steps build "outside any tokio runtime" on a `std::thread`, never in `spawn_blocking` (whose threads are inside the runtime), and shut a runtime down from an async step with `shutdown_background()`. The chaos adapter runner and the Block 14 @P gates pass.
+
+```gherkin
+Feature: Tokio runtime handle
+
+  Scenario: Building outside a runtime without a handle fails
+    Given client options without a runtime handle
+    When the client is built outside any tokio runtime
+    Then building fails with a configuration error naming the runtime option
+
+  @A
+  Scenario: A client built outside a runtime with a handle connects
+    Given a separate multi-thread tokio runtime
+    And a client built outside any tokio runtime with that runtime's handle
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected"
+
+  @D
+  Scenario: The client ends when its runtime shuts down
+    Given a separate multi-thread tokio runtime
+    And a client built with that runtime's handle and connected to the fake server that never replies to commands
+    And the client calls RPC "slow"
+    And the fake server has received the RPC command
+    When that runtime shuts down
+    Then the call fails with a "disconnected" error before the configured timeout
+    And the client emits "disconnected" with code 4 and reason "runtime shut down"
+    And the client's stream ends
+    And creating a subscription fails because the client is closed
+```
+
+**Exceptions introduced:** none (the codes 2 and 4 are recorded in `src/codes.rs`; Block 34 tabulates them).
