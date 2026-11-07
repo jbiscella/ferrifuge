@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–31 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–32 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -75,6 +75,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 6, out of scope | custom root certificates | owner, 2026-11-06 (item 2) | 22 |
 | Block 14, out of scope | HTTP proxy (CONNECT) support | owner, 2026-11-06 (item 1) | 23 |
 | Block 14, out of scope | sleep/resume behaviour | owner, 2026-11-06 (item 4) | 25 |
+| Block 17, out of scope | replacing the HTTP headers of a built client (no `set_http_headers`) | owner, 2026-11-06 (item 14) | 32 |
 
 ### Test layers
 
@@ -2444,7 +2445,7 @@ Feature: Validation harness
 **Dependencies:** Blocks 1, 5 (token component), 8 (transports), 9 (data callbacks, `DataError`), 10 (token before data), 15 (event delivery).
 
 **Out of scope:**
-- replacing the HTTP headers of a built client (no `set_http_headers`): neither the spec nor centrifuge-js has it;
+- replacing the HTTP headers of a built client (no `set_http_headers`): neither the spec nor centrifuge-js has it (reversed by the owner decision of 2026-11-06: Block 32);
 - changing the current connection: every option and setter here applies from the next connection attempt and sends no command;
 - a timeout on the `get_data` callback (none in centrifuge-js, none in Block 9);
 - the other `ConnectRequest` and `ConnectResult` fields of the vendored `client.proto` (`flag`, `profile`, `dict`, `time`);
@@ -4423,6 +4424,123 @@ Feature: Statistics
       | option                                                    |
       | with the fossil delta option, which did not turn delta on |
       | without the delta option                                  |
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 32 — Runtime HTTP headers and subscription data
+
+**Goal:** an app behind a gateway that checks an expiring real header on each request replaces it without rebuilding the client and keeps being admitted, and an app changes what a subscription's subscribe requests carry without recreating the subscription (parity items 14 and 27; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A for both).
+
+**Dependencies:** Blocks 8 (attempts, emulated transports, emulation requests), 9 (subscription `data` and `get_data`, resubscribes), 14 (@P gates), 17 (`http_headers`, its validation, `set_data`, `set_emulated_headers`, "from the next attempt"), 20 (changelog), 21 (headers never logged), 23 (`Proxy-Authorization` refused, `set_proxy` from the next attempt), 28 (a closed client ignores setters), 31 (latest format).
+
+**Out of scope:**
+- an async header callback before each attempt or request (the analysis's design B for item 14);
+- adding to the headers instead of replacing them;
+- reopening the current websocket or stream request, or resending a subscribe, to apply a new value: an app calls `reconnect()`, or `unsubscribe()` then `subscribe()`;
+- what an emulation request answered 401 or 403 does (Block 8 behaviour, unchanged);
+- clearing a subscription's data back to none (`set_data` sets bytes, as `Client::set_data` does).
+
+This block reverses Block 17's exclusion of replacing the HTTP headers of a built client: Block 0's "Reversed exclusions" gains its row, and Block 17's out-of-scope line says so.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 `Client::set_http_headers`.** `pub fn set_http_headers<I, K, V>(&self, headers: I) -> Result<(), ClientError>`, taking what `ClientBuilder::http_headers` takes, replaces the whole set of real HTTP headers (Block 17): a header missing from the new set is no longer sent, and a name given twice keeps its later value. The same rules as `build()` validate it (Block 17; Block 23 D7). A name or value that is not valid HTTP, or a header the transport sets, `Proxy-Authorization` included, is an `ErrorKind::Configuration` error naming the header, never its value. The set is then left as it was, with none of the call's headers applied. It sends nothing and opens nothing. Adapter only, as Block 17 keeps real headers out of the core: the set moves from the driver into the state the client handle and the driver share. A closed client (Block 28) still reports an invalid set and ignores a valid one, as it ignores the other setters.
+- **D2 What the new set applies to.** Each HTTP request the client starts after the call returns carries the new set. That means the websocket upgrade and the stream request of every later attempt, and each emulation request of the open http_stream or sse transport. The open connection is kept: its upgrade or stream request is not sent again, and a request already started keeps the headers it started with. Reason:
+  - HTTP clients set headers per request (reqwest `RequestBuilder::headers`, hyper `Request`), and per-request credentials take the current value on each request over an existing connection (tonic interceptors, aws-sdk-rust's per-request signing); connection settings apply from the next connection (`set_proxy`, Block 23).
+  - A gateway checks each emulation request, which is why Block 17 sends them the headers. Applied only from the next attempt, an expired header would keep reaching it until the client reconnects.
+  - The official SDK applies the set from the next connect attempt (centrifuge-rust `docs/spec.md` §4.3, §5.1, commit 88d6edf). Over websocket the result is the same, and on the emulated transports this rule goes further.
+- **D3 `Subscription::set_data`.** `pub fn set_data(&self, data: impl Into<Vec<u8>>)` replaces the subscription's `data` (Block 9) in every subscribe command built after the call: the next `subscribe()` and every resubscribe.
+  - The data is raw JSON with JSON and any bytes with Protobuf, unchecked, as `SubscriptionBuilder::data` is.
+  - It sends nothing now, and a subscribe command already sent keeps its data.
+  - A `get_data` callback still replaces it on every attempt (centrifuge-js 63ed73e `subscription.ts:382-386`, `_getDataAndSubscribe`). Unlike `SubscriptionBuilder::data` and `SubscriptionOptions::data`, where the last option set decides, `set_data` never turns the callback off.
+  - Sans-IO: a new `Input::SetSubscriptionData(SubscriptionId, Vec<u8>)`, additive (`Input` is `#[non_exhaustive]`), as `Input::SetData` is for the client (Block 17). An id not in the registry (a removed subscription) is ignored, and so is the input on a closed client (Block 28).
+  - It returns nothing, as `Client::set_data` does. Ferrifuge never validates data (Block 9), while the official SDK's `set_data` returns a `Result` because it checks JSON (centrifuge-rust `docs/api.md`).
+- **D4 Logging and Debug.** Neither setter logs, and no value reaches a record (Block 21, D5). The `Debug` of the shared header set shows names only, as `ClientBuilder`'s does, since `Batch` derives `Debug` over the shared state. `Input::SetSubscriptionData`'s `Debug` shows the id and the data as its length, as `Input::SetData`'s does.
+- **D5 Version.** No bump: additive. `Unreleased` entries under "Added": `Client::set_http_headers`, also applied to the emulation requests of the open transport; `Subscription::set_data`; `Input::SetSubscriptionData`.
+
+Value clause: As an app developer behind a gateway that checks an expiring header on each request, or whose subscriptions carry app data that changes, I want to replace the headers and a subscription's data on a running client, so that the gateway keeps admitting the client and later subscribes carry the new data, without rebuilding the client or recreating the subscription.
+
+**Structural acceptance:**
+- Adapter unit tests:
+  - a refused header (a transport header, `Proxy-Authorization`, an invalid name, an invalid value), alone or with valid ones in one call, leaves the set as it was, and the error names the header, not the value;
+  - a header missing from the new set is not sent, and a name given twice keeps the later value;
+  - the next attempt's upgrade request carries the new set;
+  - the `Debug` of `Client` and of `Batch`, for a client whose set holds "Authorization: h-secret", contains no "h-secret".
+- Core unit tests:
+  - `Input::SetSubscriptionData` while subscribed adds no action;
+  - the subscribe after `unsubscribe()` then `subscribe()`, and the resubscribe after a reconnect, both carry the new data;
+  - with a data callback, the fetch still happens and its result is sent;
+  - an id not in the registry is ignored;
+  - its `Debug` shows the id and the length.
+- Documentation:
+  - `ClientBuilder::http_headers` names `Proxy-Authorization` among the refused headers;
+  - `set_http_headers` says what D2 applies to;
+  - the README's setter list names both setters.
+- The Block 14 @P gates pass: reading the set costs one lock per request.
+- New steps:
+  - "a client with HTTP header ..., configured with only the server's ... endpoint, connected" waits for `connected` and records the client id.
+  - "set_http_headers is called with ..." keeps its result for the next Then step; the success scenarios fail at their Then step when it fails.
+  - "... right after the HTTP proxy relayed an emulation request" calls the setter just after a pong is relayed, so no request with the old set is in flight (the server pings every 2 s).
+
+```gherkin
+Feature: Runtime HTTP headers and subscription data
+
+  @B
+  Scenario Outline: set_http_headers applies from the next connection attempt
+    Given a connect proxy recording requests
+    And a server with http_stream and sse enabled
+    And a client with HTTP header "X-Device-Real: r1", configured with only the server's <transport> endpoint, connected
+    When set_http_headers is called with "X-Device-Real: r2"
+    And the server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then the connect proxy received header "X-Device-Real: r1" then "X-Device-Real: r2"
+
+    Examples:
+      | transport   |
+      | websocket   |
+      | http_stream |
+      | sse         |
+
+  @B
+  Scenario Outline: set_http_headers applies to the emulation requests of the open transport
+    Given a client with HTTP header "X-Device-Real: r1" connected over transport "<transport>" through the HTTP proxy
+    When set_http_headers is called with "X-Device-Real: r2" right after the HTTP proxy relayed an emulation request
+    And the HTTP proxy relays another emulation request
+    Then the HTTP proxy relayed one stream request, carrying header "X-Device-Real: r1"
+    And every emulation request it relayed after the call carried header "X-Device-Real: r2"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  Scenario Outline: set_http_headers refuses a header the transport sets
+    Given a new client with HTTP header "X-Device-Real: r1"
+    When set_http_headers is called with "<header>"
+    Then it fails with a configuration error naming "<name>" and not "<value>"
+
+    Examples:
+      | header                        | name                | value    |
+      | Sec-WebSocket-Key: k1         | Sec-WebSocket-Key   | k1       |
+      | Proxy-Authorization: p-secret | Proxy-Authorization | p-secret |
+
+  @B
+  Scenario: Subscription set_data applies from the next resubscribe
+    Given a subscribe proxy recording requests
+    And a client subscribed to channel "news" with subscription data {"room":1}
+    When set_data is called on the subscription with {"room":2}
+    And the server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the subscribe proxy recorded data {"room":1} then {"room":2}
+
+  @E
+  Scenario: A subscription data callback takes precedence over set_data
+    Given a subscription whose data callback returns {"n":1}
+    When set_data is called on the subscription with {"n":2}
+    And the subscription is subscribed on a connected client
+    Then the subscribe command carries data {"n":1}
 ```
 
 **Exceptions introduced:** none.
