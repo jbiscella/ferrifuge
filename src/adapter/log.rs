@@ -95,6 +95,11 @@ impl Log {
     pub(super) fn input(&self, input: &Input) {
         trace!(input = ?input, "input");
         let (fetch, outcome) = match input {
+            // Forgotten by the machine without a `CallSettled`.
+            Input::CallAbandoned(call) => {
+                lock(&self.state).calls.remove(call);
+                return;
+            }
             Input::TokenFetched { fetch, result }
             | Input::SubscriptionTokenFetched { fetch, result } => (fetch, token_outcome(result)),
             Input::ConnectDataFetched { fetch, result }
@@ -272,14 +277,13 @@ impl Log {
     /// cannot be applied is a server anomaly.
     fn error(&self, error: &ClientError, subscription: Option<SubscriptionId>) {
         let span = &self.parent(subscription);
-        let kind = format_args!("{:?}", error.kind);
         if error.kind == ErrorKind::Delta {
             let channel = subscription.and_then(|id| self.subscription_of(id).1);
             warn!(
                 parent: span,
                 client = self.number,
                 channel,
-                kind = %kind,
+                kind = ?error.kind,
                 code = error.code,
                 reason = %error.message,
                 "a delta from the server could not be applied"
@@ -287,7 +291,7 @@ impl Log {
         } else {
             debug!(
                 parent: span,
-                kind = %kind,
+                kind = ?error.kind,
                 code = error.code,
                 reason = %error.message,
                 "error"
@@ -333,7 +337,24 @@ pub(super) fn endpoint(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint;
+    use super::{Log, endpoint};
+    use crate::machine::{Input, Machine};
+    use crate::{CallRequest, Config};
+
+    /// A call the application drops is forgotten by the machine without a
+    /// `CallSettled`: its kind must not stay behind (Codex, #109).
+    #[test]
+    fn an_abandoned_call_leaves_nothing_behind() {
+        let log = Log::new(["ws://localhost:8000/connection/websocket"]);
+        let mut machine = Machine::new(Config::default());
+        let call = machine.add_call(CallRequest::Rpc {
+            method: "m".to_owned(),
+            data: Vec::new(),
+        });
+        log.call(call, "rpc");
+        log.input(&Input::CallAbandoned(call));
+        assert!(super::lock(&log.state).calls.is_empty());
+    }
 
     #[test]
     fn an_endpoint_is_logged_without_credentials_query_or_fragment() {
