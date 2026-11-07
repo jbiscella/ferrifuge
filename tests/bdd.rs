@@ -348,6 +348,12 @@ const IMPLEMENTED: &[&str] = &[
     // Block 21: logging.
     "The core reports a frame that is not client protocol data",
     "The core reports a reply without its command's result",
+    "State changes are logged with their codes and reasons",
+    "Subscription records are in the subscription's span",
+    "A frame that is not client protocol data is logged as a warning",
+    "Endpoints are logged without credentials, query or fragment",
+    "No secret reaches a record",
+    "The records of two clients are told apart",
 ];
 
 /// Server configuration of @A scenarios.
@@ -478,6 +484,8 @@ fn main() {
     }
     trust_test_ca();
     assert_implemented_scenarios_exist();
+    // Before any client: a client built earlier would have no span.
+    support::logs::install();
     start_watchdog();
     let runner = thread::Builder::new()
         .name("scenarios".to_owned())

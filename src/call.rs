@@ -51,6 +51,20 @@ pub enum CallRequest {
     },
 }
 
+impl CallRequest {
+    /// The name `client.proto` gives its request.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Rpc { .. } => "rpc",
+            Self::Publish { .. } => "publish",
+            Self::History { .. } => "history",
+            Self::Presence { .. } => "presence",
+            Self::PresenceStats { .. } => "presence_stats",
+            Self::Send { .. } => "send",
+        }
+    }
+}
+
 impl std::fmt::Debug for CallRequest {
     // Application data is shown by its length only.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

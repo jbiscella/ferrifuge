@@ -41,6 +41,7 @@ tokio = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:reqwest",
+    "dep:tracing",
 ]
 # TLS crypto provider of the tokio adapter, chosen at build time (Block 6).
 # A build without ring disables default features. When several are enabled
@@ -67,6 +68,9 @@ rustls-native-certs = { version = "0.8", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 tokio = { version = "1.54.0", features = ["rt", "sync", "time", "macros"], optional = true }
+# Logging of the tokio adapter (Block 21): the core logs nothing. `log`
+# makes the records reach a `log` logger while no tracing subscriber is set.
+tracing = { version = "0.1.44", default-features = false, features = ["std", "log"], optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
 
 [build-dependencies]
@@ -95,6 +99,10 @@ sha2 = "0.11.1"
 testcontainers = { version = "0.28", features = ["http_wait"] }
 tokio = { version = "1.54.0", features = ["macros", "rt-multi-thread", "time", "process", "io-util"] }
 bolero = "0.13.7"
+# The log capture of the Block 21 scenarios and of tests/log_facade.rs.
+log = { version = "0.4.35", features = ["std"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
 
 [[test]]
 name = "centrifugo_smoke"

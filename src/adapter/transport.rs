@@ -176,8 +176,15 @@ impl WebSocket {
     /// was lost.
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Option<Inbound>> {
         loop {
-            let Some(Ok(message)) = ready!(self.stream.poll_next_unpin(cx)) else {
-                return Poll::Ready(None);
+            let message = match ready!(self.stream.poll_next_unpin(cx)) {
+                Some(Ok(message)) => message,
+                Some(Err(Error::Capacity(_))) => {
+                    return Poll::Ready(Some(Inbound::Closed {
+                        code: None,
+                        reason: TOO_LARGE.to_owned(),
+                    }));
+                }
+                _ => return Poll::Ready(None),
             };
             match message {
                 Message::Text(text) => {
@@ -298,6 +305,10 @@ fn websocket_config() -> WebSocketConfig {
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE))
 }
+
+/// The reason of [`Inbound::Closed`] when the server sent a message larger
+/// than the size limit, on any transport (Block 21: a server anomaly).
+pub(super) const TOO_LARGE: &str = "message larger than the size limit";
 
 /// Largest message, and frame, accepted from the server.
 const MAX_MESSAGE: usize = crate::config::MAX_MESSAGE_BYTES;
