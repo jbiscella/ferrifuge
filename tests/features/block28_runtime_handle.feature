@@ -20,7 +20,7 @@ Feature: Tokio runtime handle
     And the client calls RPC "slow"
     And the fake server has received the RPC command
     When that runtime shuts down
-    Then the call fails with a "disconnected" error before the configured timeout
+    Then the call fails with a "client closed" error before the configured timeout
     And the client emits "disconnected" with code 4 and reason "runtime shut down"
     And the client's stream ends
     And creating a subscription fails because the client is closed

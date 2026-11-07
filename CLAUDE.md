@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–32 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–33 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -25,7 +25,7 @@ Markers used below:
 | Wire contract | `client.proto` of centrifugal/protocol | Source of truth for frames |
 | Serialization | JSON and Protobuf | Both supported by centrifuge-js |
 | Transports | websocket, http_stream, sse | Fallback in this order |
-| `closed` client state | Not implemented | Spec marks it optional |
+| `closed` client state | Not implemented; a closed client reports `disconnected`, and `Client::is_closed()` tells it apart (Block 33) | Spec marks it optional |
 | Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) | Owner's choice |
 | Scenario execution | cucumber-rs; `.feature` files under `tests/features/` are verbatim copies of the Gherkin in this file | Scenario text is the test; drift is checked mechanically |
 | Real server for @A/@B | testcontainers-rs, image `centrifugo/centrifugo:v6.10.1` | `cargo test` needs only Docker |
@@ -3975,14 +3975,14 @@ Block 8's outline "Protobuf with an HTTP transport is rejected" is replaced in p
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Option.** `ClientBuilder::runtime(tokio::runtime::Handle)`: the client's driver runs on that runtime. Without it, `build()` takes `Handle::try_current()`; with neither, `build()` and `Client::new` return an `ErrorKind::Configuration` error saying that no tokio runtime is current and naming `ClientBuilder::runtime`, and start nothing (centrifuge-rust `docs/spec.md` §4.1 line 236 and `docs/api.md` line 71, commit 88d6edf). A given handle wins over the current runtime. The client keeps the handle, and every spawn of the adapter goes through it (`Handle::spawn`), the transports' closing included (`Transport::close`), so that none depends on the context it runs in (analysis item 15, design A); the dependencies' own spawns (hyper-util's `TokioExecutor`, DNS lookups in `spawn_blocking`) happen while the driver polls them, so on its runtime. The runtime needs time and I/O enabled (`enable_all`), as today; the option's documentation says so. The `# Panics` sections of `build()` and `Client::new` go, and the README's "`Client::new` must be called inside a tokio runtime" becomes the option, with a Tauri setup hook (`tauri::async_runtime::handle()`) as its example.
 - **D2 Runtime not driven.** A current-thread runtime runs the client only while a thread is inside its `Runtime::block_on` (tokio `runtime` module, "Driving the runtime": `Handle::block_on` does not drive it); meanwhile calls and streams wait and no timeout runs, the timers being the driver's. Documented on the option, as tokio documents `Handle::spawn`.
-- **D3 Runtime shut down.** A `Handle` does not keep its runtime alive (tokio `Runtime`, "Sharing"), and a runtime shutting down drops its tasks without running them to the end (`Runtime`, "Shutdown"); today the driver's cleanup then never runs: calls wait forever and streams never end, even after the client is dropped. The driver gets a drop guard, as hyper's dispatch callback fails its request when the runtime drops the dispatch task (hyper 1.12.0 `src/client/dispatch.rs:242-271`, "runtime dropped the dispatch task"). When the driver's task is dropped before the client was closed, the client ends as when it is dropped, with its own code: it emits `disconnected` with code 4 "runtime shut down" (`codes::disconnected::RUNTIME_SHUT_DOWN`, through a new `Input::DriverDropped { panicked: false }`; no event when it was `disconnected` already, as no state changes), the SDK spec letting client implementations use codes below 3000 for client-side reasons ("Disconnect codes"). Pending calls fail with "disconnected" (code 3); every stream, the subscriptions' included, yields the events already queued and ends; later calls fail at once with code 3, `connect()` does nothing and `new_subscription` returns `SubscriptionError::ClientClosed`. The guard checks and sets the closed flag under the core lock, as `Shared::shut_down` does, so a client dropped while its runtime shuts down ends once, with the code of whichever came first; after a normal stop it runs again with no effect. It spawns nothing and does no I/O: the transport is dropped, and the server sees the connection close without a close frame.
+- **D3 Runtime shut down.** A `Handle` does not keep its runtime alive (tokio `Runtime`, "Sharing"), and a runtime shutting down drops its tasks without running them to the end (`Runtime`, "Shutdown"); today the driver's cleanup then never runs: calls wait forever and streams never end, even after the client is dropped. The driver gets a drop guard, as hyper's dispatch callback fails its request when the runtime drops the dispatch task (hyper 1.12.0 `src/client/dispatch.rs:242-271`, "runtime dropped the dispatch task"). When the driver's task is dropped before the client was closed, the client ends as when it is dropped, with its own code: it emits `disconnected` with code 4 "runtime shut down" (`codes::disconnected::RUNTIME_SHUT_DOWN`, through a new `Input::DriverDropped { panicked: false }`; no event when it was `disconnected` already, as no state changes), the SDK spec letting client implementations use codes below 3000 for client-side reasons ("Disconnect codes"). Every subscription, client-side and server-side, first emits `unsubscribed` with code 2 "client closed", and pending calls fail with "client closed" (code 4), as on `close()` (Block 33, D4); every stream, the subscriptions' included, yields the events already queued and ends; later calls fail at once with code 4, `connect()` does nothing and `new_subscription` returns `SubscriptionError::ClientClosed`. The guard checks and sets the closed flag under the core lock, as `Shared::shut_down` does, so a client dropped while its runtime shuts down ends once, with the code of whichever came first; after a normal stop it runs again with no effect. It spawns nothing and does no I/O: the transport is dropped, and the server sees the connection close without a close frame.
 - **D4 Driver panic.** A driver task dropped while panicking (`std::thread::panicking()`: a bug, which invariant I2 forbids, or a runtime without time or I/O) is not a runtime shutdown (hyper 1.12.0 reports "user code panicked" then, same file): the client ends as in D3 with code 2 "exception during message handling" (`codes::disconnected::BAD_PROTOCOL`; centrifuge-js 63ed73e `codes.ts` `badProtocol`, `centrifuge.ts:1816-1822`; Block 41's "exception in event handler" uses the same code), through `Input::DriverDropped { panicked: true }`. When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed and no event is emitted, while the calls and streams still end.
 - **D5 Runtime already shut down.** Spawning on a runtime that has shut down drops the task at once (tokio 1.54.1 `src/runtime/task/list.rs:140-143`), so the guard closes the client before `build()` returns; `build()` then returns an `ErrorKind::Configuration` error saying that the tokio runtime has shut down, instead of a client that can never connect.
 - **D6 Version.** No bump: `ClientBuilder::runtime`, the two codes and `Input::DriverDropped` (`Input` is `#[non_exhaustive]`, Block 17) are additive, and a build that panicked now returns an error (Block 27 D5). `Unreleased` entries: "Added" `ClientBuilder::runtime`; disconnected codes 2 "exception during message handling" and 4 "runtime shut down" (`codes::disconnected::BAD_PROTOCOL`, `RUNTIME_SHUT_DOWN`); `Input::DriverDropped`. "Fixed" building outside a runtime returning an error instead of panicking; a client whose runtime shut down, or whose driver panicked, failing its calls and ending its streams instead of leaving them pending. "Changed" `SubscriptionError::ClientClosed` reads "the client is closed" (dropped, or its runtime shut down), and the `events()` documentation says that the streams also end then.
 
 Value clause: As an app developer whose start-up code runs outside a tokio runtime, I want to give the client the runtime it runs on, so that building it never panics and its calls and streams end when that runtime does.
 
-**Structural acceptance:** unit tests in the adapter, on current-thread runtimes that are not driven unless stated: `Client::new` on a plain thread returns D1's error (no panic, no `catch_unwind`, as `client_new_returns_an_endpoint_error_instead_of_panicking`); with a handle given inside another runtime, the driver is a task of the given one (`RuntimeMetrics::num_alive_tasks`, stable since tokio 1.39, goes from 0 to 1 there and is unchanged on the current one); dropping the given runtime while the client is `connecting` emits `disconnected` code 4 and fails a call waiting for the connection with code 3; dropping it while `disconnected` emits nothing and ends the stream; dropping the client and then its runtime ends the streams after `disconnected` code 0, and a subscription's call fails with code 3; after a shutdown a call fails at once, `connect()` emits nothing and `state()` is `disconnected`; a runtime built without `enable_all`, driven, makes `connect()` end the client with code 2; the guard dropped during a panic with the core's lock poisoned emits nothing and still ends the calls and streams; building with the handle of a runtime already shut down returns D5's error. A source check, like Block 26 D3: no `tokio::spawn` or `tokio::task::spawn` in non-test code under `src/adapter/`. The steps build "outside any tokio runtime" on a `std::thread`, never in `spawn_blocking` (whose threads are inside the runtime), and shut a runtime down from an async step with `shutdown_background()`. The chaos adapter runner and the Block 14 @P gates pass.
+**Structural acceptance:** unit tests in the adapter, on current-thread runtimes that are not driven unless stated: `Client::new` on a plain thread returns D1's error (no panic, no `catch_unwind`, as `client_new_returns_an_endpoint_error_instead_of_panicking`); with a handle given inside another runtime, the driver is a task of the given one (`RuntimeMetrics::num_alive_tasks`, stable since tokio 1.39, goes from 0 to 1 there and is unchanged on the current one); dropping the given runtime while the client is `connecting` emits `disconnected` code 4 and fails a call waiting for the connection with code 4; dropping it while `disconnected` emits nothing and ends the stream; dropping the client and then its runtime ends the streams after the subscription's `unsubscribed` code 2 and `disconnected` code 0, and a subscription's call fails with code 4; after a shutdown a call fails at once, `connect()` emits nothing and `state()` is `disconnected`; a runtime built without `enable_all`, driven, makes `connect()` end the client with code 2; the guard dropped during a panic with the core's lock poisoned emits nothing and still ends the calls and streams; building with the handle of a runtime already shut down returns D5's error. A source check, like Block 26 D3: no `tokio::spawn` or `tokio::task::spawn` in non-test code under `src/adapter/`. The steps build "outside any tokio runtime" on a `std::thread`, never in `spawn_blocking` (whose threads are inside the runtime), and shut a runtime down from an async step with `shutdown_background()`. The chaos adapter runner and the Block 14 @P gates pass.
 
 ```gherkin
 Feature: Tokio runtime handle
@@ -4007,7 +4007,7 @@ Feature: Tokio runtime handle
     And the client calls RPC "slow"
     And the fake server has received the RPC command
     When that runtime shuts down
-    Then the call fails with a "disconnected" error before the configured timeout
+    Then the call fails with a "client closed" error before the configured timeout
     And the client emits "disconnected" with code 4 and reason "runtime shut down"
     And the client's stream ends
     And creating a subscription fails because the client is closed
@@ -4135,16 +4135,16 @@ Feature: Handshake timeout and maximum incoming message size
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Client.** `Client::ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + 'static`. The wait starts when the method returns: the closed flag and the state are judged, and the waiter registered, in one section under the core lock, as `Shared::call` makes a call. The future borrows nothing from the client, so it can be spawned, as `Client::rpc`'s can.
-  - A closed client (its runtime shut down or its driver panicked, Block 28 D3, D4) fails at once with code 3 "disconnected", whatever `state()` reports.
+  - A closed client (closed by `close()`, its runtime shut down or its driver panicked, Blocks 28 D3, D4 and 33) fails at once with code 4 "client closed" (`codes::error::CLIENT_CLOSED`), whatever `state()` reports.
   - Connected: it resolves at once.
   - Disconnected: it fails at once with code 3 "disconnected" (`codes::error::DISCONNECTED`), also on a client whose `connect()` was never called. A call made then waits instead (Block 13). Sources: centrifuge-js 63ed73e `centrifuge.ts:440-463`, whose message here is "client disconnected" (Ferrifuge keeps its calls' "disconnected": one message per code); centrifuge-rust `docs/spec.md:353`, "`ready()` is different: it fails at once in `disconnected`".
-  - Connecting: it waits, across failed attempts and reconnects, until the client is connected, and then resolves. If instead the client enters `disconnected` for any reason, it fails with code 3, as the calls waiting for the connection do (Block 13; centrifuge-js `_rejectPromises`, `centrifuge.ts:1947`, `:1989`, `:2011`). The reasons are `disconnect()`, a terminal disconnect code or connect error, a denied token, the `Client` dropped, its runtime shut down, or its driver panicked.
+  - Connecting: it waits, across failed attempts and reconnects, until the client is connected, and then resolves. If instead the client enters `disconnected` for any reason, it fails with code 3, as the calls waiting for the connection do (Block 13; centrifuge-js `_rejectPromises`, `centrifuge.ts:1947`, `:1989`, `:2011`). The reasons are `disconnect()`, a terminal disconnect code or connect error, or a denied token. If the client is closed instead (`close()`, the `Client` dropped, its runtime shut down or its driver panicked), it fails with code 4 "client closed" (Block 33).
   - `Config::timeout` does not bound it.
 - **D2 Subscription.** `Subscription::ready(&self)`, with the same signature, starts its wait the same way.
-  - When its client is closed, it fails at once with code 3 "disconnected", whatever its state, as its calls do then (Block 28 D3).
+  - When its client is closed, it fails at once with code 4 "client closed", whatever its state, as its calls do then (Blocks 28 D3, 33).
   - Subscribed: it resolves at once.
   - Unsubscribed: it fails at once with code 7 "subscription unsubscribed" (`codes::error::SUBSCRIPTION_UNSUBSCRIBED`, the message of its calls; centrifuge-js `subscription.ts:209-231`, whose message is "unsubscribed"). This includes a removed subscription, whose `state()` reports `unsubscribed`.
-  - Subscribing: it waits, also while the client is disconnected or connecting (a subscription subscribed before `connect()`, Block 9) and across the client's reconnects, which keep it subscribing. It resolves once the subscription is subscribed. It fails with code 7 when the subscription becomes `unsubscribed` for any reason: `unsubscribe()`, removal, a permanent subscribe error, a denied token or data callback, a server unsubscribe code below 2500, or an oversized message (Blocks 9, 10, 29; centrifuge-js `subscription.ts:1100`). It fails with code 3 when its client enters `disconnected` or is closed, as a subscription-level call waiting for its subscription does (Block 13, Exceptions introduced; see below).
+  - Subscribing: it waits, also while the client is disconnected or connecting (a subscription subscribed before `connect()`, Block 9) and across the client's reconnects, which keep it subscribing. It resolves once the subscription is subscribed. It fails with code 7 when the subscription becomes `unsubscribed` for any reason: `unsubscribe()`, removal, a permanent subscribe error, a denied token or data callback, a server unsubscribe code below 2500, or an oversized message (Blocks 9, 10, 29; centrifuge-js `subscription.ts:1100`). It fails with code 3 when its client enters `disconnected`, and with code 4 when it is closed (Block 33), as a subscription-level call waiting for its subscription does (Block 13, Exceptions introduced; see below).
 - **D3 Error type.** `CallError`, the error of the calls `ready()` gates, so `client.ready().await?` and the calls after it share one error type. Precedents: hyper's `SendRequest::ready()` returns `hyper::Error`, and tower's `Service::poll_ready` returns the service's error. Codes 3 and 7 are already `CallError` codes, it is `#[non_exhaustive]`, and it carries centrifuge-js's `{code, message}` (`centrifuge.ts:443`, `subscription.ts:211`). A `ReadyError` enum (the analysis's sketch) would duplicate those codes. Each method has an `# Errors` section.
 - **D4 State, not events.**
   - `ready()` follows the states `state()` reports, not the events taken. Waiters are settled under the core lock when the adapter sees the state after an input it gives the machine (`Shared::handle_fired`), not when the future is polled. So a waiter released by `connected` stays resolved even if the client is connecting again before the future is polled. A state that lasts only within one input, such as a connect reply followed by a disconnect push in the same frame, is not seen, as `state()` never reports it.
@@ -4155,7 +4155,7 @@ Feature: Handshake timeout and maximum incoming message size
   - Any number of `ready()` futures may wait at once; each is settled once.
   - They are cancel-safe: dropping one removes its waiter.
   - They wait on `tokio::sync` primitives only, so any executor can await them (Block 28). On a runtime that is not driven (Block 28 D2) they wait as calls do.
-  - The drop guard of Block 28 D3 and D4 fails every waiter with code 3, also when the poisoned core lock leaves the machine unfed.
+  - The drop guard of Block 28 D3 and D4 fails every waiter with code 4, also when the poisoned core lock leaves the machine unfed (Block 33).
   - Cost: the client's state is compared after each input, and subscription states are read only for subscriptions that have a waiter, so without waiters the cost per message is unchanged (Block 14 @P gates).
   - There is no new `Input` or `Action`. An owner of the machine does the same with `Machine::state` and `Machine::subscription_state` after each input.
 - **D6 Version.** No bump: the two methods are additive. `Unreleased` entry: "Added" `Client::ready` and `Subscription::ready`.
@@ -4168,8 +4168,8 @@ Value clause: As an app developer, I want to wait until the client is connected 
   - several futures waiting at once all settle;
   - a waiter released by `connected` stays resolved when the client reconnects before the future is polled;
   - a subscription's waiter keeps waiting across a client reconnect and fails with code 7 when the subscription is removed;
-  - after the `Client` is dropped, a subscription's `ready()` fails at once with code 3, and one already waiting fails with code 3;
-  - a runtime shut down while a client `ready()` and a subscription `ready()` wait fails both with code 3, also with the core lock poisoned (Block 28 D4);
+  - after the `Client` is dropped, a subscription's `ready()` fails at once with code 4, and one already waiting fails with code 4;
+  - a runtime shut down while a client `ready()` and a subscription `ready()` wait fails both with code 4, also with the core lock poisoned (Block 28 D4);
   - a `ready()` future awaited with `futures-executor` 0.3's `block_on` (a new dev-dependency, from the same project as `futures-core` and `futures-util`) on a plain thread outside any runtime fails with code 3 when another thread calls `disconnect()`.
 - The steps "ready is awaited on ..." start the future on a task and record its outcome and time, as the call steps do (`track`, `outcome`).
 - The Block 14 @P gates and the chaos adapter runner pass.
@@ -4283,7 +4283,7 @@ Feature: Waiting until ready
   - `failed_attempts: u64`: attempts that ended without the client becoming connected.
     - An attempt is a transport the client opens to connect (`Action::OpenTransport`), each fallback transport being one.
     - It fails when its opening fails, when it closes or exceeds the size limit before the connect reply, on a handshake or connect timeout, on a connect error reply (temporary or terminal), on a disconnect push or close code before connecting, or on a token denied during it.
-    - An attempt ended by `disconnect()`, `reconnect()` or the client's closing (Block 28) is not counted.
+    - An attempt ended by `disconnect()`, `reconnect()` or the client's closing (Blocks 28, 33) is not counted.
     - A failure before any transport is opened (a connect data or token callback failing) is not an attempt.
     - Not every failure emits a transport `error` event (a connect error reply's is `ErrorKind::Connect`), so the counter follows attempts, not events. The name says what it counts, unlike centrifuge-rust's `reconnect_attempts`, which also counts the first connect's failures; async-nats 0.52.0 `Statistics` names its counter `connects` too.
   - `bytes_in: u64`: bytes of the frames the core reads on the current transport (`Input::Frame` data), an undecodable frame included.
@@ -4299,7 +4299,7 @@ Feature: Waiting until ready
 - **D2 Where the counters live.**
   - Every counter but `connected_since` lives in the core: `Machine::statistics(&self) -> Statistics`, deterministic and @E-testable. It reports `connected_since: None`, as the core has no clock; its owner sets that public field.
   - The tokio adapter's `Client::statistics` reads the machine's snapshot under the core lock, also when the lock is poisoned (Block 28 D4). It sets `connected_since` from `SystemTime::now()` when it sees the state become `connected` after an input, where Block 30 D4 settles waiters, and clears it when it sees any other state.
-  - A closed client keeps its last counters (Block 28).
+  - A closed client keeps its last counters (Blocks 28, 33).
   - Cost: plain `u64` additions on inputs and actions the core already handles. The only addition is that the core keeps each sent frame's size and command count until it is reported written, and drops the entries of a transport that ends. The Block 14 @P gates hold, "Memory stays flat across reconnects" among them.
 - **D3 Delta statistics.**
   - `Subscription::delta_statistics(&self) -> DeltaStatistics`, a `#[non_exhaustive]` struct (`Debug`, `Clone`, `PartialEq`, `Eq`), and `Machine::delta_statistics(&self, SubscriptionId) -> Option<DeltaStatistics>`, `None` for an id not in the registry (centrifuge-js 63ed73e `subscription.ts:388-400`, `types.ts:818-831`).
@@ -4544,3 +4544,133 @@ Feature: Runtime HTTP headers and subscription data
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 33 — Closing a client
+
+**Goal:** an app stops a client for good and awaits the end (the transport closed, the driver stopped, every stream ended after the events already queued), also from a shared reference such as Tauri's managed state, and subscription handles that outlive their client learn that it is closed instead of staying `subscribing` forever (parity item 16; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A's behaviour with design B's `&self` receiver, without its `Closed` state).
+
+**Dependencies:** Blocks 0 (no `closed` state), 1 (states, `disconnect()`), 8 (closing a websocket bounded by `Config::timeout`, emulated transports), 9 (subscription states, the registry, `SubscriptionError::ClientClosed`), 12 (server-side subscriptions), 13 (calls, codes 3, 7 and 11), 15 (streams, events taken, the read-ahead), 28 (the closed flag, `Shared::shut_down`, the drop guard, `Input::DriverDropped`, disconnected codes 2 and 4), 30 (`ready()` on a closed client), 31 (counters kept, attempts ended by closing not counted).
+
+**Out of scope:**
+- a `closed` client state (Block 0: the spec marks it optional; `State` is exhaustive, so a variant would break every `match` on it, the analysis's design B): a closed client reports `disconnected`, and `Client::is_closed()` tells it apart (D1);
+- `Client: Clone`, `downgrade` and `WeakClient` (Block 41, where `close(&self)` ends every clone);
+- closing from an event handler, and its deadlock detection (Block 41);
+- a timeout parameter on `close()`: closing is bounded by `Config::timeout` (D1), and a caller wanting a shorter bound wraps the future, as for `ready()` (Block 30);
+- a status code in the websocket close frame (Block 8, unchanged).
+
+This block reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Method.** `pub fn close(&self) -> impl Future<Output = ()> + Send + use<>`, as centrifuge-rust (`docs/spec.md` §4.3, `docs/api.md`, commit 88d6edf) and as `ready()` (Block 30 D1). It does not consume the client: an app holding it behind a shared reference (Tauri managed state, an `Arc<Client>`, Block 41's clones) must be able to close it, and Block 41's `Clone` would undo what a consuming `close` expresses (async-nats `Client::drain(&self)`, quinn `Connection::close(&self)`, rumqttc `AsyncClient::disconnect(&self)`).
+  - Closing starts when the method returns, not when the future is first polled: the closed flag is checked, the machine fed `Input::Close` (D2) and the flag set in one section under the core lock, as `Shared::shut_down` does (Block 28), so an API call either runs before and is closed with the rest, or after and sees the client closed. Dropping the future, or never awaiting it, still closes the client (centrifuge-rust §4.3, "Cancel safety"). The future is `#[must_use]`, as every future is; an app closes without waiting by dropping the client or spawning the future.
+  - The future resolves once the driver's task has ended, however it ends. The driver awaits the closing of its transport instead of spawning it (`Transport::close`: a websocket's close handshake bounded by `Config::timeout`, then aborted, Block 8; an emulated transport's stream request dropped and its emulation requests ended, each within `Config::timeout`), then stops; its drop guard (Block 28 D3) ends every stream and releases the future through a `tokio::sync` primitive, so any executor can await it. A runtime shutting down during the close releases it too.
+  - It does not wait for events to be taken: every stream yields the events queued before the close, then ends (Block 28 D3), so a task awaiting `close()` while holding an unread stream does not wait for it (unlike `ready()`, Block 30 D4).
+  - A second `close()`, or one on a client already closed (its runtime shut down or its driver panicked), changes nothing and resolves once the driver's task has ended, at once when it has. On a runtime that is not driven (Block 28 D2) it waits until the runtime runs.
+  - Awaiting it inside the client's own token, data or getState callback does not deadlock: the driver drops or aborts a running callback when it stops.
+  - `pub fn is_closed(&self) -> bool`, `#[must_use]`: whether the client is closed, by `close()`, its runtime shut down or its driver panicked; one atomic load, as tokio's `mpsc::Sender::is_closed`. A closed client reports `disconnected` from `state()`; `connect()`, `reconnect()`, `disconnect()` and the setters do nothing; `new_subscription` returns `SubscriptionError::ClientClosed`; `events()` gives a stream that ends at once, as after Block 28's shutdown.
+- **D2 What closing does.** A new `Input::Close` (additive: `Input` is `#[non_exhaustive]`), in one step:
+  - every call not settled, client-level or subscription-level, whether queued, waiting for the connection or its subscription, or sent, fails with a new error code 4 "client closed" (`codes::error::CLIENT_CLOSED`; centrifuge-js 63ed73e `codes.ts` `errorCodes.clientClosed`, defined there and unused, centrifuge-js having no `close()`), and not with 3, 7 or 11;
+  - then every client-side subscription not `unsubscribed` emits `Unsubscribed` with a new client-side code 2 "client closed" (`codes::unsubscribed::CLIENT_CLOSED`; `codes.ts` `unsubscribedCodes.clientClosed`; centrifuge-rust §6.5) and stays in the registry, as after `unsubscribe()`; every server-side subscription emits its `unsubscribed` with the same code and reason and leaves the registry, as on an unsubscribe push (centrifuge-rust §8); then the client emits `Disconnected` with code 0 "disconnect called", unless it was `disconnected` already (centrifuge-rust §6.1: every `unsubscribed(2)` before `disconnected`);
+  - no unsubscribe command is sent: the connection closes (`Action::CloseTransport`), and timers and running callbacks are cancelled as `disconnect()` cancels them; there is no new `Action`;
+  - the attempt it ends is not a failed one (Block 31 D1).
+
+  An owner of the machine feeds it nothing after `Input::Close`, as after `Input::DriverDropped` (Block 28); the machine does not check.
+- **D3 Waiters and leftover handles.** In the same locked section the adapter fails every waiting `ready()` future, of the client and of its subscriptions, with code 4, before Block 30 D4 judges the new states (which would give 3 or 7). After closing, a leftover `Subscription` reports `unsubscribed`; `subscribe()`, `unsubscribe()` and `set_data()` on it do nothing (the closed flag, Block 28); its calls and `ready()` fail at once with code 4; its streams end after the events queued.
+- **D4 Drop and the driver's end.** Dropping the client closes it as `close()` does, without waiting: `Shared::shut_down` feeds `Input::Close` instead of `Input::Disconnect`. A client whose runtime shut down or whose driver panicked is closed too, and gets the same codes: `Input::DriverDropped` does what `Input::Close` does, its `Disconnected` keeping code 4 "runtime shut down" or 2 "exception during message handling" (Block 28 D3, D4). Its subscriptions therefore emit `unsubscribed` code 2 first, and its calls, pending or later, and its `ready()` futures fail with code 4 instead of 3. When the poisoned core lock leaves the machine unfed (Block 28 D4), no event is emitted, and the guard still fails calls and waiters with code 4. Code 3 "disconnected" stays for a client that entered `disconnected` and can connect again. Reason: an error code tells the caller whether retrying can succeed, as tokio's channels return one closed error whatever closed them; the cause is reported once on the client's stream, as the `Disconnected` code; and `SubscriptionError::ClientClosed` already calls every one of these cases closed (Block 28 D6).
+- **D5 Statistics.** The closed client's handle stays (D1), so `Client::statistics()` stays readable: its last counters (Block 31 D2), `state` `disconnected`, `transport` and `connected_since` `None`, `subscriptions` unchanged (D2 keeps client-side subscriptions registered), `server_subscriptions` 0. A leftover subscription's `delta_statistics()` stays readable. Block 31 is otherwise unchanged.
+- **D6 Version.** 0.19.0, set in this block's PR. Dropping a client changes what its leftover subscription handles report (`unsubscribed` code 2 instead of `subscribing`), and a closed client's calls and `ready()` fail with code 4 instead of 3, also after a runtime shutdown, which 0.18.0 released; an app matching codes sees both. Behaviour changes an app can see took a minor version before (Block 23 D8, Block 29 D5); blocks that only add API did not (Block 27 D5). `Unreleased` entries: "Added" `Client::close`, `Client::is_closed`, `Input::Close`, unsubscribed code 2 and error code 4 "client closed" (`codes::unsubscribed::CLIENT_CLOSED`, `codes::error::CLIENT_CLOSED`); "Changed" dropping a client, or its runtime shutting down, unsubscribes its subscriptions with code 2 before `disconnected`, and a closed client's calls and `ready()` futures, those of its leftover subscriptions included, fail with code 4 "client closed" instead of 3 "disconnected", as `Input::DriverDropped` now does too.
+
+This block amends Block 0's `closed` state row, Block 28 D3, its structural acceptance and its scenario "The client ends when its runtime shuts down" (the call fails with "client closed"; the scenario leaves `IMPLEMENTED` in `tests/bdd.rs` until this block's implementation), Block 30 D1, D2, D5 and its structural acceptance (code 4 for a closed client), and Block 31's references to closing.
+
+Value clause: As an app developer, I want to close a client and await its end, also from a shared reference, and leftover subscription handles to learn that the client is closed, so that shutdown is orderly and no handle waits forever.
+
+**Structural acceptance:**
+- Core unit tests:
+  - for `Input::Close`: client-side `unsubscribed` code 2, server-side `unsubscribed` code 2, then `disconnected` code 0, in the order of the emit actions; no unsubscribe command; client-level and subscription-level calls, queued, waiting and sent, failing with code 4; a disconnected client emitting no `Disconnected` while its subscribing subscriptions emit `unsubscribed` code 2; client-side subscriptions kept in the registry and server-side ones removed; the attempt ended not counted as failed;
+  - `Input::DriverDropped` doing the same with its codes 4 and 2.
+- Adapter unit tests:
+  - on a separate runtime given with `ClientBuilder::runtime`, when `close()` resolves no task of the client is left there (`RuntimeMetrics::num_alive_tasks`, polled for at most 100 ms, as the driver's task is released just after its guard runs), with a server answering the close handshake late, so that a closing left detached would still be alive;
+  - dropping the future at once still closes (state, streams, calls); a second `close()` resolves;
+  - `close()` resolves while the client's stream holds events not taken, which the stream then yields before ending;
+  - a call racing `close()` from another thread fails with code 4 whichever runs first;
+  - waiting client and subscription `ready()` futures fail with code 4;
+  - a token callback awaiting `close()` on its own client ends;
+  - a runtime shut down during `close()` releases it;
+  - a dropped client's subscription reports `unsubscribed` at once;
+  - `is_closed()` after `close()` and after a runtime shutdown.
+- Steps:
+  - "close is awaited" awaits the future, bounded by `Config::timeout` plus tolerance, and records when it resolved;
+  - "close resolves at once" uses the `AT_ONCE` bound of the ready steps;
+  - "the client is dropped" takes the client out of the world;
+  - "the fake server received no unsubscribe command" is checked after the server saw the connection end;
+  - the call steps' error regex gains "client closed".
+- The Block 14 @P gates and the chaos adapter runner pass.
+
+```gherkin
+Feature: Closing a client
+
+  @D
+  Scenario: close waits until the connection is closed and the stream ends
+    Given a client connected to the fake server
+    When close is awaited
+    Then close resolves
+    And the fake server sees the connection closed within the configured timeout plus tolerance
+    And the client emits "disconnected" with code 0 and reason "disconnect called"
+    And the client's stream ends
+    And the client is closed
+
+  @D
+  Scenario: close unsubscribes every subscription with code 2 and sends no unsubscribe command
+    Given a client subscribed to channel "news" on the fake server
+    When close is awaited
+    Then the subscription emits "unsubscribed" with code 2 and reason "client closed"
+    And the subscription's stream ends
+    And the fake server sees the connection closed within the configured timeout plus tolerance
+    And the fake server received no unsubscribe command
+
+  @D
+  Scenario: close ends a server-side subscription before the client's "disconnected"
+    Given the fake server grants a server-side subscription to channel "news" at connect
+    And a client connected to the fake server
+    And the client emits a server-side "subscribed" event for channel "news"
+    When close is awaited
+    Then the client emits a server-side "unsubscribed" event for channel "news" with code 2
+    And then the client emits "disconnected" with code 0
+    And the client's stream ends
+
+  @D
+  Scenario: A call pending at close fails with "client closed"
+    Given a client connected to the fake server that never replies to commands
+    And the client calls RPC "slow"
+    And the fake server has received the RPC command
+    When close is awaited
+    Then the call fails with a "client closed" error before the configured timeout
+
+  @D
+  Scenario: Dropping the client unsubscribes its subscriptions with code 2
+    Given a client subscribed to channel "news" on the fake server
+    When the client is dropped
+    Then the subscription state is "unsubscribed"
+    And the subscription emits "unsubscribed" with code 2 and reason "client closed"
+    And the subscription's stream ends
+    And the subscription's history call fails at once with a "client closed" error
+
+  Scenario: close on a disconnected client resolves at once
+    Given a new client
+    When close is awaited
+    Then close resolves at once
+    And the client's stream ends with no "disconnected" event
+
+  Scenario: A closed client stays closed
+    Given a new client
+    When close is awaited
+    And connect is called
+    Then the client state is "disconnected"
+    And the client is closed
+    And an RPC call fails at once with a "client closed" error
+    And creating a subscription fails because the client is closed
+```
+
+**Exceptions introduced:** none. centrifuge-js 63ed73e has no `close()`, and the absent `closed` state is Block 0's decision.

@@ -399,7 +399,8 @@ const IMPLEMENTED: &[&str] = &[
     // Block 28: the tokio runtime handle.
     "Building outside a runtime without a handle fails",
     "A client built outside a runtime with a handle connects",
-    "The client ends when its runtime shuts down",
+    // Block 33 changes "The client ends when its runtime shuts down" (code
+    // 4 "client closed"): it returns with Block 33's implementation.
     // Block 29: the handshake timeout and the maximum message size.
     "An open that never completes is bounded by the handshake timeout",
     "The connect reply keeps the timeout after the open",
