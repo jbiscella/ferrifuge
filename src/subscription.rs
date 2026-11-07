@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::ClientError;
+use crate::token::{Bytes, optional_bytes};
 
 /// State of a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,8 +84,10 @@ impl SubscriptionEvent {
 
 /// Details of a [`SubscriptionEvent::Subscribed`] (spec, "Subscription
 /// recovery state"; centrifuge-js `SubscribedContext`).
+///
+/// Its `Debug` output shows the data as its length (Block 21).
 #[allow(clippy::struct_excessive_bools)] // The flags of the spec's subscribed context.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subscribed {
     /// Data the server attached to the subscription, if any
@@ -139,7 +142,10 @@ pub struct StreamPosition {
 }
 
 /// A publication of a channel (`client.proto`, `Publication`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Its `Debug` output shows the data as its length and the tags by name
+/// (Block 21).
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Publication {
     /// Its data, exactly as received: JSON text with the JSON protocol, any
@@ -163,7 +169,10 @@ pub struct Publication {
 
 /// A client connection, as the server describes it (`client.proto`,
 /// `ClientInfo`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Its `Debug` output shows the connection and channel info as their
+/// length (Block 21).
+#[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ClientInfo {
     /// Connection id.
@@ -174,6 +183,45 @@ pub struct ClientInfo {
     pub conn_info: Option<Vec<u8>>,
     /// Channel info, from the subscription token or proxy.
     pub chan_info: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Subscribed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subscribed")
+            .field("data", &optional_bytes(self.data.as_ref()))
+            .field("positioned", &self.positioned)
+            .field("recoverable", &self.recoverable)
+            .field("was_recovering", &self.was_recovering)
+            .field("recovered", &self.recovered)
+            .field("stream_position", &self.stream_position)
+            .field("delta", &self.delta)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Publication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut tags: Vec<&String> = self.tags.keys().collect();
+        tags.sort();
+        f.debug_struct("Publication")
+            .field("data", &Bytes(&self.data))
+            .field("offset", &self.offset)
+            .field("tags", &tags)
+            .field("info", &self.info)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ClientInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientInfo")
+            .field("client", &self.client)
+            .field("user", &self.user)
+            .field("conn_info", &optional_bytes(self.conn_info.as_ref()))
+            .field("chan_info", &optional_bytes(self.chan_info.as_ref()))
+            .finish()
+    }
 }
 
 /// Why a data callback, a subscription's or the client's connect data
