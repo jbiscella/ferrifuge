@@ -119,6 +119,12 @@ pub(crate) fn emulation_frame(body: &[u8]) -> Option<Vec<u8>> {
         .map(|request| request.data.into_bytes())
 }
 
+/// The commands of `frame`, one this client encoded: its lines, each itself
+/// a one-command frame.
+pub(crate) fn split_commands(frame: &[u8]) -> Vec<&[u8]> {
+    frame.split(|byte| *byte == b'\n').collect()
+}
+
 /// One field per request type; a command sets its own and leaves the
 /// others at their default, so adding a command touches one place.
 #[derive(Serialize, Default)]

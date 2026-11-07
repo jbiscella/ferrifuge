@@ -2509,7 +2509,9 @@ mod tests {
             })
             .collect();
         assert_eq!(requests.len(), 1, "{connected:?}");
-        let frame = crate::json::emulation_frame(requests[0]).expect("an emulation request");
+        let frame = crate::codec::Codec::Json
+            .emulation_frame(requests[0])
+            .expect("an emulation request");
         assert_eq!(
             crate::codec::Codec::Json.command_ids(&frame).len(),
             3,

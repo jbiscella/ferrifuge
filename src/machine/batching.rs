@@ -281,7 +281,8 @@ mod tests {
         let inner: usize = resent
             .iter()
             .map(|(_, frame)| {
-                crate::json::emulation_frame(frame)
+                crate::codec::Codec::Json
+                    .emulation_frame(frame)
                     .expect("a request")
                     .len()
             })
