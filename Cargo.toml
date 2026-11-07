@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"
@@ -49,6 +49,7 @@ tokio = [
     "dep:http",
     "dep:base64",
     "dep:percent-encoding",
+    "dep:jni",
 ]
 # TLS crypto provider of the tokio adapter, chosen at build time (Block 6).
 # A build without ring disables default features. When several are enabled
@@ -84,6 +85,7 @@ tower-service = { version = "0.3.3", optional = true }
 http = { version = "1.5.0", optional = true }
 base64 = { version = "0.23.1", optional = true }
 percent-encoding = { version = "2.3.2", optional = true }
+
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 tokio = { version = "1.54.0", features = ["rt", "sync", "time", "macros"], optional = true }
@@ -91,6 +93,11 @@ tokio = { version = "1.54.0", features = ["rt", "sync", "time", "macros"], optio
 # makes the records reach a `log` logger while no tracing subscriber is set.
 tracing = { version = "0.1.44", default-features = false, features = ["std", "log"], optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
+
+# Android only (Block 24): the JNI types of ferrifuge::android, at the
+# version rustls-platform-verifier uses there.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22.4", default-features = false, optional = true }
 
 [build-dependencies]
 prost-build = "0.14.4"

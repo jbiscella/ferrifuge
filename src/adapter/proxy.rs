@@ -104,6 +104,12 @@ impl Proxy {
         matches!(self.0, Setting::System)
     }
 
+    /// Whether every endpoint goes through one `https://` proxy: a TLS
+    /// connection known when the client is built (Block 24, D5).
+    pub(super) fn is_https_for_all(&self) -> bool {
+        matches!(&self.0, Setting::All(target, _) if target.scheme == Scheme::Https)
+    }
+
     /// The proxy for `url`, or `None` for a direct connection (Block 23,
     /// D2): the one decision of every transport.
     pub(super) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {

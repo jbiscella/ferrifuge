@@ -76,6 +76,8 @@ mod subscription;
 mod token;
 mod wire;
 
+#[cfg(all(feature = "tokio", target_os = "android"))]
+pub use adapter::android;
 #[cfg(all(feature = "tokio", feature = "test-util"))]
 #[doc(hidden)]
 pub use adapter::stalled_websocket_writes;

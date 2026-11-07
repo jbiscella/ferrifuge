@@ -1,5 +1,7 @@
 //! Tokio adapter: performs the actions of the sans-IO core.
 
+#[cfg(target_os = "android")]
+pub mod android;
 mod client;
 mod http;
 mod log;

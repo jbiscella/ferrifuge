@@ -1,11 +1,14 @@
 //! TLS settings of the tokio adapter: the build's crypto provider
 //! (Block 6) and how servers are verified (Block 22), chosen in one place.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, RootCertStore};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 
 #[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
 compile_error!(
@@ -15,17 +18,17 @@ compile_error!(
 /// The crypto provider chosen by the build's features (Block 6). Features
 /// are additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
 #[cfg(feature = "fips")]
-fn crypto_provider() -> CryptoProvider {
+pub(super) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::default_fips_provider()
 }
 
 #[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
-fn crypto_provider() -> CryptoProvider {
+pub(super) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
 #[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
-fn crypto_provider() -> CryptoProvider {
+pub(super) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
 
@@ -133,7 +136,8 @@ pub(super) const VERIFIER: &str = if cfg!(all(
     any(
         target_os = "macos",
         target_os = "ios",
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "android"
     )
 )) {
     "platform"
@@ -144,24 +148,25 @@ pub(super) const VERIFIER: &str = if cfg!(all(
 /// TLS settings verifying servers as this build does on this platform, also
 /// trusting `extra`, and whether to keep them (Block 22, D1).
 ///
-/// The operating system's verifier on macOS, iOS and Windows, but in the
-/// fips build, whose chains must be checked inside the FIPS module.
+/// The operating system's verifier on macOS, iOS, Windows and Android, but
+/// in the fips build, whose chains must be checked inside the FIPS module.
 #[cfg(all(
     not(feature = "fips"),
-    any(target_os = "macos", target_os = "ios", target_os = "windows")
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows",
+        target_os = "android"
+    )
 ))]
 fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, bool), String> {
     let provider = Arc::new(crypto_provider());
-    let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
-        extra.iter().cloned(),
-        Arc::clone(&provider),
-    )
-    .map_err(|e| e.to_string())?;
+    let verifier = platform_verifier(extra, &provider)?;
     let config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     // The operating system reads its store at each verification.
     Ok((config, true))
@@ -175,11 +180,141 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
 /// in the fips build, on every platform.
 #[cfg(not(all(
     not(feature = "fips"),
-    any(target_os = "macos", target_os = "ios", target_os = "windows")
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows",
+        target_os = "android"
+    )
 )))]
 fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, bool), String> {
     let found = rustls_native_certs::load_native_certs();
     roots_config(found.certs, extra, found.errors.is_empty())
+}
+
+/// The operating system's verifier, also trusting `extra`.
+#[cfg(all(
+    not(feature = "fips"),
+    any(target_os = "macos", target_os = "ios", target_os = "windows")
+))]
+fn platform_verifier(
+    extra: &[CertificateDer<'static>],
+    provider: &Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, String> {
+    let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
+        extra.iter().cloned(),
+        Arc::clone(provider),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Arc::new(verifier))
+}
+
+/// Android's verifier, behind the setup gate (Block 24, D5). It takes no
+/// extra roots: `ClientBuilder::build` refuses them there (D3).
+#[cfg(all(not(feature = "fips"), target_os = "android"))]
+fn platform_verifier(
+    _extra: &[CertificateDer<'static>],
+    provider: &Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, String> {
+    let verifier =
+        rustls_platform_verifier::Verifier::new(Arc::clone(provider)).map_err(|e| e.to_string())?;
+    Ok(Arc::new(Guarded::new(verifier, android_ready)))
+}
+
+/// Set once one of `ferrifuge::android`'s setup calls succeeded (Block 24,
+/// D4): the verifier offers no way to ask.
+static ANDROID_READY: AtomicBool = AtomicBool::new(false);
+
+/// Whether Android's verifier was set up through Ferrifuge.
+pub(crate) fn android_ready() -> bool {
+    ANDROID_READY.load(Ordering::Acquire)
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn set_android_ready() {
+    ANDROID_READY.store(true, Ordering::Release);
+}
+
+/// The message of a TLS use before Android's verifier is set up.
+pub(crate) const ANDROID_SETUP_MISSING: &str = "the Android certificate verifier is not set up: call ferrifuge::android::init_with_env once before building a client";
+
+/// A verifier failing its handshakes until `ready` and turning a panic of
+/// the one it wraps into an error (Block 24, D5): Android's panics at its
+/// first check without the setup, and with a Kotlin component of another
+/// version, inside the client's task.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct Guarded<V> {
+    inner: V,
+    ready: fn() -> bool,
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl<V> Guarded<V> {
+    fn new(inner: V, ready: fn() -> bool) -> Self {
+        Self { inner, ready }
+    }
+}
+
+impl<V> std::fmt::Debug for Guarded<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Guarded").finish_non_exhaustive()
+    }
+}
+
+/// Runs `check` unless it panics, which becomes an error.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn unpanicked<T>(check: impl FnOnce() -> Result<T, rustls::Error>) -> Result<T, rustls::Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).unwrap_or_else(|_| {
+        Err(rustls::Error::General(
+            "the platform certificate verifier panicked".to_owned(),
+        ))
+    })
+}
+
+impl<V: ServerCertVerifier> ServerCertVerifier for Guarded<V> {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if !(self.ready)() {
+            return Err(rustls::Error::General(ANDROID_SETUP_MISSING.to_owned()));
+        }
+        unpanicked(|| {
+            self.inner.verify_server_cert(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp_response,
+                now,
+            )
+        })
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        unpanicked(|| self.inner.verify_tls12_signature(message, cert, dss))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        unpanicked(|| self.inner.verify_tls13_signature(message, cert, dss))
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 /// The TLS settings trusting `platform` and `extra`, kept when `complete`:
@@ -188,7 +323,12 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
 #[cfg_attr(
     all(
         not(feature = "fips"),
-        any(target_os = "macos", target_os = "ios", target_os = "windows")
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "windows",
+            target_os = "android"
+        )
     ),
     allow(dead_code)
 )]
@@ -348,6 +488,83 @@ mod tests {
         Ok(())
     }
 
+    /// A stub verifier accepting every chain, or panicking.
+    #[derive(Debug)]
+    struct Stub {
+        panics: bool,
+    }
+
+    impl ServerCertVerifier for Stub {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            assert!(!self.panics, "the stub panics");
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            Vec::new()
+        }
+    }
+
+    fn verify(verifier: &impl ServerCertVerifier) -> Result<ServerCertVerified, rustls::Error> {
+        let (_, chain, _) = private_chain();
+        verifier.verify_server_cert(
+            &chain,
+            &[],
+            &ServerName::try_from("localhost").expect("a name"),
+            &[],
+            UnixTime::now(),
+        )
+    }
+
+    /// Android's verifier is guarded (Block 24, D5): without the setup the
+    /// handshake fails naming the call, with it the check is the wrapped
+    /// verifier's, and its panic becomes an error.
+    #[test]
+    fn the_guarded_verifier_needs_the_setup_and_survives_a_panic() {
+        let unready = Guarded::new(Stub { panics: false }, || false);
+        let ready = Guarded::new(Stub { panics: false }, || true);
+        let panicking = Guarded::new(Stub { panics: true }, || true);
+
+        let refused = verify(&unready);
+        let accepted = verify(&ready);
+        let panicked = verify(&panicking);
+
+        assert!(
+            matches!(&refused, Err(rustls::Error::General(message)) if message == ANDROID_SETUP_MISSING),
+            "{refused:?}"
+        );
+        assert!(accepted.is_ok(), "{accepted:?}");
+        assert!(
+            matches!(&panicked, Err(rustls::Error::General(message)) if message.contains("panicked")),
+            "{panicked:?}"
+        );
+    }
+
     /// The verifier this build uses on this platform (Block 22, D1).
     #[test]
     fn the_build_verifies_with_its_platforms_verifier() {
@@ -356,7 +573,8 @@ mod tests {
         } else if cfg!(any(
             target_os = "macos",
             target_os = "ios",
-            target_os = "windows"
+            target_os = "windows",
+            target_os = "android"
         )) {
             "platform"
         } else {
