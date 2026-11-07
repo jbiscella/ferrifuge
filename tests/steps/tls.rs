@@ -37,21 +37,30 @@ fn a_client_with_the_wss_endpoint(world: &mut ClientWorld) {
 
 // Block 22: TLS verification.
 
-/// A raw configuration trusting `roots` only, with the build's provider:
-/// that of the default build's (ring) unless a stronger one is enabled.
+/// The build's crypto provider, as the library chooses it (Block 6).
+#[cfg(feature = "fips")]
+fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::default_fips_provider()
+}
+
+#[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
+fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::aws_lc_rs::default_provider()
+}
+
+#[cfg(not(feature = "aws-lc-rs"))]
+fn provider() -> rustls::crypto::CryptoProvider {
+    rustls::crypto::ring::default_provider()
+}
+
+/// A raw configuration trusting `roots` only, with the build's provider,
+/// offering `alpn`.
 fn raw_config(roots: &[CertificateDer<'static>], alpn: &[&str]) -> Arc<rustls::ClientConfig> {
     let mut store = rustls::RootCertStore::empty();
     for root in roots {
         store.add(root.clone()).expect("a root");
     }
-    let provider = if cfg!(feature = "fips") {
-        rustls::crypto::default_fips_provider()
-    } else if cfg!(feature = "aws-lc-rs") {
-        rustls::crypto::aws_lc_rs::default_provider()
-    } else {
-        rustls::crypto::ring::default_provider()
-    };
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
         .with_safe_default_protocol_versions()
         .expect("protocol versions")
         .with_root_certificates(store)

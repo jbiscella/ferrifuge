@@ -3352,7 +3352,7 @@ Value clause: As an app developer whose clients run behind corporate TLS inspect
 
 `VERIFY:` that the second test CA's chain (serverAuth EKU, a SAN, validity under 398 days) passes Apple's and Windows' checks on the runners; that Centrifugo offers `h2` over TLS, so the raw configuration's ALPN in the scenario matters.
 
-Verified (Centrifugo v6.10.1, 2026-11-07, by removing the ALPN rewrite): a raw configuration offering `h2` and `http/1.1` makes the server choose `h2`, and the websocket upgrade then fails ("A raw rustls configuration is used as given", websocket); the http_stream example still connects.
+Verified (Centrifugo v6.10.1, 2026-11-07, by removing the ALPN rewrite): a raw configuration offering `h2` and `http/1.1` makes the server choose `h2`, and the websocket upgrade then fails ("A raw rustls configuration is used as given", websocket); the http_stream example still connects. On the macOS and Windows runners (2026-11-07, the `portability` jobs of the implementation PR), the platform verifier, chosen there, accepted a chain from a short-lived rcgen CA (serverAuth EKU, a SAN, 31 days) given as an extra root and refused it as an unknown issuer without (`adapter::tls` unit tests).
 
 ```gherkin
 Feature: TLS verification
