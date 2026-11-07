@@ -34,7 +34,7 @@ pub(crate) struct Batching {
 
 /// A timer the simulated clock runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Key {
+pub(super) enum Key {
     Client(Timer),
     Call(CallId, CallTimer),
     Subscription(SubscriptionId, SubscriptionTimer),
@@ -42,7 +42,7 @@ enum Key {
 
 /// A connected machine on a simulated clock.
 pub(crate) struct BatchRun {
-    machine: Machine,
+    pub(super) machine: Machine,
     pub(super) transport: Option<TransportId>,
     now: Duration,
     timers: Vec<(Duration, Key)>,
@@ -59,7 +59,7 @@ pub(crate) struct BatchRun {
 }
 
 impl BatchRun {
-    fn new(config: Config, token_source: bool) -> Self {
+    pub(super) fn new(config: Config, token_source: bool) -> Self {
         let machine = if token_source {
             Machine::with_token_source(config)
         } else {
@@ -85,6 +85,10 @@ impl BatchRun {
                 Action::OpenTransport { transport, .. } => self.transport = Some(*transport),
                 Action::SetTimer(timer, delay) => self.set(Key::Client(*timer), *delay),
                 Action::CancelTimer(timer) => self.cancel(Key::Client(*timer)),
+                Action::ShortenTimer(timer, by) => self.shorten(Key::Client(*timer), *by),
+                Action::ShortenSubscriptionTimer(id, timer, by) => {
+                    self.shorten(Key::Subscription(*id, *timer), *by);
+                }
                 Action::SetCallTimer(call, timer, delay) => {
                     self.set(Key::Call(*call, *timer), *delay);
                 }
@@ -113,8 +117,25 @@ impl BatchRun {
         self.timers.retain(|(_, of)| *of != key);
     }
 
+    /// A running timer fires `by` earlier, but not before now; one not
+    /// running is ignored (Block 25, D3).
+    fn shorten(&mut self, key: Key, by: Duration) {
+        let now = self.now;
+        for (at, _) in self.timers.iter_mut().filter(|(_, of)| *of == key) {
+            *at = at.saturating_sub(by).max(now);
+        }
+    }
+
+    /// How long until the timer `key` fires, if it runs.
+    pub(super) fn due(&self, key: Key) -> Option<Duration> {
+        self.timers
+            .iter()
+            .find(|(_, of)| *of == key)
+            .map(|(at, _)| at.saturating_sub(self.now))
+    }
+
     /// Lets `by` of simulated time pass, firing the timers due.
-    fn advance(&mut self, by: Duration) {
+    pub(super) fn advance(&mut self, by: Duration) {
         let until = self.now + by;
         while let Some((index, &(at, key))) = self
             .timers
@@ -135,7 +156,7 @@ impl BatchRun {
     }
 
     /// Opens the transport and answers the connect command with `result`.
-    fn connect(&mut self, result: &Value) {
+    pub(super) fn connect(&mut self, result: &Value) {
         let transport = self.transport.expect("a transport opened");
         self.handle(Input::TransportOpened(transport));
         // Over an emulated transport the connect command opened it.
@@ -158,7 +179,7 @@ impl BatchRun {
         self.frame(&json!({"id": id, "connect": result}));
     }
 
-    fn frame(&mut self, value: &Value) {
+    pub(super) fn frame(&mut self, value: &Value) {
         self.handle(Input::Frame {
             transport: self.transport.expect("a transport"),
             data: value.to_string().into_bytes(),
@@ -183,7 +204,7 @@ impl BatchRun {
         self.frames_since(self.mark)
     }
 
-    fn call(&mut self, name: &str, request: CallRequest) -> CallId {
+    pub(super) fn call(&mut self, name: &str, request: CallRequest) -> CallId {
         let id = self.machine.add_call(request);
         self.calls.push((name.to_owned(), id));
         self.handle(Input::Call(id));

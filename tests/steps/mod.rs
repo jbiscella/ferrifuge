@@ -36,6 +36,7 @@ mod proxies;
 mod recovery;
 mod release;
 mod server_subs;
+mod sleep;
 mod slow;
 mod sub_tokens;
 mod subscriptions;
@@ -170,6 +171,7 @@ pub(crate) struct ClientWorld {
     pub(crate) delta: delta::Delta,
     pub(crate) release: release::Release,
     pub(crate) logging: logging::Logging,
+    pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).

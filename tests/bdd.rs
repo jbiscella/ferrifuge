@@ -371,6 +371,18 @@ const IMPLEMENTED: &[&str] = &[
     "A proxy function decides per endpoint",
     "A proxy set at run time applies from the next attempt",
     "A proxy URL of another scheme is refused",
+    // Block 25, sub-increment 25a: system sleep.
+    "A sleep as long as the no-ping window reconnects after the backoff and jitter",
+    "A shorter sleep keeps the connection and restarts the no-ping window",
+    "Without pings a sleep keeps the connection",
+    "A gap under 2 s changes nothing",
+    "A refresh due during a short sleep starts at the wake",
+    "A refresh not yet due moves earlier by the sleep",
+    "A token due during a long sleep is fetched before the next connect",
+    "A subscription token due during a short sleep is refreshed at the wake",
+    "A sleep leaves reply deadlines alone",
+    "A token due during a sleep in a reconnect delay is fetched before the next connect",
+    "A sleep while connecting keeps the reconnect delay",
 ];
 
 /// Server configuration of @A scenarios.
