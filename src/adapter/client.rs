@@ -1260,8 +1260,11 @@ impl Driver {
                 // The machine asks only when it was built with a token source.
                 if let Some(get_token) = &self.get_token {
                     // A stale callback stays until a running one replaces it.
-                    if let Some(running) = self.fetching.take() {
-                        self.stale_fetching = Some(running);
+                    if let Some(running) = self.fetching.take()
+                        && let Some((dropped, _)) = self.stale_fetching.replace(running)
+                    {
+                        // Dropped without an answer: nothing else tells the log.
+                        self.shared.log.fetch_dropped(dropped);
                     }
                     self.fetching = Some((id, guarded(|| get_token(), callback_panicked)));
                 }
@@ -1882,6 +1885,25 @@ mod tests {
             matches!(first, Some(ClientEvent::Disconnected { .. })),
             "{first:?}"
         );
+    }
+
+    /// Each connect of a client without a token asks the callback, which
+    /// never answers here: the driver keeps the running callback and one
+    /// stale one, and the log no more (Codex, #109).
+    #[tokio::test]
+    async fn callbacks_the_driver_drops_leave_the_log() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .get_token(std::future::pending::<Result<String, TokenError>>)
+            .build()
+            .unwrap();
+        for _ in 0..10 {
+            client.connect();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client.disconnect();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let tracked = client.shared.log.tracked_fetches();
+        assert!(tracked <= 2, "{tracked} callbacks tracked");
     }
 
     #[tokio::test]
