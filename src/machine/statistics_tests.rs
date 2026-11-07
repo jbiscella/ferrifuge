@@ -226,11 +226,11 @@ fn messages_after_a_disconnect_push_in_one_frame_count_in() {
 fn a_frame_whose_transport_ends_before_it_is_written_counts_nowhere() {
     let (mut machine, transport) = connected();
     let id = machine.add_subscription("news".into(), SubscriptionOptions::default());
+    let before = machine.statistics();
     let sent = machine.handle(Input::Subscribe(id.unwrap()));
     let [(frame_id, _)] = &sends(&sent)[..] else {
         panic!("{sent:?}");
     };
-    let before = machine.statistics();
 
     machine.handle(Input::TransportClosed {
         transport,
@@ -415,6 +415,37 @@ fn publications_count_once_taken_and_never_withdrawn() {
 
     assert_eq!(second.len(), 1, "released, then withdrawn");
     assert_eq!(machine.statistics().publications_delivered, 1);
+}
+
+#[test]
+fn joins_and_leaves_taken_are_not_publications() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_subscription(
+            "news".into(),
+            SubscriptionOptions::default().join_leave(true),
+        )
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let subscribing = machine.handle(Input::Subscribe(id));
+    take_all(&mut machine, subscribing);
+    let subscribed = machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+    take_all(&mut machine, subscribed);
+
+    let joined = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"news","join":{"info":{"client":"x","user":"u"}}}}"#,
+    ));
+    assert!(
+        joined.iter().any(|action| matches!(
+            action,
+            Action::EmitSubscription(_, _, SubscriptionEvent::Join(_))
+        )),
+        "{joined:?}"
+    );
+    take_all(&mut machine, joined);
+
+    assert_eq!(machine.statistics().publications_delivered, 0);
 }
 
 #[test]
