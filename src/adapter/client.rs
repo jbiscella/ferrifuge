@@ -440,6 +440,11 @@ impl Shared {
         // the sleep (D5; Codex, #122).
         let connected = core.machine.state() == State::Connected;
         match input {
+            // Closing ends the client for good: the sleep it would have
+            // revealed changes nothing after it, and must not reconnect or
+            // fail calls with another code first (Block 33, D2; Codex,
+            // #141).
+            Input::Close | Input::DriverDropped { .. } => self.feed(core, input),
             Input::EventTaken(_)
             | Input::Frame { .. }
             | Input::TransportClosed { .. }
@@ -1120,7 +1125,7 @@ impl Client {
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
-            closing: None,
+            closing: Vec::new(),
             opening: None,
             transport: None,
             kind: TransportKind::WebSocket,
@@ -1638,8 +1643,9 @@ struct Driver {
     runtime: Handle,
     /// Ends the client however the driver's task ends (Block 28, D3).
     _ending: Ending,
-    /// The closing of the last transport closed, if it may still run.
-    closing: Option<tokio::task::JoinHandle<()>>,
+    /// The closings of the transports closed that may still run, each
+    /// awaited before the driver stops (Block 33, D1; Codex, #141).
+    closing: Vec<tokio::task::JoinHandle<()>>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     /// The kind of the transport opening or open, for the records.
@@ -1775,10 +1781,10 @@ impl Driver {
                 self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
-                // The last transport's close is awaited, so that `close()`
+                // Every transport's close is awaited, so that `close()`
                 // resolves after it (Block 33, D1); the guard then ends the
                 // streams as the driver goes.
-                if let Some(closing) = self.closing.take() {
+                for closing in std::mem::take(&mut self.closing) {
                     let _ = closing.await;
                 }
                 return;
@@ -1899,7 +1905,8 @@ impl Driver {
                     self.opening = None;
                 }
                 if let Some((_, transport)) = self.transport.take_if(|(open, _)| *open == id) {
-                    self.closing = Some(transport.close(&self.runtime));
+                    self.closing.retain(|closing| !closing.is_finished());
+                    self.closing.push(transport.close(&self.runtime));
                 }
             }
             Action::Send {
@@ -3061,11 +3068,35 @@ mod tests {
         let mut held = Vec::new();
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 8192];
-            let read = socket.read(&mut request).await.unwrap_or(0);
-            if String::from_utf8_lossy(&request[..read]).starts_with("POST /connection/") {
-                let reply =
-                    "{\"id\":1,\"connect\":{\"client\":\"c\",\"session\":\"s\",\"node\":\"n\"}}\n";
+            // The whole request: its headers, then a body of Content-Length.
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap_or(0);
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request).to_lowercase();
+                let complete = text.split_once("\r\n\r\n").is_some_and(|(head, body)| {
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .and_then(|length| length.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    body.len() >= length
+                });
+                if read == 0 || complete {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            if text.starts_with("POST /connection/") {
+                // The connect command's id, from the request body.
+                let id: String = text.split("\"id\":").nth(1).map_or_else(
+                    || "1".to_owned(),
+                    |rest| rest.chars().take_while(char::is_ascii_digit).collect(),
+                );
+                let reply = format!(
+                    "{{\"id\":{id},\"connect\":{{\"client\":\"c\",\"session\":\"s\",\"node\":\"n\"}}}}\n"
+                );
                 let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n";
                 let chunk = format!("{response}{:x}\r\n{reply}\r\n", reply.len());
                 let _ = socket.write_all(chunk.as_bytes()).await;
@@ -3121,6 +3152,60 @@ mod tests {
         assert!(client.is_closed());
         let failed = runtime.block_on(call).unwrap_err();
         assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
+        runtime.shutdown_background();
+        server.shutdown_background();
+    }
+
+    // Codex, #141: every transport's close is awaited, not only the last.
+    #[test]
+    fn close_awaits_the_close_of_an_earlier_transport_too() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = tokio::runtime::Runtime::new().unwrap();
+        let listener = server
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!(
+            "http://{}/connection/http_stream",
+            listener.local_addr().unwrap()
+        );
+        server.spawn(stalling_http_stream(listener));
+        let timeout = Duration::from_millis(400);
+        let client = Client::builder_with_transports([(TransportKind::HttpStream, url)])
+            .config(Config::default().timeout(timeout))
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let wait_ready = |client: &Client| {
+            let ready = client.ready();
+            runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), ready).await })
+        };
+        client.connect();
+        assert_eq!(wait_ready(&client).ok(), Some(Ok(())));
+        // An emulation request the server never answers keeps the first
+        // transport's close running for the timeout.
+        let call = client.rpc("slow", b"{}".to_vec());
+        std::thread::sleep(Duration::from_millis(100));
+        client.reconnect();
+        assert_eq!(wait_ready(&client).ok(), Some(Ok(())));
+
+        let started = std::time::Instant::now();
+        runtime.block_on(client.close());
+        let took = started.elapsed();
+        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        while runtime.metrics().num_alive_tasks() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            took >= Duration::from_millis(100),
+            "the first close was not awaited: {took:?}"
+        );
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
+        drop(call);
         runtime.shutdown_background();
         server.shutdown_background();
     }
@@ -3462,6 +3547,45 @@ mod tests {
     /// Makes the core's next input reveal a sleep of `gap`.
     fn slept(core: &mut Core, gap: Duration) {
         core.clock = Clock(Some((SystemTime::now() - gap, std::time::Instant::now())));
+    }
+
+    // Codex, #141: a close that reveals a sleep goes first: calls fail with
+    // "client closed", and the client does not reconnect for the sleep.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_close_revealing_a_sleep_goes_before_it() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut events = client.events();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+        let shared = Arc::clone(client.shared());
+        let call = core.machine.add_call(CallRequest::Rpc {
+            method: "slow".into(),
+            data: Vec::new(),
+        });
+        shared.handle(&mut core, Input::Call(call));
+        slept(&mut core, Duration::from_secs(120));
+
+        shared.handle(&mut core, Input::Close);
+
+        let settled: Vec<u32> = core
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::CallSettled {
+                    result: Err(error), ..
+                } => Some(error.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(settled, [codes::error::CLIENT_CLOSED]);
+        drop(core);
+        let (taken, _) = queued(&mut events);
+        let connecting = taken
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::Connecting { .. }))
+            .count();
+        assert_eq!(connecting, 1, "only the connect's: {taken:?}");
     }
 
     // Single-threaded runtime: the driver task cannot run in between.
