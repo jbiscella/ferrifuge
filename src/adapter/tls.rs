@@ -60,11 +60,15 @@ pub(super) struct Tls {
     trust: Trust,
     /// Its own TLS settings, built at its first secure attempt.
     config: BuildOnce<Arc<ClientConfig>>,
-    /// Its own HTTPS client, built from them.
-    https: BuildOnce<reqwest::Client>,
 }
 
 impl Tls {
+    /// Whether the client trusts the platform alone, sharing the
+    /// process-wide settings.
+    pub(super) fn is_platform(&self) -> bool {
+        matches!(self.trust, Trust::Platform)
+    }
+
     pub(super) fn new(trust: Trust) -> Self {
         Self {
             trust,
@@ -80,7 +84,7 @@ impl Tls {
     /// [`Tls::config`], and whether it is kept: a read of the platform's
     /// root certificates that reported errors serves the attempt but is
     /// read again by the next one (Block 6, review item C7).
-    fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
+    pub(super) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
         match &self.trust {
             Trust::Platform => platform_setup(),
             Trust::ExtraRoots(roots) => self
@@ -89,47 +93,12 @@ impl Tls {
             Trust::Raw(raw) => self.config.get(|| Ok((Arc::new(http1_only(raw)), true))),
         }
     }
-
-    /// The HTTP client of `https://` requests: built once, per process
-    /// when the client trusts the platform alone, per client otherwise;
-    /// not kept when its TLS settings are not.
-    pub(super) fn https_client(&self) -> Result<reqwest::Client, String> {
-        static PLATFORM: BuildOnce<reqwest::Client> = BuildOnce::new();
-        let client = match self.trust {
-            Trust::Platform => &PLATFORM,
-            _ => &self.https,
-        };
-        let (client, _) = client.get(|| {
-            let (config, keep) = self.setup()?;
-            http_client((*config).clone()).map(|client| (client, keep))
-        })?;
-        Ok(client)
-    }
-}
-
-/// The HTTP client of plain `http://` requests, built once per process.
-pub(super) fn plain_http_client() -> Result<reqwest::Client, String> {
-    static PLAIN: BuildOnce<reqwest::Client> = BuildOnce::new();
-    let (client, _) = PLAIN.get(|| http_client(plain_tls_config()).map(|client| (client, true)))?;
-    Ok(client)
-}
-
-fn http_client(tls: ClientConfig) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .tls_backend_preconfigured(tls)
-        // The TLS setup and the emulation endpoint follow from the
-        // configured URL: a redirect elsewhere fails the attempt, like an
-        // unreachable endpoint, rather than splitting the stream and the
-        // commands between two servers.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 /// TLS settings of an HTTP client that only ever speaks plain `http://`:
 /// no root certificates, so it works on hosts without platform ones, and
 /// still the build's provider, as the HTTP client takes no default one.
-fn plain_tls_config() -> ClientConfig {
+pub(super) fn plain_tls_config() -> ClientConfig {
     ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("the provider supports the default protocol versions")
@@ -436,7 +405,6 @@ mod tests {
 
         assert_eq!(config.alpn_protocols, [b"http/1.1".to_vec()]);
         assert_eq!(handshake(config, chain, key), Ok(()));
-        assert!(tls.https_client().is_ok());
     }
 
     // Review item C7: a transient failure (a CA bundle being replaced, no

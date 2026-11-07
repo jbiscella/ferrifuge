@@ -6,10 +6,10 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 
-use super::tls::Tls;
+use super::net::Network;
+use super::proxy::{Stream, dial};
 use crate::machine::{FrameId, FrameType};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -24,7 +24,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 /// and written while [`WebSocket::recv`] waits for the server, so a server
 /// that stops reading cannot freeze the client (Block 8).
 pub(crate) struct WebSocket {
-    stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    stream: WebSocketStream<MaybeTlsStream<Stream>>,
     /// Frames not yet handed to the stream, with their id and the time each
     /// was queued.
     queue: VecDeque<(FrameId, Message, Instant)>,
@@ -66,17 +66,22 @@ impl WebSocket {
         subprotocol: Option<&str>,
         timeout: Duration,
         headers: &reqwest::header::HeaderMap,
-        tls: &Tls,
+        network: &Network,
     ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure = url
             .get(..6)
             .is_some_and(|s| s.eq_ignore_ascii_case("wss://"));
         let connector = if secure {
-            Connector::Rustls(tls.config()?)
+            Connector::Rustls(network.tls.config()?)
         } else {
             Connector::Plain
         };
+        let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+        // The stream to the server's host, through the proxy the setting
+        // decides (Block 23, D3); TLS to the server comes after.
+        let proxy = network.decide(&parsed)?;
+        let stream = dial(&parsed, proxy.as_ref(), &network.tls).await?;
         let mut request = url.into_client_request().map_err(|e| e.to_string())?;
         // The application's, which leave out those the handshake sets.
         for (name, value) in headers {
@@ -88,10 +93,10 @@ impl WebSocket {
         }
         // tungstenite fails the handshake unless the server accepts the
         // subprotocol asked for.
-        let (stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        let (stream, _) = tokio_tungstenite::client_async_tls_with_config(
             request,
+            stream,
             Some(websocket_config()),
-            true,
             Some(connector),
         )
         .await
@@ -259,8 +264,8 @@ impl WebSocket {
     /// never read, rather than leaving the system to keep trying to send it.
     fn abort(self) {
         let tcp = match self.stream.get_ref() {
-            MaybeTlsStream::Plain(tcp) => Some(tcp),
-            MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0),
+            MaybeTlsStream::Plain(stream) => Some(stream.tcp()),
+            MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0.tcp()),
             _ => None,
         };
         if let Some(tcp) = tcp {
@@ -366,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn sends_and_receives_frames_then_reports_close_code() {
         let url = echo_then_close(3001, "shutdown").await;
-        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Tls::default())
+        let mut ws = WebSocket::open(&url, None, TIMEOUT, &HeaderMap::new(), &Network::default())
             .await
             .unwrap();
 
@@ -409,7 +414,7 @@ mod tests {
             None,
             TIMEOUT,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -451,7 +456,7 @@ mod tests {
             None,
             TIMEOUT,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -492,7 +497,7 @@ mod tests {
             None,
             timeout,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -551,7 +556,7 @@ mod tests {
             None,
             timeout,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -592,7 +597,7 @@ mod tests {
             None,
             TIMEOUT,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -617,7 +622,7 @@ mod tests {
             None,
             TIMEOUT,
             &HeaderMap::new(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await;
 

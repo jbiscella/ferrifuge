@@ -15,7 +15,8 @@ use futures_util::stream::{BoxStream, FuturesUnordered};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 
-use super::tls::{Tls, plain_http_client};
+use super::net::Network;
+use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
 use crate::machine::{FrameId, TransportKind};
 
@@ -72,11 +73,16 @@ impl HttpTransport {
         emulation_endpoint: Option<&str>,
         request_timeout: Duration,
         headers: Arc<HeaderMap>,
-        tls: &Tls,
+        network: &Network,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
-        let http = http_client(url.scheme() == "https", tls)?;
         let emulation_url = emulation_url(&url, emulation_endpoint)?;
+        // The HTTP client asks the same decision for each request; a proxy
+        // it cannot use must fail the attempt here rather than send the
+        // requests directly (Block 23, D2).
+        network.decide(&url)?;
+        network.decide(&emulation_url)?;
+        let http = network.http_client(url.scheme() == "https")?;
         let sse = kind == TransportKind::Sse;
         let request = if sse {
             url.query_pairs_mut()
@@ -93,11 +99,11 @@ impl HttpTransport {
         };
         // Without the URL: the sse one carries the connect command, token
         // included, which must not reach error events.
-        let response = request
-            .send()
-            .await
-            .map_err(|e| e.without_url().to_string())?;
+        let response = request.send().await.map_err(request_error)?;
         let status = response.status();
+        if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+            return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
+        }
         if !status.is_success() {
             return Err(format!("HTTP status {status}"));
         }
@@ -123,7 +129,7 @@ impl HttpTransport {
             })
             .boxed();
         Ok(Self {
-            emulation_http: http_client(emulation_url.scheme() == "https", tls)?,
+            emulation_http: network.http_client(emulation_url.scheme() == "https")?,
             emulation_url,
             request_timeout,
             headers,
@@ -155,10 +161,11 @@ impl HttpTransport {
                 let response = tokio::time::timeout(timeout, request.send())
                     .await
                     .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
-                    // Without its URL: the error message is logged, and an
-                    // emulation URL may carry a credential (Block 21, D5).
-                    .map_err(|e| format!("emulation request failed: {}", e.without_url()))?;
+                    .map_err(|e| format!("emulation request failed: {}", request_error(e)))?;
                 let status = response.status();
+                if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+                    return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
+                }
                 // A server without the session's node (404) or failing (5xx)
                 // cannot answer the command; other statuses reject only it
                 // (centrifuge-js `send`). A redirect is not followed (see
@@ -255,6 +262,27 @@ fn is_event_stream(content_type: &str) -> bool {
     essence.eq_ignore_ascii_case("text/event-stream")
 }
 
+/// The message of a failed request, without its URL, which may carry the
+/// connect command and its token (sse) or a credential (Block 21, D5).
+/// reqwest's own message stops at "error sending request": its sources
+/// follow, and a proxy refusing the credentials says so (Block 23, D5).
+fn request_error(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // hyper-util's `TunnelError::ProxyAuthRequired` (`tunnel.rs:241`).
+        if text == "tunnel error: proxy authorization required" {
+            return PROXY_AUTHENTICATION_REQUIRED.to_owned();
+        }
+        message.push_str(": ");
+        message.push_str(&text);
+        source = cause.source();
+    }
+    message
+}
+
 /// Where emulation requests go: `configured`, absolute, or `/emulation` on
 /// the server of `stream` (centrifuge-js `emulationEndpoint`).
 fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> {
@@ -266,16 +294,6 @@ fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> 
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
-}
-
-/// The HTTP client for `https://` endpoints, with the client's TLS
-/// settings, or for plain ones.
-fn http_client(secure: bool, tls: &Tls) -> Result<reqwest::Client, String> {
-    if secure {
-        tls.https_client()
-    } else {
-        plain_http_client()
-    }
 }
 
 /// Splits a response body into the messages it carries: one JSON reply per
@@ -512,7 +530,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await;
 
@@ -594,7 +612,7 @@ mod tests {
             Some(&redirecting),
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -640,7 +658,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -682,7 +700,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -725,7 +743,7 @@ mod tests {
             Some(&rejecting),
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -766,7 +784,7 @@ mod tests {
             Some(&hung),
             Duration::from_secs(60),
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await
         .unwrap();
@@ -818,7 +836,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await;
 
@@ -844,7 +862,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
-            &Tls::default(),
+            &Network::default(),
         )
         .await;
 
