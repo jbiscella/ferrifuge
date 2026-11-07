@@ -396,6 +396,10 @@ const IMPLEMENTED: &[&str] = &[
     "Fallback to http_stream with Protobuf",
     "Binary publication delivered over Protobuf on http_stream",
     "Server pings over Protobuf on http_stream are answered",
+    // Block 28: the tokio runtime handle.
+    "Building outside a runtime without a handle fails",
+    "A client built outside a runtime with a handle connects",
+    "The client ends when its runtime shuts down",
 ];
 
 /// Server configuration of @A scenarios.

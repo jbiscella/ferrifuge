@@ -271,7 +271,8 @@ pub enum SubscriptionError {
         /// The channel.
         channel: String,
     },
-    /// The client was dropped: it can no longer subscribe.
+    /// The client is closed, dropped or its runtime shut down (Block 28):
+    /// it can no longer subscribe.
     ClientClosed,
 }
 
@@ -281,7 +282,7 @@ impl std::fmt::Display for SubscriptionError {
             Self::AlreadyExists { channel } => {
                 write!(f, "a subscription to channel {channel} already exists")
             }
-            Self::ClientClosed => f.write_str("the client was dropped"),
+            Self::ClientClosed => f.write_str("the client is closed"),
         }
     }
 }

@@ -148,7 +148,19 @@ docker run --rm -p 8000:8000 \
 
 ### Client
 
-`Client::new` must be called inside a tokio runtime. `connect()` and
+The client runs as a task on the tokio runtime current when it is built,
+or on the one given with `ClientBuilder::runtime`, e.g. in a Tauri setup
+hook, which runs outside a runtime:
+
+```rust,ignore
+let client = Client::builder("wss://example.com/connection/websocket")
+    .runtime(tauri::async_runtime::handle().inner().clone())
+    .build()?;
+```
+
+Without either, building returns a configuration error. When that runtime
+shuts down, the client emits `disconnected` with code 4 "runtime shut
+down": its calls fail and its streams end. `connect()` and
 `disconnect()` change the state before they return. `events()` returns a
 `Stream` of the events emitted from then on. An event counts as delivered
 only when the stream yields it: a publication's stream position, which

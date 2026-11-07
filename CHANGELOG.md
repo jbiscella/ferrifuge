@@ -13,6 +13,12 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `ClientBuilder::runtime` (Block 28): the tokio runtime the client runs
+  on, for building it where none is current, such as a Tauri setup hook.
+  Disconnected codes 2 "exception during message handling" and 4 "runtime
+  shut down" (`codes::disconnected::BAD_PROTOCOL`, `RUNTIME_SHUT_DOWN`),
+  and `Input::DriverDropped`.
+
 - Protobuf over http_stream (Block 27): a client with the Protobuf
   protocol can fall back to http_stream when websocket is blocked; its
   stream and emulation requests are `application/octet-stream`.
@@ -24,6 +30,10 @@ repository held while it carried that version, from the blocks of
   a disconnected client is left alone.
 
 ### Changed
+
+- `SubscriptionError::ClientClosed` reads "the client is closed": the client
+  was dropped, or its runtime shut down (Block 28); the client's and the
+  subscriptions' streams end then too.
 
 - Building a client refuses the Protobuf protocol only with an sse
   endpoint; with http_stream it is now accepted (Block 27).
@@ -48,6 +58,15 @@ repository held while it carried that version, from the blocks of
 - The crate's license expression is `0BSD AND MIT`: `proto/client.proto`,
   which the crate ships, is under the MIT license. `LICENSE` lists every
   file not under 0BSD; `REUSE.toml` states the same per file.
+
+### Fixed
+
+- Building a client outside a tokio runtime returns a configuration error
+  instead of panicking (Block 28); so does building on a runtime that has
+  shut down.
+
+- A client whose runtime shut down, or whose task panicked, fails its calls
+  and ends its streams instead of leaving them pending (Block 28).
 
 ## [0.17.0] - 2026-11-07
 

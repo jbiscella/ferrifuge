@@ -35,6 +35,7 @@ mod protobuf;
 mod proxies;
 mod recovery;
 mod release;
+mod runtime;
 mod server_subs;
 mod sleep;
 mod slow;
@@ -173,6 +174,8 @@ pub(crate) struct ClientWorld {
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,
+    /// The separate runtime of a Block 28 scenario.
+    pub(crate) runtime: runtime::Separate,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,

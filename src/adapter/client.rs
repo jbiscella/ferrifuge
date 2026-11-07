@@ -16,6 +16,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rustls::pki_types::CertificateDer;
+use tokio::runtime::Handle;
 use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
@@ -351,7 +352,7 @@ impl Shared {
     fn apply_fired(&self, input: Input, set: Option<u64>) {
         let mut core = lock(&self.core);
         // The driver has stopped (the client was dropped, after its final
-        // disconnect): actions would pile up with nothing to perform them,
+        // disconnect, or its runtime shut down): actions would pile up with nothing to perform them,
         // e.g. from a subscription handle that outlived the client.
         if self.closed.load(Ordering::Acquire) {
             return;
@@ -725,6 +726,8 @@ pub struct ClientBuilder {
     /// The application's TLS configuration, if any.
     tls_config: Option<Arc<rustls::ClientConfig>>,
     proxy: Proxy,
+    /// The runtime the client runs on; the current one otherwise.
+    runtime: Option<Handle>,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -770,6 +773,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("root_certificates", &self.root_certificates.len())
             .field("tls_config", &self.tls_config.is_some())
             .field("proxy", &self.proxy)
+            .field("runtime", &self.runtime.is_some())
             .finish()
     }
 }
@@ -919,16 +923,42 @@ impl ClientBuilder {
         self
     }
 
+    /// Runs the client on `runtime` (Block 28), e.g. when building it where
+    /// no tokio runtime is current, as in a Tauri setup hook:
+    ///
+    /// ```no_run
+    /// # fn run(handle: tokio::runtime::Handle) -> Result<(), ferrifuge::ClientError> {
+    /// // In Tauri: `tauri::async_runtime::handle().inner().clone()`.
+    /// let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
+    ///     .runtime(handle)
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// By default the client runs on the runtime current when it is built.
+    /// The runtime needs time and I/O enabled (`enable_all`). A
+    /// current-thread runtime runs the client only while a thread is inside
+    /// its `Runtime::block_on`: meanwhile calls and streams wait, and no
+    /// timeout runs. When the runtime shuts down, the client emits
+    /// `disconnected` with code 4 "runtime shut down"
+    /// ([`crate::codes::disconnected::RUNTIME_SHUT_DOWN`]), its calls fail
+    /// and its streams end; the client's futures and streams themselves need
+    /// no runtime, so any executor can await them.
+    #[must_use]
+    pub fn runtime(mut self, runtime: Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
     /// Creates the disconnected client.
     ///
     /// # Errors
     ///
     /// A [`crate::ErrorKind::Configuration`] error when the options cannot
-    /// work together, e.g. the Protobuf protocol with the sse transport.
-    ///
-    /// # Panics
-    ///
-    /// When called outside a tokio runtime: the client runs as a task on it.
+    /// work together, e.g. the Protobuf protocol with the sse transport, or
+    /// when there is no runtime to run on: none was given with
+    /// [`ClientBuilder::runtime`] and none is current, or it has shut down.
     pub fn build(self) -> Result<Client, ClientError> {
         Client::start(self)
     }
@@ -941,11 +971,9 @@ impl Client {
     /// # Errors
     ///
     /// As [`ClientBuilder::build`], e.g. for an empty endpoint or an
-    /// `http://` one.
-    ///
-    /// # Panics
-    ///
-    /// When called outside a tokio runtime: the client runs as a task on it.
+    /// `http://` one, or when called outside a tokio runtime: the client
+    /// runs as a task on the current one ([`ClientBuilder::runtime`] takes
+    /// another).
     pub fn new(endpoint: impl Into<String>, config: Config) -> Result<Self, ClientError> {
         Self::builder(endpoint).config(config).build()
     }
@@ -973,6 +1001,7 @@ impl Client {
             root_certificates: Vec::new(),
             tls_config: None,
             proxy: Proxy::default(),
+            runtime: None,
         }
     }
 
@@ -988,6 +1017,7 @@ impl Client {
             root_certificates,
             tls_config,
             proxy,
+            runtime,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
@@ -1018,6 +1048,15 @@ impl Client {
         };
         let machine = machine.with_emulated_headers(emulated_headers);
         let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
+        let runtime = match runtime {
+            Some(runtime) => runtime,
+            None => Handle::try_current().map_err(|_| {
+                runtime_error(
+                    "no tokio runtime is current: build the client inside one, or give \
+                     one with ClientBuilder::runtime",
+                )
+            })?,
+        };
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
                 machine,
@@ -1044,6 +1083,8 @@ impl Client {
             http_headers,
             timeout,
             shared: Arc::clone(&shared),
+            runtime: runtime.clone(),
+            _ending: Ending(Arc::clone(&shared)),
             opening: None,
             transport: None,
             kind: TransportKind::WebSocket,
@@ -1060,7 +1101,12 @@ impl Client {
             callback_aborts: HashMap::new(),
         };
         let span = shared.log.span.clone();
-        tokio::spawn(driver.run().instrument(span));
+        runtime.spawn(driver.run().instrument(span));
+        // A runtime that has shut down drops the task at once, and its
+        // guard closes the client (Block 28, D5).
+        if shared.closed.load(Ordering::Acquire) {
+            return Err(runtime_error("the tokio runtime has shut down"));
+        }
         Ok(Self { shared })
     }
 
@@ -1089,7 +1135,7 @@ impl Client {
     /// one. A later call takes over: the earlier stream ends and the events
     /// it had not yielded are the new one's (Block 15). The stream borrows
     /// nothing from the client, so it can be kept beside it, and it ends
-    /// once the client is dropped.
+    /// once the client is dropped or its runtime shuts down (Block 28).
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
         let mut core = lock(&self.shared.core);
         let number = lock(&self.shared.outboxes).client.open_stream();
@@ -1426,6 +1472,10 @@ struct Driver {
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
     shared: Arc<Shared>,
+    /// The runtime the driver runs on, for every spawn (Block 28, D1).
+    runtime: Handle,
+    /// Ends the client however the driver's task ends (Block 28, D3).
+    _ending: Ending,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     /// The kind of the transport opening or open, for the records.
@@ -1561,17 +1611,7 @@ impl Driver {
                 self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
-                // Handles of subscriptions may outlive the client: end
-                // every event stream rather than leave it pending forever,
-                // and release the data callbacks nothing can call anymore.
-                let mut outboxes = lock(&self.shared.outboxes);
-                outboxes.client.close();
-                outboxes.subscriptions.values_mut().for_each(Outbox::close);
-                drop(outboxes);
-                lock(&self.shared.callbacks).0.clear();
-                // The final disconnect settled every call; any other future
-                // gets "disconnected" rather than waiting forever.
-                lock(&self.shared.calls).clear();
+                // The guard ends the streams as the driver goes.
                 return;
             }
             // A full read-ahead stops the reading: the server's handling of
@@ -1681,7 +1721,7 @@ impl Driver {
                     self.opening = None;
                 }
                 if let Some((_, transport)) = self.transport.take_if(|(open, _)| *open == id) {
-                    transport.close();
+                    transport.close(&self.runtime);
                 }
             }
             Action::Send {
@@ -2034,13 +2074,13 @@ impl Transport {
         }
     }
 
-    fn close(self) {
+    fn close(self, runtime: &Handle) {
         match self {
             Self::WebSocket(websocket) => {
-                tokio::spawn(websocket.close());
+                runtime.spawn(websocket.close());
             }
             Self::Http(http) => {
-                tokio::spawn(http.close());
+                runtime.spawn(http.close());
             }
         }
     }
@@ -2060,6 +2100,59 @@ async fn opened(
 /// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
 /// `http(s)://` is right for `http_stream` and sse (owner decision,
 /// 2026-11-04). The message leaves the endpoint out: it may carry a token.
+/// An error of building a client without a runtime to run on (Block 28).
+fn runtime_error(message: &str) -> ClientError {
+    ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: message.to_owned(),
+        transport: None,
+    }
+}
+
+/// Ends the client when the driver's task ends, however it ends: after
+/// the final disconnect, or dropped by a runtime shutting down or by a
+/// panic (Block 28, D3, D4), which would otherwise leave calls and
+/// streams pending forever, even after the client is dropped (as hyper's
+/// dispatch callback fails its request when its task is dropped).
+struct Ending(Arc<Shared>);
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let shared = &self.0;
+        match shared.core.lock() {
+            Ok(mut core) => {
+                // Checked and set under the lock, as `Shared::shut_down`
+                // does: a client dropped as its runtime shuts down ends
+                // once.
+                if !shared.closed.load(Ordering::Acquire) {
+                    let panicked = std::thread::panicking();
+                    shared.handle(&mut core, Input::DriverDropped { panicked });
+                    shared.closed.store(true, Ordering::Release);
+                }
+                // Nothing performs them anymore; the transport is dropped
+                // with the driver.
+                core.actions.clear();
+            }
+            // A panic with the lock held may have left the machine
+            // inconsistent, and a second panic would abort: it is not fed,
+            // and no event is emitted (D4).
+            Err(_) => shared.closed.store(true, Ordering::Release),
+        }
+        // Handles of subscriptions may outlive the client: end every event
+        // stream rather than leave it pending forever, and release the data
+        // callbacks nothing can call anymore.
+        let mut outboxes = lock(&shared.outboxes);
+        outboxes.client.close();
+        outboxes.subscriptions.values_mut().for_each(Outbox::close);
+        drop(outboxes);
+        lock(&shared.callbacks).0.clear();
+        // The final disconnect settled the calls it could; any other future
+        // gets "disconnected" rather than waiting forever.
+        lock(&shared.calls).clear();
+    }
+}
+
 fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
     let endpoint = endpoint.trim();
     let http = endpoint.split_once("://").is_some_and(|(scheme, _)| {
@@ -2414,6 +2507,290 @@ mod tests {
             matches!(&created, Err(error) if error.kind == crate::ErrorKind::Configuration),
             "{created:?}"
         );
+    }
+
+    /// A current-thread runtime nothing drives, so that its client's
+    /// driver never runs until the runtime is dropped.
+    fn idle_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The events queued for `stream`, until it is pending or ends, and
+    /// whether it ended.
+    fn queued(stream: &mut (impl Stream<Item = ClientEvent> + Unpin)) -> (Vec<ClientEvent>, bool) {
+        let mut events = Vec::new();
+        loop {
+            match stream.next().now_or_never() {
+                Some(Some(event)) => events.push(event),
+                Some(None) => return (events, true),
+                None => return (events, false),
+            }
+        }
+    }
+
+    fn disconnected_codes(events: &[ClientEvent]) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::Disconnected { code, .. } => Some(*code),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn client_new_outside_a_runtime_returns_an_error() {
+        let created = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default());
+
+        let error = created.expect_err("an error, without a runtime");
+        assert_eq!(error.kind, crate::ErrorKind::Configuration);
+        assert!(
+            error.message.contains("ClientBuilder::runtime"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn the_driver_runs_on_the_given_runtime() {
+        let runtime = idle_runtime();
+        let current = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
+
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+
+        assert_eq!(runtime.metrics().num_alive_tasks(), 1);
+        assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            current
+        );
+        drop(client);
+        // Dropping a runtime inside an asynchronous context panics.
+        runtime.shutdown_background();
+    }
+
+    #[test]
+    fn a_runtime_shut_down_while_connecting_ends_the_client() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+        client.connect();
+        let mut call = Box::pin(client.rpc("echo", b"{}".to_vec()));
+        assert!(
+            call.as_mut().now_or_never().is_none(),
+            "waits for the connection"
+        );
+
+        drop(runtime);
+
+        let (taken, ended) = queued(&mut events);
+        assert_eq!(
+            disconnected_codes(&taken),
+            [codes::disconnected::RUNTIME_SHUT_DOWN]
+        );
+        assert!(
+            matches!(taken.last(), Some(ClientEvent::Disconnected { reason, .. }) if reason == "runtime shut down"),
+            "{taken:?}"
+        );
+        assert!(ended, "the stream ends");
+        let failed = call.now_or_never().expect("settled").unwrap_err();
+        assert_eq!(failed.code, codes::error::DISCONNECTED);
+    }
+
+    #[test]
+    fn a_runtime_shut_down_while_disconnected_emits_nothing() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+
+        drop(runtime);
+
+        let (taken, ended) = queued(&mut events);
+        assert!(taken.is_empty(), "{taken:?}");
+        assert!(ended, "the stream ends");
+    }
+
+    #[test]
+    fn a_client_dropped_before_its_runtime_ends_once_with_its_own_code() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let subscription = client.new_subscription("news").unwrap();
+        let mut subscription_events = subscription.events();
+        let mut events = client.events();
+        client.connect();
+
+        drop(client);
+        drop(runtime);
+
+        let (taken, ended) = queued(&mut events);
+        assert_eq!(
+            disconnected_codes(&taken),
+            [codes::disconnected::DISCONNECT_CALLED]
+        );
+        assert!(ended, "the client's stream ends");
+        let mut ended = false;
+        while let Some(next) = subscription_events.next().now_or_never() {
+            if next.is_none() {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the subscription's stream ends");
+        let failed = subscription
+            .history(crate::HistoryOptions::default())
+            .now_or_never()
+            .expect("fails at once")
+            .unwrap_err();
+        assert_eq!(failed.code, codes::error::DISCONNECTED);
+    }
+
+    #[test]
+    fn after_a_runtime_shut_down_the_client_stays_disconnected() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+        client.connect();
+        drop(runtime);
+        queued(&mut events);
+        let mut events = client.events();
+
+        client.connect();
+
+        assert_eq!(client.state(), State::Disconnected);
+        let (taken, _) = queued(&mut events);
+        assert!(taken.is_empty(), "{taken:?}");
+        let failed = client
+            .rpc("echo", b"{}".to_vec())
+            .now_or_never()
+            .expect("fails at once")
+            .unwrap_err();
+        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        assert_eq!(
+            client.new_subscription("news").err(),
+            Some(crate::SubscriptionError::ClientClosed)
+        );
+    }
+
+    #[test]
+    fn a_runtime_without_time_or_io_ends_the_client_with_code_2() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+        client.connect();
+
+        // The driver panics on its first timer or socket; the stream ends.
+        let taken: Vec<ClientEvent> = runtime.block_on(async {
+            let mut taken = Vec::new();
+            while let Some(event) = events.next().await {
+                taken.push(event);
+            }
+            taken
+        });
+
+        assert_eq!(
+            disconnected_codes(&taken),
+            [codes::disconnected::BAD_PROTOCOL]
+        );
+    }
+
+    #[test]
+    fn a_guard_dropped_with_the_core_poisoned_ends_calls_and_streams_without_an_event() {
+        let runtime = idle_runtime();
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+        client.connect();
+        queued(&mut events);
+        let mut call = Box::pin(client.rpc("echo", b"{}".to_vec()));
+        assert!(call.as_mut().now_or_never().is_none());
+        let shared = Arc::clone(client.shared());
+
+        let panicked = std::thread::spawn(move || {
+            // The lock guard drops first as the panic unwinds, poisoning
+            // the lock; then the guard runs, still panicking.
+            let _ending = Ending(Arc::clone(&shared));
+            let _core = shared.core.lock().unwrap();
+            panic!("a bug in the driver");
+        })
+        .join();
+
+        assert!(panicked.is_err());
+        let (taken, ended) = queued(&mut events);
+        assert!(taken.is_empty(), "{taken:?}");
+        assert!(ended, "the stream ends");
+        let failed = call.now_or_never().expect("settled").unwrap_err();
+        assert_eq!(failed.code, codes::error::DISCONNECTED);
+        drop(client);
+        drop(runtime);
+    }
+
+    #[test]
+    fn building_on_a_runtime_already_shut_down_returns_an_error() {
+        let runtime = idle_runtime();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+
+        let built = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .runtime(handle)
+            .build();
+
+        let error = built.expect_err("an error, the runtime being gone");
+        assert_eq!(error.kind, crate::ErrorKind::Configuration);
+        assert!(error.message.contains("shut down"), "{}", error.message);
+    }
+
+    #[test]
+    fn the_adapter_spawns_only_through_its_runtime_handle() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&root).expect("src/adapter") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            // Code before the test module only.
+            let code = text
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(&text);
+            for (number, line) in code.lines().enumerate() {
+                if line.contains("tokio::spawn") || line.contains("tokio::task::spawn") {
+                    found.push(format!("{}:{}: {line}", path.display(), number + 1));
+                }
+            }
+        }
+
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     #[tokio::test]
