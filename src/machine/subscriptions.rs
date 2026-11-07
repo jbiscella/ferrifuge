@@ -86,8 +86,10 @@ struct Subscription {
     recover: bool,
     /// Delta compression as the last subscribe reply set it.
     delta: DeltaChain,
-    /// What delta did since the subscription was created (Block 31).
-    delta_statistics: crate::DeltaStatistics,
+    /// What delta did since the subscription was created (Block 31);
+    /// boxed at the first payload counted, so that a subscription without
+    /// delta pays a pointer (Block 14, "Marginal cost of a subscription").
+    delta_statistics: Option<Box<crate::DeltaStatistics>>,
 }
 
 /// Whether a subscribe reply turned delta on (Block 19, D4), and what the
@@ -221,7 +223,7 @@ impl Machine {
                 position,
                 recover,
                 delta: DeltaChain::Off,
-                delta_statistics: crate::DeltaStatistics::default(),
+                delta_statistics: None,
             },
         );
         Ok(id)
@@ -266,7 +268,7 @@ impl Machine {
         self.subscriptions
             .by_id
             .get(&id)
-            .map(|sub| sub.delta_statistics)
+            .map(|sub| sub.delta_statistics.as_deref().copied().unwrap_or_default())
     }
 
     /// `subscribe()` was called.
@@ -1009,6 +1011,7 @@ impl Machine {
         // As carried and as rebuilt, a failed delta not counted (Block 31,
         // D3).
         sub.delta_statistics
+            .get_or_insert_default()
             .count(publication.delta, received, data.len());
         *base = Some(data.clone());
         publication.data = data;
