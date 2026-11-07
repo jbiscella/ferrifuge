@@ -114,7 +114,7 @@ fn close_unsubscribes_every_subscription_before_disconnected() {
         machine.subscription_state(id),
         Some(SubscriptionState::Unsubscribed)
     );
-    assert!(machine.server_subscriptions().is_empty());
+    assert_eq!(machine.server_subscriptions(), Vec::<String>::new());
     assert_eq!(machine.statistics().subscriptions, 1);
 }
 
