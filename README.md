@@ -646,7 +646,9 @@ environment applies).
 ### Mobile
 
 Ferrifuge builds for Android (`aarch64-linux-android`, API level 22 and up)
-and iOS (`aarch64-apple-ios`); CI builds both, without running on a device.
+and iOS (`aarch64-apple-ios`, iOS 13 and up); CI builds both, without
+running on a device. For iOS, set `IPHONEOS_DEPLOYMENT_TARGET` to the app's
+deployment target, so that rustc and the C builds of ring or aws-lc agree.
 
 **Backgrounding.** Mobile systems suspend an app's sockets in the
 background. Disconnect when the app goes to the background and connect when
