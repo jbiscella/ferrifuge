@@ -359,6 +359,61 @@ jobs:
       - name: Examples
         run: cargo build --examples
 
+  # Mobile builds (Block 24, D1): the library and its unit tests build for
+  # Android and iOS, with ring and with aws-lc-rs; nothing runs on a device.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The compiler, archiver and linker of the runner's NDK
+      # (ANDROID_NDK_HOME), at API level 22, the floor of the verifier's
+      # Kotlin component; as rustls-platform-verifier's own CI does.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+
+      - name: Default features (ring)
+        run: |
+          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests -- -D warnings
+          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run
+
+      - name: aws-lc-rs
+        run: |
+          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests --no-default-features --features tokio,aws-lc-rs -- -D warnings
+          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run --no-default-features --features tokio,aws-lc-rs
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Default features (ring)
+        run: |
+          cargo clippy --target aarch64-apple-ios --lib --tests -- -D warnings
+          cargo test --target aarch64-apple-ios --lib --no-run
+
+      - name: aws-lc-rs
+        run: |
+          cargo clippy --target aarch64-apple-ios --lib --tests --no-default-features --features tokio,aws-lc-rs -- -D warnings
+          cargo test --target aarch64-apple-ios --lib --no-run --no-default-features --features tokio,aws-lc-rs
+
   # The public API against the base branch (Block 14e): a breaking change
   # needs a version bump (0.x: the minor version).
   semver:
