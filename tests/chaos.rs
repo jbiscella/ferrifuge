@@ -1386,6 +1386,8 @@ impl Run {
                 self.agenda
                     .retain(|_, due| !matches!(due, Due::State(of, ..) if *of == fetch));
             }
+            // Only reported: the reconnect follows as its own actions.
+            Action::Anomaly(_) => self.count("anomaly"),
             other => panic!("an action the runner does not expect: {other:?}"),
         }
         Ok(())

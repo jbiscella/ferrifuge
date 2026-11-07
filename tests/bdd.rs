@@ -345,6 +345,9 @@ const IMPLEMENTED: &[&str] = &[
     "The release check refuses a version without a changelog section",
     "The published package holds only what the crate needs",
     "The quickstart example receives a publication",
+    // Block 21: logging.
+    "The core reports a frame that is not client protocol data",
+    "The core reports a reply without its command's result",
 ];
 
 /// Server configuration of @A scenarios.

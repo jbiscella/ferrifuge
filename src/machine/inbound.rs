@@ -7,7 +7,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use super::{Action, EventId, Machine, Timer, TransportId};
+use super::{Action, Anomaly, EventId, Machine, Timer, TransportId};
 use crate::State;
 use crate::wire::{Reply, ReplyResult};
 
@@ -48,6 +48,11 @@ impl Machine {
     pub(super) fn frame(&mut self, transport: TransportId, data: &[u8]) {
         let Some(replies) = self.codec.decode_sized(data) else {
             // Not client protocol data, e.g. from a misconfigured proxy.
+            self.actions
+                .push(Action::Anomaly(Anomaly::UndecodableFrame {
+                    transport,
+                    bytes: data.len(),
+                }));
             self.reconnect_after_transport_closed();
             return;
         };

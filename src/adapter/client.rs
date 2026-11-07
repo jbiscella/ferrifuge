@@ -1147,6 +1147,7 @@ impl Driver {
             }
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
+            Action::Anomaly(_) => {}
             // Shared::handle routes them to the outboxes.
             Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
                 unreachable!("events never reach the driver")
