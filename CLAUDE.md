@@ -3667,6 +3667,7 @@ This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "R
   - A wall clock set forward by 2 s or more counts as a sleep, with D2 and D3's safe consequences; one set backward is ignored.
   - The core ignores a gap under 2 s, so another owner may report every gap it measures.
   - The check reads two clocks and allocates nothing; the Block 14 @P gates pass unchanged.
+  - When the input that revealed the sleep is the firing of a timer that the core's answer to `Slept` sets again or shortens, the adapter drops that firing: it belongs to the deadline the core just replaced. Otherwise a sleep first seen at the no-ping deadline would reconnect although D2 keeps the transport (Codex, #119).
   - `VERIFY:` whether `Instant` (QueryPerformanceCounter) counts a suspend on Windows. If it does, no gap is seen there and the timers fire at the wake as if they counted it; the README says which.
 - **D2 The connection, in the core.** On `Slept { gap }` while connected:
   - when `gap` is at least the no-ping window (Block 4: the ping interval plus `max_server_ping_delay`, neither 0), the core closes the transport and reconnects with code 2 "no ping", as when the no-ping deadline fires: Block 2's delay and Block 14's jitter window apply, so a fleet waking on a schedule does not reconnect at once (diverges on purpose from the official SDK's immediate reconnect, §9.7);
@@ -3675,7 +3676,7 @@ This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "R
   While connecting, the attempt in flight keeps its connect timeout and the backoff its delay; only D3 applies.
 - **D3 Refresh timers.** On `Slept { gap }`, the core shortens by `gap` every token refresh timer running, the connection's and each subscription's, with two new actions, `Action::ShortenTimer(Timer, Duration)` and `Action::ShortenSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration)`: the owner makes the timer fire that much earlier, at once if that time has passed, and ignores a timer not running. The core holds no clock (Block 0); only the owner knows how long each timer has left.
   - A refresh that came due during the sleep starts at the wake.
-  - A reconnect caused by a sleep (D2) keeps the refresh timers running until the next connect or subscribe reply re-arms or cancels them. One that fires while the client is connecting makes the next attempt fetch a new connection token first; one that fires while its subscription is subscribing makes its next subscribe fetch a new token first. So a token that expired during the sleep is not sent, and no error 109 round trip is needed (the official SDK keeps expiry as wall time, §6.6).
+  - Every reconnect, whether a sleep caused it (D2) or not, keeps the refresh timers running until the next connect or subscribe reply re-arms or cancels them, so a transport lost just before a sleep still has its refresh timer for D3 to shorten (Codex, #119); `disconnect()`, `unsubscribe()` and a terminal condition still cancel them (amends Blocks 5b and 10, whose teardown cancelled them on every reconnect). One that fires while the client is connecting makes the next attempt fetch a new connection token first; one that fires while its subscription is subscribing makes its next subscribe fetch a new token first. So a token that expired during the sleep is not sent, and no error 109 round trip is needed (the official SDK keeps expiry as wall time, §6.6).
 - **D4 Timers a sleep leaves alone.** Reply deadlines (connect, refresh, subscribe, unsubscribe, `sub_refresh`), call timers, and the reconnect and resubscribe delays. The monotonic clock stopped during the sleep, so it used none of their time. Shortening the delays would make a fleet that slept together reconnect together.
 - **D5 `Client::reconnect()`.** It mirrors `connect()`; in the core it is `Input::Reconnect`. The client goes to, or stays in, `connecting`, never `disconnected`:
   - connected: the transport closes and the client emits "connecting" with code 6 "reconnect called" (`codes::connecting::RECONNECT_CALLED`);
@@ -3702,6 +3703,7 @@ Value clause: As an app developer whose clients run on laptops and phones that s
 
 **Structural acceptance:**
 - a unit test of the adapter's comparison: a wall clock ahead by 2 s gives a gap; ahead by 1999 ms, or behind, gives none;
+- an adapter unit test: a sleep revealed by the no-ping timer's firing, shorter than the no-ping window, drops that firing and keeps the transport;
 - unit tests of the open checks: a websocket upgrade answered with 200 `text/html`, 302 or 511 names a captive portal, and one answered with 403 does not; http_stream and sse the same, against `src/adapter/http.rs`'s one-shot server;
 - a unit test: after `reconnect()`, the delay after a failed attempt stays within Block 2's bound for attempt 0, drawn 1000 times;
 - a unit test: after `reconnect()`, the next attempt reads the system proxy settings again;
@@ -3770,6 +3772,14 @@ Feature: Sleep, network changes, captive portals
     Given a connected machine whose server pings every 25 s, with maxServerPingDelay 10 s and timeout 5 s, with an RPC call sent 2 s ago and not answered
     When it is told it slept for 30 s
     Then the call's reply deadline is 3 s from now
+
+  @E
+  Scenario: A token due during a sleep in a reconnect delay is fetched before the next connect
+    Given a connected machine with minReconnectDelay 10000 ms whose connection token refresh is due in 50 s
+    And its transport was lost a moment ago
+    When it is told it slept for 60 s
+    And its next attempt starts
+    Then it asks for a new connection token before opening a transport
 
   @E
   Scenario: A sleep while connecting keeps the reconnect delay
