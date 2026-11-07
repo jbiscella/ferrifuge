@@ -52,6 +52,9 @@ pub(super) struct Tokens {
     next_fetch: u64,
     /// Id of the refresh command awaiting its reply.
     refresh_command: Option<u32>,
+    /// A refresh came due and has no new token yet: its fetch runs, or its
+    /// retry waits (Block 25, D3).
+    refreshing: bool,
 }
 
 impl Tokens {
@@ -65,6 +68,7 @@ impl Tokens {
             stale_fetch: None,
             next_fetch: 0,
             refresh_command: None,
+            refreshing: false,
         }
     }
 
@@ -99,6 +103,9 @@ impl Tokens {
     /// their fetches from one counter, as the adapter routes answers by id.
     pub(super) fn begin_fetch(&mut self, id: FetchId, purpose: FetchPurpose) {
         self.fetch = Some((id, purpose));
+        if purpose == FetchPurpose::Refresh {
+            self.refreshing = true;
+        }
     }
 
     /// The pending fetch, if any.
@@ -139,6 +146,7 @@ impl Tokens {
     /// expired flag.
     pub(super) fn store(&mut self, token: String, purpose: FetchPurpose) {
         self.current = Secret(token);
+        self.refreshing = false;
         if purpose == FetchPurpose::Connect {
             self.refresh_required = false;
         }
@@ -179,6 +187,22 @@ impl Tokens {
         }
     }
 
+    /// The connection or subscription is torn down to connect or subscribe
+    /// again: a refresh left without a new token makes that attempt fetch
+    /// one first; a token already fetched, its command pending, is kept
+    /// for it (Block 25, D3).
+    pub(super) fn abandon_refresh(&mut self) {
+        if std::mem::take(&mut self.refreshing) {
+            self.refresh_due();
+        }
+    }
+
+    /// The refresh ends without another attempt: `disconnect()`,
+    /// `unsubscribe()` or a terminal condition.
+    pub(super) fn forget_refresh(&mut self) {
+        self.refreshing = false;
+    }
+
     pub(super) fn connected(&mut self) {
         self.refresh_required = false;
     }
@@ -191,6 +215,7 @@ impl Tokens {
     pub(super) fn invalidate(&mut self) {
         self.current = Secret::default();
         self.refresh_required = false;
+        self.refreshing = false;
         self.fetch = None;
         self.stale_fetch = None;
     }
@@ -225,6 +250,11 @@ impl Tokens {
     /// (centrifuge-js `_refresh`), and the next connection refreshes on its
     /// own schedule.
     pub(super) fn teardown(&mut self, reconnect: bool) {
+        if reconnect {
+            self.abandon_refresh();
+        } else {
+            self.forget_refresh();
+        }
         self.refresh_command = None;
         match self.fetch.take() {
             Some((id, FetchPurpose::Refresh)) if reconnect => self.stale_fetch = Some(id),

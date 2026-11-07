@@ -1393,6 +1393,13 @@ impl Machine {
             return;
         }
         match result {
+            // A refresh that came due while the callback ran, e.g. after a
+            // sleep, needs a new token first; the data callback then runs
+            // again for it, as on any attempt that fetches one (Block 25,
+            // D3).
+            Ok(_) if self.tokens.before_connect() == BeforeConnect::Fetch => {
+                self.fetch_token(FetchPurpose::Connect);
+            }
             Ok(data) => {
                 self.connect_data.attempt = Some(data);
                 self.open_transport();
@@ -2208,6 +2215,57 @@ mod tests {
         }
     }
 
+    // Codex, #120: the refresh came due while the connect data callback
+    // ran.
+    #[test]
+    fn a_refresh_due_during_the_connect_data_callback_fetches_a_token_first() {
+        let mut machine = token_machine("t0").with_data_source();
+        let fetch_data = |actions: &[Action]| {
+            actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::FetchConnectData(fetch) => Some(*fetch),
+                    _ => None,
+                })
+                .expect("a connect data fetch")
+        };
+        let first = fetch_data(&machine.handle(Input::Connect));
+        let transport = opened_transport(&machine.handle(Input::ConnectDataFetched {
+            fetch: first,
+            result: Ok(b"{}".to_vec()),
+        }));
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let again = fetch_data(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.handle(Input::TimerFired(Timer::Refresh));
+
+        let answered = machine.handle(Input::ConnectDataFetched {
+            fetch: again,
+            result: Ok(b"{}".to_vec()),
+        });
+
+        assert!(
+            answered
+                .iter()
+                .any(|action| matches!(action, Action::FetchToken(_))),
+            "{answered:?}"
+        );
+        assert!(
+            !answered
+                .iter()
+                .any(|action| matches!(action, Action::OpenTransport { .. })),
+            "{answered:?}"
+        );
+    }
+
     // Block 25, D3: the refresh timer outlives a reconnect, until the next
     // connect reply re-arms or cancels it.
     #[test]
@@ -2853,7 +2911,13 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        // The refresh got no token: the attempt fetches one first (Block 25,
+        // D3).
+        let attempt = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let transport = opened_transport(&machine.handle(Input::TokenFetched {
+            fetch: attempt,
+            result: Ok("t0b".into()),
+        }));
         machine.handle(Input::TransportOpened(transport));
         machine.handle(frame(
             transport,
@@ -2925,7 +2989,13 @@ mod tests {
             result: Ok("t1".into()),
         });
 
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        // The refresh got no token: the attempt fetches one first (Block 25,
+        // D3), and the late one is not used.
+        let attempt = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let transport = opened_transport(&machine.handle(Input::TokenFetched {
+            fetch: attempt,
+            result: Ok("t2".into()),
+        }));
         let connecting = machine.handle(Input::TransportOpened(transport));
 
         let Some(Action::Send { frame, .. }) = connecting
@@ -2935,7 +3005,7 @@ mod tests {
             panic!("{connecting:?}");
         };
         let frame = String::from_utf8(frame.clone()).unwrap();
-        assert!(frame.contains(r#""token":"t0""#), "{frame}");
+        assert!(frame.contains(r#""token":"t2""#), "{frame}");
     }
 
     #[test]
