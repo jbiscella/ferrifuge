@@ -354,6 +354,14 @@ const IMPLEMENTED: &[&str] = &[
     "Endpoints are logged without credentials, query or fragment",
     "No secret reaches a record",
     "The records of two clients are told apart",
+    // Block 22: TLS verification.
+    "A private certificate authority given as an extra root is trusted",
+    "A server whose CA is not trusted is refused",
+    "Extra roots also apply to HTTPS transports",
+    "A raw rustls configuration is used as given",
+    "A raw rustls configuration replaces the platform's trust",
+    "Extra roots and a raw configuration together are rejected",
+    "An extra root that does not parse is rejected",
 ];
 
 /// Server configuration of @A scenarios.

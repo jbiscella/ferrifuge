@@ -15,7 +15,8 @@ use futures_util::stream::{BoxStream, FuturesUnordered};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 
-use super::transport::{BuildOnce, Inbound, plain_tls_config, tls_setup};
+use super::tls::{Tls, plain_http_client};
+use super::transport::Inbound;
 use crate::machine::{FrameId, TransportKind};
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
@@ -71,9 +72,10 @@ impl HttpTransport {
         emulation_endpoint: Option<&str>,
         request_timeout: Duration,
         headers: Arc<HeaderMap>,
+        tls: &Tls,
     ) -> Result<Self, String> {
         let mut url = Url::parse(url).map_err(|e| e.to_string())?;
-        let http = http_client(url.scheme() == "https")?;
+        let http = http_client(url.scheme() == "https", tls)?;
         let emulation_url = emulation_url(&url, emulation_endpoint)?;
         let sse = kind == TransportKind::Sse;
         let request = if sse {
@@ -121,7 +123,7 @@ impl HttpTransport {
             })
             .boxed();
         Ok(Self {
-            emulation_http: http_client(emulation_url.scheme() == "https")?,
+            emulation_http: http_client(emulation_url.scheme() == "https", tls)?,
             emulation_url,
             request_timeout,
             headers,
@@ -266,32 +268,14 @@ fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> 
     Ok(url)
 }
 
-/// The HTTP client for `https://` endpoints or for plain ones, built once
-/// per process with the client's TLS configuration; not kept when that
-/// configuration is not (Block 6, review item C7).
-fn http_client(secure: bool) -> Result<reqwest::Client, String> {
-    static SECURE: BuildOnce<reqwest::Client> = BuildOnce::new();
-    static PLAIN: BuildOnce<reqwest::Client> = BuildOnce::new();
-    let client = if secure { &SECURE } else { &PLAIN };
-    let (client, _) = client.get(|| {
-        let (tls, keep) = if secure {
-            let (config, keep) = tls_setup()?;
-            ((*config).clone(), keep)
-        } else {
-            (plain_tls_config(), true)
-        };
-        reqwest::Client::builder()
-            .tls_backend_preconfigured(tls)
-            // The TLS setup and the emulation endpoint follow from the
-            // configured URL: a redirect elsewhere fails the attempt, like an
-            // unreachable endpoint, rather than splitting the stream and the
-            // commands between two servers.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map(|client| (client, keep))
-            .map_err(|e| e.to_string())
-    })?;
-    Ok(client)
+/// The HTTP client for `https://` endpoints, with the client's TLS
+/// settings, or for plain ones.
+fn http_client(secure: bool, tls: &Tls) -> Result<reqwest::Client, String> {
+    if secure {
+        tls.https_client()
+    } else {
+        plain_http_client()
+    }
 }
 
 /// Splits a response body into the messages it carries: one JSON reply per
@@ -528,6 +512,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await;
 
@@ -609,6 +594,7 @@ mod tests {
             Some(&redirecting),
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await
         .unwrap();
@@ -654,6 +640,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await
         .unwrap();
@@ -695,6 +682,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await
         .unwrap();
@@ -737,6 +725,7 @@ mod tests {
             Some(&rejecting),
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await
         .unwrap();
@@ -777,6 +766,7 @@ mod tests {
             Some(&hung),
             Duration::from_secs(60),
             Arc::default(),
+            &Tls::default(),
         )
         .await
         .unwrap();
@@ -828,6 +818,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await;
 
@@ -853,6 +844,7 @@ mod tests {
             None,
             TIMEOUT,
             Arc::default(),
+            &Tls::default(),
         )
         .await;
 

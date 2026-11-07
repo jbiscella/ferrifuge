@@ -91,6 +91,12 @@ pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, St
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub use fossil::write as write_fossil_delta;
+/// rustls, whose types [`ClientBuilder::root_certificates`] and
+/// [`ClientBuilder::tls_config`] take (Block 22). Moving to another rustls
+/// 0.x line is a breaking release of Ferrifuge.
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use rustls;
 pub use subscription::{
     ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,
     SubscriptionError, SubscriptionEvent, SubscriptionState,

@@ -63,3 +63,43 @@ pub(crate) fn server_pem() -> (String, String) {
         fs::read_to_string(server_key_path()).expect("server key"),
     )
 }
+
+/// A second CA, never in `SSL_CERT_FILE`, so the platform does not trust it
+/// (Block 22): its certificate and a server certificate it signed, with the
+/// server's key, in DER and PEM. Created once per process.
+pub(crate) struct Private {
+    pub(crate) ca: rustls::pki_types::CertificateDer<'static>,
+    pub(crate) server_pem: String,
+    pub(crate) key_pem: String,
+}
+
+pub(crate) fn private() -> &'static Private {
+    static PRIVATE: std::sync::OnceLock<Private> = std::sync::OnceLock::new();
+    PRIVATE.get_or_init(|| {
+        let now = time::OffsetDateTime::now_utc();
+        let ca_key = KeyPair::generate().expect("CA key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "ferrifuge private test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params.not_before = now - time::Duration::days(1);
+        ca_params.not_after = now + time::Duration::days(30);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("CA certificate");
+        let issuer = Issuer::new(ca_params, ca_key);
+        let server_key = KeyPair::generate().expect("server key");
+        let mut server = CertificateParams::new(SERVER_NAMES.map(str::to_owned).to_vec())
+            .expect("server certificate parameters");
+        server.not_before = now - time::Duration::days(1);
+        server.not_after = now + time::Duration::days(30);
+        let server_cert = server
+            .signed_by(&server_key, &issuer)
+            .expect("server certificate");
+        Private {
+            ca: ca_cert.der().clone(),
+            server_pem: server_cert.pem(),
+            key_pem: server_key.serialize_pem(),
+        }
+    })
+}
