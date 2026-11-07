@@ -407,6 +407,17 @@ const IMPLEMENTED: &[&str] = &[
     "A message at the limit is delivered",
     "A message over the limit before the connect reply fails the attempt",
     "A maximum message size of 0 is rejected",
+    // Block 30: waiting until ready.
+    "Client ready resolves on the state, before the \"connected\" event is taken",
+    "Client ready on a disconnected client fails at once",
+    "Disconnect fails a waiting client ready",
+    "Client ready keeps waiting across failed attempts",
+    "A terminal connect failure fails a waiting client ready",
+    "Subscription ready resolves on the state, before the \"subscribed\" event is taken",
+    "Subscription ready on an unsubscribed subscription fails at once",
+    "A permanent subscribe error fails a waiting subscription ready",
+    "Subscription ready made before connect waits for the connection",
+    "Disconnect fails a waiting subscription ready",
 ];
 
 /// Server configuration of @A scenarios.

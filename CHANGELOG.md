@@ -11,6 +11,13 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- `Client::ready` and `Subscription::ready` (Block 30): wait until the
+  client is connected or the subscription subscribed, without taking an
+  event from their streams; they fail with code 3 "disconnected" or code 7
+  "subscription unsubscribed" (`CallError`) when that will not come.
+
 ## [0.18.0] - 2026-11-07
 
 ### Added

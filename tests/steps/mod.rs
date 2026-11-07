@@ -34,6 +34,7 @@ mod logging;
 mod ping;
 mod protobuf;
 mod proxies;
+mod ready;
 mod recovery;
 mod release;
 mod runtime;
@@ -179,6 +180,8 @@ pub(crate) struct ClientWorld {
     pub(crate) runtime: runtime::Separate,
     /// Timeouts and the size limit of a Block 29 scenario.
     pub(crate) limits: limits::Limits,
+    /// The `ready()` futures of a Block 30 scenario.
+    pub(crate) ready: ready::Ready,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
