@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–34 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–35 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -60,7 +60,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 - sockjs, webtransport transports (webtransport planned: Block 48)
 - map subscriptions, shared poll subscriptions (experimental; planned: Blocks 45 and 47)
 - client publish debouncing (Centrifugo PRO; planned: Block 46)
-- channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it
+- channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
 - browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims (planned: Block 44)
 - `closed` state
 
@@ -76,6 +76,9 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 14, out of scope | HTTP proxy (CONNECT) support | owner, 2026-11-06 (item 1) | 23 |
 | Block 14, out of scope | sleep/resume behaviour | owner, 2026-11-06 (item 4) | 25 |
 | Block 17, out of scope | replacing the HTTP headers of a built client (no `set_http_headers`) | owner, 2026-11-06 (item 14) | 32 |
+| Block 9, out of scope | delta compression, "the client never requests it" | owner, 2026-11-06 (item 5) | 19 |
+| Block 0, out of scope | channel compaction, "the client never offers it" | owner, 2026-11-06 (item 7) | 35 |
+| Block 9, out of scope | tag filters (`SubscribeRequest.tf`), "the client never sends one" | owner, 2026-11-06 (item 6) | 35 |
 
 ### Test layers
 
@@ -683,7 +686,7 @@ Feature: Transport fallback
 
 **Dependencies:** Blocks 1–5, 8 (publications over the emulated transports arrive as top-level pushes rather than websocket's reply envelope, so delivery is checked over every transport here).
 
-**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches; tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one.
+**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
 
 **Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
@@ -2894,7 +2897,7 @@ Feature: Batching
 **Out of scope:**
 - encoding deltas: the client never sends one (owner decision);
 - delta for server-side subscriptions: the client never asks for it in `ConnectRequest.subs` (centrifuge-js 63ed73e has no server-side delta either), so a delta publication there is a protocol fault (D8);
-- a tag filter together with delta: tag filters are not implemented yet (parity item 6); when they are, a subscription with both is rejected when built (`client.proto`, `SubscribeRequest.tf`: "disables delta compression"; centrifuge-js `subscription.ts:368-370`);
+- a tag filter together with delta: a subscription with both is rejected when built (Block 35, D1; `client.proto`, `SubscribeRequest.tf`: "disables delta compression"; centrifuge-js `subscription.ts:368-370`);
 - delta statistics (centrifuge-js `deltaStats()`): with `statistics()`, parity item 8;
 - a configurable inbound message limit (parity item 12);
 - map and shared-poll subscriptions and their per-key delta chains (Block 0).
@@ -4763,6 +4766,206 @@ Feature: Table of codes
   Scenario: Every quoted reason is one the client sends
     Given the crate's codes module
     Then every reason a row quotes occurs as a string literal in the crate's source outside the codes module
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 35 — Tag filters, channel compaction, publication channel, recovered publications
+
+**Goal:** a subscriber to a broad channel receives only the publications whose tags it asks for, filtered by the server; an app with many subscriptions and short messages lets a Centrifugo PRO server send numeric channel ids instead of names; a publication of a wildcard subscription says its channel; and the `subscribed` event says whether recovered publications follow (parity items 6, 7, 28 and 37; "Planned after Block 19", owner decision 2026-11-06, decided by the reviewer by state of the art: design A for each).
+
+**Dependencies:** Blocks 0 (the compaction exclusion), 7 (Protobuf), 9 (subscription options, its tag-filter exclusion, `Publication`), 11 (`Subscribed`, recovery, positions), 12 (server-side subscriptions), 13 (join and leave pushes), 14 (O(1) dispatch by channel), 19 (delta, its tag-filter line), 21 (redacting `Debug`), 32 (`set_data` pattern), 34 (latest, format).
+
+**Out of scope:**
+- `Publication.time` (`client.proto` field 9: "not sent to clients by the current server");
+- map and shared-poll subscriptions (Blocks 45, 47), whose tag filters and keys come with them;
+- a string filter language (the analysis's design C for item 6);
+- channel compaction for server-side subscriptions: `ConnectRequest.subs` uses "only recover, epoch, offset and delta" (`client.proto`), so a client cannot ask for it; ids in `ConnectResult.subs` are ignored (centrifuge-js 63ed73e routes server-side pushes by channel only, `centrifuge.ts:2245-2262`, `:2690-2696`);
+- requesting compaction on every subscribe (centrifuge-js 63ed73e `subscription.ts:977`, the analysis's design B);
+- tag filters set by the server (Centrifugo PRO "server tags filter"): nothing for the client;
+- checking a filter beyond D1 (operators, numeric values): the server's, answered as Block 9's permanent subscribe error.
+
+This block reverses two exclusions: Block 0's "channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it" and Block 9's "tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one" (owner decision 2026-11-06, items 6 and 7); Block 0's "Reversed exclusions" gains both rows, and both lines say so. Block 19's out-of-scope line on a tag filter with delta points to D1. Block 9's delta clause, reversed by Block 19 and not marked then, is marked now, with its row.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 35a | As an app developer subscribing to a broad channel, I want the server to send me only the publications whose tags match my filter, so that my clients spend no bandwidth on the rest | "A tag filter delivers only matching publications", "The tag filter is sent on subscribe and on resubscribe", "A tag filter set on a subscription is sent from the next subscribe", "A tag filter with delta is refused", "A tag filter the server would reject is refused" |
+| 35b | As an app developer with many subscriptions on Centrifugo PRO, I want pushes to carry numeric channel ids, so that short messages are not dominated by channel names | "Channel compaction is requested on every subscribe", "Pushes with a numeric channel id reach their subscription", "A push with an unknown channel id is dropped", "Numeric channel ids are forgotten when the connection ends", "Channel compaction on a server without it changes nothing" |
+| 35c | As an app developer, I want a publication's own channel and whether a subscribe brought recovered publications, so that wildcard subscriptions and recovery metrics need no guessing | "A publication of a wildcard subscription carries its channel", "A publication of another channel does not move the stream position", "The subscribed event says whether recovered publications follow", "A server-side subscribed event says whether publications follow" |
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Tag filter (35a).**
+  - **Type.** `TagFilter` is an opaque struct with a private representation of `client.proto` `FilterNode`: Ferrifuge's own type, not prost's. It derives `Clone`, `PartialEq`, `Eq` and `Hash`.
+  - **Leaves.** Associated functions taking their operands as `impl Into<String>`, `vals` as an `IntoIterator`:
+    - `eq` and `neq`;
+    - `is_in` and `not_in` (`in` is a keyword; the names follow sea-query);
+    - `exists` and `not_exists`;
+    - `starts_with`, `ends_with` and `contains` (the names follow std's `str`);
+    - `lt`, `lte`, `gt` and `gte`, whose value is decimal text, as `client.proto` compares.
+
+    Each has a `#[doc(alias)]` naming its wire operator (`in`, `nin`, `ex`, `nex`, `sw`, `ew`, `ct`).
+  - **Combinators.** `a.and(b)` and `a.or(b)` merge into one node when an operand already has that operation. `!a` comes from `std::ops::Not` (Rust API Guidelines C-OVERLOAD). A list is combined with `Iterator::reduce(TagFilter::and)`, which gives `None` when the list is empty. An empty `and` or `or`, a `not` with other than one node, and a leaf without its comparison therefore cannot be built (Q1, C-VALIDATE: static checks first).
+  - **Checked when attached.** `build()` and `set_tag_filter` check what no signature can: a comparison other than `exists` and `not_exists` with an empty key, and an `is_in` or `not_in` with no value (`client.proto`: "Required"). Centrifugo rejects either with ErrorBadRequest (centrifugal.dev, "Channel publication filtering"), which would unsubscribe the subscription for good. Either fails with `SubscriptionError::InvalidTagFilter { reason }`, the reason naming the key, and nothing is sent.
+  - **API.** `SubscriptionBuilder::tag_filter(TagFilter)` and `SubscriptionOptions::tag_filter: Option<TagFilter>`. `Subscription::set_tag_filter(Option<TagFilter>) -> Result<(), SubscriptionError>` applies from the next subscribe command, as `set_data` does (Block 32; centrifuge-js 63ed73e `subscription.ts:367-380` `setTagsFilter`), sending nothing now. `None` removes the filter.
+  - **Wire.** Sent as `SubscribeRequest.tf` on every subscribe and resubscribe, in JSON and Protobuf.
+  - **Delta.** A filter together with the delta option fails `build()`, and fails `set_tag_filter(Some(_))` on a delta subscription, with `SubscriptionError::TagFilterWithDelta`, changing nothing. centrifuge-js throws "cannot use delta and tagsFilter together" (`:368-370`, `:1415-1417`); `client.proto`: a filter "disables delta compression".
+  - **Debug.** Shows keys and operators, never values (Block 21, D5: tags by name only).
+  - **Verified** (centrifugal.dev, read 2026-11-08): the channel option `allow_tags_filter` (default false, "Available since Centrifugo v6.4.0"), so v6.10.1 honours `tf` and the delivery scenario is @A. Recovery returns only matching publications.
+  - `VERIFY:` that `CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_TAGS_FILTER=true` allows it on channels without a namespace (the documentation speaks of namespaces), by a raw client run as Block 19 did. If it does not, the @A server gains a namespace with `allow_tags_filter`; the scenario stays @A.
+- **D2 Channel compaction (35b).**
+  - **Option.** `SubscriptionBuilder::channel_compaction(bool)` and `SubscriptionOptions::channel_compaction`, default off (analysis design A, opt-in like `join_leave`). It sets `SubscribeRequest.flag` bit 0 beside bit 1 (`REJECT_UNRECOVERED`) on every subscribe. A server without compaction ignores the bit; the @A scenario checks v6.10.1.
+  - **Map.** The core keeps a map from id to subscription for the connection (Block 14's O(1) dispatch).
+    - A subscribe reply carrying `SubscribeResult.id` > 0 maps that id to its subscription, replacing any earlier holder of the id (centrifuge-js 63ed73e `subscription.ts:548-550`).
+    - A subscription's entry is removed when it leaves `subscribed`: on a resubscribe, an unsubscribe, a removal or state invalidation (`:623-626`, `:1084-1087`).
+    - The whole map is cleared when the connection ends (centrifuge-rust `docs/spec.md` §7.7, §7.8, commit 88d6edf).
+  - **Routing.**
+    - A pub, join or leave push with `Push.id` > 0 and an empty channel goes to the subscription its id maps to, under the same rules as routing by channel: only while subscribed, and delta checks after routing (Block 19, D5).
+    - A push with an unknown id is dropped and never given to server-side subscriptions (Q2, out of scope).
+    - A push with a channel is routed by channel, as before. In JSON the id is a number (centrifuge-js 63ed73e `fakeServer.ts:17`).
+  - **Tests.** @D for the routing: there is no Centrifugo PRO server in CI, and the documentation of the option says so.
+- **D3 Publication channel (35c).**
+  - **Field.** `Publication::channel: Option<String>` is set when the server sends a non-empty `Publication.channel` (`client.proto` field 10: "only set when it differs from the channel of the subscription, i.e. for wildcard subscriptions") and is `None` otherwise. It applies to client-side and server-side subscriptions alike, and `Debug` shows it.
+  - **Position.** A publication with its own channel moves neither the offset nor the epoch of its subscription, since it belongs to another stream (centrifuge-rust `docs/spec.md` §7.4, commit 88d6edf).
+  - **Verified:** the open-source Centrifugo v6.10.1 has no wildcard subscriptions. Its documentation reserves `*` "for the future Centrifugo needs" (centrifugal.dev, "Channels"), and a maintainer said only concrete channels can be subscribed to (centrifugal/centrifugo#799). The scenarios are therefore @D.
+- **D4 Recovered publications (35c).**
+  - **Field.** `Subscribed::has_recovered_publications: bool` is true when the subscribe reply, or the `ConnectResult.subs` entry, carries publications, recovered or initial, which follow the event unless withdrawn (Block 15). This is centrifuge-js 63ed73e `_getSubscribeContext` (`centrifuge.ts:2484-2524`, `types.ts:326` server-side, `:347` client-side).
+  - **Subscribe push.** A `Subscribe` push carries no publications (`client.proto`, `Subscribe`), so the field is false there.
+  - **Documentation.** The field is documented for metrics and logging.
+- **D5 Version and documentation.**
+  - **Version.** No bump: the change is additive. `Publication`, `Subscribed`, `SubscriptionOptions` and `SubscriptionError` are `#[non_exhaustive]`, and the types, methods and `Input::SetSubscriptionTagFilter` are new.
+  - **Changelog.** `Unreleased` "Added" entries per sub-increment.
+  - **README.** The "Subscriptions" section gains the tag filter and the compaction option, the latter marked Centrifugo PRO and untested in CI.
+
+Value clause: As an app developer on a busy Centrifugo deployment, I want server-side tag filtering, numeric channel ids, a publication's own channel and the recovered-publications flag, so that clients receive and decode only what they need.
+
+**Structural acceptance:**
+- codec unit tests encode a nested filter and the flag (bit 0 alone, bit 0 with bit 1, neither without the option) in JSON and Protobuf, and decode `SubscribeResult.id`, `Push.id` and `Publication.channel`;
+- unit tests: `and` and `or` chains merge; the D1 checks; `Debug` of a filter shows no value;
+- core unit tests route a pub, join and leave by id; drop an unknown id without a server-side publication; drop an id after its subscription unsubscribes or resubscribes; clear the map on disconnect;
+- each scenario is seen failing once on a mutation (filter not sent, flag not set, id map not cleared, channel not decoded, flag always true), recorded in the PR.
+
+```gherkin
+Feature: Tag filters, channel compaction, publication channel, recovered publications
+
+  @A
+  Scenario Outline: A tag filter delivers only matching publications
+    Given a client configured with the <protocol> protocol, subscribed to a channel allowing tag filters with the filter ticker in BTC, ETH
+    When the server API publishes to the channel with tags {"ticker":"BTC"}, then {"ticker":"XRP"}, then {"ticker":"ETH"}
+    Then the subscription receives exactly the publications tagged BTC and ETH, in order
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario: The tag filter is sent on subscribe and on resubscribe
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the filter ticker eq BTC is subscribed
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the fake server received 2 subscribe commands for "news", each carrying the filter ticker eq BTC
+
+  @D
+  Scenario: A tag filter set on a subscription is sent from the next subscribe
+    Given a client connected to the fake server
+    When a subscription to channel "news" with the filter ticker eq BTC is subscribed
+    And the tag filter of the subscription is set to ticker eq ETH
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the fake server received exactly 2 subscribe commands for "news", the first carrying the filter ticker eq BTC and the second ticker eq ETH
+
+  Scenario: A tag filter with delta is refused
+    Given subscription options with the fossil delta option and a tag filter
+    When the subscription is built
+    Then building fails because a tag filter cannot be combined with delta
+    And setting a tag filter on a subscription with the fossil delta option fails the same way
+
+  Scenario Outline: A tag filter the server would reject is refused
+    Given subscription options with the tag filter <filter>
+    When the subscription is built
+    Then building fails because the tag filter is invalid
+    And setting that tag filter on a built subscription fails the same way
+
+    Examples:
+      | filter                                      |
+      | a set comparison on "ticker" with no value  |
+      | an equality with an empty key               |
+
+  @D
+  Scenario: Channel compaction is requested on every subscribe
+    Given a client connected to the fake server
+    When a subscription to channel "news" with channel compaction is subscribed
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    Then the fake server received 2 subscribe commands for "news", each requesting channel compaction
+
+  @D
+  Scenario Outline: Pushes with a numeric channel id reach their subscription
+    Given a client subscribed to channel "news" on the fake server with channel compaction and join and leave pushes, the fake server giving it id 7
+    When the fake server pushes a <push> with id 7 and no channel
+    Then the subscription receives that <push>
+
+    Examples:
+      | push        |
+      | publication |
+      | join        |
+      | leave       |
+
+  @D
+  Scenario: A push with an unknown channel id is dropped
+    Given a client subscribed to channel "news" on the fake server with channel compaction, the fake server giving it id 7
+    When the fake server pushes a publication with id 8 and no channel, then one with id 7 and no channel
+    Then the subscription receives exactly one publication, the one pushed with id 7
+    And the client receives no server-side publication
+
+  @D
+  Scenario: Numeric channel ids are forgotten when the connection ends
+    Given a client subscribed to channel "news" on the fake server with channel compaction, the fake server giving it id 7
+    When the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again, the fake server giving it id 9
+    And the fake server pushes a publication with id 7 and no channel, then one with id 9 and no channel
+    Then the subscription receives exactly one publication, the one pushed with id 9
+
+  @A
+  Scenario: Channel compaction on a server without it changes nothing
+    Given a client subscribed to channel "news" with channel compaction
+    When the server API publishes {"text":"hello"} to channel "news"
+    Then the subscription receives a publication with data {"text":"hello"}
+
+  @D
+  Scenario: A publication of a wildcard subscription carries its channel
+    Given a client subscribed to channel "news" on the fake server
+    When the fake server pushes a publication for channel "news" whose own channel is "news.sport", then one with no own channel
+    Then the subscription receives a publication whose channel is "news.sport", then one with no channel
+
+  @D
+  Scenario: A publication of another channel does not move the stream position
+    Given a client subscribed to recoverable channel "news" on the fake server
+    When the fake server pushes a publication for channel "news" at offset 1, then one whose own channel is "news.sport" at offset 5
+    And the fake server disconnects the client with a reconnect-advised code
+    Then the next subscribe command for "news" asks to recover from offset 1 in the same epoch
+
+  @A
+  Scenario Outline: The subscribed event says whether recovered publications follow
+    Given a client subscribed to a channel with history and recovery
+    When <count> publications are made to the channel while the client reconnects
+    Then the subscription emits "subscribed" again with has_recovered_publications <flag>
+
+    Examples:
+      | count | flag  |
+      | 2     | true  |
+      | 0     | false |
+
+  @D
+  Scenario: A server-side subscribed event says whether publications follow
+    Given the fake server grants a server-side subscription to channel "alerts" with 1 initial publication and recovered false at connect
+    When a client connects to the fake server
+    Then the client emits a server-side "subscribed" event for channel "alerts" with has_recovered_publications true
 ```
 
 **Exceptions introduced:** none.
