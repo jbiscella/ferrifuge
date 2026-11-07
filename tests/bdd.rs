@@ -80,7 +80,8 @@ const IMPLEMENTED: &[&str] = &[
     "A transport that worked is kept on reconnect",
     "Commands work over an emulated transport",
     "A failed emulation request makes the client reconnect",
-    "An HTTP stream that never answers the handshake falls back",
+    // Block 29 changes "An HTTP stream that never answers the handshake
+    // falls back": its steps come with Block 29's implementation.
     // Brief C3: an opened websocket is chosen only when the server answers.
     "A websocket that never answers the handshake falls back",
     "An opened websocket without a connect reply falls back",
