@@ -31,10 +31,16 @@ pub mod disconnected {
     /// The token callback denied access, or an expiring token could not be
     /// refreshed for lack of a callback.
     pub const UNAUTHORIZED: u32 = 1;
+    /// The task running the client panicked (Block 28, D4; centrifuge-js
+    /// `badProtocol`, with which it ends a client whose message handling
+    /// threw).
+    pub const BAD_PROTOCOL: u32 = 2;
     /// The server refused a refresh command as too large (an emulation
     /// request answered with HTTP 413); retrying it would fail the same way
     /// (centrifuge-js `messageSizeLimit`).
     pub const MESSAGE_SIZE_LIMIT: u32 = 3;
+    /// The tokio runtime the client ran on shut down (Block 28, D3).
+    pub const RUNTIME_SHUT_DOWN: u32 = 4;
 }
 
 /// Codes of [`crate::SubscriptionEvent::Subscribing`].
