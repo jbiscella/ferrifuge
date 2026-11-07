@@ -518,6 +518,13 @@ pub enum Input {
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting.
     CallAbandoned(CallId),
+    /// The system slept for `gap`: the wall clock moved that much further
+    /// than the monotonic one, whose timers resume with the time they had
+    /// left (Block 25, D1). A gap under 2 s is ignored.
+    Slept {
+        /// How long the system slept.
+        gap: Duration,
+    },
 }
 
 /// Something the owner of the machine must do.
@@ -646,6 +653,12 @@ pub enum Action {
     /// as for a lost transport (Block 21). For the owner's logs; nothing
     /// needs performing.
     Anomaly(Anomaly),
+    /// Make the timer fire `by` earlier, at once if that time has passed;
+    /// nothing when it is not running (Block 25, D3: a refresh due during a
+    /// sleep).
+    ShortenTimer(Timer, Duration),
+    /// As [`Action::ShortenTimer`], for a subscription's timer.
+    ShortenSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
 }
 
 /// A breach of the client protocol by the server, reported with
@@ -695,6 +708,7 @@ impl Input {
 }
 
 impl std::fmt::Debug for Input {
+    #[allow(clippy::too_many_lines)] // One arm per variant.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect => f.write_str("Connect"),
@@ -796,6 +810,7 @@ impl std::fmt::Debug for Input {
                 .field(timer)
                 .finish(),
             Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
+            Self::Slept { gap } => f.debug_struct("Slept").field("gap", gap).finish(),
         }
     }
 }
@@ -919,6 +934,17 @@ impl std::fmt::Debug for Action {
                 .field("result", result)
                 .finish(),
             Self::Anomaly(anomaly) => f.debug_tuple("Anomaly").field(anomaly).finish(),
+            Self::ShortenTimer(timer, by) => f
+                .debug_tuple("ShortenTimer")
+                .field(timer)
+                .field(by)
+                .finish(),
+            Self::ShortenSubscriptionTimer(id, timer, by) => f
+                .debug_tuple("ShortenSubscriptionTimer")
+                .field(id)
+                .field(timer)
+                .field(by)
+                .finish(),
         }
     }
 }
@@ -940,6 +966,10 @@ struct Pings {
     /// Whether the server expects a pong for each ping.
     pong: bool,
 }
+
+/// The smallest gap between the wall and monotonic clocks taken for a
+/// system sleep (Block 25, D1).
+const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 
 /// Websocket close code "message too big" (RFC 6455).
 const MESSAGE_TOO_BIG: u32 = 1009;
@@ -1242,6 +1272,7 @@ impl Machine {
             Input::Call(id) => self.call(id),
             Input::CallTimerFired(id, timer) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),
+            Input::Slept { gap } => self.slept(gap),
             // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportFailed { .. }
@@ -1313,6 +1344,10 @@ impl Machine {
             Timer::Refresh => {
                 if self.state == State::Connected && !self.tokens.refresh_in_flight() {
                     self.refresh();
+                } else if self.state == State::Connecting {
+                    // Due while reconnecting (Block 25, D3): the next attempt
+                    // fetches a new token first.
+                    self.tokens.refresh_due();
                 }
             }
             Timer::ServerPing => {
@@ -1698,6 +1733,9 @@ impl Machine {
         self.tokens.connected();
         if result.expires {
             self.set_refresh_timer(result.ttl);
+        } else {
+            // One kept from the last connection (Block 25, D3).
+            self.actions.push(Action::CancelTimer(Timer::Refresh));
         }
         self.state = State::Connected;
         self.pings = (result.ping > 0).then(|| Pings {
@@ -1803,11 +1841,16 @@ impl Machine {
         self.drop_held_commands();
         self.tokens.teardown(reconnect);
         // Every timer belongs to the connection being torn down; the
-        // reconnect timer is set again below when reconnecting.
+        // reconnect timer is set again below when reconnecting. The refresh
+        // timer outlives a reconnect, until the next connect reply re-arms or
+        // cancels it, so a token due while reconnecting, or during a sleep,
+        // is fetched before the next connect (Block 25, D3).
         for timer in Timer::ALL {
-            self.actions.push(Action::CancelTimer(timer));
+            if !(reconnect && timer == Timer::Refresh) {
+                self.actions.push(Action::CancelTimer(timer));
+            }
         }
-        self.subscriptions_disconnected();
+        self.subscriptions_disconnected(reconnect);
         self.server_subscriptions_disconnected();
         self.pings = None;
 
@@ -1838,6 +1881,32 @@ impl Machine {
             }
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
         }
+    }
+
+    /// The system slept for `gap` (Block 25, D2 and D3).
+    fn slept(&mut self, gap: Duration) {
+        if gap < SLEEP_THRESHOLD || self.state == State::Disconnected {
+            return;
+        }
+        if self.state == State::Connected
+            && let Some(pings) = self.pings
+            && !self.config.max_server_ping_delay.is_zero()
+        {
+            let window = pings
+                .interval
+                .saturating_add(self.config.max_server_ping_delay);
+            if gap >= window {
+                // As when the no-ping deadline fires: the server gave up
+                // on the connection; the backoff and jitter apply.
+                self.disconnect(codes::connecting::NO_PING, "no ping", true);
+            } else {
+                // Pings queued during the sleep are on their way.
+                self.wait_server_ping();
+            }
+        }
+        // Only the owner knows how long each timer has left.
+        self.actions.push(Action::ShortenTimer(Timer::Refresh, gap));
+        self.shorten_subscription_refreshes(gap);
     }
 
     /// A random delay added to the first reconnect after a lost connection,

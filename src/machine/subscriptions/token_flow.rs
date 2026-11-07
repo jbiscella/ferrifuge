@@ -162,9 +162,15 @@ impl Machine {
     /// The refresh timer fired: a new token from the callback, or, without
     /// one, unauthorized (centrifuge-js `_getSubscriptionToken`).
     pub(super) fn subscription_refresh_due(&mut self, id: SubscriptionId) {
-        let Some(sub) = self.subscriptions.by_id.get(&id) else {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
+        // Due while resubscribing (Block 25, D3): the next subscribe
+        // fetches a new token first.
+        if sub.state == SubscriptionState::Subscribing {
+            sub.tokens.refresh_due();
+            return;
+        }
         if sub.state != SubscriptionState::Subscribed || sub.tokens.refresh_in_flight() {
             return;
         }

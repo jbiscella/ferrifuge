@@ -211,6 +211,9 @@ enum Op {
     Drop,
     /// The server stops pinging this connection.
     PingGap,
+    /// The system sleeps this long: the wall clock moves, the monotonic
+    /// one does not (Block 25).
+    Sleep(Duration),
     /// The application starts a batch (18d).
     StartBatching,
     /// The application stops one of its batches.
@@ -292,7 +295,8 @@ impl Op {
             43..50 => Self::Read,
             50..55 => Self::OpenStream(target(rng, subscriptions)),
             55..59 => Self::DropStream(target(rng, subscriptions)),
-            59..80 => Self::Advance(Duration::from_millis(rng.u64(100..=2000))),
+            59..77 => Self::Advance(Duration::from_millis(rng.u64(100..=2000))),
+            77..80 => Self::Sleep(Duration::from_millis(rng.u64(0..=120_000))),
             80..88 => Self::Close(CODES[rng.usize(..CODES.len())]),
             88..93 => Self::Push(CODES[rng.usize(..CODES.len())]),
             93..97 => Self::Drop,
@@ -332,6 +336,7 @@ impl Op {
             Self::OpenStream(target) => format!("OpenStream {}", target.kind()),
             Self::DropStream(target) => format!("DropStream {}", target.kind()),
             Self::Advance(_) => "advance".to_owned(),
+            Self::Sleep(_) => "sleep".to_owned(),
             Self::Close(code) => format!("close {code}"),
             Self::Push(code) => format!("push {code}"),
             Self::Add(_) => "add".to_owned(),
@@ -702,6 +707,36 @@ impl Run {
         }
     }
 
+    /// The application makes a call of `kind`.
+    fn call(&mut self, kind: CallKind) -> Step {
+        let channel = "news".to_owned();
+        // With batches, data of up to 600 bytes, so that a few calls
+        // fill a frame and batches split.
+        let data = if self.mode == Mode::Batching {
+            format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes()
+        } else {
+            b"{}".to_vec()
+        };
+        let id = self.machine.add_call(match kind {
+            CallKind::Rpc => CallRequest::Rpc {
+                method: "m".to_owned(),
+                data,
+            },
+            CallKind::Publish => CallRequest::Publish { channel, data },
+            CallKind::History => CallRequest::History {
+                channel,
+                options: HistoryOptions::default(),
+            },
+            CallKind::Presence => CallRequest::Presence { channel },
+        });
+        self.checker.calls.insert(id, self.now);
+        if self.checker.batches_open > 0 {
+            // Held: sent only after a batch stops (I10).
+            self.checker.held.insert(id, self.checker.stops);
+        }
+        self.feed(Input::Call(id))
+    }
+
     fn of(&self, target: Target) -> Option<Of> {
         match target {
             Target::Client => Some(None),
@@ -720,32 +755,17 @@ impl Run {
                 self.feed(Input::Disconnect)
             }
             Op::Call(kind) => {
-                let channel = "news".to_owned();
-                // With batches, data of up to 600 bytes, so that a few calls
-                // fill a frame and batches split.
-                let data = if self.mode == Mode::Batching {
-                    format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes()
+                // Inside a batch, a burst of calls, so that the batch fills
+                // more than one frame and splits (Block 18, D5).
+                let burst = if self.mode == Mode::Batching && self.checker.batches_open > 0 {
+                    self.rng.usize(1..=4)
                 } else {
-                    b"{}".to_vec()
+                    1
                 };
-                let id = self.machine.add_call(match kind {
-                    CallKind::Rpc => CallRequest::Rpc {
-                        method: "m".to_owned(),
-                        data,
-                    },
-                    CallKind::Publish => CallRequest::Publish { channel, data },
-                    CallKind::History => CallRequest::History {
-                        channel,
-                        options: HistoryOptions::default(),
-                    },
-                    CallKind::Presence => CallRequest::Presence { channel },
-                });
-                self.checker.calls.insert(id, self.now);
-                if self.checker.batches_open > 0 {
-                    // Held: sent only after a batch stops (I10).
-                    self.checker.held.insert(id, self.checker.stops);
+                for _ in 0..burst {
+                    self.call(kind)?;
                 }
-                self.feed(Input::Call(id))
+                Ok(())
             }
             Op::TakeNext(target) => match self.of(target) {
                 Some(of) => self.take_next(of),
@@ -791,6 +811,7 @@ impl Run {
                 self.server.pinging = false;
                 Ok(())
             }
+            Op::Sleep(gap) => self.feed(Input::Slept { gap }),
             Op::StartBatching => {
                 if self.batches == 3 {
                     return Ok(());
@@ -1275,6 +1296,10 @@ impl Run {
                 self.cancel(Key::Client(timer));
                 self.schedule(delay, Due::Timer(Key::Client(timer)));
             }
+            Action::ShortenTimer(timer, by) => self.shorten(Key::Client(timer), by),
+            Action::ShortenSubscriptionTimer(id, timer, by) => {
+                self.shorten(Key::Subscription(id, timer), by);
+            }
             Action::CancelTimer(timer) => {
                 let kept =
                     self.fault == Some(Fault::KeepCancelledTimer) && self.checker.disconnected;
@@ -1396,6 +1421,22 @@ impl Run {
     fn cancel(&mut self, key: Key) {
         self.agenda
             .retain(|_, due| !matches!(due, Due::Timer(of) if *of == key));
+    }
+
+    /// The owner's part of Block 25's D3: a running timer fires `by`
+    /// earlier, at once if that is past; one not running is ignored.
+    fn shorten(&mut self, key: Key, by: Duration) {
+        let Some(at) = self
+            .agenda
+            .iter()
+            .find(|(_, due)| matches!(due, Due::Timer(of) if *of == key))
+            .map(|(at, _)| *at)
+        else {
+            return;
+        };
+        let due = self.agenda.remove(&at).expect("found above");
+        self.count("timer shortened");
+        self.schedule(at.0.saturating_sub(by).saturating_sub(self.now), due);
     }
 
     /// The current incarnation of the server-side subscription to `channel`.
@@ -2006,6 +2047,7 @@ fn connection_counts() -> Vec<String> {
         Op::Advance(Duration::ZERO),
         Op::Drop,
         Op::PingGap,
+        Op::Sleep(Duration::ZERO),
     ]
     .into_iter()
     .map(Op::name)
@@ -2035,6 +2077,7 @@ fn connection_counts() -> Vec<String> {
             "token unauthorized",
             "reconnect",
             "call timeout",
+            "timer shortened",
         ]
         .map(str::to_owned),
     );

@@ -170,6 +170,15 @@ impl Tokens {
         }
     }
 
+    /// The refresh came due while no connection could carry it (Block 25,
+    /// D3): with a source, the next connect or subscribe fetches a new
+    /// token first; a fixed token is sent as it is.
+    pub(super) fn refresh_due(&mut self) {
+        if self.source {
+            self.refresh_required = true;
+        }
+    }
+
     pub(super) fn connected(&mut self) {
         self.refresh_required = false;
     }

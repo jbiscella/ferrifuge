@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::outbox::Outbox;
 use futures_core::Stream;
@@ -104,6 +104,68 @@ impl Outboxes {
 pub(super) struct Core {
     pub(super) machine: Machine,
     pub(super) actions: VecDeque<Action>,
+    /// The clocks at the last input, to notice a system sleep (Block 25).
+    pub(super) clock: Clock,
+}
+
+/// The wall-clock and monotonic times of the last input given the machine.
+#[derive(Debug, Default)]
+pub(super) struct Clock(Option<(SystemTime, std::time::Instant)>);
+
+impl Clock {
+    /// How long the system slept since the last input, if it did.
+    fn tick(&mut self) -> Option<Duration> {
+        let now = (SystemTime::now(), std::time::Instant::now());
+        let gap = self.0.and_then(|last| sleep_gap(last, now));
+        self.0 = Some(now);
+        gap
+    }
+}
+
+/// The sleep between `last` and `now`: how much further the wall clock
+/// moved than the monotonic one, whose time stops in a suspend, when at
+/// least 2 s (Block 25, D1). A wall clock set back gives none.
+fn sleep_gap(
+    last: (SystemTime, std::time::Instant),
+    now: (SystemTime, std::time::Instant),
+) -> Option<Duration> {
+    let wall = now.0.duration_since(last.0).ok()?;
+    let monotonic = now.1.saturating_duration_since(last.1);
+    wall.checked_sub(monotonic)
+        .filter(|gap| *gap >= SLEEP_THRESHOLD)
+}
+
+/// The smallest gap taken for a sleep, as the core ignores shorter ones.
+const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// The timers the machine re-armed while answering a sleep, whose firing,
+/// if it revealed the sleep, is stale (Block 25, D1).
+#[derive(Debug, Default)]
+struct Rearmed {
+    timers: Vec<Timer>,
+    subscription_timers: Vec<(SubscriptionId, SubscriptionTimer)>,
+}
+
+impl Rearmed {
+    fn note(&mut self, action: &Action) {
+        match action {
+            Action::SetTimer(timer, _) => self.timers.push(*timer),
+            Action::SetSubscriptionTimer(id, timer, _) => {
+                self.subscription_timers.push((*id, *timer));
+            }
+            _ => {}
+        }
+    }
+
+    fn makes_stale(&self, input: &Input) -> bool {
+        match input {
+            Input::TimerFired(timer) => self.timers.contains(timer),
+            Input::SubscriptionTimerFired(id, timer) => {
+                self.subscription_timers.contains(&(*id, *timer))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Async callback returning the data of a subscription's next subscribe
@@ -180,11 +242,28 @@ impl Shared {
         // Application calls and stream reads feed the machine too, on the
         // application's tasks.
         let _entered = self.log.span.enter();
+        // A sleep since the last input is the machine's first news of the
+        // wake (Block 25, D1).
+        if let Some(gap) = core.clock.tick() {
+            debug!(gap = ?gap, "system sleep detected");
+            let rearmed = self.feed(core, Input::Slept { gap });
+            if rearmed.makes_stale(&input) {
+                return;
+            }
+        }
+        self.feed(core, input);
+    }
+
+    /// Gives the machine `input`, and the inputs its events cause; the
+    /// timers it set meanwhile.
+    fn feed(&self, core: &mut Core, input: Input) -> Rearmed {
+        let mut rearmed = Rearmed::default();
         let mut inputs = VecDeque::from([input]);
         while let Some(input) = inputs.pop_front() {
             self.log.input(&input);
             for action in core.machine.handle(input) {
                 self.log.action(&action);
+                rearmed.note(&action);
                 let mut outboxes = lock(&self.outboxes);
                 let taken = match action {
                     Action::Emit(id, event) => outboxes.client.offer(id, event),
@@ -206,6 +285,7 @@ impl Shared {
                 inputs.extend(taken.map(Input::EventTaken));
             }
         }
+        rearmed
     }
 
     fn next_action(&self) -> Option<Action> {
@@ -703,6 +783,7 @@ impl Client {
             core: Mutex::new(Core {
                 machine,
                 actions: VecDeque::new(),
+                clock: Clock::default(),
             }),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
@@ -1123,6 +1204,12 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
         self.0.remove(&key);
     }
 
+    fn shorten(&mut self, key: K, by: Duration) {
+        if let Some(sleep) = self.0.get_mut(&key) {
+            shortened(sleep, by);
+        }
+    }
+
     /// Resolves with the first timer to fire, which is removed; never while
     /// none is set. Cancel-safe.
     async fn fired(&mut self) -> K {
@@ -1143,6 +1230,16 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
     }
 }
 
+/// Makes `sleep` end `by` earlier; a deadline already past fires at once
+/// (Block 25, D3).
+fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
+    let deadline = sleep
+        .deadline()
+        .checked_sub(by)
+        .unwrap_or_else(tokio::time::Instant::now);
+    sleep.as_mut().reset(deadline);
+}
+
 /// The machine's timers: one slot per [`Timer`] kind, so a new kind needs
 /// no change here.
 #[derive(Default)]
@@ -1156,6 +1253,12 @@ impl Timers {
 
     fn cancel(&mut self, timer: Timer) {
         self.0[timer.index()] = None;
+    }
+
+    fn shorten(&mut self, timer: Timer, by: Duration) {
+        if let Some(sleep) = &mut self.0[timer.index()] {
+            shortened(sleep, by);
+        }
     }
 
     /// Resolves with the first timer to fire, which is cleared; never while
@@ -1319,6 +1422,10 @@ impl Driver {
             }
             Action::SetTimer(timer, delay) => self.timers.set(timer, delay),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
+            Action::ShortenTimer(timer, by) => self.timers.shorten(timer, by),
+            Action::ShortenSubscriptionTimer(id, timer, by) => {
+                self.subscription_timers.shorten((id, timer), by);
+            }
             // Logged by `Shared::handle`, as every action.
             Action::Anomaly(_) => {}
             // Shared::handle routes them to the outboxes.
@@ -2070,6 +2177,130 @@ mod tests {
             matches!(first, Some(ClientEvent::Disconnected { .. })),
             "{first:?}"
         );
+    }
+
+    #[test]
+    fn a_sleep_is_the_wall_clock_moving_2_s_further_than_the_monotonic_one() {
+        let wall = SystemTime::now();
+        let monotonic = std::time::Instant::now();
+        let last = (wall, monotonic);
+        let later = monotonic + Duration::from_secs(10);
+
+        let gap = |wall_moved: Duration| sleep_gap(last, (wall + wall_moved, later));
+        let behind = sleep_gap(last, (wall - Duration::from_secs(5), later));
+
+        assert_eq!(gap(Duration::from_secs(12)), Some(Duration::from_secs(2)));
+        assert_eq!(gap(Duration::from_millis(11_999)), None);
+        assert_eq!(gap(Duration::from_secs(10)), None);
+        assert_eq!(behind, None);
+    }
+
+    /// Takes `client`'s core, connected by `reply` to its connect command,
+    /// with the actions so far performed. The caller holds the core, so the
+    /// driver task does not run until it is dropped.
+    fn connected_core<'a>(client: &'a Client, reply: &str) -> std::sync::MutexGuard<'a, Core> {
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        shared.handle(&mut core, Input::Connect);
+        let transport = core
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("an attempt");
+        shared.handle(&mut core, Input::TransportOpened(transport));
+        shared.handle(
+            &mut core,
+            Input::Frame {
+                transport,
+                data: reply.as_bytes().to_vec(),
+            },
+        );
+        assert_eq!(core.machine.state(), State::Connected);
+        core.actions.clear();
+        core
+    }
+
+    /// Makes the core's next input reveal a sleep of `gap`.
+    fn slept(core: &mut Core, gap: Duration) {
+        core.clock = Clock(Some((SystemTime::now() - gap, std::time::Instant::now())));
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_short_sleep_seen_at_the_no_ping_deadline_keeps_the_connection() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+
+        slept(&mut core, Duration::from_secs(30));
+        client
+            .shared()
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing));
+
+        assert_eq!(core.machine.state(), State::Connected);
+        assert!(
+            core.actions
+                .iter()
+                .any(|action| matches!(action, Action::SetTimer(Timer::ServerPing, _))),
+            "{:?}",
+            core.actions
+        );
+        assert!(
+            !core
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::CloseTransport(_))),
+            "{:?}",
+            core.actions
+        );
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sleep_seen_at_the_refresh_timer_still_refreshes_the_token() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .config(Config {
+                token: "t".to_owned(),
+                ..Config::default()
+            })
+            .get_token(|| async { Ok("t2".to_owned()) })
+            .build()
+            .unwrap();
+        let mut core = connected_core(
+            &client,
+            r#"{"id":1,"connect":{"client":"c","ping":25,"expires":true,"ttl":60}}"#,
+        );
+
+        slept(&mut core, Duration::from_secs(30));
+        client
+            .shared()
+            .handle(&mut core, Input::TimerFired(Timer::Refresh));
+
+        assert_eq!(core.machine.state(), State::Connected);
+        assert!(
+            core.actions
+                .iter()
+                .any(|action| matches!(action, Action::FetchToken(_))),
+            "{:?}",
+            core.actions
+        );
+    }
+
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn without_a_sleep_the_no_ping_deadline_reconnects() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+
+        client
+            .shared()
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing));
+
+        assert_eq!(core.machine.state(), State::Connecting);
     }
 
     fn raw_config() -> Arc<rustls::ClientConfig> {
