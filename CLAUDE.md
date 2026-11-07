@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–26 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–27 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -517,13 +517,13 @@ Feature: Protobuf encoding
 
 **Dependencies:** Blocks 5 (5d transport kind), 6.
 
-**Out of scope:** sockjs, webtransport, unidirectional http_stream and sse (Block 0); Protobuf over these transports (rejected, see decisions); browser-only shims.
+**Out of scope:** sockjs, webtransport, unidirectional http_stream and sse (Block 0); Protobuf over sse (rejected, see decisions); browser-only shims.
 
 **Decisions** (documented in the centrifuge-js README unless noted):
 - the client takes a list of (transport, endpoint); a single endpoint string means websocket only;
 - transports are tried in order during the initial handshake only, until the server answers on one: a connect reply, an error reply to the connect, a Disconnect push, or, over websocket, a close code from 3000 (review items C2 and C3; centrifuge-js 63ed73e `_transportWasOpen`); reconnects then use only that transport, the first of them after the reconnect backoff delay (Block 2);
 - reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope;
-- a client configured with the Protobuf protocol and an http_stream or sse endpoint is rejected when it is built, with a configuration error naming the combination, rather than failing at run time;
+- a client configured with the Protobuf protocol and an sse endpoint is rejected when it is built, with a configuration error naming the combination (Centrifugo's sse carries JSON only; Protobuf over http_stream: Block 27), rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
 - server pings are the same empty `Reply` as over websocket, and are answered with a pong, sent through the emulation endpoint, when `ConnectResult.pong` is set (`client.proto`, `ConnectResult.pong`; centrifuge-js `_handleServerPing`; verified: Centrifugo v6.10.1 sets `pong` on these transports and disconnects an unanswered client with 3012 "no pong"). The unanswered empty `Push` ping of `client.proto` belongs to the unidirectional transports, out of scope (Block 0);
 - an attempt that opens but gets no connect reply within `Config::timeout` fails like a refused one, and the next transport is tried (owner decision, 2026-11-04, kept although centrifuge-js 63ed73e keeps an opened websocket: Ferrifuge targets corporate networks, where a middlebox may accept the upgrade and then forward nothing, and never falling back would leave the client stuck; the fallback applies only before the first success, so a transport that worked once is still kept);
@@ -654,15 +654,10 @@ Feature: Transport fallback
     And the relay comes up after every transport has failed once
     Then the client emits "connected" over transport "http_stream"
 
-  Scenario Outline: Protobuf with an HTTP transport is rejected
-    Given client options with the Protobuf protocol and an <transport> endpoint
+  Scenario: Protobuf with the sse transport is rejected
+    Given client options with the Protobuf protocol and an sse endpoint
     When the client is built
-    Then building fails with a configuration error naming Protobuf and <transport>
-
-    Examples:
-      | transport   |
-      | http_stream |
-      | sse         |
+    Then building fails with a configuration error naming Protobuf and sse
 
   @A
   Scenario Outline: Server pings over an HTTP transport are answered
@@ -3099,7 +3094,7 @@ Decisions that bind the blocks:
 - **Logging (item 9):** `tracing` with its `log` feature, in the tokio adapter only, as a regular dependency of the `tokio` feature; DEBUG and TRACE, WARN for server anomalies; spans skip their fields, values go through the redacting `Debug`; no payload switch; a capture test; the docs warn that dependencies log secrets at TRACE through `log`.
 - **Release (item 21):** a tag-triggered `release.yml` with crates.io trusted publishing (`rust-lang/crates-io-auth-action`, environment `release`, version and `cargo-semver-checks` checked, actions pinned by SHA), a hand-written Keep a Changelog `CHANGELOG.md`, `SECURITY.md` pointing to GitHub private vulnerability reporting, docs.rs metadata, and an MSRV raised only in a minor version and only when needed. The account, first publish, trusted-publisher registration and repository settings are the owner's.
 - **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
-- **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by mime; the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
+- **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by a maintained media-type parser (mediatype, Block 27 D4); the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
 - **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs.
 - **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` on, `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
 - **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
@@ -3897,3 +3892,66 @@ Value clause: As a maintainer, I want the machine to reach the emulation envelop
 **Structural acceptance:** no file under `src/machine*` names the `json` or `protobuf` module (D3's test) or splits a frame itself; every scenario and test passes unchanged; the `Codec` unit tests cover, in both encodings, the envelope's round trip (`emulation_frame` reads back what `emulation_request` made, and a body that is not an envelope gives `None`) and the split (each piece of a two-command frame is a one-command frame with its id); the JSON envelope's bytes stay those of `emulation_request_carries_the_frame_as_a_string`.
 
 **Exceptions introduced:** no scenario, as for 5a: the codec is crate-private and its emulation envelope is not observable through the public API beyond what Blocks 8, 13d and 18 already exercise.
+
+---
+
+## Block 27 — Maintained stream decoders, Protobuf over http_stream
+
+**Goal:** the bytes the server streams are split, and their content types read, by maintained components where one exists (Block 0, "Components"), and an app that uses Protobuf can fall back to http_stream, so that binary payloads reach clients behind networks that block websocket (the plan's "Components audit" and parity item 36; "Planned after Block 19", owner decision 2026-11-06).
+
+**Dependencies:** Blocks 0 (Components), 7 (Protobuf, varint-delimited frames), 8 (transports, decoders buffering across chunks, the Protobuf + sse build check), 14 (fuzz targets), 19 (`MAX_MESSAGE_BYTES`), 25 (D8, the captive-portal check), 26 (the Codec seam).
+
+**Out of scope:**
+- Protobuf over sse: it stays refused at build (Centrifugo's sse is JSON only: centrifuge `handler_sse.go:208-209`; centrifuge-js 63ed73e `transport_sse.ts:35`);
+- a maintained varint stream splitter: none exists (tokio-util's `LengthDelimitedCodec` takes fixed-width lengths), so the Protobuf splitter is written in-house (D3);
+- a Protobuf 413 scenario: Block 26's unit tests cover the read-back;
+- WHATWG's leniency for content-type parameters without a value;
+- unidirectional transports (Block 0).
+
+**Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft and a research report verified against the crates, centrifuge-js 63ed73e, centrifuge 7ac037196c95 and a live Centrifugo v6.10.1):
+- **D1 sse.** The in-house sse decoder is replaced by sse-core 0.2.3 (`default-features = false`, `features = ["std"]`; MIT OR Apache-2.0; release and commit 2026-07-31; no unsafe in its source; no shipped crate beyond bytes, memchr and thiserror, already in the tree), `SseDecoder::with_limit(MAX_MESSAGE_BYTES)`: an event over the limit fails the transport as today (`TOO_LARGE`), the events before it in the same chunk delivered first. Chosen over finesse 2.4.3 (Apache-2.0 only, whose NOTICE adds an attribution duty, and 3 to 5 times slower) and sse-parse 0.1.0 (drops an oversized event and resyncs, which hides it; one release), by bolero fuzzing (chunk invariance, and a differential against the in-house decoder, 2.0 M runs clean) and benchmarks (about 7 times the in-house decoder's throughput). The limit bounds an event's data, name and id each (sse-core `SseDecoder::next`), so the decoder holds at most about three times `MAX_MESSAGE_BYTES`; comment and unknown-field lines are skipped unbuffered, so a long one no longer ends the transport. Data that is not UTF-8 is delivered with U+FFFD replacement characters, as EventSource decodes (WHATWG HTML, "UTF-8 decode"); Centrifugo's sse frames are JSON, hence UTF-8. The first error ends the transport; sse-core's resynchronisation is not used.
+- **D2 http_stream, JSON.** The line splitter is tokio-util's `codec::AnyDelimiterCodec::new_with_max_length(b"\n", b"\n", MAX_MESSAGE_BYTES)` (tokio-util 0.7.20, already in the tree; the `codec` feature adds no crate), fed each body chunk; empty and whitespace-only lines are skipped and a trailing `\r` stripped, as today; an over-long line fails the transport (`TOO_LARGE`). The first `MaxChunkLengthExceeded` ends the transport; the codec's discarding is not used.
+- **D3 http_stream, Protobuf (item 36).** Building no longer refuses Protobuf with http_stream (amends Block 8). The stream request is a POST whose body is the varint-delimited connect frame; emulation requests carry the Protobuf `EmulationRequest` (Block 26's `Codec::emulation_request`); both send `Content-Type` and `Accept` exactly `application/octet-stream`, with no parameter (centrifuge `handler_http_stream.go:73` and `emulation.go:72` compare the value exactly; Centrifugo v6.10.1 answers 400 to `application/octet-stream; charset=binary`, verified). Replies on the stream are uvarint length-delimited (centrifuge `handler_http_stream.go:163-168`, protocol `encode.go:353-372`; centrifuge-js `protobuf.codec.ts:9-91`). The splitter is in-house, on prost's `decode_length_delimiter`, with a bolero fuzz target in CI like the others (Block 14) and no unsafe. It yields each reply with its prefix, a one-reply frame for Block 7's decode; a zero length is an empty reply, the server's ping, delivered, never skipped. A prefix whose buffered bytes (fewer than 10) all have the continuation bit set waits; any other prefix prost refuses ends the transport (prost reports both as `InvalidVarint`); an announced length over `MAX_MESSAGE_BYTES` ends it at once (`TOO_LARGE`), as centrifuge-js `decodeReply`. Its limit is a parameter, fuzzed small.
+- **D4 Content type.** `is_event_stream` and the captive-portal check (amends Block 25 D8) parse the value with mediatype 0.23.0 (MIT, no required dependency, `forbid(unsafe_code)`, released 2026-07-27) and compare type and subtype, case-insensitively, with `text/event-stream` and `text/html`; a value that does not parse is neither. Chosen over mime 0.3.18 (amends the plan's "Components audit" line), which refuses `text/event-stream ; charset=utf-8`, allowed by RFC 9110 §5.6.6, and over the in-house compare, as a maintained parser exists (Block 0). A parameter without a value, which RFC 9110 forbids and EventSource accepts, is now refused.
+- **D5 Version.** No bump: nothing breaks (Block 25 D11). `Unreleased` entries: 27a "Changed": non-UTF-8 sse data arrives with U+FFFD; a content type with a valueless parameter is not an event stream; a long sse comment or unknown field no longer ends the transport. 27b "Added": Protobuf over http_stream; "Changed": building refuses Protobuf only with sse.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scope | Scenarios |
+|---|---|---|---|
+| 27a | As a maintainer, I want the sse and http_stream JSON streams and the content-type check handled by maintained components bounded by `MAX_MESSAGE_BYTES`, so that a fix to their parsing reaches the client from upstream | D1, D2, D4, D5 | none (see Exceptions) |
+| 27b | As an app developer using Protobuf behind networks that block websocket, I want the client to fall back to http_stream, so that binary payloads still arrive | D3, D5 | the three scenarios below |
+
+Value clause: As an app developer using Protobuf behind networks that block websocket, I want the client to fall back to http_stream, with the server's stream split by maintained, bounded components, so that binary payloads arrive and a parsing fix reaches my client from upstream.
+
+**Structural acceptance:** new shipped crates are sse-core and mediatype only (`cargo tree -e normal`), passing `cargo deny`; the in-house sse decoder and line splitter are removed; the Protobuf splitter has a bolero target in `fuzz.yml` and the `ci.yml` fuzz loop (chunk invariance, a frame over the limit failing, a truncated prefix waiting); the existing sse and http_stream fuzz targets keep their invariants against the new components; unit tests: a Protobuf reply split over chunks (inside its prefix too), several in one chunk, a zero-length reply delivered, an over-limit length failing before its bytes, an over-long varint failing, and the exact `Content-Type` and `Accept` of the stream and emulation requests in both encodings; `a_build_error_is_a_standard_error` uses sse; the README says sse carries JSON only.
+
+```gherkin
+Feature: Protobuf over http_stream
+
+  @A
+  Scenario: Fallback to http_stream with Protobuf
+    Given a server with http_stream and sse enabled
+    And a client configured with the Protobuf protocol, an unreachable websocket endpoint and the server's http_stream endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "http_stream"
+
+  @A
+  Scenario: Binary publication delivered over Protobuf on http_stream
+    Given a server with http_stream and sse enabled
+    And a client configured with the Protobuf protocol connected over transport "http_stream" and subscribed to channel "news"
+    When the server API publishes the bytes ff 0a 00 fe to channel "news"
+    Then the subscription receives a publication with the bytes ff 0a 00 fe
+
+  @A
+  Scenario: Server pings over Protobuf on http_stream are answered
+    Given a server with http_stream and sse enabled, a ping interval of 2 s and a pong timeout of 1 s
+    And a client configured with the Protobuf protocol connected over transport "http_stream"
+    When 6 s elapse
+    Then the client stays "connected"
+```
+
+Block 8's outline "Protobuf with an HTTP transport is rejected" is replaced in place by the scenario "Protobuf with the sse transport is rejected" (amends Block 8).
+
+**Exceptions introduced:** 27a has no scenario, as Block 26: its observable changes concern malformed input only (D5) and are unit-tested in `src/adapter/http.rs`.

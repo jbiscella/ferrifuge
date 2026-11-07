@@ -89,7 +89,7 @@ const IMPLEMENTED: &[&str] = &[
     "Every transport unreachable",
     "A failed fallback sequence is retried after the reconnect backoff",
     "The fallback sequence is retried until a transport succeeds",
-    "Protobuf with an HTTP transport is rejected",
+    "Protobuf with the sse transport is rejected",
     "Server pings over an HTTP transport are answered",
     // Block 9.
     "New subscription starts unsubscribed",
