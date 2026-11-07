@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -19,6 +19,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
+use super::client::lock;
 use super::net::Network;
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
@@ -31,6 +32,36 @@ const JSON: &str = "application/json";
 /// compares the whole value (Block 27, D3; centrifuge
 /// `handler_http_stream.go:73`, `emulation.go:72`).
 const PROTOBUF: &str = "application/octet-stream";
+/// The application's real HTTP headers (Blocks 17, 32), shared by the
+/// client handle, which replaces them, and every request, which reads them
+/// when it starts. Its `Debug` output shows the names only.
+#[derive(Clone, Default)]
+pub(crate) struct HeaderSet(Arc<Mutex<Arc<HeaderMap>>>);
+
+impl HeaderSet {
+    pub(crate) fn new(headers: HeaderMap) -> Self {
+        Self(Arc::new(Mutex::new(Arc::new(headers))))
+    }
+
+    /// The headers a request starting now carries.
+    pub(crate) fn current(&self) -> HeaderMap {
+        let headers = Arc::clone(&lock(&self.0));
+        (*headers).clone()
+    }
+
+    /// Replaces the whole set, for the requests started from now on.
+    pub(crate) fn replace(&self, headers: HeaderMap) {
+        *lock(&self.0) = Arc::new(headers);
+    }
+}
+
+impl std::fmt::Debug for HeaderSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers = Arc::clone(&lock(&self.0));
+        f.debug_list().entries(headers.keys()).finish()
+    }
+}
+
 /// An emulation request in flight; its failure ends the transport.
 type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)> + Send>>;
 
@@ -49,8 +80,9 @@ pub(crate) struct HttpTransport {
     emulation_url: Url,
     /// Time allowed for an emulation request, as for a command's reply.
     request_timeout: Duration,
-    /// The application's HTTP headers, on every request (Block 17).
-    headers: Arc<HeaderMap>,
+    /// The application's HTTP headers, read for every request (Blocks 17,
+    /// 32).
+    headers: HeaderSet,
     /// The media type of emulation requests: JSON's or Protobuf's.
     content_type: &'static str,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
@@ -78,7 +110,7 @@ impl HttpTransport {
         initial_frame: Vec<u8>,
         emulation_endpoint: Option<&str>,
         request_timeout: Duration,
-        headers: Arc<HeaderMap>,
+        headers: HeaderSet,
         network: &Network,
         protobuf: bool,
         max_message: usize,
@@ -99,11 +131,11 @@ impl HttpTransport {
             url.query_pairs_mut()
                 .append_pair("cf_connect", &String::from_utf8_lossy(&initial_frame));
             http.get(url)
-                .headers((*headers).clone())
+                .headers(headers.current())
                 .header(ACCEPT, "text/event-stream")
         } else {
             http.post(url)
-                .headers((*headers).clone())
+                .headers(headers.current())
                 .header(ACCEPT, requests_type)
                 .header(CONTENT_TYPE, requests_type)
                 .body(initial_frame)
@@ -175,7 +207,9 @@ impl HttpTransport {
         let request = self
             .emulation_http
             .post(self.emulation_url.clone())
-            .headers((*self.headers).clone())
+            // The set as it is now: replaced while open, it applies to the
+            // next request (Block 32, D2).
+            .headers(self.headers.current())
             .header(CONTENT_TYPE, self.content_type)
             .body(frame);
         let timeout = self.request_timeout;
@@ -631,7 +665,7 @@ mod tests {
             connect,
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -794,7 +828,7 @@ mod tests {
                 b"connect".to_vec(),
                 None,
                 TIMEOUT,
-                Arc::default(),
+                HeaderSet::default(),
                 &Network::default(),
                 protobuf,
                 LIMIT,
@@ -914,7 +948,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&redirecting),
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -962,7 +996,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1006,7 +1040,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1051,7 +1085,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&rejecting),
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1094,7 +1128,7 @@ mod tests {
             b"{}".to_vec(),
             Some(&hung),
             Duration::from_secs(60),
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1165,7 +1199,7 @@ mod tests {
                     b"{}".to_vec(),
                     None,
                     TIMEOUT,
-                    Arc::default(),
+                    HeaderSet::default(),
                     &Network::default(),
                     false,
                     LIMIT,
@@ -1199,7 +1233,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1227,7 +1261,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             LIMIT,
@@ -1324,7 +1358,7 @@ mod tests {
             b"{}".to_vec(),
             None,
             TIMEOUT,
-            Arc::default(),
+            HeaderSet::default(),
             &Network::default(),
             false,
             8,

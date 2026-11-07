@@ -256,6 +256,15 @@ impl Machine {
             .collect()
     }
 
+    /// `Subscription::set_data` (Block 32): the data of every subscribe
+    /// command built from now on. A data callback keeps replacing it, as it
+    /// is never turned off here, unlike [`SubscriptionOptions::data`].
+    pub(super) fn set_subscription_data(&mut self, id: SubscriptionId, data: Vec<u8>) {
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            sub.options.data = Some(data);
+        }
+    }
+
     /// How many subscriptions the registry holds (Block 31).
     pub(super) fn subscription_count(&self) -> usize {
         self.subscriptions.by_id.len()
@@ -1569,6 +1578,108 @@ mod tests {
             machine.read_ahead()
         );
         assert!(!machine.wants_frames());
+    }
+
+    /// The data of the subscribe commands `actions` send, as text.
+    fn subscribe_data(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => {
+                    let json: serde_json::Value = serde_json::from_slice(frame).ok()?;
+                    Some(json["subscribe"]["data"].to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Block 32, D3: nothing is sent now; the next subscribe after
+    // unsubscribe and subscribe, and a resubscribe, carry the new data.
+    #[test]
+    fn set_subscription_data_applies_to_later_subscribes_only() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().data(br#"{"v":1}"#.to_vec()));
+        let first = machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{}}"#.to_vec(),
+        });
+
+        let set = machine.handle(Input::SetSubscriptionData(id, br#"{"v":2}"#.to_vec()));
+        machine.handle(Input::Unsubscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":3,"unsubscribe":{}}"#.to_vec(),
+        });
+        let again = machine.handle(Input::Subscribe(id));
+
+        assert!(set.is_empty(), "{set:?}");
+        assert_eq!(subscribe_data(&first), [r#"{"v":1}"#]);
+        assert_eq!(subscribe_data(&again), [r#"{"v":2}"#]);
+    }
+
+    // Block 32, D3: a resubscribe after a reconnect carries the new data.
+    #[test]
+    fn a_resubscribe_after_a_reconnect_carries_the_new_data() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().data(br#"{"v":1}"#.to_vec()));
+        machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{}}"#.to_vec(),
+        });
+        machine.handle(Input::SetSubscriptionData(id, br#"{"v":2}"#.to_vec()));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let reconnect = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let again = opened(&reconnect).expect("a new attempt");
+        machine.handle(Input::TransportOpened(again));
+
+        let resubscribed = machine.handle(Input::Frame {
+            transport: again,
+            data: br#"{"id":3,"connect":{"client":"c"}}"#.to_vec(),
+        });
+
+        assert_eq!(subscribe_data(&resubscribed), [r#"{"v":2}"#]);
+    }
+
+    // Block 32, D3: the data callback is never turned off.
+    #[test]
+    fn set_subscription_data_keeps_the_data_callback() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().data_source());
+        machine.handle(Input::SetSubscriptionData(id, br#"{"v":2}"#.to_vec()));
+
+        let subscribing = machine.handle(Input::Subscribe(id));
+
+        assert!(
+            subscribing
+                .iter()
+                .any(|action| matches!(action, Action::FetchSubscriptionData { .. })),
+            "{subscribing:?}"
+        );
+        assert_eq!(subscribe_data(&subscribing), Vec::<String>::new());
+    }
+
+    // Block 32, D3, D4: an id not in the registry is ignored; the Debug
+    // output shows the data as its length.
+    #[test]
+    fn set_subscription_data_ignores_a_removed_subscription_and_hides_the_data() {
+        let (mut machine, _, id) = connected();
+        machine.handle(Input::RemoveSubscription(id));
+        let input = Input::SetSubscriptionData(id, b"secret".to_vec());
+
+        let debug = format!("{input:?}");
+        let actions = machine.handle(input);
+
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(
+            !debug.contains("secret") && debug.contains("<6 bytes>"),
+            "{debug}"
+        );
     }
 
     // Block 29, D2: the publications of one reply are bounded by

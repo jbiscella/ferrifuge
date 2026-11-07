@@ -61,6 +61,17 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
+    /// Sets the data sent in every subscribe command built from now on:
+    /// the next `subscribe()` and every resubscribe (Block 32), sending
+    /// nothing now; a command already sent keeps its data. Raw JSON with
+    /// the JSON protocol, any bytes with Protobuf. A
+    /// [`SubscriptionBuilder::get_data`] callback still replaces it on every
+    /// attempt (centrifuge-js `setData`).
+    pub fn set_data(&self, data: impl Into<Vec<u8>>) {
+        self.shared
+            .apply(Input::SetSubscriptionData(self.id, data.into()));
+    }
+
     /// What delta compression did on the subscription since it was created
     /// (Block 31): zeros without negotiated delta, and once the
     /// subscription is removed.
