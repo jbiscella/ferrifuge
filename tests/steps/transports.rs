@@ -132,6 +132,21 @@ async fn a_server_behind_a_relay(world: &mut ClientWorld, mode: String) {
 }
 
 #[given(
+    "a client configured with the Protobuf protocol, an unreachable websocket endpoint and the server's http_stream endpoint"
+)]
+fn a_protobuf_client_falling_back(world: &mut ClientWorld) {
+    world.protocol = ferrifuge::Protocol::Protobuf;
+    let http_stream = server_url(server(world), TransportKind::HttpStream);
+    configure(
+        world,
+        vec![
+            (TransportKind::WebSocket, UNREACHABLE_ENDPOINT.to_owned()),
+            (TransportKind::HttpStream, http_stream),
+        ],
+    );
+}
+
+#[given(
     "a client configured with an unreachable websocket endpoint and the server's http_stream and sse endpoints"
 )]
 fn a_client_falling_back_to_http_stream(world: &mut ClientWorld) {
@@ -229,8 +244,13 @@ fn no_websocket_attempt(world: &mut ClientWorld) {
 }
 
 /// Through the scenario's HTTP proxy when an earlier step set one.
-#[given(regex = r#"^a client connected over transport "(\w+)"$"#)]
-async fn a_client_connected_over(world: &mut ClientWorld, transport: String) {
+#[given(
+    regex = r#"^a client (configured with the Protobuf protocol )?connected over transport "(\w+)"$"#
+)]
+async fn a_client_connected_over(world: &mut ClientWorld, protobuf: String, transport: String) {
+    if !protobuf.is_empty() {
+        world.protocol = ferrifuge::Protocol::Protobuf;
+    }
     let kind = kind(&transport);
     let url = match &world.http_proxy {
         Some(proxy) if kind.is_emulated() => {

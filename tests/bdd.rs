@@ -392,6 +392,10 @@ const IMPLEMENTED: &[&str] = &[
     "Publications not taken before reconnect() are recovered once",
     // Block 25, sub-increment 25c: captive portals.
     "A captive portal answering the websocket upgrade is reported",
+    // Block 27, sub-increment 27b: Protobuf over http_stream.
+    "Fallback to http_stream with Protobuf",
+    "Binary publication delivered over Protobuf on http_stream",
+    "Server pings over Protobuf on http_stream are answered",
 ];
 
 /// Server configuration of @A scenarios.
