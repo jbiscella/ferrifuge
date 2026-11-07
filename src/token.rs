@@ -31,6 +31,20 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// Application data in `Debug` output: its length only, as `<n bytes>`.
+pub(crate) struct Bytes<'a>(pub(crate) &'a [u8]);
+
+impl std::fmt::Debug for Bytes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+/// Optional application data in `Debug` output: its length only.
+pub(crate) fn optional_bytes(data: Option<&Vec<u8>>) -> Option<Bytes<'_>> {
+    data.map(|data| Bytes(data))
+}
+
 /// Writes `"<redacted>"` for a non-empty token, `""` for none.
 pub(crate) fn redacted(token: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     if token.is_empty() {

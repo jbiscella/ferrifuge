@@ -1,5 +1,6 @@
 //! Client state and the events reporting its changes.
 
+use crate::token::{Bytes, optional_bytes};
 use crate::{ClientInfo, Publication, Subscribed};
 
 /// Connection state of a client.
@@ -28,7 +29,10 @@ impl State {
 
 /// Something that happened to a client. `#[non_exhaustive]`: later blocks
 /// add events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` output shows data as its length, so that events can be
+/// logged (Block 21).
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClientEvent {
     /// The client moved to [`State::Connecting`].
@@ -120,6 +124,40 @@ impl ServerSubscriptionEvent {
     }
 }
 
+impl std::fmt::Debug for ClientEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connecting { code, reason } => f
+                .debug_struct("Connecting")
+                .field("code", code)
+                .field("reason", reason)
+                .finish(),
+            Self::Connected {
+                client_id,
+                transport,
+                data,
+            } => f
+                .debug_struct("Connected")
+                .field("client_id", client_id)
+                .field("transport", transport)
+                .field("data", &optional_bytes(data.as_ref()))
+                .finish(),
+            Self::Disconnected { code, reason } => f
+                .debug_struct("Disconnected")
+                .field("code", code)
+                .field("reason", reason)
+                .finish(),
+            Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
+            Self::ServerSubscription { channel, event } => f
+                .debug_struct("ServerSubscription")
+                .field("channel", channel)
+                .field("event", event)
+                .finish(),
+            Self::Message(data) => f.debug_tuple("Message").field(&Bytes(data)).finish(),
+        }
+    }
+}
+
 impl ClientEvent {
     /// Name of the event as used by the Client SDK spec.
     #[must_use]
@@ -201,4 +239,74 @@ pub enum ErrorKind {
     /// subscribes again, or, for a server-side subscription, the client
     /// reconnects (Block 19, D8).
     Delta,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{ClientEvent, ServerSubscriptionEvent};
+    use crate::{ClientInfo, Publication, Subscribed, SubscriptionEvent};
+
+    const SECRET: &str = "s3cr3t-d4t4";
+
+    fn secret() -> Vec<u8> {
+        SECRET.as_bytes().to_vec()
+    }
+
+    fn info() -> ClientInfo {
+        ClientInfo {
+            client: "c".to_owned(),
+            user: "u".to_owned(),
+            conn_info: Some(secret()),
+            chan_info: Some(secret()),
+        }
+    }
+
+    fn publication() -> Publication {
+        Publication {
+            data: secret(),
+            tags: HashMap::from([("kind".to_owned(), SECRET.to_owned())]),
+            info: Some(info()),
+            ..Publication::default()
+        }
+    }
+
+    fn subscribed() -> Subscribed {
+        Subscribed {
+            data: Some(secret()),
+            ..Subscribed::default()
+        }
+    }
+
+    /// Events are logged at TRACE through their `Debug` output (Block 21,
+    /// D5): no data, info or tag value may show, as text or as bytes.
+    #[test]
+    fn the_debug_output_of_events_shows_no_data() {
+        let events: Vec<Box<dyn std::fmt::Debug>> = vec![
+            Box::new(ClientEvent::Connected {
+                client_id: "c".to_owned(),
+                transport: "websocket".to_owned(),
+                data: Some(secret()),
+            }),
+            Box::new(ClientEvent::Message(secret())),
+            Box::new(ClientEvent::ServerSubscription {
+                channel: "alerts".to_owned(),
+                event: ServerSubscriptionEvent::Publication(publication()),
+            }),
+            Box::new(ServerSubscriptionEvent::Subscribed(subscribed())),
+            Box::new(ServerSubscriptionEvent::Join(info())),
+            Box::new(SubscriptionEvent::Subscribed(subscribed())),
+            Box::new(SubscriptionEvent::Publication(publication())),
+            Box::new(SubscriptionEvent::Leave(info())),
+        ];
+        let as_bytes = format!("{:?}", SECRET.as_bytes());
+        let as_bytes = as_bytes.trim_matches(['[', ']']);
+        for event in events {
+            let shown = format!("{event:?}");
+            assert!(!shown.contains(SECRET), "{shown}");
+            assert!(!shown.contains(as_bytes), "{shown}");
+            assert!(shown.contains("<11 bytes>"), "{shown}");
+        }
+    }
 }
