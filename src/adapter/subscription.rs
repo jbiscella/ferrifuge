@@ -61,6 +61,27 @@ impl Subscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
+    /// Sets the tag filter sent in every subscribe command built from now
+    /// on, `None` to remove it (Block 35a), sending nothing now; a command
+    /// already sent keeps its filter (centrifuge-js `setTagsFilter`).
+    ///
+    /// # Errors
+    ///
+    /// [`SubscriptionError::InvalidTagFilter`] for a filter the server
+    /// would refuse, [`SubscriptionError::TagFilterWithDelta`] on a
+    /// subscription with delta; the filter is then left as it was.
+    pub fn set_tag_filter(
+        &self,
+        filter: Option<crate::TagFilter>,
+    ) -> Result<(), SubscriptionError> {
+        lock(&self.shared.core)
+            .machine
+            .check_subscription_tag_filter(self.id, filter.as_ref())?;
+        self.shared
+            .apply(Input::SetSubscriptionTagFilter(self.id, filter));
+        Ok(())
+    }
+
     /// Sets the data sent in every subscribe command built from now on:
     /// the next `subscribe()` and every resubscribe (Block 32), sending
     /// nothing now; a command already sent keeps its data. Raw JSON with
@@ -359,6 +380,16 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.options = self.options.delta(format);
+        self
+    }
+
+    /// Asks the server to send only the publications `filter` matches, on
+    /// channels with `allow_tags_filter` (Centrifugo from v6.4.0), with
+    /// every subscribe command (Block 35a). Building fails when the filter
+    /// is one the server would refuse, or goes with [`Self::delta`].
+    #[must_use]
+    pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
+        self.options = self.options.tag_filter(filter);
         self
     }
 

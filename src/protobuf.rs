@@ -161,8 +161,10 @@ impl From<&Command> for pb::Command {
                 flag,
                 join_leave,
                 delta,
+                tag_filter,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
+                    tf: tag_filter.as_ref().map(|filter| filter_node(&filter.0)),
                     delta: if *delta {
                         crate::wire::FOSSIL.to_owned()
                     } else {
@@ -415,6 +417,18 @@ impl From<pb::Publication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             delta: publication.delta,
         }
+    }
+}
+
+/// A tag filter as `client.proto` `FilterNode` (Block 35a).
+fn filter_node(node: &crate::tag_filter::Node) -> pb::FilterNode {
+    pb::FilterNode {
+        op: node.op.to_owned(),
+        key: node.key.clone(),
+        cmp: node.cmp.to_owned(),
+        val: node.val.clone(),
+        vals: node.vals.clone(),
+        nodes: node.nodes.iter().map(filter_node).collect(),
     }
 }
 
@@ -1014,6 +1028,42 @@ mod tests {
             ReplyResult::Push(Push::Publication { channel, publication })
                 if channel == "news" && publication.data == [0xfe] && publication.offset.is_none() && publication.epoch.is_none()
         ));
+    }
+
+    // Block 35a: a nested filter as `client.proto` `FilterNode`.
+    #[test]
+    fn encodes_a_tag_filter_as_a_filter_node() {
+        let filter =
+            crate::TagFilter::is_in("ticker", ["BTC"]).or(!crate::TagFilter::exists("venue"));
+        let frame = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                tag_filter: Some(filter),
+                ..SubscribeRequest::default()
+            }),
+        }]);
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+
+        let tf = command.subscribe.unwrap().tf.expect("a filter");
+        assert_eq!((tf.op.as_str(), tf.nodes.len()), ("or", 2));
+        assert_eq!(
+            (
+                tf.nodes[0].key.as_str(),
+                tf.nodes[0].cmp.as_str(),
+                tf.nodes[0].vals.clone()
+            ),
+            ("ticker", "in", vec!["BTC".to_owned()])
+        );
+        assert_eq!(tf.nodes[1].op, "not");
+        assert_eq!(
+            (
+                tf.nodes[1].nodes[0].key.as_str(),
+                tf.nodes[1].nodes[0].cmp.as_str()
+            ),
+            ("venue", "ex")
+        );
     }
 
     #[test]

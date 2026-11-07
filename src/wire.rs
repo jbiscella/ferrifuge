@@ -80,6 +80,9 @@ pub(crate) struct SubscribeRequest {
     /// Asks for publications as Fossil deltas (Block 19, D4), sent as
     /// `SubscribeRequest.delta = "fossil"`.
     pub(crate) delta: bool,
+    /// Asks the server to send only the publications it matches
+    /// (`SubscribeRequest.tf`, Block 35a).
+    pub(crate) tag_filter: Option<crate::TagFilter>,
 }
 
 /// The only delta format of `client.proto` (`SubscribeRequest.delta`).

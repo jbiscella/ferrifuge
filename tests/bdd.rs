@@ -480,6 +480,12 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // Join and leave pushes, for clients that ask (Block 13e): not forced,
     // and only to clients allowed to see presence.
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_JOIN_LEAVE", "true"),
+    // Tag filters, for subscriptions that send one (Block 35a; channel
+    // option `allow_tags_filter`, Centrifugo from v6.4.0).
+    (
+        "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_TAGS_FILTER",
+        "true",
+    ),
     (
         "CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_ALLOW_PUBLISH_FOR_CLIENT",
         "true",

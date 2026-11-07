@@ -167,6 +167,9 @@ pub struct SubscriptionOptions {
     /// Asks the server for publications as deltas against the previous one,
     /// on channels that allow it; the client rebuilds them (Block 19).
     pub delta: Option<crate::DeltaFormat>,
+    /// Asks the server to send only the publications this filter matches
+    /// (Block 35a); refused together with `delta`.
+    pub tag_filter: Option<crate::TagFilter>,
 }
 
 impl std::fmt::Debug for SubscriptionOptions {
@@ -190,6 +193,7 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("recoverable", &self.recoverable)
             .field("join_leave", &self.join_leave)
             .field("delta", &self.delta)
+            .field("tag_filter", &self.tag_filter)
             .finish()
     }
 }
@@ -209,6 +213,7 @@ impl Default for SubscriptionOptions {
             recoverable: false,
             join_leave: false,
             delta: None,
+            tag_filter: None,
         }
     }
 }
@@ -301,6 +306,13 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.delta = Some(format);
+        self
+    }
+
+    /// Sends `filter` with every subscribe command (Block 35a).
+    #[must_use]
+    pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
+        self.tag_filter = Some(filter);
         self
     }
 }
@@ -490,6 +502,11 @@ pub enum Input {
     /// (`Subscription::set_data`, Block 32). Ignored for an id not in the
     /// registry.
     SetSubscriptionData(SubscriptionId, Vec<u8>),
+    /// The application set a subscription's tag filter, `None` to remove
+    /// it, for the subscribe commands built from now on
+    /// (`Subscription::set_tag_filter`, Block 35a). The owner checks it with
+    /// [`Machine::check_subscription_tag_filter`] first.
+    SetSubscriptionTagFilter(SubscriptionId, Option<crate::TagFilter>),
     /// The application set the emulated headers sent from the next
     /// connection attempt (`set_emulated_headers`).
     SetEmulatedHeaders(BTreeMap<String, String>),
@@ -737,6 +754,11 @@ impl Input {
                 .field(id)
                 .field(&format_args!("<{} bytes>", data.len()))
                 .finish(),
+            Self::SetSubscriptionTagFilter(id, filter) => f
+                .debug_tuple("SetSubscriptionTagFilter")
+                .field(id)
+                .field(filter)
+                .finish(),
             Self::SetEmulatedHeaders(headers) => f
                 .debug_tuple("SetEmulatedHeaders")
                 .field(&headers.keys().collect::<Vec<_>>())
@@ -805,7 +827,8 @@ impl std::fmt::Debug for Input {
             Self::SetToken(_)
             | Self::SetData(_)
             | Self::SetEmulatedHeaders(_)
-            | Self::SetSubscriptionData(..) => self.fmt_setter(f),
+            | Self::SetSubscriptionData(..)
+            | Self::SetSubscriptionTagFilter(..) => self.fmt_setter(f),
             Self::ConnectDataFetched { fetch, result } => f
                 .debug_struct("ConnectDataFetched")
                 .field("fetch", fetch)
@@ -1339,7 +1362,8 @@ impl Machine {
             input @ (Input::SetToken(_)
             | Input::SetData(_)
             | Input::SetEmulatedHeaders(_)
-            | Input::SetSubscriptionData(..)) => {
+            | Input::SetSubscriptionData(..)
+            | Input::SetSubscriptionTagFilter(..)) => {
                 self.set(input);
             }
             Input::Subscribe(id) => self.subscribe(id),
@@ -1476,6 +1500,9 @@ impl Machine {
             Input::SetData(data) => self.config.data = Some(data),
             Input::SetEmulatedHeaders(headers) => self.emulated_headers = EmulatedHeaders(headers),
             Input::SetSubscriptionData(id, data) => self.set_subscription_data(id, data),
+            Input::SetSubscriptionTagFilter(id, filter) => {
+                self.set_subscription_tag_filter(id, filter);
+            }
             _ => unreachable!("not a setter input: {input:?}"),
         }
     }

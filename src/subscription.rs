@@ -274,6 +274,15 @@ pub enum SubscriptionError {
     /// The client is closed, dropped or its runtime shut down (Block 28):
     /// it can no longer subscribe.
     ClientClosed,
+    /// A tag filter the server would refuse: a comparison with an empty key,
+    /// or a set comparison with no value (Block 35a).
+    InvalidTagFilter {
+        /// What is wrong, naming the key, never a value.
+        reason: String,
+    },
+    /// A tag filter cannot go with delta compression (Block 35a;
+    /// `client.proto`: a filter "disables delta compression").
+    TagFilterWithDelta,
 }
 
 impl std::fmt::Display for SubscriptionError {
@@ -283,6 +292,10 @@ impl std::fmt::Display for SubscriptionError {
                 write!(f, "a subscription to channel {channel} already exists")
             }
             Self::ClientClosed => f.write_str("the client is closed"),
+            Self::InvalidTagFilter { reason } => write!(f, "invalid tag filter: {reason}"),
+            Self::TagFilterWithDelta => {
+                f.write_str("a tag filter cannot be combined with delta compression")
+            }
         }
     }
 }

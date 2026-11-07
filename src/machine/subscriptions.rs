@@ -197,6 +197,7 @@ impl Machine {
         if self.find_subscription(&channel).is_some() {
             return Err(SubscriptionError::AlreadyExists { channel });
         }
+        check_tag_filter(&options, options.tag_filter.as_ref())?;
         let subscriptions = &mut self.subscriptions;
         let id = SubscriptionId(subscriptions.next_id);
         subscriptions.next_id += 1;
@@ -262,6 +263,37 @@ impl Machine {
     pub(super) fn set_subscription_data(&mut self, id: SubscriptionId, data: Vec<u8>) {
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.options.data = Some(data);
+        }
+    }
+
+    /// Whether `filter` may be attached to subscription `id` (Block 35,
+    /// D1): what the server refuses, and a filter with delta. `Ok` for an id
+    /// not in the registry, which ignores the filter.
+    ///
+    /// # Errors
+    ///
+    /// [`SubscriptionError::InvalidTagFilter`] or
+    /// [`SubscriptionError::TagFilterWithDelta`].
+    pub fn check_subscription_tag_filter(
+        &self,
+        id: SubscriptionId,
+        filter: Option<&crate::TagFilter>,
+    ) -> Result<(), SubscriptionError> {
+        match self.subscriptions.by_id.get(&id) {
+            Some(sub) => check_tag_filter(&sub.options, filter),
+            None => Ok(()),
+        }
+    }
+
+    /// `Subscription::set_tag_filter` (Block 35, D1): the filter of every
+    /// subscribe command built from now on, checked by the owner first.
+    pub(super) fn set_subscription_tag_filter(
+        &mut self,
+        id: SubscriptionId,
+        filter: Option<crate::TagFilter>,
+    ) {
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            sub.options.tag_filter = filter;
         }
     }
 
@@ -384,6 +416,7 @@ impl Machine {
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
+        let tag_filter = sub.options.tag_filter.clone();
         let (positioned, recoverable, join_leave, delta) = (
             sub.options.positioned,
             sub.options.recoverable,
@@ -417,6 +450,7 @@ impl Machine {
                     flag,
                     join_leave,
                     delta,
+                    tag_filter,
                 }),
             },
         );
@@ -1272,6 +1306,22 @@ impl Machine {
     }
 }
 
+/// Block 35, D1: a filter the server would refuse, or one with delta.
+fn check_tag_filter(
+    options: &SubscriptionOptions,
+    filter: Option<&crate::TagFilter>,
+) -> Result<(), SubscriptionError> {
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+    if options.delta.is_some() {
+        return Err(SubscriptionError::TagFilterWithDelta);
+    }
+    filter
+        .check()
+        .map_err(|reason| SubscriptionError::InvalidTagFilter { reason })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1598,6 +1648,81 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // Block 35, D1: a filter the server would refuse, or one with delta, is
+    // refused when the subscription is created and when it is set.
+    #[test]
+    fn a_tag_filter_is_checked_when_attached() {
+        let mut machine = Machine::new(Config::default());
+        let empty_key = machine.add_subscription(
+            "a".into(),
+            SubscriptionOptions::default().tag_filter(crate::TagFilter::eq("", "1")),
+        );
+        let with_delta = machine.add_subscription(
+            "b".into(),
+            SubscriptionOptions::default()
+                .delta(crate::DeltaFormat::Fossil)
+                .tag_filter(crate::TagFilter::eq("k", "1")),
+        );
+        let delta = machine
+            .add_subscription(
+                "c".into(),
+                SubscriptionOptions::default().delta(crate::DeltaFormat::Fossil),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            empty_key,
+            Err(SubscriptionError::InvalidTagFilter { .. })
+        ));
+        assert_eq!(with_delta, Err(SubscriptionError::TagFilterWithDelta));
+        assert_eq!(
+            machine.check_subscription_tag_filter(delta, Some(&crate::TagFilter::eq("k", "1"))),
+            Err(SubscriptionError::TagFilterWithDelta)
+        );
+        assert_eq!(machine.check_subscription_tag_filter(delta, None), Ok(()));
+    }
+
+    // Block 35, D1: a filter set applies to the next subscribe command.
+    #[test]
+    fn a_tag_filter_set_applies_to_the_next_subscribe() {
+        let (mut machine, transport, id) = connected();
+        let first = machine.handle(Input::Subscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"subscribe":{}}"#.to_vec(),
+        });
+
+        let set = machine.handle(Input::SetSubscriptionTagFilter(
+            id,
+            Some(crate::TagFilter::eq("ticker", "BTC")),
+        ));
+        machine.handle(Input::Unsubscribe(id));
+        machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":3,"unsubscribe":{}}"#.to_vec(),
+        });
+        let again = machine.handle(Input::Subscribe(id));
+
+        let tf = |actions: &[Action]| -> Vec<serde_json::Value> {
+            actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::Send { frame, .. } => {
+                        let json: serde_json::Value = serde_json::from_slice(frame).ok()?;
+                        Some(json["subscribe"]["tf"].clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(set.is_empty(), "{set:?}");
+        assert_eq!(tf(&first), [serde_json::Value::Null]);
+        assert_eq!(
+            tf(&again),
+            [serde_json::json!({"key": "ticker", "cmp": "eq", "val": "BTC"})]
+        );
     }
 
     // Block 32, D3: nothing is sent now; the next subscribe after
