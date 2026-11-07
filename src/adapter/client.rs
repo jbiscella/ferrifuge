@@ -404,20 +404,14 @@ impl Shared {
                 self.fire_due_refreshes(core);
             }
             // What the server did before the wake stands, a terminal close
-            // or disconnect push included. While connecting, the refreshes
-            // now due go first, so that the subscribes a connect reply
-            // starts fetch new tokens; while connected, after, so that no
-            // refresh the input then tears down is left half done.
+            // or disconnect push included. The refreshes now due go first,
+            // so that a subscribe or connect the input starts fetches a new
+            // token; one the input tears down makes the next attempt fetch
+            // it (D3).
             Input::Frame { .. } | Input::TransportClosed { .. } => {
-                let connecting = core.machine.state() == State::Connecting;
-                if connecting {
-                    self.fire_due_refreshes(core);
-                }
+                self.fire_due_refreshes(core);
                 self.feed(core, input);
                 self.feed(core, Input::Slept { gap });
-                if !connecting {
-                    self.fire_due_refreshes(core);
-                }
             }
             input => {
                 self.feed(core, Input::Slept { gap });
@@ -2783,6 +2777,69 @@ mod tests {
             sent.iter()
                 .any(|frame| frame.contains(r#""recover":true"#) && frame.contains(r#""offset":1"#)),
             "{sent:?}"
+        );
+    }
+
+    // Codex, #120: a resubscribe-advised push read after a sleep longer
+    // than the subscription token's refresh, shorter than the no-ping
+    // window, resubscribes with a new token.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_resubscribe_push_read_after_a_sleep_fetches_a_new_token() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":120}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .token("s0")
+            .get_token(|_| async { Ok("s1".to_owned()) })
+            .build()
+            .unwrap();
+        let _events = subscription.events();
+        subscription.subscribe();
+        let frame = |data: &str| Input::Frame {
+            transport,
+            data: data.as_bytes().to_vec(),
+        };
+        let mut core = lock(&client.shared().core);
+        let shared = client.shared();
+        shared.handle(
+            &mut core,
+            frame(r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#),
+        );
+        core.actions.clear();
+
+        slept(&mut core, Duration::from_secs(70));
+        shared.handle(
+            &mut core,
+            frame(
+                r#"{"push":{"channel":"news","unsubscribe":{"code":2500,"reason":"resubscribe"}}}"#,
+            ),
+        );
+
+        assert_eq!(core.machine.state(), State::Connected);
+        let sent: Vec<String> = core
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !sent.iter().any(|frame| frame.contains(r#""token":"s0""#)),
+            "{sent:?}"
+        );
+        assert!(
+            core.actions
+                .iter()
+                .rev()
+                .take_while(|action| !matches!(action, Action::CancelSubscriptionToken(_)))
+                .any(|action| matches!(action, Action::FetchSubscriptionToken { .. })),
+            "{:?}",
+            core.actions
         );
     }
 

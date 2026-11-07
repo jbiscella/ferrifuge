@@ -862,6 +862,9 @@ impl Machine {
         }
         let sub = self.subscriptions.by_id.get_mut(&id).expect("found above");
         sub.state = SubscriptionState::Subscribing;
+        // A refresh left without a new token makes the resubscribe fetch
+        // one first (Block 25, D3).
+        sub.tokens.abandon_refresh();
         // A refresh of the dropped subscription's token would hold the
         // subscribe back, or report a timeout while subscribing; the new
         // subscribe reply schedules the next one.
@@ -1150,6 +1153,11 @@ impl Machine {
             // The token is kept for the resubscribe; its refresh starts
             // again from the new subscribe reply.
             if sub.uses_token() {
+                if reconnect {
+                    sub.tokens.abandon_refresh();
+                } else {
+                    sub.tokens.forget_refresh();
+                }
                 if let Some(fetch) = sub.tokens.abandon() {
                     self.actions.push(Action::CancelSubscriptionToken(fetch));
                 }
@@ -2111,8 +2119,11 @@ mod tests {
         (machine, transport, id, fetch)
     }
 
+    // The refresh came due and got no new token: the resubscribe fetches
+    // one first (Block 25, D3), and the abandoned fetch's answer is not
+    // used.
     #[test]
-    fn a_resubscribe_advised_during_a_token_refresh_fetch_subscribes_at_once() {
+    fn a_resubscribe_advised_during_a_token_refresh_fetch_fetches_a_new_token_first() {
         let (mut machine, transport, _, fetch) = refresh_fetching();
 
         let actions = machine.handle(reply(transport, &unsubscribe_push(2500)));
@@ -2120,14 +2131,51 @@ mod tests {
             fetch,
             result: Ok("late".into()),
         });
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: subscription_token_fetch(&actions),
+            result: Ok("new".into()),
+        });
 
         assert!(actions.contains(&Action::CancelSubscriptionToken(fetch)));
-        assert_eq!(
-            sent(&actions),
-            [r#"{"id":3,"subscribe":{"channel":"news","token":"t"}}"#]
-        );
+        assert_eq!(sent(&actions), Vec::<String>::new());
         // The abandoned refresh sends no sub_refresh.
         assert_eq!(sent(&late), Vec::<String>::new());
+        assert_eq!(
+            sent(&answered),
+            [r#"{"id":3,"subscribe":{"channel":"news","token":"new"}}"#]
+        );
+    }
+
+    // A token already fetched, its sub_refresh pending, is the resubscribe's.
+    #[test]
+    fn a_resubscribe_advised_during_a_sub_refresh_keeps_the_fetched_token() {
+        let (mut machine, transport, _, fetch) = refresh_fetching();
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+
+        let actions = machine.handle(reply(transport, &unsubscribe_push(2500)));
+
+        assert_eq!(
+            sent(&actions),
+            [r#"{"id":4,"subscribe":{"channel":"news","token":"u"}}"#]
+        );
+    }
+
+    // `unsubscribe()` ends the refresh: the next subscribe is as before.
+    #[test]
+    fn unsubscribe_during_a_token_refresh_fetch_leaves_the_next_subscribe_alone() {
+        let (mut machine, transport, id, _) = refresh_fetching();
+        machine.handle(Input::Unsubscribe(id));
+        machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
+
+        let subscribing = machine.handle(Input::Subscribe(id));
+
+        assert_eq!(
+            sent(&subscribing),
+            [r#"{"id":4,"subscribe":{"channel":"news","token":"t"}}"#]
+        );
     }
 
     #[test]
@@ -2907,7 +2955,14 @@ mod tests {
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
         machine.handle(Input::TransportOpened(transport));
-        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        // The refresh in progress got no token: the resubscribe fetches one
+        // first (Block 25, D3).
+        let resubscribing =
+            machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch: subscription_token_fetch(&resubscribing),
+            result: Ok("s".into()),
+        });
         machine.handle(reply(
             transport,
             r#"{"id":4,"subscribe":{"expires":true,"ttl":60}}"#,

@@ -130,6 +130,7 @@ impl Machine {
         if !sub.uses_token() {
             return;
         }
+        sub.tokens.forget_refresh();
         if let Some(fetch) = sub.tokens.abandon() {
             self.actions.push(Action::CancelSubscriptionToken(fetch));
         }

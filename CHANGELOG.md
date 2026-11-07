@@ -28,6 +28,10 @@ repository held while it carried that version, from the blocks of
 - Token refresh timers keep running across a reconnect, until the next
   connect or subscribe reply re-arms or cancels them; one that fires
   meanwhile makes the next attempt fetch a new token first.
+- A refresh that came due and got no new token before a reconnect, or
+  before a resubscribe advised by the server (codes from 2500), makes the
+  next connect or subscribe fetch a new token first, instead of sending
+  the token whose refresh came due; a token already fetched is used.
 
 ### Fixed
 
