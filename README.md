@@ -92,7 +92,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.16"
+ferrifuge = "0.17"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -549,7 +549,7 @@ server's asynchronous messages, exactly as received.
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.16", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.17", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -655,10 +655,8 @@ background. Disconnect when the app goes to the background and connect when
 it returns, or keep the client running only where the system allows it.
 Recovery and in-order delivery make the gap lossless on channels with
 history and recovery, within the server's history size and TTL: the next
-subscribe asks for what was missed. A suspended device's clock stops, so
-the no-ping deadline and the token refresh run late after a resume;
-disconnecting in the background avoids that, and a connect answered with an
-expired token (109) gets a new one from the token callback.
+subscribe asks for what was missed. For what a client does after the
+device slept, see Sleep and network changes.
 
 **Android setup.** The operating system's certificate verifier needs:
 
@@ -678,6 +676,34 @@ Revocation is checked from API level 24. Extra roots go through a
 `root_certificates` works there. On both, only the environment's proxy
 applies (see Proxies), and the `fips` build is unsupported.
 
+### Sleep and network changes
+
+The client notices a system sleep at the first input after the wake: a
+timer, data from the server, a callback's answer or a call. It compares how
+far the wall clock and the monotonic clock moved since the previous input,
+and takes a difference of 2 s or more for a sleep. Nothing wakes an idle
+client to look sooner: it notices at its next timer, at the latest the
+no-ping deadline (the server's ping interval plus `max_server_ping_delay`).
+Then:
+
+- after a sleep at least as long as that no-ping window, the server has
+  given up on the connection: the client closes it and reconnects with
+  code 2 "no ping", after the reconnect backoff and the jitter window, so
+  devices waking together do not reconnect together;
+- after a shorter sleep the connection stays and the no-ping window starts
+  again from the wake; without server pings the connection always stays;
+- every token refresh, the connection's and each subscription's, moves
+  earlier by the sleep, so a token that expired meanwhile is refreshed at
+  the wake, or fetched before the next connect or subscribe, never sent
+  expired;
+- reply deadlines, call timeouts and the reconnect and resubscribe delays
+  are left alone: their clock stopped too.
+
+A wall clock set forward by 2 s or more counts as a sleep; one set back is
+ignored. On Windows the monotonic clock (`QueryPerformanceCounter`) counts a
+suspend, so no sleep is seen there: the timers come due at the wake as if
+the device had stayed awake, with the same effect.
+
 ### Logging
 
 The tokio adapter logs through [`tracing`](https://docs.rs/tracing); the
@@ -687,15 +713,15 @@ sans-IO core logs nothing and reports the protocol breaches only it sees as
 | Level | What |
 |---|---|
 | WARN | Server anomalies: a frame that is not client protocol data, a reply without its command's result, a delta that cannot be applied, a message over the size limit, a websocket closed with 1009 |
-| DEBUG | Each state change of the client and of its subscriptions, with its code and reason; each transport attempt, its opening, failure and close; the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback started and how it ended; the read-ahead filling and draining; each call that fails |
+| DEBUG | Each state change of the client and of its subscriptions, with its code and reason; each transport attempt, its opening, failure and close; the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback started and how it ended; the read-ahead filling and draining; each call that fails; a system sleep detected, with its gap |
 | TRACE | Every input given to the core and every action it returns; each frame sent or received, by length |
 
 Each client logs in a `client` span whose `client` field is a number unique
 in the process, and each subscription in a `subscription` span with its
 `channel`. Values are fields (`state`, `code`, `reason`, `transport`,
-`endpoint`, `channel`, `bytes`, `delay`, `kind`). No record holds a token,
-any payload, connection or channel info, or a header value: data shows as
-its length and endpoints without userinfo, query or fragment.
+`endpoint`, `channel`, `bytes`, `delay`, `kind`, `gap`). No record holds a
+token, any payload, connection or channel info, or a header value: data
+shows as its length and endpoints without userinfo, query or fragment.
 
 With `tracing-subscriber`:
 
