@@ -383,6 +383,13 @@ const IMPLEMENTED: &[&str] = &[
     "A sleep leaves reply deadlines alone",
     "A token due during a sleep in a reconnect delay is fetched before the next connect",
     "A sleep while connecting keeps the reconnect delay",
+    // Block 25, sub-increment 25b: reconnect().
+    "reconnect() while connected skips the backoff but keeps the jitter window",
+    "reconnect() while connecting starts an attempt at once and keeps waiting calls",
+    "reconnect() tries the first transport again",
+    "reconnect() does nothing to a disconnected client",
+    "reconnect() reconnects at once without \"disconnected\"",
+    "Publications not taken before reconnect() are recovered once",
 ];
 
 /// Server configuration of @A scenarios.

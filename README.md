@@ -704,6 +704,21 @@ ignored. On Windows the monotonic clock (`QueryPerformanceCounter`) counts a
 suspend, so no sleep is seen there: the timers come due at the wake as if
 the device had stayed awake, with the same effect.
 
+To reconnect at once instead, call `reconnect()` when the platform reports a
+wake or a network change: macOS `NSWorkspace.didWakeNotification`, Windows
+`WM_POWERBROADCAST`, systemd-logind `PrepareForSleep`, Android
+`ConnectivityManager.NetworkCallback`, iOS `NWPathMonitor`. A connected
+client closes its transport, emits `connecting` with code 6 "reconnect
+called" and connects again after the jitter window only, without the
+backoff; a connecting one starts a new attempt at once. Either way the
+transports are tried again from the first, as a new network may allow
+websocket again, and every client's next attempt reads the environment's
+and the operating system's proxy settings again. Calls waiting for the
+connection keep waiting, and on channels with history and recovery the
+next connection recovers what the old one had not delivered. A disconnected
+client stays disconnected: `connect()` starts it. To fail waiting calls
+instead, call `disconnect()`, then `connect()`.
+
 ### Logging
 
 The tokio adapter logs through [`tracing`](https://docs.rs/tracing); the

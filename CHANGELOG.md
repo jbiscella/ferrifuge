@@ -11,7 +11,20 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- `Client::reconnect` and `Input::Reconnect` (Block 25): reconnect at once
+  on the platform's wake or network-change notification, with connecting
+  code 6 "reconnect called" (`codes::connecting::RECONNECT_CALLED`); the
+  jitter window still applies to a connected client, the backoff does not;
+  a disconnected client is left alone.
+
 ### Changed
+
+- `reconnect()` starts the transport round again from the first transport,
+  and makes every client's next attempt read the environment's and the
+  operating system's proxy settings again, rebuilding the HTTP clients
+  built on them.
 
 - The crate's license expression is `0BSD AND MIT`: `proto/client.proto`,
   which the crate ships, is under the MIT license. `LICENSE` lists every

@@ -1117,6 +1117,31 @@ impl Client {
         self.shared.apply(Input::Connect);
     }
 
+    /// Connects again at once, as an app does on its platform's wake or
+    /// network-change notification (macOS `NSWorkspace.didWakeNotification`,
+    /// Windows `WM_POWERBROADCAST`, systemd-logind `PrepareForSleep`,
+    /// Android `ConnectivityManager.NetworkCallback`, iOS `NWPathMonitor`).
+    ///
+    /// A connected client closes its transport and emits
+    /// [`ClientEvent::Connecting`] with code
+    /// [`codes::connecting::RECONNECT_CALLED`], then connects after the
+    /// reconnect jitter window only, without the backoff, so a fleet told
+    /// at once does not reconnect at once; a connecting client starts a new
+    /// attempt at once, with no event. Either way the attempt counter
+    /// restarts, the transports are tried again from the first, and every
+    /// client's next attempt reads the environment's and the operating
+    /// system's proxy settings again. A disconnected client is left alone:
+    /// call [`Client::connect`] to start it.
+    ///
+    /// Calls waiting for the connection keep waiting; calls sent on the
+    /// closed transport fail with code [`codes::error::CONNECTION_CLOSED`].
+    /// Publications not yet taken are withdrawn and, on recoverable
+    /// channels, recovered by the next connection.
+    pub fn reconnect(&self) {
+        super::proxy::read_settings_again();
+        self.shared.apply(Input::Reconnect);
+    }
+
     /// Disconnects and stops reconnecting. The state is
     /// [`State::Disconnected`] when this returns. Every pending call fails
     /// with code [`codes::error::DISCONNECTED`].
@@ -3085,6 +3110,18 @@ mod tests {
             shared.actions_queued.notified().now_or_never().is_some(),
             "the driver is not woken"
         );
+    }
+
+    // Block 25, D7.
+    #[tokio::test]
+    async fn reconnect_asks_for_the_proxy_settings_to_be_read_again() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let before = super::super::proxy::settings_generation();
+
+        client.reconnect();
+
+        assert!(super::super::proxy::settings_generation() > before);
     }
 
     // Single-threaded runtime: the driver task cannot run in between.

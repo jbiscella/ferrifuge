@@ -388,6 +388,10 @@ impl Timer {
 pub enum Input {
     /// The application called `connect()`.
     Connect,
+    /// The application called `reconnect()`, e.g. on its platform's wake or
+    /// network-change notification: the client connects again at once,
+    /// from the first transport (Block 25, D5, D6).
+    Reconnect,
     /// The application called `disconnect()`.
     Disconnect,
     /// The transport opened.
@@ -712,6 +716,7 @@ impl std::fmt::Debug for Input {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect => f.write_str("Connect"),
+            Self::Reconnect => f.write_str("Reconnect"),
             Self::StartBatching => f.write_str("StartBatching"),
             Self::StopBatching => f.write_str("StopBatching"),
             Self::Disconnect => f.write_str("Disconnect"),
@@ -1202,6 +1207,7 @@ impl Machine {
             matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));
         match input {
             Input::Connect => self.connect(),
+            Input::Reconnect => self.reconnect(),
             Input::StartBatching => self.start_batching(),
             Input::StopBatching => self.stop_batching(),
             Input::Disconnect => self.disconnect(
@@ -1814,6 +1820,50 @@ impl Machine {
     /// connecting (`reconnect`) or disconnected. An event is emitted only on
     /// an actual state change.
     fn disconnect(&mut self, code: u32, reason: &str, reconnect: bool) {
+        let Some(was_connected) = self.tear_down(code, reason, reconnect) else {
+            return;
+        };
+        if reconnect {
+            // The first round over the transports is the handshake: each is
+            // tried at once (centrifuge-js `_scheduleReconnect`).
+            let mut delay = if self.transports.in_first_round() {
+                Duration::ZERO
+            } else {
+                self.backoff.next_delay(&mut self.rng)
+            };
+            if was_connected {
+                delay += self.reconnect_jitter();
+            }
+            self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+        }
+    }
+
+    /// `reconnect()` (Block 25, D5, D6): a connected client reconnects
+    /// after the jitter window only, a connecting one at once; a
+    /// disconnected one is left alone, as one stopped on purpose.
+    fn reconnect(&mut self) {
+        let Some(was_connected) = self.tear_down(
+            codes::connecting::RECONNECT_CALLED,
+            "reconnect called",
+            true,
+        ) else {
+            return;
+        };
+        self.transports.restart();
+        // As after `connect()` (Block 2).
+        self.backoff.restart();
+        if was_connected {
+            let delay = self.reconnect_jitter();
+            self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+        } else {
+            self.start_attempt();
+        }
+    }
+
+    /// Ends the connection or the attempt in flight, entering `connecting`
+    /// when `reconnect`, else `disconnected`; whether the client was
+    /// connected, or `None` when it was disconnected already.
+    fn tear_down(&mut self, code: u32, reason: &str, reconnect: bool) -> Option<bool> {
         // "State invalidated" (Block 11): the connection token and every
         // subscription token, fixed ones too, are dropped and every stream
         // position is made unmatchable, whether a push or a close frame
@@ -1831,7 +1881,7 @@ impl Machine {
             self.fail_calls_disconnected();
         }
         if self.state == State::Disconnected {
-            return;
+            return None;
         }
         // No reply can come for the calls sent on the transport.
         self.fail_sent_calls();
@@ -1893,19 +1943,7 @@ impl Machine {
                 ClientEvent::Disconnected { code, reason }
             });
         }
-        if reconnect {
-            // The first round over the transports is the handshake: each is
-            // tried at once (centrifuge-js `_scheduleReconnect`).
-            let mut delay = if self.transports.in_first_round() {
-                Duration::ZERO
-            } else {
-                self.backoff.next_delay(&mut self.rng)
-            };
-            if was_connected {
-                delay += self.reconnect_jitter();
-            }
-            self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
-        }
+        Some(was_connected)
     }
 
     /// The system slept for `gap` (Block 25, D2 and D3).
@@ -2238,6 +2276,41 @@ mod tests {
         Input::Frame {
             transport,
             data: json.as_bytes().to_vec(),
+        }
+    }
+
+    // Block 25, D5: after `reconnect()` the backoff starts over, whatever
+    // it had grown to.
+    #[test]
+    fn after_reconnect_a_failed_attempt_waits_at_most_the_first_bound() {
+        let config = Config::default();
+        let bound = config.min_reconnect_delay * 2;
+        for seed in 0..1000 {
+            let mut machine =
+                Machine::with_rng(config.clone(), false, fastrand::Rng::with_seed(seed));
+            let mut transport = opened_transport(&machine.handle(Input::Connect));
+            for _ in 0..8 {
+                machine.handle(Input::TransportFailed {
+                    transport,
+                    message: "refused".into(),
+                });
+                transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+            }
+
+            let restarted = opened_transport(&machine.handle(Input::Reconnect));
+            let failed = machine.handle(Input::TransportFailed {
+                transport: restarted,
+                message: "refused".into(),
+            });
+
+            let delay = failed
+                .iter()
+                .find_map(|action| match action {
+                    Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                    _ => None,
+                })
+                .expect("a reconnect delay");
+            assert!(delay <= bound, "seed {seed}: {delay:?}");
         }
     }
 

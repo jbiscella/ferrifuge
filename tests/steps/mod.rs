@@ -231,6 +231,7 @@ impl ClientWorld {
         }
         config.protocol = self.protocol;
         self.connect_data.configure(&mut config);
+        self.sleep.configure(&mut config);
         config
     }
 

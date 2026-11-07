@@ -65,6 +65,11 @@ impl BatchRun {
         } else {
             Machine::new(config)
         };
+        Self::of(machine)
+    }
+
+    /// A run of `machine`, as built by the caller.
+    pub(super) fn of(machine: Machine) -> Self {
         Self {
             machine,
             transport: None,
@@ -488,7 +493,16 @@ fn a_batch_with_a_subscribe(world: &mut ClientWorld) {
 
 #[then(regex = r#"^the client emits "connecting" with code (\d+) and reason "([^"]+)"$"#)]
 #[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
-fn connecting_with_reason(world: &mut ClientWorld, code: u32, reason: String) {
+async fn connecting_with_reason(world: &mut ClientWorld, code: u32, reason: String) {
+    if !drives_a_machine(world) {
+        let event = world.next_event().await;
+        assert!(
+            matches!(&event, ClientEvent::Connecting { code: got, reason: why }
+                if *got == code && *why == reason),
+            "{event:?}"
+        );
+        return;
+    }
     let run = run(world);
     assert!(
         run.actions.iter().any(|action| matches!(

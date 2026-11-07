@@ -55,6 +55,14 @@ impl Transports {
         }
     }
 
+    /// The round starts again from the first transport, as on the first
+    /// connection: a new network may allow it again (Block 25, D6).
+    pub(super) fn restart(&mut self) {
+        self.index = 0;
+        self.chosen = false;
+        self.tried_all = false;
+    }
+
     /// Whether the client is still in its first round over the transports,
     /// which tries each at once rather than after the reconnect backoff.
     pub(super) fn in_first_round(&self) -> bool {

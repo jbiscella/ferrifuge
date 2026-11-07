@@ -9,7 +9,7 @@ use reqwest::Url;
 use rustls::ClientConfig;
 
 use super::client::lock;
-use super::proxy::{Proxy, ProxyTarget};
+use super::proxy::{self, Proxy, ProxyTarget};
 use super::tls::{BuildOnce, Tls, plain_tls_config};
 
 /// The network settings of one client.
@@ -98,19 +98,32 @@ impl Network {
     /// platform's trust, per client and per proxy setting otherwise; not
     /// kept when its TLS settings are not (Block 6, C7).
     pub(super) fn http_client(&self, secure: bool) -> Result<reqwest::Client, String> {
-        static SECURE: BuildOnce<reqwest::Client> = BuildOnce::new();
-        static PLAIN: BuildOnce<reqwest::Client> = BuildOnce::new();
+        // Built again once the system's proxy settings are read again
+        // (Block 25, D7).
+        static SHARED: Mutex<Option<(u64, Arc<Clients>)>> = Mutex::new(None);
         let (decisions, own) = {
             let current = lock(&self.current);
             (Arc::clone(&current.decisions), Arc::clone(&current.clients))
         };
         let system = lock(&decisions).proxy.is_system();
         let shared = system && self.tls.is_platform();
-        let once = match (shared, secure) {
-            (true, true) => &SECURE,
-            (true, false) => &PLAIN,
-            (false, true) => &own.secure,
-            (false, false) => &own.plain,
+        let process = shared.then(|| {
+            let generation = proxy::settings_generation();
+            let mut cached = lock(&SHARED);
+            match &*cached {
+                Some((built_in, clients)) if *built_in == generation => Arc::clone(clients),
+                _ => {
+                    let clients = Arc::<Clients>::default();
+                    *cached = Some((generation, Arc::clone(&clients)));
+                    clients
+                }
+            }
+        });
+        let clients = process.as_ref().unwrap_or(&own);
+        let once = if secure {
+            &clients.secure
+        } else {
+            &clients.plain
         };
         let (client, _) = once.get(|| {
             let (config, keep) = if secure {
@@ -129,7 +142,7 @@ impl Network {
             // The process-wide clients take the system's decision; a
             // client's own, the decisions of its setting, never the clients.
             let decide: Decide = if shared {
-                Arc::new(|url: &Url| Proxy::system().decide(url))
+                Arc::new(Proxy::system_decider())
             } else {
                 Arc::new(move |url: &Url| decide_once(&decisions, url))
             };
