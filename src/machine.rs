@@ -478,6 +478,11 @@ pub enum Input {
     /// The application set the connect data used from the next connection
     /// attempt, unless a connect data callback replaces it (`set_data`).
     SetData(Vec<u8>),
+    /// The application set a subscription's data, used in every subscribe
+    /// command built from now on, unless its data callback replaces it
+    /// (`Subscription::set_data`, Block 32). Ignored for an id not in the
+    /// registry.
+    SetSubscriptionData(SubscriptionId, Vec<u8>),
     /// The application set the emulated headers sent from the next
     /// connection attempt (`set_emulated_headers`).
     SetEmulatedHeaders(BTreeMap<String, String>),
@@ -720,6 +725,11 @@ impl Input {
                 .debug_tuple("SetData")
                 .field(&format_args!("<{} bytes>", data.len()))
                 .finish(),
+            Self::SetSubscriptionData(id, data) => f
+                .debug_tuple("SetSubscriptionData")
+                .field(id)
+                .field(&format_args!("<{} bytes>", data.len()))
+                .finish(),
             Self::SetEmulatedHeaders(headers) => f
                 .debug_tuple("SetEmulatedHeaders")
                 .field(&headers.keys().collect::<Vec<_>>())
@@ -784,9 +794,10 @@ impl std::fmt::Debug for Input {
                     &result.as_ref().map(|token| Secret(token.clone())),
                 )
                 .finish(),
-            Self::SetToken(_) | Self::SetData(_) | Self::SetEmulatedHeaders(_) => {
-                self.fmt_setter(f)
-            }
+            Self::SetToken(_)
+            | Self::SetData(_)
+            | Self::SetEmulatedHeaders(_)
+            | Self::SetSubscriptionData(..) => self.fmt_setter(f),
             Self::ConnectDataFetched { fetch, result } => f
                 .debug_struct("ConnectDataFetched")
                 .field("fetch", fetch)
@@ -1313,7 +1324,10 @@ impl Machine {
             }
 
             Input::ConnectDataFetched { fetch, result } => self.connect_data_fetched(fetch, result),
-            input @ (Input::SetToken(_) | Input::SetData(_) | Input::SetEmulatedHeaders(_)) => {
+            input @ (Input::SetToken(_)
+            | Input::SetData(_)
+            | Input::SetEmulatedHeaders(_)
+            | Input::SetSubscriptionData(..)) => {
                 self.set(input);
             }
             Input::Subscribe(id) => self.subscribe(id),
@@ -1449,6 +1463,7 @@ impl Machine {
             Input::SetToken(token) => self.tokens.set(token),
             Input::SetData(data) => self.config.data = Some(data),
             Input::SetEmulatedHeaders(headers) => self.emulated_headers = EmulatedHeaders(headers),
+            Input::SetSubscriptionData(id, data) => self.set_subscription_data(id, data),
             _ => unreachable!("not a setter input: {input:?}"),
         }
     }

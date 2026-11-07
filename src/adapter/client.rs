@@ -21,7 +21,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
 
-use super::http::HttpTransport;
+use super::http::{HeaderSet, HttpTransport};
 use super::log::{self, Log};
 use super::net::Network;
 use super::proxy::Proxy;
@@ -79,6 +79,9 @@ pub(super) struct Shared {
     pub(super) log: Log,
     /// Its TLS and proxy settings and HTTP clients (Blocks 22, 23).
     pub(super) network: Arc<Network>,
+    /// The real HTTP headers of every transport request, which
+    /// `set_http_headers` replaces (Blocks 17, 32).
+    pub(super) http_headers: HeaderSet,
 }
 
 /// Events waiting for their streams (Block 15). Locked after
@@ -888,8 +891,9 @@ impl ClientBuilder {
     /// case-insensitive, a later value replacing an earlier one. A name or
     /// value that is not valid HTTP, or a header the transport sets itself
     /// (`Host`, `Connection`, `Upgrade`, `Content-Length`,
-    /// `Transfer-Encoding`, `Content-Type`, `Accept`, `Sec-WebSocket-*`),
-    /// makes [`ClientBuilder::build`] fail.
+    /// `Transfer-Encoding`, `Content-Type`, `Accept`, `Sec-WebSocket-*`,
+    /// `Proxy-Authorization`), makes [`ClientBuilder::build`] fail.
+    /// [`Client::set_http_headers`] replaces them on a built client.
     #[must_use]
     pub fn http_headers<I, K, V>(mut self, headers: I) -> Self
     where
@@ -1043,7 +1047,7 @@ impl Client {
             emulation_endpoint.as_deref(),
             &proxy,
         )?;
-        let http_headers = Arc::new(http_header_map(&http_headers)?);
+        let http_headers = HeaderSet::new(http_header_map(&http_headers)?);
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
@@ -1079,6 +1083,7 @@ impl Client {
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
             network: Arc::new(Network::new(Tls::new(trust), proxy)),
+            http_headers,
         });
         let driver = Driver {
             endpoints: endpoints
@@ -1087,7 +1092,6 @@ impl Client {
                 .collect(),
             subprotocol,
             emulation_endpoint,
-            http_headers,
             timeout,
             max_message,
             shared: Arc::clone(&shared),
@@ -1322,6 +1326,42 @@ impl Client {
         Ok(())
     }
 
+    /// Replaces the real HTTP headers (Block 32): every HTTP request started
+    /// from now on carries the new set, the upgrade or stream request of
+    /// the next attempt and each emulation request of an open `http_stream`
+    /// or sse transport. The open connection is kept, and a request already
+    /// started keeps the headers it started with. A header missing from the
+    /// new set is no longer sent; a name given twice keeps its later value.
+    ///
+    /// ```no_run
+    /// # fn run(client: &ferrifuge::Client, token: &str) -> Result<(), ferrifuge::ClientError> {
+    /// client.set_http_headers([("Authorization", format!("Bearer {token}"))])?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::ErrorKind::Configuration`] error naming a header, never its
+    /// value, as [`ClientBuilder::http_headers`] refuses it: a name or value
+    /// that is not valid HTTP, or a header the transport sets,
+    /// `Proxy-Authorization` included. The headers are then left as they
+    /// were.
+    pub fn set_http_headers<I, K, V>(&self, headers: I) -> Result<(), ClientError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let headers: Vec<(String, String)> = headers
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        let headers = http_header_map(&headers)?;
+        self.shared.http_headers.replace(headers);
+        Ok(())
+    }
+
     /// Replaces the proxy setting from the next connection attempt
     /// (Block 23), as the other setters do; the current connection is
     /// kept.
@@ -1529,8 +1569,6 @@ struct Driver {
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
     emulation_endpoint: Option<String>,
-    /// HTTP headers of every transport request.
-    http_headers: Arc<HeaderMap>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
@@ -1922,7 +1960,7 @@ impl Driver {
         let subprotocol = self.subprotocol;
         let timeout = self.timeout;
         let max_message = self.max_message;
-        let headers = Arc::clone(&self.http_headers);
+        let headers = self.shared.http_headers.clone();
         let network = Arc::clone(&self.shared.network);
         // The attempt's proxy, decided once (Block 23, D1); the transport
         // opening it gets the same decision.
@@ -1933,6 +1971,7 @@ impl Driver {
         self.shared.log.attempt(kind, endpoint, &decision);
         let opening: Opening = match kind {
             TransportKind::WebSocket => Box::pin(async move {
+                let headers = headers.current();
                 WebSocket::open(&url, subprotocol, timeout, &headers, &network, max_message)
                     .await
                     .map(|websocket| Transport::WebSocket(Box::new(websocket)))
@@ -2839,6 +2878,107 @@ mod tests {
         assert_eq!(failed.code, codes::error::DISCONNECTED);
         drop(client);
         drop(runtime);
+    }
+
+    fn header_names(client: &Client) -> Vec<(String, String)> {
+        client
+            .shared()
+            .http_headers
+            .current()
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    // Block 32, D1: a refused header leaves the set as it was, named
+    // without its value.
+    #[tokio::test]
+    async fn a_refused_header_leaves_the_set_and_names_the_header_only() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .http_headers([("X-Kept", "k")])
+            .build()
+            .unwrap();
+        for (name, value) in [
+            ("Sec-WebSocket-Key", "v-secret"),
+            ("Proxy-Authorization", "v-secret"),
+            ("bad name", "v-secret"),
+            ("X-Bad-Value", "v-secret\n"),
+        ] {
+            let error = client
+                .set_http_headers([("X-New", "n"), (name, value)])
+                .expect_err(name);
+
+            assert_eq!(error.kind, crate::ErrorKind::Configuration, "{name}");
+            assert!(error.message.contains(name), "{error:?}");
+            assert!(!error.message.contains("v-secret"), "{error:?}");
+            assert_eq!(
+                header_names(&client),
+                [("x-kept".to_owned(), "k".to_owned())]
+            );
+        }
+    }
+
+    // Block 32, D1: the whole set is replaced; a name given twice keeps the
+    // later value.
+    #[tokio::test]
+    async fn set_http_headers_replaces_the_whole_set() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .http_headers([("X-Old", "o")])
+            .build()
+            .unwrap();
+
+        client
+            .set_http_headers([("X-New", "1"), ("x-new", "2")])
+            .unwrap();
+
+        assert_eq!(
+            header_names(&client),
+            [("x-new".to_owned(), "2".to_owned())]
+        );
+    }
+
+    // Block 32, D2: the next attempt's upgrade request carries the new set.
+    #[tokio::test]
+    async fn the_next_upgrade_request_carries_the_new_set() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/connection/websocket",
+            listener.local_addr().unwrap()
+        );
+        let client = Client::builder(url)
+            .http_headers([("X-Device-Real", "r1")])
+            .build()
+            .unwrap();
+        client.set_http_headers([("X-Device-Real", "r2")]).unwrap();
+
+        client.connect();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 4096];
+        let read = socket.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..read]).to_lowercase();
+
+        assert!(request.contains("x-device-real: r2\r\n"), "{request}");
+        assert!(!request.contains("r1"), "{request}");
+    }
+
+    // Block 32, D4: the set's values never reach a Debug output.
+    #[tokio::test]
+    async fn debug_output_shows_header_names_only() {
+        let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
+            .build()
+            .unwrap();
+        client
+            .set_http_headers([("Authorization", "h-secret")])
+            .unwrap();
+        let batch = client.start_batching();
+
+        let debug = format!("{client:?} {batch:?} {:?}", client.shared());
+
+        assert!(!debug.contains("h-secret"), "{debug}");
+        assert!(debug.contains("authorization"), "{debug}");
+        drop(batch);
     }
 
     // Block 31, D2: set when connected is seen, cleared otherwise.
