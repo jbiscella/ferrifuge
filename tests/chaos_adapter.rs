@@ -7,6 +7,7 @@
 // @P scenario: The adapter runner reports a planted fault
 // @P scenario: Seeded chaos with batching on the tokio client keeps the invariants
 // @P scenario: Seeded chaos with delta subscriptions on the tokio client keeps the invariants
+// @P scenario: Seeded chaos on the tokio client batches automatically and keeps the invariants
 
 mod support;
 
@@ -353,6 +354,7 @@ impl Run {
             Op::StartBatching => {
                 if self.batches.len() < 3 {
                     self.batches.push(self.client.start_batching());
+                    self.count("batch started");
                 }
             }
             Op::StopBatching => {
@@ -645,11 +647,62 @@ async fn run_seeds(
         let mut run = Run::new(seed, skip_recovered, delta).await;
         run.run(OPS).await?;
         *counts.entry("corrupted delta").or_default() += run.server.corrupted_deltas();
+        frames_of(&run, &mut counts);
         for (name, count) in run.counts {
             *counts.entry(name).or_default() += count;
         }
     }
     Ok(counts)
+}
+
+/// Counts the frames of `run` the fake server read: those of several
+/// commands in a seed that opened no batch, which automatic batching made
+/// (Block 36a), and those whose connect command carries subscribe commands
+/// (Block 36b).
+fn frames_of(run: &Run, counts: &mut BTreeMap<&'static str, usize>) {
+    let mut frames: BTreeMap<usize, Vec<serde_json::Value>> = BTreeMap::new();
+    for (command, frame) in run.server.received_with_frames() {
+        frames.entry(frame).or_default().push(command);
+    }
+    let batched = run.counts.contains_key("batch started");
+    for commands in frames.values() {
+        if commands.len() > 1 && !batched {
+            *counts
+                .entry("frame of several commands no batch held")
+                .or_default() += 1;
+        }
+        if commands[0]["connect"].is_object()
+            && commands
+                .iter()
+                .any(|command| command["subscribe"].is_object())
+        {
+            *counts
+                .entry("connect frame carrying subscribe commands")
+                .or_default() += 1;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeded_chaos_on_the_tokio_client_batches_automatically() {
+    let seeds = seeds();
+    let counts = run_seeds(seeds.clone(), false, false)
+        .await
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let missing: Vec<_> = [
+        "frame of several commands no batch held",
+        "connect frame carrying subscribe commands",
+    ]
+    .into_iter()
+    .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
+    .collect();
+    assert!(
+        missing.is_empty(),
+        "counted 0 times: {missing:?}; counts {counts:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
