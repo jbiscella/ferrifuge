@@ -243,6 +243,11 @@ impl Handlers {
     }
 }
 
+/// Wakes the consumer, to see the client closed (Codex, #169).
+pub(super) fn wake_consumer(shared: &Shared) {
+    lock(&shared.handlers).wake();
+}
+
 /// A handler the client no longer calls, dropped once no lock is held.
 #[allow(dead_code)] // Held only to be dropped.
 enum Dropped {
@@ -323,7 +328,7 @@ fn install(
 }
 
 /// An event handed to its handler, which runs with no lock held.
-enum Handed {
+pub(super) enum Handed {
     Client {
         id: EventId,
         event: ClientEvent,
@@ -353,7 +358,7 @@ async fn consume(shared: Arc<Shared>) {
 
 /// The next event for a handler, the earliest emitted; `None` once the
 /// client is closed and no handler has an event left.
-fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>> {
+pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>> {
     let mut core = lock(&shared.core);
     let mut outboxes = lock(&shared.outboxes);
     let mut handlers = lock(&shared.handlers);
@@ -457,7 +462,7 @@ fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>> {
 }
 
 /// Calls the handler with no lock held, then reports its outcome (D3, D4).
-fn deliver(shared: &Shared, handed: Handed) {
+pub(super) fn deliver(shared: &Shared, handed: Handed) {
     let (id, outcome) = match handed {
         Handed::Client {
             id,
@@ -612,6 +617,37 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         false
+    }
+
+    // A handler only Send keeps the builders Sync (Codex, #169: semver).
+    #[test]
+    fn builders_stay_send_and_sync() {
+        fn sync<T: Send + Sync>() {}
+        sync::<crate::ClientBuilder>();
+        sync::<crate::SubscriptionBuilder>();
+    }
+
+    // Codex, #169: a consumer left without a handler ends when the client
+    // closes, rather than keep the client's state on a long-lived runtime.
+    #[test]
+    fn a_consumer_without_a_handler_ends_at_close() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            client.set_handler(|_: ClientEvent| {});
+            tokio::task::yield_now().await;
+            // The stream takes over: the consumer has no handler left.
+            let events = client.events();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client.close().await;
+            drop(events);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
     }
 
     // D3, D5: a handler a stream took over is dropped, as are the handlers
