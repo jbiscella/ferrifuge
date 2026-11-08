@@ -27,6 +27,12 @@ SPDX-FileCopyrightText = [
 SPDX-License-Identifier = "BSD-2-Clause"
 
 [[annotations]]
+path = "tests/fixtures/tla-traces/upstream/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Centrifugal Labs LTD"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = ".claude/skills/solidifier/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Fernando José Rodríguez Ramírez"
