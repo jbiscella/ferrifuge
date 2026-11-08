@@ -648,14 +648,13 @@ impl Shared {
         }
     }
 
-    /// Fails the call `id` with `error`; abandoned, as a dropped call is
-    /// (Block 41, D6).
-    pub(super) fn fail_call(&self, id: CallId, error: CallError) {
+    /// Gives the call `id` its outcome now, leaving the machine to be told;
+    /// locks only the calls, after any other lock.
+    pub(super) fn settle_call_now(&self, id: CallId, result: Result<CallReply, CallError>) {
         if let Some(sender) = lock(&self.calls).remove(&id) {
             // The future may be gone already.
-            let _ = sender.send(Err(error));
+            let _ = sender.send(result);
         }
-        self.apply(Input::CallAbandoned(id));
     }
 
     /// Feeds [`Input::Flush`].
