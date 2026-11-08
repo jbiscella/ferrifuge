@@ -571,7 +571,10 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
         Ok(()) => Input::EventTaken(id),
         Err(panic) => {
             let message = panic_message(panic.as_ref());
-            tracing::warn!(message = %message, "an event handler panicked");
+            // In the client's span, as every record (Block 21).
+            shared.log.span.in_scope(|| {
+                tracing::warn!(message = %message, "an event handler panicked");
+            });
             Input::HandlerPanicked { event: id, message }
         }
     };
@@ -611,6 +614,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -798,6 +803,44 @@ mod tests {
             *outcome.lock().unwrap(),
             Some(Poll::Ready(Err(crate::codes::error::WOULD_DEADLOCK)))
         );
+    }
+
+    /// A `close()` future handed to a handler.
+    type Closing = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // Codex, #169: a close() first polled outside a handler returns when a
+    // handler polls it later. The runtime never runs: the test hands the
+    // event to the handler itself, so the driver cannot end in between.
+    #[test]
+    fn a_close_polled_again_in_a_handler_returns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let closing: Arc<Mutex<Option<Closing>>> = Arc::default();
+        let in_handler = Arc::clone(&closing);
+        let returned = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&returned);
+        client.set_handler(move |_: ClientEvent| {
+            if let Some(mut close) = in_handler.lock().unwrap().take() {
+                let mut cx = Context::from_waker(Waker::noop());
+                *record.lock().unwrap() = Some(close.as_mut().poll(&mut cx).is_ready());
+            }
+        });
+        client.connect();
+        let mut close: Closing = Box::pin(client.close());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(close.as_mut().poll(&mut cx).is_pending());
+        *closing.lock().unwrap() = Some(close);
+
+        let Poll::Ready(Some(handed)) = next(client.shared(), &mut cx) else {
+            panic!("an event for the handler");
+        };
+        deliver(client.shared(), handed);
+
+        assert_eq!(*returned.lock().unwrap(), Some(true));
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).
