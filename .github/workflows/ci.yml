@@ -181,7 +181,8 @@ jobs:
 
   # Seeded chaos on the sans-IO core (Block 16): 10 000 seeds of 200
   # operations in release, from a start seed drawn per run and printed,
-  # then the same with delta subscriptions (Block 19); a
+  # then the same with delta subscriptions (Block 19), and with automatic
+  # batching on even seeds (Block 36); a
   # failure prints the command that reruns its seed alone. Pull requests
   # run seeds 0-299 in the test and portability jobs.
   chaos:
@@ -202,6 +203,8 @@ jobs:
           cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee chaos.txt
           # And with delta subscriptions, some deltas broken (Block 19).
           FERRIFUGE_CHAOS_SUBSCRIPTIONS=3 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
+          # And with automatic batching on even seeds (Block 36, D9).
+          FERRIFUGE_CHAOS_SUBSCRIPTIONS=4 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
 
       # The drawn start seed, and the failing seed, also when the run fails.
       - name: Chaos summary

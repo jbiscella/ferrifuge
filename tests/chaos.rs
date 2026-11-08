@@ -12,6 +12,8 @@
 // @P scenario: The core runner reports a planted batching fault
 // @P scenario: Seeded chaos with delta subscriptions keeps every invariant
 // @P scenario: The core runner reports a planted payload fault
+// @P scenario: Seeded chaos with automatic batching and optimistic subscriptions on the core keeps every invariant
+// @P scenario: The core runner reports a planted automatic-batching fault
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -97,6 +99,9 @@ enum Mode {
     Batching,
     /// Subscriptions with fossil delta, some deltas broken (19c).
     Delta,
+    /// Subscriptions and batches, with automatic batching on even seeds
+    /// (Block 36, D9).
+    AutoBatching,
 }
 
 impl Mode {
@@ -107,7 +112,13 @@ impl Mode {
             Self::Subscriptions => 1,
             Self::Batching => 2,
             Self::Delta => 3,
+            Self::AutoBatching => 4,
         }
+    }
+
+    /// Whether the application starts and stops batches.
+    fn batching(self) -> bool {
+        matches!(self, Self::Batching | Self::AutoBatching)
     }
 }
 
@@ -146,6 +157,12 @@ enum Fault {
     /// One byte of a publication's payload flipped by the tap before the
     /// checker (I11).
     FlipPayloadByte,
+    /// A frame sent by a flush reported to the checker as sent by the input
+    /// before it (I10, Block 36).
+    LateFlushReport,
+    /// The first subscribe command of a connect frame reported to the
+    /// checker before the connect command (I10, Block 36).
+    SubscribeBeforeConnect,
 }
 
 /// An invariant a seed broke.
@@ -399,6 +416,10 @@ enum Due {
     State(FetchId, SubscriptionId, bool),
     /// The server pings the connection, if it still pings it.
     Ping(TransportId),
+    /// The server sends a reply it made earlier, if the connection is still
+    /// there: an error to a command after a connect in its frame, which
+    /// leaves after the connect reply (Block 36, D9).
+    Answer(TransportId, Value),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +467,18 @@ struct Server {
     /// The client-side channels whose subscription on `current` has delta
     /// on, with the payload the next delta applies to (Block 19).
     delta: BTreeMap<&'static str, Option<String>>,
+    /// Transports whose connect it answered with an error: as Centrifugo,
+    /// it closes them with 3501 on their next frame (Block 36, D9).
+    failed: BTreeSet<u64>,
+}
+
+/// What the server does with a command of a frame (Block 36, D9).
+enum Answered {
+    /// Its reply, if any, leaves no earlier than this.
+    After(Duration),
+    /// A connect answered with an error or not at all: the rest of the
+    /// frame is dropped.
+    ConnectFailed,
 }
 
 /// An object whose events the application reads from one stream.
@@ -505,6 +538,26 @@ struct Checker {
     /// Calls made while a batch was open, not yet sent, with the stops known
     /// when they were made (I10).
     held: BTreeMap<CallId, u64>,
+    /// Transports that sent something: the first was a connect (I10).
+    started: BTreeSet<u64>,
+}
+
+/// The simulated owner's flushes, with automatic batching (Block 36, D9).
+#[derive(Default)]
+struct Owner {
+    /// The machine batches automatically.
+    automatic: bool,
+    /// Inputs fed since the last flush, and how many make the owner flush.
+    unflushed: usize,
+    every: usize,
+    /// Nesting of `feed`: inputs the actions of an input cause count with it.
+    depth: usize,
+    /// Whether the input whose actions are being performed is a flush, as
+    /// the checker is told, and whether the last input fed was one.
+    flushing: bool,
+    last_was_flush: bool,
+    /// Commands the current flush sent.
+    commands: usize,
 }
 
 /// One seed's run.
@@ -524,6 +577,8 @@ struct Run {
     last_batch_frame: Option<usize>,
     /// Frames of several commands sent while handling the current input.
     batch_frames: usize,
+    /// How the simulated owner flushes (Block 36, D9).
+    owner: Owner,
     rng: fastrand::Rng,
     machine: Machine,
     now: Duration,
@@ -568,8 +623,20 @@ impl Run {
             late_stop: false,
             last_batch_frame: None,
             batch_frames: 0,
+            owner: Owner {
+                automatic: mode == Mode::AutoBatching && seed.is_multiple_of(2),
+                every: usize::try_from(seed % 4).expect("small") + 1,
+                ..Owner::default()
+            },
             rng: fastrand::Rng::with_seed(seed ^ 0x5eed_c4a0_5000_0016),
-            machine: Machine::with_token_source(chaos_config()).with_seed(seed),
+            machine: {
+                let machine = Machine::with_token_source(chaos_config()).with_seed(seed);
+                if mode == Mode::AutoBatching && seed.is_multiple_of(2) {
+                    machine.with_automatic_batching()
+                } else {
+                    machine
+                }
+            },
             now: Duration::ZERO,
             agenda: BTreeMap::new(),
             scheduled: 0,
@@ -585,6 +652,7 @@ impl Run {
                 granted: BTreeSet::new(),
                 payloads: BTreeMap::new(),
                 delta: BTreeMap::new(),
+                failed: BTreeSet::new(),
             },
             subs: [None; CHANNELS.len()],
             streams: BTreeMap::new(),
@@ -610,7 +678,7 @@ impl Run {
             }
             // Drawn only with batching, so the other modes' seeds keep their
             // operations.
-            let next = if self.mode == Mode::Batching && self.rng.u32(0..100) < 12 {
+            let next = if self.mode.batching() && self.rng.u32(0..100) < 12 {
                 if self.rng.bool() {
                     Op::StartBatching
                 } else {
@@ -665,6 +733,43 @@ impl Run {
         Ok(())
     }
 
+    /// I10 (Block 36, D9): with automatic batching a frame is sent only by
+    /// a flush, and the first command sent on a transport is its connect
+    /// command.
+    fn check_sent(&mut self, transport: TransportId, text: &str) -> Step {
+        if self.owner.automatic && !self.owner.flushing {
+            return Err(self.violation("I10", "a frame sent by an input other than a flush"));
+        }
+        let mut commands: Vec<&str> = text.lines().collect();
+        if self.owner.flushing {
+            self.owner.commands += commands.len();
+        }
+        let connect_frame = commands
+            .first()
+            .is_some_and(|first| first.contains(r#""connect""#));
+        if connect_frame
+            && commands
+                .iter()
+                .any(|command| command.contains(r#""subscribe""#))
+        {
+            self.count("connect frame carrying subscribe commands");
+            if self.fault == Some(Fault::SubscribeBeforeConnect) {
+                commands.swap(0, 1);
+            }
+        }
+        if self.checker.started.insert(id(transport))
+            && !commands
+                .first()
+                .is_some_and(|first| first.contains(r#""connect""#))
+        {
+            return Err(self.violation(
+                "I10",
+                format!("the first command sent on {transport:?} is not its connect command"),
+            ));
+        }
+        Ok(())
+    }
+
     /// I10: a frame of several commands stays within the frame cap.
     fn check_frame(&mut self, frame: &[u8]) -> Step {
         let commands = frame.split(|byte| *byte == b'\n').count();
@@ -713,7 +818,7 @@ impl Run {
         let channel = "news".to_owned();
         // With batches, data of up to 600 bytes, so that a few calls
         // fill a frame and batches split.
-        let data = if self.mode == Mode::Batching {
+        let data = if self.mode.batching() {
             format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes()
         } else {
             b"{}".to_vec()
@@ -760,7 +865,7 @@ impl Run {
             Op::Call(kind) => {
                 // Inside a batch, a burst of calls, so that the batch fills
                 // more than one frame and splits (Block 18, D5).
-                let burst = if self.mode == Mode::Batching && self.checker.batches_open > 0 {
+                let burst = if self.mode.batching() && self.checker.batches_open > 0 {
                     self.rng.usize(1..=4)
                 } else {
                     1
@@ -1049,7 +1154,13 @@ impl Run {
     /// Lets `by` of simulated time pass, handling what falls due.
     fn advance(&mut self, by: Duration) -> Step {
         let until = self.now + by;
-        while let Some(entry) = self.agenda.first_entry() {
+        loop {
+            // The owner flushes before the clock moves, as the driver does
+            // before it waits (Block 36, D9).
+            self.flush()?;
+            let Some(entry) = self.agenda.first_entry() else {
+                break;
+            };
             let (at, _) = *entry.key();
             if at > until {
                 break;
@@ -1060,6 +1171,21 @@ impl Run {
         }
         self.now = until;
         self.check_calls()
+    }
+
+    /// The owner feeds `Input::Flush`, with automatic batching, once inputs
+    /// came since the last.
+    fn flush(&mut self) -> Step {
+        if !self.owner.automatic || self.owner.unflushed == 0 {
+            return Ok(());
+        }
+        self.owner.unflushed = 0;
+        self.owner.commands = 0;
+        self.feed(Input::Flush)?;
+        if self.owner.commands >= 2 {
+            self.count("flush sending several commands");
+        }
+        Ok(())
     }
 
     fn schedule(&mut self, after: Duration, due: Due) {
@@ -1120,6 +1246,12 @@ impl Run {
                     Err(StateError("chaos".to_owned()))
                 };
                 self.feed(Input::SubscriptionStateFetched { fetch, result })
+            }
+            Due::Answer(transport, reply) => {
+                if self.server.current == Some(transport) {
+                    self.arrive(transport, frame(&reply));
+                }
+                Ok(())
             }
             Due::Ping(transport) => {
                 if self.server.current == Some(transport) && self.server.pinging {
@@ -1219,14 +1351,43 @@ impl Run {
     /// Feeds `input` to the machine, performs its actions, and checks the
     /// invariants.
     fn feed(&mut self, input: Input) -> Step {
+        let flush = matches!(input, Input::Flush);
+        self.owner.depth += 1;
+        let fed = self.feed_one(input, flush);
+        self.owner.depth -= 1;
+        fed?;
+        // A seeded number of inputs, and those their actions cause, then a
+        // flush (Block 36, D9).
+        if self.owner.automatic && self.owner.depth == 0 && !flush {
+            self.owner.unflushed += 1;
+            if self.owner.unflushed >= self.owner.every {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn feed_one(&mut self, input: Input, flush: bool) -> Step {
         self.trace.push(format!("in {input:?}"));
         let machine = &mut self.machine;
         let actions = catch_unwind(AssertUnwindSafe(|| machine.handle(input)))
             .map_err(|panic| self.violation("I2", panic_message(&panic)))?;
+        // The planted fault tells the checker the input before this one.
+        let reported = if self.fault == Some(Fault::LateFlushReport) {
+            self.owner.last_was_flush
+        } else {
+            flush
+        };
+        self.owner.last_was_flush = flush;
+        let outer = std::mem::replace(&mut self.owner.flushing, reported);
         for action in actions {
             self.trace.push(format!("out {action:?}"));
-            self.act(action)?;
+            if let Err(violation) = self.act(action) {
+                self.owner.flushing = outer;
+                return Err(violation);
+            }
         }
+        self.owner.flushing = outer;
         for event in std::mem::take(&mut self.taken_at_once) {
             self.delivered(event)?;
             self.feed(Input::EventTaken(event))?;
@@ -1285,11 +1446,10 @@ impl Run {
                 let after = self.latency();
                 self.schedule(after, Due::Written(transport, frame_id));
                 self.check_frame(&frame)?;
+                let text = String::from_utf8(frame).expect("JSON frames");
+                self.check_sent(transport, &text)?;
                 if self.server.current == Some(transport) {
-                    let text = String::from_utf8(frame).expect("JSON frames");
-                    for command in text.lines() {
-                        self.answer(transport, command);
-                    }
+                    self.answer_frame(transport, &text);
                 }
             }
             Action::SetTimer(timer, delay) => {
@@ -1808,11 +1968,39 @@ impl Run {
     }
 
     /// The simulated server answers a command of the client, or not.
-    fn answer(&mut self, transport: TransportId, command: &str) {
+    /// The server handles the commands of a frame in order, as Centrifugo
+    /// does (Block 36, D9): those after a connect are answered after its
+    /// reply; after a connect it answers with an error, or not at all, the
+    /// rest of the frame is dropped, and an error closes the next frame of
+    /// the transport with 3501.
+    fn answer_frame(&mut self, transport: TransportId, text: &str) {
+        if self.server.failed.contains(&id(transport)) {
+            self.count("frame after a failed connect");
+            self.server_close(Some(3501), "bad request");
+            return;
+        }
+        let mut not_before = Duration::ZERO;
+        let mut commands = text.lines();
+        while let Some(command) = commands.next() {
+            match self.answer(transport, command, not_before) {
+                Answered::After(after) => not_before = not_before.max(after),
+                Answered::ConnectFailed => {
+                    if commands.any(|rest| rest.contains(r#""subscribe""#)) {
+                        self.count("optimistic subscribes lost to a failed connect");
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The server's answer to `command`, its reply leaving no earlier than
+    /// `not_before`.
+    fn answer(&mut self, transport: TransportId, command: &str, not_before: Duration) -> Answered {
         let command: Value = serde_json::from_str(command).expect("a JSON command");
         let Some(id) = command.get("id").and_then(Value::as_u64) else {
             // A pong, or a send: no reply.
-            return;
+            return Answered::After(not_before);
         };
         if let Some(channel) = command["unsubscribe"]["channel"].as_str() {
             self.server.subscribed.retain(|known| *known != channel);
@@ -1820,35 +2008,57 @@ impl Run {
         }
         let connect = command.get("connect").is_some();
         if connect && self.server.healed && self.fault == Some(Fault::IgnoreConnectWhenHealed) {
-            return;
+            return Answered::ConnectFailed;
         }
         let mut after = Duration::ZERO;
         if !self.server.healed {
-            match self.rng.u32(0..100) {
-                0..70 => self.count("answer"),
+            let error = match self.rng.u32(0..100) {
+                0..70 => {
+                    self.count("answer");
+                    None
+                }
                 70..80 => {
                     self.count("ignore");
-                    return;
+                    return if connect {
+                        Answered::ConnectFailed
+                    } else {
+                        Answered::After(not_before)
+                    };
                 }
                 80..88 => {
                     self.count("late answer");
                     after = Duration::from_millis(self.rng.u64(1000..=3000));
+                    None
                 }
                 88..94 => {
                     self.count("temporary error");
-                    return self.arrive(transport, frame(&error(id, 100, true)));
+                    Some(error(id, 100, true))
                 }
                 94..98 => {
                     self.count("permanent error");
-                    return self.arrive(transport, frame(&error(id, 103, false)));
+                    Some(error(id, 103, false))
                 }
                 _ => {
                     self.count("error 109");
-                    return self.arrive(transport, frame(&error(id, 109, false)));
+                    Some(error(id, 109, false))
                 }
+            };
+            if let Some(reply) = error {
+                if not_before.is_zero() {
+                    self.arrive(transport, frame(&reply));
+                } else {
+                    self.schedule(not_before, Due::Answer(transport, reply));
+                }
+                if connect {
+                    self.server.failed.insert(self::id(transport));
+                    return Answered::ConnectFailed;
+                }
+                return Answered::After(not_before);
             }
         }
+        let after = after.max(not_before);
         self.schedule(after, Due::Reply(transport, command));
+        Answered::After(after)
     }
 
     /// The server's reply to `command`, as it sends it now.
@@ -2273,6 +2483,37 @@ fn the_core_runner_reports_a_planted_payload_fault() {
     assert_reported(Fault::FlipPayloadByte, "I11", Mode::Delta);
 }
 
+#[test]
+fn seeded_chaos_with_automatic_batching_on_the_core_keeps_every_invariant() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::AutoBatching)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let mut expected = subscription_counts();
+    expected.extend(
+        [
+            "start batching",
+            "stop batching",
+            "batch stopped",
+            "frame of several commands",
+            "flush sending several commands",
+            "connect frame carrying subscribe commands",
+            "optimistic subscribes lost to a failed connect",
+        ]
+        .map(str::to_owned),
+    );
+    assert_counted(&counts, &expected);
+}
+
+#[test]
+fn the_core_runner_reports_a_planted_automatic_batching_fault() {
+    for fault in [Fault::LateFlushReport, Fault::SubscribeBeforeConnect] {
+        assert_reported(fault, "I10", Mode::AutoBatching);
+    }
+}
+
 /// Prints the whole trace of `FERRIFUGE_CHAOS_SEED` (seed 0 without it),
 /// of `FERRIFUGE_CHAOS_OPS` operations (60 without it), with
 /// subscriptions: `cargo test --test chaos trace -- --ignored --nocapture`.
@@ -2311,6 +2552,7 @@ fn seeded_chaos_long_run() {
         0 => Mode::Connection,
         1 => Mode::Subscriptions,
         3 => Mode::Delta,
+        4 => Mode::AutoBatching,
         _ => Mode::Batching,
     };
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);

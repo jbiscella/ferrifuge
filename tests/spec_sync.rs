@@ -18,12 +18,7 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
-const P_NOT_YET_MEASURED: &[&str] = &[
-    // Block 36c.
-    "Seeded chaos with automatic batching and optimistic subscriptions on the core keeps every invariant",
-    "The core runner reports a planted automatic-batching fault",
-    "Seeded chaos on the tokio client batches automatically and keeps the invariants",
-];
+const P_NOT_YET_MEASURED: &[&str] = &[];
 
 /// How a benchmark or simulation claims a `@P` scenario: a line of its own
 /// reading `// @P scenario: <scenario name>`.
