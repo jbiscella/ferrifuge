@@ -722,9 +722,20 @@ subscription.subscribe();
   events): while a handler runs, no timer fires, nothing is read and no ping
   is answered, so a handler that runs longer than the ping interval plus
   `max_server_ping_delay` may make the client reconnect.
-- A handler that calls its own client and waits fails at once with error 16
-  "would deadlock": a call, `ready()` or `close()` (`close()` then returns
-  once closing has started).
+- `EventDelivery::Thread` runs them on a thread of the client's own, named
+  `ferrifuge-events` and started at the first handler: handlers that block
+  take this mode, since the runtime and the driver go on meanwhile. If the
+  thread cannot start, the client disconnects with code 2 as for a panic,
+  and the next `connect()` tries again.
+- Under `Task` and `Inline`, a handler that calls its own client and waits
+  fails at once with error 16 "would deadlock": a call, `ready()` or
+  `close()` (`close()` then returns once closing has started). Under
+  `Thread` a wait fails with it only when nothing but a message held back
+  by the handler's own event could end it. That is a call or `ready()`
+  waiting for the connection or a subscription while that event holds the
+  messages after it, or a call whose reply cannot be read because a full
+  read-ahead stopped the reading. Other waits complete, and `close()`
+  returns once the driver stops. Calls of another client never fail.
 
 ### Codes
 

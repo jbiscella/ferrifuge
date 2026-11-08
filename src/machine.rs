@@ -14,6 +14,7 @@ mod batching;
 #[cfg(test)]
 mod buffer_tests;
 mod calls;
+#[cfg(feature = "tokio")]
 pub(crate) use calls::CallWait;
 #[cfg(test)]
 mod close_tests;
@@ -104,6 +105,11 @@ pub struct FetchId(u64);
 pub struct EventId(u64);
 
 impl EventId {
+    /// No event: for a handler failure that has none, as an events thread
+    /// that could not start (Block 41, D2).
+    #[cfg(feature = "tokio")]
+    pub(crate) const NONE: Self = Self(u64::MAX);
+
     /// An id for the adapter's unit tests.
     #[cfg(all(test, feature = "tokio"))]
     pub(crate) fn for_tests(n: u64) -> Self {
