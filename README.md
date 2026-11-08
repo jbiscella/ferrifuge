@@ -717,6 +717,11 @@ subscription.subscribe();
   default). On a multi-thread runtime, a handler that blocks lets the
   client's timers and pongs go on. On a current-thread runtime nothing else
   runs until it returns.
+- `EventDelivery::Inline` runs them on the client's driver instead, adding
+  no task per client. It gives up "timers keep running" (see States and
+  events): while a handler runs, no timer fires, nothing is read and no ping
+  is answered, so a handler that runs longer than the ping interval plus
+  `max_server_ping_delay` may make the client reconnect.
 - A handler that calls its own client and waits fails at once with error 16
   "would deadlock": a call, `ready()` or `close()` (`close()` then returns
   once closing has started).
