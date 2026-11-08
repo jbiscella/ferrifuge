@@ -125,6 +125,8 @@ struct State {
     subscribes_answered_at: Vec<std::time::Instant>,
     /// When each JSON connect reply went out (Block 36).
     connects_answered_at: Vec<std::time::Instant>,
+    /// Whether each upgrade asked for the Protobuf subprotocol, in order.
+    protobuf_upgrades: Vec<bool>,
     /// Per channel, the offset up to which the history has expired.
     expired: std::collections::HashMap<String, u64>,
     /// Publications a recovery may bring back at most; more fail it.
@@ -250,6 +252,7 @@ impl FakeServer {
                 {
                     let mut state = shared.lock().unwrap();
                     state.connections += 1;
+                    state.protobuf_upgrades.push(protobuf);
                     state.current = Some(control);
                     state.out = Some(out.clone());
                     state.delta_chains.clear();
@@ -399,6 +402,12 @@ impl FakeServer {
     /// subscribes answered from history, which go out at once.
     pub(crate) fn delay_next_connect(&self, delay: std::time::Duration) {
         self.state.lock().unwrap().connect_delay = Some(delay);
+    }
+
+    /// Whether each upgrade asked for the Protobuf subprotocol, in order
+    /// (Block 37b).
+    pub(crate) fn protobuf_upgrades(&self) -> Vec<bool> {
+        self.state.lock().unwrap().protobuf_upgrades.clone()
     }
 
     /// When each JSON connect reply went out, in order.
