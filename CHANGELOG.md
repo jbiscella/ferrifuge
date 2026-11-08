@@ -13,6 +13,11 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Channel compaction (Block 35b): `SubscriptionBuilder::channel_compaction`
+  and `SubscriptionOptions::channel_compaction` ask a Centrifugo PRO server
+  for a numeric channel id, and publication, join and leave pushes carrying
+  one reach their subscription; a push with an unknown id is dropped.
+
 - `TagFilter` (Block 35a): server-side filtering of a subscription's
   publications by their tags (Centrifugo `allow_tags_filter`, from v6.4.0),
   built from comparisons and `and`, `or`, `!`;

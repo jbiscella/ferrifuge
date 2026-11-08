@@ -262,6 +262,7 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             was_recovering: subscribe.was_recovering,
             recovered: subscribe.recovered,
             delta: subscribe.delta,
+            id: subscribe.id,
         }
     }
 }
@@ -350,6 +351,7 @@ impl From<pb::Push> for Push {
         if let Some(publication) = push.r#pub {
             Push::Publication {
                 channel: push.channel,
+                id: push.id,
                 publication: publication.into(),
             }
         } else if let Some(pb::Disconnect { code, reason, .. }) = push.disconnect {
@@ -377,11 +379,13 @@ impl From<pb::Push> for Push {
         } else if let Some(join) = push.join {
             Push::Join {
                 channel: push.channel,
+                id: push.id,
                 info: join.info.map(ClientInfo::from).unwrap_or_default(),
             }
         } else if let Some(leave) = push.leave {
             Push::Leave {
                 channel: push.channel,
+                id: push.id,
                 info: leave.info.map(ClientInfo::from).unwrap_or_default(),
             }
         } else {
@@ -436,7 +440,7 @@ fn filter_node(node: &crate::tag_filter::Node) -> pb::FilterNode {
 mod tests {
     use super::*;
     use crate::token::Secret;
-    use crate::wire::REJECT_UNRECOVERED;
+    use crate::wire::{CHANNEL_COMPACTION, REJECT_UNRECOVERED};
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -675,6 +679,7 @@ mod tests {
             replies[0].result,
             ReplyResult::Push(Push::Join {
                 channel: "news".into(),
+                id: 0,
                 info: expected.clone()
             })
         );
@@ -682,9 +687,82 @@ mod tests {
             replies[1].result,
             ReplyResult::Push(Push::Leave {
                 channel: "news".into(),
+                id: 0,
                 info: expected
             })
         );
+    }
+
+    #[test]
+    fn encodes_the_channel_compaction_flag_and_decodes_numeric_channel_ids() {
+        let flags = [
+            0,
+            CHANNEL_COMPACTION,
+            CHANNEL_COMPACTION | REJECT_UNRECOVERED,
+        ];
+        let frame = encode(
+            &flags
+                .iter()
+                .zip(1..)
+                .map(|(&flag, id)| Command {
+                    id,
+                    method: Method::Subscribe(SubscribeRequest {
+                        channel: "news".into(),
+                        flag,
+                        ..SubscribeRequest::default()
+                    }),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let push = |push: pb::Push| pb::Reply {
+            push: Some(push),
+            ..Default::default()
+        };
+        let replies = decode(&frame_of(&[
+            pb::Reply {
+                id: 1,
+                subscribe: Some(pb::SubscribeResult {
+                    id: 7,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            push(pb::Push {
+                id: 7,
+                r#pub: Some(pb::Publication::default()),
+                ..Default::default()
+            }),
+            push(pb::Push {
+                id: 7,
+                join: Some(pb::Join::default()),
+                ..Default::default()
+            }),
+            push(pb::Push {
+                id: 7,
+                leave: Some(pb::Leave::default()),
+                ..Default::default()
+            }),
+        ]))
+        .unwrap();
+
+        let mut rest = frame.as_slice();
+        for flag in flags {
+            let command = pb::Command::decode_length_delimited(&mut rest).unwrap();
+            assert_eq!(command.subscribe.unwrap().flag, flag);
+        }
+        assert!(matches!(&replies[0].result, ReplyResult::Subscribe(result) if result.id == 7));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Publication { channel, id: 7, .. }) if channel.is_empty()
+        ));
+        assert!(matches!(
+            &replies[2].result,
+            ReplyResult::Push(Push::Join { id: 7, .. })
+        ));
+        assert!(matches!(
+            &replies[3].result,
+            ReplyResult::Push(Push::Leave { id: 7, .. })
+        ));
     }
 
     #[test]
@@ -1025,7 +1103,7 @@ mod tests {
         assert_eq!(result.publications[0].offset, Some(3));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Publication { channel, publication })
+            ReplyResult::Push(Push::Publication { channel, publication, .. })
                 if channel == "news" && publication.data == [0xfe] && publication.offset.is_none() && publication.epoch.is_none()
         ));
     }

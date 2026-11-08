@@ -26,6 +26,7 @@ mod calls;
 mod close;
 mod codes;
 mod codes_table;
+mod compaction;
 mod connect_data;
 mod connection;
 mod delivery;

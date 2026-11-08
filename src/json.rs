@@ -645,6 +645,7 @@ struct JsonSubscribeResult {
     was_recovering: bool,
     recovered: bool,
     delta: bool,
+    id: i64,
 }
 
 impl From<JsonSubscribeResult> for SubscribeResult {
@@ -665,6 +666,7 @@ impl From<JsonSubscribeResult> for SubscribeResult {
             was_recovering: subscribe.was_recovering,
             recovered: subscribe.recovered,
             delta: subscribe.delta,
+            id: subscribe.id,
         }
     }
 }
@@ -705,6 +707,8 @@ struct JsonRpcResult {
 #[derive(Deserialize)]
 struct JsonPush {
     #[serde(default)]
+    id: i64,
+    #[serde(default)]
     channel: String,
     #[serde(rename = "pub")]
     publication: Option<JsonPublication>,
@@ -734,6 +738,7 @@ impl From<JsonPush> for Push {
         if let Some(publication) = push.publication {
             Self::Publication {
                 channel: push.channel,
+                id: push.id,
                 publication: publication.into(),
             }
         } else if let Some(JsonDisconnect { code, reason }) = push.disconnect {
@@ -755,11 +760,13 @@ impl From<JsonPush> for Push {
         } else if let Some(join) = push.join {
             Self::Join {
                 channel: push.channel,
+                id: push.id,
                 info: join.info.map(ClientInfo::from).unwrap_or_default(),
             }
         } else if let Some(leave) = push.leave {
             Self::Leave {
                 channel: push.channel,
+                id: push.id,
                 info: leave.info.map(ClientInfo::from).unwrap_or_default(),
             }
         } else {
@@ -844,7 +851,7 @@ where
 mod tests {
     use super::*;
     use crate::token::Secret;
-    use crate::wire::REJECT_UNRECOVERED;
+    use crate::wire::{CHANNEL_COMPACTION, REJECT_UNRECOVERED};
 
     /// Fuzz target (Block 14e): any bytes decode or fail, never panic.
     /// Random inputs under `cargo test`; coverage-guided with
@@ -1042,7 +1049,7 @@ mod tests {
             String::from_utf8(frame).unwrap(),
             r#"{"id":2,"subscribe":{"channel":"news","join_leave":true}}"#
         );
-        let ReplyResult::Push(Push::Join { channel, info }) = &replies[0].result else {
+        let ReplyResult::Push(Push::Join { channel, info, .. }) = &replies[0].result else {
             panic!("{:?}", replies[0]);
         };
         assert_eq!(
@@ -1053,7 +1060,67 @@ mod tests {
         assert_eq!(info.chan_info.as_deref(), Some(&br#"{"b":2}"#[..]));
         assert!(matches!(
             &replies[1].result,
-            ReplyResult::Push(Push::Leave { channel, info }) if channel == "news" && info.client == "c"
+            ReplyResult::Push(Push::Leave { channel, info, .. }) if channel == "news" && info.client == "c"
+        ));
+    }
+
+    #[test]
+    fn encodes_the_channel_compaction_flag_and_decodes_numeric_channel_ids() {
+        let flags = [
+            0,
+            CHANNEL_COMPACTION,
+            CHANNEL_COMPACTION | REJECT_UNRECOVERED,
+        ];
+        let frame = encode(
+            &flags
+                .iter()
+                .zip(1..)
+                .map(|(&flag, id)| Command {
+                    id,
+                    method: Method::Subscribe(SubscribeRequest {
+                        channel: "news".into(),
+                        flag,
+                        ..SubscribeRequest::default()
+                    }),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let replies = decode(
+            concat!(
+                r#"{"id":1,"subscribe":{"id":7}}"#,
+                "\n",
+                r#"{"push":{"id":7,"pub":{"data":{}}}}"#,
+                "\n",
+                r#"{"push":{"id":7,"join":{"info":{"client":"c"}}}}"#,
+                "\n",
+                r#"{"push":{"id":7,"leave":{"info":{"client":"c"}}}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            concat!(
+                r#"{"id":1,"subscribe":{"channel":"news"}}"#,
+                "\n",
+                r#"{"id":2,"subscribe":{"channel":"news","flag":1}}"#,
+                "\n",
+                r#"{"id":3,"subscribe":{"channel":"news","flag":3}}"#,
+            )
+        );
+        assert!(matches!(&replies[0].result, ReplyResult::Subscribe(result) if result.id == 7));
+        assert!(matches!(
+            &replies[1].result,
+            ReplyResult::Push(Push::Publication { channel, id: 7, .. }) if channel.is_empty()
+        ));
+        assert!(matches!(
+            &replies[2].result,
+            ReplyResult::Push(Push::Join { id: 7, .. })
+        ));
+        assert!(matches!(
+            &replies[3].result,
+            ReplyResult::Push(Push::Leave { id: 7, .. })
         ));
     }
 

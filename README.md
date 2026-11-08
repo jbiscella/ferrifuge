@@ -375,6 +375,23 @@ comparison with no value) and a filter with delta compression are refused
 when built or set, with `SubscriptionError::InvalidTagFilter` and
 `TagFilterWithDelta`.
 
+### Channel compaction
+
+On a Centrifugo PRO server with channel compaction, a subscription built
+with `.channel_compaction(true)` asks, with every subscribe command, to be
+named by a numeric id instead of its channel in publication, join and leave
+pushes, which saves bandwidth when messages are short. A server without it
+ignores the request. The ids belong to the connection: the client forgets
+them when it ends. CI has no Centrifugo PRO server, so routing by id is
+tested against the fake server only.
+
+```rust
+let subscription = client
+    .subscription_builder("prices")
+    .channel_compaction(true)
+    .build()?;
+```
+
 ### Delta compression
 
 A subscription built with `.delta(DeltaFormat::Fossil)` asks the server to

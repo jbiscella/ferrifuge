@@ -453,6 +453,12 @@ const IMPLEMENTED: &[&str] = &[
     "A tag filter set on a subscription is sent from the next subscribe",
     "A tag filter with delta is refused",
     "A tag filter the server would reject is refused",
+    // Block 35b: channel compaction.
+    "Channel compaction is requested on every subscribe",
+    "Pushes with a numeric channel id reach their subscription",
+    "A push with an unknown channel id is dropped",
+    "Numeric channel ids are forgotten when the connection ends",
+    "Channel compaction on a server without it changes nothing",
 ];
 
 /// Server configuration of @A scenarios.
