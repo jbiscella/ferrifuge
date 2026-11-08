@@ -9,8 +9,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use super::client::{Shared, lock};
-use super::outbox::Head;
+use super::client::{Outboxes, Shared, lock};
+use super::outbox::{Head, Outbox};
 use crate::machine::{EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, Publication, ServerSubscriptionEvent, Subscribed,
@@ -346,14 +346,24 @@ pub(super) enum Handed {
 
 /// The consumer of a client's handlers (D2: `Task`).
 async fn consume(shared: Arc<Shared>) {
+    let _release = Release(&shared);
     while let Some(handed) = std::future::poll_fn(|cx| next(&shared, cx)).await {
         deliver(&shared, handed);
         // A task's turn: the driver and the other tasks run between events.
         tokio::task::yield_now().await;
     }
-    // Dropped after close, once their events are delivered (D5).
-    let handlers = std::mem::take(&mut *lock(&shared.handlers));
-    drop(handlers);
+}
+
+/// Drops the handlers after close, once their events are delivered (D5),
+/// or when a runtime shutting down drops the consumer, which a handler
+/// holding a clone of its client would otherwise keep alive (Codex, #169).
+struct Release<'a>(&'a Shared);
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        let handlers = std::mem::take(&mut *lock(&self.0.handlers));
+        drop(handlers);
+    }
 }
 
 /// The next event for a handler, the earliest emitted; `None` once the
@@ -364,43 +374,7 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
     let mut handlers = lock(&shared.handlers);
     handlers.waker = Some(cx.waker().clone());
     let mut dropped = Vec::new();
-    let mut earliest: Option<(EventId, Option<SubscriptionId>)> = None;
-    if let Some(slot) = &handlers.client {
-        match outboxes.client.head(slot.stream) {
-            Head::Event(id) if slot.handler.is_some() => earliest = Some((id, None)),
-            Head::Event(_) | Head::Empty => {}
-            Head::Gone => dropped.extend(
-                handlers
-                    .client
-                    .take()
-                    .and_then(|slot| slot.handler)
-                    .map(Dropped::Client),
-            ),
-        }
-    }
-    let ids: Vec<SubscriptionId> = handlers.subscriptions.keys().copied().collect();
-    for of in ids {
-        let slot = &handlers.subscriptions[&of];
-        let head = outboxes
-            .subscriptions
-            .get(&of)
-            .map_or(Head::Gone, |outbox| outbox.head(slot.stream));
-        match head {
-            Head::Event(id) if slot.handler.is_some() => {
-                if earliest.is_none_or(|(first, _)| id < first) {
-                    earliest = Some((id, Some(of)));
-                }
-            }
-            Head::Event(_) | Head::Empty => {}
-            Head::Gone => dropped.extend(
-                handlers
-                    .subscriptions
-                    .remove(&of)
-                    .and_then(|slot| slot.handler)
-                    .map(Dropped::Subscription),
-            ),
-        }
-    }
+    let earliest = earliest(&mut handlers, &mut outboxes, &mut dropped);
     let handed = earliest.and_then(|(_, of)| match of {
         None => {
             let slot = handlers.client.as_mut()?;
@@ -417,7 +391,9 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
         Some(of) => {
             let slot = handlers.subscriptions.get_mut(&of)?;
             let outbox = outboxes.subscriptions.get_mut(&of)?;
-            let Poll::Ready(Some((id, event))) = outbox.poll_take(slot.stream, cx) else {
+            let polled = outbox.poll_take(slot.stream, cx);
+            remove_finished(&mut outboxes, of);
+            let Poll::Ready(Some((id, event))) = polled else {
                 return None;
             };
             Some(Handed::Subscription {
@@ -458,6 +434,68 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
             Poll::Ready(None)
         }
         None => Poll::Pending,
+    }
+}
+
+/// The earliest event a handler can take, and whose it is; handlers whose
+/// stream is gone go to `dropped`.
+fn earliest(
+    handlers: &mut Handlers,
+    outboxes: &mut Outboxes,
+    dropped: &mut Vec<Dropped>,
+) -> Option<(EventId, Option<SubscriptionId>)> {
+    let mut earliest: Option<(EventId, Option<SubscriptionId>)> = None;
+    if let Some(slot) = &handlers.client {
+        match outboxes.client.head(slot.stream) {
+            Head::Event(id) if slot.handler.is_some() => earliest = Some((id, None)),
+            Head::Event(_) | Head::Empty => {}
+            Head::Gone => dropped.extend(
+                handlers
+                    .client
+                    .take()
+                    .and_then(|slot| slot.handler)
+                    .map(Dropped::Client),
+            ),
+        }
+    }
+    let ids: Vec<SubscriptionId> = handlers.subscriptions.keys().copied().collect();
+    for of in ids {
+        let slot = &handlers.subscriptions[&of];
+        let head = outboxes
+            .subscriptions
+            .get(&of)
+            .map_or(Head::Gone, |outbox| outbox.head(slot.stream));
+        if head == Head::Gone {
+            remove_finished(outboxes, of);
+        }
+        match head {
+            Head::Event(id) if slot.handler.is_some() => {
+                if earliest.is_none_or(|(first, _)| id < first) {
+                    earliest = Some((id, Some(of)));
+                }
+            }
+            Head::Event(_) | Head::Empty => {}
+            Head::Gone => dropped.extend(
+                handlers
+                    .subscriptions
+                    .remove(&of)
+                    .and_then(|slot| slot.handler)
+                    .map(Dropped::Subscription),
+            ),
+        }
+    }
+    earliest
+}
+
+/// Removes the outbox of a removed subscription once its last event is
+/// taken, as its stream does (Codex, #169).
+fn remove_finished(outboxes: &mut Outboxes, of: SubscriptionId) {
+    if outboxes
+        .subscriptions
+        .get(&of)
+        .is_some_and(Outbox::is_finished)
+    {
+        outboxes.subscriptions.remove(&of);
     }
 }
 
@@ -617,6 +655,56 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         false
+    }
+
+    // Codex, #169: the outbox of a subscription removed with a handler goes
+    // once the handler took its last event, as with a stream.
+    #[test]
+    fn a_removed_subscription_s_outbox_goes_after_its_handler_took_the_last_event() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let record = Arc::clone(&seen);
+            let subscription = client
+                .subscription_builder("news")
+                .handler(move |event: SubscriptionEvent| {
+                    record.lock().unwrap().push(event.name().to_owned());
+                })
+                .build()
+                .unwrap();
+            subscription.subscribe();
+            client.remove_subscription(&subscription);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            assert_eq!(*seen.lock().unwrap(), ["subscribing", "unsubscribed"]);
+            assert!(lock(&client.shared().outboxes).subscriptions.is_empty());
+        });
+    }
+
+    // Codex, #169: a runtime that shuts down drops the consumer, and its
+    // handlers with it.
+    #[test]
+    fn handlers_are_dropped_with_the_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let client = runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            client.set_handler(Flagged(Arc::clone(&dropped)));
+            tokio::task::yield_now().await;
+            client
+        });
+
+        drop(runtime);
+
+        assert!(dropped.load(Ordering::Acquire));
+        drop(client);
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).
