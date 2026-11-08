@@ -3181,19 +3181,25 @@ mod tests {
         let connected =
             runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), ready).await });
         assert_eq!(connected.ok(), Some(Ok(())));
-        // An emulation request the server never answers.
+        // An emulation request the server never answers, its deadline
+        // counting from when it is made.
+        let made = std::time::Instant::now();
         let call = client.rpc("slow", b"{}".to_vec());
         std::thread::sleep(Duration::from_millis(100));
 
-        let started = std::time::Instant::now();
         runtime.block_on(client.close());
-        let took = started.elapsed();
+        // From the call, not from the close: a sleep that oversleeps, as on
+        // macOS runners, shortens the close but not this.
+        let took = made.elapsed();
         let deadline = std::time::Instant::now() + Duration::from_millis(100);
         while runtime.metrics().num_alive_tasks() > 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        assert!(took >= timeout / 2, "the close was not awaited: {took:?}");
+        assert!(
+            took >= timeout.saturating_sub(Duration::from_millis(50)),
+            "the close was not awaited: {took:?}"
+        );
         assert_eq!(runtime.metrics().num_alive_tasks(), 0);
         assert!(client.is_closed());
         let failed = runtime.block_on(call).unwrap_err();
