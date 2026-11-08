@@ -280,3 +280,106 @@ impl std::fmt::Display for CallError {
 }
 
 impl std::error::Error for CallError {}
+
+/// Why a typed JSON call failed (Block 38, D2): before it was sent, as an
+/// untyped call fails, or after the server answered.
+///
+/// `serde_json`'s messages may quote fragments of the data: the client never
+/// logs them, and an application that logs this error should know it.
+#[non_exhaustive]
+pub enum JsonCallError {
+    /// The value did not encode as JSON: nothing was sent.
+    Encode(serde_json::Error),
+    /// The call failed as the untyped one does (Block 13).
+    Call(CallError),
+    /// The server answered, and its result data did not decode as the
+    /// type asked for. The call ran on the server: retrying it runs it
+    /// again.
+    #[non_exhaustive]
+    Decode {
+        /// Why the data did not decode.
+        error: serde_json::Error,
+        /// The result data, exactly as received.
+        data: Vec<u8>,
+    },
+}
+
+impl std::fmt::Debug for JsonCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(error) => f.debug_tuple("Encode").field(error).finish(),
+            Self::Call(error) => f.debug_tuple("Call").field(error).finish(),
+            // The data only by its length (Block 21, D3).
+            Self::Decode { error, data } => f
+                .debug_struct("Decode")
+                .field("error", error)
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Display for JsonCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encode(error) => write!(f, "the value did not encode as JSON: {error}"),
+            Self::Call(error) => error.fmt(f),
+            Self::Decode { error, .. } => {
+                write!(
+                    f,
+                    "the result did not decode as the type asked for: {error}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for JsonCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Encode(error) | Self::Decode { error, .. } => Some(error),
+            Self::Call(error) => Some(error),
+        }
+    }
+}
+
+impl From<CallError> for JsonCallError {
+    fn from(error: CallError) -> Self {
+        Self::Call(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decode_error_shows_its_data_only_by_length() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Sum {
+            sum: u32,
+        }
+        let data = br#"{"token":"secret","sum":"x"}"#.to_vec();
+        let error = serde_json::from_slice::<Sum>(&data).unwrap_err();
+        let failed = JsonCallError::Decode { error, data };
+
+        let debug = format!("{failed:?}");
+
+        // serde_json's message quotes the value it refused, "x", which the
+        // documentation warns about; the data itself does not show.
+        assert!(debug.contains("<28 bytes>"), "{debug}");
+        assert!(!debug.contains("secret"), "{debug}");
+        assert!(std::error::Error::source(&failed).is_some());
+    }
+
+    #[test]
+    fn a_call_error_converts_and_displays_as_itself() {
+        let error = CallError::new(108, "not available");
+
+        let failed = JsonCallError::from(error.clone());
+
+        assert_eq!(failed.to_string(), error.to_string());
+        assert!(matches!(failed, JsonCallError::Call(inner) if inner == error));
+    }
+}

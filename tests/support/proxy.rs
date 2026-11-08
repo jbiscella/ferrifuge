@@ -39,6 +39,8 @@ struct Answers {
     subscribe: HashMap<String, SubscribeAnswer>,
     /// Bodies of the subscribe requests received.
     subscribe_requests: Vec<Value>,
+    /// Bodies of the RPC requests received (Block 38).
+    rpc_requests: Vec<Value>,
     /// When each of them arrived.
     subscribe_times: Vec<Instant>,
     /// Channels an accepted connection is subscribed to on the server side,
@@ -160,6 +162,11 @@ impl ProxyBackend {
     /// Bodies of the subscribe requests received so far.
     pub(crate) fn subscribe_requests(&self) -> Vec<Value> {
         self.state.lock().unwrap().subscribe_requests.clone()
+    }
+
+    /// Bodies of the RPC requests received so far.
+    pub(crate) fn rpc_requests(&self) -> Vec<Value> {
+        self.state.lock().unwrap().rpc_requests.clone()
     }
 
     /// When each subscribe request received so far arrived.
@@ -331,11 +338,14 @@ async fn subscribe(
     Json(answer.body.unwrap_or_else(|| json!({"result": {}})))
 }
 
-/// Answers RPCs: "echo" returns its input, "busy" fails with a temporary
-/// error 1000 "try later", and any other method returns no data.
-async fn rpc(Json(request): Json<Value>) -> Json<Value> {
+/// Answers RPCs: "echo" returns its input, "sum" returns `{"sum":3}`,
+/// "busy" fails with a temporary error 1000 "try later", and any other
+/// method returns no data.
+async fn rpc(State(state): State<Arc<Mutex<Answers>>>, Json(request): Json<Value>) -> Json<Value> {
+    state.lock().unwrap().rpc_requests.push(request.clone());
     Json(match request["method"].as_str() {
         Some("echo") => json!({"result": {"data": request["data"]}}),
+        Some("sum") => json!({"result": {"data": {"sum": 3}}}),
         Some("busy") => {
             json!({"error": {"code": 1000, "message": "try later", "temporary": true}})
         }
