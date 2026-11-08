@@ -820,6 +820,10 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             };
             let mut handlers = lock(&shared.handlers);
             handlers.running = None;
+            // Waits are watched only while the handler that made them runs
+            // (Codex, #171).
+            handlers.watched.clear();
+            handlers.watched_ready.clear();
             let old = match handlers.client.as_mut() {
                 Some(slot) if slot.stream == stream && slot.handler.is_none() => {
                     slot.handler = Some(handler);
@@ -844,6 +848,10 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             };
             let mut handlers = lock(&shared.handlers);
             handlers.running = None;
+            // Waits are watched only while the handler that made them runs
+            // (Codex, #171).
+            handlers.watched.clear();
+            handlers.watched_ready.clear();
             let old = match handlers.subscriptions.get_mut(&of) {
                 Some(slot) if slot.stream == stream && slot.handler.is_none() => {
                     slot.handler = Some(handler);
@@ -1495,6 +1503,55 @@ mod tests {
             matches!(&outcome, Poll::Ready(Err(error)) if error.code == crate::codes::error::WOULD_DEADLOCK),
             "{outcome:?}"
         );
+    }
+
+    /// A history call handed between a handler and the test.
+    type History =
+        Pin<Box<dyn Future<Output = Result<crate::HistoryResult, crate::CallError>> + Send>>;
+
+    // Codex, #171: a call a Thread handler polled and left pending when it
+    // returned is no longer watched: nothing waits on it in the handler.
+    #[test]
+    fn a_call_left_pending_by_a_returned_handler_is_not_failed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::builder(UNREACHABLE)
+            .event_delivery(EventDelivery::Thread)
+            .build()
+            .unwrap();
+        let subscription = client.new_subscription("news").unwrap();
+        let slot: Arc<Mutex<Option<History>>> = Arc::default();
+        let in_handler = Arc::clone(&slot);
+        let made = subscription.clone();
+        // No events thread: the test hands the events to the handler.
+        FAIL_SPAWN.set(true);
+        client.set_handler(move |_: ClientEvent| {
+            let mut slot = in_handler.lock().unwrap();
+            if slot.is_none() {
+                let mut history: History = Box::pin(made.history(crate::HistoryOptions::default()));
+                let mut cx = Context::from_waker(Waker::noop());
+                assert!(history.as_mut().poll(&mut cx).is_pending());
+                *slot = Some(history);
+            }
+        });
+        FAIL_SPAWN.set(false);
+        subscription.subscribe();
+        let transport = opened_by_hand(&client);
+        let shared = client.shared();
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Some(handed)) = next(shared, &mut cx) else {
+            panic!("an event for the handler");
+        };
+        deliver(shared, handed);
+
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        check_thread_waits(shared);
+        let mut history = slot.lock().unwrap().take().expect("the handler's call");
+
+        assert!(history.as_mut().poll(&mut cx).is_pending());
     }
 
     // Codex, #171: handlers whose events thread never started are dropped
