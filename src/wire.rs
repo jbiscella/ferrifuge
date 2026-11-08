@@ -88,6 +88,12 @@ pub(crate) struct SubscribeRequest {
 /// The only delta format of `client.proto` (`SubscribeRequest.delta`).
 pub(crate) const FOSSIL: &str = "fossil";
 
+/// Ask a server with channel compaction for a numeric channel id in
+/// `SubscribeResult.id`, used in later pushes instead of the channel
+/// (`client.proto`, `SubscribeRequest.flag`; centrifuge-js
+/// `subscriptionFlags.channelCompaction`).
+pub(crate) const CHANNEL_COMPACTION: i64 = 1;
+
 /// Fail a subscribe whose recovery is not possible with error 112 instead
 /// of succeeding unrecovered (`client.proto`, `SubscribeRequest.flag`).
 pub(crate) const REJECT_UNRECOVERED: i64 = 1 << 1;
@@ -250,14 +256,20 @@ pub(crate) struct SubscribeResult {
     /// Publications come as Fossil deltas until the next subscribe
     /// (`SubscribeResult.delta`, Block 19, D4).
     pub(crate) delta: bool,
+    /// The numeric channel id later pushes may use instead of the channel;
+    /// 0 for none (`SubscribeResult.id`, Block 35b).
+    pub(crate) id: i64,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Push {
     Disconnect(Disconnect),
+    /// `id` is the numeric channel id used instead of an empty `channel`,
+    /// 0 for none (`Push.id`, Block 35b); likewise for `Join` and `Leave`.
     Publication {
         channel: String,
+        id: i64,
         publication: Publication,
     },
     /// The server subscribed the connection to `channel` during the
@@ -280,11 +292,13 @@ pub(crate) enum Push {
     /// A client subscribed to `channel` (`Join.info`).
     Join {
         channel: String,
+        id: i64,
         info: ClientInfo,
     },
     /// A client unsubscribed from `channel` (`Leave.info`).
     Leave {
         channel: String,
+        id: i64,
         info: ClientInfo,
     },
     Unsupported,

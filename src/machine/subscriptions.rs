@@ -15,8 +15,8 @@ use crate::backoff::Backoff;
 use crate::fossil::{self, DeltaError};
 use crate::token::Secret;
 use crate::wire::{
-    Command, Error, Method, REJECT_UNRECOVERED, Reply, ReplyResult, SubscribeRequest,
-    UnsubscribeRequest,
+    CHANNEL_COMPACTION, Command, Error, Method, REJECT_UNRECOVERED, Reply, ReplyResult,
+    SubscribeRequest, UnsubscribeRequest,
 };
 use crate::{
     ClientError, ClientInfo, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
@@ -30,6 +30,10 @@ pub(super) struct Subscriptions {
     /// publications among them, cost the same however many there are
     /// (Block 14, "O(1) dispatch").
     by_channel: HashMap<String, SubscriptionId>,
+    /// The subscription each numeric channel id of this connection names
+    /// (Block 35b, D2): a subscription is found by it only while
+    /// subscribed with that id, so an entry left behind names nobody.
+    by_compact_id: HashMap<i64, SubscriptionId>,
     next_id: u64,
     next_fetch: u64,
     /// Subscribe commands awaiting their reply: whose, and for which
@@ -90,6 +94,9 @@ struct Subscription {
     /// boxed at the first payload counted, so that a subscription without
     /// delta pays a pointer (Block 14, "Marginal cost of a subscription").
     delta_statistics: Option<Box<crate::DeltaStatistics>>,
+    /// The numeric channel id its last subscribe reply on this connection
+    /// gave, 0 for none (Block 35b).
+    compact_id: i64,
 }
 
 /// Whether a subscribe reply turned delta on (Block 19, D4), and what the
@@ -181,6 +188,27 @@ impl Subscriptions {
             .chain(self.unsubscribes.values())
             .any(|(_, pending)| pending == channel)
     }
+
+    /// Removes the entry of `compact_id` when it still names `id`.
+    fn forget_compact_id(&mut self, id: SubscriptionId, compact_id: i64) {
+        if compact_id > 0 && self.by_compact_id.get(&compact_id) == Some(&id) {
+            self.by_compact_id.remove(&compact_id);
+        }
+    }
+
+    /// Maps `compact_id`, when the server gave one, to `id`, replacing its
+    /// earlier holder and the id `id` held before (centrifuge-js
+    /// `subscription.ts` `_setSubscribed`).
+    fn map_compact_id(&mut self, id: SubscriptionId, compact_id: i64) {
+        let Some(sub) = self.by_id.get_mut(&id) else {
+            return;
+        };
+        let earlier = std::mem::replace(&mut sub.compact_id, compact_id.max(0));
+        self.forget_compact_id(id, earlier);
+        if compact_id > 0 {
+            self.by_compact_id.insert(compact_id, id);
+        }
+    }
 }
 
 impl Machine {
@@ -225,9 +253,15 @@ impl Machine {
                 recover,
                 delta: DeltaChain::Off,
                 delta_statistics: None,
+                compact_id: 0,
             },
         );
         Ok(id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn subscriptions_by_compact_id_is_empty(&self) -> bool {
+        self.subscriptions.by_compact_id.is_empty()
     }
 
     /// State of a subscription in the registry.
@@ -427,6 +461,10 @@ impl Machine {
         // succeeding with publications missing.
         let flag = if sub.options.state_source {
             REJECT_UNRECOVERED
+        } else {
+            0
+        } | if sub.options.channel_compaction {
+            CHANNEL_COMPACTION
         } else {
             0
         };
@@ -737,6 +775,12 @@ impl Machine {
             (Some(error), _) => self.subscribe_error(id, &error),
             (None, ReplyResult::Subscribe(result)) => {
                 sub.state = SubscriptionState::Subscribed;
+                self.subscriptions.map_compact_id(id, result.id);
+                let sub = self
+                    .subscriptions
+                    .by_id
+                    .get_mut(&id)
+                    .expect("checked above");
                 // A delta failure during this subscribe takes the reset back
                 // (Block 19, D8), so only this one may be undone.
                 sub.backoff.keep_reset();
@@ -849,6 +893,7 @@ impl Machine {
         self.unsubscribe(id);
         if let Some(sub) = self.subscriptions.by_id.remove(&id) {
             self.subscriptions.by_channel.remove(&sub.channel);
+            self.subscriptions.forget_compact_id(id, sub.compact_id);
         }
         self.forget_deliveries(id);
     }
@@ -984,18 +1029,42 @@ impl Machine {
         }
     }
 
-    /// A publication pushed for `channel`.
-    pub(super) fn publication(&mut self, channel: &str, publication: Publication) {
-        // Only a subscribed handle receives publications (Block 9).
-        let subscribed = self.find_subscription(channel).filter(|id| {
+    /// The subscribed subscription a push names: by `channel`, or by its
+    /// numeric channel id `compact_id` when the channel is empty (Block
+    /// 35b, D2). `Err(true)` when the push names a channel no subscribed
+    /// subscription holds, for server-side subscriptions to take; `Err(false)`
+    /// when it names an id none holds, and is dropped.
+    fn subscribed_target(&self, channel: &str, compact_id: i64) -> Result<SubscriptionId, bool> {
+        // Only a subscribed handle receives pushes (Block 9).
+        let subscribed = |id: &SubscriptionId| {
             self.subscriptions
                 .by_id
                 .get(id)
                 .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
-        });
-        let Some(id) = subscribed else {
-            self.server_publication(channel, publication);
-            return;
+        };
+        if channel.is_empty() && compact_id > 0 {
+            return self
+                .subscriptions
+                .by_compact_id
+                .get(&compact_id)
+                .copied()
+                .filter(|id| {
+                    subscribed(id) && self.subscriptions.by_id[id].compact_id == compact_id
+                })
+                .ok_or(false);
+        }
+        self.find_subscription(channel)
+            .filter(subscribed)
+            .ok_or(true)
+    }
+
+    /// A publication pushed for `channel`, or for the subscription numeric
+    /// channel id `compact_id` names.
+    pub(super) fn publication(&mut self, channel: &str, compact_id: i64, publication: Publication) {
+        let id = match self.subscribed_target(channel, compact_id) {
+            Ok(id) => id,
+            Err(true) => return self.server_publication(channel, publication),
+            Err(false) => return,
         };
         // Delta checks follow routing: a publication no subscribed
         // subscription takes is dropped as before (Block 19, D5).
@@ -1104,20 +1173,22 @@ impl Machine {
         self.schedule_resubscribe(id);
     }
 
-    /// A join or leave push for `channel`, routed as a publication is: to
-    /// its client-side subscription when that is subscribed, else to its
+    /// A join or leave push for `channel`, or for the subscription numeric
+    /// channel id `compact_id` names, routed as a publication is: to its
+    /// client-side subscription when that is subscribed, else to its
     /// server-side one; dropped when neither is subscribed (centrifuge-js
     /// `_handleJoin`, `_handleLeave`).
-    pub(super) fn join_or_leave(&mut self, channel: &str, info: ClientInfo, join: bool) {
-        let subscribed = self.find_subscription(channel).filter(|id| {
-            self.subscriptions
-                .by_id
-                .get(id)
-                .is_some_and(|sub| sub.state == SubscriptionState::Subscribed)
-        });
-        let Some(id) = subscribed else {
-            self.server_join_or_leave(channel, info, join);
-            return;
+    pub(super) fn join_or_leave(
+        &mut self,
+        channel: &str,
+        compact_id: i64,
+        info: ClientInfo,
+        join: bool,
+    ) {
+        let id = match self.subscribed_target(channel, compact_id) {
+            Ok(id) => id,
+            Err(true) => return self.server_join_or_leave(channel, info, join),
+            Err(false) => return,
         };
         let Some(event_id) = self.admit_event(Some(id), false) else {
             return;
@@ -1217,6 +1288,8 @@ impl Machine {
             ));
         }
         self.subscriptions.sub_refreshes.clear();
+        // Numeric channel ids belong to the connection (Block 35b, D2).
+        self.subscriptions.by_compact_id.clear();
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;

@@ -393,6 +393,16 @@ impl SubscriptionBuilder {
         self
     }
 
+    /// Asks a server with channel compaction (Centrifugo PRO) to name this
+    /// subscription by a numeric id instead of its channel in publication,
+    /// join and leave pushes, with every subscribe command (Block 35b). A
+    /// server without it ignores the request. Off by default.
+    #[must_use]
+    pub fn channel_compaction(mut self, channel_compaction: bool) -> Self {
+        self.options = self.options.channel_compaction(channel_compaction);
+        self
+    }
+
     /// Sends `token`, a subscription token (JWT) for the channel, with the
     /// first subscribe command. With [`Self::get_token`] too, the callback
     /// is asked once it expires.

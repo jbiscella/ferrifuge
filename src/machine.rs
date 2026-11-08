@@ -14,6 +14,8 @@ mod batching;
 mod calls;
 #[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod compaction_tests;
 mod delivery;
 mod inbound;
 mod server_subscriptions;
@@ -170,6 +172,10 @@ pub struct SubscriptionOptions {
     /// Asks the server to send only the publications this filter matches
     /// (Block 35a); refused together with `delta`.
     pub tag_filter: Option<crate::TagFilter>,
+    /// Asks a server with channel compaction (Centrifugo PRO) to name this
+    /// subscription by a numeric id instead of its channel in publication,
+    /// join and leave pushes (Block 35b).
+    pub channel_compaction: bool,
 }
 
 impl std::fmt::Debug for SubscriptionOptions {
@@ -194,6 +200,7 @@ impl std::fmt::Debug for SubscriptionOptions {
             .field("join_leave", &self.join_leave)
             .field("delta", &self.delta)
             .field("tag_filter", &self.tag_filter)
+            .field("channel_compaction", &self.channel_compaction)
             .finish()
     }
 }
@@ -214,6 +221,7 @@ impl Default for SubscriptionOptions {
             join_leave: false,
             delta: None,
             tag_filter: None,
+            channel_compaction: false,
         }
     }
 }
@@ -313,6 +321,13 @@ impl SubscriptionOptions {
     #[must_use]
     pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
         self.tag_filter = Some(filter);
+        self
+    }
+
+    /// Asks for channel compaction on every subscribe command (Block 35b).
+    #[must_use]
+    pub fn channel_compaction(mut self, channel_compaction: bool) -> Self {
+        self.channel_compaction = channel_compaction;
         self
     }
 }
@@ -1725,8 +1740,9 @@ impl Machine {
                 }
                 ReplyResult::Push(Push::Publication {
                     channel,
+                    id,
                     publication,
-                }) => self.publication(&channel, publication),
+                }) => self.publication(&channel, id, publication),
                 ReplyResult::Push(Push::Unsubscribe {
                     channel,
                     code,
@@ -1737,11 +1753,11 @@ impl Machine {
                 }
                 // centrifuge-js `_handleMessage`.
                 ReplyResult::Push(Push::Message(data)) => self.emit(ClientEvent::Message(data)),
-                ReplyResult::Push(Push::Join { channel, info }) => {
-                    self.join_or_leave(&channel, info, true);
+                ReplyResult::Push(Push::Join { channel, id, info }) => {
+                    self.join_or_leave(&channel, id, info, true);
                 }
-                ReplyResult::Push(Push::Leave { channel, info }) => {
-                    self.join_or_leave(&channel, info, false);
+                ReplyResult::Push(Push::Leave { channel, id, info }) => {
+                    self.join_or_leave(&channel, id, info, false);
                 }
                 // An empty reply is a server ping (client.proto, Reply).
                 ReplyResult::Empty if self.state == State::Connected && reply.error.is_none() => {
