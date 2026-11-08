@@ -223,7 +223,12 @@ pub(super) fn ready(
                     // wakes this wait, one after it sees it (Codex, #171).
                     super::handler::watch_ready(&shared, cx.waker());
                     if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(true)) {
-                        return Poll::Ready(None);
+                        // Settled since the look above, it keeps its
+                        // outcome (Codex, #171).
+                        return match Pin::new(&mut receiver).poll(cx) {
+                            Poll::Ready(result) => Poll::Ready(Some(result)),
+                            Poll::Pending => Poll::Ready(None),
+                        };
                     }
                     Poll::Pending
                 })

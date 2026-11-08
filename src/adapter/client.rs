@@ -715,7 +715,11 @@ impl Shared {
             let wait = super::handler::Wait::Call(pending.id);
             let result = std::future::poll_fn(|cx| {
                 if super::handler::would_deadlock(&shared, wait) {
-                    return Poll::Ready(None);
+                    // Settled meanwhile, it keeps its outcome (Codex, #171).
+                    return match Pin::new(&mut receiver).poll(cx) {
+                        Poll::Ready(result) => Poll::Ready(Some(result)),
+                        Poll::Pending => Poll::Ready(None),
+                    };
                 }
                 Pin::new(&mut receiver).poll(cx).map(Some)
             })
