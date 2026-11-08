@@ -572,9 +572,12 @@ static RUNNING: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
 const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 
 /// Stack of the thread running the scenarios: Windows gives the main
-/// thread 1 MiB, too little for the runner's futures in a debug build,
-/// where Linux gives 8 MiB.
-const RUNNER_STACK: usize = 8 << 20;
+/// thread 1 MiB, too little for the runner's futures in a debug build. In
+/// a debug build cucumber's scenario and step frames hold the world by
+/// value some 330 times over, about 8 MiB once the world reached 25 KiB
+/// (Block 35b), so the stack leaves room for it to grow; it is reserved,
+/// not committed, until used.
+const RUNNER_STACK: usize = 32 << 20;
 
 /// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
 /// debug build, enough to delay the timers of scenarios running alongside
