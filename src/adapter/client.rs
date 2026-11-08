@@ -1149,7 +1149,8 @@ impl ClientBuilder {
 
     /// Where the handlers of the client and of its subscriptions run
     /// (Block 41, D2): [`EventDelivery::Task`](super::EventDelivery::Task)
-    /// by default.
+    /// by default, or on the client's driver with
+    /// [`EventDelivery::Inline`](super::EventDelivery::Inline).
     #[must_use]
     pub fn event_delivery(mut self, delivery: super::EventDelivery) -> Self {
         self.event_delivery = delivery;
@@ -1277,6 +1278,7 @@ impl Client {
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
+            inline: event_delivery == super::handler::EventDelivery::Inline,
             closing: Vec::new(),
             opening: None,
             transport: None,
@@ -1912,6 +1914,8 @@ struct Driver {
     runtime: Handle,
     /// Ends the client however the driver's task ends (Block 28, D3).
     _ending: Ending,
+    /// Handlers run on the driver (`EventDelivery::Inline`, Block 41).
+    inline: bool,
     /// The closings of the transports closed that may still run, each
     /// awaited before the driver stops (Block 33, D1; Codex, #141).
     closing: Vec<tokio::task::JoinHandle<()>>,
@@ -2080,6 +2084,12 @@ impl Driver {
         while let Some(action) = self.shared.next_action() {
             self.perform(action);
         }
+        if self.inline {
+            super::handler::deliver_remaining(&self.shared);
+            while let Some(action) = self.shared.next_action() {
+                self.perform(action);
+            }
+        }
         for closing in std::mem::take(&mut self.closing) {
             let _ = closing.await;
         }
@@ -2097,23 +2107,20 @@ impl Driver {
             if self.shared.closed.load(Ordering::Acquire) {
                 return self.finish().await;
             }
-            // A full read-ahead stops the reading: the server's handling of
-            // slow clients acts instead (Block 15). Taking an event wakes
-            // the loop.
-            let reading = lock(&self.shared.core).machine.wants_frames();
-            if reading != self.reading {
-                self.reading = reading;
-                if reading {
-                    debug!("read-ahead drained: reading resumes");
-                } else {
-                    debug!("read-ahead full: reading stops");
-                }
-            }
+            let reading = self.reading();
             // The number of the setting of a timer that fired.
             let mut fired = None;
             let input = tokio::select! {
                 // Queued by an API call; performed at the top of the loop.
                 () = self.shared.actions_queued.notified() => continue,
+                // Under `Inline` the handler runs here: nothing else of the
+                // driver runs until it returns (Block 41, D3).
+                Some(handed) = std::future::poll_fn(|cx| super::handler::next(&self.shared, cx)),
+                    if self.inline =>
+                {
+                    super::handler::deliver(&self.shared, handed);
+                    continue;
+                }
                 (id, result) = opened(&mut self.opening) => {
                     self.opening = None;
                     match result {
@@ -2188,6 +2195,22 @@ impl Driver {
             };
             self.shared.apply_fired(input, fired);
         }
+    }
+
+    /// Whether to read the transport: a full read-ahead stops the reading,
+    /// so that the server's handling of slow clients acts instead
+    /// (Block 15). Taking an event wakes the loop.
+    fn reading(&mut self) -> bool {
+        let reading = lock(&self.shared.core).machine.wants_frames();
+        if reading != self.reading {
+            self.reading = reading;
+            if reading {
+                debug!("read-ahead drained: reading resumes");
+            } else {
+                debug!("read-ahead full: reading stops");
+            }
+        }
+        reading
     }
 
     /// Numbers the next setting of a timer (see [`Armed`]).
@@ -2657,6 +2680,7 @@ impl Drop for Ending {
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
         super::handler::wake_consumer(shared);
+        super::handler::release_inline(shared);
         // The final disconnect settled the calls it could; any other future
         // gets "client closed" rather than waiting forever (Block 33).
         lock(&shared.calls).clear();

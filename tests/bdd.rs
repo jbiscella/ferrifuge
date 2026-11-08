@@ -516,8 +516,8 @@ const IMPLEMENTED: &[&str] = &[
     "Dropping one clone of a client leaves it running",
     "A weak handle upgrades only while a clone of the client is alive",
     "close on one clone closes every clone",
-    // Block 41b: handlers under Task delivery; the @inline and @thread
-    // examples wait for 41c and 41d (EXAMPLES_NOT_YET).
+    // Block 41b: handlers under Task delivery; 41c adds the @inline
+    // examples; the @thread ones wait for 41d (EXAMPLES_NOT_YET).
     "Handlers receive the client's and its subscriptions' events one at a time, in order",
     "A publication a handler had not returned from before disconnect is taken once",
     "A panicking handler disconnects the client with code 2, and its publication is recovered",
@@ -656,7 +656,7 @@ const RUNNER_STACK: usize = 32 << 20;
 
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
 /// (Block 41, D8): 41c runs `@inline`, 41d `@thread`.
-const EXAMPLES_NOT_YET: &[&str] = &["inline", "thread"];
+const EXAMPLES_NOT_YET: &[&str] = &["thread"];
 
 /// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
 /// debug build, enough to delay the timers of scenarios running alongside

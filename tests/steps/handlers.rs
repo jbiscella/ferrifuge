@@ -1,4 +1,5 @@
-//! Steps of Block 41b: event handlers under `Task` delivery.
+//! Steps of Block 41b and 41c: event handlers under `Task` and `Inline`
+//! delivery.
 
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
@@ -76,6 +77,7 @@ impl std::fmt::Debug for Handlers {
 fn delivery(mode: &str) -> EventDelivery {
     match mode {
         "Task" => EventDelivery::Task,
+        "Inline" => EventDelivery::Inline,
         mode => panic!("{mode} delivery comes with a later sub-increment"),
     }
 }

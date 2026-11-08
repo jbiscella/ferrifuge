@@ -163,6 +163,10 @@ pub enum EventDelivery {
     /// On a task of the client's runtime, one handler call at a time.
     #[default]
     Task,
+    /// On the client's driver, adding no task or thread per client. Gives
+    /// up Block 15's "timers keep running": while a handler runs, no timer
+    /// fires, nothing is read and no ping is answered.
+    Inline,
 }
 
 thread_local! {
@@ -188,8 +192,8 @@ impl Drop for Marked {
 
 /// Whether a call, `ready()` or `close()` of `shared` polled now would wait
 /// on the loop the running handler holds (Block 41, D6): under `Task`, the
-/// handler holds a worker its client's driver may need, so any such wait
-/// fails at once.
+/// handler holds a worker its client's driver may need, and under `Inline`
+/// the driver itself, so any such wait fails at once.
 pub(super) fn would_deadlock(shared: &Shared) -> bool {
     RUNNING.get() == std::ptr::from_ref(shared) as usize
 }
@@ -343,6 +347,8 @@ fn install(
             EventDelivery::Task => {
                 shared.runtime.spawn(consume(Arc::clone(shared)));
             }
+            // The driver polls `next` itself, woken above.
+            EventDelivery::Inline => {}
         }
     }
     old
@@ -382,9 +388,32 @@ struct Release<'a>(&'a Shared);
 
 impl Drop for Release<'_> {
     fn drop(&mut self) {
-        let handlers = std::mem::take(&mut *lock(&self.0.handlers));
-        drop(handlers);
+        drop_handlers(self.0);
     }
+}
+
+/// Under `Inline`, delivers the events left at close; the driver then
+/// stops (D2).
+pub(super) fn deliver_remaining(shared: &Shared) {
+    let mut cx = Context::from_waker(Waker::noop());
+    while let Poll::Ready(Some(handed)) = next(shared, &mut cx) {
+        deliver(shared, handed);
+    }
+    drop_handlers(shared);
+}
+
+/// Under `Inline`, drops the handlers when the driver ends, even when a
+/// runtime shutting down drops it before [`deliver_remaining`].
+pub(super) fn release_inline(shared: &Shared) {
+    if lock(&shared.handlers).delivery == EventDelivery::Inline {
+        drop_handlers(shared);
+    }
+}
+
+/// Drops the handlers, with no lock held as they go.
+fn drop_handlers(shared: &Shared) {
+    let handlers = std::mem::take(&mut *lock(&shared.handlers));
+    drop(handlers);
 }
 
 /// The next event for a handler, the earliest emitted; `None` once the
@@ -682,9 +711,10 @@ mod tests {
 
     impl SubscriptionHandler for FlaggedSubscription {}
 
-    async fn dropped_within_a_second(dropped: &AtomicBool) -> bool {
+    /// Whether `flag` is set within a second.
+    async fn set_within_a_second(flag: &AtomicBool) -> bool {
         for _ in 0..100 {
-            if dropped.load(Ordering::Acquire) {
+            if flag.load(Ordering::Acquire) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -843,6 +873,31 @@ mod tests {
         assert_eq!(*returned.lock().unwrap(), Some(true));
     }
 
+    // Codex, #169, under Inline: a runtime that shuts down drops the
+    // driver, and the handlers with it.
+    #[test]
+    fn inline_handlers_are_dropped_with_the_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let client = runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Inline)
+                .build()
+                .unwrap();
+            client.set_handler(Flagged(Arc::clone(&dropped)));
+            tokio::task::yield_now().await;
+            client
+        });
+
+        drop(runtime);
+
+        assert!(dropped.load(Ordering::Acquire));
+        drop(client);
+    }
+
     // A handler only Send keeps the builders Sync (Codex, #169: semver).
     #[test]
     fn builders_stay_send_and_sync() {
@@ -878,16 +933,86 @@ mod tests {
     // once the client is closed.
     #[tokio::test]
     async fn handlers_are_dropped_when_taken_over_and_after_close() {
-        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
-        let taken_over = Arc::new(AtomicBool::new(false));
-        client.set_handler(Flagged(Arc::clone(&taken_over)));
-        client.connect();
-        let _events = client.events();
-        assert!(dropped_within_a_second(&taken_over).await, "kept");
+        for delivery in [EventDelivery::Task, EventDelivery::Inline] {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(delivery)
+                .build()
+                .unwrap();
+            let taken_over = Arc::new(AtomicBool::new(false));
+            client.set_handler(Flagged(Arc::clone(&taken_over)));
+            client.connect();
+            let _events = client.events();
+            assert!(set_within_a_second(&taken_over).await, "{delivery:?}: kept");
 
-        let closed = Arc::new(AtomicBool::new(false));
-        client.set_handler(Flagged(Arc::clone(&closed)));
-        client.close().await;
-        assert!(dropped_within_a_second(&closed).await, "kept after close");
+            let closed = Arc::new(AtomicBool::new(false));
+            client.set_handler(Flagged(Arc::clone(&closed)));
+            client.close().await;
+            assert!(
+                set_within_a_second(&closed).await,
+                "{delivery:?}: kept after close"
+            );
+        }
+    }
+
+    // Structural acceptance: on the driver, a handler may call every
+    // synchronous method of its client and of a subscription, since no
+    // lock is held while it runs (D3).
+    #[test]
+    fn an_inline_handler_calls_every_synchronous_method() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let returned = Arc::new(AtomicBool::new(false));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Inline)
+                .build()
+                .unwrap();
+            let weak = client.downgrade();
+            let done = Arc::clone(&returned);
+            client.set_handler(move |event: ClientEvent| {
+                if done.load(Ordering::Acquire) || !matches!(event, ClientEvent::Connecting { .. })
+                {
+                    return;
+                }
+                let client = weak.upgrade().expect("a clone lives");
+                let _ = (client.log_number(), client.state(), client.is_closed());
+                let _ = (
+                    client.statistics(),
+                    client.read_ahead(),
+                    client.held_events(),
+                );
+                drop(client.clone().downgrade());
+                client.set_token("t");
+                client.set_data(b"{}".to_vec());
+                let _ = client.set_emulated_headers([("a", "b")]);
+                let _ = client.set_http_headers([("a", "b")]);
+                client.set_proxy(crate::Proxy::none());
+                drop(client.start_batching());
+                let subscription = client.new_subscription("news").unwrap();
+                let _ = (subscription.channel(), subscription.state());
+                let _ = (subscription.held_events(), subscription.delta_statistics());
+                let _ = subscription.set_tag_filter(None);
+                subscription.set_data(b"{}".to_vec());
+                subscription.subscribe();
+                subscription.unsubscribe();
+                subscription.set_handler(|_: SubscriptionEvent| {});
+                drop(subscription.publications());
+                drop(subscription.events());
+                let _ = client.get_subscription("news");
+                let _ = (client.subscriptions(), client.server_subscriptions());
+                client.remove_subscription(&subscription);
+                drop(client.subscription_builder("sport").build().unwrap());
+                client.reconnect();
+                client.disconnect();
+                client.connect();
+                done.store(true, Ordering::Release);
+            });
+            client.connect();
+            assert!(set_within_a_second(&returned).await, "never returned");
+            // The driver still runs.
+            client.close().await;
+        });
     }
 }

@@ -19,7 +19,8 @@ repository held while it carried that version, from the blocks of
   under `EventDelivery::Task`; an event counts as delivered when its handler
   returns; a panicking handler disconnects the client with code 2; a call of
   its own client from a handler fails with error 16 `WOULD_DEADLOCK`; the
-  inputs `EventHanded` and `HandlerPanicked`.
+  inputs `EventHanded` and `HandlerPanicked`. `EventDelivery::Inline`
+  (Block 41c) runs the handlers on the client's driver.
 
 - `Client: Clone` and weak handles (Block 41a): clones share one client;
   `Client::downgrade` gives a `WeakClient` whose `upgrade` gives the client
