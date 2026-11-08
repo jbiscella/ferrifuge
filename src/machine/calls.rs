@@ -85,7 +85,29 @@ impl Calls {
     }
 }
 
+/// What a call not yet settled waits for, for the adapter's deadlock
+/// detection (Block 41, D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallWait {
+    /// A message from the server before it is sent: the connect reply, or
+    /// the subscribe reply of its subscription.
+    Message,
+    /// Its own reply, matched when it is read (Block 13).
+    Reply,
+    /// Its start, an open batch or room in the write queue.
+    Other,
+}
+
 impl Machine {
+    /// What the call `id` waits for; `None` once it is settled.
+    pub(crate) fn call_wait(&self, id: CallId) -> Option<CallWait> {
+        self.calls.by_id.get(&id).map(|call| match call.phase {
+            Phase::Subscribing | Phase::Queued => CallWait::Message,
+            Phase::Sent(_) => CallWait::Reply,
+            Phase::Added | Phase::Room | Phase::Held => CallWait::Other,
+        })
+    }
+
     /// Adds a call, which [`super::Input::Call`] then starts; the machine
     /// settles it with [`Action::CallSettled`], unless the owner abandons
     /// it with [`super::Input::CallAbandoned`].
@@ -1287,6 +1309,30 @@ mod tests {
             Some(codes::error::SUBSCRIPTION_UNSUBSCRIBED)
         );
         assert!(unsubscribed.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
+    }
+
+    // Block 41, D6: what a call waits for, as the adapter reads it.
+    #[test]
+    fn a_call_waits_for_a_message_then_for_its_reply() {
+        let mut machine = machine();
+        let (call, _) = rpc(&mut machine, "echo");
+        let transport = opened(&mut machine);
+        let queued = machine.call_wait(call);
+        connect_reply(&mut machine, transport);
+        let sent = machine.call_wait(call);
+        machine.handle(frame(transport, r#"{"id":2,"rpc":{"data":1}}"#));
+
+        assert_eq!(queued, Some(CallWait::Message));
+        assert_eq!(sent, Some(CallWait::Reply));
+        assert_eq!(machine.call_wait(call), None);
+    }
+
+    #[test]
+    fn a_subscription_call_waits_for_its_subscribe_reply() {
+        let (mut machine, _, subscription) = subscribing();
+        let (call, _) = history(&mut machine, subscription);
+
+        assert_eq!(machine.call_wait(call), Some(CallWait::Message));
     }
 
     #[test]
