@@ -141,12 +141,14 @@ impl ResubscribeRun {
         run
     }
 
-    /// Opens the transport and answers the connect command.
+    /// Opens the transport and answers the connect command; a subscribe
+    /// may go in its frame (Block 36, D5) or after its reply.
     fn connect(&mut self) {
         let actions = self.machine.handle(Input::TransportOpened(self.transport));
         let connect = command_ids(&actions, "connect")
             .pop()
             .expect("a connect command");
+        self.note_subscribe(&actions);
         let actions = self.reply(&format!(r#"{{"id":{connect},"connect":{{"client":"c"}}}}"#));
         self.note_subscribe(&actions);
     }
