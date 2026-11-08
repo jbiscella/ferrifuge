@@ -3,11 +3,12 @@
 //! duplex and a real websocket handshake, with no socket opened.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use prost::Message as _;
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -17,6 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::protocol as pb;
+use crate::wire::REJECT_UNRECOVERED;
 use crate::{CallError, ConnectedStream, Connector, StreamPosition};
 
 /// The endpoint a client of the double is built with: it never resolves
@@ -434,12 +436,19 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
         match message {
             // As Centrifugo, nothing after a refused connect in its frame is
             // handled (Block 36, D7).
+            // Command by command, as the crate's codec reads replies: data
+            // may hold newlines (Codex on #161).
             Message::Text(frame) => {
-                for line in frame.as_str().lines() {
-                    let Ok(command) = serde_json::from_str::<Value>(line) else {
+                for raw in
+                    serde_json::Deserializer::from_str(frame.as_str()).into_iter::<&RawValue>()
+                {
+                    let Ok(raw) = raw else {
+                        break;
+                    };
+                    let Ok(command) = serde_json::from_str::<Value>(raw.get()) else {
                         continue;
                     };
-                    let handled = handle_json(&mut lock(&shared), id, &command);
+                    let handled = handle_json(&mut lock(&shared), id, &command, raw.get());
                     if finish(&shared, id, handled) {
                         break;
                     }
@@ -466,24 +475,56 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
     writer.abort();
 }
 
-/// Data as the JSON protocol carries it: the bytes when they are JSON, a
-/// JSON string of them otherwise.
+/// Marks, inside a reply's `Value`, data that [`text`] writes verbatim: as
+/// a `Value` it would lose its key order and its whitespace, where
+/// Centrifugo and the crate's codec keep its bytes (Codex on #161).
+const RAW: char = '\u{1}';
+/// The mark as `serde_json` writes it, quotes included.
+const RAW_OPEN: &str = "\"\\u0001";
+const RAW_CLOSE: &str = "\\u0001\"";
+
+/// Data as the JSON protocol carries it: the bytes themselves when they are
+/// JSON, a JSON string of them otherwise.
 fn json_data(data: &[u8]) -> Value {
-    serde_json::from_slice(data)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(data).into_owned()))
+    match std::str::from_utf8(data) {
+        Ok(json) if serde_json::from_str::<serde::de::IgnoredAny>(json).is_ok() => {
+            let hex = data.iter().fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            });
+            Value::String(format!("{RAW}{hex}{RAW}"))
+        }
+        _ => Value::String(String::from_utf8_lossy(data).into_owned()),
+    }
 }
 
-/// The bytes of the JSON data field `field` of `object`: none when it is
-/// missing, `null` kept as such (as the crate's codec, Codex on #161).
-fn bytes_of(object: &Value, field: &str) -> Vec<u8> {
-    object
-        .get(field)
-        .map(|value| value.to_string().into_bytes())
-        .unwrap_or_default()
+/// The raw `data` of the `method` object of the JSON command `raw`, as the
+/// client wrote it: none when it is missing, `null` kept as such (Codex on
+/// #161).
+fn data_of(raw: &str, method: &str) -> Option<Vec<u8>> {
+    let command: HashMap<&str, &RawValue> = serde_json::from_str(raw).ok()?;
+    let fields: HashMap<&str, &RawValue> = serde_json::from_str(command.get(method)?.get()).ok()?;
+    Some(fields.get("data")?.get().as_bytes().to_vec())
 }
 
+/// `value` as a JSON frame, the data [`json_data`] marked written verbatim.
 fn text(value: &Value) -> Message {
-    Message::text(value.to_string())
+    let written = value.to_string();
+    let mut frame = String::with_capacity(written.len());
+    let mut rest = written.as_str();
+    while let Some(start) = rest.find(RAW_OPEN) {
+        frame.push_str(&rest[..start]);
+        let marked = &rest[start + RAW_OPEN.len()..];
+        let end = marked.find(RAW_CLOSE).expect("a closed mark");
+        let bytes: Vec<u8> = (0..end)
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&marked[at..at + 2], 16).expect("hex"))
+            .collect();
+        frame.push_str(&String::from_utf8(bytes).expect("JSON data is UTF-8"));
+        rest = &marked[end + RAW_CLOSE.len()..];
+    }
+    frame.push_str(rest);
+    Message::text(frame)
 }
 
 fn protobuf(reply: &pb::Reply) -> Message {
@@ -536,6 +577,8 @@ enum Asked {
     Subscribe {
         channel: String,
         recover: Option<StreamPosition>,
+        /// `SubscribeRequest.flag` asks for error 112 when recovery fails.
+        reject_unrecovered: bool,
         positioned: bool,
         recoverable: bool,
     },
@@ -644,13 +687,14 @@ fn answer(state: &mut State, id: u64, request: Asked) -> Answer {
         Asked::Subscribe {
             channel,
             recover,
+            reject_unrecovered,
             positioned,
             recoverable,
         } => subscribe_answer(
             state,
             id,
             &channel,
-            recover.as_ref(),
+            (recover.as_ref(), reject_unrecovered),
             positioned || recoverable,
             recoverable,
         ),
@@ -698,15 +742,12 @@ fn subscribe_answer(
     state: &mut State,
     id: u64,
     channel: &str,
-    recover: Option<&StreamPosition>,
+    (recover, reject_unrecovered): (Option<&StreamPosition>, bool),
     positioned: bool,
     recoverable: bool,
 ) -> Answer {
     if let Some(error) = state.refused.get(channel) {
         return Answer::Error(error.clone());
-    }
-    if let Some(connection) = state.connections.get_mut(&id) {
-        connection.subscribed.insert(channel.to_owned());
     }
     let stream = state.streams.get(channel).map_or(&[][..], Vec::as_slice);
     let Recovery {
@@ -715,6 +756,15 @@ fn subscribe_answer(
         recovered,
         publications,
     } = recovery(stream, recover);
+    // With the flag, a failed recovery is refused, so that the client
+    // reloads its state (`client.proto`, `SubscribeRequest.flag`; Codex on
+    // #161).
+    if reject_unrecovered && was_recovering && !recovered {
+        return Answer::Error(CallError::new(112, "unrecoverable position"));
+    }
+    if let Some(connection) = state.connections.get_mut(&id) {
+        connection.subscribed.insert(channel.to_owned());
+    }
     Answer::Subscribe {
         positioned,
         recoverable,
@@ -783,6 +833,30 @@ fn position(offset: u64, epoch: &str, recover: bool) -> Option<StreamPosition> {
     })
 }
 
+/// What a JSON subscribe command asks.
+fn json_subscribe(subscribe: &Value) -> (Option<Command>, Asked) {
+    let string = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    let channel = string(&subscribe["channel"]);
+    let recover = position(
+        subscribe["offset"].as_u64().unwrap_or(0),
+        subscribe["epoch"].as_str().unwrap_or_default(),
+        subscribe["recover"].as_bool().unwrap_or(false),
+    );
+    (
+        Some(Command::Subscribe {
+            channel: channel.clone(),
+            recover: recover.clone(),
+        }),
+        Asked::Subscribe {
+            channel,
+            recover,
+            reject_unrecovered: subscribe["flag"].as_i64().unwrap_or(0) & REJECT_UNRECOVERED != 0,
+            positioned: subscribe["positioned"].as_bool().unwrap_or(false),
+            recoverable: subscribe["recoverable"].as_bool().unwrap_or(false),
+        },
+    )
+}
+
 /// What a JSON history command asks.
 fn json_history(history: &Value) -> (Option<Command>, Asked) {
     let string = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -809,7 +883,7 @@ fn json_history(history: &Value) -> (Option<Command>, Asked) {
 
 /// What a JSON command asks, and the command to record; none for a
 /// `send`, which is recorded only, or a pong.
-fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, Asked)> {
+fn json_request(state: &mut State, command: &Value, raw: &str) -> Option<(Option<Command>, Asked)> {
     let string = |value: &Value| value.as_str().unwrap_or_default().to_owned();
     let request = if let Some(connect) = command.get("connect") {
         let recover = connect["subs"]
@@ -828,29 +902,12 @@ fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, 
         (
             Some(Command::Connect {
                 token: string(&connect["token"]),
-                data: connect.get("data").map(|_| bytes_of(connect, "data")),
+                data: data_of(raw, "connect"),
             }),
             Asked::Connect(recover),
         )
     } else if let Some(subscribe) = command.get("subscribe") {
-        let channel = string(&subscribe["channel"]);
-        let recover = position(
-            subscribe["offset"].as_u64().unwrap_or(0),
-            subscribe["epoch"].as_str().unwrap_or_default(),
-            subscribe["recover"].as_bool().unwrap_or(false),
-        );
-        (
-            Some(Command::Subscribe {
-                channel: channel.clone(),
-                recover: recover.clone(),
-            }),
-            Asked::Subscribe {
-                channel,
-                recover,
-                positioned: subscribe["positioned"].as_bool().unwrap_or(false),
-                recoverable: subscribe["recoverable"].as_bool().unwrap_or(false),
-            },
-        )
+        json_subscribe(subscribe)
     } else if let Some(unsubscribe) = command.get("unsubscribe") {
         let channel = string(&unsubscribe["channel"]);
         (
@@ -860,7 +917,10 @@ fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, 
             Asked::Unsubscribe(channel),
         )
     } else if let Some(publish) = command.get("publish") {
-        let (channel, data) = (string(&publish["channel"]), bytes_of(publish, "data"));
+        let (channel, data) = (
+            string(&publish["channel"]),
+            data_of(raw, "publish").unwrap_or_default(),
+        );
         (
             Some(Command::Publish {
                 channel: channel.clone(),
@@ -869,7 +929,10 @@ fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, 
             Asked::Publish(channel, data),
         )
     } else if let Some(rpc) = command.get("rpc") {
-        let (method, data) = (string(&rpc["method"]), bytes_of(rpc, "data"));
+        let (method, data) = (
+            string(&rpc["method"]),
+            data_of(raw, "rpc").unwrap_or_default(),
+        );
         (
             Some(Command::Rpc {
                 method: method.clone(),
@@ -877,9 +940,9 @@ fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, 
             }),
             Asked::Rpc(method, data),
         )
-    } else if let Some(sent) = command.get("send") {
+    } else if command.get("send").is_some() {
         state.received.push(Command::Send {
-            data: bytes_of(sent, "data"),
+            data: data_of(raw, "send").unwrap_or_default(),
         });
         return None;
     } else if let Some(history) = command.get("history") {
@@ -910,9 +973,9 @@ fn json_request(state: &mut State, command: &Value) -> Option<(Option<Command>, 
 }
 
 /// Handles a JSON command, but for an RPC's answer.
-fn handle_json(state: &mut State, id: u64, command: &Value) -> Handled {
+fn handle_json(state: &mut State, id: u64, command: &Value, raw: &str) -> Handled {
     let reply_id = command["id"].as_u64().unwrap_or(0);
-    let Some((recorded, request)) = json_request(state, command) else {
+    let Some((recorded, request)) = json_request(state, command, raw) else {
         return Handled::Answered(false);
     };
     let connect = matches!(request, Asked::Connect(_));
@@ -1108,6 +1171,7 @@ fn protobuf_request(state: &mut State, command: pb::Command) -> Option<(Option<C
             Asked::Subscribe {
                 channel: subscribe.channel,
                 recover,
+                reject_unrecovered: subscribe.flag & REJECT_UNRECOVERED != 0,
                 positioned: subscribe.positioned,
                 recoverable: subscribe.recoverable,
             },
@@ -1418,7 +1482,7 @@ mod tests {
         let offsets: Vec<u64> = recovered.publications.iter().map(|(at, _)| *at).collect();
         assert_eq!(offsets, [2, 3]);
         assert!(lost.was_recovering && !lost.recovered);
-        assert!(lost.publications.is_empty());
+        assert_eq!(lost.publications, Vec::new());
     }
 
     // Codex on #161: explicit null data stays the JSON `null`; missing data
@@ -1426,7 +1490,11 @@ mod tests {
     #[test]
     fn json_null_data_is_kept() {
         let mut state = State::default();
-        let data = |state: &mut State, command: Value| match json_request(state, &command) {
+        let data = |state: &mut State, command: Value| match json_request(
+            state,
+            &command,
+            &command.to_string(),
+        ) {
             Some((_, Asked::Rpc(_, data) | Asked::Publish(_, data))) => data,
             _ => panic!("an RPC or a publish"),
         };
@@ -1435,7 +1503,67 @@ mod tests {
         let missing = data(&mut state, json!({"publish": {"channel": "news"}}));
 
         assert_eq!(null, b"null");
-        assert!(missing.is_empty());
+        assert_eq!(missing, Vec::<u8>::new());
+    }
+
+    // Codex on #161: data keep their bytes both ways, newlines and key
+    // order included.
+    #[tokio::test]
+    async fn json_data_keep_their_bytes() {
+        let server = Server::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        server.on_rpc(move |_, data| {
+            record.lock().unwrap().push(data.to_vec());
+            Ok(br#"{"z":1, "a":2}"#.to_vec())
+        });
+        let client = crate::Client::builder(server.endpoint())
+            .connector(server.connector())
+            .build()
+            .unwrap();
+        client.connect();
+
+        let sent = b"{\n  \"n\": 1,\n  \"b\": 2\n}".to_vec();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.rpc("m", sent.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            result.ok().and_then(Result::ok),
+            Some(br#"{"z":1, "a":2}"#.to_vec())
+        );
+        assert_eq!(*seen.lock().unwrap(), [sent]);
+    }
+
+    // Codex on #161: with the reject-unrecovered flag a failed recovery is
+    // error 112, and the connection is not subscribed.
+    #[test]
+    fn the_reject_unrecovered_flag_refuses_a_failed_recovery() {
+        let mut state = State::default();
+        let (out, _queue) = mpsc::unbounded_channel();
+        state.connections.insert(
+            0,
+            Connection {
+                client: "double-0".to_owned(),
+                protobuf: false,
+                subscribed: HashSet::new(),
+                out,
+            },
+        );
+        let lost = StreamPosition {
+            offset: 1,
+            epoch: "another".to_owned(),
+        };
+
+        let answered = subscribe_answer(&mut state, 0, "news", (Some(&lost), true), true, true);
+
+        assert!(
+            matches!(&answered, Answer::Error(error) if error.code == 112),
+            "not refused"
+        );
+        assert!(!state.connections[&0].subscribed.contains("news"));
     }
 
     // Codex on #161: an RPC handler may use the double, whose state is not
