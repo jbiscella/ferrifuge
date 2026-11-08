@@ -107,6 +107,15 @@ pub(crate) fn emulation_request(session: &str, node: &str, frame: &[u8]) -> Vec<
     .expect("serializing plain structs to a Vec cannot fail")
 }
 
+/// The length of `frame` as the string value of an [`emulation_request`]
+/// carries it, escaped, without its quotes (Block 36, D1).
+pub(crate) fn escaped_len(frame: &[u8]) -> usize {
+    serde_json::to_string(&String::from_utf8_lossy(frame))
+        .expect("serializing a string cannot fail")
+        .len()
+        - 2
+}
+
 /// The frame an [`emulation_request`] body carries; `None` for a body that
 /// is not one.
 pub(crate) fn emulation_frame(body: &[u8]) -> Option<Vec<u8>> {

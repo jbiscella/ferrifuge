@@ -71,6 +71,15 @@ impl Codec {
         }
     }
 
+    /// The size of `frame` inside an [`Codec::emulation_request`] body:
+    /// JSON escapes it as a string, Protobuf carries its bytes.
+    pub(crate) fn escaped_len(self, frame: &[u8]) -> usize {
+        match self {
+            Self::Json => json::escaped_len(frame),
+            Self::Protobuf => frame.len(),
+        }
+    }
+
     /// The frame an [`Codec::emulation_request`] body carries; `None` for a
     /// body that is not one.
     pub(crate) fn emulation_frame(self, body: &[u8]) -> Option<Vec<u8>> {
