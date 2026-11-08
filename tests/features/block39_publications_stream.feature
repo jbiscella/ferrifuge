@@ -2,13 +2,13 @@ Feature: Publications-only stream
 
   @D
   Scenario: The publications stream yields only the subscription's publications
-    Given a client connected to the fake server, with a subscription to channel "news" with the join_leave option whose publications stream was taken before subscribe is called
+    Given a client connected to the fake server, with a subscription to channel "news" with the join_leave option whose publications stream was taken before subscribe is called and is read
     And the subscription is subscribed
     When the fake server sends a publication at offset 1, a join, a leave, then a publication at offset 2 to "news"
     And the fake server disconnects the client with a reconnect-advised code
-    And the subscription reaches state "subscribed" again
+    And the client has resubscribed to "news" on the new connection
     And the fake server sends a publication at offset 3 to "news"
-    Then the publications stream yields exactly the publications at offsets 1, 2 and 3, in order
+    Then the publications stream has yielded exactly the publications at offsets 1, 2 and 3, in order
 
   @D
   Scenario: Events the publications stream skips hold the connection until it is read
