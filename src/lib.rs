@@ -76,7 +76,8 @@ mod statistics;
 mod subscription;
 mod tag_filter;
 #[cfg(feature = "test-util")]
-mod test_util;
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+pub mod test_util;
 mod token;
 mod wire;
 

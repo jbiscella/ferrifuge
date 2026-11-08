@@ -13,6 +13,11 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- An in-memory server double (Block 37c), behind `test-util` with `tokio`:
+  `test_util::Server` and `test_util::Command`. The real client runs
+  against it through its connector, without a socket; the test sets its
+  answers, publishes, disconnects and reads what the client sent.
+
 - An injectable connector (Block 37b): `ClientBuilder::connector`, the
   `Connector` trait (implemented for closures and for an `Arc` of one),
   `ConnectedStream`, `Connecting` and `BoxError`, and `ferrifuge::http`, the

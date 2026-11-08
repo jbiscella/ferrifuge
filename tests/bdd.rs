@@ -495,6 +495,14 @@ const IMPLEMENTED: &[&str] = &[
     "A connector that fails fails the attempt",
     "A connector that never finishes fails the attempt with the handshake timeout",
     "A connector goes with websocket endpoints and no proxy setting only",
+    // Block 37c: an in-memory server double.
+    "An application tests its subscription against the server double",
+    "The server double recovers publications missed during a reconnect",
+    "The server double answers calls",
+    "The server double refuses as the test asks",
+    "The server double disconnects the client with a code",
+    "The server double grants server-side subscriptions and sends messages",
+    "The server double and Centrifugo answer alike",
 ];
 
 /// Server configuration of @A scenarios.

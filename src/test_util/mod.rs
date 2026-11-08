@@ -1,7 +1,15 @@
 //! Testing support for applications (Block 37), behind the `test-util`
-//! feature: constructors of the events and results the client yields.
+//! feature: constructors of the events and results the client yields, and,
+//! with the `tokio` feature, [`Server`], an in-memory server double the
+//! real client runs against.
 
 mod constructors;
+#[cfg(feature = "tokio")]
+mod server;
+
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use server::{Command, Server};
 
 #[cfg(test)]
 mod tests {
@@ -49,7 +57,9 @@ mod tests {
             for (number, line) in text.lines().enumerate() {
                 let gated = line.contains(r#"feature = "test-util""#);
                 let allowed = (path == "lib.rs"
-                    && line.trim() == r#"#[cfg(feature = "test-util")]"#)
+                    && (line.trim() == r#"#[cfg(feature = "test-util")]"#
+                        || line.trim()
+                            == r#"#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]"#))
                     || (in_module && line.contains("doc(cfg("));
                 if gated && !allowed {
                     found.push(format!("src/{path}:{}: {line}", number + 1));
@@ -67,7 +77,7 @@ mod tests {
 
         assert!(found.is_empty(), "{found:#?}");
         assert!(
-            lib.contains("#[cfg(feature = \"test-util\")]\nmod test_util;"),
+            lib.contains("#[cfg(feature = \"test-util\")]\n#[cfg_attr(docsrs, doc(cfg(feature = \"test-util\")))]\npub mod test_util;"),
             "src/lib.rs declares the module under test-util"
         );
     }

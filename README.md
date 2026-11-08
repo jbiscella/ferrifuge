@@ -781,7 +781,7 @@ let config = Config::default()
 | `ring` | yes | ring as the TLS crypto provider; builds with a C compiler |
 | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
-| `test-util` | no | constructors of the events and results the client yields, for an application's tests (see Testing your application) |
+| `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -830,6 +830,37 @@ Each constructor takes what has no sensible default, and each setter one
 field; a field left out holds what the client yields when the server leaves
 it out. `SubscriptionEvent`, `ClientError` and `CallError` are built
 directly, without the feature.
+
+`test_util::Server` is an in-memory Centrifugo double the real client runs
+against, through its connector, with no socket: the test sets its answers,
+publishes, disconnects with a code and reads the commands it received.
+
+```rust,ignore
+use ferrifuge::test_util::Server;
+use ferrifuge::{CallError, Client};
+
+let server = Server::new();
+server.on_rpc(|method, data| match method {
+    "echo" => Ok(data.to_vec()),
+    _ => Err(CallError::new(104, "method not found")),
+});
+let client = Client::builder(server.endpoint())
+    .connector(server.connector())
+    .build()?;
+let news = client.new_subscription("news")?;
+client.connect();
+news.subscribe();
+news.ready().await?;
+server.publish("news", br#"{"n":1}"#.to_vec()); // the subscription receives it at offset 1
+server.disconnect(3001, "shutdown"); // the client reconnects and recovers what it missed
+```
+
+Every channel has one stream with offsets from 1 and a history, so a
+reconnect recovers what the client missed; the double answers JSON and
+Protobuf clients, grants server-side subscriptions, refuses connects and
+subscribes as asked, and answers history, presence and RPC. Tokens, server
+pings, join and leave, delta compression and the HTTP transports are left
+to Centrifugo itself.
 
 ### TLS verification
 
