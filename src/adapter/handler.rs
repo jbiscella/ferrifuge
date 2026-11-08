@@ -7,9 +7,10 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
-use super::client::{Outboxes, Shared, lock};
+use super::client::{Core, Outboxes, Shared, lock};
 use super::outbox::{Head, Outbox};
 use crate::machine::{EventId, Input, SubscriptionId};
 use crate::{
@@ -250,14 +251,21 @@ pub(super) fn wake_consumer(shared: &Shared) {
 
 /// A handler the client no longer calls, dropped once no lock is held.
 #[allow(dead_code)] // Held only to be dropped.
-enum Dropped {
+pub(super) enum Dropped {
     Client(Box<dyn ClientHandler>),
     Subscription(Box<dyn SubscriptionHandler>),
 }
 
-/// Sets the client's handler, which takes over its stream (D1, D3).
+/// Sets the client's handler, which takes over its stream (D1, D3); none
+/// once the client is closed, when nothing would call or drop it (Codex,
+/// #169).
 pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHandler>) {
     let mut core = lock(&shared.core);
+    if shared.closed.load(Ordering::Acquire) {
+        drop(core);
+        drop(handler);
+        return;
+    }
     let stream = lock(&shared.outboxes).client.open_stream();
     shared.handle(&mut core, Input::StreamOpened(None));
     let old = install(shared, |handlers| {
@@ -274,24 +282,39 @@ pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHa
     drop(old);
 }
 
-/// Sets the handler of the subscription `of`, which takes over its stream;
-/// none for a subscription no longer in the registry.
+/// Sets the handler of the subscription `of`, which takes over its stream.
 pub(super) fn set_subscription_handler(
     shared: &Arc<Shared>,
     of: SubscriptionId,
     handler: Box<dyn SubscriptionHandler>,
 ) {
     let mut core = lock(&shared.core);
-    if core.machine.subscription_state(of).is_none() {
-        return;
+    let old = install_subscription_handler(shared, &mut core, of, handler);
+    drop(core);
+    drop(old);
+}
+
+/// Sets the handler of the subscription `of` under the core lock, so that
+/// a subscription being built gets it before another thread can subscribe
+/// it (Codex, #169). Gives the handler to drop with no lock held: the one
+/// replaced, or this one for a subscription no longer in the registry or a
+/// closed client.
+pub(super) fn install_subscription_handler(
+    shared: &Arc<Shared>,
+    core: &mut Core,
+    of: SubscriptionId,
+    handler: Box<dyn SubscriptionHandler>,
+) -> Option<Dropped> {
+    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
+        return Some(Dropped::Subscription(handler));
     }
     let stream = lock(&shared.outboxes)
         .subscriptions
         .entry(of)
         .or_default()
         .open_stream();
-    shared.handle(&mut core, Input::StreamOpened(Some(of)));
-    let old = install(shared, |handlers| {
+    shared.handle(core, Input::StreamOpened(Some(of)));
+    install(shared, |handlers| {
         handlers
             .subscriptions
             .insert(
@@ -303,9 +326,7 @@ pub(super) fn set_subscription_handler(
             )
             .and_then(|slot| slot.handler)
             .map(Dropped::Subscription)
-    });
-    drop(core);
-    drop(old);
+    })
 }
 
 /// Installs a handler with `set`, starting the consumer at the first one.
@@ -430,9 +451,7 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
     drop(dropped);
     match handed {
         Some(handed) => Poll::Ready(Some(handed)),
-        None if idle && shared.closed.load(std::sync::atomic::Ordering::Acquire) => {
-            Poll::Ready(None)
-        }
+        None if idle && shared.closed.load(Ordering::Acquire) => Poll::Ready(None),
         None => Poll::Pending,
     }
 }
@@ -647,6 +666,17 @@ mod tests {
 
     impl ClientHandler for Flagged {}
 
+    /// Sets its flag when dropped, as [`Flagged`].
+    struct FlaggedSubscription(Arc<AtomicBool>);
+
+    impl Drop for FlaggedSubscription {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    impl SubscriptionHandler for FlaggedSubscription {}
+
     async fn dropped_within_a_second(dropped: &AtomicBool) -> bool {
         for _ in 0..100 {
             if dropped.load(Ordering::Acquire) {
@@ -705,6 +735,69 @@ mod tests {
 
         assert!(dropped.load(Ordering::Acquire));
         drop(client);
+    }
+
+    // Codex, #169: a handler set after close is dropped at once, and no
+    // consumer starts for it.
+    #[test]
+    fn a_handler_set_after_close_is_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (of_client, of_subscription) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let subscription = client.new_subscription("news").unwrap();
+            client.close().await;
+
+            client.set_handler(Flagged(Arc::clone(&of_client)));
+            subscription.set_handler(FlaggedSubscription(Arc::clone(&of_subscription)));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+
+        assert!(of_client.load(Ordering::Acquire));
+        assert!(of_subscription.load(Ordering::Acquire));
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
+    }
+
+    // Codex, #169: a call first polled outside a handler fails when a
+    // handler polls it later.
+    #[test]
+    fn a_call_polled_again_in_a_handler_would_deadlock() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = Arc::new(Mutex::new(None));
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let mut call = Box::pin(client.rpc("echo", b"{}".to_vec()));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(call.as_mut().poll(&mut cx).is_pending());
+            let call = Mutex::new(Some(call));
+            let record = Arc::clone(&outcome);
+            client.set_handler(move |_: ClientEvent| {
+                if let Some(mut call) = call.lock().unwrap().take() {
+                    let mut cx = Context::from_waker(Waker::noop());
+                    *record.lock().unwrap() = Some(
+                        call.as_mut()
+                            .poll(&mut cx)
+                            .map(|result| result.map(|_| ()).map_err(|error| error.code)),
+                    );
+                }
+            });
+            client.connect();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+
+        assert_eq!(
+            *outcome.lock().unwrap(),
+            Some(Poll::Ready(Err(crate::codes::error::WOULD_DEADLOCK)))
+        );
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).

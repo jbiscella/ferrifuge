@@ -4,8 +4,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 
 use tokio::sync::oneshot;
 
@@ -208,8 +210,18 @@ pub(super) fn ready(
         }
         match start {
             Start::Settled(result) => result,
-            Start::Waiting(receiver, registered) => {
-                let result = receiver.await;
+            Start::Waiting(mut receiver, registered) => {
+                // Checked at every poll, as a call is (Codex, #169).
+                let result = std::future::poll_fn(|cx| {
+                    if super::handler::would_deadlock(&shared) {
+                        return Poll::Ready(None);
+                    }
+                    Pin::new(&mut receiver).poll(cx).map(Some)
+                })
+                .await;
+                let Some(result) = result else {
+                    return Err(super::handler::deadlock_error());
+                };
                 drop(registered);
                 // The sender was dropped unsettled only when the driver
                 // stopped (Block 28): the client is closed (Block 33).
