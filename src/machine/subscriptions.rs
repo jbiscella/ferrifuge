@@ -44,6 +44,10 @@ pub(super) struct Subscriptions {
     unsubscribes: HashMap<u32, (SubscriptionId, String)>,
     /// `sub_refresh` commands awaiting their reply, and whose.
     sub_refreshes: HashMap<u32, SubscriptionId>,
+    /// Subscribe commands sent with the connect command whose reply is not
+    /// read yet: their deadline starts when the connect reply is read
+    /// (Block 36, D6).
+    optimistic: Vec<(u32, SubscriptionId)>,
 }
 
 /// Who started a subscribe (Block 18, D2).
@@ -441,12 +445,44 @@ impl Machine {
         };
         let command_id = self.command_id();
         let holding = self.holding();
-        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+        let Some(command) = self.subscribe_request(id, command_id, data) else {
             return;
         };
-        sub.subscribe_command = Some(command_id);
-        let started_by = std::mem::replace(&mut sub.started_by, StartedBy::Client);
+        let started_by = self.subscribe_sent(id, command_id);
         let held = holding && started_by == StartedBy::Application;
+        self.send_or_hold(transport, held, command);
+        self.actions.push(Action::SetSubscriptionTimer(
+            id,
+            SubscriptionTimer::SubscribeReply,
+            self.config.timeout,
+        ));
+    }
+
+    /// Command `command_id` is now the subscribe of `id` in flight; who
+    /// started it.
+    fn subscribe_sent(&mut self, id: SubscriptionId, command_id: u32) -> StartedBy {
+        let sub = self
+            .subscriptions
+            .by_id
+            .get_mut(&id)
+            .expect("a subscription");
+        sub.subscribe_command = Some(command_id);
+        let channel = sub.channel.clone();
+        let started_by = std::mem::replace(&mut sub.started_by, StartedBy::Client);
+        self.subscriptions
+            .subscribes
+            .insert(command_id, (id, channel));
+        started_by
+    }
+
+    /// The subscribe command `command_id` of `id`, carrying `data`.
+    fn subscribe_request(
+        &mut self,
+        id: SubscriptionId,
+        command_id: u32,
+        data: Option<Vec<u8>>,
+    ) -> Option<Command> {
+        let sub = self.subscriptions.by_id.get_mut(&id)?;
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
         let recover_from = sub.position.clone().filter(|_| sub.recover);
@@ -468,35 +504,105 @@ impl Machine {
         } else {
             0
         };
+        Some(Command {
+            id: command_id,
+            method: Method::Subscribe(SubscribeRequest {
+                channel,
+                token,
+                data,
+                recover: recover_from.is_some(),
+                offset: recover_from.as_ref().map_or(0, |at| at.offset),
+                epoch: recover_from.map(|at| at.epoch).unwrap_or_default(),
+                positioned,
+                recoverable,
+                flag,
+                join_leave,
+                delta,
+                tag_filter,
+            }),
+        })
+    }
+
+    /// The subscribe commands that go in the frame of `connect`, sent over
+    /// websocket (Block 36, D5): of the subscriptions a connect reply would
+    /// subscribe at once, needing no callback first, in registry order,
+    /// while the frame stays within `batch_frame_bytes`. Their deadline
+    /// waits for the connect reply (D6).
+    pub(super) fn optimistic_subscribes(&mut self, connect: &Command) -> Vec<Command> {
+        let cap = self.config.batch_frame_bytes.max(1);
+        let mut size = self.piece_size(&self.codec.encode(std::slice::from_ref(connect)));
+        let ready: Vec<SubscriptionId> = self
+            .subscriptions
+            .by_id
+            .keys()
+            .copied()
+            .filter(|id| self.subscribes_with_connect(*id))
+            .collect();
+        let mut commands = Vec::new();
+        for id in ready {
+            let data = self.subscriptions.by_id[&id].options.data.clone();
+            // The id `command_id` gives next, taken only if it fits.
+            let command_id = self.next_command.wrapping_add(1).max(1);
+            let Some(command) = self.subscribe_request(id, command_id, data) else {
+                continue;
+            };
+            let piece = self.piece_size(&self.codec.encode(std::slice::from_ref(&command)));
+            if self.frame_bytes(commands.len() + 2, size + piece) > cap {
+                break;
+            }
+            size += piece;
+            self.command_id();
+            self.subscribe_sent(id, command_id);
+            self.subscriptions.optimistic.push((command_id, id));
+            commands.push(command);
+        }
+        commands
+    }
+
+    /// Whether `id` would subscribe at once on a connect reply, with no
+    /// callback to run first (see `start_subscribe`).
+    fn subscribes_with_connect(&self, id: SubscriptionId) -> bool {
+        let Some(sub) = self.subscriptions.by_id.get(&id) else {
+            return false;
+        };
+        sub.state == SubscriptionState::Subscribing
+            && !sub.resubscribe_pending
+            && sub.subscribe_command.is_none()
+            && sub.fetch.is_none()
+            && sub.state_fetch.is_none()
+            && sub.tokens.pending_fetch().is_none()
+            && !self.subscriptions.channel_busy(&sub.channel)
+            && !self.needs_state(id)
+            && sub.tokens.before_connect() != BeforeConnect::Fetch
+            && !sub.options.data_source
+    }
+
+    /// The connect reply was read: the subscribe commands sent with the
+    /// connect command whose reply is not read yet have `timeout` from now
+    /// (Block 36, D6).
+    pub(super) fn start_optimistic_deadlines(&mut self) {
+        for (command, id) in std::mem::take(&mut self.subscriptions.optimistic) {
+            if self.subscriptions.subscribes.contains_key(&command) {
+                self.actions.push(Action::SetSubscriptionTimer(
+                    id,
+                    SubscriptionTimer::SubscribeReply,
+                    self.config.timeout,
+                ));
+            }
+        }
+    }
+
+    /// The reply to command `command` was read: an optimistic subscribe
+    /// answered before the connect reply needs no deadline.
+    pub(super) fn optimistic_answered(&mut self, command: u32) {
         self.subscriptions
-            .subscribes
-            .insert(command_id, (id, channel.clone()));
-        self.send_or_hold(
-            transport,
-            held,
-            Command {
-                id: command_id,
-                method: Method::Subscribe(SubscribeRequest {
-                    channel,
-                    token,
-                    data,
-                    recover: recover_from.is_some(),
-                    offset: recover_from.as_ref().map_or(0, |at| at.offset),
-                    epoch: recover_from.map(|at| at.epoch).unwrap_or_default(),
-                    positioned,
-                    recoverable,
-                    flag,
-                    join_leave,
-                    delta,
-                    tag_filter,
-                }),
-            },
-        );
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-            self.config.timeout,
-        ));
+            .optimistic
+            .retain(|(sent, _)| *sent != command);
+    }
+
+    /// Whether `command` is a subscribe command awaiting its reply.
+    pub(super) fn awaits_subscribe(&self, command: u32) -> bool {
+        self.subscriptions.subscribes.contains_key(&command)
     }
 
     fn send_unsubscribe(&mut self, id: SubscriptionId, channel: String) {
@@ -1298,6 +1404,7 @@ impl Machine {
             ));
         }
         self.subscriptions.sub_refreshes.clear();
+        self.subscriptions.optimistic.clear();
         // Numeric channel ids belong to the connection (Block 35b, D2).
         self.subscriptions.by_compact_id.clear();
         let mut resubscribing = Vec::new();
@@ -1851,12 +1958,9 @@ mod tests {
         });
         let reconnect = machine.handle(Input::TimerFired(Timer::Reconnect));
         let again = opened(&reconnect).expect("a new attempt");
-        machine.handle(Input::TransportOpened(again));
 
-        let resubscribed = machine.handle(Input::Frame {
-            transport: again,
-            data: br#"{"id":3,"connect":{"client":"c"}}"#.to_vec(),
-        });
+        // Sent with the connect command (Block 36, D5).
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(again)));
 
         assert_eq!(subscribe_data(&resubscribed), [r#"{"v":2}"#]);
     }
@@ -2056,8 +2160,8 @@ mod tests {
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
 
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
         // No callback gives a new token: the resubscribe carries none.
         assert_eq!(
@@ -2232,8 +2336,8 @@ mod tests {
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
 
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
         // The server can never match epoch "_": the recovery fails and the
         // subscribed event tells the app (offset 0 is not encoded).
@@ -2251,8 +2355,8 @@ mod tests {
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
 
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
         assert_eq!(
             sent(&resubscribed),
@@ -2285,9 +2389,8 @@ mod tests {
         ));
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3014);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
         machine.handle(reply(
             transport,
             r#"{"id":4,"error":{"code":112,"message":"unrecoverable position"}}"#,
@@ -2320,6 +2423,31 @@ mod tests {
         let frame = frames.next().expect("a frame sent");
         assert!(frames.next().is_none(), "{actions:?}");
         frame
+    }
+
+    /// The frames sent among `actions` without the connect command each
+    /// begins with: the subscribe commands sent with it (Block 36, D5).
+    fn with_connect(actions: &[Action]) -> Vec<Action> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send {
+                    transport,
+                    id,
+                    frame,
+                    frame_type,
+                } => {
+                    let (_, rest) = std::str::from_utf8(frame).unwrap().split_once('\n')?;
+                    Some(Action::Send {
+                        transport: *transport,
+                        id: *id,
+                        frame: rest.as_bytes().to_vec(),
+                        frame_type: *frame_type,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Frames sent among `actions`, as text.
@@ -2955,9 +3083,8 @@ mod tests {
         ));
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-
-        let reconnected = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let reconnected = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
         let retried = machine.handle(Input::SubscriptionTimerFired(
             id,
             SubscriptionTimer::Resubscribe,
@@ -3122,10 +3249,25 @@ mod tests {
         machine.handle(Input::Unsubscribe(id));
         let connected = machine.handle(reply(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
         let again = machine.handle(Input::Subscribe(id));
+        // The subscribe sent with the connect command succeeded: undone
+        // first (Block 36, D7), then the channel is free.
+        let undone = machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"unsubscribe":{}}"#));
 
-        assert_eq!(sent(&connect).len(), 1, "{connect:?}");
+        assert_eq!(
+            sent(&with_connect(&connect)),
+            [r#"{"id":2,"subscribe":{"channel":"news"}}"#]
+        );
         assert_eq!(sent(&connected), Vec::<String>::new());
-        assert_eq!(sent(&again), [r#"{"id":2,"subscribe":{"channel":"news"}}"#]);
+        assert_eq!(sent(&again), Vec::<String>::new());
+        assert_eq!(
+            sent(&undone),
+            [r#"{"id":3,"unsubscribe":{"channel":"news"}}"#]
+        );
+        assert_eq!(
+            sent(&resubscribed),
+            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+        );
     }
 
     #[test]
@@ -3253,8 +3395,8 @@ mod tests {
         });
         let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)))
             .expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-        let reconnected = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let reconnected = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
         assert_eq!(resubscribe_delay(&closed), None, "{closed:?}");
         assert_eq!(
@@ -3410,9 +3552,8 @@ mod tests {
         ));
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
         let recovered = machine.handle(reply(
             transport,
             r#"{"id":4,"subscribe":{"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e","offset":1}}"#,
@@ -3474,9 +3615,8 @@ mod tests {
         ));
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
-
-        let resubscribed = machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
+        let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
+        machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
         assert_eq!(
             sent(&first),
@@ -3558,16 +3698,19 @@ mod tests {
         ));
         let reconnecting = closed_then_reconnecting(&mut machine, transport, 3000);
         let transport = opened(&reconnecting).expect("a reconnect attempt");
-        machine.handle(Input::TransportOpened(transport));
 
-        let resubscribed =
-            machine.handle(protobuf_reply(transport, &pb::Reply { id: 3, ..connected }));
+        // The subscribe goes in the frame of the connect command, after it
+        // (Block 36, D5).
+        let resubscribed = machine.handle(Input::TransportOpened(transport));
 
         let subscribe = resubscribed
             .iter()
             .find_map(|action| match action {
                 Action::Send { frame, .. } => {
-                    pb::Command::decode_length_delimited(frame.as_slice())
+                    let mut frame = frame.as_slice();
+                    let connect = pb::Command::decode_length_delimited(&mut frame).unwrap();
+                    assert!(connect.connect.is_some(), "{connect:?}");
+                    pb::Command::decode_length_delimited(frame)
                         .unwrap()
                         .subscribe
                 }

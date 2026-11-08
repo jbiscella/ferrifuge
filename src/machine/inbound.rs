@@ -144,9 +144,11 @@ impl Machine {
         if self.connect_command == Some(id) {
             self.actions
                 .push(Action::CancelTimer(Timer::ConnectTimeout));
+            self.start_optimistic_deadlines();
         } else if self.tokens.awaits_refresh_reply(id) {
             self.actions.push(Action::CancelTimer(Timer::RefreshReply));
         } else if let Some((subscription, timer)) = self.subscriptions.reply_timer(id) {
+            self.optimistic_answered(id);
             self.actions
                 .push(Action::CancelSubscriptionTimer(subscription, timer));
         }
