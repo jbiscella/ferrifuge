@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–39 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–40 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -5928,3 +5928,38 @@ Feature: Publications-only stream
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 40 — wasm32 build check of the core
+
+**Goal:** CI proves on every pull request that the sans-IO core builds for `wasm32-unknown-unknown` and calls no std clock or thread function that panics there, so that the runtime-agnostic core of Block 0 stays usable by the browser adapter (parity item 25, design A first; "Planned after Block 19", owner decision 2026-11-06, late, decided by the reviewer by state of the art).
+
+Value clause: As a maintainer, I want CI to build and lint the sans-IO core for wasm32-unknown-unknown on every pull request, rejecting a dependency that does not build there and a std clock or thread call that panics there, so that the runtime-agnostic core of Block 0, which the browser adapter of Block 44 will drive, cannot regress unnoticed.
+
+**Dependencies:** Blocks 0 (core alone, Components rule), 2, 10 and 14 (random delays), 6 (provider compile error), 16 and 24 (CI layout, mobile jobs), 20 (MSRV D6, changelog D4), 37 (`test-util`).
+
+**Out of scope:**
+- the browser adapter, browser timers and transports, item 39's options, relaxing `Send` bounds (Block 44);
+- running tests on wasm (wasm-bindgen-test, wasm32-wasip1 with wasmtime) and checking a linked module's imports (Block 44);
+- entropy for the core's random source on wasm32-unknown-unknown (D4, Block 44);
+- the `tokio` feature on wasm32 (D5);
+- other wasm targets (wasip1, wasip2, wasm64, emscripten, wasm32v1-none) and a `no_std` core;
+- an MSRV check on wasm32;
+- cargo-deny targets for wasm: no wasm-only dependency yet (Block 44).
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 CI job.** A `wasm` job in the `portability` set, on pull requests, on `ubuntu-latest`, stable toolchain with target `wasm32-unknown-unknown` and clippy. For `--no-default-features` and for `--no-default-features --features test-util`: `cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings` with D2's configuration, then `cargo build --lib --target wasm32-unknown-unknown`. No MSRV step on this target: Block 20 D6 checks it per feature set, and the core alone is checked on 1.88.
+- **D2 Calls that compile but panic there.** The job's clippy reads a configuration of its own through `CLIPPY_CONF_DIR`, disallowing the type `std::time::Instant` and the functions `std::time::Instant::now`, `std::time::SystemTime::now`, `std::thread::spawn`, `std::thread::Builder::spawn`, `std::thread::scope` and `std::thread::sleep`, each with its reason. `SystemTime` as a value stays allowed (`Statistics::connected_since`). The adapter and the tests are not built in this job.
+- **D3 No tests on wasm32.** The dev-dependencies pull in mio, which does not build there; wasm-bindgen-test arrives with Block 44.
+- **D4 Random source.** fastrand 2.5.0 without its `js` feature seeds its generator with a constant on wasm32-unknown-unknown (`src/global_rng.rs`), and `Machine::new` forks from it, so the n-th machine of every page draws the same delays. The core does not enable `js`: getrandom 0.4.3 advises libraries against `wasm_js` unless they already depend on wasm-bindgen there, and it breaks non-JS hosts. Block 44's browser feature enables `fastrand/js`. Until then the rustdoc of `Machine::new` and `Machine::with_token_source` and the README say so.
+- **D5 No compile error for `tokio` on wasm32.** Its dependencies fail before Ferrifuge compiles, so the message could never show; the README says that `tokio` does not build there.
+- **D6 Sizes and clocks.** Unchanged: the size limits are `usize` with defaults of 64 MiB or less, u64-to-usize conversions are checked, counters are plain `u64`, and the core sets no clock values. For Block 44: building a `SystemTime` without `SystemTime::now` (`VERIFY:` that `UNIX_EPOCH + Duration` works there at run time).
+- **D7 Version and docs.** No version bump. `Unreleased`, "Added": "A wasm32-unknown-unknown build of the sans-IO core in CI." The README's "Cargo features" and "Continuous integration" sections name the check, D4 and D5.
+
+**Structural acceptance:**
+- the `wasm` job passes on pull requests with both feature sets, clippy and build (D1);
+- a temporary mutation adding `std::time::Instant::now()` to the core fails the job's clippy, and one adding a dependency that does not build for wasm32 fails its build (checked once, from a clean state, in the implementation PR);
+- the rustdoc and README text of D4, D5 and D7, and the changelog entry.
+
+**Exceptions introduced:** no Gherkin scenario: the property is a build configuration, verified by the CI job, as Block 6's feature matrix and Block 24's mobile builds are.
