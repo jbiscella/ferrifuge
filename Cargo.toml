@@ -167,6 +167,10 @@ name = "log_facade"
 required-features = ["tokio"]
 
 [[test]]
+name = "handler_logs"
+required-features = ["tokio"]
+
+[[test]]
 name = "proxy_env"
 harness = false
 required-features = ["tokio"]

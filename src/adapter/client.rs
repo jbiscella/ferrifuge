@@ -1367,10 +1367,16 @@ impl Client {
         async move {
             // From one of its own handlers, closing has started: waiting for
             // the driver could wait on the worker the handler holds (Block
-            // 41, D6).
-            if !super::handler::would_deadlock(&shared) {
-                shared.ended().await;
-            }
+            // 41, D6). Checked at every poll, as a call is (Codex, #169).
+            let ended = shared.ended();
+            let mut ended = std::pin::pin!(ended);
+            std::future::poll_fn(|cx| {
+                if super::handler::would_deadlock(&shared) {
+                    return Poll::Ready(());
+                }
+                ended.as_mut().poll(cx)
+            })
+            .await;
         }
     }
 
