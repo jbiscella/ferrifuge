@@ -140,6 +140,9 @@ struct State {
     /// The next JSON connect command is answered with a text message of
     /// this many bytes (Block 29).
     sized_connect: Option<usize>,
+    /// The next JSON connect command is answered after this delay, the
+    /// commands after it in its frame once it is (Block 36, D10).
+    connect_delay: Option<std::time::Duration>,
     /// Bytes and JSON messages written to clients, and bytes and JSON
     /// commands read from them (Block 31).
     sent_traffic: (u64, u64),
@@ -387,6 +390,13 @@ impl FakeServer {
     /// a websocket message of exactly `size` bytes (Block 29).
     pub(crate) fn answer_next_connect_sized(&self, size: usize) {
         self.state.lock().unwrap().sized_connect = Some(size);
+    }
+
+    /// Answers the next JSON connect command after `delay`, and the
+    /// commands after it in its frame once it has (Block 36, D10). Not for
+    /// subscribes answered from history, which go out at once.
+    pub(crate) fn delay_next_connect(&self, delay: std::time::Duration) {
+        self.state.lock().unwrap().connect_delay = Some(delay);
     }
 
     /// Answers the next connect command with error `code` and `message`.
@@ -817,9 +827,17 @@ impl Connection {
         ))
     }
 
-    /// Records the JSON commands of a text frame; the replies to send.
+    /// Records the JSON commands of a text frame and answers them in the
+    /// order of the frame, as Centrifugo does (Block 36, D10): each reply
+    /// goes out as it is made, before the next command, so that one
+    /// answered from history cannot overtake an earlier reply. As
+    /// Centrifugo, nothing after a connect answered with an error is
+    /// answered (centrifuge `client.go`, a failed connect ends the frame).
     fn json_commands(&mut self, text: &str) -> Vec<Message> {
         let mut replies = Vec::new();
+        // The replies of a connect answered late and of what follows it.
+        let mut deferred: Option<(std::time::Duration, Vec<Message>)> = None;
+        let mut connect_failed = false;
         let frame = {
             let mut state = self.state.lock().unwrap();
             state.frames += 1;
@@ -829,6 +847,13 @@ impl Connection {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            if connect_failed {
+                let mut state = self.state.lock().unwrap();
+                state.received.push(message);
+                state.received_frames.push(frame);
+                state.received_at.push(std::time::Instant::now());
+                continue;
+            }
             let failing = message["connect"].is_object().then(|| {
                 let mut state = self.state.lock().unwrap();
                 if state.failing_connects > 0 {
@@ -841,7 +866,11 @@ impl Connection {
                 replies.push(Message::text(
                     json!({"id": message["id"], "error": error}).to_string(),
                 ));
+                connect_failed = true;
             } else if message["connect"].is_object() {
+                if let Some(delay) = self.state.lock().unwrap().connect_delay.take() {
+                    deferred = Some((delay, Vec::new()));
+                }
                 replies.push(self.connect_reply(&message));
             } else if message["subscribe"].is_object() {
                 replies.extend(self.subscribe_answer(&message));
@@ -885,10 +914,27 @@ impl Connection {
                     .to_string(),
                 ));
             }
+            match &mut deferred {
+                Some((_, held)) => held.append(&mut replies),
+                None => {
+                    for reply in replies.drain(..) {
+                        let _ = self.out.send(Outgoing::Message(reply));
+                    }
+                }
+            }
             let mut state = self.state.lock().unwrap();
             state.received.push(message);
             state.received_frames.push(frame);
             state.received_at.push(std::time::Instant::now());
+        }
+        if let Some((delay, held)) = deferred {
+            let out = self.out.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                for reply in held {
+                    let _ = out.send(Outgoing::Message(reply));
+                }
+            });
         }
         replies
     }
