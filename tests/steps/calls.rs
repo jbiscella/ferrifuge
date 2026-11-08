@@ -50,6 +50,10 @@ pub(crate) struct Calls {
     pub(crate) write_queue_bytes: Option<usize>,
     /// The sans-IO core of an @E write-queue scenario.
     queue: Option<QueueRun>,
+    /// When a step that should settle the calls at once (a disconnect, a
+    /// lost transport) ran: tells a runner stall from a client that failed
+    /// to settle (Windows flake, #138, #157, #174).
+    pub(crate) settling_step_at: Option<Instant>,
 }
 
 /// A second client, subscribed, with its subscription's events.
@@ -345,6 +349,9 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
             .collect(),
         _ => Vec::new(),
     };
+    let settling_step_after = made_at
+        .zip(world.calls.settling_step_at)
+        .map(|(made_at, at)| at.saturating_duration_since(made_at));
     let error = error(result);
     let code = match message.as_str() {
         "disconnected" => codes::error::DISCONNECTED,
@@ -357,7 +364,7 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
     assert_eq!(
         (error.code, error.message.as_str()),
         (code, message.as_str()),
-        "settled {after:?} after the call was made; RPC commands read by the fake server {read_after:?} after it"
+        "settled {after:?} after the call was made; RPC commands read by the fake server {read_after:?} after it; the settling step ran {settling_step_after:?} after it"
     );
     if !early.is_empty() {
         assert!(after < timeout, "failed after {after:?}");

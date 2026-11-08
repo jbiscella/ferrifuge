@@ -482,6 +482,7 @@ async fn a_client_subscribed_to_the_recoverable_channel(world: &mut ClientWorld)
     regex = r"^the fake server disconnects the client with a reconnect-advised code(?: before any publication| again)?$"
 )]
 fn the_fake_server_disconnects(world: &mut ClientWorld) {
+    world.calls.settling_step_at = Some(std::time::Instant::now());
     fake_server_disconnects(world);
 }
 

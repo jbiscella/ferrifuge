@@ -136,6 +136,7 @@ fn disconnect_is_called(world: &mut ClientWorld) {
         super::batching::disconnect(world);
         return;
     }
+    world.calls.settling_step_at = Some(std::time::Instant::now());
     world.client().disconnect();
 }
 
