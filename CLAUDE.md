@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–41 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–42 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -691,7 +691,7 @@ Feature: Transport fallback
 
 **Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
 
-**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
+**Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); an `unsubscribe()` or a removal while the flow waits for its data, token or getState callback sends an unsubscribe command (amended by Block 42 D10; centrifuge-js 63ed73e `_inflight`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
 `VERIFY:` the Centrifugo v6 channel options letting an anonymous client subscribe to channels without a namespace (`channel.without_namespace` permissions), and the server API `publish` request shape, including `b64data` for binary data.
 
@@ -6236,3 +6236,138 @@ Feature: Event handlers
 ```
 
 **Exceptions introduced:** `ready()` keeps following the state (Block 30 D4): it can resolve before the `connected` or `subscribed` handler runs, unlike centrifuge-js 63ed73e (`subscription.ts:596-601`) and centrifuge-rust (`docs/spec.md:1087`).
+
+---
+
+## Block 42 — TLA+ trace replay
+
+**Goal:** the sans-IO core is replayed, step by step, against the traces centrifugal/centrifuge-rust generated from the Centrifugal SDK TLA+ model, so that a step where the core leaves the model's schedule fails CI naming the trace, the step and the value that differs (parity item 20, adopted by the owner, 2026-11-06, late; restores Block 16's "trace replay, optional, later").
+
+**Dependencies:** Blocks 8 (emulated transports, a failed emulation request), 9–13 (subscriptions, tokens, recovery, server-side subscriptions, calls), 15 (delivery), 16 (harness layout, planted faults), 18 (frames of several commands), 19 (delta), 33 (`close()`), 36 (automatic batching, optimistic subscribes).
+
+**Out of scope:**
+- generating traces: they come from the model (`tla/sdk`, an internal Centrifugal Labs repository) through centrifuge-rust's `Replay.tla` and `cargo xtask tla-traces`, none of which is read;
+- reading anything of centrifuge-rust but its `docs/spec.md`, `docs/api.md`, the trace data files and their README, and its `LICENSE` for the notice;
+- replaying into the tokio adapter: the traces describe the core's steps;
+- changing the client to fit the model: a divergence that is a defect is fixed in its own pull request (D10); one that follows a recorded Ferrifuge decision is recorded (D5) by a spec pull request;
+- traces of a later centrifuge-rust commit: a new copy is a new decision, and re-derives D5 and D6.
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Fixtures.** The 18 `traces/MC_*.jsonl`, `traces/README.md` and `bugs.jsonl` of `crates/centrifuge-client-core/tests/tla/` at centrifuge-rust 88d6edf178f6db370d8e6756d389c89bf100436b (model commit dd28e7f9, per their README) are copied byte for byte to `tests/fixtures/tla-traces/upstream/`, keeping their relative paths. In `tests/fixtures/tla-traces/` go centrifuge-rust's MIT text and copyright line (`LICENSE`) and a Ferrifuge README naming the source commit, the path, the model commit and each copied file's SHA-256, as the fossil vectors do. `LICENSE`'s "Exceptions" ("In the repository only") and `REUSE.toml` gain an entry; `.gitattributes` marks `upstream/**` binary. The crate's `include` already leaves `tests/` out of the package.
+- **D2 Trace format, as read from the data.** One JSON object per line: `config`, `constants`, `states`, and `violated` in `bugs.jsonl`. Step n is `states[n]`. `states[0]` is `Init` with all 13 variables. Every later state holds its `act` and the variables it changed, each written whole. Steps carry no parameters. The replayer finds the channel from the callback that settles (`cbs`) for `Cb_*`, from the `sub` that changes for `App_*`, and from the head of `toC` for replies and pushes. A teardown may change several channels at once. The 663 traces have 4 to 40 states each, 8 151 in all.
+- **D3 Replayer.** A test binary, `tests/tla_replay.rs`, builds one `Machine` per trace from `constants`. It uses JSON and default options, with one transport only: websocket when `Ordered` is true, http_stream when false, so no fallback occurs. Automatic batching is on, and `Input::Flush` is fed after each step's inputs, as the tokio driver does (Block 36 D2, D3).
+  - `Chans` become client-side subscriptions, added at the start. `ServerChans` become server-side subscriptions granted at connect.
+  - `Recoverable`, `Delta`, `GetState`, `SubToken` and `ConnToken` set the subscription options and the token, data and state sources.
+  - The other constants bound the model's search; a trace whose `MapChans` or `SPChans` is not empty fails.
+
+  The steps map as follows. An `act` with no mapping fails the trace.
+  - `App_*` → `Connect`, `Disconnect`, `Close`, `Subscribe`, `Unsubscribe`, `RemoveSubscription` then `add_subscription` (`App_Replace`), `add_call` then `Call`.
+  - `Env_Open` → `TransportOpened`.
+  - `Env_Drop` → `TransportFailed` before the transport opened, `TransportClosed` after.
+  - `Env_Timeout` → `TimerFired(ConnectTimeout)` or `SubscriptionTimerFired(SubscribeReply)`, according to the head of `pend`.
+  - `Env_CallTimeout` → `CallTimerFired`.
+  - `Env_WriteError` → `TransportClosed`, since a failed emulation request closes the transport (Block 8).
+  - `Cb_*` → `TokenFetched`, `SubscriptionTokenFetched`, `SubscriptionStateFetched`.
+  - `Sdk_ReconnectTimer` → `TimerFired(Reconnect)`; `Sdk_ResubscribeTimer` → `SubscriptionTimerFired(Resubscribe)`.
+  - Reply and push steps → a `Frame` encoding the head of `toC`. Abstract codes map to: `temp` 100 with `temporary: true`, `perm` 403, `expired` 109, `already` 105, `unrec` 112. Unsubscribe codes: `terminal` 2000, `resub` 2500, `invalidate` 2502. Disconnect codes: `reconnect` 3001, `terminal` 3500, `invalidate` 3014.
+  - `Srv_*` and `Env_TokenExpires` drive the replayer's simulated server and clock only.
+  - `Sdk_SSDeliver` → `EventTaken` of the next recovered publication.
+  - `Sdk_StartFlow` and `Sdk_SSSubscribed` → no input. Each run of them is checked together with the last step before it that has an input.
+
+  Every other event is taken at once (`EventTaken`), as in the model's "queued deliveries first". A callback outcome or reply is inferred from the trace; if more than one outcome fits, the trace fails instead of the replayer choosing one.
+- **D4 What is checked after each step or group of steps.** The model's state, built up from `Init`, is compared whole, not only the variables the step wrote:
+  - the client's state;
+  - each subscription's state, client-side and server-side;
+  - the commands sent, in order and field by field: kind, channel, token version, recover flag, epoch and offset, the reject-unrecovered flag, server-side positions in the connect;
+  - the callbacks started (token, data, getState);
+  - the reconnect and resubscribe timers, armed or not (other timers are not compared);
+  - the application's stream position (`app`: epoch, offset).
+
+  An action of the core that the model lacks fails as a missing one does. Abstract values map one to one:
+  - token version 0 is no token, and n is `t<n>`;
+  - epoch -1 is none, 0 is the sentinel `_`, and n is `e<n>`.
+
+  A mismatch fails with the configuration, the trace's line, the step's index and `act`, and the value with both sides.
+- **D5 Recorded divergences.** Four schedules of the model differ from recorded Ferrifuge decisions. Each predicate is mechanical, on the trace. A trace that reaches one is checked up to that step, must differ there as recorded, and stops. If the core matches at that step, the trace fails.
+  - **DV1** (Block 36 D5, item 31): at an `Env_Open` over websocket, a client-side subscription is `subscribing` with no resubscribe timer and no unsubscribe reply awaited for its channel, and needs no callback (no getState load without a position, no token fetch without a token). The core's frame carries those subscribes after the connect; the trace's carries the connect alone. 70 traces.
+  - **DV2** (Block 9), over websocket:
+    - `App_Unsubscribe` or `App_Replace` while a subscribe of the channel awaits its reply: the trace sends an unsubscribe at once, the core waits for the reply;
+    - `Sdk_StartFlow` while an unsubscribe of the channel awaits its reply: the trace starts the flow, the core waits.
+
+    3 traces.
+  - **DV3** (Block 11): an `invalidate` (2502) unsubscribe push to a client-side subscription that holds a position. At that subscription's next subscribe command, the trace recovers from offset 0 and epoch `_`; the core sends no position. 16 traces.
+  - **DV4** (Block 8): `Env_WriteError` of a subscribe over http_stream. The trace keeps the client connected and the subscription `subscribing` with a resubscribe timer; the core reconnects. 5 traces.
+
+  The count of traces each predicate matches must equal the recorded one. 86 traces reach at least one (DV1 and DV2 both: 2, DV1 and DV3: 4, DV3 and DV4: 2); 577 reach none.
+- **D6 Counterexamples.** Each of the 7 traces of `bugs.jsonl` must match up to its step and differ there as this table says, checked in the test. `VERIFY:` the table was derived from the data by the reviewer; 42b confirms each row against the trace before running the core, and stops and reports if a row is wrong.
+
+  | Line | Config | Step | The trace, unlike the core | Shows |
+  |---|---|---|---|---|
+  | 1 | `bug_accept_stale_reply`, websocket | 7 `App_Unsubscribe` | sends an unsubscribe while the subscribe awaits its reply | DV2 |
+  | 2 | `bug_invalidate_empty_epoch`, websocket | 4 `Env_Open` | sends the connect without the subscribe | DV1 |
+  | 3 | `bug_no_unsub_defer`, http_stream | 7 `App_Unsubscribe` | sends an unsubscribe while the subscribe awaits its reply | the bug |
+  | 4 | `bug_no_unsub_wait`, http_stream | 9 `Sdk_StartFlow`, checked with step 8 | sends a second subscribe while the first awaits its reply | the bug |
+  | 5 | `bug_stale_flow_continuation`, http_stream | 9 `Cb_SubToken` | subscribes with the token fetched for the flow `unsubscribe()` ended | the bug |
+  | 6 | `bug_stale_flow_continuation_ws`, websocket | 9 `Sdk_StartFlow`, checked with step 8 | starts a token fetch while step 7's unsubscribe awaits its reply | DV2 |
+  | 7 | `bug_unsub_push_any_state`, websocket | 3 `Env_Open` | sends the connect without the subscribe | DV1 |
+
+- **D7 Coverage.** What the replayed traces cover:
+  - they deliver 1 live publication and none as a delta;
+  - the 2 recovered publications (server-side, from a connect reply, `MC_large.jsonl` line 37) are in a DV1 trace, as is every websocket schedule where a subscription is `subscribing` when the transport opens;
+  - no refresh or sub_refresh is sent;
+  - Block 9's deferral over emulation is reached only by counterexamples 3 and 4.
+
+  The replay therefore checks the scheduling of connections, subscriptions, tokens, getState and server-side subscriptions. Delivery, recovery and delta stay with Block 16's runners, and optimistic subscribes with Block 36's tests. The fixtures README says so.
+- **D8 CI and layer.** The replay runs in the `test` job and the portability job of every pull request, with no time gate.
+  - The test checks each copied file's SHA-256 against the README.
+  - The run counts the steps replayed per `act` and the values compared per D4 kind; a count of 0 fails.
+  - Layer `@P`, each scenario claimed with `// @P scenario:`, as Block 16's are. No new dependency.
+- **D9 Public API.** None. A hook the replayer needs goes behind `__test-hooks`, `#[doc(hidden)]`, as in Block 16.
+- **D10 Unsubscribing while a callback runs** (prerequisite pull request; amends Block 9). `unsubscribe()` or a removal while a subscription's flow waits for its data, token or getState callback sends an unsubscribe command. A later subscribe of the channel waits for its reply, as Block 9 says. Sources: centrifuge-js 63ed73e `subscription.ts` `_subscribe` sets `_inflight` before the callbacks, and `_setUnsubscribed` (:1067-1077) sends `_unsubscribe` then; the model and centrifuge-rust `docs/spec.md` §7.3 do the same. Without D10, `MC_get_state.jsonl` line 22, `MC_refresh.jsonl` line 13 and counterexamples 5 and 6 diverge at their unsubscribe.
+
+**Sub-increments** (one branch and PR each, in this order; D10's pull request, with core unit tests, comes first, as Block 41d's prerequisite did):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 42a | As a maintainer, I want the core replayed against the SDK model's traces, so that a step outside the model's schedule fails CI with the trace and step | "Every model trace replays into the core up to its recorded divergence", "The replayer reports a planted mismatch" |
+| 42b | As a maintainer, I want each counterexample of a bug variant to diverge where recorded, so that the replay is shown to tell the model from its bugs where the schedule lets it | "Every counterexample of a bug variant diverges where recorded" |
+
+```gherkin
+Feature: TLA+ trace replay
+
+  @P
+  Scenario: Every model trace replays into the core up to its recorded divergence
+    Given the 663 traces of the 18 model configurations copied from centrifuge-rust
+    When each trace is replayed step by step into the sans-IO core
+    Then 577 traces match the model at every step
+    And each of the other 86 matches the model up to the first recorded divergence it reaches, and differs there as recorded
+    And the recorded divergences DV1 to DV4 match 70, 3, 16 and 5 traces
+    And the run counted the steps replayed of every act and the values compared of every kind, none of them 0
+
+  @P
+  Scenario Outline: The replayer reports a planted mismatch
+    Given a copy of a model trace held by the replayer, with <fault>
+    When it is replayed
+    Then the replay fails naming the configuration, the trace's line, the step, its act and <report>
+
+    Examples:
+      | fault                                                         | report                                      |
+      | the channel of one expected subscribe command changed         | the command's channel with both values      |
+      | the expected state of the client changed at one step          | the client's state with both values         |
+      | the expected state of a subscription changed at one step      | the subscription's state with both values   |
+      | one expected token callback removed                           | the callbacks started with both values      |
+      | an expected resubscribe timer marked armed                    | the timers with both values                 |
+      | the expected application offset raised by one                 | the application's position with both values |
+      | one expected unsubscribe command removed                      | the commands sent with both values          |
+      | one step's act renamed to one without a mapping               | the act without a mapping                   |
+      | a step of a trace free of recorded divergences marked as DV2  | DV2 not found at that step                  |
+
+  @P
+  Scenario: Every counterexample of a bug variant diverges where recorded
+    Given the 7 counterexample traces of bugs.jsonl
+    When each is replayed step by step into the sans-IO core
+    Then each matches the model up to the step recorded for it and differs there as recorded
+    And the 3 counterexamples over http_stream differ at the step where their bug departs from the model
+```
+
+**Exceptions introduced:** none. The four recorded divergences of D5 follow earlier Ferrifuge decisions (Blocks 8, 9, 11, 36).
