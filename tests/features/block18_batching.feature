@@ -137,22 +137,22 @@ Feature: Batching
       | http_stream |
       | sse         |
 
-  @D
-  Scenario: A reconnect sends its subscribe commands in one frame
-    Given a client with three subscriptions subscribed, connected to the fake server
-    When the fake server disconnects the client with a reconnect-advised code
-    Then after the next connect reply the fake server receives one frame carrying the three subscribe commands
+  @E
+  Scenario: A reconnect over an emulated transport sends its subscribe commands in one request
+    Given a client core over http_stream with three subscriptions subscribed
+    When the server closes the transport with a reconnect-advised code
+    Then after the next connect reply the core sends one emulation request carrying the three subscribe commands
     And the three subscriptions reach state "subscribed"
 
   @E
   Scenario: The subscribe commands of a connect reply are split at the frame cap
-    Given a client with a batch frame cap of 1000 bytes and five subscriptions whose subscribe commands encode to 300 bytes each
+    Given a client over http_stream with a batch frame cap of 1000 bytes and five subscriptions whose subscribe commands encode to 300 bytes each
     When connect is called and the server answers the connect command
     Then the client sends two frames, carrying three and then two subscribe commands
 
   @E
   Scenario: An open batch does not hold the subscribe commands of a connect reply
-    Given a client with a subscription in state "subscribing"
+    Given a client over http_stream with a subscription in state "subscribing"
     And the application has started a batch
     When connect is called and the server answers the connect command
     Then the client sends the subscribe command while the batch is open
