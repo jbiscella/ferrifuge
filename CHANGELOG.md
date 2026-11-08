@@ -87,6 +87,11 @@ repository held while it carried that version, from the blocks of
 
 ### Changed
 
+- `unsubscribe()` or a removal while a subscription waits for its data,
+  token or getState callback sends an unsubscribe command, as centrifuge-js
+  does, and a later subscribe of the channel waits for its reply (Block 42,
+  D10).
+
 - Dropping a client closes it only once its last clone is dropped (Block
   41a); with no clone, as before.
 
