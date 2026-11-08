@@ -219,10 +219,12 @@ pub(super) fn ready(
                     if let Poll::Ready(result) = Pin::new(&mut receiver).poll(cx) {
                         return Poll::Ready(Some(result));
                     }
+                    // Registered before the check: a driver check in between
+                    // wakes this wait, one after it sees it (Codex, #171).
+                    super::handler::watch_ready(&shared, cx.waker());
                     if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(true)) {
                         return Poll::Ready(None);
                     }
-                    super::handler::watch_ready(&shared, cx.waker());
                     Poll::Pending
                 })
                 .await;
