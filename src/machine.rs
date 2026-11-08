@@ -2274,7 +2274,7 @@ impl Machine {
                 self.actions.push(Action::CancelTimer(timer));
             }
         }
-        self.subscriptions_disconnected(reconnect);
+        self.subscriptions_disconnected(reconnect, code == STATE_INVALIDATED);
         self.server_subscriptions_disconnected();
         self.pings = None;
 

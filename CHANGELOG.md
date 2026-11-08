@@ -90,6 +90,13 @@ repository held while it carried that version, from the blocks of
 
 ### Changed
 
+- A subscription's data, token or getState callback running when the
+  connection is torn down keeps running, and its answer is used: a token
+  or a getState position serves the next connection's subscribe, a denial
+  unsubscribes with code 1, a failure arms the resubscribe backoff, as
+  centrifuge-js does (Block 42, D11). Disconnect code 3014 still abandons
+  it, and a token refresh's fetch stays abandoned.
+
 - `unsubscribe()` or a removal while a subscription waits for its data,
   token or getState callback sends an unsubscribe command, as centrifuge-js
   does, and a later subscribe of the channel waits for its reply (Block 42,
