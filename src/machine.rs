@@ -14,6 +14,7 @@ mod batching;
 #[cfg(test)]
 mod buffer_tests;
 mod calls;
+pub(crate) use calls::CallWait;
 #[cfg(test)]
 mod close_tests;
 #[cfg(test)]
