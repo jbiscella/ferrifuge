@@ -93,17 +93,20 @@ impl Machine {
         reply: Option<(&StreamPosition, bool)>,
     ) {
         let replaces = reply.is_some();
+        // A publication of another channel, as a wildcard subscription
+        // gets, is of another stream: its position is not this one's
+        // (Block 35c, D3).
+        let (own_offset, own_epoch) = if publication.channel.is_some() {
+            (None, None)
+        } else {
+            (publication.offset, publication.epoch.clone())
+        };
         let (offset, epoch) = match reply {
             Some((position, last)) => (
-                publication.offset.or(last.then_some(position.offset)),
-                Some(
-                    publication
-                        .epoch
-                        .clone()
-                        .unwrap_or_else(|| position.epoch.clone()),
-                ),
+                own_offset.or(last.then_some(position.offset)),
+                Some(own_epoch.unwrap_or_else(|| position.epoch.clone())),
             ),
-            None => (publication.offset, publication.epoch.clone()),
+            None => (own_offset, own_epoch),
         };
         let commit = Commit {
             owner,
@@ -248,8 +251,11 @@ impl Machine {
         replied: &StreamPosition,
         publications: &[Publication],
     ) -> StreamPosition {
+        // Publications of another channel are of another stream (Block
+        // 35c, D3).
         let offset = publications
-            .first()
+            .iter()
+            .find(|publication| publication.channel.is_none())
             .and_then(|first| first.offset)
             .map_or(replied.offset, |first| first.saturating_sub(1));
         StreamPosition {

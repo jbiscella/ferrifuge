@@ -459,6 +459,11 @@ const IMPLEMENTED: &[&str] = &[
     "A push with an unknown channel id is dropped",
     "Numeric channel ids are forgotten when the connection ends",
     "Channel compaction on a server without it changes nothing",
+    // Block 35c: publication channel, recovered publications.
+    "A publication of a wildcard subscription carries its channel",
+    "A publication of another channel does not move the stream position",
+    "The subscribed event says whether recovered publications follow",
+    "A server-side subscribed event says whether publications follow",
 ];
 
 /// Server configuration of @A scenarios.

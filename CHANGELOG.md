@@ -13,6 +13,12 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `Publication::channel` and `Subscribed::has_recovered_publications`
+  (Block 35c): the channel of a publication that differs from its
+  subscription's, as for a wildcard subscription, which then moves no stream
+  position; and whether publications, recovered or initial, follow a
+  `subscribed` event, client-side and server-side.
+
 - Channel compaction (Block 35b): `SubscriptionBuilder::channel_compaction`
   and `SubscriptionOptions::channel_compaction` ask a Centrifugo PRO server
   for a numeric channel id, and publication, join and leave pushes carrying

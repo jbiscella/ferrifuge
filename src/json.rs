@@ -796,6 +796,8 @@ struct JsonPublication {
     epoch: String,
     #[serde(default)]
     delta: bool,
+    #[serde(default)]
+    channel: String,
 }
 
 impl From<JsonPublication> for Publication {
@@ -810,6 +812,7 @@ impl From<JsonPublication> for Publication {
             tags: publication.tags,
             info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
+            channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
         }
     }
@@ -1459,6 +1462,30 @@ mod tests {
                 reason: "resubscribe".into()
             })
         );
+    }
+
+    #[test]
+    fn decodes_the_own_channel_of_a_publication() {
+        let replies = decode(
+            concat!(
+                r#"{"push":{"channel":"news","pub":{"data":{},"channel":"news.sport"}}}"#,
+                "\n",
+                r#"{"push":{"channel":"news","pub":{"data":{}}}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let channels: Vec<_> = replies
+            .iter()
+            .map(|reply| match &reply.result {
+                ReplyResult::Push(Push::Publication { publication, .. }) => {
+                    publication.channel.clone()
+                }
+                result => panic!("{result:?}"),
+            })
+            .collect();
+        assert_eq!(channels, [Some("news.sport".to_owned()), None]);
     }
 
     #[test]

@@ -37,6 +37,7 @@ mod logging;
 mod ping;
 mod protobuf;
 mod proxies;
+mod publication_channel;
 mod ready;
 mod recovery;
 mod release;
@@ -198,6 +199,8 @@ pub(crate) struct ClientWorld {
     pub(crate) codes_table: codes_table::CodesTable,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
+    /// The channels of the publications a Block 35c scenario took.
+    pub(crate) publication_channels: Vec<Option<String>>,
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
