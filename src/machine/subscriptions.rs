@@ -1494,6 +1494,24 @@ impl Machine {
             commit.apply(&mut sub.position);
         }
     }
+
+    /// The stream position the subscription `id` keeps.
+    pub(super) fn subscription_position(&self, id: SubscriptionId) -> Option<StreamPosition> {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .and_then(|sub| sub.position.clone())
+    }
+
+    pub(super) fn set_subscription_position(
+        &mut self,
+        id: SubscriptionId,
+        position: Option<StreamPosition>,
+    ) {
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            sub.position = position;
+        }
+    }
 }
 
 /// Block 35, D1: a filter the server would refuse, or one with delta.
@@ -1682,6 +1700,65 @@ mod tests {
 
         let resubscribe = String::from_utf8(frame_sent(&actions)).unwrap();
         assert!(resubscribe.contains(r#""offset":1"#), "{resubscribe}");
+    }
+
+    // Block 41, D3: a publication handed to a handler moves the position at
+    // once and is not withdrawn; its return takes it.
+    #[test]
+    fn a_handed_publication_moves_the_position_and_is_not_withdrawn() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+        subscribed_recoverable(&mut machine, transport, id);
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
+
+        machine.handle(Input::EventHanded(publication));
+        let handed = offset_of(&machine, id);
+        let disconnected = machine.handle(Input::Disconnect);
+        machine.handle(Input::EventTaken(publication));
+
+        assert_eq!(handed, Some(1));
+        assert!(
+            !disconnected
+                .iter()
+                .any(|action| matches!(action, Action::Withdraw(_))),
+            "{disconnected:?}"
+        );
+        assert_eq!(offset_of(&machine, id), Some(1));
+        assert_eq!(machine.statistics().publications_delivered, 1);
+    }
+
+    // Block 41, D4: a handler panic moves the position back and disconnects
+    // with code 2, without reconnecting.
+    #[test]
+    fn a_handler_panic_restores_the_position_and_disconnects_with_code_2() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+        subscribed_recoverable(&mut machine, transport, id);
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
+        machine.handle(Input::EventHanded(publication));
+
+        let panicked = machine.handle(Input::HandlerPanicked {
+            event: publication,
+            message: "boom".to_owned(),
+        });
+
+        assert_eq!(offset_of(&machine, id), Some(0));
+        assert_eq!(machine.state(), crate::State::Disconnected);
+        assert!(
+            panicked.iter().any(|action| matches!(
+                action,
+                Action::Emit(_, crate::ClientEvent::Disconnected { code: 2, reason })
+                    if reason == "exception in event handler: boom"
+            )),
+            "{panicked:?}"
+        );
+        assert!(
+            !panicked
+                .iter()
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+            "{panicked:?}"
+        );
+        assert_eq!(machine.statistics().publications_delivered, 0);
     }
 
     #[test]

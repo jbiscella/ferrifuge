@@ -35,6 +35,7 @@ mod connector;
 mod delivery;
 mod delta;
 mod double;
+mod handlers;
 mod jitter;
 mod json_helpers;
 mod limits;
@@ -216,6 +217,8 @@ pub(crate) struct ClientWorld {
     pub(crate) doubles: double::Doubles,
     /// Centrifugo's side and the double's, compared (Block 37c).
     pub(crate) sides: Vec<double::Side>,
+    /// What the handlers of a Block 41 scenario record.
+    pub(crate) handlers: handlers::Handlers,
     /// The clone and weak handle of a Block 41a scenario.
     pub(crate) clones: clones::Clones,
     /// What a Block 38 scenario holds.

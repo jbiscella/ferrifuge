@@ -190,6 +190,15 @@ impl Subscription {
         })
     }
 
+    /// Sets the subscription's handler (Block 41, D1): from now on it takes
+    /// the subscription's events, one at a time, in order with those of the
+    /// client's other handlers, as a later [`Subscription::events`] call
+    /// would; the earlier stream or handler gets no more. Its events count
+    /// as delivered when its method returns.
+    pub fn set_handler(&self, handler: impl super::SubscriptionHandler) {
+        super::handler::set_subscription_handler(&self.shared, self.id, Box::new(handler));
+    }
+
     /// Events from now on. An event counts as delivered once this stream
     /// yields it; until a stream is taken, events count as delivered at
     /// once, so take it before calling [`Subscription::subscribe`] to get
@@ -346,6 +355,8 @@ pub struct SubscriptionBuilder {
     get_data: Option<GetData>,
     get_token: Option<GetSubscriptionToken>,
     get_state: Option<GetState>,
+    /// Its handler, set once it is built (Block 41b).
+    handler: Option<Box<dyn super::SubscriptionHandler>>,
 }
 
 /// The options' `Debug` output redacts the token.
@@ -357,6 +368,7 @@ impl std::fmt::Debug for SubscriptionBuilder {
             .field("get_data", &self.get_data.is_some())
             .field("get_token", &self.get_token.is_some())
             .field("get_state", &self.get_state.is_some())
+            .field("handler", &self.handler.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -543,11 +555,22 @@ impl SubscriptionBuilder {
             );
         }
         drop(core);
+        if let Some(handler) = self.handler {
+            super::handler::set_subscription_handler(&self.shared, id, handler);
+        }
         Ok(Subscription {
             shared: self.shared,
             id,
             channel: self.channel.into(),
         })
+    }
+
+    /// The subscription's handler, which takes its events from the start
+    /// instead of a stream (Block 41, D1); see [`Subscription::set_handler`].
+    #[must_use]
+    pub fn handler(mut self, handler: impl super::SubscriptionHandler) -> Self {
+        self.handler = Some(Box::new(handler));
+        self
     }
 }
 
@@ -561,6 +584,7 @@ impl Client {
             get_data: None,
             get_token: None,
             get_state: None,
+            handler: None,
         }
     }
 

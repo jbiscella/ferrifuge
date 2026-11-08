@@ -576,8 +576,24 @@ pub enum Input {
         result: Result<StreamPosition, StateError>,
     },
     /// The application took an event of [`Action::Emit`] or
-    /// [`Action::EmitSubscription`] from its stream.
+    /// [`Action::EmitSubscription`] from its stream, or the handler it was
+    /// handed to returned (Block 41, D3).
     EventTaken(EventId),
+    /// The owner handed an event of [`Action::Emit`] or
+    /// [`Action::EmitSubscription`] to a handler, which has not returned
+    /// (Block 41, D3): the event moves its stream position now, so that a
+    /// command sent meanwhile recovers from after it, is not withdrawn,
+    /// and holds the messages after it until [`Input::EventTaken`].
+    EventHanded(EventId),
+    /// The handler an event was handed to panicked (Block 41, D4): the
+    /// event's position moves back, and the client disconnects with code 2
+    /// "exception in event handler: `message`" and does not reconnect.
+    HandlerPanicked {
+        /// The event the handler was given.
+        event: EventId,
+        /// The panic's message.
+        message: String,
+    },
     /// A stream takes the events of a subscription, or of the client when
     /// `None` (server-side subscriptions' included), from now on. Until
     /// then, and after [`Input::StreamClosed`], their events count as taken
@@ -909,6 +925,13 @@ impl std::fmt::Debug for Input {
                 .field("result", result)
                 .finish(),
             Self::EventTaken(id) => f.debug_tuple("EventTaken").field(id).finish(),
+            Self::EventHanded(id) => f.debug_tuple("EventHanded").field(id).finish(),
+            // The message only by its length: the application's text.
+            Self::HandlerPanicked { event, message } => f
+                .debug_struct("HandlerPanicked")
+                .field("event", event)
+                .field("message", &format_args!("<{} bytes>", message.len()))
+                .finish(),
             Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
             Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
             Self::Call(id) => f.debug_tuple("Call").field(id).finish(),
@@ -1447,12 +1470,11 @@ impl Machine {
             Input::SubscriptionStateFetched { fetch, result } => {
                 self.subscription_state_fetched(fetch, result);
             }
-            Input::EventTaken(id) => {
-                self.event_taken(id);
-                self.settle_event(id);
-            }
-            Input::StreamOpened(of) => self.stream_opened(of),
-            Input::StreamClosed(of) => self.stream_closed(of),
+            input @ (Input::EventTaken(_)
+            | Input::EventHanded(_)
+            | Input::HandlerPanicked { .. }
+            | Input::StreamOpened(_)
+            | Input::StreamClosed(_)) => self.delivery_input(input),
             Input::Call(id) => self.call(id),
             Input::CallTimerFired(id, timer) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),

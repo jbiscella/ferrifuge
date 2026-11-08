@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{Action, EventId, Machine, SubscriptionId};
+use super::{Action, EventId, Input, Machine, SubscriptionId};
 use crate::{Publication, StreamPosition};
 
 /// Whose stream position a publication moves.
@@ -42,6 +42,19 @@ pub(super) struct Deliveries {
     /// stream, and how many each stream holds.
     untaken: HashMap<EventId, Option<SubscriptionId>>,
     held: HashMap<Option<SubscriptionId>, usize>,
+    /// Publications handed to a handler that has not returned (Block 41,
+    /// D3): their position already moved.
+    in_flight: HashMap<EventId, InFlight>,
+}
+
+/// A publication handed to a handler: the position it moved from and to,
+/// for a panic to move it back.
+#[derive(Debug)]
+struct InFlight {
+    owner: Owner,
+    before: Option<StreamPosition>,
+    after: Option<StreamPosition>,
+    publication: bool,
 }
 
 /// Untaken events a stream holds past which further `error` events for it
@@ -182,6 +195,9 @@ impl Machine {
         self.deliveries
             .pending
             .retain(|_, commit| commit.owner != Owner::Client(id));
+        self.deliveries
+            .in_flight
+            .retain(|_, handed| handed.owner != Owner::Client(id));
     }
 
     /// Whether a stream takes the events of `of`.
@@ -202,11 +218,72 @@ impl Machine {
         self.deliveries.untaken.retain(|_, stream| *stream != of);
     }
 
-    /// The application took the event `id`.
+    /// An input about the delivery of events (Blocks 15, 41).
+    pub(super) fn delivery_input(&mut self, input: Input) {
+        match input {
+            Input::EventTaken(id) => {
+                self.event_taken(id);
+                self.settle_event(id);
+            }
+            Input::EventHanded(id) => self.event_handed(id),
+            Input::HandlerPanicked { event, message } => self.handler_panicked(event, &message),
+            Input::StreamOpened(of) => self.stream_opened(of),
+            Input::StreamClosed(of) => self.stream_closed(of),
+            _ => {}
+        }
+    }
+
+    /// The application took the event `id`, or its handler returned.
     pub(super) fn event_taken(&mut self, id: EventId) {
         self.untake(id);
-        if let Some(commit) = self.deliveries.pending.remove(&id) {
+        if let Some(handed) = self.deliveries.in_flight.remove(&id) {
+            if handed.publication {
+                self.counters.publications_delivered += 1;
+            }
+        } else if let Some(commit) = self.deliveries.pending.remove(&id) {
             self.commit(commit);
+        }
+    }
+
+    /// The event `id` was handed to a handler (Block 41, D3): its position
+    /// moves now, and it is no longer withdrawn; it is taken once the
+    /// handler returns.
+    pub(super) fn event_handed(&mut self, id: EventId) {
+        let Some(commit) = self.deliveries.pending.remove(&id) else {
+            return;
+        };
+        let owner = commit.owner.clone();
+        let publication = commit.publication;
+        let before = self.position_of(&owner);
+        self.move_position(commit);
+        let after = self.position_of(&owner);
+        self.deliveries.in_flight.insert(
+            id,
+            InFlight {
+                owner,
+                before,
+                after,
+                publication,
+            },
+        );
+    }
+
+    /// The handler the event `id` was handed to panicked (Block 41, D4).
+    pub(super) fn handler_panicked(&mut self, id: EventId, message: &str) {
+        self.untake(id);
+        self.deliveries.pending.remove(&id);
+        if let Some(handed) = self.deliveries.in_flight.remove(&id)
+            && self.position_of(&handed.owner) == handed.after
+        {
+            self.set_position_of(&handed.owner, handed.before);
+        }
+        self.settle_event(id);
+        if self.state() != crate::State::Disconnected {
+            self.disconnect(
+                crate::codes::disconnected::BAD_PROTOCOL,
+                &format!("exception in event handler: {message}"),
+                false,
+            );
         }
     }
 
@@ -214,6 +291,24 @@ impl Machine {
         if commit.publication {
             self.counters.publications_delivered += 1;
         }
+        self.move_position(commit);
+    }
+
+    fn position_of(&self, owner: &Owner) -> Option<StreamPosition> {
+        match owner {
+            Owner::Client(of) => self.subscription_position(*of),
+            Owner::Server(channel) => self.server_subscription_position(channel),
+        }
+    }
+
+    fn set_position_of(&mut self, owner: &Owner, position: Option<StreamPosition>) {
+        match owner {
+            Owner::Client(of) => self.set_subscription_position(*of, position),
+            Owner::Server(channel) => self.set_server_subscription_position(channel, position),
+        }
+    }
+
+    fn move_position(&mut self, commit: Commit) {
         match commit.owner.clone() {
             Owner::Client(of) => self.commit_subscription_position(of, commit),
             Owner::Server(channel) => self.commit_server_subscription_position(&channel, commit),

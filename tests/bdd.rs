@@ -516,6 +516,16 @@ const IMPLEMENTED: &[&str] = &[
     "Dropping one clone of a client leaves it running",
     "A weak handle upgrades only while a clone of the client is alive",
     "close on one clone closes every clone",
+    // Block 41b: handlers under Task delivery; the @inline and @thread
+    // examples wait for 41c and 41d (EXAMPLES_NOT_YET).
+    "Handlers receive the client's and its subscriptions' events one at a time, in order",
+    "A publication a handler had not returned from before disconnect is taken once",
+    "A panicking handler disconnects the client with code 2, and its publication is recovered",
+    "events() takes over a subscription's handler",
+    "A handler takes over the subscription's stream",
+    "Pings are answered while a handler runs, except under Inline",
+    "A call a Task or Inline handler blocks on fails at once",
+    "close awaited inside a handler returns",
     // Block 39: a publications-only stream.
     "The publications stream yields only the subscription's publications",
     "Events the publications stream skips hold the connection until it is read",
@@ -644,6 +654,10 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 /// not committed, until used.
 const RUNNER_STACK: usize = 32 << 20;
 
+/// Tags of `Examples` tables whose sub-increment is not implemented yet
+/// (Block 41, D8): 41c runs `@inline`, 41d `@thread`.
+const EXAMPLES_NOT_YET: &[&str] = &["inline", "thread"];
+
 /// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
 /// debug build, enough to delay the timers of scenarios running alongside
 /// (seen: a missed ping deadline in "Regular pings keep the connection
@@ -765,6 +779,10 @@ async fn run_scenarios() {
             let p_only = !scenario.tags.is_empty() && scenario.tags.iter().all(|tag| tag == "P");
             IMPLEMENTED.contains(&scenario.name.as_str())
                 && !p_only
+                && !scenario
+                    .tags
+                    .iter()
+                    .any(|tag| EXAMPLES_NOT_YET.contains(&tag.as_str()))
                 && selected(feature, rule, scenario)
         })
         .await;

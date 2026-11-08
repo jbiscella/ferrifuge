@@ -201,7 +201,11 @@ pub(super) fn ready(
             }
         }
     };
+    let shared = Arc::clone(shared);
     async move {
+        if super::handler::would_deadlock(&shared) {
+            return Err(super::handler::deadlock_error());
+        }
         match start {
             Start::Settled(result) => result,
             Start::Waiting(receiver, registered) => {

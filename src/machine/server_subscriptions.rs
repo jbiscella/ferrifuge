@@ -340,6 +340,24 @@ impl Machine {
 
     /// Applies a taken publication's `commit` to the position of the
     /// server-side subscription to `channel`, when it keeps one.
+    /// The stream position the server-side subscription to `channel` keeps.
+    pub(super) fn server_subscription_position(&self, channel: &str) -> Option<StreamPosition> {
+        self.server_subscriptions
+            .by_channel
+            .get(channel)
+            .and_then(|sub| sub.position.clone())
+    }
+
+    pub(super) fn set_server_subscription_position(
+        &mut self,
+        channel: &str,
+        position: Option<StreamPosition>,
+    ) {
+        if let Some(sub) = self.server_subscriptions.by_channel.get_mut(channel) {
+            sub.position = position;
+        }
+    }
+
     pub(super) fn commit_server_subscription_position(&mut self, channel: &str, commit: Commit) {
         if let Some(sub) = self.server_subscriptions.by_channel.get_mut(channel)
             && (commit.replaces || sub.position.is_some())

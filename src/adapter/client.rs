@@ -132,6 +132,11 @@ pub(super) struct Shared {
     /// The real HTTP headers of every transport request, which
     /// `set_http_headers` replaces (Blocks 17, 32).
     pub(super) http_headers: HeaderSet,
+    /// The handlers of the client and its subscriptions (Block 41b).
+    /// Locked after `outboxes`.
+    pub(super) handlers: Mutex<super::handler::Handlers>,
+    /// The runtime the client's tasks run on (Block 28).
+    pub(super) runtime: Handle,
 }
 
 /// Events waiting for their streams (Block 15). Locked after
@@ -148,6 +153,19 @@ impl Outboxes {
         self.client.withdraw(ids);
         for outbox in self.subscriptions.values_mut() {
             outbox.withdraw(ids);
+        }
+    }
+}
+
+impl Core {
+    fn new(machine: Machine) -> Self {
+        Self {
+            machine,
+            actions: VecDeque::new(),
+            clock: Clock::default(),
+            refreshes: Refreshes::default(),
+            armed: Armed::default(),
+            connected_since: None,
         }
     }
 }
@@ -450,6 +468,11 @@ impl Shared {
         }
     }
 
+    /// Wakes the driver for actions queued by another task.
+    pub(super) fn notify_actions(&self) {
+        self.actions_queued.notify_one();
+    }
+
     /// Feeds `input` to the machine: events go to their outboxes, taken at
     /// once where no stream takes them, other actions to the driver.
     pub(super) fn handle(&self, core: &mut Core, input: Input) {
@@ -659,10 +682,15 @@ impl Shared {
             }
         };
         self.actions_queued.notify_one();
+        let shared = Arc::clone(self);
         async move {
             let Some(mut pending) = pending else {
                 return Err(client_closed());
             };
+            // Abandoned, as a dropped call is (Block 41, D6).
+            if super::handler::would_deadlock(&shared) {
+                return Err(super::handler::deadlock_error());
+            }
             let result = receiver.await;
             pending.settled = true;
             // The sender was dropped unsettled only when the driver stopped.
@@ -831,6 +859,10 @@ pub struct ClientBuilder {
     connector: Option<connector::Shared>,
     /// The runtime the client runs on; the current one otherwise.
     runtime: Option<Handle>,
+    /// The client's handler, set once it is built (Block 41b).
+    handler: Option<Box<dyn super::ClientHandler>>,
+    /// Where its handlers run (Block 41, D2).
+    event_delivery: super::EventDelivery,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -879,6 +911,8 @@ impl std::fmt::Debug for ClientBuilder {
             .field("proxy_set", &self.proxy_set)
             .field("connector", &self.connector.is_some())
             .field("runtime", &self.runtime.is_some())
+            .field("handler", &self.handler.is_some())
+            .field("event_delivery", &self.event_delivery)
             .finish()
     }
 }
@@ -1080,8 +1114,30 @@ impl ClientBuilder {
     /// work together, e.g. the Protobuf protocol with the sse transport, or
     /// when there is no runtime to run on: none was given with
     /// [`ClientBuilder::runtime`] and none is current, or it has shut down.
-    pub fn build(self) -> Result<Client, ClientError> {
-        Client::start(self)
+    pub fn build(mut self) -> Result<Client, ClientError> {
+        let handler = self.handler.take();
+        let client = Client::start(self)?;
+        if let Some(handler) = handler {
+            super::handler::set_client_handler(&client.shared, handler);
+        }
+        Ok(client)
+    }
+
+    /// The client's handler, which takes its events from the start instead
+    /// of a stream (Block 41, D1); see [`Client::set_handler`].
+    #[must_use]
+    pub fn handler(mut self, handler: impl super::ClientHandler) -> Self {
+        self.handler = Some(Box::new(handler));
+        self
+    }
+
+    /// Where the handlers of the client and of its subscriptions run
+    /// (Block 41, D2): [`EventDelivery::Task`](super::EventDelivery::Task)
+    /// by default.
+    #[must_use]
+    pub fn event_delivery(mut self, delivery: super::EventDelivery) -> Self {
+        self.event_delivery = delivery;
+        self
     }
 }
 
@@ -1125,6 +1181,8 @@ impl Client {
             proxy_set: false,
             connector: None,
             runtime: None,
+            handler: None,
+            event_delivery: super::EventDelivery::default(),
         }
     }
 
@@ -1143,6 +1201,8 @@ impl Client {
             proxy_set,
             connector,
             runtime,
+            handler: _,
+            event_delivery,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
@@ -1174,14 +1234,7 @@ impl Client {
         )?;
         let runtime = runtime_or_current(runtime)?;
         let shared = Arc::new(Shared {
-            core: Mutex::new(Core {
-                machine,
-                actions: VecDeque::new(),
-                clock: Clock::default(),
-                refreshes: Refreshes::default(),
-                armed: Armed::default(),
-                connected_since: None,
-            }),
+            core: Mutex::new(Core::new(machine)),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
             calls: Mutex::new(HashMap::new()),
@@ -1193,6 +1246,8 @@ impl Client {
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
             network: Arc::new(Network::new(Tls::new(trust), proxy).with_connector(connector)),
             http_headers,
+            handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
+            runtime: runtime.clone(),
         });
         let driver = Driver {
             endpoints: endpoints
@@ -1293,7 +1348,14 @@ impl Client {
     pub fn close(&self) -> impl Future<Output = ()> + Send + use<> {
         self.shared.shut_down();
         let shared = Arc::clone(&self.shared);
-        async move { shared.ended().await }
+        async move {
+            // From one of its own handlers, closing has started: waiting for
+            // the driver could wait on the worker the handler holds (Block
+            // 41, D6).
+            if !super::handler::would_deadlock(&shared) {
+                shared.ended().await;
+            }
+        }
     }
 
     /// Whether the client is closed: by [`Client::close`], its runtime shut
@@ -1358,6 +1420,15 @@ impl Client {
     /// clone dropped or its runtime shut down included (Block 33).
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
         ready::ready(&self.shared, Of::Client)
+    }
+
+    /// Sets the client's handler (Block 41, D1): from now on it takes the
+    /// client's events, server-side subscriptions' included, one at a time,
+    /// in order with those of its subscriptions' handlers, as a later
+    /// [`Client::events`] call would; the earlier stream or handler gets no
+    /// more. Its events count as delivered when its method returns.
+    pub fn set_handler(&self, handler: impl super::ClientHandler) {
+        super::handler::set_client_handler(&self.shared, Box::new(handler));
     }
 
     /// Events from now on. An event counts as delivered once this stream

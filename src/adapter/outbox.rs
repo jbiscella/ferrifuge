@@ -7,6 +7,17 @@ use std::task::{Context, Poll, Waker};
 
 use crate::machine::EventId;
 
+/// What comes next for a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Head {
+    /// The event of this id.
+    Event(EventId),
+    /// Nothing yet.
+    Empty,
+    /// Nothing ever: the stream is superseded, or the outbox finished.
+    Gone,
+}
+
 /// Events of one object waiting for its stream.
 #[derive(Debug)]
 pub(super) struct Outbox<E> {
@@ -81,6 +92,25 @@ impl<E> Outbox<E> {
         }
         self.waker = Some(cx.waker().clone());
         Poll::Pending
+    }
+
+    /// What comes next for stream `number`: a handler's consumer looks
+    /// before it takes (Block 41b).
+    pub(super) fn head(&self, number: u64) -> Head {
+        if self.stream != Some(number) || (self.closed && self.events.is_empty()) {
+            return Head::Gone;
+        }
+        self.events
+            .front()
+            .map_or(Head::Empty, |(id, _)| Head::Event(*id))
+    }
+
+    /// Wakes `cx` at the next event for stream `number`, as a pending take
+    /// does.
+    pub(super) fn watch(&mut self, number: u64, cx: &Context<'_>) {
+        if self.stream == Some(number) {
+            self.waker = Some(cx.waker().clone());
+        }
     }
 
     /// Stream `number` was dropped: if it was the active one, its queued
