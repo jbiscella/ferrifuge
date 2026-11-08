@@ -199,7 +199,8 @@ impl Drop for Marked {
 pub(super) enum Wait {
     /// A call not yet settled.
     Call(CallId),
-    /// `ready()`: waiting for a state when `true`, settled when `false`.
+    /// `ready()`: `true` while it waits for a state, `false` before its
+    /// outcome is looked at, which only `Task` and `Inline` refuse.
     Ready(bool),
     /// `close()`, waiting for the driver to stop.
     Close,
@@ -232,14 +233,12 @@ pub(super) fn would_deadlock(shared: &Shared, wait: Wait) -> bool {
 /// read-ahead stops the reading ([`fail_stuck_calls`]).
 fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
     let core = lock(&shared.core);
+    let outboxes = lock(&shared.outboxes);
     let mut handlers = lock(&shared.handlers);
     if let Some(id) = call {
         handlers.watched.insert(id);
     }
-    let Some(event) = handlers.running else {
-        return false;
-    };
-    if !core.machine.holds_messages(event) {
+    if !consumer_holds_messages(&core, &outboxes, &handlers) {
         return false;
     }
     match call.map(|id| core.machine.call_wait(id)) {
@@ -249,6 +248,37 @@ fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
     }
 }
 
+/// Whether the messages read next wait for an event only this client's
+/// handler consumer can take: the one its running handler was given, or
+/// one queued for a handler, which the consumer reaches only after the
+/// running one returns (Codex, #171).
+fn consumer_holds_messages(core: &Core, outboxes: &Outboxes, handlers: &Handlers) -> bool {
+    if handlers
+        .running
+        .is_some_and(|event| core.machine.holds_messages(event))
+    {
+        return true;
+    }
+    core.machine.events_holding_messages().any(|event| {
+        handlers
+            .client
+            .as_ref()
+            .is_some_and(|slot| outboxes.client.holds(slot.stream, event))
+            || handlers.subscriptions.iter().any(|(of, slot)| {
+                outboxes
+                    .subscriptions
+                    .get(of)
+                    .is_some_and(|outbox| outbox.holds(slot.stream, event))
+            })
+    })
+}
+
+/// No handler call waits on the call `id` anymore: it settled or was
+/// dropped (Codex, #171).
+pub(super) fn unwatch(shared: &Shared, id: CallId) {
+    lock(&shared.handlers).watched.remove(&id);
+}
+
 /// Under `Thread`, fails with error 16 the calls the running handler waits
 /// on whose reply can no longer be read: a full read-ahead stopped the
 /// reading while the handler's event holds the messages (D6). The driver
@@ -256,6 +286,7 @@ fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
 pub(super) fn fail_stuck_calls(shared: &Shared) {
     let stuck: Vec<CallId> = {
         let core = lock(&shared.core);
+        let outboxes = lock(&shared.outboxes);
         let mut handlers = lock(&shared.handlers);
         if handlers.watched.is_empty() {
             return;
@@ -263,10 +294,7 @@ pub(super) fn fail_stuck_calls(shared: &Shared) {
         handlers
             .watched
             .retain(|id| core.machine.call_wait(*id).is_some());
-        let holds = handlers
-            .running
-            .is_some_and(|event| core.machine.holds_messages(event));
-        if !holds || core.machine.wants_frames() {
+        if !consumer_holds_messages(&core, &outboxes, &handlers) || core.machine.wants_frames() {
             return;
         }
         handlers
@@ -513,6 +541,9 @@ fn thread_failed(shared: &Shared, core: &mut Core, error: &std::io::Error) {
             message,
         },
     );
+    // Its transport close and settled calls are the driver's (Codex,
+    // #171).
+    shared.notify_actions();
 }
 
 /// An event handed to its handler, which runs with no lock held.
@@ -1204,6 +1235,149 @@ mod tests {
         deliver(client.shared(), handed);
 
         assert!(!would_deadlock(client.shared(), Wait::Close));
+    }
+
+    /// Connects `client` by hand, its runtime not running: the connect
+    /// reply `reply` is read.
+    fn connected_by_hand(client: &Client, reply: &str) {
+        let transport = opened_by_hand(client);
+        replied_by_hand(client, transport, reply);
+    }
+
+    /// Opens `client`'s transport by hand: its connect command is sent.
+    fn opened_by_hand(client: &Client) -> crate::machine::TransportId {
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        shared.handle(&mut core, Input::Connect);
+        let transport = core
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                crate::machine::Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("an attempt");
+        shared.handle(&mut core, Input::TransportOpened(transport));
+        shared.handle(&mut core, Input::Flush);
+        transport
+    }
+
+    /// Reads `reply` from `transport` by hand.
+    fn replied_by_hand(client: &Client, transport: crate::machine::TransportId, reply: &str) {
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        shared.handle(
+            &mut core,
+            Input::Frame {
+                transport,
+                data: reply.as_bytes().to_vec(),
+            },
+        );
+    }
+
+    /// A client whose handler holds an event that holds the messages after
+    /// it, its runtime entered and not running.
+    fn connected_with_a_held_event(runtime: &tokio::runtime::Runtime) -> Client {
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        client.set_handler(|_: ClientEvent| {});
+        client
+    }
+
+    // Codex, #171: under `Thread`, a `ready()` settled before the handler
+    // awaits it gives its result, though the handler's event holds the
+    // messages.
+    #[test]
+    fn a_settled_ready_gives_its_result_in_a_thread_handler() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = connected_with_a_held_event(&runtime);
+        let _context = runtime.enter();
+        let transport = opened_by_hand(&client);
+        let mut ready = Box::pin(client.ready());
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        let shared = client.shared();
+        let held = lock(&shared.core).machine.events_holding_messages().next();
+        lock(&shared.handlers).running = held;
+        let _marked = Marked::new(shared, true);
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let outcome = ready.as_mut().poll(&mut cx);
+
+        assert!(held.is_some());
+        assert!(matches!(outcome, Poll::Ready(Ok(()))), "{outcome:?}");
+    }
+
+    // Codex, #171: under `Thread`, a wait that only a message held behind an
+    // event queued for this consumer could end fails, though the running
+    // event holds nothing.
+    #[test]
+    fn a_thread_wait_held_by_a_queued_handler_event_would_deadlock() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = connected_with_a_held_event(&runtime);
+        let _context = runtime.enter();
+        connected_by_hand(&client, r#"{"id":1,"connect":{"client":"c"}}"#);
+        let shared = client.shared();
+        // A running event that holds nothing, as `connecting` does.
+        lock(&shared.handlers).running = Some(EventId::for_tests(u64::MAX - 1));
+        let _marked = Marked::new(shared, true);
+
+        assert!(would_deadlock(shared, Wait::Ready(true)));
+    }
+
+    // Codex, #171: a call a Thread handler waited on is no longer watched
+    // once it ends.
+    #[test]
+    fn a_call_ended_is_no_longer_watched() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let shared = client.shared();
+        let mut call = Box::pin(client.rpc("echo", b"{}".to_vec()));
+        {
+            let _marked = Marked::new(shared, true);
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(call.as_mut().poll(&mut cx).is_pending());
+        }
+        let watched = lock(&shared.handlers).watched.len();
+
+        drop(call);
+
+        assert_eq!(watched, 1);
+        assert!(lock(&shared.handlers).watched.is_empty());
+    }
+
+    // Codex, #171: an events thread that cannot start wakes the driver, to
+    // close the transport and settle the calls of the disconnect.
+    #[test]
+    fn an_events_thread_that_cannot_start_wakes_the_driver() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::builder(UNREACHABLE)
+            .event_delivery(EventDelivery::Thread)
+            .build()
+            .unwrap();
+        connected_by_hand(&client, r#"{"id":1,"connect":{"client":"c"}}"#);
+        let shared = client.shared();
+        shared.woken();
+
+        FAIL_SPAWN.set(true);
+        client.set_handler(|_: ClientEvent| {});
+        FAIL_SPAWN.set(false);
+
+        assert_eq!(client.state(), crate::State::Disconnected);
+        assert!(shared.woken());
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).

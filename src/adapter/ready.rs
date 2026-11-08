@@ -205,8 +205,9 @@ pub(super) fn ready(
     };
     let shared = Arc::clone(shared);
     async move {
-        let waiting = matches!(start, Start::Waiting(..));
-        if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(waiting)) {
+        // Under `Task` and `Inline` any wait fails at once; under `Thread`
+        // the receiver is looked at first (Codex, #171).
+        if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(false)) {
             return Err(super::handler::deadlock_error());
         }
         match start {
@@ -214,10 +215,14 @@ pub(super) fn ready(
             Start::Waiting(mut receiver, registered) => {
                 // Checked at every poll, as a call is (Codex, #169).
                 let result = std::future::poll_fn(|cx| {
+                    // Settled already, it gives its result, whoever polls.
+                    if let Poll::Ready(result) = Pin::new(&mut receiver).poll(cx) {
+                        return Poll::Ready(Some(result));
+                    }
                     if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(true)) {
                         return Poll::Ready(None);
                     }
-                    Pin::new(&mut receiver).poll(cx).map(Some)
+                    Poll::Pending
                 })
                 .await;
                 let Some(result) = result else {
