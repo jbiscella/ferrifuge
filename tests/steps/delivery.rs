@@ -25,7 +25,7 @@ use crate::support::fake_server::{Announce, HISTORY_EPOCH};
 use crate::support::relay::CountingRelay;
 
 /// How long a step watches a stream for events that must not come.
-const QUIET: Duration = Duration::from_millis(500);
+pub(super) const QUIET: Duration = Duration::from_millis(500);
 
 /// The streams of a Block 15 scenario, read by its steps.
 #[derive(Default)]
@@ -35,14 +35,14 @@ pub(crate) struct Delivery {
     /// The client's stream from a second `events()` call.
     second_client_events: Option<Events>,
     /// The stream of the scenario's subscription.
-    subscription_events: Option<SubscriptionEvents>,
+    pub(super) subscription_events: Option<SubscriptionEvents>,
     /// The subscription's stream from a second `events()` call.
-    second_subscription_events: Option<SubscriptionEvents>,
+    pub(super) second_subscription_events: Option<SubscriptionEvents>,
     /// Further subscriptions, with their streams, by channel.
-    channels: HashMap<String, (Subscription, Option<SubscriptionEvents>)>,
+    pub(super) channels: HashMap<String, (Subscription, Option<SubscriptionEvents>)>,
     /// Offsets the fake server pushed, and those the application took.
-    sent: Vec<u64>,
-    taken: Vec<u64>,
+    pub(super) sent: Vec<u64>,
+    pub(super) taken: Vec<u64>,
     /// Options of the scenario's client, besides the world's.
     read_ahead_bytes: Option<usize>,
     timeout: Option<Duration>,
@@ -75,13 +75,13 @@ impl std::fmt::Debug for Delivery {
     }
 }
 
-fn offsets(list: &str) -> Vec<u64> {
+pub(super) fn offsets(list: &str) -> Vec<u64> {
     list.split([',', ' '])
         .filter_map(|word| word.parse().ok())
         .collect()
 }
 
-fn offset(publication: &Publication) -> u64 {
+pub(super) fn offset(publication: &Publication) -> u64 {
     publication.offset.expect("the fake server sends offsets")
 }
 
@@ -97,7 +97,9 @@ pub(super) async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
 }
 
 /// The next item of `stream`, `None` once it ended.
-async fn next_of<E>(stream: &mut (impl futures_util::Stream<Item = E> + Unpin)) -> Option<E> {
+pub(super) async fn next_of<E>(
+    stream: &mut (impl futures_util::Stream<Item = E> + Unpin),
+) -> Option<E> {
     tokio::time::timeout(EVENT_TIMEOUT, stream.next())
         .await
         .unwrap_or_else(|_| panic!("no item within {EVENT_TIMEOUT:?}"))
@@ -105,7 +107,7 @@ async fn next_of<E>(stream: &mut (impl futures_util::Stream<Item = E> + Unpin)) 
 
 /// The next event of the scenario's subscription stream, recording the
 /// publications the application takes.
-async fn next_subscription_event(world: &mut ClientWorld) -> SubscriptionEvent {
+pub(super) async fn next_subscription_event(world: &mut ClientWorld) -> SubscriptionEvent {
     let stream = world
         .delivery
         .subscription_events
@@ -140,7 +142,10 @@ pub(super) fn a_client_with_its_stream(world: &mut ClientWorld) {
 }
 
 /// Subscribes to `channel`, reading its stream up to `subscribed`.
-async fn subscribed(world: &mut ClientWorld, channel: &str) -> (Subscription, SubscriptionEvents) {
+pub(super) async fn subscribed(
+    world: &mut ClientWorld,
+    channel: &str,
+) -> (Subscription, SubscriptionEvents) {
     let subscription = world
         .client()
         .subscription_builder(channel)
