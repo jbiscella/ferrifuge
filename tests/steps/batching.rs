@@ -7,7 +7,7 @@ use std::time::Duration;
 use cucumber::{given, then, when};
 use ferrifuge::machine::{
     Action, CallId, CallTimer, Input, Machine, SubscriptionId, SubscriptionOptions,
-    SubscriptionTimer, Timer, TransportId,
+    SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use ferrifuge::{
     Batch, CallError, CallReply, CallRequest, ClientEvent, Config, HistoryOptions, Protocol,
@@ -850,6 +850,17 @@ async fn one_frame_of_subscribes(world: &mut ClientWorld) {
 
 #[then(r#"the three subscriptions reach state "subscribed""#)]
 async fn three_subscribed(world: &mut ClientWorld) {
+    // On the core (Block 18, 18c over http_stream).
+    if let Some(run) = &world.batching.run {
+        assert!(
+            run.subscriptions.iter().all(|id| {
+                run.machine.subscription_state(*id)
+                    == Some(ferrifuge::SubscriptionState::Subscribed)
+            }),
+            "not all subscribed"
+        );
+        return;
+    }
     let reached =
         tokio::time::timeout(Duration::from_secs(5), async {
             while !world.named_subscriptions.iter().all(|subscription| {
@@ -1162,48 +1173,87 @@ async fn receives_only(world: &mut ClientWorld, data: String) {
 
 // 18c: the subscribe commands of a connect reply in one batch.
 
-#[given("a client with three subscriptions subscribed, connected to the fake server")]
-async fn three_subscribed_on_the_fake_server(world: &mut ClientWorld) {
-    super::connection::a_connected_client(world).await;
+/// A run of a machine over http_stream, where a connect reply alone sends
+/// the subscribe commands (Block 36, D10).
+fn http_stream_run(config: Config) -> BatchRun {
+    BatchRun::of(
+        Machine::new(config)
+            .with_transports(vec![TransportKind::HttpStream])
+            .expect("one transport"),
+    )
+}
+
+/// The result of a connect reply over an emulated transport.
+fn emulated_connect() -> Value {
+    json!({"client": "c", "session": "s", "node": "n"})
+}
+
+#[given("a client core over http_stream with three subscriptions subscribed")]
+fn three_subscribed_over_http_stream(world: &mut ClientWorld) {
+    let mut run = http_stream_run(Config::default());
     for channel in ["a", "b", "c"] {
-        let subscription = world
-            .client()
-            .new_subscription(channel)
+        let id = run
+            .machine
+            .add_subscription(channel.to_owned(), SubscriptionOptions::default())
             .expect("a new channel");
-        subscription.subscribe();
-        world.named_subscriptions.push(subscription);
+        run.handle(Input::Subscribe(id));
+        run.subscriptions.push(id);
     }
-    three_subscribed(world).await;
-    world.batching.received_at_start = world.fake().received().len();
+    run.handle(Input::Connect);
+    run.connect(&emulated_connect());
+    answer_subscribes(&mut run);
+    world.batching.run = Some(run);
+}
+
+/// Answers every subscribe command sent so far, with success.
+fn answer_subscribes(run: &mut BatchRun) {
+    let ids: Vec<u64> = run
+        .frames_since(0)
+        .iter()
+        .flat_map(|(_, commands)| commands.clone())
+        .filter(|command| command["subscribe"].is_object())
+        .filter_map(|command| command["id"].as_u64())
+        .collect();
+    for id in ids {
+        run.frame(&json!({"id": id, "subscribe": {}}));
+    }
+}
+
+#[when("the server closes the transport with a reconnect-advised code")]
+fn the_server_closes_the_transport(world: &mut ClientWorld) {
+    let run = run(world);
+    let transport = run.transport.expect("a transport");
+    run.handle(Input::TransportClosed {
+        transport,
+        code: Some(3001),
+        reason: "closed by the test".to_owned(),
+    });
+    run.handle(Input::TimerFired(Timer::Reconnect));
 }
 
 #[then(
-    "after the next connect reply the fake server receives one frame carrying the three subscribe commands"
+    "after the next connect reply the core sends one emulation request carrying the three subscribe commands"
 )]
-async fn resubscribes_in_one_frame(world: &mut ClientWorld) {
-    let start = world.batching.received_at_start;
-    let subscribes = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let subscribes: Vec<(Value, usize)> = world.fake().received_with_frames()[start..]
+fn resubscribes_in_one_request(world: &mut ClientWorld) {
+    let run = run(world);
+    run.mark = run.actions.len();
+    run.connect(&emulated_connect());
+    let frames: Vec<Vec<Value>> = run
+        .frames()
+        .into_iter()
+        .map(|(_, commands)| commands)
+        .collect();
+    let channels: Vec<Vec<&str>> = frames
+        .iter()
+        .map(|commands| {
+            commands
                 .iter()
-                .filter(|(command, _)| command["subscribe"].is_object())
-                .cloned()
-                .collect();
-            if subscribes.len() >= 3 {
-                return subscribes;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("three subscribe commands");
-    assert_eq!(subscribes.len(), 3, "{subscribes:?}");
-    assert!(
-        subscribes
-            .iter()
-            .all(|(_, frame)| *frame == subscribes[0].1),
-        "{subscribes:?}"
-    );
+                .map(|command| command["subscribe"]["channel"].as_str().unwrap_or("other"))
+                .collect()
+        })
+        .collect();
+    assert_eq!(channels, [["a", "b", "c"]], "{frames:?}");
+    answer_subscribes(run);
 }
 
 /// A subscription whose subscribe command encodes to `size` bytes once
@@ -1225,10 +1275,10 @@ fn subscription_of_size(run: &mut BatchRun, id: u64, size: usize) {
 }
 
 #[given(
-    regex = r"^a client with a batch frame cap of (\d+) bytes and five subscriptions whose subscribe commands encode to (\d+) bytes each$"
+    regex = r"^a client over http_stream with a batch frame cap of (\d+) bytes and five subscriptions whose subscribe commands encode to (\d+) bytes each$"
 )]
 fn five_subscriptions_of_size(world: &mut ClientWorld, cap: usize, size: usize) {
-    let mut run = BatchRun::new(Config::default().batch_frame_bytes(cap), false);
+    let mut run = http_stream_run(Config::default().batch_frame_bytes(cap));
     // The connect command is 1, the subscribe commands 2 to 6.
     for id in 2..7 {
         subscription_of_size(&mut run, id, size);
@@ -1241,7 +1291,7 @@ fn connect_and_answer(world: &mut ClientWorld) {
     let run = run(world);
     run.handle(Input::Connect);
     run.mark = run.actions.len();
-    run.connect(&json!({"client": "c"}));
+    run.connect(&emulated_connect());
 }
 
 #[then("the client sends two frames, carrying three and then two subscribe commands")]
@@ -1261,9 +1311,9 @@ fn two_frames_of_subscribes(world: &mut ClientWorld) {
     assert_eq!(counts, [3, 2], "{:?}", run.frames());
 }
 
-#[given(r#"a client with a subscription in state "subscribing""#)]
+#[given(r#"a client over http_stream with a subscription in state "subscribing""#)]
 fn a_subscribing_subscription(world: &mut ClientWorld) {
-    let mut run = BatchRun::new(Config::default(), false);
+    let mut run = http_stream_run(Config::default());
     let id = run
         .machine
         .add_subscription("news".to_owned(), SubscriptionOptions::default())
