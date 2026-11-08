@@ -1563,6 +1563,8 @@ enum Fault {
     SubscriptionState,
     TokenCallback,
     ResubscribeTimer,
+    /// Not an example of the outline: the reconnect timer's comparison.
+    ReconnectTimer,
     ApplicationOffset,
     UnsubscribeCommand,
     UnknownAct,
@@ -1649,6 +1651,15 @@ impl Fault {
                 state["sub"][&channel]["tmr"] = json!(true);
                 true
             }
+            Self::ReconnectTimer => {
+                let planted = if state["cl"]["ph"] == "wait" {
+                    "idle"
+                } else {
+                    "wait"
+                };
+                state["cl"]["ph"] = json!(planted);
+                true
+            }
             Self::ApplicationOffset => {
                 let Some(channel) = channels(state, "app").into_iter().next() else {
                     return false;
@@ -1672,7 +1683,7 @@ impl Fault {
             Self::ClientState => Kind::Client.name(),
             Self::SubscriptionState => Kind::Subscriptions.name(),
             Self::TokenCallback => Kind::Callbacks.name(),
-            Self::ResubscribeTimer => Kind::Timers.name(),
+            Self::ResubscribeTimer | Self::ReconnectTimer => Kind::Timers.name(),
             Self::ApplicationOffset => Kind::Position.name(),
             Self::UnknownAct => "the act without a mapping",
             Self::MarkedDivergence => "Dv2 not found at that step",
@@ -1781,4 +1792,11 @@ fn offset_of(offset: Option<u64>) -> i64 {
     offset
         .and_then(|offset| i64::try_from(offset).ok())
         .unwrap_or(0)
+}
+
+// Beyond the outline's examples: the reconnect timer is compared too.
+#[test]
+fn a_reconnect_timer_mismatch_is_reported() {
+    let report = planted(Fault::ReconnectTimer);
+    assert!(report.contains("reconnect model"), "{report}");
 }
