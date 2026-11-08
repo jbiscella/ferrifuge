@@ -4,7 +4,7 @@
 //! of its subscriptions, one at a time, in the order the events were
 //! emitted. An event counts as taken when its handler returns (D3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 
 use super::client::{Core, Outboxes, Shared, lock};
 use super::outbox::{Head, Outbox};
-use crate::machine::{EventId, Input, SubscriptionId};
+use crate::machine::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, Publication, ServerSubscriptionEvent, Subscribed,
     SubscriptionEvent,
@@ -167,20 +167,24 @@ pub enum EventDelivery {
     /// up Block 15's "timers keep running": while a handler runs, no timer
     /// fires, nothing is read and no ping is answered.
     Inline,
+    /// On a thread of the client's own, named `ferrifuge-events` and
+    /// started at the first handler, for handlers that block: the runtime
+    /// and the driver go on while one runs.
+    Thread,
 }
 
 thread_local! {
     /// The client whose handler this thread runs, by the address of its
-    /// `Shared`; 0 when none (Block 41, D6).
-    static RUNNING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `Shared`, 0 when none, and whether under `Thread` (Block 41, D6).
+    static RUNNING: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
 /// Marks this thread as running a handler of `shared` until dropped.
-struct Marked(usize);
+struct Marked((usize, bool));
 
 impl Marked {
-    fn new(shared: &Shared) -> Self {
-        Self(RUNNING.replace(std::ptr::from_ref(shared) as usize))
+    fn new(shared: &Shared, thread: bool) -> Self {
+        Self(RUNNING.replace((std::ptr::from_ref(shared) as usize, thread)))
     }
 }
 
@@ -190,12 +194,92 @@ impl Drop for Marked {
     }
 }
 
-/// Whether a call, `ready()` or `close()` of `shared` polled now would wait
-/// on the loop the running handler holds (Block 41, D6): under `Task`, the
-/// handler holds a worker its client's driver may need, and under `Inline`
-/// the driver itself, so any such wait fails at once.
-pub(super) fn would_deadlock(shared: &Shared) -> bool {
-    RUNNING.get() == std::ptr::from_ref(shared) as usize
+/// What a handler of its own client waits on, for [`would_deadlock`].
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Wait {
+    /// A call not yet settled.
+    Call(CallId),
+    /// `ready()`: waiting for a state when `true`, settled when `false`.
+    Ready(bool),
+    /// `close()`, waiting for the driver to stop.
+    Close,
+}
+
+/// Whether `wait`, of `shared` and polled now, would never end (Block 41,
+/// D6). Under `Task` the handler holds a worker its client's driver may
+/// need, and under `Inline` the driver itself, so any such wait fails at
+/// once. Under `Thread` it fails when only a message that the running
+/// handler's event holds back could end it.
+pub(super) fn would_deadlock(shared: &Shared, wait: Wait) -> bool {
+    let (running, thread) = RUNNING.get();
+    if running != std::ptr::from_ref(shared) as usize {
+        return false;
+    }
+    if !thread {
+        return true;
+    }
+    match wait {
+        // The driver stops whatever the handler does.
+        Wait::Close | Wait::Ready(false) => false,
+        Wait::Ready(true) => held_back(shared, None),
+        Wait::Call(id) => held_back(shared, Some(id)),
+    }
+}
+
+/// Under `Thread`: whether the event the running handler was given holds
+/// the message that `call`, or `ready()` when `None`, waits for. A call is
+/// watched from then on: its reply also becomes unreadable once a full
+/// read-ahead stops the reading ([`fail_stuck_calls`]).
+fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
+    let core = lock(&shared.core);
+    let mut handlers = lock(&shared.handlers);
+    if let Some(id) = call {
+        handlers.watched.insert(id);
+    }
+    let Some(event) = handlers.running else {
+        return false;
+    };
+    if !core.machine.holds_messages(event) {
+        return false;
+    }
+    match call.map(|id| core.machine.call_wait(id)) {
+        None | Some(Some(CallWait::Message)) => true,
+        Some(Some(CallWait::Reply)) => !core.machine.wants_frames(),
+        Some(Some(CallWait::Other) | None) => false,
+    }
+}
+
+/// Under `Thread`, fails with error 16 the calls the running handler waits
+/// on whose reply can no longer be read: a full read-ahead stopped the
+/// reading while the handler's event holds the messages (D6). The driver
+/// checks while reading is stopped.
+pub(super) fn fail_stuck_calls(shared: &Shared) {
+    let stuck: Vec<CallId> = {
+        let core = lock(&shared.core);
+        let mut handlers = lock(&shared.handlers);
+        if handlers.watched.is_empty() {
+            return;
+        }
+        handlers
+            .watched
+            .retain(|id| core.machine.call_wait(*id).is_some());
+        let holds = handlers
+            .running
+            .is_some_and(|event| core.machine.holds_messages(event));
+        if !holds || core.machine.wants_frames() {
+            return;
+        }
+        handlers
+            .watched
+            .iter()
+            .copied()
+            .filter(|id| core.machine.call_wait(*id) == Some(CallWait::Reply))
+            .collect()
+    };
+    for id in stuck {
+        lock(&shared.handlers).watched.remove(&id);
+        shared.fail_call(id, deadlock_error());
+    }
 }
 
 /// Error 16, for a wait [`would_deadlock`].
@@ -222,6 +306,10 @@ pub(super) struct Handlers {
     /// The consumer runs, from the first handler set.
     started: bool,
     waker: Option<Waker>,
+    /// The event a handler runs for.
+    running: Option<EventId>,
+    /// Calls a `Thread` handler waits on, for [`fail_stuck_calls`].
+    watched: HashSet<CallId>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -272,7 +360,7 @@ pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHa
     }
     let stream = lock(&shared.outboxes).client.open_stream();
     shared.handle(&mut core, Input::StreamOpened(None));
-    let old = install(shared, |handlers| {
+    let old = install(shared, &mut core, |handlers| {
         handlers
             .client
             .replace(Slot {
@@ -318,7 +406,7 @@ pub(super) fn install_subscription_handler(
         .or_default()
         .open_stream();
     shared.handle(core, Input::StreamOpened(Some(of)));
-    install(shared, |handlers| {
+    install(shared, core, |handlers| {
         handlers
             .subscriptions
             .insert(
@@ -336,22 +424,95 @@ pub(super) fn install_subscription_handler(
 /// Installs a handler with `set`, starting the consumer at the first one.
 fn install(
     shared: &Arc<Shared>,
+    core: &mut Core,
     set: impl FnOnce(&mut Handlers) -> Option<Dropped>,
 ) -> Option<Dropped> {
     let mut handlers = lock(&shared.handlers);
     let old = set(&mut handlers);
     handlers.wake();
-    if !handlers.started {
-        handlers.started = true;
-        match handlers.delivery {
-            EventDelivery::Task => {
-                shared.runtime.spawn(consume(Arc::clone(shared)));
-            }
-            // The driver polls `next` itself, woken above.
-            EventDelivery::Inline => {}
-        }
+    let failed = start(shared, &mut handlers);
+    drop(handlers);
+    if let Some(error) = failed {
+        thread_failed(shared, core, &error);
     }
     old
+}
+
+/// Starts the consumer unless it runs. An events thread that could not
+/// start gives its error and is tried again at the next start (D2).
+fn start(shared: &Arc<Shared>, handlers: &mut Handlers) -> Option<std::io::Error> {
+    if handlers.started {
+        return None;
+    }
+    handlers.started = true;
+    match handlers.delivery {
+        EventDelivery::Task => {
+            shared.runtime.spawn(consume(Arc::clone(shared)));
+        }
+        // The driver polls `next` itself, woken by the installation.
+        EventDelivery::Inline => {}
+        EventDelivery::Thread => {
+            let consumer = Arc::clone(shared);
+            let runtime = shared.runtime.clone();
+            // Detached: it ends after close, once its events are delivered.
+            let spawned = spawn_thread(move || {
+                let _context = runtime.enter();
+                consume_on_thread(&consumer);
+            });
+            if let Err(error) = spawned {
+                handlers.started = false;
+                return Some(error);
+            }
+        }
+    }
+    None
+}
+
+/// Starts the events thread of `Thread`.
+fn spawn_thread(run: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+    #[cfg(test)]
+    if tests::FAIL_SPAWN.get() {
+        return Err(std::io::Error::other("no thread for a test"));
+    }
+    std::thread::Builder::new()
+        .name("ferrifuge-events".to_owned())
+        .spawn(run)
+        .map(drop)
+}
+
+/// At `connect()`: under `Thread`, an events thread that could not start
+/// is tried again, so that the connection's events reach the handlers;
+/// failing again, the connection fails as for a panic (D2, D4).
+pub(super) fn start_again(shared: &Arc<Shared>, core: &mut Core) {
+    let mut handlers = lock(&shared.handlers);
+    let unstarted = handlers.delivery == EventDelivery::Thread
+        && !handlers.started
+        && (handlers.client.is_some() || !handlers.subscriptions.is_empty());
+    let failed = if unstarted {
+        start(shared, &mut handlers)
+    } else {
+        None
+    };
+    drop(handlers);
+    if let Some(error) = failed {
+        thread_failed(shared, core, &error);
+    }
+}
+
+/// The events thread could not start: the client fails as for a panic,
+/// with no event of its own (D2, D4).
+fn thread_failed(shared: &Shared, core: &mut Core, error: &std::io::Error) {
+    let message = format!("the events thread could not start: {error}");
+    shared.log.span.in_scope(|| {
+        tracing::warn!(message = %message, "an event handler panicked");
+    });
+    shared.handle(
+        core,
+        Input::HandlerPanicked {
+            event: EventId::NONE,
+            message,
+        },
+    );
 }
 
 /// An event handed to its handler, which runs with no lock held.
@@ -378,6 +539,30 @@ async fn consume(shared: Arc<Shared>) {
         deliver(&shared, handed);
         // A task's turn: the driver and the other tasks run between events.
         tokio::task::yield_now().await;
+    }
+}
+
+/// The consumer of a client's handlers on its own thread (D2: `Thread`),
+/// ending after close once its events are delivered.
+fn consume_on_thread(shared: &Arc<Shared>) {
+    /// Wakes the thread parked for the next event.
+    struct Unpark(std::thread::Thread);
+
+    impl std::task::Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let _release = Release(shared);
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        match next(shared, &mut cx) {
+            Poll::Ready(Some(handed)) => deliver(shared, handed),
+            Poll::Ready(None) => return,
+            Poll::Pending => std::thread::park(),
+        }
     }
 }
 
@@ -467,12 +652,15 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
             }
         }
     }
-    drop(handlers);
-    drop(outboxes);
     let id = match &handed {
         Some(Handed::Client { id, .. } | Handed::Subscription { id, .. }) => Some(*id),
         None => None,
     };
+    if id.is_some() {
+        handlers.running = id;
+    }
+    drop(handlers);
+    drop(outboxes);
     if let Some(id) = id {
         shared.handle(&mut core, Input::EventHanded(id));
     }
@@ -549,6 +737,7 @@ fn remove_finished(outboxes: &mut Outboxes, of: SubscriptionId) {
 
 /// Calls the handler with no lock held, then reports its outcome (D3, D4).
 pub(super) fn deliver(shared: &Shared, handed: Handed) {
+    let thread = lock(&shared.handlers).delivery == EventDelivery::Thread;
     let (id, outcome) = match handed {
         Handed::Client {
             id,
@@ -557,10 +746,11 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             stream,
         } => {
             let outcome = {
-                let _marked = Marked::new(shared);
-                run(|| handler.on_event(event))
+                let _marked = Marked::new(shared, thread);
+                run(|| handler.on_event(event), thread)
             };
             let mut handlers = lock(&shared.handlers);
+            handlers.running = None;
             let old = match handlers.client.as_mut() {
                 Some(slot) if slot.stream == stream && slot.handler.is_none() => {
                     slot.handler = Some(handler);
@@ -580,10 +770,11 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             stream,
         } => {
             let outcome = {
-                let _marked = Marked::new(shared);
-                run(|| handler.on_event(event))
+                let _marked = Marked::new(shared, thread);
+                run(|| handler.on_event(event), thread)
             };
             let mut handlers = lock(&shared.handlers);
+            handlers.running = None;
             let old = match handlers.subscriptions.get_mut(&of) {
                 Some(slot) if slot.stream == stream && slot.handler.is_none() => {
                     slot.handler = Some(handler);
@@ -613,16 +804,18 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
     shared.notify_actions();
 }
 
-/// Runs a handler call, catching its panic (D4). On a multi-thread runtime
-/// the worker hands its other tasks over first (`block_in_place`), so that
-/// a handler that blocks holds no task woken before it behind it (D6: the
-/// driver among them); on a current-thread runtime nothing else runs until
-/// it returns.
-fn run(call: impl FnOnce()) -> std::thread::Result<()> {
+/// Runs a handler call, catching its panic (D4). On a worker of a
+/// multi-thread runtime the worker hands its other tasks over first
+/// (`block_in_place`), so that a handler that blocks holds no task woken
+/// before it behind it (D6: the driver among them); on a current-thread
+/// runtime nothing else runs until it returns. The events thread of
+/// `Thread` is no worker.
+fn run(call: impl FnOnce(), thread: bool) -> std::thread::Result<()> {
     let call = AssertUnwindSafe(call);
-    let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
-        runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-    });
+    let multi_thread = !thread
+        && tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
+            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        });
     if multi_thread {
         tokio::task::block_in_place(|| std::panic::catch_unwind(call))
     } else {
@@ -653,6 +846,11 @@ mod tests {
     use crate::Client;
 
     const UNREACHABLE: &str = "ws://127.0.0.1:1/connection/websocket";
+
+    thread_local! {
+        /// Makes this thread's next events-thread starts fail.
+        pub(super) static FAIL_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 
     // D2: the earliest event goes first, whichever handler it is for.
     #[test]
@@ -896,6 +1094,116 @@ mod tests {
 
         assert!(dropped.load(Ordering::Acquire));
         drop(client);
+    }
+
+    // Structural acceptance (D2): under `Thread` every handler of a client
+    // runs on one thread named `ferrifuge-events`.
+    #[test]
+    fn thread_handlers_run_on_one_thread_named_ferrifuge_events() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Thread)
+                .build()
+                .unwrap();
+            let of_client = Arc::clone(&threads);
+            client.set_handler(move |_: ClientEvent| {
+                let thread = std::thread::current();
+                of_client
+                    .lock()
+                    .unwrap()
+                    .push((thread.name().map(str::to_owned), thread.id()));
+            });
+            let of_subscription = Arc::clone(&threads);
+            let subscription = client
+                .subscription_builder("news")
+                .handler(move |_: SubscriptionEvent| {
+                    let thread = std::thread::current();
+                    of_subscription
+                        .lock()
+                        .unwrap()
+                        .push((thread.name().map(str::to_owned), thread.id()));
+                })
+                .build()
+                .unwrap();
+            subscription.subscribe();
+            client.connect();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.close().await;
+        });
+
+        let threads = threads.lock().unwrap();
+        assert!(threads.len() >= 3, "{threads:?}");
+        assert!(
+            threads.iter().all(
+                |(name, id)| name.as_deref() == Some("ferrifuge-events") && *id == threads[0].1
+            ),
+            "{threads:?}"
+        );
+    }
+
+    // D2, D4: an events thread that cannot start fails the connection as a
+    // panic does, and is tried again at the next connect().
+    #[test]
+    fn an_events_thread_that_cannot_start_fails_the_connection_and_starts_later() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Thread)
+                .build()
+                .unwrap();
+            FAIL_SPAWN.set(true);
+            let record = Arc::clone(&seen);
+            client.set_handler(move |event: ClientEvent| {
+                if let ClientEvent::Disconnected { code, reason } = &event {
+                    record.lock().unwrap().push(format!("{code} {reason}"));
+                }
+            });
+            client.connect();
+            let failed = client.state();
+            FAIL_SPAWN.set(false);
+            client.connect();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            client.close().await;
+
+            assert_eq!(failed, crate::State::Disconnected);
+        });
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen[0]
+                .starts_with("2 exception in event handler: the events thread could not start: "),
+            "{seen:?}"
+        );
+    }
+
+    // Structural acceptance: the marker is restored after a handler panics.
+    #[test]
+    fn the_marker_is_restored_after_a_panic() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        client.set_handler(|_: ClientEvent| panic!("boom"));
+        client.connect();
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Some(handed)) = next(client.shared(), &mut cx) else {
+            panic!("an event for the handler");
+        };
+        deliver(client.shared(), handed);
+
+        assert!(!would_deadlock(client.shared(), Wait::Close));
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).

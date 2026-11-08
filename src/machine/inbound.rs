@@ -283,6 +283,7 @@ impl Machine {
 
     /// Whether the event `id` holds the messages read after the one that
     /// emitted it (Block 15, in order; Block 41, D6).
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))] // Read by the tokio adapter.
     pub(crate) fn holds_messages(&self, id: EventId) -> bool {
         self.inbound.waiting_for.contains(&id)
     }

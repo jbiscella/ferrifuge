@@ -641,6 +641,16 @@ impl Shared {
         }
     }
 
+    /// Fails the call `id` with `error`; abandoned, as a dropped call is
+    /// (Block 41, D6).
+    pub(super) fn fail_call(&self, id: CallId, error: CallError) {
+        if let Some(sender) = lock(&self.calls).remove(&id) {
+            // The future may be gone already.
+            let _ = sender.send(Err(error));
+        }
+        self.apply(Input::CallAbandoned(id));
+    }
+
     /// Feeds [`Input::Flush`].
     fn flush(&self) {
         let mut core = lock(&self.core);
@@ -695,8 +705,9 @@ impl Shared {
             // Checked at every poll: a future first polled elsewhere may be
             // awaited in a handler later (Codex, #169). Abandoned, as a
             // dropped call is (Block 41, D6).
+            let wait = super::handler::Wait::Call(pending.id);
             let result = std::future::poll_fn(|cx| {
-                if super::handler::would_deadlock(&shared) {
+                if super::handler::would_deadlock(&shared, wait) {
                     return Poll::Ready(None);
                 }
                 Pin::new(&mut receiver).poll(cx).map(Some)
@@ -1149,8 +1160,10 @@ impl ClientBuilder {
 
     /// Where the handlers of the client and of its subscriptions run
     /// (Block 41, D2): [`EventDelivery::Task`](super::EventDelivery::Task)
-    /// by default, or on the client's driver with
-    /// [`EventDelivery::Inline`](super::EventDelivery::Inline).
+    /// by default, on the client's driver with
+    /// [`EventDelivery::Inline`](super::EventDelivery::Inline), or on a
+    /// thread of the client's own with
+    /// [`EventDelivery::Thread`](super::EventDelivery::Thread).
     #[must_use]
     pub fn event_delivery(mut self, delivery: super::EventDelivery) -> Self {
         self.event_delivery = delivery;
@@ -1278,7 +1291,7 @@ impl Client {
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
-            inline: event_delivery == super::handler::EventDelivery::Inline,
+            delivery: event_delivery,
             closing: Vec::new(),
             opening: None,
             transport: None,
@@ -1369,11 +1382,12 @@ impl Client {
         async move {
             // From one of its own handlers, closing has started: waiting for
             // the driver could wait on the worker the handler holds (Block
-            // 41, D6). Checked at every poll, as a call is (Codex, #169).
+            // 41, D6); under `Thread` the driver stops whatever it does.
+            // Checked at every poll, as a call is (Codex, #169).
             let ended = shared.ended();
             let mut ended = std::pin::pin!(ended);
             std::future::poll_fn(|cx| {
-                if super::handler::would_deadlock(&shared) {
+                if super::handler::would_deadlock(&shared, super::handler::Wait::Close) {
                     return Poll::Ready(());
                 }
                 ended.as_mut().poll(cx)
@@ -1492,7 +1506,14 @@ impl Client {
     /// Starts connecting; reconnects until connected or disconnected. The
     /// state is [`State::Connecting`] when this returns.
     pub fn connect(&self) {
-        self.shared.apply(Input::Connect);
+        let mut core = lock(&self.shared.core);
+        if self.shared.closed.load(Ordering::Acquire) {
+            return;
+        }
+        self.shared.handle(&mut core, Input::Connect);
+        super::handler::start_again(&self.shared, &mut core);
+        drop(core);
+        self.shared.actions_queued.notify_one();
     }
 
     /// Connects again at once, as an app does on its platform's wake or
@@ -1914,8 +1935,8 @@ struct Driver {
     runtime: Handle,
     /// Ends the client however the driver's task ends (Block 28, D3).
     _ending: Ending,
-    /// Handlers run on the driver (`EventDelivery::Inline`, Block 41).
-    inline: bool,
+    /// Where the handlers run (Block 41, D2): `Inline` on this driver.
+    delivery: super::EventDelivery,
     /// The closings of the transports closed that may still run, each
     /// awaited before the driver stops (Block 33, D1; Codex, #141).
     closing: Vec<tokio::task::JoinHandle<()>>,
@@ -2084,7 +2105,7 @@ impl Driver {
         while let Some(action) = self.shared.next_action() {
             self.perform(action);
         }
-        if self.inline {
+        if self.delivery == super::EventDelivery::Inline {
             super::handler::deliver_remaining(&self.shared);
             while let Some(action) = self.shared.next_action() {
                 self.perform(action);
@@ -2108,6 +2129,9 @@ impl Driver {
                 return self.finish().await;
             }
             let reading = self.reading();
+            if !reading && self.delivery == super::EventDelivery::Thread {
+                super::handler::fail_stuck_calls(&self.shared);
+            }
             // The number of the setting of a timer that fired.
             let mut fired = None;
             let input = tokio::select! {
@@ -2116,7 +2140,7 @@ impl Driver {
                 // Under `Inline` the handler runs here: nothing else of the
                 // driver runs until it returns (Block 41, D3).
                 Some(handed) = std::future::poll_fn(|cx| super::handler::next(&self.shared, cx)),
-                    if self.inline =>
+                    if self.delivery == super::EventDelivery::Inline =>
                 {
                     super::handler::deliver(&self.shared, handed);
                     continue;

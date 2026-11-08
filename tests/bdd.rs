@@ -517,7 +517,7 @@ const IMPLEMENTED: &[&str] = &[
     "A weak handle upgrades only while a clone of the client is alive",
     "close on one clone closes every clone",
     // Block 41b: handlers under Task delivery; 41c adds the @inline
-    // examples; the @thread ones wait for 41d (EXAMPLES_NOT_YET).
+    // examples, 41d the @thread ones.
     "Handlers receive the client's and its subscriptions' events one at a time, in order",
     "A publication a handler had not returned from before disconnect is taken once",
     "A panicking handler disconnects the client with code 2, and its publication is recovered",
@@ -526,6 +526,12 @@ const IMPLEMENTED: &[&str] = &[
     "Pings are answered while a handler runs, except under Inline",
     "A call a Task or Inline handler blocks on fails at once",
     "close awaited inside a handler returns",
+    // Block 41d: the Thread handler scenarios.
+    "A Thread handler may block on a call that completes",
+    "A Thread handler's call stuck behind a full read-ahead fails with \"would deadlock\"",
+    "A Thread handler blocking on a subscription's ready() its own event holds back fails at once",
+    "A Thread handler may block on a ready() its event does not hold back",
+    "A Thread handler may block on another client's call",
     // Block 39: a publications-only stream.
     "The publications stream yields only the subscription's publications",
     "Events the publications stream skips hold the connection until it is read",
@@ -655,8 +661,8 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 const RUNNER_STACK: usize = 32 << 20;
 
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
-/// (Block 41, D8): 41c runs `@inline`, 41d `@thread`.
-const EXAMPLES_NOT_YET: &[&str] = &["thread"];
+/// (Block 41, D8): none since 41d ran `@thread`.
+const EXAMPLES_NOT_YET: &[&str] = &[];
 
 /// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
 /// debug build, enough to delay the timers of scenarios running alongside

@@ -880,6 +880,13 @@ async fn client_stream_yields(world: &mut ClientWorld, list: String) {
 
 #[then(regex = r"^the client stops reading with (\d+) messages in its read-ahead$")]
 async fn stops_reading_with_messages(world: &mut ClientWorld, expected: usize) {
+    // A handler's call stuck behind the full read-ahead fails, and the
+    // client then reads on: its read-ahead is read when the call ended
+    // (Block 41, D6).
+    if let Some(held) = world.handlers.read_ahead_when_the_call_ended().await {
+        assert_eq!(held, expected);
+        return;
+    }
     let client = world.client();
     wait_until(&format!("{expected} messages in the read-ahead"), || {
         client.read_ahead().0 == expected
