@@ -153,6 +153,19 @@ impl Centrifugo {
     }
 }
 
+/// `error` with its sources, so that a failed request says why (a refused
+/// connection, a reset, a timeout), not only that sending failed.
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Client for the server HTTP API (<https://centrifugal.dev/docs/server/server_api>).
 pub(crate) struct ServerApi {
     http: reqwest::Client,
@@ -184,7 +197,7 @@ impl ServerApi {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .unwrap_or_else(|e| panic!("server API {method}: {e}"));
+            .unwrap_or_else(|e| panic!("server API {method}: {}", chain(&e)));
         let mut body: Value = response.json().await.expect("server API JSON body");
         match body.get_mut("error").map(Value::take) {
             Some(error) => Err(ApiError {
