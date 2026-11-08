@@ -1030,6 +1030,12 @@ impl Machine {
             return;
         }
         let was_subscribed = sub.state == SubscriptionState::Subscribed;
+        // A flow waiting for its data, token or getState callback counts as
+        // in flight: the server is told, as for a subscribed one (Block 42,
+        // D10; centrifuge-js 63ed73e `_inflight`).
+        let in_callback = sub.fetch.is_some()
+            || sub.state_fetch.is_some()
+            || matches!(sub.tokens.pending_fetch(), Some((_, FetchPurpose::Connect)));
         // A subscribe in flight stays in `subscribes`, with its reply
         // deadline: its reply undoes it, its timeout starts over.
         sub.subscribe_command = None;
@@ -1053,7 +1059,7 @@ impl Machine {
         // A token being fetched, a refresh scheduled or in flight end too
         // (centrifuge-js `_setUnsubscribed`).
         self.end_token_refresh(id);
-        if send && was_subscribed {
+        if send && (was_subscribed || in_callback) {
             self.send_unsubscribe(id, channel);
         }
         self.emit_subscription(
@@ -1725,6 +1731,97 @@ mod tests {
         );
         assert_eq!(offset_of(&machine, id), Some(1));
         assert_eq!(machine.statistics().publications_delivered, 1);
+    }
+
+    /// The unsubscribe commands among `actions`, by channel.
+    fn unsubscribes_sent(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => {
+                    let text = String::from_utf8(frame.clone()).unwrap();
+                    text.contains(r#""unsubscribe""#).then_some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Block 42, D10: unsubscribing while the flow waits for a callback
+    // tells the server, as centrifuge-js 63ed73e (`_inflight`) does.
+    #[test]
+    fn unsubscribing_while_a_callback_runs_sends_an_unsubscribe() {
+        for options in [
+            SubscriptionOptions::default().data_source(),
+            SubscriptionOptions::default().token_source(),
+            SubscriptionOptions::default().state_source(),
+        ] {
+            let (mut machine, _, id) = connected_with(options.clone());
+            let subscribing = machine.handle(Input::Subscribe(id));
+            assert!(
+                subscribing.iter().any(|action| matches!(
+                    action,
+                    Action::FetchSubscriptionData { .. }
+                        | Action::FetchSubscriptionToken { .. }
+                        | Action::FetchSubscriptionState { .. }
+                )),
+                "{options:?}: {subscribing:?}"
+            );
+
+            let unsubscribed = machine.handle(Input::Unsubscribe(id));
+            machine.handle(Input::Flush);
+
+            assert_eq!(
+                unsubscribes_sent(&unsubscribed).len(),
+                1,
+                "{options:?}: {unsubscribed:?}"
+            );
+        }
+    }
+
+    // Block 42, D10: so does a removal, and a new subscription to the
+    // channel waits for that unsubscribe's reply (Block 9).
+    #[test]
+    fn removing_while_a_callback_runs_sends_an_unsubscribe_the_next_subscribe_waits_for() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().data_source());
+        machine.handle(Input::Subscribe(id));
+
+        let removed = machine.handle(Input::RemoveSubscription(id));
+        let again = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        let waiting = machine.handle(Input::Subscribe(again));
+        let answered = machine.handle(Input::Frame {
+            transport,
+            data: br#"{"id":2,"unsubscribe":{}}"#.to_vec(),
+        });
+
+        assert_eq!(unsubscribes_sent(&removed).len(), 1, "{removed:?}");
+        assert!(!frames_contain(&waiting, r#""subscribe""#), "{waiting:?}");
+        assert!(frames_contain(&answered, r#""subscribe""#), "{answered:?}");
+    }
+
+    /// Whether a frame among `actions` contains `text`.
+    fn frames_contain(actions: &[Action], text: &str) -> bool {
+        actions.iter().any(|action| {
+            matches!(action, Action::Send { frame, .. }
+                if String::from_utf8_lossy(frame).contains(text))
+        })
+    }
+
+    // Block 42, D10: a subscription that is not yet subscribing on a
+    // connection, nor waiting for a callback, sends nothing.
+    #[test]
+    fn unsubscribing_before_any_flow_sends_nothing() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default());
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+
+        assert!(
+            unsubscribes_sent(&unsubscribed).is_empty(),
+            "{unsubscribed:?}"
+        );
     }
 
     // Codex, #169: a publication whose handler removes its subscription is
@@ -3548,11 +3645,16 @@ mod tests {
 
     #[test]
     fn the_token_of_an_outdated_subscribe_sends_nothing() {
-        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().token_source());
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
         let outdated = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
-        // A new subscribe while the token loads: a new fetch.
-        machine.handle(Input::Unsubscribe(id));
-        let current = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        // Unsubscribing while the token loads tells the server (Block 42,
+        // D10); a new subscribe fetches a token once that is answered.
+        let unsubscribed = machine.handle(Input::Unsubscribe(id));
+        machine.handle(Input::Subscribe(id));
+        let current = subscription_token_fetch(
+            &machine.handle(reply(transport, r#"{"id":2,"unsubscribe":{}}"#)),
+        );
 
         let late = machine.handle(Input::SubscriptionTokenFetched {
             fetch: outdated,
@@ -3563,10 +3665,14 @@ mod tests {
             result: Ok("new".into()),
         });
 
+        assert_eq!(
+            sent(&unsubscribed),
+            [r#"{"id":2,"unsubscribe":{"channel":"news"}}"#]
+        );
         assert_eq!(sent(&late), Vec::<String>::new());
         assert_eq!(
             sent(&answered),
-            [r#"{"id":2,"subscribe":{"channel":"news","token":"new"}}"#]
+            [r#"{"id":3,"subscribe":{"channel":"news","token":"new"}}"#]
         );
     }
 
