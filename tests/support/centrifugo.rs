@@ -205,7 +205,13 @@ pub(crate) struct ApiError {
 impl ServerApi {
     fn new(base_url: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // A fresh connection per call: a pooled one the server, or the
+            // container's port forwarding, closed while idle fails the next
+            // call with "connection closed before message completed".
+            http: reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .build()
+                .expect("an HTTP client"),
             base_url: base_url.to_owned(),
         }
     }
