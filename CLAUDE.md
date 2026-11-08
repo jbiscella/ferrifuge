@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–38 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–39 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -2086,7 +2086,7 @@ Feature: Footprint, performance and fleet behaviour
 - **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads, and the queued reply is dropped (Centrifugo v6.10.1: centrifuge `writer.go` `enqueue`, `client.go` `writeEncodedCommandReply`; a 3008 close does not flush the queue). Each reconnect asks for the same backlog, so the client keeps reconnecting, its backoff growing up to `max_reconnect_delay` ("Backoff after 3008"; a connect reply that is itself dropped resets nothing), until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers.
 - **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.)
 - **Timers keep running** while the application holds events, with two pauses. The no-ping deadline pauses while the client has stopped reading because the read-ahead is full, and restarts in full when reading resumes; without this pause an application stuck with a full read-ahead would make the client reconnect with code 2 about every 35 s, recovering a full read-ahead each time. A reply deadline (connect, refresh, subscribe, unsubscribe, sub_refresh) pauses while its reply has been read but waits to be handled.
-- **One active stream per object.** The client and each subscription have one active stream. A second `events()` call ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
+- **One active stream per object.** The client and each subscription have one active stream. A second `events()` call (or `publications()`, Block 39) ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
 - **No stream, no hold-up.** An object whose stream was never requested, or was dropped, takes its events at once: they count as delivered and positions move, events not yet taken included (centrifuge-rust §9.4: "a dropped stream acks like an unregistered handler"); so an application that needs every event, and exactly-once delivery on recoverable channels, takes the stream before calling connect() or subscribe(): events emitted before the first events() call count as delivered (documented, with the README examples in that order).
 - **Lifecycle events** go through the same stream as publications, in order, and count as delivered only when taken; none is dropped or merged, and each state change is one event. `state()` returns the current state, which may be ahead of the stream. An event caused by an application call or a timer joins its stream at once.
 - **Withdrawal.** A publication not yet taken when its subscription, client-side or server-side, leaves `subscribed` for a client-side reason (`disconnect()`, `unsubscribe()`, a client-side timeout) is withdrawn and never yielded; its position did not move, so recovery brings it back.
@@ -5811,6 +5811,120 @@ Feature: Typed JSON helpers
       | not json                | it fails with a serde_json syntax error       |
       | the bytes ff 00 fe      | it fails with a serde_json syntax error       |
       | nothing                 | it fails with a serde_json end-of-input error |
+```
+
+**Exceptions introduced:** none.
+
+---
+
+## Block 39 — A publications-only stream
+
+**Goal:** an application that only consumes a channel's publications takes a stream of just those, without matching lifecycle events by hand, while delivery, take-over and recovery keep Block 15's guarantees. Source: parity item 13, design A ("Planned after Block 19").
+
+Value clause: As an app developer who only consumes a channel's publications, I want a stream of just its publications, so that I do not match lifecycle events by hand, while delivery, take-over and recovery keep Block 15's guarantees.
+
+**Dependencies:** Blocks 9 (subscriptions), 11 (recovery, the gap signal), 13 (join and leave), 15 (delivery), 33 (`close()`) and 35 (`Publication.channel`, no version bump for an additive change, D5).
+
+**Out of scope:**
+- A client-level publications stream for server-side subscriptions: item 13 is per subscription, and such a view would also hide `connected` and `disconnected`.
+- Independent streams of each kind, active together (design B; centrifuge-rust `docs/spec.md` §9.4, "Each kind has one active stream per object"): ferrifuge keeps one active stream per object (D1).
+- Signalling a gap in the item type, such as a `Lagged` item in the style of tokio-stream's `BroadcastStream`: design A chose a documentation warning (D4).
+- `FusedStream`, for either stream, so that `publications()` stays consistent with `events()`.
+- Typed publication streams: Block 38's `Publication::json` decodes each item.
+- Any change to the sans-IO `machine` API: no new `Input`.
+- Handlers: Block 41's handler takes over this stream like any other.
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 One active stream.** `Subscription::publications(&self) -> impl Stream<Item = Publication> + Send + Unpin + use<>` is the subscription's one active stream (Block 15, "One active stream per object"). `events()` and `publications()` take over from each other: either call ends the earlier stream, whose next item is its end (`None`, and `None` on every later poll), and every event it had not taken moves to the new stream, in order. This diverges on purpose from centrifuge-rust, whose kinds each have their own active stream (§9.4): one outbox per object keeps "in order, one message at a time" unchanged.
+- **D2 The events it skips.** The other events (subscribing, subscribed, unsubscribed, error, join, leave) are taken when the stream passes them while being polled, not when they are queued. "In order, one message at a time" and withdrawal hold unchanged, and a later `events()` that takes over still gets a skipped `subscribed` in place. Only publications move positions, so exactly-once on recoverable channels is unchanged. An unread `publications()` stream holds the connection as an unread `events()` does (Block 15, head-of-line), and the documentation says so.
+- **D3 Its end.** As `events()`: it ends when the subscription is removed, when the client is closed or dropped, or when it is superseded. It does not end on `unsubscribed`: it continues across unsubscribe and subscribe.
+- **D4 Item and documentation.** The item is `Publication`, which already carries `channel` (Block 35c). The rustdoc and the README's "Subscriptions" section say what the view hides:
+  - `subscribed` reporting `was_recovering` true and `recovered` false, the one signal of a gap on a recoverable channel without `get_state` (with `get_state`, a failed recovery reloads state instead, Block 11);
+  - `unsubscribed`: after a permanent unsubscribe the stream goes silent but does not end;
+  - `error` events.
+
+  They also warn that an `events()` call elsewhere ends this stream, and that dropping it counts its held events taken (Block 15, "No stream, no hold-up").
+- **D5 Implementation.** `events()` with a filter that keeps the publications (`futures_util::StreamExt::filter_map`), which is `Send`, `Unpin` and cancel-safe; no change to the outbox, the event stream or the core.
+- **D6 Release.** Additive: a changelog entry under `Unreleased`, "Added" (Block 20 D4), no version bump (Block 35 D5), and a `no_run` rustdoc example (C-EXAMPLE).
+
+**Structural acceptance:** the rustdoc of `Subscription::publications` names the gap signal it hides (D4).
+
+```gherkin
+Feature: Publications-only stream
+
+  @D
+  Scenario: The publications stream yields only the subscription's publications
+    Given a client connected to the fake server, with a subscription to channel "news" with the join_leave option whose publications stream was taken before subscribe is called
+    And the subscription is subscribed
+    When the fake server sends a publication at offset 1, a join, a leave, then a publication at offset 2 to "news"
+    And the fake server disconnects the client with a reconnect-advised code
+    And the subscription reaches state "subscribed" again
+    And the fake server sends a publication at offset 3 to "news"
+    Then the publications stream yields exactly the publications at offsets 1, 2 and 3, in order
+
+  @D
+  Scenario: Events the publications stream skips hold the connection until it is read
+    Given a client connected to the fake server, subscribed to channel "chat", whose subscription's stream is read
+    And a subscription to channel "news" whose publications stream was taken before subscribe is called and is not read
+    When the application subscribes to "news"
+    And the fake server has answered the subscribe command for "news", then sent a publication to "chat"
+    Then 1 s later the stream of "chat" has yielded no publication
+    And when the application reads the publications stream of "news" for 100 ms, it yields nothing
+    And then the stream of "chat" yields that publication
+
+  @D
+  Scenario: Publications the publications stream has not yielded are recovered on the next connect
+    Given a client subscribed to recoverable channel "news" on the fake server, whose publications stream was taken before subscribe is called
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the application has taken only the publication at offset 1 from the publications stream
+    And the client holds the publications at offsets 2 and 3 not yet taken
+    When disconnect is called
+    And connect is called
+    And the fake server answers the subscribe command with the publications at offsets 2 and 3 recovered
+    Then that subscribe command asked to recover from offset 1
+    And the publications stream yields the publications at offsets 2 and 3, in order
+    And no publication is yielded twice
+
+  @D
+  Scenario: publications() takes over the subscription's events stream
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    And the client holds them not yet taken
+    When the application calls the subscription's publications()
+    Then the first stream's next item is its end
+    And the publications stream yields the publications at offsets 1 and 2
+
+  @D
+  Scenario: events() takes over the subscription's publications stream
+    Given a client connected to the fake server, with a subscription to channel "news" whose publications stream was taken before subscribe is called and is not read
+    And the subscription is subscribed
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    When the application calls the subscription's events()
+    Then the publications stream's next item is its end
+    And the new stream yields "subscribing", "subscribed", and the publications at offsets 1 and 2, in order
+
+  @D
+  Scenario: The publications stream outlives unsubscribe, which withdraws what it had not yielded
+    Given a client subscribed to channel "news" on the fake server, whose publications stream was taken once it was subscribed and is not read
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    And the client holds them not yet taken
+    When unsubscribe is called on the subscription
+    And subscribe is called on the subscription
+    And the fake server answers the subscribe command, then sends a publication at offset 3 to "news"
+    Then the publications stream yields the publication at offset 3, and no other
+
+  @D
+  Scenario Outline: The publications stream ends with its subscription or its client
+    Given a client connected to the fake server, with a subscription to channel "news" whose publications stream was taken
+    When <cause>
+    Then the publications stream's next item is its end
+
+    Examples:
+      | cause                       |
+      | the subscription is removed |
+      | the client is closed        |
+      | the client is dropped       |
 ```
 
 **Exceptions introduced:** none.
