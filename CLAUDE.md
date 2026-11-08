@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–37 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–38 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -5684,3 +5684,133 @@ Feature: Test constructors, an in-memory server double, an injectable connector
 The steps of "The server double and Centrifugo answer alike" compare everything except epochs and client ids, which differ by design. "Before its client reconnects" is checked: the double's connector has been called once, and Centrifugo has had no new connection.
 
 **Exceptions introduced:** one divergence from centrifuge-js 63ed73e. Its `websocket`, `fetch`, `readableStream` and `eventsource` options replace the constructors of every transport (`centrifuge.ts:1070-1100`); ferrifuge's connector carries the websocket only (D3, D4; out of scope).
+
+---
+
+## Block 38 — Typed JSON helpers
+
+**Goal:** an application whose messages are serde types publishes, calls RPC and reads publications as those types, without encoding and decoding `data` by hand. A failed typed call says whether it was never sent, refused by the server, or answered with data the type does not accept. Source: parity item 18, design A ("Planned after Block 19": the helpers are always available, with no `serde` feature).
+
+Value clause: As an app developer whose messages are serde types, I want to publish, call RPC and read publications as those types, so that I do not encode and decode `data` by hand on every call and publication, and a failed call tells me whether it was never sent, refused, or answered with data my type does not accept.
+
+**Dependencies:**
+- Blocks 0 (raw bytes payloads, `async fn` returning `Result`) and 7 (Protobuf);
+- Blocks 9 (publications), 12 (server-side publications) and 13 (publish, RPC, history, their waiting, timeout and failure rules);
+- Blocks 20 (changelog), 21 (redacting `Debug`), 34 (table of codes) and 35 (no version bump for an additive change, D5).
+
+**Out of scope:**
+- `send_json`.
+- Typed decoding of `ClientEvent::Message`, of `Connected` and `Subscribed` data, of connect data, `get_data` and `set_data`. `Message(Vec<u8>)` is raw bytes with no type of ferrifuge's to carry a method; its documentation points to `serde_json::from_slice`.
+- `history_json`: history publications decode through `Publication::json`.
+- A `serde` feature (already decided).
+- Formats other than JSON (MessagePack, typed prost messages).
+- Refusing the helpers under the Protobuf protocol.
+- Checking that raw JSON given to `publish` or `rpc` is valid.
+- Treating empty RPC data as `null`.
+- Re-exporting `serde_json`: Cargo unifies its 1.x versions.
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 Surface.** Four helpers, the four that centrifuge-rust documents (`docs/api.md` at 88d6edf, lines 38-40, 115 and 161; clean room: its docs only):
+  - `Publication::json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error>`, in the core, in every build. Borrowing lets `T` hold a `&str` or a `&serde_json::value::RawValue`. History publications and server-side publications decode through it.
+  - `Client::publish_json<T: serde::Serialize + ?Sized>(&self, channel: impl Into<String>, data: &T)` and `Subscription::publish_json<T: Serialize + ?Sized>(&self, data: &T)`, returning `impl Future<Output = Result<(), JsonCallError>> + Send + 'static`.
+  - `Client::rpc_json<Req: Serialize + ?Sized, Resp: serde::de::DeserializeOwned>(&self, method: impl Into<String>, data: &Req)`, returning `impl Future<Output = Result<Resp, JsonCallError>> + Send + 'static`.
+- **D2 Errors.**
+  - `Publication::json` returns `serde_json::Error`: one cause, and serde_json is 1.x (Rust API Guidelines C-STABLE), as centrifuge-rust's signature (`docs/api.md:161`).
+  - The call helpers return `JsonCallError`, `#[non_exhaustive]`, in `src/call.rs`:
+    - `Encode(serde_json::Error)`: the value did not encode; nothing was sent;
+    - `Call(CallError)`: the call failed as the untyped one does (Block 13), its code, message and `temporary` flag kept;
+    - `Decode { error: serde_json::Error, data: Vec<u8> }`, itself `#[non_exhaustive]`: the server answered, and its result data did not decode as `Resp`. The RPC already ran on the server, so this must not look like a failed call that is safe to retry.
+  - Sources: aws-smithy-runtime-api 1.20.0 `SdkError` (`ConstructionFailure`, "the request failed during construction. It was not dispatched over the network"; `ResponseError` with `raw()`); reqwest 0.13.5 `Error::is_builder` and `is_decode` (`error.rs:97`, `:196`). A `CallError` with a client-side code cannot hold a `serde_json::Error`, as `CallError` derives `Clone` and `Eq` (`src/call.rs:239`).
+  - `JsonCallError` implements `Display` and `std::error::Error` (with `source`) and `From<CallError>`. Its `Debug` shows `Decode`'s data as its length (Block 21 D3). serde_json's messages may quote fragments of the data: ferrifuge never logs them, and the documentation warns applications.
+- **D3 Encoding before the call.** The helper encodes its value with `serde_json::to_vec` before it registers the call, then makes the untyped call (`publish`, `rpc`), which registers when the method returns (Block 13). On an encode failure the future resolves at once with `Encode` and nothing is sent, as reqwest's `RequestBuilder::json` keeps its error for `send` (`request.rs:466-483`). The value is borrowed only while the method runs, so the futures stay `Send + 'static` whatever `T`, `Req` and `Resp` are: a borrowed, non-`Send` `Req` and a `Resp` neither `Send` nor `'static` compile on rustc 1.88 and 1.99 (edition 2024; checked by the reviewer). A compile test pins that.
+- **D4 Protobuf.** The helpers work under the Protobuf protocol too: `data` is then the JSON bytes, which a JSON client receives unchanged. The documentation says so; centrifuge-rust: the helpers are "the same in both protocols" (`docs/spec.md:480`). `VERIFY:` that Centrifugo v6.10.1 forwards a Protobuf client's JSON bytes to a JSON client byte for byte.
+- **D5 An empty RPC result.** No special case, as reqwest's `Response::json` has none: an RPC answered with no data gives a `Decode` error unless `Resp` accepts empty input. The documentation says to use `rpc` for an RPC that returns no data.
+- **D6 Documentation and release.**
+  - Each helper has a doc-test (C-EXAMPLE; Block 37 D2): the `Client` and `Subscription` ones `no_run`; the `Publication` one written as a function taking `&Publication`, so it builds without `test-util`.
+  - Each has an `# Errors` section (clippy pedantic `missing_errors_doc`).
+  - The README's calls section shows `publish_json` and `rpc_json`.
+  - Additive: a changelog entry under `Unreleased`, "Added" (Block 20 D4), and no version bump (Block 35 D5).
+
+The steps use a test type `Note { text: String, n: u32 }`, with `serde`'s derive and its default field order, and a type whose `Serialize` fails. "Data exactly" compares bytes; "equal as JSON" compares parsed values. "The fake server has received one command since" counts every command the fake server read after the failed helper was called.
+
+```gherkin
+Feature: Typed JSON helpers
+
+  @A
+  Scenario Outline: A typed publication reaches subscribers as the JSON its type encodes to
+    Given two clients subscribed to channel "news"
+    When the first client publishes the note {text: "hi", n: 1} as JSON through its <publisher>
+    Then the second client's subscription receives a publication with data exactly {"text":"hi","n":1}
+
+    Examples:
+      | publisher    |
+      | client       |
+      | subscription |
+
+  @A
+  Scenario: A publication from the server API decodes as the application's type
+    Given a client subscribed to channel "news"
+    When the server API publishes {"n":1,"extra":true,"text":"hi"} to channel "news"
+    Then the subscription receives a publication that decodes as the note {text: "hi", n: 1}
+
+  @A
+  Scenario: A typed publication from a Protobuf client reaches a JSON client
+    Given a client configured with the Protobuf protocol and a client configured with the JSON protocol, both subscribed to channel "news"
+    When the Protobuf client publishes the note {text: "hi", n: 1} as JSON
+    Then the JSON client's subscription receives a publication with data exactly {"text":"hi","n":1}
+
+  @B
+  Scenario: A typed RPC sends JSON and decodes the proxy's result
+    Given a connected client and an RPC proxy answering method "sum" with {"sum":3}
+    When the client calls RPC "sum" as JSON with the terms {a: 1, b: 2}, expecting a sum
+    Then the RPC proxy received data equal as JSON to {"a":1,"b":2}
+    And the call returns the sum {sum: 3}
+
+  @D
+  Scenario Outline: A typed RPC tells its failures apart
+    Given a client connected to the fake server that answers RPC "sum" <answer>
+    When the client calls RPC "sum" as JSON with the terms {a: 1, b: 2}, expecting a sum
+    Then the call fails with <error>
+
+    Examples:
+      | answer                                                   | error                                                    |
+      | with {"sum":"three"}                                     | a decoding error holding the result data {"sum":"three"} |
+      | with no data                                             | a decoding error holding empty result data               |
+      | with a temporary error with code 1000 and message "busy" | a call error with code 1000, message "busy", temporary   |
+
+  @D
+  Scenario Outline: A value that cannot be encoded fails the call at once and sends nothing
+    Given a client connected to the fake server with a subscription to channel "news"
+    When the client calls <helper> with a value whose serialization fails
+    Then the call fails at once with an encoding error
+    When the client publishes {"n":2} to channel "news"
+    Then the fake server has received one command since, a publish with data {"n":2}
+
+    Examples:
+      | helper                           |
+      | publish_json to channel "news"   |
+      | publish_json on its subscription |
+      | rpc_json with method "sum"       |
+
+  @D
+  Scenario: A typed call is made when the method returns
+    Given a client connected to the fake server
+    When the client publishes the note {text: "hi", n: 1} as JSON to channel "news" and holds the future without polling it
+    Then the fake server receives a publish command with data exactly {"text":"hi","n":1}
+
+  Scenario Outline: A publication's data decodes as the application's type, or says why not
+    Given a publication whose data is <data>
+    When it is decoded as a note
+    Then <outcome>
+
+    Examples:
+      | data                    | outcome                                       |
+      | {"text":"hi","n":1}     | it gives the note {text: "hi", n: 1}          |
+      | {"text":"hi","n":"one"} | it fails with a serde_json data error         |
+      | not json                | it fails with a serde_json syntax error       |
+      | the bytes ff 00 fe      | it fails with a serde_json syntax error       |
+      | nothing                 | it fails with a serde_json end-of-input error |
+```
+
+**Exceptions introduced:** none.
