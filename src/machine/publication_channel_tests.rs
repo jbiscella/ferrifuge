@@ -162,10 +162,8 @@ fn a_last_reply_publication_of_another_channel_does_not_reach_the_reply_position
     let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
     machine.handle(Input::TransportOpened(transport));
 
-    let resubscribe = sent(&machine.handle(frame(
-        transport,
-        r#"{"id":3,"connect":{"client":"c"}}"#,
-    )));
+    let resubscribe =
+        sent(&machine.handle(frame(transport, r#"{"id":3,"connect":{"client":"c"}}"#)));
 
     assert_eq!(
         resubscribe,
