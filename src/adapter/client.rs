@@ -1158,7 +1158,7 @@ impl Client {
 
     /// The number of this client in its log records' `client` field
     /// (Block 21), for tests.
-    #[cfg(feature = "test-util")]
+    #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn log_number(&self) -> u64 {
@@ -1278,8 +1278,8 @@ impl Client {
 
     /// Messages read from the server and not yet handled, and their bytes
     /// (Block 15), so that tests can wait for the read-ahead to fill. Only
-    /// with the `test-util` feature.
-    #[cfg(feature = "test-util")]
+    /// with the `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn read_ahead(&self) -> (usize, usize) {
@@ -1287,8 +1287,8 @@ impl Client {
     }
 
     /// Events of the client queued for its streams and not yet taken, so
-    /// that tests can wait for them. Only with the `test-util` feature.
-    #[cfg(feature = "test-util")]
+    /// that tests can wait for them. Only with the `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {

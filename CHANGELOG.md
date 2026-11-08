@@ -13,6 +13,13 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Test constructors (Block 37a), behind the new `test-util` feature:
+  `ClientEvent::connected`, `Publication::new`, `ClientInfo::new`,
+  `Statistics::new`, and setters on those and on `Subscribed`,
+  `HistoryResult`, `PresenceResult`, `PresenceStatsResult` and
+  `DeltaStatistics`, so that an application's tests build what the client
+  yields.
+
 - Automatic command batching (Block 36a): `Machine::with_automatic_batching`
   and `Input::Flush`, with which the core buffers the commands it would send
   until its owner flushes them, in frames of at most `batch_frame_bytes`.
@@ -44,6 +51,10 @@ repository held while it carried that version, from the blocks of
   in the `codes` documentation and the README's "Codes" section.
 
 ### Changed
+
+- The crate's own test hooks (`Machine::with_seed` and the others) move from
+  the `test-util` feature to the private `__test-hooks` (Block 37a); they
+  were never public API.
 
 - The tokio client batches automatically (Block 36a): the commands made
   before its driver next runs go out together, in frames of at most

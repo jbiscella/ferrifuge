@@ -16,5 +16,5 @@ mod transport;
 pub use client::{Batch, Client, ClientBuilder};
 pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};
-#[cfg(feature = "test-util")]
+#[cfg(feature = "__test-hooks")]
 pub use transport::stalled_websocket_writes;

@@ -105,7 +105,7 @@ impl<E> Outbox<E> {
     }
 
     /// Events queued and not yet taken.
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(any(test, feature = "__test-hooks"))]
     pub(super) fn held(&self) -> usize {
         self.events.len()
     }

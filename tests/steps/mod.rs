@@ -52,6 +52,7 @@ mod statistics;
 mod sub_tokens;
 mod subscriptions;
 mod tag_filters;
+mod test_support;
 mod tls;
 mod token;
 mod transports;
@@ -202,6 +203,8 @@ pub(crate) struct ClientWorld {
     /// What a Block 36a scenario holds.
     pub(crate) auto_batching: auto_batching::AutoBatching,
     pub(crate) optimistic: optimistic::Optimistic,
+    /// What a Block 37a scenario built.
+    pub(crate) test_support: test_support::TestSupport,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.

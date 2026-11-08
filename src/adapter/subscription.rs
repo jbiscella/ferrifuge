@@ -137,9 +137,9 @@ impl Subscription {
     }
 
     /// Events of the subscription queued for its streams and not yet
-    /// taken, so that tests can wait for them. Only with the `test-util`
+    /// taken, so that tests can wait for them. Only with the `__test-hooks`
     /// feature.
-    #[cfg(feature = "test-util")]
+    #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {
