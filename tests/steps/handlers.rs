@@ -1,4 +1,4 @@
-//! Steps of Block 41b and 41c: event handlers under `Task` and `Inline`
+//! Steps of Block 41: event handlers under `Task`, `Inline` and `Thread`
 //! delivery.
 
 // cucumber passes captures by value.
@@ -15,7 +15,7 @@ use ferrifuge::{
 
 use super::delivery::{offset, wait_until};
 use super::{ClientWorld, recorded};
-use crate::support::fake_server::Announce;
+use crate::support::fake_server::{Announce, Rpc};
 
 /// A handler call: what it was for, and when it ran.
 #[derive(Debug, Clone)]
@@ -58,6 +58,9 @@ struct Shared {
     /// The outcome of the handler's call, `ready()` or `close()`, and how
     /// long it took.
     outcome: Mutex<Option<(Result<(), CallError>, Duration)>>,
+    /// The messages in the client's read-ahead when the handler's call
+    /// ended.
+    read_ahead_at_outcome: Mutex<Option<usize>>,
     panicked: Mutex<bool>,
 }
 
@@ -66,6 +69,28 @@ pub(crate) struct Handlers {
     shared: Arc<Shared>,
     /// Pings sent and pongs received when the handler started.
     pings_before: Option<(usize, usize)>,
+    /// The second client of a scenario with two.
+    second: Option<Client>,
+    /// A handler blocks on a call that a full read-ahead holds up: its
+    /// read-ahead is read when the call ended, since the handler then
+    /// returns and the client reads on.
+    stuck_call: bool,
+}
+
+impl Handlers {
+    /// The messages in the read-ahead when a handler's call stuck behind a
+    /// full one ended; `None` in any other scenario.
+    pub(crate) async fn read_ahead_when_the_call_ended(&self) -> Option<usize> {
+        if !self.stuck_call {
+            return None;
+        }
+        let shared = Arc::clone(&self.shared);
+        wait_until("the handler's call ending", || {
+            shared.read_ahead_at_outcome.lock().unwrap().is_some()
+        })
+        .await;
+        *self.shared.read_ahead_at_outcome.lock().unwrap()
+    }
 }
 
 impl std::fmt::Debug for Handlers {
@@ -78,6 +103,7 @@ fn delivery(mode: &str) -> EventDelivery {
     match mode {
         "Task" => EventDelivery::Task,
         "Inline" => EventDelivery::Inline,
+        "Thread" => EventDelivery::Thread,
         mode => panic!("{mode} delivery comes with a later sub-increment"),
     }
 }
@@ -556,8 +582,24 @@ fn answered_those_pings(world: &mut ClientWorld, which: String) {
 
 /// Runs `wait` from the client handler at `connected`, recording its
 /// outcome and how long it took.
-fn a_handler_waiting_on<F>(world: &mut ClientWorld, mode: &str, wait: fn(Client) -> F)
-where
+fn a_handler_waiting_on<F>(
+    world: &mut ClientWorld,
+    mode: &str,
+    wait: impl Fn(Client) -> F + Send + 'static,
+) where
+    F: std::future::Future<Output = Result<(), CallError>> + 'static,
+{
+    a_handler_waiting_at(world, mode, "connected", wait);
+}
+
+/// Runs `wait` from the client handler at the event named `at`, recording
+/// its outcome and how long it took.
+fn a_handler_waiting_at<F>(
+    world: &mut ClientWorld,
+    mode: &str,
+    at: &'static str,
+    wait: impl Fn(Client) -> F + Send + 'static,
+) where
     F: std::future::Future<Output = Result<(), CallError>> + 'static,
 {
     let shared = Arc::clone(&world.handlers.shared);
@@ -566,7 +608,7 @@ where
         mode,
         Some(Box::new(move |event: ClientEvent| {
             record(&shared, client_name_of(&event), || {
-                if !matches!(event, ClientEvent::Connected { .. }) {
+                if event.name() != at {
                     return;
                 }
                 let client = shared
@@ -635,7 +677,7 @@ async fn outcome(world: &ClientWorld) -> (Result<(), CallError>, Duration) {
     shared.outcome.lock().unwrap().clone().expect("an outcome")
 }
 
-#[then(regex = r#"^the handler's call fails at once with a "would deadlock" error$"#)]
+#[then(regex = r#"^the handler's (?:call|ready\(\)) fails at once with a "would deadlock" error$"#)]
 async fn fails_with_would_deadlock(world: &mut ClientWorld) {
     let (result, took) = outcome(world).await;
     let error = result.expect_err("the call succeeded");
@@ -681,4 +723,196 @@ async fn client_handler_receives_disconnected(world: &mut ClientWorld, code: u32
             .any(|call| call.what == what)
     })
     .await;
+}
+
+#[when("the fake server answers the connect command, then the RPC command")]
+async fn answers_the_connect_then_the_rpc(world: &mut ClientWorld) {
+    // The fake server answers each RPC command as it reads it.
+    connected(world).await;
+}
+
+#[then("the handler's call succeeds")]
+async fn the_call_succeeds(world: &mut ClientWorld) {
+    let (result, _) = outcome(world).await;
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[given(
+    regex = r#"^a client with (\w+) delivery, subscribed to channel "(\w+)" on the fake server, whose subscription handler blocks on an RPC call of the client when it receives the publication at offset (\d+)$"#
+)]
+async fn a_subscription_handler_blocking_on_a_call(
+    world: &mut ClientWorld,
+    mode: String,
+    channel: String,
+    at: u64,
+) {
+    // Answered by a step, behind the publications.
+    world.fake().answer_rpc(Rpc::Ignore);
+    world.handlers.stuck_call = true;
+    let mut called = false;
+    subscribed_with_handler(world, &mode, &channel, false, move |shared, event| {
+        if let SubscriptionEvent::Publication(publication) = event
+            && offset(publication) == at
+            && !called
+        {
+            called = true;
+            let client = shared
+                .client
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(WeakClient::upgrade)
+                .expect("the client");
+            let started = Instant::now();
+            let outcome = block_on(client.rpc("m", b"{}".to_vec())).map(drop);
+            *shared.read_ahead_at_outcome.lock().unwrap() = Some(client.read_ahead().0);
+            *shared.outcome.lock().unwrap() = Some((outcome, started.elapsed()));
+        }
+    })
+    .await;
+}
+
+#[when(
+    regex = r#"^the fake server sends (\d+) publications of (\d+) bytes to "(\w+)", then answers the RPC command$"#
+)]
+async fn sends_publications_then_answers(
+    world: &mut ClientWorld,
+    count: u64,
+    size: usize,
+    channel: String,
+) {
+    for at in 1..=count {
+        world.fake().publish_sized(&channel, at, size);
+    }
+    let fake = world.fake();
+    wait_until("the RPC command", || !fake.rpc_commands().is_empty()).await;
+    let id = world.fake().rpc_commands()[0]["id"].clone();
+    world
+        .fake()
+        .send(&serde_json::json!({"id": id, "rpc": {"data": {}}}).to_string());
+}
+
+#[then(
+    regex = r#"^the handler's call fails with a "would deadlock" error before the configured timeout$"#
+)]
+async fn fails_with_would_deadlock_in_time(world: &mut ClientWorld) {
+    let (result, took) = outcome(world).await;
+    let error = result.expect_err("the call succeeded");
+    assert_eq!(
+        error.code,
+        ferrifuge::codes::error::WOULD_DEADLOCK,
+        "{error:?}"
+    );
+    assert!(took < super::test_config().timeout, "it took {took:?}");
+}
+
+#[then(regex = r"^the subscription handler then receives the other (\d+) publications in order$")]
+async fn receives_the_others_in_order(world: &mut ClientWorld, others: u64) {
+    let shared = Arc::clone(&world.handlers.shared);
+    let last = format!("publication {}", others + 1);
+    wait_until(&format!("the handler returning from {last}"), || {
+        shared
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.what == last)
+    })
+    .await;
+    let seen: Vec<String> = shared
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.what.clone())
+        .filter(|what| what.starts_with("publication "))
+        .collect();
+    let expected: Vec<String> = (1..=others + 1)
+        .map(|at| format!("publication {at}"))
+        .collect();
+    assert_eq!(seen, expected);
+}
+
+#[given(
+    regex = r#"^a client with (\w+) delivery and a subscription to channel "(\w+)", whose client handler blocks on the subscription's ready\(\) when it receives "connected"$"#
+)]
+fn a_handler_waiting_on_a_subscription(world: &mut ClientWorld, mode: String, channel: String) {
+    let of = channel.clone();
+    a_handler_waiting_on(world, &mode, move |client| {
+        let subscription = client.get_subscription(&of).expect("the subscription");
+        async move { subscription.ready().await }
+    });
+    let subscription = world
+        .client()
+        .new_subscription(channel)
+        .expect("no subscription to the channel yet");
+    world.subscription = Some(subscription);
+}
+
+#[when("the fake server answers the connect and subscribe commands")]
+async fn answers_the_connect_and_subscribe(world: &mut ClientWorld) {
+    // The fake server answers both as it reads them.
+    connected(world).await;
+}
+
+#[then(regex = r#"^then the subscription state becomes "(\w+)"$"#)]
+async fn the_subscription_state_becomes(world: &mut ClientWorld, state: String) {
+    let subscription = world.subscription().clone();
+    wait_until(&format!("the subscription {state}"), || {
+        format!("{:?}", subscription.state()).eq_ignore_ascii_case(&state)
+    })
+    .await;
+}
+
+#[given(
+    regex = r#"^a client with (\w+) delivery whose client handler blocks on the client's ready\(\) when it receives "connecting"$"#
+)]
+fn a_handler_waiting_on_the_client(world: &mut ClientWorld, mode: String) {
+    a_handler_waiting_at(world, &mode, "connecting", |client| async move {
+        client.ready().await
+    });
+}
+
+#[then("the handler's ready() resolves")]
+async fn ready_resolves(world: &mut ClientWorld) {
+    let (result, _) = outcome(world).await;
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[given(
+    regex = r"^two clients with (\w+) delivery connected to the fake server, the first's client handler blocking on an RPC call of the second when it receives an asynchronous message$"
+)]
+async fn two_clients(world: &mut ClientWorld, mode: String) {
+    // The second connects first: the fake server drives the latest
+    // connection, the first client's.
+    let second = Client::builder(world.server_endpoint())
+        .config(world.client_config())
+        .event_delivery(delivery(&mode))
+        .build()
+        .expect("a valid client configuration");
+    second.connect();
+    let state = second.clone();
+    wait_until("the second client connected", || {
+        state.state() == State::Connected
+    })
+    .await;
+    let other = second.clone();
+    a_handler_waiting_at(world, &mode, "message", move |_| {
+        let other = other.clone();
+        async move { other.rpc("m", b"{}".to_vec()).await.map(drop) }
+    });
+    world.handlers.second = Some(second);
+    world.client().connect();
+    connected(world).await;
+}
+
+#[when(
+    "the fake server sends an asynchronous message to the first client, then answers the second client's RPC command"
+)]
+fn sends_a_message(world: &mut ClientWorld) {
+    // The second client's RPC command is answered as the fake server reads
+    // it, on that client's connection.
+    world
+        .fake()
+        .send(r#"{"push":{"message":{"data":{"m":1}}}}"#);
 }
