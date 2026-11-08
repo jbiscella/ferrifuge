@@ -452,6 +452,8 @@ impl Shared {
         }
         drop(core);
         self.actions_queued.notify_one();
+        // A consumer left without a handler ends now (Codex, #169).
+        super::handler::wake_consumer(self);
     }
 
     /// Resolves once the driver's task has ended, however it ended (Block
@@ -515,6 +517,8 @@ impl Shared {
             // #141).
             Input::Close | Input::DriverDropped { .. } => self.feed(core, input),
             Input::EventTaken(_)
+            | Input::EventHanded(_)
+            | Input::HandlerPanicked { .. }
             | Input::Frame { .. }
             | Input::TransportClosed { .. }
             | Input::Reconnect
@@ -859,8 +863,10 @@ pub struct ClientBuilder {
     connector: Option<connector::Shared>,
     /// The runtime the client runs on; the current one otherwise.
     runtime: Option<Handle>,
-    /// The client's handler, set once it is built (Block 41b).
-    handler: Option<Box<dyn super::ClientHandler>>,
+    /// The client's handler, set once it is built (Block 41b); behind a
+    /// mutex so that the builder stays `Sync` for a handler that is only
+    /// `Send`.
+    handler: Option<Mutex<Box<dyn super::ClientHandler>>>,
     /// Where its handlers run (Block 41, D2).
     event_delivery: super::EventDelivery,
 }
@@ -1118,6 +1124,7 @@ impl ClientBuilder {
         let handler = self.handler.take();
         let client = Client::start(self)?;
         if let Some(handler) = handler {
+            let handler = handler.into_inner().unwrap_or_else(PoisonError::into_inner);
             super::handler::set_client_handler(&client.shared, handler);
         }
         Ok(client)
@@ -1127,7 +1134,7 @@ impl ClientBuilder {
     /// of a stream (Block 41, D1); see [`Client::set_handler`].
     #[must_use]
     pub fn handler(mut self, handler: impl super::ClientHandler) -> Self {
-        self.handler = Some(Box::new(handler));
+        self.handler = Some(Mutex::new(Box::new(handler)));
         self
     }
 
@@ -2634,6 +2641,7 @@ impl Drop for Ending {
         outboxes.subscriptions.values_mut().for_each(Outbox::close);
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
+        super::handler::wake_consumer(shared);
         // The final disconnect settled the calls it could; any other future
         // gets "client closed" rather than waiting forever (Block 33).
         lock(&shared.calls).clear();
@@ -4261,6 +4269,101 @@ mod tests {
         assert!(
             matches!(taken, Some(SubscriptionEvent::Publication(_))),
             "{taken:?}"
+        );
+        let mut core = lock(&client.shared().core);
+        assert_eq!(core.machine.state(), State::Connecting);
+        let shared = client.shared();
+        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect));
+        let again = core
+            .actions
+            .iter()
+            .rev()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a reconnect attempt");
+        core.actions.clear();
+        shared.handle(&mut core, Input::TransportOpened(again));
+        shared.handle(
+            &mut core,
+            Input::Frame {
+                transport: again,
+                data: br#"{"id":3,"connect":{"client":"c"}}"#.to_vec(),
+            },
+        );
+        // As the driver does before performing the actions (Block 36, D3).
+        shared.handle(&mut core, Input::Flush);
+        let sent: Vec<String> = core
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sent.iter()
+                .any(|frame| frame.contains(r#""recover":true"#) && frame.contains(r#""offset":1"#)),
+            "{sent:?}"
+        );
+    }
+
+    // Codex, #169: an event handed to a handler as a sleep is noticed moves
+    // its position as one taken does.
+    // Single-threaded runtime: the driver task cannot run in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_publication_handed_as_a_sleep_is_noticed_moves_its_position() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .recoverable(true)
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        subscription.set_handler(move |event: SubscriptionEvent| {
+            record.lock().unwrap().push(event.name());
+        });
+        subscription.subscribe();
+        // The consumer's steps, by hand: no task runs in between.
+        let hand = |shared: &Shared| {
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let Poll::Ready(Some(handed)) = super::super::handler::next(shared, &mut cx) else {
+                panic!("an event for the handler");
+            };
+            super::super::handler::deliver(shared, handed);
+        };
+        let frame = |data: &str| Input::Frame {
+            transport,
+            data: data.as_bytes().to_vec(),
+        };
+        {
+            let mut core = lock(&client.shared().core);
+            let shared = client.shared();
+            shared.handle(
+                &mut core,
+                frame(r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":0}}"#),
+            );
+            shared.handle(
+                &mut core,
+                frame(r#"{"push":{"channel":"news","pub":{"data":{"n":1},"offset":1}}}"#),
+            );
+        }
+        for _ in ["subscribing", "subscribed"] {
+            hand(client.shared());
+        }
+
+        slept(&mut lock(&client.shared().core), Duration::from_secs(70));
+        hand(client.shared());
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["subscribing", "subscribed", "publication"]
         );
         let mut core = lock(&client.shared().core);
         assert_eq!(core.machine.state(), State::Connecting);

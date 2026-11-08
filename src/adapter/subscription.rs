@@ -355,8 +355,9 @@ pub struct SubscriptionBuilder {
     get_data: Option<GetData>,
     get_token: Option<GetSubscriptionToken>,
     get_state: Option<GetState>,
-    /// Its handler, set once it is built (Block 41b).
-    handler: Option<Box<dyn super::SubscriptionHandler>>,
+    /// Its handler, set once it is built (Block 41b); behind a mutex so that
+    /// the builder stays `Sync` for a handler that is only `Send`.
+    handler: Option<std::sync::Mutex<Box<dyn super::SubscriptionHandler>>>,
 }
 
 /// The options' `Debug` output redacts the token.
@@ -556,6 +557,9 @@ impl SubscriptionBuilder {
         }
         drop(core);
         if let Some(handler) = self.handler {
+            let handler = handler
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             super::handler::set_subscription_handler(&self.shared, id, handler);
         }
         Ok(Subscription {
@@ -569,7 +573,7 @@ impl SubscriptionBuilder {
     /// instead of a stream (Block 41, D1); see [`Subscription::set_handler`].
     #[must_use]
     pub fn handler(mut self, handler: impl super::SubscriptionHandler) -> Self {
-        self.handler = Some(Box::new(handler));
+        self.handler = Some(std::sync::Mutex::new(Box::new(handler)));
         self
     }
 }
