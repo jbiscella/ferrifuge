@@ -368,6 +368,34 @@ jobs:
       - name: Examples
         run: cargo build --examples
 
+  # The sans-IO core builds for wasm32-unknown-unknown (Block 40, D1, D2):
+  # its clippy also refuses the std clock and thread calls that panic there.
+  # Nothing runs: the dev-dependencies do not build for wasm32 (D3).
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLIPPY_CONF_DIR: ci/wasm-clippy
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: The core alone
+        run: |
+          cargo clippy --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
+          cargo build --lib --target wasm32-unknown-unknown --no-default-features
+
+      - name: The core with test-util
+        run: |
+          cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features test-util -- -D warnings
+          cargo build --lib --target wasm32-unknown-unknown --no-default-features --features test-util
+
   # Mobile builds (Block 24, D1): the library and its unit tests build for
   # Android and iOS, with ring and with aws-lc-rs; nothing runs on a device.
   android:

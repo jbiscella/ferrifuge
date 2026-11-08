@@ -22,6 +22,8 @@ repository held while it carried that version, from the blocks of
   only, as a view of its one stream, which takes over from `events()` and
   back; the events it skips count as delivered as it passes them.
 
+- A wasm32-unknown-unknown build of the sans-IO core in CI (Block 40).
+
 - An injectable connector (Block 37b): `ClientBuilder::connector`, the
   `Connector` trait (implemented for closures and for an `Arc` of one),
   `ConnectedStream`, `Connecting` and `BoxError`, and `ferrifuge::http`, the
