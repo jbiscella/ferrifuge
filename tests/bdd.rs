@@ -456,6 +456,14 @@ const IMPLEMENTED: &[&str] = &[
     "A push with an unknown channel id is dropped",
     "Numeric channel ids are forgotten when the connection ends",
     "Channel compaction on a server without it changes nothing",
+    // Block 36a: automatic command batching.
+    "The core batches automatically only when its owner enables it",
+    "Automatic batching keeps the order of commands, send and pong included",
+    "Automatic batching splits at the frame cap",
+    "Automatic batching admits calls to the write queue as they are made",
+    "An explicit batch holds its commands across flushes",
+    "Commands refused with HTTP 413 are resent alone",
+    "A call abandoned before the flush is never sent",
     // Block 35c: publication channel, recovered publications.
     "A publication of a wildcard subscription carries its channel",
     "A publication of another channel does not move the stream position",
