@@ -95,7 +95,7 @@ pub use adapter::stalled_websocket_writes;
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use adapter::{
     Batch, BoxError, Client, ClientBuilder, ConnectedStream, Connecting, Connector, Proxy,
-    ProxyTarget, Subscription, SubscriptionBuilder,
+    ProxyTarget, Subscription, SubscriptionBuilder, WeakClient,
 };
 pub use call::{
     CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, JsonCallError,

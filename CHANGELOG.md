@@ -13,6 +13,10 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `Client: Clone` and weak handles (Block 41a): clones share one client;
+  `Client::downgrade` gives a `WeakClient` whose `upgrade` gives the client
+  while a clone lives.
+
 - An in-memory server double (Block 37c), behind `test-util` with `tokio`:
   `test_util::Server` and `test_util::Command`. The real client runs
   against it through its connector, without a socket; the test sets its
@@ -73,6 +77,9 @@ repository held while it carried that version, from the blocks of
   in the `codes` documentation and the README's "Codes" section.
 
 ### Changed
+
+- Dropping a client closes it only once its last clone is dropped (Block
+  41a); with no clone, as before.
 
 - The crate's own test hooks (`Machine::with_seed` and the others) move from
   the `test-util` feature to the private `__test-hooks` (Block 37a); they

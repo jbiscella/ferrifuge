@@ -14,7 +14,7 @@ mod subscription;
 mod tls;
 mod transport;
 
-pub use client::{Batch, Client, ClientBuilder};
+pub use client::{Batch, Client, ClientBuilder, WeakClient};
 pub use connector::{BoxError, ConnectedStream, Connecting, Connector};
 pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};

@@ -42,9 +42,54 @@ use tracing::{debug, trace, warn};
 
 /// Centrifugo client running on tokio.
 ///
-/// Dropping the client disconnects it.
+/// Clones share one client and its connection. Dropping the last clone
+/// closes the client, as [`Client::close`] does without waiting (Block 33);
+/// a [`WeakClient`] from [`Client::downgrade`] does not keep it alive
+/// (Block 41, D5).
+#[derive(Clone)]
 pub struct Client {
     shared: Arc<Shared>,
+    owner: Arc<Owner>,
+}
+
+/// What the clones of a client own together: the last one dropped shuts the
+/// client down. The driver and the subscriptions hold `Shared`, not this.
+struct Owner {
+    shared: Arc<Shared>,
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.shared.shut_down();
+    }
+}
+
+/// A handle that does not keep its client alive, from
+/// [`Client::downgrade`] (Block 41, D5), as tokio's `WeakSender`: for the
+/// state of an application, or a handler, that must not hold the client.
+#[derive(Clone)]
+pub struct WeakClient {
+    owner: std::sync::Weak<Owner>,
+}
+
+impl WeakClient {
+    /// The client, while one of its clones is alive; `None` once the last
+    /// one was dropped. A client closed with [`Client::close`] while clones
+    /// live is still given, closed.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<Client> {
+        let owner = self.owner.upgrade()?;
+        Some(Client {
+            shared: Arc::clone(&owner.shared),
+            owner,
+        })
+    }
+}
+
+impl std::fmt::Debug for WeakClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakClient").finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for Client {
@@ -1184,7 +1229,25 @@ impl Client {
         if shared.closed.load(Ordering::Acquire) {
             return Err(runtime_error("the tokio runtime has shut down"));
         }
-        Ok(Self { shared })
+        Ok(Self::owning(shared))
+    }
+
+    /// The first clone of the client `shared` drives.
+    fn owning(shared: Arc<Shared>) -> Self {
+        Self {
+            owner: Arc::new(Owner {
+                shared: Arc::clone(&shared),
+            }),
+            shared,
+        }
+    }
+
+    /// A handle that does not keep this client alive (Block 41, D5).
+    #[must_use]
+    pub fn downgrade(&self) -> WeakClient {
+        WeakClient {
+            owner: Arc::downgrade(&self.owner),
+        }
     }
 
     pub(super) fn shared(&self) -> &Arc<Shared> {
@@ -1288,10 +1351,11 @@ impl Client {
     /// # Errors
     ///
     /// Code 3 "disconnected" (`codes::error::DISCONNECTED`) at once when the
-    /// client is disconnected, `connect()` never called included, or closed
-    /// (its runtime shut down); and when the client enters `disconnected`
-    /// while connecting: `disconnect()`, a terminal code, a denied token,
-    /// the client dropped.
+    /// client is disconnected, `connect()` never called included; and when
+    /// the client enters `disconnected` while connecting: `disconnect()`, a
+    /// terminal code, a denied token. Code 4 "client closed"
+    /// (`codes::error::CLIENT_CLOSED`) when the client is closed, its last
+    /// clone dropped or its runtime shut down included (Block 33).
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
         ready::ready(&self.shared, Of::Client)
     }
@@ -1725,12 +1789,6 @@ impl Batch {
 impl Drop for Batch {
     fn drop(&mut self) {
         self.end();
-    }
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.shared.shut_down();
     }
 }
 
@@ -2821,6 +2879,14 @@ mod tests {
         spawnable(&client.publish_json("news", &local));
         let subscription = client.new_subscription("news").expect("a new channel");
         spawnable(&subscription.publish_json(&local));
+    }
+
+    // Clones and weak handles cross tasks and threads (Block 41, D5).
+    #[test]
+    fn clients_and_weak_handles_are_send_and_sync() {
+        fn shared<T: Send + Sync + Clone>() {}
+        shared::<Client>();
+        shared::<WeakClient>();
     }
 
     // A batch can be stopped from another task (Block 18, D1).

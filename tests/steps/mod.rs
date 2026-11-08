@@ -24,6 +24,7 @@ mod auto_batching;
 mod backoff;
 mod batching;
 mod calls;
+mod clones;
 mod close;
 mod codes;
 mod codes_table;
@@ -215,6 +216,8 @@ pub(crate) struct ClientWorld {
     pub(crate) doubles: double::Doubles,
     /// Centrifugo's side and the double's, compared (Block 37c).
     pub(crate) sides: Vec<double::Side>,
+    /// The clone and weak handle of a Block 41a scenario.
+    pub(crate) clones: clones::Clones,
     /// What a Block 38 scenario holds.
     pub(crate) json_helpers: json_helpers::JsonHelpers,
     /// The tag filter of a Block 35a scenario.

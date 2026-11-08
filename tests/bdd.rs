@@ -512,6 +512,10 @@ const IMPLEMENTED: &[&str] = &[
     "A value that cannot be encoded fails the call at once and sends nothing",
     "A typed call is made when the method returns",
     "A publication's data decodes as the application's type, or says why not",
+    // Block 41a: clones and weak handles.
+    "Dropping one clone of a client leaves it running",
+    "A weak handle upgrades only while a clone of the client is alive",
+    "close on one clone closes every clone",
     // Block 39: a publications-only stream.
     "The publications stream yields only the subscription's publications",
     "Events the publications stream skips hold the connection until it is read",
