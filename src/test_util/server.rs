@@ -415,7 +415,7 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
         );
         id
     };
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(message) = queue.recv().await {
             let close = matches!(message, Message::Close(_));
             if sink.send(message).await.is_err() || close {
@@ -431,48 +431,64 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
         if !lock(&shared).connections.contains_key(&id) {
             break;
         }
-        // The state is locked per command, so that an RPC handler runs with
-        // it unlocked.
-        match message {
-            // As Centrifugo, nothing after a refused connect in its frame is
-            // handled (Block 36, D7).
-            // Command by command, as the crate's codec reads replies: data
-            // may hold newlines (Codex on #161).
-            Message::Text(frame) => {
-                for raw in
-                    serde_json::Deserializer::from_str(frame.as_str()).into_iter::<&RawValue>()
-                {
-                    let Ok(raw) = raw else {
-                        break;
-                    };
-                    let Ok(command) = serde_json::from_str::<Value>(raw.get()) else {
-                        continue;
-                    };
-                    let handled = handle_json(&mut lock(&shared), id, &command, raw.get());
-                    if finish(&shared, id, handled) {
-                        break;
-                    }
-                }
-            }
-            Message::Binary(mut frame) => {
-                while !frame.is_empty() {
-                    let Ok(command) = pb::Command::decode_length_delimited(&mut frame) else {
-                        break;
-                    };
-                    let handled = handle_protobuf(&mut lock(&shared), id, command);
-                    if finish(&shared, id, handled) {
-                        break;
-                    }
-                }
-            }
-            Message::Close(_) => break,
-            _ => {}
+        if matches!(message, Message::Close(_)) {
+            break;
         }
+        handle_frame(&shared, id, message);
     }
     if let Some(shared) = state.upgrade() {
         lock(&shared).connections.remove(&id);
     }
-    writer.abort();
+    // With its sender gone, the writer ends once it has written what is
+    // queued, a close the test asked for included (Codex on #161); a client
+    // that stopped reading cannot hold it longer than this.
+    if tokio::time::timeout(WRITER_DRAIN, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
+}
+
+/// How long a connection's writer may take to write what is queued once
+/// the connection ends.
+const WRITER_DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Handles the commands of a frame of connection `id`, in order.
+fn handle_frame(shared: &Mutex<State>, id: u64, message: Message) {
+    // The state is locked per command, so that an RPC handler runs with it
+    // unlocked. As Centrifugo, nothing after a refused connect in its frame
+    // is handled (Block 36, D7).
+    match message {
+        // Command by command, as the crate's codec reads replies: data may
+        // hold newlines (Codex on #161).
+        Message::Text(frame) => {
+            for raw in serde_json::Deserializer::from_str(frame.as_str()).into_iter::<&RawValue>() {
+                let Ok(raw) = raw else {
+                    break;
+                };
+                let Ok(command) = serde_json::from_str::<Value>(raw.get()) else {
+                    continue;
+                };
+                let handled = handle_json(&mut lock(shared), id, &command, raw.get());
+                if finish(shared, id, handled) {
+                    break;
+                }
+            }
+        }
+        Message::Binary(mut frame) => {
+            while !frame.is_empty() {
+                let Ok(command) = pb::Command::decode_length_delimited(&mut frame) else {
+                    break;
+                };
+                let handled = handle_protobuf(&mut lock(shared), id, command);
+                if finish(shared, id, handled) {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Marks, inside a reply's `Value`, data that [`text`] writes verbatim: as
@@ -1647,6 +1663,58 @@ mod tests {
             "not refused"
         );
         assert!(!state.connections[&0].subscribed.contains("news"));
+    }
+
+    // Codex on #161: a close the test asks for reaches the client, even when
+    // a command is read before the writer runs.
+    #[tokio::test]
+    async fn a_close_asked_for_is_written_before_the_connection_ends() {
+        use futures_util::StreamExt as _;
+
+        let server = Server::new();
+        let inside = server.clone();
+        server.on_rpc(move |method, _| {
+            if method == "bye" {
+                inside.disconnect(3500, "bye");
+            }
+            Ok(b"{}".to_vec())
+        });
+        // One command per frame: "next" is already read when "bye" is
+        // handled, before the writer runs.
+        let client = crate::Client::builder(server.endpoint())
+            .config(crate::Config::default().batch_frame_bytes(1))
+            .connector(server.connector())
+            .build()
+            .unwrap();
+        let mut events = client.events();
+        client.connect();
+        let connected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                events.next().await,
+                Some(crate::ClientEvent::Connected { .. })
+            ) {}
+        })
+        .await;
+        assert!(connected.is_ok(), "not connected");
+
+        let bye = client.rpc("bye", b"{}".to_vec());
+        let next = client.rpc("next", b"{}".to_vec());
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.next().await {
+                    Some(crate::ClientEvent::Disconnected { code, .. }) => return Some(code),
+                    Some(crate::ClientEvent::Connecting { code, .. }) if code != 0 => {
+                        return None;
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        drop((bye, next));
+
+        assert_eq!(ended.ok().flatten(), Some(3500));
     }
 
     // Codex on #161: an RPC handler may use the double, whose state is not
