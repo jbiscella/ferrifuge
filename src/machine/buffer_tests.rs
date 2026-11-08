@@ -166,6 +166,45 @@ fn a_call_abandoned_or_settled_before_the_flush_is_not_sent() {
     assert_eq!(flushed, [r#"{"id":3,"rpc":{"method":"b","data":{}}}"#]);
 }
 
+/// The room of a buffered call abandoned before the flush goes at once
+/// to the call waiting for it (Codex on #150).
+#[test]
+fn a_call_abandoned_before_the_flush_frees_its_room_at_once() {
+    let config = Config::default().write_queue_bytes(60);
+    let (mut machine, _) = connected(config, vec![TransportKind::WebSocket], r#"{"client":"c"}"#);
+    let (abandoned, _) = call(&mut machine, rpc("a"));
+    // The first call fills the queue: the second waits for room.
+    call(&mut machine, rpc("b"));
+
+    machine.handle(Input::CallAbandoned(abandoned));
+    let flushed = sent(&machine.handle(Input::Flush));
+
+    assert_eq!(flushed, [r#"{"id":3,"rpc":{"method":"b","data":{}}}"#]);
+}
+
+/// A buffered call that settles before the flush, by its timeout, leaves
+/// the buffer and its room too.
+#[test]
+fn a_call_timed_out_before_the_flush_leaves_the_buffer() {
+    let config = Config::default().write_queue_bytes(60);
+    let (mut machine, _) = connected(config, vec![TransportKind::WebSocket], r#"{"client":"c"}"#);
+    let (timed_out, _) = call(&mut machine, rpc("a"));
+    call(&mut machine, rpc("b"));
+
+    let settled = machine.handle(Input::CallTimerFired(timed_out, CallTimer::Reply));
+    let flushed = sent(&machine.handle(Input::Flush));
+
+    assert!(
+        settled.iter().any(|action| matches!(
+            action,
+            Action::CallSettled { call, result: Err(error) }
+                if *call == timed_out && error.code == codes::error::TIMEOUT
+        )),
+        "{settled:?}"
+    );
+    assert_eq!(flushed, [r#"{"id":3,"rpc":{"method":"b","data":{}}}"#]);
+}
+
 #[test]
 fn teardown_drops_the_buffer_and_fails_its_calls_with_connection_closed() {
     let (mut machine, transport) = websocket();

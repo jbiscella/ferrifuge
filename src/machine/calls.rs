@@ -287,11 +287,6 @@ impl Machine {
         }
     }
 
-    /// Whether call `id` is still awaited: neither settled nor abandoned.
-    pub(super) fn awaits_call(&self, id: CallId) -> bool {
-        self.calls.by_id.contains_key(&id)
-    }
-
     /// `bytes` of calls in the output buffer count against the write queue
     /// from now (Block 36, D1).
     pub(super) fn queue_bytes(&mut self, bytes: usize) {
@@ -375,7 +370,7 @@ impl Machine {
 
     /// Sends the calls waiting for room, in order, while they fit: each
     /// waiter is looked at once it is first in line.
-    fn admit_waiting(&mut self) {
+    pub(super) fn admit_waiting(&mut self) {
         if !self.can_send() {
             return;
         }
@@ -558,6 +553,7 @@ impl Machine {
     pub(super) fn call_abandoned(&mut self, id: CallId) {
         if let Some(call) = self.calls.by_id.remove(&id) {
             self.calls.room.remove(&id);
+            self.unbuffer_call(id);
             if let Phase::Sent(command) = call.phase {
                 self.calls.by_command.remove(&command);
             }
@@ -682,6 +678,7 @@ impl Machine {
             self.actions.push(Action::CancelCallTimer(id, timer));
         }
         self.actions.push(Action::CallSettled { call: id, result });
+        self.unbuffer_call(id);
     }
 }
 

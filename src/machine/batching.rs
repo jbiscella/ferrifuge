@@ -248,9 +248,25 @@ impl Machine {
         }
     }
 
+    /// Call `id` ended before its frame was flushed: its command leaves the
+    /// output buffer, never sent, and its room in the write queue goes to
+    /// the calls waiting for room (Block 36, D1; Codex on #150).
+    pub(super) fn unbuffer_call(&mut self, id: CallId) {
+        let Some(index) = self
+            .batching
+            .buffer
+            .iter()
+            .position(|piece| piece.call == Some(id))
+        else {
+            return;
+        };
+        let piece = self.batching.buffer.remove(index);
+        self.unqueue_bytes(piece.queued);
+        self.admit_waiting();
+    }
+
     /// Sends the output buffer in frames, in order, within
-    /// `Config::batch_frame_bytes`; a call settled or abandoned meanwhile
-    /// is left out (Block 36, D1).
+    /// `Config::batch_frame_bytes` (Block 36, D1).
     pub(super) fn flush(&mut self) {
         let buffer = std::mem::take(&mut self.batching.buffer);
         let Some(transport) = self.transport else {
@@ -260,10 +276,6 @@ impl Machine {
         let mut frame: Vec<Buffered> = Vec::new();
         let mut size = 0;
         for piece in buffer {
-            if piece.call.is_some_and(|call| !self.awaits_call(call)) {
-                self.unqueue_bytes(piece.queued);
-                continue;
-            }
             let apart = piece.alone || frame.last().is_some_and(|last| last.alone);
             if !frame.is_empty()
                 && (apart || self.frame_bytes(frame.len() + 1, size + piece.size) > cap)
