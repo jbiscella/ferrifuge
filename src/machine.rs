@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod batching;
+#[cfg(test)]
+mod buffer_tests;
 mod calls;
 #[cfg(test)]
 mod close_tests;
