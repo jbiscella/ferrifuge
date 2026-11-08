@@ -15,7 +15,7 @@ use ferrifuge::{
 
 use super::delivery::{offset, wait_until};
 use super::{ClientWorld, recorded};
-use crate::support::fake_server::{Announce, Rpc};
+use crate::support::fake_server::{Announce, FakeServer, Rpc};
 
 /// A handler call: what it was for, and when it ran.
 #[derive(Debug, Clone)]
@@ -69,8 +69,8 @@ pub(crate) struct Handlers {
     shared: Arc<Shared>,
     /// Pings sent and pongs received when the handler started.
     pings_before: Option<(usize, usize)>,
-    /// The second client of a scenario with two.
-    second: Option<Client>,
+    /// The second client of a scenario with two, and its fake server.
+    second: Option<(Client, FakeServer)>,
     /// A handler blocks on a call that a full read-ahead holds up: its
     /// read-ahead is read when the call ended, since the handler then
     /// returns and the client reads on.
@@ -883,9 +883,11 @@ async fn ready_resolves(world: &mut ClientWorld) {
     regex = r"^two clients with (\w+) delivery connected to the fake server, the first's client handler blocking on an RPC call of the second when it receives an asynchronous message$"
 )]
 async fn two_clients(world: &mut ClientWorld, mode: String) {
-    // The second connects first: the fake server drives the latest
-    // connection, the first client's.
-    let second = Client::builder(world.server_endpoint())
+    // The second client has a fake server instance of its own: one
+    // instance keeps only its latest connection, and the first client's
+    // would close the second's.
+    let fake = FakeServer::start(Announce::default()).await;
+    let second = Client::builder(format!("ws://{}/connection/websocket", fake.address()))
         .config(world.client_config())
         .event_delivery(delivery(&mode))
         .build()
@@ -901,7 +903,7 @@ async fn two_clients(world: &mut ClientWorld, mode: String) {
         let other = other.clone();
         async move { other.rpc("m", b"{}".to_vec()).await.map(drop) }
     });
-    world.handlers.second = Some(second);
+    world.handlers.second = Some((second, fake));
     world.client().connect();
     connected(world).await;
 }
@@ -910,8 +912,8 @@ async fn two_clients(world: &mut ClientWorld, mode: String) {
     "the fake server sends an asynchronous message to the first client, then answers the second client's RPC command"
 )]
 fn sends_a_message(world: &mut ClientWorld) {
-    // The second client's RPC command is answered as the fake server reads
-    // it, on that client's connection.
+    // The second client's RPC command is answered as its fake server reads
+    // it.
     world
         .fake()
         .send(r#"{"push":{"message":{"data":{"m":1}}}}"#);
