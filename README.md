@@ -513,6 +513,29 @@ has not taken earlier events, so call results are not ordered with events.
 Dropping the future abandons the call: one still waiting for the connection
 is never sent.
 
+### Batching
+
+The client batches by itself: the commands made before its driver next runs,
+from any task, go out together, in the order they were made, in frames, or
+emulation requests over http_stream and sse, of at most
+`Config::batch_frame_bytes`. There is no delay: an idle client sends a call
+at once. A `batch_frame_bytes` of 1 sends every command alone.
+
+An application can also hold its calls and subscriptions for longer, until
+it stops a batch:
+
+```rust
+let batch = client.start_batching();
+let rpc = client.rpc("echo", br#"{"n":1}"#.to_vec());
+let publish = client.publish("news", br#"{"n":2}"#.to_vec());
+batch.stop(); // or drop it
+let (rpc, publish) = (rpc.await?, publish.await?);
+```
+
+A machine of the sans-IO core batches only when built with
+`Machine::with_automatic_batching`; its owner then feeds `Input::Flush`
+once it has fed the inputs it has, before performing the actions.
+
 ### Transport fallback
 
 To fall back to http_stream, then sse, where websocket is blocked, give the

@@ -27,9 +27,9 @@ pub(crate) struct Batching {
     batches: BTreeMap<String, Batch>,
     /// Calls of a @D or @B scenario, in the order they were made, each
     /// giving its error code when it fails.
-    calls: Vec<JoinHandle<Result<(), u32>>>,
+    pub(super) calls: Vec<JoinHandle<Result<(), u32>>>,
     /// Commands the fake server had received when the batch started.
-    received_at_start: usize,
+    pub(super) received_at_start: usize,
 }
 
 /// A timer the simulated clock runs.
@@ -710,7 +710,7 @@ fn start_batch(world: &mut ClientWorld) {
     world.batching.batches.insert(String::new(), batch);
 }
 
-fn spawn_call<F, T>(world: &mut ClientWorld, call: F)
+pub(super) fn spawn_call<F, T>(world: &mut ClientWorld, call: F)
 where
     F: std::future::Future<Output = Result<T, CallError>> + Send + 'static,
 {

@@ -464,6 +464,10 @@ const IMPLEMENTED: &[&str] = &[
     "An explicit batch holds its commands across flushes",
     "Commands refused with HTTP 413 are resent alone",
     "A call abandoned before the flush is never sent",
+    "A burst of calls goes out in one frame",
+    "A burst of subscribes goes out in one frame",
+    "Calls a new connection releases go out together",
+    "A burst of publishes reaches Centrifugo in one frame",
     // Block 35c: publication channel, recovered publications.
     "A publication of a wildcard subscription carries its channel",
     "A publication of another channel does not move the stream position",

@@ -146,6 +146,13 @@ pub(crate) struct AutoBatching {
     frame: Option<ferrifuge::machine::FrameId>,
     /// The emulation request a step saw sent, for the server to refuse.
     request: Option<Vec<u8>>,
+    /// The runtime of a @D scenario's client.
+    single: Option<Single>,
+    /// The outcome of an awaited call, how long it took, and how many
+    /// commands the fake server had before it.
+    awaited: Option<(Result<(), u32>, std::time::Duration, usize)>,
+    /// The frames the counting server had read before a step's calls.
+    frames_before: Option<u64>,
 }
 
 #[when(regex = r#"^the application calls RPC "(\w+)", then RPC "(\w+)"$"#)]
@@ -424,4 +431,342 @@ fn one_frame_without(world: &mut ClientWorld, sent: String, abandoned: String) {
         .collect();
     assert_eq!(frames, [[format!("rpc {sent}")]]);
     assert!(!frames.concat().contains(&format!("rpc {abandoned}")));
+}
+
+// @D: a tokio client on a current-thread runtime, against the fake server.
+
+/// A current-thread runtime driven by a thread of its own, so that a step
+/// can block it while it makes calls: the client's driver then runs only
+/// once they are all made.
+#[derive(Debug)]
+pub(crate) struct Single {
+    handle: tokio::runtime::Handle,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Single {
+    fn start() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime");
+        let handle = runtime.handle().clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = runtime.block_on(stopped);
+        });
+        Self {
+            handle,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+
+    /// Blocks the runtime's thread until the guard is dropped.
+    fn pause(&self) -> std::sync::mpsc::Sender<()> {
+        let (started, running) = std::sync::mpsc::channel();
+        let (resume, paused) = std::sync::mpsc::channel::<()>();
+        self.handle.spawn(async move {
+            let _ = started.send(());
+            // Blocking on purpose: nothing else on this runtime may run.
+            let _ = paused.recv();
+        });
+        running.recv().expect("the runtime runs the pause");
+        resume
+    }
+}
+
+impl Drop for Single {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The scenario's client, built on a [`Single`] runtime, connected to the
+/// fake server, which announces no pings.
+async fn a_single_runtime_client(world: &mut ClientWorld, config: Config) {
+    world
+        .restart_fake(crate::support::fake_server::Announce::default())
+        .await;
+    let single = Single::start();
+    let builder = ferrifuge::Client::builder(world.server_endpoint())
+        .config(config)
+        .runtime(single.handle.clone());
+    world.auto_batching.single = Some(single);
+    world.build_client(builder);
+    super::transports::connect_and_wait(world).await;
+}
+
+/// The fake server's commands from `start` on, once `count` came, each
+/// with the frame it arrived in.
+async fn received_from(world: &ClientWorld, start: usize, count: usize) -> Vec<(Value, usize)> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let received = world.fake().received_with_frames();
+            if received.len() >= start + count {
+                return received[start..].to_vec();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the commands")
+}
+
+#[given(
+    regex = r"^a client on a current-thread runtime with a timeout of (\d+) s, connected to the fake server, which sends no pings$"
+)]
+async fn a_client_on_a_single_runtime(world: &mut ClientWorld, seconds: u64) {
+    let mut config = world.client_config();
+    config.timeout = std::time::Duration::from_secs(seconds);
+    a_single_runtime_client(world, config).await;
+}
+
+#[given(
+    "a client on a current-thread runtime, connected to the fake server, with three subscriptions not subscribed"
+)]
+async fn a_single_runtime_client_with_subscriptions(world: &mut ClientWorld) {
+    let config = world.client_config();
+    a_single_runtime_client(world, config).await;
+    for channel in ["a", "b", "c"] {
+        let subscription = world
+            .client()
+            .new_subscription(channel)
+            .expect("a new channel");
+        world.named_subscriptions.push(subscription);
+    }
+}
+
+#[when(
+    regex = r#"^the application makes RPC "(\w+)", publishes (\{.*\}) to channel "(\w+)" and requests the history of channel "(\w+)", without yielding between the calls$"#
+)]
+fn a_burst_of_calls(
+    world: &mut ClientWorld,
+    method: String,
+    data: String,
+    channel: String,
+    history: String,
+) {
+    world.batching.received_at_start = world.fake().received().len();
+    let single = world
+        .auto_batching
+        .single
+        .as_ref()
+        .expect("a current-thread runtime");
+    let paused = single.pause();
+    let rpc = world.client().rpc(method, b"{}".to_vec());
+    let publish = world.client().publish(channel, data.into_bytes());
+    let history = world
+        .client()
+        .history(history, ferrifuge::HistoryOptions::default());
+    drop(paused);
+    super::batching::spawn_call(world, rpc);
+    super::batching::spawn_call(world, publish);
+    super::batching::spawn_call(world, history);
+}
+
+#[when(
+    "the application calls subscribe on the three subscriptions, without yielding between the calls"
+)]
+fn a_burst_of_subscribes(world: &mut ClientWorld) {
+    world.batching.received_at_start = world.fake().received().len();
+    let single = world
+        .auto_batching
+        .single
+        .as_ref()
+        .expect("a current-thread runtime");
+    let paused = single.pause();
+    for subscription in &world.named_subscriptions {
+        subscription.subscribe();
+    }
+    drop(paused);
+}
+
+#[then(
+    "the fake server receives one frame carrying the three subscribe commands, in the order of the calls"
+)]
+async fn one_frame_of_three_subscribes(world: &mut ClientWorld) {
+    let received = received_from(world, world.batching.received_at_start, 3).await;
+    let channels: Vec<&str> = received
+        .iter()
+        .map(|(command, _)| command["subscribe"]["channel"].as_str().unwrap_or("other"))
+        .collect();
+    assert_eq!(channels, ["a", "b", "c"], "{received:?}");
+    assert!(
+        received.iter().all(|(_, frame)| *frame == received[0].1),
+        "{received:?}"
+    );
+}
+
+#[when(regex = r#"^the application then calls RPC "(\w+)" and awaits it$"#)]
+async fn then_one_rpc(world: &mut ClientWorld, method: String) {
+    let start = world.fake().received().len();
+    let made = std::time::Instant::now();
+    let result = world.client().rpc(method, b"{}".to_vec()).await;
+    world.auto_batching.awaited = Some((
+        result.map(|_| ()).map_err(|error| error.code),
+        made.elapsed(),
+        start,
+    ));
+}
+
+#[then(
+    regex = r"^the call returns the fake server's reply within (\d+) s, its command alone in its frame$"
+)]
+async fn returned_alone(world: &mut ClientWorld, seconds: u64) {
+    let (result, took, start) = world.auto_batching.awaited.expect("an awaited call");
+    assert_eq!(result, Ok(()));
+    assert!(took < std::time::Duration::from_secs(seconds), "{took:?}");
+    let received = received_from(world, start, 1).await;
+    let frame = received[0].1;
+    let all = world.fake().received_with_frames();
+    let in_frame = all.iter().filter(|(_, of)| *of == frame).count();
+    assert_eq!(in_frame, 1, "{received:?}");
+}
+
+#[given("a client configured with the fake server's endpoint, not connected")]
+fn a_client_not_connected(world: &mut ClientWorld) {
+    let endpoint = world.server_endpoint();
+    world.new_client(endpoint);
+}
+
+#[when(regex = r#"^the application calls RPC "(\w+)", RPC "(\w+)" and RPC "(\w+)"$"#)]
+fn three_rpcs(world: &mut ClientWorld, a: String, b: String, c: String) {
+    for method in [a, b, c] {
+        let rpc = world.client().rpc(method, b"{}".to_vec());
+        super::batching::spawn_call(world, rpc);
+    }
+}
+
+#[then(
+    "after the connect reply the fake server receives one frame carrying the three rpc commands, in the order of the calls"
+)]
+async fn one_frame_of_three_rpcs(world: &mut ClientWorld) {
+    let received = received_from(world, 0, 4).await;
+    assert!(received[0].0["connect"].is_object(), "{received:?}");
+    let rpcs = &received[1..];
+    let methods: Vec<&str> = rpcs
+        .iter()
+        .map(|(command, _)| command["rpc"]["method"].as_str().unwrap_or("other"))
+        .collect();
+    assert_eq!(methods, ["a", "b", "c"], "{received:?}");
+    assert!(
+        rpcs.iter().all(|(_, frame)| *frame == rpcs[0].1) && rpcs[0].1 != received[0].1,
+        "{received:?}"
+    );
+}
+
+// @A: a Centrifugo server of its own, counting the frames it reads.
+
+/// The @A server with Prometheus metrics, pinging rarely, so that no pong
+/// joins the frames a scenario counts.
+async fn a_counting_server(world: &mut ClientWorld) -> String {
+    let mut env: Vec<(&str, &str)> = crate::SERVER_A.to_vec();
+    env.extend([
+        ("CENTRIFUGO_PROMETHEUS_ENABLED", "true"),
+        ("CENTRIFUGO_CLIENT_PING_INTERVAL", "120s"),
+        ("CENTRIFUGO_CLIENT_PONG_TIMEOUT", "10s"),
+    ]);
+    let server = crate::support::centrifugo::Centrifugo::start(&env).await;
+    let endpoint = server.websocket_url();
+    world.server = Some(server);
+    endpoint
+}
+
+#[given(
+    regex = r#"^a Centrifugo server of its own with Prometheus metrics, and a client on a current-thread runtime subscribed to channel "(\w+)" on it$"#
+)]
+async fn a_client_on_a_counting_server(world: &mut ClientWorld, channel: String) {
+    let endpoint = a_counting_server(world).await;
+    let single = Single::start();
+    let builder = ferrifuge::Client::builder(endpoint)
+        .config(world.client_config())
+        .runtime(single.handle.clone());
+    world.auto_batching.single = Some(single);
+    world.build_client(builder);
+    super::transports::connect_and_wait(world).await;
+    let subscription = world
+        .client()
+        .new_subscription(channel)
+        .expect("a new channel");
+    world.track_subscription(subscription);
+    super::subscriptions::subscribe(world).await;
+    super::subscriptions::expect_subscription_event(world, "subscribed", false).await;
+}
+
+#[when(
+    regex = r#"^the application publishes (\{.*\}), (\{.*\}) and (\{.*\}) to channel "(\w+)", without yielding between the calls$"#
+)]
+async fn a_burst_of_publishes(
+    world: &mut ClientWorld,
+    a: String,
+    b: String,
+    c: String,
+    channel: String,
+) {
+    let before = world
+        .server
+        .as_ref()
+        .expect("the counting server")
+        .websocket_frames_received()
+        .await;
+    world.auto_batching.frames_before = Some(before);
+    let single = world
+        .auto_batching
+        .single
+        .as_ref()
+        .expect("a current-thread runtime");
+    let paused = single.pause();
+    let publishes: Vec<_> = [a, b, c]
+        .into_iter()
+        .map(|data| world.client().publish(channel.clone(), data.into_bytes()))
+        .collect();
+    drop(paused);
+    for publish in publishes {
+        super::batching::spawn_call(world, publish);
+    }
+}
+
+#[then("each publish succeeds")]
+async fn each_publish_succeeds(world: &mut ClientWorld) {
+    for call in std::mem::take(&mut world.batching.calls) {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+            .await
+            .expect("the publish settles")
+            .expect("the publish task");
+        assert_eq!(result, Ok(()), "a publish failed");
+    }
+}
+
+#[then(
+    regex = r"^the subscription receives the publications (\{.*\}), (\{.*\}) and (\{.*\}), in that order$"
+)]
+async fn receives_the_three(world: &mut ClientWorld, a: String, b: String, c: String) {
+    for expected in [a, b, c] {
+        let publication = super::subscriptions::next_publication(world, false).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&publication.data).expect("JSON"),
+            serde_json::from_str::<Value>(&expected).expect("JSON")
+        );
+    }
+}
+
+#[then(
+    regex = r"^the server's count of websocket frames received grew by exactly (\d+) during the publishes$"
+)]
+async fn frames_grew_by(world: &mut ClientWorld, count: u64) {
+    let before = world.auto_batching.frames_before.expect("a count before");
+    let after = world
+        .server
+        .as_ref()
+        .expect("the counting server")
+        .websocket_frames_received()
+        .await;
+    assert_eq!(after - before, count);
 }
