@@ -1385,8 +1385,11 @@ impl Machine {
     /// and subscribed subscriptions subscribe again on the next connection
     /// (spec, "Subscription states"); `reconnect` when the client
     /// reconnects, which keeps each subscription's refresh timer (Block 25,
-    /// D3).
-    pub(super) fn subscriptions_disconnected(&mut self, reconnect: bool) {
+    /// D3). A subscribe flow waiting for its data, token or getState
+    /// callback stays in flight, and the answer is used (Block 42, D11),
+    /// unless `invalidated` (disconnect code 3014): what was asked before
+    /// the invalidation is not used (Block 11).
+    pub(super) fn subscriptions_disconnected(&mut self, reconnect: bool, invalidated: bool) {
         for (id, _) in self
             .subscriptions
             .subscribes
@@ -1416,11 +1419,13 @@ impl Machine {
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;
-            if let Some(fetch) = sub.fetch.take() {
-                self.actions.push(Action::CancelSubscriptionData(fetch));
-            }
-            if let Some(fetch) = sub.state_fetch.take() {
-                self.actions.push(Action::CancelSubscriptionState(fetch));
+            if invalidated {
+                if let Some(fetch) = sub.fetch.take() {
+                    self.actions.push(Action::CancelSubscriptionData(fetch));
+                }
+                if let Some(fetch) = sub.state_fetch.take() {
+                    self.actions.push(Action::CancelSubscriptionState(fetch));
+                }
             }
             // The token is kept for the resubscribe; its refresh starts
             // again from the new subscribe reply.
@@ -1430,7 +1435,8 @@ impl Machine {
                 } else {
                     sub.tokens.forget_refresh();
                 }
-                if let Some(fetch) = sub.tokens.abandon() {
+                // 3014 dropped a subscribe flow's fetch with the token.
+                if let Some(fetch) = sub.tokens.abandon_refresh_fetch() {
                     self.actions.push(Action::CancelSubscriptionToken(fetch));
                 }
                 // The refresh timer outlives a reconnect, until the next
@@ -3658,6 +3664,280 @@ mod tests {
                 _ => None,
             })
             .expect("a subscription token fetch")
+    }
+
+    /// The server closes `transport` with `code`: the actions.
+    fn closed_with(machine: &mut Machine, transport: TransportId, code: u16) -> Vec<Action> {
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(code),
+            reason: "closed by the test".into(),
+        })
+    }
+
+    /// Reconnects after a teardown and reads connect reply `command`: every
+    /// action of the attempt.
+    fn reconnected(machine: &mut Machine, command: u32) -> Vec<Action> {
+        let mut actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let transport = opened(&actions).expect("a reconnect attempt");
+        actions.extend(machine.handle(Input::TransportOpened(transport)));
+        actions.extend(machine.handle(reply(
+            transport,
+            &format!(r#"{{"id":{command},"connect":{{"client":"c"}}}}"#),
+        )));
+        actions
+    }
+
+    fn fetches(actions: &[Action]) -> usize {
+        actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::FetchSubscriptionData { .. }
+                        | Action::FetchSubscriptionToken { .. }
+                        | Action::FetchSubscriptionState { .. }
+                )
+            })
+            .count()
+    }
+
+    fn unsubscribed_codes(actions: &[Action]) -> Vec<u32> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::EmitSubscription(_, _, SubscriptionEvent::Unsubscribed { code, .. }) => {
+                    Some(*code)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Block 42, D11: a subscribe flow's token fetch outlives a lost
+    // transport; its token serves the next connection's subscribe, with no
+    // new fetch.
+    #[test]
+    fn a_subscribe_token_fetched_across_a_drop_serves_the_next_connection() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
+        let fetch = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+
+        let closed = closed_with(&mut machine, transport, 3001);
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+        let reconnecting = reconnected(&mut machine, 2);
+
+        assert!(!closed.contains(&Action::CancelSubscriptionToken(fetch)));
+        assert_eq!(sent(&answered), Vec::<String>::new());
+        assert_eq!(fetches(&reconnecting), 0, "{reconnecting:?}");
+        assert!(
+            sent(&reconnecting)
+                .iter()
+                .any(|frame| frame.contains(r#""subscribe":{"channel":"news","token":"t1"}"#)),
+            "{:?}",
+            sent(&reconnecting)
+        );
+    }
+
+    // Block 42, D11: the next connection starts no second flow while the
+    // first one's callback runs.
+    #[test]
+    fn a_reconnect_starts_no_second_flow_while_a_callback_runs() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
+        machine.handle(Input::Subscribe(id));
+        closed_with(&mut machine, transport, 3001);
+
+        let reconnecting = reconnected(&mut machine, 2);
+
+        assert_eq!(fetches(&reconnecting), 0, "{reconnecting:?}");
+        assert!(
+            !sent(&reconnecting)
+                .iter()
+                .any(|frame| frame.contains(r#""subscribe""#)),
+            "{:?}",
+            sent(&reconnecting)
+        );
+    }
+
+    // Block 42, D11: a denial answered after disconnect() unsubscribes with
+    // code 1 and sends nothing.
+    #[test]
+    fn a_token_denied_after_disconnect_unsubscribes_with_code_1() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().token_source());
+        let fetch = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        machine.handle(Input::Disconnect);
+
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Err(TokenError::Unauthorized),
+        });
+
+        assert_eq!(
+            unsubscribed_codes(&answered),
+            [codes::unsubscribed::UNAUTHORIZED]
+        );
+        assert_eq!(sent(&answered), Vec::<String>::new());
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Unsubscribed)
+        );
+    }
+
+    // Block 42, D11: another failure answered while reconnecting emits its
+    // error and arms the resubscribe backoff.
+    #[test]
+    fn a_token_failure_after_a_drop_arms_the_resubscribe_backoff() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
+        let fetch = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        closed_with(&mut machine, transport, 3001);
+
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Err(TokenError::Failed("down".into())),
+        });
+
+        assert!(answered.iter().any(|action| matches!(
+            action,
+            Action::EmitSubscription(_, _, SubscriptionEvent::Error(_))
+        )));
+        assert!(answered.iter().any(|action| matches!(
+            action,
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, _) if *of == id
+        )));
+    }
+
+    // Block 42, D11: getState answered across a teardown keeps its position
+    // and goes on to the token; the next connection subscribes from both.
+    #[test]
+    fn get_state_then_token_across_a_teardown_serve_the_next_subscribe() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().state_source().token_source());
+        let subscribing = machine.handle(Input::Subscribe(id));
+        let state = subscribing
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionState { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .expect("a getState fetch");
+        let closed = closed_with(&mut machine, transport, 3001);
+
+        let loaded = machine.handle(Input::SubscriptionStateFetched {
+            fetch: state,
+            result: Ok(StreamPosition {
+                offset: 5,
+                epoch: "e".into(),
+            }),
+        });
+        let token = subscription_token_fetch(&loaded);
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch: token,
+            result: Ok("t1".into()),
+        });
+        let reconnecting = reconnected(&mut machine, 2);
+
+        assert!(!closed.contains(&Action::CancelSubscriptionState(state)));
+        assert_eq!(fetches(&reconnecting), 0, "{reconnecting:?}");
+        let subscribe = sent(&reconnecting)
+            .into_iter()
+            .find(|frame| frame.contains(r#""subscribe""#))
+            .expect("a subscribe");
+        for field in [
+            r#""token":"t1""#,
+            r#""recover":true"#,
+            r#""offset":5"#,
+            r#""epoch":"e""#,
+        ] {
+            assert!(subscribe.contains(field), "{field} in {subscribe}");
+        }
+    }
+
+    // Block 42, D11: the data callback answered across a teardown does not
+    // serve the next connection, which calls it again, as before every
+    // subscribe (Block 9).
+    #[test]
+    fn data_answered_across_a_teardown_is_asked_again_on_the_next_connection() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().data_source());
+        let subscribing = machine.handle(Input::Subscribe(id));
+        let data = subscribing
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionData { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .expect("a data fetch");
+        let closed = closed_with(&mut machine, transport, 3001);
+
+        let answered = machine.handle(Input::SubscriptionDataFetched {
+            fetch: data,
+            result: Ok(b"{}".to_vec()),
+        });
+        let reconnecting = reconnected(&mut machine, 2);
+
+        assert!(!closed.contains(&Action::CancelSubscriptionData(data)));
+        assert_eq!(sent(&answered), Vec::<String>::new());
+        assert_eq!(fetches(&reconnecting), 1, "{reconnecting:?}");
+    }
+
+    // Block 42, D11: disconnect code 3014 still abandons the callbacks.
+    #[test]
+    fn a_state_invalidation_still_abandons_the_callbacks() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().data_source());
+        let subscribing = machine.handle(Input::Subscribe(id));
+        let data = subscribing
+            .iter()
+            .find_map(|action| match action {
+                Action::FetchSubscriptionData { fetch, .. } => Some(*fetch),
+                _ => None,
+            })
+            .expect("a data fetch");
+
+        let closed = closed_with(&mut machine, transport, 3014);
+
+        assert!(closed.contains(&Action::CancelSubscriptionData(data)));
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
+        let token = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        closed_with(&mut machine, transport, 3014);
+        let late = machine.handle(Input::SubscriptionTokenFetched {
+            fetch: token,
+            result: Ok("old".into()),
+        });
+        let reconnecting = reconnected(&mut machine, 2);
+        assert_eq!(late, Vec::<Action>::new());
+        assert_eq!(fetches(&reconnecting), 1, "{reconnecting:?}");
+    }
+
+    // Block 42, D11 with D10: unsubscribe() during a fetch kept across a
+    // teardown makes its answer stale.
+    #[test]
+    fn unsubscribing_makes_a_fetch_kept_across_a_teardown_stale() {
+        let (mut machine, transport, id) =
+            connected_with(SubscriptionOptions::default().token_source());
+        let fetch = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+        closed_with(&mut machine, transport, 3001);
+        machine.handle(Input::Unsubscribe(id));
+
+        let late = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+        let reconnecting = reconnected(&mut machine, 2);
+
+        assert_eq!(late, Vec::<Action>::new());
+        assert_eq!(fetches(&reconnecting), 0, "{reconnecting:?}");
+        assert!(
+            !sent(&reconnecting)
+                .iter()
+                .any(|frame| frame.contains(r#""subscribe""#))
+        );
     }
 
     #[test]

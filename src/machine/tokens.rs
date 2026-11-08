@@ -119,6 +119,20 @@ impl Tokens {
         self.fetch.take().map(|(id, _)| id)
     }
 
+    /// The connection is torn down: a refresh's fetch and command are
+    /// dropped, the fetch's id given for its cancel; a subscribe flow's
+    /// fetch outlives the teardown, its answer used (Block 42, D11).
+    pub(super) fn abandon_refresh_fetch(&mut self) -> Option<FetchId> {
+        self.refresh_command = None;
+        match self.fetch {
+            Some((id, FetchPurpose::Refresh)) => {
+                self.fetch = None;
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
     /// Whether a fetch or a refresh command is pending.
     pub(super) fn refresh_in_flight(&self) -> bool {
         self.fetch.is_some() || self.refresh_command.is_some()
