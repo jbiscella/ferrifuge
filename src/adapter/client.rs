@@ -2138,8 +2138,8 @@ impl Driver {
                 return self.finish().await;
             }
             let reading = self.reading();
-            if !reading && self.delivery == super::EventDelivery::Thread {
-                super::handler::fail_stuck_calls(&self.shared);
+            if self.delivery == super::EventDelivery::Thread {
+                super::handler::check_thread_waits(&self.shared);
             }
             // The number of the setting of a timer that fired.
             let mut fired = None;
@@ -2713,7 +2713,7 @@ impl Drop for Ending {
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
         super::handler::wake_consumer(shared);
-        super::handler::release_inline(shared);
+        super::handler::release_unconsumed(shared);
         // The final disconnect settled the calls it could; any other future
         // gets "client closed" rather than waiting forever (Block 33).
         lock(&shared.calls).clear();

@@ -222,6 +222,7 @@ pub(super) fn ready(
                     if super::handler::would_deadlock(&shared, super::handler::Wait::Ready(true)) {
                         return Poll::Ready(None);
                     }
+                    super::handler::watch_ready(&shared, cx.waker());
                     Poll::Pending
                 })
                 .await;

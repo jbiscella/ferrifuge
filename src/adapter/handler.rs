@@ -230,7 +230,7 @@ pub(super) fn would_deadlock(shared: &Shared, wait: Wait) -> bool {
 /// Under `Thread`: whether the event the running handler was given holds
 /// the message that `call`, or `ready()` when `None`, waits for. A call is
 /// watched from then on: its reply also becomes unreadable once a full
-/// read-ahead stops the reading ([`fail_stuck_calls`]).
+/// read-ahead stops the reading ([`check_thread_waits`]).
 fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
     let core = lock(&shared.core);
     let outboxes = lock(&shared.outboxes);
@@ -279,31 +279,42 @@ pub(super) fn unwatch(shared: &Shared, id: CallId) {
     lock(&shared.handlers).watched.remove(&id);
 }
 
-/// Under `Thread`, fails with error 16 the calls the running handler waits
-/// on whose reply can no longer be read: a full read-ahead stopped the
-/// reading while the handler's event holds the messages (D6). The driver
-/// checks while reading is stopped.
-pub(super) fn fail_stuck_calls(shared: &Shared) {
-    let stuck: Vec<CallId> = {
+/// Under `Thread`, at each turn of the driver: once the consumer holds the
+/// messages back, fails with error 16 the calls a handler waits on that
+/// only a held message could end, waiting for the connection or a
+/// subscription, or for a reply a full read-ahead keeps unread, and wakes
+/// the handler's pending `ready()` waits to check again (D6; Codex, #171).
+pub(super) fn check_thread_waits(shared: &Shared) {
+    {
+        let handlers = lock(&shared.handlers);
+        if handlers.watched.is_empty() && handlers.watched_ready.is_empty() {
+            return;
+        }
+    }
+    let (stuck, ready): (Vec<CallId>, Vec<Waker>) = {
         let core = lock(&shared.core);
         let outboxes = lock(&shared.outboxes);
         let mut handlers = lock(&shared.handlers);
-        if handlers.watched.is_empty() {
-            return;
-        }
         handlers
             .watched
             .retain(|id| core.machine.call_wait(*id).is_some());
-        if !consumer_holds_messages(&core, &outboxes, &handlers) || core.machine.wants_frames() {
+        if !consumer_holds_messages(&core, &outboxes, &handlers) {
             return;
         }
-        handlers
+        let reading = core.machine.wants_frames();
+        let stuck = handlers
             .watched
             .iter()
             .copied()
-            .filter(|id| core.machine.call_wait(*id) == Some(CallWait::Reply))
-            .collect()
+            .filter(|id| match core.machine.call_wait(*id) {
+                Some(CallWait::Message) => true,
+                Some(CallWait::Reply) => !reading,
+                Some(CallWait::Other) | None => false,
+            })
+            .collect();
+        (stuck, std::mem::take(&mut handlers.watched_ready))
     };
+    ready.into_iter().for_each(Waker::wake);
     for id in stuck {
         lock(&shared.handlers).watched.remove(&id);
         shared.fail_call(id, deadlock_error());
@@ -336,8 +347,11 @@ pub(super) struct Handlers {
     waker: Option<Waker>,
     /// The event a handler runs for.
     running: Option<EventId>,
-    /// Calls a `Thread` handler waits on, for [`fail_stuck_calls`].
+    /// Calls a `Thread` handler waits on, for [`check_thread_waits`].
     watched: HashSet<CallId>,
+    /// The wakers of the `ready()` waits pending in a `Thread` handler, for
+    /// [`check_thread_waits`].
+    watched_ready: Vec<Waker>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -618,11 +632,35 @@ pub(super) fn deliver_remaining(shared: &Shared) {
     drop_handlers(shared);
 }
 
-/// Under `Inline`, drops the handlers when the driver ends, even when a
-/// runtime shutting down drops it before [`deliver_remaining`].
-pub(super) fn release_inline(shared: &Shared) {
-    if lock(&shared.handlers).delivery == EventDelivery::Inline {
+/// When the driver ends, drops the handlers no consumer will drop: under
+/// `Inline`, even when a runtime shutting down drops the driver before
+/// [`deliver_remaining`], and under `Thread` when the events thread never
+/// started (Codex, #171).
+pub(super) fn release_unconsumed(shared: &Shared) {
+    let unconsumed = {
+        let handlers = lock(&shared.handlers);
+        handlers.delivery == EventDelivery::Inline
+            || (handlers.delivery == EventDelivery::Thread && !handlers.started)
+    };
+    if unconsumed {
         drop_handlers(shared);
+    }
+}
+
+/// Under `Thread`, a pending `ready()` of a handler is woken when the
+/// consumer comes to hold messages back ([`check_thread_waits`]).
+pub(super) fn watch_ready(shared: &Shared, waker: &Waker) {
+    let (running, thread) = RUNNING.get();
+    if !thread || running != std::ptr::from_ref(shared) as usize {
+        return;
+    }
+    let mut handlers = lock(&shared.handlers);
+    if !handlers
+        .watched_ready
+        .iter()
+        .any(|known| known.will_wake(waker))
+    {
+        handlers.watched_ready.push(waker.clone());
     }
 }
 
@@ -1378,6 +1416,109 @@ mod tests {
 
         assert_eq!(client.state(), crate::State::Disconnected);
         assert!(shared.woken());
+    }
+
+    /// Counts its wakes.
+    #[derive(Default)]
+    struct Counted(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for Counted {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A client with a subscription subscribing and its transport open by
+    /// hand, its runtime entered and not running.
+    fn subscribing_by_hand(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (Client, crate::Subscription, crate::machine::TransportId) {
+        let client = connected_with_a_held_event(runtime);
+        let _context = runtime.enter();
+        let subscription = client.new_subscription("news").unwrap();
+        subscription.subscribe();
+        let transport = opened_by_hand(&client);
+        (client, subscription, transport)
+    }
+
+    // Codex, #171: a Thread handler's pending ready() that the consumer
+    // comes to hold back later is woken by the driver's check, to fail.
+    #[test]
+    fn a_thread_ready_held_back_later_is_woken() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (client, subscription, transport) = subscribing_by_hand(&runtime);
+        let _context = runtime.enter();
+        let shared = client.shared();
+        let counted = Arc::new(Counted::default());
+        let waker = Waker::from(Arc::clone(&counted));
+        let mut cx = Context::from_waker(&waker);
+        let mut ready = Box::pin(subscription.ready());
+        {
+            let _marked = Marked::new(shared, true);
+            assert!(ready.as_mut().poll(&mut cx).is_pending());
+        }
+
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        check_thread_waits(shared);
+
+        assert_eq!(counted.0.load(Ordering::SeqCst), 1);
+    }
+
+    // Codex, #171: a call a Thread handler waits on, waiting for its
+    // subscription, fails once the consumer comes to hold the subscribe
+    // reply back.
+    #[test]
+    fn a_thread_call_held_back_later_fails() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (client, subscription, transport) = subscribing_by_hand(&runtime);
+        let _context = runtime.enter();
+        let shared = client.shared();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut history = Box::pin(subscription.history(crate::HistoryOptions::default()));
+        {
+            let _marked = Marked::new(shared, true);
+            assert!(history.as_mut().poll(&mut cx).is_pending());
+        }
+
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        check_thread_waits(shared);
+        // Out of the handler: only the check can have failed it.
+        let outcome = history.as_mut().poll(&mut cx);
+
+        assert!(
+            matches!(&outcome, Poll::Ready(Err(error)) if error.code == crate::codes::error::WOULD_DEADLOCK),
+            "{outcome:?}"
+        );
+    }
+
+    // Codex, #171: handlers whose events thread never started are dropped
+    // when the client closes.
+    #[test]
+    fn unstarted_thread_handlers_are_dropped_at_close() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Thread)
+                .build()
+                .unwrap();
+            FAIL_SPAWN.set(true);
+            client.set_handler(Flagged(Arc::clone(&dropped)));
+            FAIL_SPAWN.set(false);
+            client.close().await;
+            // The client still lives: only the close dropped them.
+            assert!(set_within_a_second(&dropped).await);
+            drop(client);
+        });
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).
