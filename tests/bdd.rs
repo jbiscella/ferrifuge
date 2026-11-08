@@ -487,6 +487,8 @@ const IMPLEMENTED: &[&str] = &[
     "Unsubscribing before the connect reply undoes an optimistic subscribe",
     "A subscribe reply before the connect reply breaks the protocol",
     "Optimistic subscriptions on Centrifugo",
+    // Block 37a: test constructors.
+    "Test constructors build what the client core yields",
 ];
 
 /// Server configuration of @A scenarios.

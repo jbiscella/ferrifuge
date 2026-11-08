@@ -781,6 +781,7 @@ let config = Config::default()
 | `ring` | yes | ring as the TLS crypto provider; builds with a C compiler |
 | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
+| `test-util` | no | constructors of the events and results the client yields, for an application's tests (see Testing your application) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -801,6 +802,34 @@ module's status on the NIST CMVP list before relying on it for compliance.
 Without default features, ferrifuge has no runtime or network dependency.
 `ferrifuge::machine::Machine` then takes inputs (API calls, transport
 activity, timers) and returns the actions to perform.
+
+### Testing your application
+
+With the `test-util` feature, an application's tests build the events and
+results the client yields, to test the code that handles them:
+
+```toml
+[dev-dependencies]
+ferrifuge = { version = "0.19", features = ["test-util"] }
+```
+
+```rust
+use ferrifuge::{ClientEvent, ClientInfo, HistoryResult, Publication};
+
+let connected = ClientEvent::connected("c1", "websocket", None);
+let publication = Publication::new(br#"{"n":1}"#.to_vec())
+    .offset(4)
+    .info(ClientInfo::new("c1", "u1"));
+let history = HistoryResult::default()
+    .publications([publication.clone()])
+    .epoch("e")
+    .offset(4);
+```
+
+Each constructor takes what has no sensible default, and each setter one
+field; a field left out holds what the client yields when the server leaves
+it out. `SubscriptionEvent`, `ClientError` and `CallError` are built
+directly, without the feature.
 
 ### TLS verification
 

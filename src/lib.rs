@@ -75,12 +75,14 @@ pub(crate) mod protocol;
 mod statistics;
 mod subscription;
 mod tag_filter;
+#[cfg(feature = "test-util")]
+mod test_util;
 mod token;
 mod wire;
 
 #[cfg(all(feature = "tokio", target_os = "android"))]
 pub use adapter::android;
-#[cfg(all(feature = "tokio", feature = "test-util"))]
+#[cfg(all(feature = "tokio", feature = "__test-hooks"))]
 #[doc(hidden)]
 pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
@@ -94,7 +96,7 @@ pub use call::{
 };
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
-#[cfg(feature = "test-util")]
+#[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub use fossil::write as write_fossil_delta;
 /// rustls, whose types [`ClientBuilder::root_certificates`] and

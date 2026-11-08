@@ -293,27 +293,27 @@ impl WebSocket {
 }
 
 /// Writes that found a connection unable to take more, across the process.
-#[cfg(feature = "test-util")]
+#[cfg(feature = "__test-hooks")]
 static STALLED_WRITES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// How many times so far in this process a websocket write found the
 /// connection unable to take more, so that tests can wait for a stalled
 /// write instead of guessing how much the system buffers. Only with the
-/// `test-util` feature.
-#[cfg(feature = "test-util")]
+/// `__test-hooks` feature.
+#[cfg(feature = "__test-hooks")]
 pub fn stalled_websocket_writes() -> usize {
     STALLED_WRITES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Counts a write that `poll` shows stalled, for [`stalled_websocket_writes`].
-#[cfg(feature = "test-util")]
+#[cfg(feature = "__test-hooks")]
 fn note_stall<T>(poll: &Poll<T>) {
     if poll.is_pending() {
         STALLED_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-#[cfg(not(feature = "test-util"))]
+#[cfg(not(feature = "__test-hooks"))]
 fn note_stall<T>(_: &Poll<T>) {}
 
 /// Limits of a websocket connection: a frame may be as large as a message

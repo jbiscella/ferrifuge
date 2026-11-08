@@ -25,10 +25,11 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features on one target: never fips, whose
-# build needs Go and CMake (Block 20, D7).
+# docs.rs builds the default features and test-util on one target: never
+# fips, whose build needs Go and CMake (Block 20, D7; Block 37, D7).
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
+features = ["test-util"]
 
 [features]
 default = ["tokio", "ring"]
@@ -62,10 +63,13 @@ ring = ["rustls?/ring"]
 aws-lc-rs = ["rustls?/aws-lc-rs"]
 # aws-lc-rs in FIPS mode; building it needs CMake and Go.
 fips = ["aws-lc-rs", "rustls?/fips"]
+# Constructors of the events and results the client yields, for an
+# application's tests (Block 37). Not a default.
+test-util = ["tokio?/io-util"]
 # Hooks for the crate's own tests and benchmarks, e.g. Machine::with_seed.
-# Not part of the public API: enabled only by the dev-dependency on itself
-# below, never by applications.
-test-util = []
+# Private (the leading underscores): not part of the public API, enabled
+# only by the dev-dependency on itself below, never by applications.
+__test-hooks = []
 
 [dependencies]
 fastrand = "2.5.0"
@@ -117,7 +121,7 @@ protoc-bin-vendored = "3.3.0"
 # The crate itself with its test hooks, for its tests and benchmarks only.
 # No default features, so builds without them (the core alone, aws-lc
 # providers without ring) stay so.
-ferrifuge = { path = ".", default-features = false, features = ["test-util"] }
+ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", "test-util"] }
 # Reports the linked AWS-LC module in the fips build's unit test. Its
 # backend comes from rustls (fips) or reqwest (other test builds).
 aws-lc-rs = { version = "1.18.2", default-features = false }
@@ -197,16 +201,16 @@ required-features = ["tokio"]
 name = "perf_delta"
 harness = false
 
-# Uses Machine::with_seed. The dev-dependency enabling test-util has no
+# Uses Machine::with_seed. The dev-dependency enabling __test-hooks has no
 # version, so a packaged crate drops it; this target then skips.
 [[test]]
 name = "perf_sim"
-required-features = ["test-util"]
+required-features = ["__test-hooks"]
 
 # Seeded chaos on the sans-IO core (Block 16); uses Machine::with_seed.
 [[test]]
 name = "chaos"
-required-features = ["test-util"]
+required-features = ["__test-hooks"]
 
 # Seeded chaos on the tokio client against the fake server (Block 16).
 [[test]]

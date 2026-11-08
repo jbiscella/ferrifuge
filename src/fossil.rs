@@ -226,7 +226,7 @@ fn checksum(target: &[u8]) -> u32 {
 /// A delta turning `base` into `target`: a copy of their common prefix, an
 /// insert of what differs, a copy of their common suffix. For the tests'
 /// servers (Block 19, D9); the client never encodes deltas.
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(any(test, feature = "__test-hooks"))]
 #[must_use]
 pub fn write(base: &[u8], target: &[u8]) -> Vec<u8> {
     let prefix = base.iter().zip(target).take_while(|(a, b)| a == b).count();
@@ -259,13 +259,13 @@ pub fn write(base: &[u8], target: &[u8]) -> Vec<u8> {
     delta
 }
 
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(any(test, feature = "__test-hooks"))]
 fn len(value: usize) -> u64 {
     u64::try_from(value).expect("a length fits 64 bits")
 }
 
 /// `value` in the delta's base-64 digits, most significant first.
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(any(test, feature = "__test-hooks"))]
 fn number(value: impl Into<u64>) -> Vec<u8> {
     const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
     let mut value = value.into();

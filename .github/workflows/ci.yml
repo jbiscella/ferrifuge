@@ -452,10 +452,11 @@ jobs:
         with:
           tool: cargo-semver-checks
 
-      # Default features: the public API. Without the flag the check also
-      # enables test-util, whose hooks are not part of it.
+      # Default features and the current test-util: the public API. The
+      # private __test-hooks are not part of it; the base's test-util held
+      # them, so it is checked on the current side only (Block 37, D7).
       - name: cargo semver-checks
-        run: cargo semver-checks --default-features --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
+        run: cargo semver-checks --default-features --current-features test-util --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.
@@ -578,6 +579,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: rustdoc as on docs.rs
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --features test-util
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
