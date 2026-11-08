@@ -25,6 +25,10 @@ const PORT: u16 = 8000;
 const CONFIG_PATH: &str = "/centrifugo/config.json";
 /// Port of the API and health endpoints when the client endpoints use TLS.
 const INTERNAL_PORT: u16 = 9000;
+/// Containers starting at once. Cucumber runs up to 64 scenarios together,
+/// and on a CI runner that many Centrifugo containers starting at the same
+/// time miss testcontainers' 60 s wait for their health endpoint.
+static STARTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 pub(crate) struct Centrifugo {
     /// Removed asynchronously by [`Centrifugo::stop`] or on drop: dropping
@@ -95,7 +99,10 @@ impl Centrifugo {
         for (name, value) in env {
             request = request.with_env_var(*name, *value);
         }
-        let container = request.start().await.expect("start Centrifugo container");
+        let container = {
+            let _starting = STARTING.acquire().await.expect("never closed");
+            request.start().await.expect("start Centrifugo container")
+        };
 
         let host = container.get_host().await.expect("container host");
         let port = container
