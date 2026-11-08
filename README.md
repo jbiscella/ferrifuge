@@ -536,6 +536,17 @@ A machine of the sans-IO core batches only when built with
 `Machine::with_automatic_batching`; its owner then feeds `Input::Flush`
 once it has fed the inputs it has, before performing the actions.
 
+Over websocket the subscribe commands of the subscriptions waiting to
+subscribe go in the frame of the connect command, as many as fit
+`batch_frame_bytes`, so that the first publications arrive a round trip
+sooner; a subscription that needs its token, data or getState callback
+first subscribes after the connect reply, as do the rest. Over http_stream
+and sse they follow the connect reply. An attempt whose connect fails
+carries those subscribe commands for nothing: across a fleet reconnecting
+to a failing server, that is up to `batch_frame_bytes` per attempt. A
+smaller `batch_frame_bytes` lowers it; a `batch_frame_bytes` of 1 turns it
+off, and automatic batching with it.
+
 ### Transport fallback
 
 To fall back to http_stream, then sse, where websocket is blocked, give the
