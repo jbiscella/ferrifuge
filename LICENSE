@@ -38,6 +38,11 @@ In the repository only:
     copyright notices of Centrifugal Labs LTD, Ruslan Sokolov, Endel Dreyer,
     Dmitry Chestnykh and D. Richard Hipp: tests/fixtures/fossil-vectors/LICENSE.
 
+  tests/fixtures/tla-traces/upstream/
+    Copied unchanged from https://github.com/centrifugal/centrifuge-rust,
+    commit 88d6edf178f6db370d8e6756d389c89bf100436b. Copyright (c) 2026
+    Centrifugal Labs LTD. MIT license: tests/fixtures/tla-traces/LICENSE.
+
   .claude/skills/solidifier/
     From https://github.com/FernandoJRR/solidifier, commit 71fd5a9, with the
     local changes listed in its SOURCE.md. Copyright (c) 2026 Fernando José
