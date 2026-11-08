@@ -105,6 +105,11 @@ impl<E> Outbox<E> {
             .map_or(Head::Empty, |(id, _)| Head::Event(*id))
     }
 
+    /// Whether the event `id` waits here for stream `number`.
+    pub(super) fn holds(&self, number: u64, id: EventId) -> bool {
+        self.stream == Some(number) && self.events.iter().any(|(event, _)| *event == id)
+    }
+
     /// Wakes `cx` at the next event for stream `number`, as a pending take
     /// does.
     pub(super) fn watch(&mut self, number: u64, cx: &Context<'_>) {

@@ -288,6 +288,12 @@ impl Machine {
         self.inbound.waiting_for.contains(&id)
     }
 
+    /// The events the messages read next wait for (Block 15, in order).
+    #[cfg_attr(not(feature = "tokio"), allow(dead_code))] // Read by the tokio adapter.
+    pub(crate) fn events_holding_messages(&self) -> impl Iterator<Item = EventId> + '_ {
+        self.inbound.waiting_for.iter().copied()
+    }
+
     /// Whether an event of a handled message waits to be taken.
     pub(super) fn events_hold_inbound(&self) -> bool {
         !self.inbound.waiting_for.is_empty()

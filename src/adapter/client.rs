@@ -475,6 +475,13 @@ impl Shared {
         self.actions_queued.notify_one();
     }
 
+    /// Whether the driver was woken since this was last asked, for tests.
+    #[cfg(test)]
+    pub(super) fn woken(&self) -> bool {
+        use futures_util::FutureExt as _;
+        self.actions_queued.notified().now_or_never().is_some()
+    }
+
     /// Feeds `input` to the machine: events go to their outboxes, taken at
     /// once where no stream takes them, other actions to the driver.
     pub(super) fn handle(&self, core: &mut Core, input: Input) {
@@ -717,6 +724,7 @@ impl Shared {
                 return Err(super::handler::deadlock_error());
             };
             pending.settled = true;
+            super::handler::unwatch(&shared, pending.id);
             // The sender was dropped unsettled only when the driver stopped.
             result.unwrap_or_else(|_| Err(client_closed()))
         }
@@ -749,6 +757,7 @@ impl Drop for PendingCall {
             return;
         }
         lock(&self.shared.calls).remove(&self.id);
+        super::handler::unwatch(&self.shared, self.id);
         self.shared.apply(Input::CallAbandoned(self.id));
     }
 }
