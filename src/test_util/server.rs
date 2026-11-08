@@ -792,6 +792,10 @@ fn history_answer(
         Some(from) if from.epoch != EPOCH || from.offset > top => {
             return Answer::Error(CallError::new(112, "unrecoverable position"));
         }
+        // `client.proto`, `HistoryRequest.since` (Codex on #161).
+        Some(from) if reverse && from.offset == 0 => {
+            return Answer::Error(CallError::new(107, "bad request"));
+        }
         Some(from) => from.offset,
         None => 0,
     };
@@ -1439,6 +1443,30 @@ mod tests {
         // In reverse, the publications before the position (Codex on #161).
         assert_eq!(history(&mut state, -1, Some(3), true), (vec![2, 1], 3));
         assert_eq!(history(&mut state, 1, Some(3), true), (vec![2], 3));
+    }
+
+    // `client.proto`: a zero offset with reverse set is error 107 (Codex on
+    // #161).
+    #[test]
+    fn reverse_history_from_offset_zero_is_a_bad_request() {
+        let mut state = State::default();
+        publish(&mut state, "news", b"1");
+
+        let answered = history_answer(
+            &state,
+            "news",
+            -1,
+            Some(&StreamPosition {
+                offset: 0,
+                epoch: EPOCH.to_owned(),
+            }),
+            true,
+        );
+
+        assert!(
+            matches!(&answered, Answer::Error(error) if error.code == 107),
+            "not refused"
+        );
     }
 
     // Codex on #161: a granted server-side subscription recovers from the
