@@ -3153,7 +3153,9 @@ mod tests {
         let request = String::from_utf8_lossy(&request).to_lowercase();
 
         assert!(request.contains("x-device-real: r2\r\n"), "{request}");
-        assert!(!request.contains("r1"), "{request}");
+        // The header, not "r1" anywhere: the random sec-websocket-key may
+        // hold it (seen on macOS, #159).
+        assert!(!request.contains("x-device-real: r1"), "{request}");
     }
 
     // Block 32, D4: the set's values never reach a Debug output.
