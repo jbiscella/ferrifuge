@@ -311,13 +311,19 @@ pub(super) fn check_thread_waits(shared: &Shared) {
                 Some(CallWait::Reply) => !reading,
                 Some(CallWait::Other) | None => false,
             })
-            .collect();
+            .collect::<Vec<CallId>>();
+        // Failed while the handler's watches are held, so a handler that
+        // returns meanwhile cannot leave a call failed that it no longer
+        // waits on (Codex, #174).
+        for id in &stuck {
+            handlers.watched.remove(id);
+            shared.settle_call_now(*id, Err(deadlock_error()));
+        }
         (stuck, std::mem::take(&mut handlers.watched_ready))
     };
     ready.into_iter().for_each(Waker::wake);
     for id in stuck {
-        lock(&shared.handlers).watched.remove(&id);
-        shared.fail_call(id, deadlock_error());
+        shared.apply(Input::CallAbandoned(id));
     }
 }
 
