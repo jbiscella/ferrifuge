@@ -24,6 +24,11 @@ repository held while it carried that version, from the blocks of
   `http` crate its endpoint `Uri` comes from. The client runs TLS and the
   websocket upgrade over the connector's stream and reads no proxy setting.
 
+- Typed JSON helpers (Block 38): `Publication::json`, `Client::publish_json`,
+  `Subscription::publish_json` and `Client::rpc_json`, with `JsonCallError`
+  telling an encoding failure (nothing sent), a call failure and a result
+  that does not decode (the RPC ran) apart.
+
 - Test constructors (Block 37a), behind the new `test-util` feature:
   `ClientEvent::connected`, `Publication::new`, `ClientInfo::new`,
   `Statistics::new`, and setters on those and on `Subscribed`,

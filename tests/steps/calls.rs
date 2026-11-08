@@ -479,9 +479,15 @@ const USERS: [(&str, &str, &str); 3] = [
 /// The channel of the scenarios with two clients.
 const CHANNEL: &str = "news";
 
-/// A client of `user` connected to the scenario's server, with its
-/// connection info in its token when `info` is set, and its client id.
-async fn connected_as(world: &mut ClientWorld, index: usize, info: bool) -> (Client, String) {
+/// A client of `user` connected to the scenario's server with `protocol`,
+/// with its connection info in its token when `info` is set, and its client
+/// id.
+async fn connected_as(
+    world: &mut ClientWorld,
+    index: usize,
+    info: bool,
+    protocol: Protocol,
+) -> (Client, String) {
     let (user, conn_info, _) = USERS[index];
     let conn_info: Value = if info {
         serde_json::from_str(conn_info).unwrap()
@@ -490,7 +496,7 @@ async fn connected_as(world: &mut ClientWorld, index: usize, info: bool) -> (Cli
     };
     let config = test_config()
         .token(connection_token_with_info(user, &conn_info))
-        .protocol(world.protocol);
+        .protocol(protocol);
     let client = Client::builder(world.server_endpoint())
         .config(config)
         .build()
@@ -526,7 +532,13 @@ fn subscription_of(client: &Client, index: usize, info: bool) -> Subscription {
 /// The scenario's client (the first) and a second one, each of its own
 /// user, subscribed to [`CHANNEL`].
 async fn two_clients(world: &mut ClientWorld, info: bool) {
-    let (client, client_id) = connected_as(world, 0, info).await;
+    let protocol = world.protocol;
+    two_clients_of(world, info, protocol).await;
+}
+
+/// As [`two_clients`], the second client using `second` (Block 38).
+pub(super) async fn two_clients_of(world: &mut ClientWorld, info: bool, second: Protocol) {
+    let (client, client_id) = connected_as(world, 0, info, world.protocol).await;
     world.events = Some(super::recorded(client.events()));
     world.client_id = Some(client_id);
     world.client = Some(client);
@@ -535,7 +547,7 @@ async fn two_clients(world: &mut ClientWorld, info: bool) {
     subscribe(world).await;
     expect_subscription_event(world, "subscribed", false).await;
 
-    let (client, client_id) = connected_as(world, 1, info).await;
+    let (client, client_id) = connected_as(world, 1, info, second).await;
     let subscription = subscription_of(&client, 1, info);
     let mut events = super::recorded(subscription.events());
     subscription.subscribe();
@@ -599,7 +611,7 @@ async fn the_subscription_publishes(world: &mut ClientWorld, data: String) {
 }
 
 /// The second client's next publication.
-async fn second_publication(world: &mut ClientWorld) -> ferrifuge::Publication {
+pub(super) async fn second_publication(world: &mut ClientWorld) -> ferrifuge::Publication {
     let events = &mut second(world).events;
     tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
@@ -1609,7 +1621,7 @@ async fn the_fake_server_received_three_sends(world: &mut ClientWorld) {
 /// Another client of user `index`, subscribed to [`CHANNEL`], asking for
 /// join and leave pushes when `join_leave` is set.
 async fn another_client(world: &mut ClientWorld, index: usize, join_leave: bool) -> Second {
-    let (client, client_id) = connected_as(world, index, false).await;
+    let (client, client_id) = connected_as(world, index, false, world.protocol).await;
     let subscription = client
         .subscription_builder(CHANNEL)
         .join_leave(join_leave)

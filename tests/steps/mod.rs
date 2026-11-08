@@ -35,6 +35,7 @@ mod delivery;
 mod delta;
 mod double;
 mod jitter;
+mod json_helpers;
 mod limits;
 mod logging;
 mod optimistic;
@@ -213,6 +214,8 @@ pub(crate) struct ClientWorld {
     pub(crate) doubles: double::Doubles,
     /// Centrifugo's side and the double's, compared (Block 37c).
     pub(crate) sides: Vec<double::Side>,
+    /// What a Block 38 scenario holds.
+    pub(crate) json_helpers: json_helpers::JsonHelpers,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.

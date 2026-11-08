@@ -503,6 +503,15 @@ const IMPLEMENTED: &[&str] = &[
     "The server double disconnects the client with a code",
     "The server double grants server-side subscriptions and sends messages",
     "The server double and Centrifugo answer alike",
+    // Block 38: typed JSON helpers.
+    "A typed publication reaches subscribers as the JSON its type encodes to",
+    "A publication from the server API decodes as the application's type",
+    "A typed publication from a Protobuf client reaches a JSON client",
+    "A typed RPC sends JSON and decodes the proxy's result",
+    "A typed RPC tells its failures apart",
+    "A value that cannot be encoded fails the call at once and sends nothing",
+    "A typed call is made when the method returns",
+    "A publication's data decodes as the application's type, or says why not",
 ];
 
 /// Server configuration of @A scenarios.

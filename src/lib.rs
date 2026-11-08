@@ -98,8 +98,8 @@ pub use adapter::{
     ProxyTarget, Subscription, SubscriptionBuilder,
 };
 pub use call::{
-    CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, PresenceResult,
-    PresenceStatsResult,
+    CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, JsonCallError,
+    PresenceResult, PresenceStatsResult,
 };
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};

@@ -13,9 +13,9 @@ use super::client::{
 };
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
-    CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, PresenceResult,
-    PresenceStatsResult, StateError, StreamPosition, SubscriptionError, SubscriptionEvent,
-    SubscriptionState, TokenError,
+    CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, JsonCallError,
+    PresenceResult, PresenceStatsResult, StateError, StreamPosition, SubscriptionError,
+    SubscriptionEvent, SubscriptionState, TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
@@ -216,6 +216,30 @@ impl Subscription {
         reply_of(call, |reply| {
             matches!(reply, CallReply::Publish).then_some(())
         })
+    }
+
+    /// Publishes `data` encoded as JSON to the subscription's channel
+    /// (Block 38), as [`Subscription::publish`] does; `data` is encoded
+    /// when this returns, so the future borrows nothing.
+    ///
+    /// ```no_run
+    /// # async fn run(subscription: ferrifuge::Subscription) -> Result<(), ferrifuge::JsonCallError> {
+    /// subscription.publish_json(&serde_json::json!({"text": "hi"})).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
+    /// sent; [`JsonCallError::Call`] with the errors of
+    /// [`Subscription::publish`].
+    pub fn publish_json<T: serde::Serialize + ?Sized>(
+        &self,
+        data: &T,
+    ) -> impl Future<Output = Result<(), JsonCallError>> + Send + 'static {
+        let call = serde_json::to_vec(data).map(|data| self.publish(data));
+        async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
 
     /// The history of the subscription's channel, as [`Client::history`]
