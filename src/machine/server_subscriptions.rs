@@ -204,9 +204,11 @@ impl Machine {
         );
         // Initial or recovered publications follow it and move the position
         // once taken.
-        let last = result.publications.len().saturating_sub(1);
+        let last = Machine::last_of_stream(&result.publications);
         for (index, publication) in result.publications.into_iter().enumerate() {
-            let reply = replied.as_ref().map(|position| (position, index == last));
+            let reply = replied
+                .as_ref()
+                .map(|position| (position, Some(index) == last));
             self.emit_server_publication(channel, publication, reply);
         }
         false
