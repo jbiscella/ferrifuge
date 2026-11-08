@@ -4,6 +4,7 @@
 pub mod android;
 mod client;
 mod connector;
+mod handler;
 mod http;
 mod log;
 mod net;
@@ -16,6 +17,7 @@ mod transport;
 
 pub use client::{Batch, Client, ClientBuilder, WeakClient};
 pub use connector::{BoxError, ConnectedStream, Connecting, Connector};
+pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};
 #[cfg(feature = "__test-hooks")]

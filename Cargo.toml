@@ -102,7 +102,9 @@ mediatype = { version = "0.23.0", optional = true }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
-tokio = { version = "1.54.0", features = ["rt", "sync", "time", "macros"], optional = true }
+# `rt-multi-thread` for `block_in_place` around a handler call (Block 41b):
+# a handler that blocks must not hold the tasks its worker woke.
+tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
 # Logging of the tokio adapter (Block 21): the core logs nothing. `log`
 # makes the records reach a `log` logger while no tracing subscriber is set.
 tracing = { version = "0.1.44", default-features = false, features = ["std", "log"], optional = true }

@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Event handlers (Block 41b): `ClientHandler` and `SubscriptionHandler`,
+  set with `ClientBuilder::handler`, `Client::set_handler`,
+  `SubscriptionBuilder::handler` and `Subscription::set_handler`, and run
+  under `EventDelivery::Task`; an event counts as delivered when its handler
+  returns; a panicking handler disconnects the client with code 2; a call of
+  its own client from a handler fails with error 16 `WOULD_DEADLOCK`; the
+  inputs `EventHanded` and `HandlerPanicked`.
+
 - `Client: Clone` and weak handles (Block 41a): clones share one client;
   `Client::downgrade` gives a `WeakClient` whose `upgrade` gives the client
   while a clone lives.

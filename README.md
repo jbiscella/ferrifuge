@@ -678,6 +678,49 @@ registry sizes. `subscription.delta_statistics()` reports what delta
 compression did: full and delta payloads, their bytes as received and as
 rebuilt, and `compression_ratio()`.
 
+### Handlers
+
+Instead of reading a stream, an application can set a handler on the client
+or on a subscription: `ClientBuilder::handler`, `Client::set_handler`,
+`SubscriptionBuilder::handler` or `Subscription::set_handler`. A handler is a
+closure `FnMut(ClientEvent)` or `FnMut(SubscriptionEvent)`, or a type
+implementing `ClientHandler` or `SubscriptionHandler`, whose `on_event` calls
+by default one method per kind of event (`on_connected`, `on_publication`,
+and so on), each doing nothing unless overridden.
+
+```rust
+use ferrifuge::{Publication, SubscriptionHandler};
+
+struct Prices;
+
+impl SubscriptionHandler for Prices {
+    fn on_publication(&mut self, publication: Publication) {
+        println!("{} bytes", publication.data.len());
+    }
+}
+
+let subscription = client.subscription_builder("prices").handler(Prices).build()?;
+subscription.subscribe();
+```
+
+- A handler takes over the object's stream, as a second `events()` call
+  does, and a later `events()` call takes over from it.
+- One consumer runs every handler of a client and of its subscriptions, one
+  call at a time, in the order the events were emitted.
+- An event counts as delivered when its handler method returns, as a
+  stream's when it yields it (see States and events). Recovery is therefore
+  exactly-once in handlers too.
+- A handler that panics disconnects the client with code 2 "exception in
+  event handler: …" without reconnecting. Its event is not delivered, so the
+  next `connect()` recovers it.
+- Handlers run on a task of the client's runtime (`EventDelivery::Task`, the
+  default). On a multi-thread runtime, a handler that blocks lets the
+  client's timers and pongs go on. On a current-thread runtime nothing else
+  runs until it returns.
+- A handler that calls its own client and waits fails at once with error 16
+  "would deadlock": a call, `ready()` or `close()` (`close()` then returns
+  once closing has started).
+
 ### Codes
 
 How to read a code: a code means something only with the event or error
@@ -686,7 +729,7 @@ an error. The same fields also carry server codes, in their own ranges
 (the last table). The client's logs show the state, code and reason
 (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
 adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and
-error 15; error 14 is centrifuge-js's shared-poll code, unused until
+errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
 Block 47. Blocks are those of the repository's `CLAUDE.md`.
 
 #### `connecting`
@@ -711,7 +754,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 |---|---|---|---|---|
 | 0 | `codes::disconnected::DISCONNECT_CALLED` | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped (Blocks 1, 33) | never, until `connect()`; never after `close()` |
 | 1 | `codes::disconnected::UNAUTHORIZED` | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback (Blocks 1, 5, 17) | never, until `connect()` |
-| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"` | the task running the client panicked (Block 28, D4) | never: the client is closed |
+| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the task running the client panicked (Block 28, D4), or an event handler did (Block 41, D4) | never: the client is closed; after a handler, until `connect()` |
 | 3 | `codes::disconnected::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected (Blocks 3, 8, 29) | never, until `connect()` |
 | 4 | `codes::disconnected::RUNTIME_SHUT_DOWN` | `"runtime shut down"` | the tokio runtime the client ran on shut down (Block 28, D3) | never: the client is closed |
 
@@ -757,6 +800,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
 | 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
 | 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
+| 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
 
 #### Server codes
 

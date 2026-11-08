@@ -38,6 +38,8 @@ pub(crate) struct Delivery {
     pub(super) subscription_events: Option<SubscriptionEvents>,
     /// The subscription's stream from a second `events()` call.
     pub(super) second_subscription_events: Option<SubscriptionEvents>,
+    /// Whether a handler took over the subscription's stream (Block 41).
+    pub(super) superseded: bool,
     /// Further subscriptions, with their streams, by channel.
     pub(super) channels: HashMap<String, (Subscription, Option<SubscriptionEvents>)>,
     /// Offsets the fake server pushed, and those the application took.
@@ -528,7 +530,7 @@ async fn yields_unsubscribed_and_no_publication(world: &mut ClientWorld) {
 #[then("the first stream's next item is its end")]
 async fn the_first_stream_ends(world: &mut ClientWorld) {
     let delivery = &mut world.delivery;
-    let ended = if delivery.second_subscription_events.is_some() {
+    let ended = if delivery.second_subscription_events.is_some() || delivery.superseded {
         let stream = delivery
             .subscription_events
             .as_mut()

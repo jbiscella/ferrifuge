@@ -6,7 +6,7 @@
 //! (the last table). The client's logs show the state, code and reason
 //! (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
 //! adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and
-//! error 15; error 14 is centrifuge-js's shared-poll code, unused until
+//! errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
 //! Block 47. Blocks are those of the repository's `CLAUDE.md`.
 //!
 //! ## `connecting`
@@ -31,7 +31,7 @@
 //! |---|---|---|---|---|
 //! | 0 | [`disconnected::DISCONNECT_CALLED`] | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped (Blocks 1, 33) | never, until `connect()`; never after `close()` |
 //! | 1 | [`disconnected::UNAUTHORIZED`] | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback (Blocks 1, 5, 17) | never, until `connect()` |
-//! | 2 | [`disconnected::BAD_PROTOCOL`] | `"exception during message handling"` | the task running the client panicked (Block 28, D4) | never: the client is closed |
+//! | 2 | [`disconnected::BAD_PROTOCOL`] | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the task running the client panicked (Block 28, D4), or an event handler did (Block 41, D4) | never: the client is closed; after a handler, until `connect()` |
 //! | 3 | [`disconnected::MESSAGE_SIZE_LIMIT`] | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected (Blocks 3, 8, 29) | never, until `connect()` |
 //! | 4 | [`disconnected::RUNTIME_SHUT_DOWN`] | `"runtime shut down"` | the tokio runtime the client ran on shut down (Block 28, D3) | never: the client is closed |
 //!
@@ -77,6 +77,7 @@
 //! | 12 | [`error::BAD_CONFIGURATION`] | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
 //! | 13 | [`error::SUBSCRIPTION_GET_STATE`] | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
 //! | 15 | [`error::DELTA`] | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
+//! | 16 | [`error::WOULD_DEADLOCK`] | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
 //!
 //! ## Server codes
 //!
@@ -216,4 +217,6 @@ pub mod error {
     pub const SUBSCRIPTION_GET_STATE: u32 = 13;
     /// A delta publication could not be applied (Block 19, D8).
     pub const DELTA: u32 = 15;
+    /// A handler of the client waited on that client (Block 41, D6).
+    pub const WOULD_DEADLOCK: u32 = 16;
 }
