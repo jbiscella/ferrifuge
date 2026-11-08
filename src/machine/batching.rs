@@ -4,8 +4,13 @@
 //! commands bounded by `Config::batch_frame_bytes`, the calls admitted to
 //! the write queue one by one (centrifuge-js `startBatching`,
 //! `stopBatching`).
+//!
+//! Block 36: with automatic batching, every command goes into an output
+//! buffer instead, which `Input::Flush` sends in frames of the same bound.
 
-use super::{CallId, Machine, TransportId};
+use super::{Action, CallId, FrameId, Machine, TransportId};
+use crate::CallReply;
+use crate::codec::Codec;
 use crate::wire::Command;
 
 /// A command an open batch holds.
@@ -22,9 +27,28 @@ pub(super) enum HeldCommand {
 #[derive(Default)]
 struct Frame {
     commands: Vec<Command>,
+    /// The sum of their sizes within a frame (see `Machine::piece_size`).
+    size: usize,
     /// Bytes of the calls among them, not yet counted against the write
     /// queue: those of the frames sent before it are.
     calls: usize,
+}
+
+/// A command in the output buffer, encoded once (Block 36, D1).
+#[derive(Debug)]
+pub(super) struct Buffered {
+    /// Its encoding as one command of a frame.
+    bytes: Vec<u8>,
+    /// Its size within a frame, as `Machine::piece_size` measures it.
+    size: usize,
+    /// The call it carries: not sent once settled or abandoned.
+    call: Option<CallId>,
+    /// The bytes counted against the write queue for it.
+    queued: usize,
+    /// Goes in a frame of its own: a resend after HTTP 413 (D4).
+    alone: bool,
+    /// A `send`, which settles once its frame is handed over.
+    send: bool,
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +63,10 @@ pub(super) struct Batching {
     /// The input being handled is the application's `unsubscribe()` or
     /// removal of a subscription, whose unsubscribe command a batch holds.
     pub(super) application_unsubscribe: bool,
+    /// Commands go into `buffer` until `Input::Flush` (Block 36, D2).
+    pub(super) automatic: bool,
+    /// The output buffer, in the order the commands were produced.
+    buffer: Vec<Buffered>,
 }
 
 impl Machine {
@@ -90,20 +118,20 @@ impl Machine {
         let held = std::mem::take(&mut self.batching.held);
         let mut frame = Frame::default();
         for command in held {
-            let (command, calls) = match command {
+            let (command, calls, call) = match command {
                 HeldCommand::Call(id) => {
                     if !self.is_held(id) {
                         // Settled or abandoned meanwhile.
                         continue;
                     }
                     match self.release_held(id, frame.calls) {
-                        Some(released) => released,
+                        Some((command, calls)) => (command, calls, Some(id)),
                         None => continue,
                     }
                 }
-                HeldCommand::Command(command) => (command, 0),
+                HeldCommand::Command(command) => (command, 0, None),
             };
-            self.add_to_frame(&mut frame, command, calls);
+            self.add_to_frame(&mut frame, command, calls, call);
         }
         self.send_frame(&frame);
     }
@@ -118,24 +146,184 @@ impl Machine {
     pub(super) fn send_connect_subscribes(&mut self) {
         let mut frame = Frame::default();
         for command in self.batching.connect_reply.take().unwrap_or_default() {
-            self.add_to_frame(&mut frame, command, 0);
+            self.add_to_frame(&mut frame, command, 0, None);
         }
         self.send_frame(&frame);
     }
 
-    /// Adds `command`, carrying `calls` bytes of calls, to `frame`, sending
-    /// the frame first when the command would take it past the cap.
-    fn add_to_frame(&mut self, frame: &mut Frame, command: Command, calls: usize) {
-        if !frame.commands.is_empty() {
-            frame.commands.push(command.clone());
-            let fits = self.frame_of(&frame.commands).len() <= self.config.batch_frame_bytes.max(1);
-            frame.commands.pop();
-            if !fits {
-                self.send_frame(&std::mem::take(frame));
-            }
+    /// Adds `command`, carrying `calls` bytes of call `call`, to `frame`,
+    /// sending the frame first when the command would take it past the
+    /// cap; with automatic batching it goes into the output buffer, whose
+    /// flush splits frames at the cap, its call bytes counted now.
+    fn add_to_frame(
+        &mut self,
+        frame: &mut Frame,
+        command: Command,
+        calls: usize,
+        call: Option<CallId>,
+    ) {
+        if self.batching.automatic {
+            self.queue_bytes(calls);
+            self.buffer(&command, call, calls, false);
+            return;
+        }
+        let size = self.piece_size(&self.codec.encode(std::slice::from_ref(&command)));
+        if !frame.commands.is_empty()
+            && self.frame_bytes(frame.commands.len() + 1, frame.size + size)
+                > self.config.batch_frame_bytes.max(1)
+        {
+            self.send_frame(&std::mem::take(frame));
         }
         frame.commands.push(command);
+        frame.size += size;
         frame.calls += calls;
+    }
+
+    /// Whether commands go into the output buffer (Block 36, D2).
+    pub(super) fn buffering(&self) -> bool {
+        self.batching.automatic
+    }
+
+    /// Puts `command` into the output buffer: of call `call` when given,
+    /// `queued` bytes of which already count against the write queue.
+    pub(super) fn buffer(
+        &mut self,
+        command: &Command,
+        call: Option<CallId>,
+        queued: usize,
+        send: bool,
+    ) {
+        let bytes = self.codec.encode(std::slice::from_ref(command));
+        self.buffer_bytes(bytes, call, queued, false, send);
+    }
+
+    /// Puts an encoded command into the output buffer; `alone` when it
+    /// must go in a frame of its own.
+    pub(super) fn buffer_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        call: Option<CallId>,
+        queued: usize,
+        alone: bool,
+        send: bool,
+    ) {
+        let size = self.piece_size(&bytes);
+        self.batching.buffer.push(Buffered {
+            bytes,
+            size,
+            call,
+            queued,
+            alone,
+            send,
+        });
+    }
+
+    /// The size of one encoded command within a frame as sent: inside a
+    /// JSON emulation request it is escaped (Block 36, D1).
+    pub(super) fn piece_size(&self, bytes: &[u8]) -> usize {
+        match (&self.emulation, self.codec) {
+            (Some(_), codec) => codec.escaped_len(bytes),
+            _ => bytes.len(),
+        }
+    }
+
+    /// The size of a frame of `count` commands whose sizes add up to `sum`,
+    /// as sent: their separators and, over an emulated transport, the
+    /// request around them; equal to the length of the frame encoded
+    /// (Block 36, D1).
+    pub(super) fn frame_bytes(&self, count: usize, sum: usize) -> usize {
+        let separators = count.saturating_sub(1);
+        let Some((session, node)) = &self.emulation else {
+            return match self.codec {
+                Codec::Json => sum + separators,
+                Codec::Protobuf => sum,
+            };
+        };
+        let around = self.codec.emulation_request(session, node, b"").len();
+        match self.codec {
+            // An escaped newline between commands.
+            Codec::Json => around + sum + 2 * separators,
+            // The data field, absent when empty: its tag and length.
+            Codec::Protobuf => around + 1 + prost::length_delimiter_len(sum) + sum,
+        }
+    }
+
+    /// Sends the output buffer in frames, in order, within
+    /// `Config::batch_frame_bytes`; a call settled or abandoned meanwhile
+    /// is left out (Block 36, D1).
+    pub(super) fn flush(&mut self) {
+        let buffer = std::mem::take(&mut self.batching.buffer);
+        let Some(transport) = self.transport else {
+            return;
+        };
+        let cap = self.config.batch_frame_bytes.max(1);
+        let mut frame: Vec<Buffered> = Vec::new();
+        let mut size = 0;
+        for piece in buffer {
+            if piece.call.is_some_and(|call| !self.awaits_call(call)) {
+                self.unqueue_bytes(piece.queued);
+                continue;
+            }
+            let apart = piece.alone || frame.last().is_some_and(|last| last.alone);
+            if !frame.is_empty()
+                && (apart || self.frame_bytes(frame.len() + 1, size + piece.size) > cap)
+            {
+                self.send_buffered(transport, std::mem::take(&mut frame));
+                size = 0;
+            }
+            size += piece.size;
+            frame.push(piece);
+        }
+        if !frame.is_empty() {
+            self.send_buffered(transport, frame);
+        }
+    }
+
+    /// Hands one frame of the output buffer to the owner: its calls count
+    /// as unwritten until it is written, and its `send`s settle.
+    fn send_buffered(&mut self, transport: TransportId, pieces: Vec<Buffered>) {
+        let separator: &[u8] = match self.codec {
+            Codec::Json => b"\n",
+            Codec::Protobuf => b"",
+        };
+        let mut joined = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            if index > 0 {
+                joined.extend_from_slice(separator);
+            }
+            joined.extend_from_slice(&piece.bytes);
+        }
+        let frame = match &self.emulation {
+            Some((session, node)) => self.codec.emulation_request(session, node, &joined),
+            None => joined,
+        };
+        let id = FrameId(self.next_frame);
+        self.next_frame += 1;
+        self.counters.sent(id, frame.len(), pieces.len());
+        self.actions.push(Action::Send {
+            transport,
+            id,
+            frame,
+            frame_type: self.codec.frame_type(),
+        });
+        let queued: usize = pieces.iter().map(|piece| piece.queued).sum();
+        self.frame_queued(id, queued);
+        for piece in pieces {
+            if let (true, Some(call)) = (piece.send, piece.call) {
+                self.settle_call(call, Ok(CallReply::Send));
+            }
+        }
+    }
+
+    /// The transport ends: its buffered commands are lost as sent ones
+    /// are, a buffered `send` failing with "connection closed" (Block 36,
+    /// D1).
+    pub(super) fn drop_buffer(&mut self) {
+        for piece in std::mem::take(&mut self.batching.buffer) {
+            if let (true, Some(call)) = (piece.send, piece.call) {
+                self.settle_call(call, Err(super::calls::connection_closed()));
+            }
+        }
     }
 
     fn send_frame(&mut self, frame: &Frame) {

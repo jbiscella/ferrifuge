@@ -78,6 +78,11 @@ impl Calls {
     pub(super) fn owns_command(&self, id: u32) -> bool {
         self.by_command.contains_key(&id)
     }
+
+    /// The call command `id` belongs to.
+    pub(super) fn call_of_command(&self, id: u32) -> Option<CallId> {
+        self.by_command.get(&id).copied()
+    }
 }
 
 impl Machine {
@@ -282,6 +287,30 @@ impl Machine {
         }
     }
 
+    /// Whether call `id` is still awaited: neither settled nor abandoned.
+    pub(super) fn awaits_call(&self, id: CallId) -> bool {
+        self.calls.by_id.contains_key(&id)
+    }
+
+    /// `bytes` of calls in the output buffer count against the write queue
+    /// from now (Block 36, D1).
+    pub(super) fn queue_bytes(&mut self, bytes: usize) {
+        self.calls.unwritten_bytes += bytes;
+    }
+
+    /// `bytes` of a buffered call no longer sent stop counting.
+    pub(super) fn unqueue_bytes(&mut self, bytes: usize) {
+        self.calls.unwritten_bytes = self.calls.unwritten_bytes.saturating_sub(bytes);
+    }
+
+    /// The buffered calls of frame `frame`, already counted, count until it
+    /// is written; their bytes add up.
+    pub(super) fn frame_queued(&mut self, frame: FrameId, bytes: usize) {
+        if bytes > 0 {
+            *self.calls.unwritten.entry(frame).or_default() += bytes;
+        }
+    }
+
     /// Whether the client can hand calls to its transport now.
     fn can_send(&self) -> bool {
         self.state == State::Connected && self.transport.is_some() && !self.transport_closing()
@@ -398,18 +427,26 @@ impl Machine {
             self.calls.by_command.insert(command_id, id);
             command_id
         };
-        let (frame, size) = self.send(
-            transport,
-            Command {
-                id: command_id,
-                method,
-            },
-        );
-        self.calls.unwritten.insert(frame, size);
-        self.calls.unwritten_bytes += size;
-        if send {
-            self.settle_call(id, Ok(CallReply::Send));
+        let command = Command {
+            id: command_id,
+            method,
+        };
+        if self.buffering() {
+            // Handled as sent: counted now, a `send` settling once its frame
+            // is handed over (Block 36, D1).
+            let bytes = self.codec.encode(std::slice::from_ref(&command));
+            let size = self.frame_bytes(1, self.piece_size(&bytes));
+            self.calls.unwritten_bytes += size;
+            self.buffer_bytes(bytes, Some(id), size, false, send);
         } else {
+            let (frame, size) = self.send_commands(transport, &[command]);
+            self.calls.unwritten.insert(frame, size);
+            self.calls.unwritten_bytes += size;
+            if send {
+                self.settle_call(id, Ok(CallReply::Send));
+            }
+        }
+        if !send {
             self.actions.push(Action::SetCallTimer(
                 id,
                 CallTimer::Reply,
@@ -591,7 +628,8 @@ impl Machine {
     pub(super) fn fail_sent_calls(&mut self) {
         // Nothing more is written on it: the write queue starts empty on the
         // next transport, and the calls waiting for room keep waiting, with
-        // their deadline.
+        // their deadline. Its buffered commands are lost as sent ones.
+        self.drop_buffer();
         self.calls.unwritten.clear();
         self.calls.unwritten_bytes = 0;
         let sent: Vec<CallId> = self.calls.by_command.values().copied().collect();
@@ -632,7 +670,7 @@ impl Machine {
         }
     }
 
-    fn settle_call(&mut self, id: CallId, result: Result<CallReply, CallError>) {
+    pub(super) fn settle_call(&mut self, id: CallId, result: Result<CallReply, CallError>) {
         let Some(call) = self.calls.by_id.remove(&id) else {
             return;
         };
@@ -677,7 +715,7 @@ fn method_of(request: &CallRequest) -> Method {
     }
 }
 
-fn connection_closed() -> CallError {
+pub(super) fn connection_closed() -> CallError {
     CallError::new(codes::error::CONNECTION_CLOSED, "connection closed")
 }
 

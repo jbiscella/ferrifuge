@@ -568,6 +568,12 @@ impl Shared {
         }
     }
 
+    /// Feeds [`Input::Flush`].
+    fn flush(&self) {
+        let mut core = lock(&self.core);
+        self.handle(&mut core, Input::Flush);
+    }
+
     fn next_action(&self) -> Option<Action> {
         lock(&self.core).actions.pop_front()
     }
@@ -1079,18 +1085,13 @@ impl Client {
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
         let max_message = config.max_message_bytes;
-        let machine = if get_token.is_some() {
-            Machine::with_token_source(config)
-        } else {
-            Machine::new(config)
-        };
-        let machine = if get_data.is_some() {
-            machine.with_data_source()
-        } else {
-            machine
-        };
-        let machine = machine.with_emulated_headers(emulated_headers);
-        let machine = machine.with_transports(endpoints.iter().map(|(kind, _)| *kind).collect())?;
+        let machine = machine_for(
+            config,
+            get_token.is_some(),
+            get_data.is_some(),
+            emulated_headers,
+            endpoints.iter().map(|(kind, _)| *kind).collect(),
+        )?;
         let runtime = runtime_or_current(runtime)?;
         let shared = Arc::new(Shared {
             core: Mutex::new(Core {
@@ -1774,27 +1775,59 @@ impl Timers {
     }
 }
 
+/// The machine of a client: its callbacks, headers and transports, and
+/// automatic batching, the driver flushing at each iteration (Block 36,
+/// D3).
+fn machine_for(
+    config: Config,
+    token_source: bool,
+    data_source: bool,
+    emulated_headers: std::collections::BTreeMap<String, String>,
+    kinds: Vec<TransportKind>,
+) -> Result<Machine, ClientError> {
+    let machine = if token_source {
+        Machine::with_token_source(config)
+    } else {
+        Machine::new(config)
+    };
+    let machine = if data_source {
+        machine.with_data_source()
+    } else {
+        machine
+    };
+    machine
+        .with_emulated_headers(emulated_headers)
+        .with_automatic_batching()
+        .with_transports(kinds)
+}
+
 impl Driver {
+    /// The client is closed. The close queued its actions before setting
+    /// the flag, under the core lock: performed now, its transport's close
+    /// among them, even when it came after the queue was last emptied
+    /// (Codex, #141). Every transport's close is awaited, so that `close()`
+    /// resolves after it (Block 33, D1); the guard then ends the streams as
+    /// the driver goes.
+    async fn finish(&mut self) {
+        while let Some(action) = self.shared.next_action() {
+            self.perform(action);
+        }
+        for closing in std::mem::take(&mut self.closing) {
+            let _ = closing.await;
+        }
+    }
+
     async fn run(mut self) {
         loop {
+            // Everything the core buffered since the last flush, from this
+            // task's inputs and the application's calls, goes out in as few
+            // frames as the cap allows (Block 36, D3).
+            self.shared.flush();
             while let Some(action) = self.shared.next_action() {
                 self.perform(action);
             }
             if self.shared.closed.load(Ordering::Acquire) {
-                // The close queued its actions before setting the flag, under
-                // the core lock: performed now, its transport's close among
-                // them, even when it came after the queue was last emptied
-                // (Codex, #141).
-                while let Some(action) = self.shared.next_action() {
-                    self.perform(action);
-                }
-                // Every transport's close is awaited, so that `close()`
-                // resolves after it (Block 33, D1); the guard then ends the
-                // streams as the driver goes.
-                for closing in std::mem::take(&mut self.closing) {
-                    let _ = closing.await;
-                }
-                return;
+                return self.finish().await;
             }
             // A full read-ahead stops the reading: the server's handling of
             // slow clients acts instead (Block 15). Taking an event wakes
@@ -3852,6 +3885,8 @@ mod tests {
                 data: br#"{"id":3,"connect":{"client":"c"}}"#.to_vec(),
             },
         );
+        // As the driver does before performing the actions (Block 36, D3).
+        shared.handle(&mut core, Input::Flush);
         let sent: Vec<String> = core
             .actions
             .iter()

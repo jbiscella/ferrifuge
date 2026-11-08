@@ -508,6 +508,12 @@ pub enum Input {
     StartBatching,
     /// The application stopped a batch: what all open batches hold is sent.
     StopBatching,
+    /// The owner of a machine made with
+    /// [`Machine::with_automatic_batching`] has fed the inputs it has: the
+    /// commands buffered since the last flush are sent, in as few frames as
+    /// [`Config::batch_frame_bytes`] allows (Block 36). Without automatic
+    /// batching it does nothing.
+    Flush,
     /// The application set the connection token used from the next
     /// connection attempt (`set_token`, Block 17); empty for none.
     SetToken(String),
@@ -793,6 +799,7 @@ impl std::fmt::Debug for Input {
             Self::Reconnect => f.write_str("Reconnect"),
             Self::StartBatching => f.write_str("StartBatching"),
             Self::StopBatching => f.write_str("StopBatching"),
+            Self::Flush => f.write_str("Flush"),
             Self::Disconnect => f.write_str("Disconnect"),
             Self::Close => f.write_str("Close"),
             Self::DriverDropped { panicked } => f
@@ -1234,6 +1241,18 @@ impl Machine {
         Self::with_rng(config, true, fastrand::Rng::new())
     }
 
+    /// Makes the machine buffer every command it would send, until the
+    /// owner feeds [`Input::Flush`], which sends them in as few frames as
+    /// [`Config::batch_frame_bytes`] allows: the owner feeds it once it has
+    /// fed the inputs it has, before performing the actions (Block 36,
+    /// D2). An owner that never feeds it holds every command until its
+    /// deadline. The tokio adapter always does this.
+    #[must_use]
+    pub fn with_automatic_batching(mut self) -> Self {
+        self.batching.automatic = true;
+        self
+    }
+
     /// Makes the owner answer [`Action::FetchConnectData`] from the
     /// application's connect data callback, asked before every connection
     /// attempt once a token is obtained; its data replaces
@@ -1324,6 +1343,11 @@ impl Machine {
             Input::Reconnect => self.reconnect(),
             Input::StartBatching => self.start_batching(),
             Input::StopBatching => self.stop_batching(),
+            Input::Flush => {
+                if self.buffering() {
+                    self.flush();
+                }
+            }
             Input::Disconnect => self.disconnect_called(),
             Input::Close => self.close(codes::disconnected::DISCONNECT_CALLED, "disconnect called"),
             Input::DriverDropped { panicked } => self.driver_dropped(panicked),
@@ -1866,6 +1890,15 @@ impl Machine {
             let (session, node) = self.emulation.clone().unwrap_or_default();
             let request = self.codec.emulation_request(&session, &node, line);
             let size = request.len();
+            if self.buffering() {
+                // Through the buffer, never joined to another command
+                // (Block 36, D4).
+                let call = self.calls.call_of_command(id);
+                let queued = if call.is_some() { size } else { 0 };
+                self.queue_bytes(queued);
+                self.buffer_bytes(line.to_vec(), call, queued, true, false);
+                continue;
+            }
             let sent = FrameId(self.next_frame);
             self.next_frame += 1;
             self.counters.sent(sent, size, 1);
@@ -2392,8 +2425,14 @@ impl Machine {
     /// command then has its own request, so a request the server refuses
     /// (HTTP 413) concerns that command only (see `send_rejected`).
     /// Hands `command` to the owner; its frame's id and size.
-    fn send(&mut self, transport: TransportId, command: Command) -> (FrameId, usize) {
-        self.send_commands(transport, &[command])
+    /// With automatic batching it goes into the output buffer instead
+    /// (Block 36, D1).
+    fn send(&mut self, transport: TransportId, command: Command) {
+        if self.buffering() {
+            self.buffer(&command, None, 0, false);
+        } else {
+            self.send_commands(transport, &[command]);
+        }
     }
 
     /// The frame `commands` make together, as sent: over an emulated
