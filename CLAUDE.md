@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–36 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–37 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -2360,7 +2360,7 @@ Feature: Event delivery and backpressure
 - **Run counters.** Each run counts every operation and server behaviour, and the outcomes its scenario lists; a count of 0 fails the run.
 - **Reproduction.** A failure prints the seed, the invariant and the operations up to it; `FERRIFUGE_CHAOS_SEED=<seed>` reruns that seed alone. A seed that found a bug joins the pull-request seeds with its fix. The core trace depends only on the seed: no wall clock, no unseeded randomness, nothing ordered by hash-map iteration.
 - **CI.** Core scenarios: seeds 0–299 × 60 operations in the `test` job and the portability job (Windows, macOS) of every pull request; on main and nightly, 10 000 seeds × 200 operations in release, from a start seed drawn per run and printed. Adapter: seeds 0–19 × 30 operations in the `test` job of every pull request; on main and nightly, 500 seeds on Linux and seeds 0–19 on Windows and macOS.
-- **Public API:** none added. A hook the runners need is gated by `test-util` and `#[doc(hidden)]`, as `Client::read_ahead` is, outside the semver check (`--default-features`).
+- **Public API:** none added. A hook the runners need is gated by the private feature `__test-hooks` and `#[doc(hidden)]`, as `Client::read_ahead` is, outside the semver check (Block 37 D1; it was `test-util` until Block 37).
 - **Test layer:** `@P` (Block 0), each scenario claimed by its runner with `// @P scenario:`.
 
 **Sub-increments** (one branch and PR each, in this order):
@@ -3107,7 +3107,7 @@ Decisions that bind the blocks:
 - **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
 - **Publish debouncing (item 32):** in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
 - **WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`. `VERIFY:` that it accepts the client's own `rustls::ClientConfig`.
-- **Connector (item 35):** a `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures, yielding `AsyncRead + AsyncWrite + Send + Unpin`; Ferrifuge runs TLS and the websocket handshake over it. Websocket only: a connector with an HTTP transport or proxy settings fails `build()`, as reqwest's connector layer cannot carry an outside connection.
+- **Connector (item 35):** a `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures, given the endpoint as an `http::Uri` and yielding `AsyncRead + AsyncWrite + Send + Unpin + 'static`; Ferrifuge runs TLS and the websocket handshake over it. Websocket only: a connector with an HTTP transport, or with a proxy setting given with `ClientBuilder::proxy`, fails `build()`, as reqwest's connector layer cannot carry an outside connection (reqwest 0.13.5 `client.rs:2475-2481`, `connect.rs:1346-1352`); with a connector no proxy setting is read, the environment's and the system's included (Block 37 D4).
 - **Unstable APIs (items 29, 30, 33):** behind a non-default `unstable` feature, since the release check runs cargo-semver-checks on default features (Block 20, D1; precedent: `tokio_unstable`, `reqwest_unstable`).
 - **Copied trace data (item 20):** the trace files copied from centrifuge-rust sit in `tests/fixtures/tla-traces/` with its MIT text and copyright line (`LICENSE`) and a README naming the source commit, as the fossil vectors do; `LICENSE`'s "Exceptions" and `REUSE.toml` gain an entry for them (owner request, 2026-11-07).
 
@@ -3162,7 +3162,7 @@ Order of the blocks:
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Release workflow.** `.github/workflows/release.yml`, triggered by a pushed tag `v*`, in three jobs, so that every check comes before the publish, which cannot be undone (a version can only be yanked):
-  - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), and runs `cargo-semver-checks` (a pinned version, default features, as the pull-request job) against the crate's latest version on crates.io, skipped only when the index has none;
+  - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), and runs `cargo-semver-checks` (a pinned version, default features and `test-util`, as the pull-request job; Block 37 D7) against the crate's latest version on crates.io, skipped only when the index has none;
   - `publish` (`needs: verify`; environment `release`; `id-token: write`): `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token);
   - `github-release` (`needs: publish`; `contents: write`): the GitHub release with that version's changelog section as its notes; re-running it never publishes again.
   Every action is pinned by commit SHA; checkouts use `persist-credentials: false`; no build cache is used; the toolchain action names its toolchain.
@@ -3171,7 +3171,7 @@ Order of the blocks:
 - **D4 Changelog.** `CHANGELOG.md` in Keep a Changelog form, written by hand: `## [Unreleased]` on top, then `## [x.y.z] - YYYY-MM-DD` for each version from 0.1.0, newest first, with Added, Changed, Deprecated, Removed, Fixed and Security subsections, backfilled from the history (the version each block reached, `git log -G'^version'` on `Cargo.toml`, and the block table of this file); no compare links for versions never tagged. A pull request that changes the public API or behaviour adds an `Unreleased` entry; the release moves them under the new version.
 - **D5 Security policy.** `SECURITY.md`: reports go through GitHub private vulnerability reporting (the repository's "Report a vulnerability" button), never public issues; the supported versions are the latest minor release; fixes are released as a patch of it and announced as a GitHub security advisory, with a RustSec advisory requested for crates.io users. No response-time commitment.
 - **D6 MSRV policy.** `rust-version` in `Cargo.toml` is the floor; it is raised only when a dependency or a language feature needs it, never in a patch release, and the changelog says so. The `msrv` CI job checks it for every feature set CI builds: the default (ring), the core alone, `aws-lc-rs` and `fips`, installing CMake and Go for the last two as the `providers` job does (closing the analysis's finding F4).
-- **D7 docs.rs.** `[package.metadata.docs.rs]` builds the default features on `x86_64-unknown-linux-gnu` only (never `fips`, whose build needs Go and CMake); items behind a feature say so (`doc(cfg)` under the `docsrs` cfg, which docs.rs sets). A `docs-rs` CI job on nightly builds with `RUSTDOCFLAGS="--cfg docsrs -D warnings"`; `lint` keeps its stable `cargo doc` step. The crate-level documentation (`src/lib.rs`) gains an overview and a `no_run` quickstart, instead of pointing to this file.
+- **D7 docs.rs.** `[package.metadata.docs.rs]` builds the default features and `test-util` (Block 37 D7) on `x86_64-unknown-linux-gnu` only (never `fips`, whose build needs Go and CMake); items behind a feature say so (`doc(cfg)` under the `docsrs` cfg, which docs.rs sets). A `docs-rs` CI job on nightly builds with `RUSTDOCFLAGS="--cfg docsrs -D warnings"`; `lint` keeps its stable `cargo doc` step. The crate-level documentation (`src/lib.rs`) gains an overview and a `no_run` quickstart, instead of pointing to this file.
 - **D8 Examples.** `examples/` holds runnable programs, each `required-features = ["tokio"]`: `quickstart` (connect, subscribe, print publications), `recovery` (a recoverable subscription, its position saved and resumed with `since`), `calls` (publish, history, presence and presence stats; RPC needs a server-side handler and is left out) and `delta` (a subscription with fossil delta). They take the endpoint from `FERRIFUGE_EXAMPLE_ENDPOINT`, default `ws://localhost:8000/connection/websocket`, and run against one server configuration, `examples/centrifugo.json`, which the README shows and the @A scenario uses. The `portability` jobs build the examples on every OS on pull requests (`lint` already builds them with `--all-targets`).
 - **D9 Crate metadata and README.** `documentation` (docs.rs) is added; `homepage` is not (it would repeat `repository`), nor `readme` (found automatically). The README stops saying the crate is not on crates.io and shows a crates.io dependency instead of a git one, with the version the manifest has; a test checks that every `ferrifuge = "x.y"` in the README matches the manifest's major and minor version and that the MSRV it states matches `rust-version`.
 
@@ -3240,7 +3240,7 @@ The release-check scenarios pass the outline's tag descriptions to the step, whi
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Dependency.** `tracing` 0.1.44 without default features, with `std` and `log`, a regular dependency of the `tokio` feature, with no feature of its own: with no subscriber a callsite costs a few relaxed atomic loads, and the default build already links `tracing` through hyper-util. With `log`, Ferrifuge's records go to the `log` logger as long as no `tracing` dispatcher, global or scoped, has ever been set in the process (tracing-core 0.1.36 `dispatcher::has_been_set`); once one is, they go to `tracing` only, never to both. No `#[instrument]` (no `attributes` feature): spans are created by hand.
-- **D2 Spans.** A DEBUG span `client` per client, with one field `client`: a number unique within the process, given when the client is built. A DEBUG span `subscription` per client-side subscription, child of its client's, with one field `channel`. Server-side subscriptions log in the client's span with a `channel` field on the record. Spans carry no other field. Every record is made in its span: the adapter enters the client's span where it feeds the machine (application calls and stream reads run on the application's tasks), instruments the driver and every task it spawns, and gives subscription records their span as explicit parent. WARN records also carry `client`, and `channel` when they have one, so they keep their client under a filter that disables DEBUG spans and through `log`, which drops span fields. A `test-util` hook gives the tests a client's number.
+- **D2 Spans.** A DEBUG span `client` per client, with one field `client`: a number unique within the process, given when the client is built. A DEBUG span `subscription` per client-side subscription, child of its client's, with one field `channel`. Server-side subscriptions log in the client's span with a `channel` field on the record. Spans carry no other field. Every record is made in its span: the adapter enters the client's span where it feeds the machine (application calls and stream reads run on the application's tasks), instruments the driver and every task it spawns, and gives subscription records their span as explicit parent. WARN records also carry `client`, and `channel` when they have one, so they keep their client under a filter that disables DEBUG spans and through `log`, which drops span fields. A `__test-hooks` hook (Block 37 D1) gives the tests a client's number.
 - **D3 Levels.** Every event's target starts with `ferrifuge`. Records give their values as fields: `state`, `code`, `reason`, `transport`, `endpoint`, `channel`, `bytes`, `delay`, `kind`; `gap` from Block 25 (D10).
   - WARN, server anomalies: a frame that is not client protocol data and a reply without the result of the command it answers (D4); a delta that cannot be applied (Block 19); a message larger than the size limit; a websocket closed with 1009. A reply whose id matches no command is no anomaly (the reply to a call abandoned or timed out): it shows only at TRACE, as an input.
   - DEBUG: every state change of the client and of each subscription, client-side and server-side, with its code and reason; each transport attempt (kind and endpoint, D5), its opening, its failure (the error's message) and its close (code and reason); the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback (token, data, getState) started and how it ended (got a value, failed, denied, panicked), never the value; the read-ahead filling (reading stops) and draining (reading resumes); each call that fails, with its kind and code.
@@ -3461,7 +3461,7 @@ This block reverses Block 14's exclusion of HTTP proxy (CONNECT) support; Block 
 - **D4 HTTP executor.** The HTTP clients of http_stream and sse are built with `no_proxy()`, so reqwest reads nothing itself, then `Proxy::custom` calling D2's function; reqwest's `socks` feature carries SOCKS5. reqwest 0.13.5 runs CONNECT and SOCKS5 with the same hyper-util `Tunnel` and `SocksV5` (`connect.rs:811`, `:856`, `:1957`), and TLS to an `https://` proxy with the client's TLS settings. It tunnels `https://` requests with CONNECT. It sends plain `http://` requests to an HTTP proxy in absolute form with `Proxy-Authorization`, as curl does, and unlike the official SDK, so a proxy allowing CONNECT only to TLS ports (Squid's default) still carries them. The README says that such a proxy sees these requests in full, including the sse connect command in the URL, and recommends `https://`.
 - **D5 Failures.** A failed proxy handshake is a failed transport attempt, as for an unreachable endpoint (Block 8: error event, fallback, backoff). The error says "proxy authentication required" for hyper-util's `TunnelError::ProxyAuthRequired` (a CONNECT answered 407) and for a 407 answering a forwarded request. Another failed CONNECT reports hyper-util's message ("tunnel error: unsuccessful"), not the status, which `TunnelError` does not carry (plan). The error messages of the HTTP transports include their sources' messages, since reqwest's own stops at "error sending request". No error message carries the proxy's userinfo or credentials.
 - **D6 Sharing.** A client with the default setting and the platform's trust keeps the process-wide HTTP clients. Any other client builds its own (Block 22, D4) at the first attempt needing one, and again at the first attempt after `set_proxy`. The Block 14 @P gates pass unchanged.
-- **D7 Logging and redaction.** The DEBUG record of each transport attempt (Block 21) gains a field `proxy`: the proxy as scheme, host and port, or `direct`. The `Debug` of `Proxy`, `ProxyTarget` and `ClientBuilder` shows the kind, the proxy as scheme, host and port, and whether credentials are set, with `custom` as `Custom(..)`; it never shows userinfo or credentials. `http_headers` and its checks refuse `Proxy-Authorization`, now one of the headers the transport sets (Block 17): proxy credentials go through `ProxyTarget` only, so they never travel through a tunnel to Centrifugo.
+- **D7 Logging and redaction.** The DEBUG record of each transport attempt (Block 21) gains a field `proxy`: the proxy as scheme, host and port, `direct`, or `connector` for a client given one (Block 37 D4). The `Debug` of `Proxy`, `ProxyTarget` and `ClientBuilder` shows the kind, the proxy as scheme, host and port, and whether credentials are set, with `custom` as `Custom(..)`; it never shows userinfo or credentials. `http_headers` and its checks refuse `Proxy-Authorization`, now one of the headers the transport sets (Block 17): proxy credentials go through `ProxyTarget` only, so they never travel through a tunnel to Centrifugo.
 - **D8 Version and changelog.** 0.15.0: websocket now follows the environment, every transport follows the macOS and Windows settings, error messages change, and `http_headers` refuses a header it used to take. `Unreleased` entries:
   - "Added": `Proxy`, `ProxyTarget`, `ClientBuilder::proxy`, `Client::set_proxy`, HTTP, HTTPS and SOCKS5 proxies;
   - "Changed": the environment's and the system's proxies on every transport, HTTP transport errors naming their cause, `Proxy-Authorization` refused in `http_headers`;
@@ -4038,7 +4038,7 @@ Feature: Tokio runtime handle
 - `#[non_exhaustive]` on other public structs.
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
-- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
+- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), an application's connector (Block 37 D4), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
 - **D2 Maximum incoming message size.** `Config::max_message_bytes`, default 64 MiB (today's fixed `MAX_MESSAGE_BYTES`, which it replaces), is at least 1, or `build()` and `Client::new` return a configuration error naming it, as the read-ahead limits do (Block 15). It bounds what a transport delivers as one message: a websocket message whole, even when it holds several JSON or Protobuf replies (Block 7), and each of its frames (tungstenite's `max_message_size` and `max_frame_size`); an http_stream JSON line; an http_stream Protobuf reply, by its length prefix (Block 27 D3); an sse event's data. It is also the core's bound of Block 19 D6 (a delta target, and the decoded publications of one subscribe reply), which keeps its outcome. The read-ahead keeps admitting one message larger than `read_ahead_bytes` alone (Block 15), so this field is the per-message memory bound; the documentation says so for devices with little memory. `Config`'s `Debug` shows both new fields.
 - **D3 An oversized message.** The adapter refuses a message once it is known to exceed `max_message_bytes`, holding at most the limit and one read (tungstenite checks a frame from its header and a message as its frames arrive; the line and sse decoders once the part buffered exceeds the limit; the Protobuf splitter from the length prefix). It ends the transport and reports it with a new `Input::MessageTooLarge(TransportId)` instead of `Input::TransportClosed` (additive: `Input` is `#[non_exhaustive]`, Block 17).
   - Before the connect reply on that transport, the attempt fails as a refused one (Block 8), with an error event whose message is "message larger than the size limit": before the server has answered, the bytes may not be Centrifugo's (centrifuge-rust `docs/spec.md` §5.3, "an HTML page read as a varint").
@@ -5308,3 +5308,379 @@ Feature: Automatic command batching, optimistic subscriptions
 - a subscription that needs a token, data or getState callback starts it after the connect reply, where centrifuge-js starts it when the websocket opens and sends the subscribe once it answers (`subscription.ts:650-692`) (D5);
 - a `subscribe()` made after the connect command left waits for the connect reply, where centrifuge-js sends it once the transport is open (`subscription.ts:653`, `:735-738`) (D5);
 - an optimistic subscribe's deadline starts when the connect reply is read (D6).
+
+---
+
+## Block 37 — Test constructors, an in-memory server double, an injectable connector
+
+**Goal:** an application tests its own code that uses ferrifuge without a Centrifugo server. It builds the events and results ferrifuge yields (item 19). It can give the client a connected byte stream of its own for the websocket (item 35). It runs its real `Client` against an in-memory server double that its test drives (item 22). Source: parity items 19, 22 and 35, "Planned after Block 19", decided by the reviewer by state of the art: design A for each.
+
+**Dependencies:**
+- Blocks 0 (components rule, features), 6 and 22 (TLS settings), 7 (Protobuf), 8 (a failed attempt, the fallback);
+- Blocks 9–13 (subscriptions, recovery, server-side subscriptions, calls) and 15 (delivery);
+- Block 16 (the crate's test hooks, today behind `test-util`);
+- Blocks 20 (release, docs.rs, semver job), 21 (logging, redaction), 23 (proxy settings, `Proxy::custom`'s endpoint form), 28 (runtime handle);
+- Blocks 29 (handshake timeout), 31 (statistics), 35 (`Publication.channel`, `has_recovered_publications`) and 36 (subscribe commands in the connect frame).
+
+**Out of scope:**
+- A client trait with a mock implementation (analysis item 22, design B): each new method breaks implementers, the centrifuge-go maintainer's objection (centrifuge-go #86).
+- A connector for http_stream and sse. reqwest's connector layer can only wrap reqwest's own connector, whose `Conn` cannot be built outside reqwest (reqwest 0.13.5 `client.rs:2475-2481`, `connect.rs:1346-1352`).
+- In the double:
+  - http_stream and sse;
+  - token checks, connection expiry and refresh;
+  - server pings;
+  - join and leave pushes;
+  - delta compression;
+  - unsubscribe pushes;
+  - history expiry and recovery limits;
+  - delayed answers and malformed frames.
+
+  These stay with the crate's fake server or the @A and @B layers.
+- The server API, proxies and other server features in the double, beyond what the client protocol carries.
+- Constructors for the sans-IO types (`Input`, `Action`): a sans-IO owner drives a `Machine` directly.
+- Moving the crate's fake server (`tests/support/fake_server.rs`) onto the double (D5).
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 37a | As an app developer, I want to build the events and results ferrifuge yields, so that I can unit-test the code that handles them | "Test constructors build what the client core yields" |
+| 37b | As an app developer behind a VPN tunnel, an in-process transport or a custom proxy, I want to give the client the connected stream its websocket runs over, so that it connects where its own networking cannot | "A connector gives the websocket its stream", "A wss endpoint over a connector is verified as without one", "A connector that fails fails the attempt", "A connector that never finishes fails the attempt with the handshake timeout", "A connector goes with websocket endpoints and no proxy setting only" |
+| 37c | As an app developer, I want my real client to run against an in-memory server my test drives, so that I test subscriptions, publications, recovery, calls and disconnects without a Centrifugo server | "An application tests its subscription against the server double", "The server double recovers publications missed during a reconnect", "The server double answers calls", "The server double refuses as the test asks", "The server double disconnects the client with a code", "The server double grants server-side subscriptions and sends messages", "The server double and Centrifugo answer alike" |
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 Features (37a; Q1).**
+  - **Private hooks.** The crate's own hooks move to a private feature, `__test-hooks`. The hooks are:
+    - `Machine::with_seed`, which gains `#[doc(hidden)]` like the others;
+    - `Client::log_number`, `Client::read_ahead` and `Client::held_events`;
+    - `Subscription::held_events`;
+    - `stalled_websocket_writes`;
+    - `write_fossil_delta`.
+
+    The files are `src/lib.rs`, `src/machine.rs`, `src/fossil.rs` and `src/adapter/{client,mod,outbox,subscription,transport}.rs`. Three other places change: the self dev-dependency (`features = ["__test-hooks", "test-util"]`), the `required-features` of the `perf_sim` and `chaos` tests, and the comment of the semver job.
+
+    The Cargo.toml comment says the feature is never for applications. A leading underscore marks it private: cargo-semver-checks 0.51.0 leaves `_` features out of its default feature set and out of `feature_missing` (`src/lints/feature_missing.ron`). reqwest 0.13.5 (`__tls`, `__rustls`) and tokio-tungstenite 0.30.0 (`__rustls-tls`) do the same, and Cargo has no private features (rust-lang/cargo#10882). This amends Block 16 and Block 21 D2.
+  - **Public feature.** `test-util = ["tokio?/io-util"]` is public and not a default.
+    - The constructors (D2) exist in every build with it, the core alone included.
+    - The server double (D5) exists when `tokio` is also enabled (`cfg(all(feature = "test-util", feature = "tokio"))`).
+    - One feature for both, as tokio's single `test-util` and the aws-sdk crates' `test-util`.
+    - The double adds no crate. tokio-tungstenite's `handshake` is already enabled. `tokio/io-util` is what `tokio::io::duplex` needs (tokio 1.54 `src/io/util/mem.rs:108`).
+  - **Documentation.** Each item shows its feature (`doc(cfg)` under `docsrs`, Block 20 D7).
+- **D2 Constructors (37a; Q2).** The test is what an application cannot build today, or can build only field by field.
+  - **Already buildable, unchanged:**
+    - every variant of `SubscriptionEvent` and `ServerSubscriptionEvent`;
+    - the variants of `ClientEvent` other than `Connected`;
+    - `ClientError`, `StreamPosition`, `CallReply`, `SubscriptionError`, `TokenError`, `DataError`, `StateError`;
+    - `CallError`, through its public `new` and `temporary`, which stay ungated.
+  - **New, behind `test-util`:**
+    - `ClientEvent::connected(client_id: impl Into<String>, transport: impl Into<String>, data: Option<Vec<u8>>)`. The `#[non_exhaustive]` variant cannot be built outside the crate. A field added to the variant later takes the value the client gives when the server leaves it out.
+    - `Publication::new(data: impl Into<Vec<u8>>)`, with `offset(u64)`, `tags(impl IntoIterator<Item = (K, V)>)` (`K`, `V`: `Into<String>`, replacing), `info(ClientInfo)`, `epoch(impl Into<String>)` and `channel(impl Into<String>)`.
+    - `ClientInfo::new(client, user)` (`impl Into<String>`), with `conn_info` and `chan_info` (`impl Into<Vec<u8>>`).
+    - `Subscribed`, from `Default`, with:
+      - `data(impl Into<Vec<u8>>)`;
+      - `positioned`, `recoverable`, `was_recovering`, `recovered`, `delta` and `has_recovered_publications` (`bool`);
+      - `stream_position(StreamPosition)`.
+    - `HistoryResult`, from `Default`, with `publications(impl IntoIterator<Item = Publication>)`, `epoch(impl Into<String>)` and `offset(u64)`.
+    - `PresenceResult`, from `Default`, with `clients(impl IntoIterator<Item = ClientInfo>)`, keyed by each `ClientInfo::client` as the wire map is.
+    - `PresenceStatsResult`, from `Default`, with `num_clients` and `num_users`.
+    - `Statistics::new(state: State)`, with every counter at 0 and no transport. It has a setter per field; `transport(TransportKind)` and `connected_since(SystemTime)` set `Some`.
+    - `DeltaStatistics`, from `Default`, with a setter per field.
+  - **Setter rules.** Each setter takes `self`, returns it and is `#[must_use]`. An `Option` field's setter takes the inner type and sets `Some`. A field a constructor does not name holds what the client yields when the server leaves it out. In particular, `Publication`'s crate-private delta flag is `false`, as on every publication the client delivers.
+  - **Sources.**
+    - The crate's own pattern: `Config`'s setters (Block 29 D4), `HistoryOptions`, `CallError`.
+    - Rust API Guidelines C-CTOR (constructors are static inherent methods) and C-BUILDER.
+    - centrifuge-rust `docs/spec.md` §3.3 (commit 88d6edf): `test-util`, "public constructors for events and results (`#[non_exhaustive]` blocks struct literals)". Its `docs/api.md` documents no shape.
+    - aws-sdk-rust builds its outputs with builders for its mocks (aws-smithy-mocks 0.3.0).
+  - **Doc-tests.** Each constructor has a doc-test (C-EXAMPLE).
+- **D3 Connector API (37b; Q3, the argument).** In the tokio adapter, not behind a feature:
+  - **The trait.** `pub trait Connector: Send + Sync { fn connect(&self, endpoint: http::Uri) -> Connecting; }`, with `pub type Connecting = Pin<Box<dyn Future<Output = Result<ConnectedStream, BoxError>> + Send>>` and `BoxError = Box<dyn std::error::Error + Send + Sync>`.
+  - **The stream.** `ConnectedStream` is opaque: `ConnectedStream::new<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(stream)`, with tokio's traits. Those bounds are exactly what `client_async_tls_with_config` needs (tokio-tungstenite 0.30.0 `src/tls.rs:189`). Opaque, so connection details can be added later (Rust API Guidelines C-STRUCT-PRIVATE).
+  - **Closures.** A blanket implementation covers `F: Fn(http::Uri) -> Fut + Send + Sync + 'static`, where `Fut: Future<Output = Result<S, E>> + Send + 'static` and `E: Into<BoxError>`. This is the shape of reqwest 0.13.5 `dns::Resolve` (`src/dns/resolve.rs:18-33`) and of wiremock 0.6.5 `Respond`, which has a closure blanket implementation.
+  - **The endpoint.** `http::Uri`, as hyper-util 0.1.21 `Connect` (a `Service<Uri>`, `client/legacy/connect/mod.rs:338-344`) and tonic 0.14.9 `Endpoint::connect_with_connector` take it. It is the configured websocket endpoint with its port always written, 80 for `ws` and 443 for `wss`, as Block 23 D1 gives `Proxy::custom`; path and query are kept. `ferrifuge::http` re-exports the `http` crate (1.x), as `ferrifuge::rustls` re-exports rustls.
+  - **Setting it.** `ClientBuilder::connector(connector: impl Connector + 'static)`. An `Arc` of a connector is itself a connector, so clients can share one, as reqwest's `dns_resolver` takes a resolver or an `Arc` of one. If coherence refuses `impl Connector for Arc<C>` next to the closure implementation, it takes reqwest's `IntoResolve` shape.
+  - **`Debug`.** `ClientBuilder`'s `Debug` shows `connector: true` or `false`.
+- **D4 Connector behaviour (37b; Q3, proxy and timeout).**
+  - **Each attempt.** Each connection attempt calls the connector once. Over the stream it returns, Ferrifuge then makes the same `client_async_tls_with_config` call as over a stream it dialled (`src/adapter/transport.rs:119`):
+    - for `wss://`, TLS with the client's settings (Blocks 6, 22), verifying the endpoint's host;
+    - the upgrade, with `http_headers` and the subprotocol;
+    - `max_message_bytes`.
+
+    There is one websocket path. `TCP_NODELAY` and socket options are the connector's.
+  - **Failure.** An error from the connector, or a panic, fails the attempt as a refused connection does (Block 8): an `error` event of kind transport, then the reconnect backoff; `failed_attempts` counts it (Block 31).
+    - The message is `connector: <its error>`, or "connector panicked".
+    - The connector is guarded as the token and data callbacks are, so a panic never ends the driver (invariant I2).
+  - **Timeout.** `Config::handshake_timeout` bounds the connector's future with the rest of the open (Block 29 D1). At the timeout the future is dropped and the error says "handshake timeout"; the documentation tells connectors to be cancel-safe. tonic: "The `connect_timeout` will still be applied".
+  - **Proxies.** A client with a connector reads no proxy setting: not the environment's, not the system's (Block 23 D1, D2). The connector is the route, as a proxy is itself a connector wrapping another (hyper-util `Tunnel` and `SocksV5`; Block 23 D3).
+    - `build()` fails with a configuration error (code 12) naming the connector and the other option in two cases: `ClientBuilder::proxy` was called with any setting, or an endpoint is not websocket (http_stream, sse).
+    - `Client::set_proxy` on such a client changes nothing, and its documentation says so.
+  - **Logging.** The DEBUG record of each attempt (Block 23 D7) gives `proxy` as `connector`. The connector sees the endpoint unredacted: it is the application's own.
+- **D5 Server double (37c; Q4).** `ferrifuge::test_util::Server` is `Clone` and shares one state.
+  - **Connecting a client.**
+    - `Server::new()` needs no runtime.
+    - `server.endpoint()` gives `ws://ferrifuge-double.invalid/connection/websocket`. It never resolves (RFC 6761), so a client that bypasses the connector fails.
+    - `server.connector()` gives a `Connector` that opens a `tokio::io::duplex` pair and answers the upgrade over it with tokio-tungstenite's `accept_hdr_async`, taking the `centrifuge-protobuf` subprotocol when the client asks for it. It serves the connection on a task of the runtime that polls the connector, the client's own, until the connection or the last `Server` handle ends.
+    - The real client, driver and core run unchanged; no socket is opened.
+    - Every connection gets a distinct client id. Several clients may share one double.
+  - **Answers, set synchronously before or during the test** (wiremock 0.6.5's registered mocks and synchronous `Respond`; aws-smithy-mocks rules). The connect reply announces no pings.
+    - `connect_data(data)` sets the data of later connect replies.
+    - `refuse_next_connect(CallError)` answers the next connect command with that error, its `temporary` flag included.
+    - `grant_server_subscription(channel)` adds the channel to the `subs` of later connect replies.
+    - `refuse_subscriptions(channel, CallError)` answers subscribes to the channel with that error.
+    - `on_rpc(F)`, with `F: Fn(&str, &[u8]) -> Result<Vec<u8>, CallError> + Send + Sync + 'static`, answers RPCs given the method and the data. Without a handler an RPC fails with 108 "not available", as Centrifugo does without an RPC proxy. Verified (Centrifugo v6.10.1, a raw websocket client, 2026-11-08): an RPC without an RPC proxy is answered with error 108 "not available".
+  - **Channels.** Every channel has one stream and one epoch, with offsets from 1 and a history of every publication. The history is unbounded and never expires.
+    - **Subscribe.** A subscribe is answered with the `positioned` and `recoverable` it asked for, and the stream's position.
+    - **Recovery.** A subscribe asking to recover from an offset and epoch of that stream gets the publications after that offset with `recovered` true. One with another epoch gets `recovered` false and no publications.
+    - **Publish.** A publish from a client is accepted and goes into the stream, to every connection subscribed, the publisher included.
+    - **Calls.** `history` follows `limit`, `since` and `reverse`, as Centrifugo does (Block 13). `presence` lists the connections subscribed, by client id, with an empty user. `presence_stats` counts them and their distinct users. `send` is recorded only.
+  - **Actions on open connections.**
+    - `publish(channel, data) -> u64` publishes into the stream and returns the offset.
+    - `message(data)` sends an async message push.
+    - `disconnect(code, reason)` sends a close frame. From that moment the connection receives nothing more, and later publications go to the history only.
+  - **Inspection.**
+    - `received() -> Vec<Command>` gives the commands of every connection, in the order read, decoded the same way from JSON and Protobuf.
+    - `connections() -> usize` gives the connections open.
+    - `Command` is `#[non_exhaustive]`, with `#[non_exhaustive]` variants with public fields: `Connect { token, data }`, `Subscribe { channel, recover: Option<StreamPosition> }`, `Unsubscribe { channel }`, `Publish { channel, data }`, `Rpc { method, data }`, `Send { data }`, `History { channel }`, `Presence { channel }`, `PresenceStats { channel }`.
+    - Its `Debug` shows data as its length and the token only as set or not (Block 21).
+    - Wiremock's `MockServer::received_requests` records requests the same way.
+  - **Components.** Framing is tungstenite's. Encoding is the crate's prost types and serde_json. No parser is written (Block 0, "Components").
+  - **Placement.** The double lives in `src/test_util/`. Block 28's source check, which bans `tokio::spawn` from `src/adapter/`, does not apply there.
+  - **The crate's fake server stays separate.** Its controls (portal pages, stopped reading, sized and corrupted frames, reversed RPC answers) are faults an application API should not carry. centrifuge-rust keeps its fake server out of the public API too (`docs/spec.md` §11.2, `docs/api.md`, 88d6edf).
+- **D6 Tests (Q6).**
+  - **37a.** An @E outline checks the constructors against what the core yields from the wire. A unit test checks each setter against assigning its field. Each constructor has a doc-test.
+  - **37b.** @D scenarios run over the fake server and a TLS listener; build refusals are @E.
+  - **37c.** @D scenarios run the real client against the double, in both encodings. One @A scenario keeps the double faithful to Centrifugo.
+- **D7 Version, CI, documentation (Q5).**
+  - **Version.** No bump: every addition is additive (Block 35 D5).
+    - The name `test-util` is kept and `__test-hooks` is new, so `feature_missing` and `feature_no_longer_enables_feature` (Deny) do not fire. The old `test-util = []` enabled nothing; `feature_newly_enables_feature` is Allow.
+    - The hooks were never public API (Block 16), and the crate is not on crates.io (2026-11-08).
+  - **CI.** The `semver` job checks the new public surface.
+    - In 37a it runs `--default-features --current-features test-util`, since the base's `test-util` holds the visible `Machine::with_seed`.
+    - From 37b, `ci.yml` and `release.yml` run `--default-features --features test-util` (cargo-semver-checks 0.51.0 README, "What features does cargo-semver-checks enable").
+    - `[package.metadata.docs.rs]` and the `docs-rs` job build `test-util` (amends Block 20 D1, D7).
+  - **Changelog.** `Unreleased`:
+    - "Added": the constructors (37a); `Connector`, `ConnectedStream`, `ClientBuilder::connector`, `ferrifuge::http` (37b); `test_util::Server` and `test_util::Command` (37c).
+    - "Changed": the crate's own test hooks move from `test-util` to the private `__test-hooks`.
+  - **README.** The features table gains `test-util`. A "Testing your application" section shows a constructor, a connector and a test against the double, as a doc-tested example on a current-thread runtime. The "Proxies" section says that a connector replaces the proxy setting.
+
+Value clause: As an app developer shipping ferrifuge to fleets of devices, I want to build its events and results, to give its websocket a stream of my own, and to run my real client against an in-memory server my test drives, so that I test my code's handling of publications, recovery, calls and disconnects in CI without a Centrifugo server, and connect through networking ferrifuge does not have.
+
+**Structural acceptance:**
+- Features:
+  - `Cargo.toml` has `test-util = ["tokio?/io-util"]` and `__test-hooks = []`;
+  - `cargo tree` shows no new crate;
+  - `cargo check --no-default-features --features test-util` builds the constructors without tokio;
+  - the constructors sit in a module compiled only under `test-util`, and no hook is reachable through `test-util`. Both are source checks, as Block 28's.
+- Unit tests:
+  - each setter of every D2 type sets its field as assigning it does, `Statistics` and `DeltaStatistics` included, and leaves the other fields at their defaults;
+  - `Command`'s `Debug` shows no token and no data;
+  - `ClientBuilder`'s `Debug` shows `connector` as a flag;
+  - the endpoint given to a connector carries its port for `ws` and `wss`, with and without one configured.
+- `tests/proxy_env.rs`: with `ALL_PROXY` set to a recording proxy, a client with a connector connects, and the proxy sees no connection.
+- Doc-tests cover every constructor, `Connector` (a closure dialling TCP) and `test_util::Server` (the README's test). All run in the `test` job.
+- The semver, docs.rs and `docs-rs` job changes are as in D7.
+- Each scenario is seen failing once on a mutation, recorded in the PR:
+  - **37a:** a setter that sets another field, or none; `ClientEvent::connected` dropping its data; `Publication::new` with the delta flag set.
+  - **37b:**
+    - the connector bypassed (a direct dial), or its endpoint passed without its port;
+    - the subprotocol not sent over the connector's stream;
+    - TLS skipped over it, or certificate verification turned off;
+    - a connector error that panics the driver or emits no `error` event;
+    - its future not bounded by the handshake timeout, or not dropped at it;
+    - the build check removed;
+    - a proxy setting applied with a connector.
+  - **37c:**
+    - the double answering JSON to a Protobuf client;
+    - offsets restarting per connection;
+    - `recovered` always true, or always false;
+    - a publication delivered to a connection after its `disconnect`;
+    - a refusal ignored;
+    - the close code replaced with 1000;
+    - server-side subscriptions not granted;
+    - messages dropped;
+    - `received()` missing a subscribe;
+    - `history` ignoring its limit.
+
+```gherkin
+Feature: Test constructors, an in-memory server double, an injectable connector
+
+  @E
+  Scenario Outline: Test constructors build what the client core yields
+    Given a client core with the JSON protocol over websocket, with a subscription to "news" subscribed before connect
+    When connect is called and the transport opens
+    And <reading>
+    Then the core yields <yielded>, equal to <built>
+    And the built value holds every value the row names
+
+    Examples:
+      | reading                                                                                                                                                                   | yielded                                    | built                                                                                                                                            |
+      | the core reads the connect reply with client id "c1" and data {"a":1}                                                                                                     | the client's "connected" event             | the connected event built with client id "c1", transport "websocket" and data {"a":1}                                                            |
+      | the core reads the connect reply, then the subscribe reply for "news", recoverable and positioned, at offset 3 with epoch "e"                                           | the "subscribed" event of "news"           | the subscribed details built as recoverable and positioned, with stream position offset 3, epoch "e"                                             |
+      | the core reads the connect reply and the subscribe reply, then a publication of "news" with data {"n":1}, offset 4, tag "k" "v" and info of client "c1", user "u1"      | the publication event of "news"            | the publication built with data {"n":1}, offset 4, tag "k" "v" and the client info built with client "c1", user "u1"                             |
+      | the core reads the connect reply, the application requests the history of "news" with limit -1, and the core reads publications {"n":1} at 1 and {"n":2} at 2, epoch "e", offset 2 | the history result                         | the history result built with the publications built with data {"n":1} offset 1 and data {"n":2} offset 2, epoch "e" and offset 2                |
+      | the core reads the connect reply, the application requests the presence of "news", and the core reads one client "c1" of user "u1"                                      | the presence result                        | the presence result built with the client info built with client "c1", user "u1"                                                                 |
+      | the core reads the connect reply, the application requests the presence stats of "news", and the core reads 2 clients and 1 user                                       | the presence stats result                  | the presence stats result built with 2 clients and 1 user                                                                                        |
+
+  @D
+  Scenario Outline: A connector gives the websocket its stream
+    Given the fake server
+    And a client configured with the <protocol> protocol and the endpoint "ws://centrifugo.invalid/connection/websocket", with a connector that opens a TCP connection to the fake server and records the endpoints it is given
+    When connect is called
+    Then the client emits "connected" over transport "websocket"
+    And the connector was called once, with "ws://centrifugo.invalid:80/connection/websocket"
+    And the fake server received a connect command in the <protocol> encoding
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the client emits "connected" again
+    And the connector was called twice
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario Outline: A wss endpoint over a connector is verified as without one
+    Given the fake server behind a TLS listener whose certificate for "centrifugo.invalid" is issued by <issuer>
+    And a client configured with the endpoint "wss://centrifugo.invalid/connection/websocket" and the test CA as an extra root certificate, with a connector that opens a TCP connection to that listener
+    When connect is called
+    Then <outcome>
+
+    Examples:
+      | issuer         | outcome                                                                                                                         |
+      | the test CA    | the client emits "connected" over transport "websocket"                                                                         |
+      | the private CA | the client emits an "error" event of kind transport naming an invalid peer certificate, and the fake server receives no command |
+
+  @D
+  Scenario Outline: A connector that fails fails the attempt
+    Given the fake server
+    And a client configured with the endpoint "ws://centrifugo.invalid/connection/websocket", with a connector that <fails> on its first call and opens a TCP connection to the fake server on later calls
+    When connect is called
+    Then the client emits "connecting", then an "error" event of kind transport whose message contains "<message>", then "connected"
+    And the connector was called twice
+    And the client's statistics count 1 failed attempt
+
+    Examples:
+      | fails                          | message            |
+      | returns the error "tunnel down" | tunnel down        |
+      | panics                         | connector panicked |
+
+  @D
+  Scenario: A connector that never finishes fails the attempt with the handshake timeout
+    Given the fake server
+    And a client configured with the endpoint "ws://centrifugo.invalid/connection/websocket" and a handshake timeout of 500 ms, with a connector whose first call never finishes and whose later calls open a TCP connection to the fake server
+    When connect is called
+    Then within the configured handshake timeout plus tolerance the client emits an "error" event of kind transport with message "handshake timeout"
+    And the future of the connector's first call has been dropped
+    And the client then emits "connected" over transport "websocket"
+
+  @E
+  Scenario Outline: A connector goes with websocket endpoints and no proxy setting only
+    Given a client builder with a connector and <options>
+    When the client is built
+    Then <outcome>
+
+    Examples:
+      | options                                                                  | outcome                                                                                     |
+      | the endpoint "ws://centrifugo.invalid/connection/websocket"             | the client is built                                                                         |
+      | a websocket endpoint, then an http_stream endpoint as a fallback        | building fails with a configuration error naming the connector and transport "http_stream" |
+      | an sse endpoint                                                          | building fails with a configuration error naming the connector and transport "sse"         |
+      | a websocket endpoint and the proxy setting none                         | building fails with a configuration error naming the connector and the proxy setting        |
+      | a websocket endpoint and the system proxy setting                       | building fails with a configuration error naming the connector and the proxy setting        |
+
+  @D
+  Scenario Outline: An application tests its subscription against the server double
+    Given a server double
+    And a client built with the double's endpoint and connector and the <protocol> protocol
+    When connect is called and the application subscribes to channel "news"
+    Then the client emits "connected" over transport "websocket", with a client id the double gave
+    And the subscription reaches state "subscribed"
+    When the double publishes {"n":1} to channel "news"
+    Then the subscription receives a publication with data {"n":1} and offset 1
+    And the double received a connect command, then a subscribe command for "news", and no other command
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario: The server double recovers publications missed during a reconnect
+    Given a server double
+    And a client built with the double's endpoint and connector and a minimum reconnect delay of 200 ms, connected, with a recoverable subscription to "news" subscribed
+    And the double published {"n":1} to channel "news", which the subscription received
+    When the double disconnects the client with code 3001 "shutdown"
+    And the double publishes {"n":2} and then {"n":3} to channel "news" while the connector has been called once
+    Then the subscription emits "subscribing", then "subscribed" with recovered true
+    And the subscription receives the publications {"n":2} at offset 2 and {"n":3} at offset 3, in that order, each exactly once
+    And the double received a second subscribe command for "news", asking to recover from offset 1
+
+  @D
+  Scenario Outline: The server double answers calls
+    Given a server double whose RPC handler answers method "echo" with the data it is given, and any other method with the error 104 "method not found"
+    And a client built with the double's endpoint and connector, connected, with a subscription to "news" subscribed
+    And the double published {"n":1} to channel "news"
+    When the application <call>
+    Then <outcome>
+
+    Examples:
+      | call                                                 | outcome                                                                                 |
+      | calls RPC "echo" with {"a":1}                        | the call returns {"a":1}                                                                |
+      | calls RPC "other" with {"a":1}                       | the call fails with code 104 and message "method not found"                             |
+      | publishes {"n":2} to channel "news"                  | the publish succeeds and the subscription receives a publication {"n":2} at offset 2    |
+      | requests the history of "news" with limit -1         | the result holds the publication {"n":1} at offset 1, and its offset is 1               |
+      | requests the history of "news" with limit 0          | the result holds no publication, and its offset is 1                                    |
+      | requests the presence of "news"                      | the result holds one client, with the client id of the client's "connected" event       |
+      | requests the presence stats of "news"                | the result counts 1 client and 1 user                                                   |
+
+  @D
+  Scenario Outline: The server double refuses as the test asks
+    Given a server double that <refusal>
+    And a client built with the double's endpoint and connector
+    When connect is called and the application subscribes to channel "secret"
+    Then <outcome>
+
+    Examples:
+      | refusal                                                                  | outcome                                                                                                                                  |
+      | refuses the next connect with the temporary error 100 "internal server error" | the client emits "connecting", an "error" event of kind connect with code 100, then "connected", and the double received two connect commands |
+      | refuses subscriptions to "secret" with the error 103 "permission denied"  | the client is "connected" and the subscription emits "unsubscribed" with code 103                                                        |
+
+  @D
+  Scenario Outline: The server double disconnects the client with a code
+    Given a server double
+    And a client built with the double's endpoint and connector and reconnect delays from 50 ms to 200 ms, connected
+    When the double disconnects the client with code <code> "<reason>"
+    Then the client emits "<state>" with code <code> and reason "<reason>"
+    And after 1 s the connector has been called <calls> times and the double has <open> connection open
+
+    Examples:
+      | code | reason      | state        | calls | open |
+      | 3001 | shutdown    | connecting   | 2     | 1    |
+      | 3501 | bad request | disconnected | 1     | 0    |
+
+  @D
+  Scenario: The server double grants server-side subscriptions and sends messages
+    Given a server double that grants the server-side subscription "personal:1" at connect
+    And a client built with the double's endpoint and connector
+    When connect is called
+    Then the client emits a server-side "subscribed" event for channel "personal:1"
+    When the double publishes {"n":1} to channel "personal:1"
+    Then the client emits a server-side publication of "personal:1" with data {"n":1} and offset 1
+    When the double sends the message {"m":1}
+    Then the client emits a "message" event with data {"m":1}
+
+  @A
+  Scenario: The server double and Centrifugo answer alike
+    Given a Centrifugo server whose channel "news" keeps history, allows recovery and accepts publishes from clients, and a server double
+    And for each of them, a client with a minimum reconnect delay of 1 s and a connection token for user "u1", connected to it, with a recoverable subscription to "news" subscribed
+    When each client publishes {"n":1} and then {"n":2} to channel "news"
+    And each client requests the history of "news" with limit -1
+    And each server disconnects its client with code 3001 "shutdown", Centrifugo through its server API
+    And each server publishes {"n":3} to channel "news" before its client reconnects
+    Then both clients emit the same client and subscription events, with the same codes, in the same order, "subscribed" with recovered true included
+    And both subscriptions receive the publications {"n":1}, {"n":2} and {"n":3} at offsets 1, 2 and 3
+    And both history results hold {"n":1} at offset 1 and {"n":2} at offset 2, with offset 2
+```
+
+The steps of "The server double and Centrifugo answer alike" compare everything except epochs and client ids, which differ by design. "Before its client reconnects" is checked: the double's connector has been called once, and Centrifugo has had no new connection.
+
+**Exceptions introduced:** one divergence from centrifuge-js 63ed73e. Its `websocket`, `fetch`, `readableStream` and `eventsource` options replace the constructors of every transport (`centrifuge.ts:1070-1100`); ferrifuge's connector carries the websocket only (D3, D4; out of scope).
