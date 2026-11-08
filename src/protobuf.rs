@@ -419,6 +419,7 @@ impl From<pb::Publication> for Publication {
             tags: publication.tags,
             info: publication.info.map(ClientInfo::from),
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
+            channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
         }
     }
@@ -691,6 +692,33 @@ mod tests {
                 info: expected
             })
         );
+    }
+
+    #[test]
+    fn decodes_the_own_channel_of_a_publication() {
+        let push = |channel: &str| pb::Reply {
+            push: Some(pb::Push {
+                channel: "news".into(),
+                r#pub: Some(pb::Publication {
+                    channel: channel.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let replies = decode(&frame_of(&[push("news.sport"), push("")])).unwrap();
+
+        let channels: Vec<_> = replies
+            .iter()
+            .map(|reply| match &reply.result {
+                ReplyResult::Push(Push::Publication { publication, .. }) => {
+                    publication.channel.clone()
+                }
+                result => panic!("{result:?}"),
+            })
+            .collect();
+        assert_eq!(channels, [Some("news.sport".to_owned()), None]);
     }
 
     #[test]

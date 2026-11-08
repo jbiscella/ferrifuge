@@ -309,4 +309,14 @@ mod tests {
             assert!(shown.contains("<11 bytes>"), "{shown}");
         }
     }
+
+    #[test]
+    fn the_debug_output_of_a_publication_shows_its_channel() {
+        let publication = Publication {
+            channel: Some("news.sport".to_owned()),
+            ..publication()
+        };
+
+        assert!(format!("{publication:?}").contains(r#"channel: Some("news.sport")"#));
+    }
 }

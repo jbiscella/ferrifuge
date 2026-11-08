@@ -120,6 +120,10 @@ pub struct Subscribed {
     ///
     /// [`delta`]: crate::machine::SubscriptionOptions::delta
     pub delta: bool,
+    /// Publications follow this event, recovered or initial ones, unless
+    /// they are withdrawn (Block 15); for metrics and logging (Block 35c,
+    /// centrifuge-js `hasRecoveredPublications`).
+    pub has_recovered_publications: bool,
 }
 
 /// A delta compression format a subscription can ask for (`client.proto`,
@@ -161,6 +165,12 @@ pub struct Publication {
     /// (`client.proto`, `Publication.epoch`): a position saved to resume
     /// from later is then this offset with this epoch.
     pub epoch: Option<String>,
+    /// The channel it was published to, when the server says it differs
+    /// from the subscription's, as for a wildcard subscription
+    /// (`client.proto`, `Publication.channel`). Such a publication belongs
+    /// to another stream: it moves neither the offset nor the epoch of its
+    /// subscription (Block 35c).
+    pub channel: Option<String>,
     /// The wire's `Publication.delta`: `data` is a Fossil delta against the
     /// previous publication. Cleared once the delta is applied, so a
     /// publication the application takes never has it (Block 19, D4).
@@ -195,6 +205,10 @@ impl std::fmt::Debug for Subscribed {
             .field("recovered", &self.recovered)
             .field("stream_position", &self.stream_position)
             .field("delta", &self.delta)
+            .field(
+                "has_recovered_publications",
+                &self.has_recovered_publications,
+            )
             .finish()
     }
 }
@@ -209,6 +223,7 @@ impl std::fmt::Debug for Publication {
             .field("tags", &tags)
             .field("info", &self.info)
             .field("epoch", &self.epoch)
+            .field("channel", &self.channel)
             .finish_non_exhaustive()
     }
 }

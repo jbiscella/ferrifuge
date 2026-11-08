@@ -198,6 +198,8 @@ impl Machine {
                 stream_position,
                 // The client never asks for delta here (Block 19).
                 delta: false,
+                // A `Subscribe` push carries none (Block 35c, D4).
+                has_recovered_publications: !result.publications.is_empty(),
             }),
         );
         // Initial or recovered publications follow it and move the position

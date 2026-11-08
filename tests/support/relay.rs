@@ -168,6 +168,11 @@ impl CountingRelay {
         self.mode.store(mode as u8, Ordering::SeqCst);
     }
 
+    /// Whether later connections are treated as `mode` says.
+    pub(crate) fn is(&self, mode: Mode) -> bool {
+        self.mode.load(Ordering::SeqCst) == mode as u8
+    }
+
     /// `host:port` of the relay.
     pub(crate) fn address(&self) -> String {
         format!("127.0.0.1:{}", self.port)

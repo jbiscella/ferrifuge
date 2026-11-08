@@ -47,7 +47,7 @@ pub(crate) struct Recovery {
     /// Data of the publications the subscription must receive next.
     expected: Vec<String>,
     /// The stream position the client must recover from next.
-    position: Option<StreamPosition>,
+    pub(super) position: Option<StreamPosition>,
     /// Subscribe commands the fake server had received before the step
     /// making the client resubscribe.
     pub(super) subscribes_before: usize,
@@ -222,7 +222,7 @@ pub(super) async fn subscribe_request(world: &ClientWorld, index: usize) -> Valu
 
 /// The client's next subscribe command asks to recover from the position
 /// the scenario expects.
-async fn assert_next_subscribe_recovers(world: &ClientWorld) {
+pub(super) async fn assert_next_subscribe_recovers(world: &ClientWorld) {
     let expected = world.recovery.position.clone().expect("a position");
     let subscribe = subscribe_request(world, world.recovery.subscribes_before).await;
     assert_eq!(subscribe["channel"], CHANNEL, "{subscribe}");
@@ -328,11 +328,16 @@ async fn disconnected_with_a_reconnect_code(world: &mut ClientWorld) {
     disconnect_and_hold(world).await;
 }
 
+/// After a step that disconnected the client and holds it away, or, with
+/// none, disconnecting it here (Block 35c).
 #[when(
-    regex = r"^2 publications (?:that differ in a few bytes from it )?are made to the channel(?:, as deltas,)? while the client reconnects$"
+    regex = r"^(\d+) publications (?:that differ in a few bytes from it )?are made to the channel(?:, as deltas,)? while the client reconnects$"
 )]
-async fn publications_while_reconnecting(world: &mut ClientWorld) {
-    publish(world, 2).await;
+async fn publications_while_reconnecting(world: &mut ClientWorld, count: usize) {
+    if !world.relay.as_ref().expect("a relay").is(Mode::Down) {
+        disconnect_and_hold(world).await;
+    }
+    publish(world, count).await;
     let_the_client_back(world);
 }
 

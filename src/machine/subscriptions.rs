@@ -773,77 +773,85 @@ impl Machine {
         sub.subscribe_command = None;
         match (reply.error, reply.result) {
             (Some(error), _) => self.subscribe_error(id, &error),
-            (None, ReplyResult::Subscribe(result)) => {
-                sub.state = SubscriptionState::Subscribed;
-                self.subscriptions.map_compact_id(id, result.id);
-                let sub = self
-                    .subscriptions
-                    .by_id
-                    .get_mut(&id)
-                    .expect("checked above");
-                // A delta failure during this subscribe takes the reset back
-                // (Block 19, D8), so only this one may be undone.
-                sub.backoff.keep_reset();
-                sub.backoff.reset();
-                // Each subscribe starts a new delta chain (D5).
-                sub.delta = if result.delta {
-                    DeltaChain::On { base: None }
-                } else {
-                    DeltaChain::Off
-                };
-                sub.tokens.connected();
-                // The server decides: a recoverable reply gives the position
-                // to recover from next; any other reply ends recovery, so a
-                // channel that does not recover is never asked to
-                // (centrifuge-js `_setSubscribed`).
-                let reported = (result.positioned || result.recoverable).then(|| StreamPosition {
-                    offset: result.offset,
-                    epoch: result.epoch.clone(),
-                });
-                sub.recover = result.recoverable;
-                // With publications, the reply's position is reached once
-                // the last of them is taken (Block 15).
-                let replied = result.recoverable.then_some(StreamPosition {
-                    offset: result.offset,
-                    epoch: result.epoch,
-                });
-                if let Some(replied) = &replied {
-                    sub.position = Some(Machine::reply_baseline(replied, &result.publications));
-                }
-                self.withdraw(&Owner::Client(id));
-                self.rearm_subscription_refresh(id, result.expires, result.ttl);
-                // Rebuilt before any is emitted: a delta failure must not
-                // withdraw an event of the message being handled, which
-                // the next message would wait for (Codex on PR #99).
-                let publications = self.apply_deltas(id, result.publications);
-                self.emit_subscription(
-                    id,
-                    SubscriptionEvent::Subscribed(Subscribed {
-                        data: result.data,
-                        positioned: result.positioned,
-                        recoverable: result.recoverable,
-                        was_recovering: result.was_recovering,
-                        recovered: result.recovered,
-                        stream_position: reported,
-                        delta: result.delta,
-                    }),
-                );
-                // Recovered publications, or initial ones, follow it and
-                // move the position once taken.
-                let publications = match publications {
-                    Ok(publications) => publications,
-                    Err(error) => return self.delta_failed(id, error),
-                };
-                let last = publications.len().saturating_sub(1);
-                for (index, publication) in publications.into_iter().enumerate() {
-                    let reply = replied.as_ref().map(|position| (position, index == last));
-                    self.emit_publication(id, publication, reply);
-                }
-                self.subscription_calls_subscribed(id);
-            }
+            (None, ReplyResult::Subscribe(result)) => self.subscribe_succeeded(id, result),
             // A reply to subscribe without its result breaks the protocol.
             (None, _) => self.reply_without_result("subscribe"),
         }
+    }
+
+    /// The current subscribe command of `id` succeeded with `result`.
+    fn subscribe_succeeded(&mut self, id: SubscriptionId, result: crate::wire::SubscribeResult) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        sub.state = SubscriptionState::Subscribed;
+        self.subscriptions.map_compact_id(id, result.id);
+        let sub = self
+            .subscriptions
+            .by_id
+            .get_mut(&id)
+            .expect("checked above");
+        // A delta failure during this subscribe takes the reset back
+        // (Block 19, D8), so only this one may be undone.
+        sub.backoff.keep_reset();
+        sub.backoff.reset();
+        // Each subscribe starts a new delta chain (D5).
+        sub.delta = if result.delta {
+            DeltaChain::On { base: None }
+        } else {
+            DeltaChain::Off
+        };
+        sub.tokens.connected();
+        // The server decides: a recoverable reply gives the position
+        // to recover from next; any other reply ends recovery, so a
+        // channel that does not recover is never asked to
+        // (centrifuge-js `_setSubscribed`).
+        let reported = (result.positioned || result.recoverable).then(|| StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch.clone(),
+        });
+        sub.recover = result.recoverable;
+        // With publications, the reply's position is reached once
+        // the last of them is taken (Block 15).
+        let replied = result.recoverable.then_some(StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch,
+        });
+        if let Some(replied) = &replied {
+            sub.position = Some(Machine::reply_baseline(replied, &result.publications));
+        }
+        self.withdraw(&Owner::Client(id));
+        self.rearm_subscription_refresh(id, result.expires, result.ttl);
+        // Rebuilt before any is emitted: a delta failure must not
+        // withdraw an event of the message being handled, which
+        // the next message would wait for (Codex on PR #99).
+        let has_recovered_publications = !result.publications.is_empty();
+        let publications = self.apply_deltas(id, result.publications);
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Subscribed(Subscribed {
+                data: result.data,
+                positioned: result.positioned,
+                recoverable: result.recoverable,
+                was_recovering: result.was_recovering,
+                recovered: result.recovered,
+                stream_position: reported,
+                delta: result.delta,
+                has_recovered_publications,
+            }),
+        );
+        // Recovered publications, or initial ones, follow it and
+        // move the position once taken.
+        let publications = match publications {
+            Ok(publications) => publications,
+            Err(error) => return self.delta_failed(id, error),
+        };
+        let last = publications.len().saturating_sub(1);
+        for (index, publication) in publications.into_iter().enumerate() {
+            let reply = replied.as_ref().map(|position| (position, index == last));
+            self.emit_publication(id, publication, reply);
+        }
+        self.subscription_calls_subscribed(id);
     }
 
     /// An unsubscribe failed or got no reply: the server-side state is

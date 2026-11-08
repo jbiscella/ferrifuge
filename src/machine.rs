@@ -18,6 +18,8 @@ mod close_tests;
 mod compaction_tests;
 mod delivery;
 mod inbound;
+#[cfg(test)]
+mod publication_channel_tests;
 mod server_subscriptions;
 #[cfg(test)]
 mod statistics_tests;
