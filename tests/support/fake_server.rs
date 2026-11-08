@@ -82,6 +82,9 @@ struct State {
     portal_answers: usize,
     /// Every JSON message received from clients, in order.
     received: Vec<Value>,
+    /// The text of each message of `received`, as the client wrote it
+    /// (Block 38).
+    received_texts: Vec<String>,
     /// The frame each message of `received` arrived in, numbered from 0
     /// over JSON and Protobuf frames alike (Block 18).
     received_frames: Vec<usize>,
@@ -113,6 +116,9 @@ struct State {
     /// Results of the subscribe replies sent, with their channel, in order.
     subscribe_replies: Vec<(String, Value)>,
     rpc: Rpc,
+    /// The reply to every RPC command, without its id, over `rpc` (Block
+    /// 38).
+    rpc_reply: Option<Value>,
     /// The RPC command whose answer waits for the next one's, in
     /// [`Rpc::Reverse`].
     held_rpc: Option<Value>,
@@ -474,6 +480,12 @@ impl FakeServer {
         self.state.lock().unwrap().received.clone()
     }
 
+    /// The text of every JSON message received from clients so far, as
+    /// written (Block 38).
+    pub(crate) fn received_texts(&self) -> Vec<String> {
+        self.state.lock().unwrap().received_texts.clone()
+    }
+
     /// Every JSON message received so far, with the frame it arrived in.
     pub(crate) fn received_with_frames(&self) -> Vec<(Value, usize)> {
         let state = self.state.lock().unwrap();
@@ -611,6 +623,12 @@ impl FakeServer {
     /// Answers RPC commands as `rpc` says from now on.
     pub(crate) fn answer_rpc(&self, rpc: Rpc) {
         self.state.lock().unwrap().rpc = rpc;
+    }
+
+    /// Answers every JSON RPC command with `reply`, e.g. `{"rpc": {}}` or
+    /// `{"error": {...}}`, given its id (Block 38).
+    pub(crate) fn answer_rpcs_with(&self, reply: Value) {
+        self.state.lock().unwrap().rpc_reply = Some(reply);
     }
 
     /// The JSON RPC commands received from clients so far.
@@ -855,7 +873,7 @@ impl Connection {
                 continue;
             };
             if connect_failed {
-                self.record(message, frame);
+                self.record(message, line, frame);
                 continue;
             }
             let failing = message["connect"].is_object().then(|| {
@@ -892,7 +910,7 @@ impl Connection {
                     }
                 }
             }
-            self.record(message, frame);
+            self.record(message, line, frame);
         }
         if let Some((delay, held)) = deferred {
             let out = self.out.clone();
@@ -914,6 +932,11 @@ impl Connection {
         let mut replies = Vec::new();
         if message["rpc"].is_object() {
             let mut state = self.state.lock().unwrap();
+            if let Some(mut reply) = state.rpc_reply.clone() {
+                reply["id"] = message["id"].clone();
+                replies.push(Message::text(reply.to_string()));
+                return replies;
+            }
             match state.rpc {
                 Rpc::Answer => replies.push(rpc_answer(message)),
                 Rpc::Reverse => match state.held_rpc.take() {
@@ -955,9 +978,10 @@ impl Connection {
     }
 
     /// Records a JSON command the server read, in frame `frame`.
-    fn record(&self, message: Value, frame: usize) {
+    fn record(&self, message: Value, text: &str, frame: usize) {
         let mut state = self.state.lock().unwrap();
         state.received.push(message);
+        state.received_texts.push(text.to_owned());
         state.received_frames.push(frame);
         state.received_at.push(std::time::Instant::now());
     }

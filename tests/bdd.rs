@@ -489,6 +489,15 @@ const IMPLEMENTED: &[&str] = &[
     "Optimistic subscriptions on Centrifugo",
     // Block 37a: test constructors.
     "Test constructors build what the client core yields",
+    // Block 38: typed JSON helpers.
+    "A typed publication reaches subscribers as the JSON its type encodes to",
+    "A publication from the server API decodes as the application's type",
+    "A typed publication from a Protobuf client reaches a JSON client",
+    "A typed RPC sends JSON and decodes the proxy's result",
+    "A typed RPC tells its failures apart",
+    "A value that cannot be encoded fails the call at once and sends nothing",
+    "A typed call is made when the method returns",
+    "A publication's data decodes as the application's type, or says why not",
 ];
 
 /// Server configuration of @A scenarios.

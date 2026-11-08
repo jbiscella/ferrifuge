@@ -213,6 +213,37 @@ impl std::fmt::Debug for Subscribed {
     }
 }
 
+impl Publication {
+    /// Decodes [`data`](Self::data) as JSON into `T` (Block 38): the JSON a
+    /// publisher's [`Client::publish_json`](crate::Client::publish_json)
+    /// encoded, or any JSON published, under either protocol. `T` may
+    /// borrow from the data, e.g. a `&str` or a
+    /// [`RawValue`](serde_json::value::RawValue).
+    ///
+    /// ```
+    /// # use ferrifuge::Publication;
+    /// #[derive(serde::Deserialize)]
+    /// struct Note {
+    ///     text: String,
+    /// }
+    ///
+    /// fn show(publication: &Publication) {
+    ///     match publication.json::<Note>() {
+    ///         Ok(note) => println!("{}", note.text),
+    ///         Err(error) => eprintln!("not a note: {error}"),
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The data is not JSON, or not JSON that `T` accepts; empty data is not
+    /// JSON. `serde_json`'s message may quote fragments of the data.
+    pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.data)
+    }
+}
+
 impl std::fmt::Debug for Publication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut tags: Vec<&String> = self.tags.keys().collect();

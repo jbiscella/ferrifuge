@@ -34,8 +34,8 @@ use crate::machine::{
 };
 use crate::{
     CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
-    HistoryOptions, HistoryResult, PresenceResult, PresenceStatsResult, State, StateError,
-    StreamPosition, SubscriptionEvent, TokenError, codes,
+    HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult, State,
+    StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 use tracing::{debug, trace, warn};
 
@@ -1477,6 +1477,57 @@ impl Client {
         })
     }
 
+    /// Calls the server's RPC `method` with `data` encoded as JSON, and
+    /// decodes the result data as `Resp` (Block 38). Made, waiting and
+    /// failing as [`Client::rpc`]; `data` is encoded when this returns, so
+    /// the future borrows nothing. Under the Protobuf protocol the data are
+    /// the JSON bytes. For an RPC that returns no data, use
+    /// [`Client::rpc`]: empty data is not JSON.
+    ///
+    /// ```no_run
+    /// # async fn run(client: ferrifuge::Client) -> Result<(), ferrifuge::JsonCallError> {
+    /// #[derive(serde::Serialize)]
+    /// struct Terms {
+    ///     a: u32,
+    ///     b: u32,
+    /// }
+    ///
+    /// #[derive(serde::Deserialize)]
+    /// struct Sum {
+    ///     sum: u32,
+    /// }
+    ///
+    /// let sum: Sum = client.rpc_json("sum", &Terms { a: 1, b: 2 }).await?;
+    /// println!("{}", sum.sum);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
+    /// sent; [`JsonCallError::Call`] with the errors of [`Client::rpc`];
+    /// [`JsonCallError::Decode`] when the server answered with data that
+    /// does not decode as `Resp`: the RPC ran.
+    pub fn rpc_json<Req, Resp>(
+        &self,
+        method: impl Into<String>,
+        data: &Req,
+    ) -> impl Future<Output = Result<Resp, JsonCallError>> + Send + 'static
+    where
+        Req: serde::Serialize + ?Sized,
+        Resp: serde::de::DeserializeOwned,
+    {
+        let call = serde_json::to_vec(data).map(|data| self.rpc(method, data));
+        async move {
+            let data = call.map_err(JsonCallError::Encode)?.await?;
+            match serde_json::from_slice(&data) {
+                Ok(result) => Ok(result),
+                Err(error) => Err(JsonCallError::Decode { error, data }),
+            }
+        }
+    }
+
     /// Publishes `data` to `channel`: raw JSON with the JSON protocol, any
     /// bytes with Protobuf. Made, waiting and failing as [`Client::rpc`].
     ///
@@ -1498,6 +1549,36 @@ impl Client {
         reply_of(call, |reply| {
             matches!(reply, CallReply::Publish).then_some(())
         })
+    }
+
+    /// Publishes `data` encoded as JSON to `channel` (Block 38), as
+    /// [`Client::publish`] does; `data` is encoded when this returns, so
+    /// the future borrows nothing. Under the Protobuf protocol the data are
+    /// the JSON bytes, which a JSON client receives unchanged.
+    ///
+    /// ```no_run
+    /// # async fn run(client: ferrifuge::Client) -> Result<(), ferrifuge::JsonCallError> {
+    /// #[derive(serde::Serialize)]
+    /// struct Note<'a> {
+    ///     text: &'a str,
+    /// }
+    ///
+    /// client.publish_json("news", &Note { text: "hi" }).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
+    /// sent; [`JsonCallError::Call`] with the errors of [`Client::rpc`].
+    pub fn publish_json<T: serde::Serialize + ?Sized>(
+        &self,
+        channel: impl Into<String>,
+        data: &T,
+    ) -> impl Future<Output = Result<(), JsonCallError>> + Send + 'static {
+        let call = serde_json::to_vec(data).map(|data| self.publish(channel, data));
+        async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
 
     /// The history of `channel`: the publications `options` select, and the
@@ -2636,6 +2717,47 @@ mod tests {
 
     use super::*;
     use crate::adapter::SubscriptionBuilder;
+
+    // The typed calls borrow nothing: their futures can be spawned whatever
+    // the application's types (Block 38, D3).
+    #[test]
+    fn typed_call_futures_are_send_and_static() {
+        use std::marker::PhantomData;
+
+        /// Neither `Send` nor `Sync`.
+        struct Local(PhantomData<*const ()>);
+        impl serde::Serialize for Local {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_unit()
+            }
+        }
+        /// Neither `Send` nor `'static`.
+        struct Borrowing<'a>(PhantomData<&'a *const ()>);
+        impl<'de> serde::Deserialize<'de> for Borrowing<'_> {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                serde::de::IgnoredAny::deserialize(deserializer)?;
+                Ok(Self(PhantomData))
+            }
+        }
+        fn spawnable<F: Future + Send + 'static>(_: &F) {}
+        // `'a` is no longer than the call: `Borrowing<'a>` is not `'static`.
+        fn rpc_with<'a>(client: &Client, local: &Local, _: PhantomData<&'a ()>) {
+            spawnable(&client.rpc_json::<_, Borrowing<'a>>("m", local));
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _entered = runtime.enter();
+        let client = Client::new("ws://127.0.0.1:1/connection/websocket", Config::default())
+            .expect("a valid endpoint");
+        let local = Local(PhantomData);
+        rpc_with(&client, &local, PhantomData);
+        spawnable(&client.publish_json("news", &local));
+        let subscription = client.new_subscription("news").expect("a new channel");
+        spawnable(&subscription.publish_json(&local));
+    }
 
     // A batch can be stopped from another task (Block 18, D1).
     #[test]

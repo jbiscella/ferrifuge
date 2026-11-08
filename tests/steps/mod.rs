@@ -33,6 +33,7 @@ mod connection;
 mod delivery;
 mod delta;
 mod jitter;
+mod json_helpers;
 mod limits;
 mod logging;
 mod optimistic;
@@ -205,6 +206,8 @@ pub(crate) struct ClientWorld {
     pub(crate) optimistic: optimistic::Optimistic,
     /// What a Block 37a scenario built.
     pub(crate) test_support: test_support::TestSupport,
+    /// What a Block 38 scenario holds.
+    pub(crate) json_helpers: json_helpers::JsonHelpers,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.

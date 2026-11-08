@@ -483,6 +483,28 @@ client.publish("news", br#"{"text":"hi"}"#.to_vec()).await?;
 let history = client.history("news", HistoryOptions::default().limit(10)).await?;
 ```
 
+With serde types, `client.publish_json(channel, &value)`,
+`subscription.publish_json(&value)` and `client.rpc_json(method, &value)`
+encode the value as JSON, and `rpc_json` decodes the result into the type
+asked for; `publication.json::<T>()` decodes a publication, live, recovered
+or from history. They work under both protocols: with Protobuf the data are
+the JSON bytes. A typed call fails with a `JsonCallError`: `Encode` when the
+value did not encode, and nothing was sent; `Call` with the `CallError` of
+the untyped call; `Decode`, holding the result data, when the server
+answered with data the type does not accept, so the RPC ran. serde_json's
+error messages may quote parts of the data: mind it when logging them. For an
+RPC that returns no data, use `rpc`: empty data is not JSON.
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Note {
+    text: String,
+}
+
+client.publish_json("news", &Note { text: "hi".into() }).await?;
+let sum: serde_json::Value = client.rpc_json("sum", &serde_json::json!({"a": 1, "b": 2})).await?;
+```
+
 `HistoryOptions::default()` returns no publications, only the stream's
 position; `limit(-1)` asks for all of them, and the server may cap the number
 (Centrifugo `client.history_max_publication_limit`, 300 by default). Without `since`, a forward history
