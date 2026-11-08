@@ -477,6 +477,16 @@ const IMPLEMENTED: &[&str] = &[
     "A publication of another channel does not move the stream position",
     "The subscribed event says whether recovered publications follow",
     "A server-side subscribed event says whether publications follow",
+    // Block 36b: optimistic subscriptions.
+    "Subscribes go with the connect command over websocket",
+    "Subscribes go with the connect command over websocket only",
+    "Only subscribes that fit the frame cap go with the connect command",
+    "A subscription that needs a callback subscribes after the connect reply",
+    "An optimistic subscribe's deadline starts at the connect reply",
+    "A failed connect loses the optimistic subscribes as a teardown does",
+    "Unsubscribing before the connect reply undoes an optimistic subscribe",
+    "A subscribe reply before the connect reply breaks the protocol",
+    "Optimistic subscriptions on Centrifugo",
 ];
 
 /// Server configuration of @A scenarios.

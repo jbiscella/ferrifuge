@@ -53,7 +53,7 @@ pub(crate) struct BatchRun {
     /// Calls by name, in the order they were made.
     pub(super) calls: Vec<(String, CallId)>,
     pub(super) settled: BTreeMap<CallId, Result<CallReply, CallError>>,
-    subscriptions: Vec<SubscriptionId>,
+    pub(super) subscriptions: Vec<SubscriptionId>,
     /// Transports closed so far.
     closed: Vec<TransportId>,
 }
@@ -1173,7 +1173,7 @@ async fn receives_only(world: &mut ClientWorld, data: String) {
 
 // 18c: the subscribe commands of a connect reply in one batch.
 
-/// A run of a machine over http_stream, where a connect reply alone sends
+/// A run of a machine over `http_stream`, where a connect reply alone sends
 /// the subscribe commands (Block 36, D10).
 fn http_stream_run(config: Config) -> BatchRun {
     BatchRun::of(
@@ -1257,21 +1257,20 @@ fn resubscribes_in_one_request(world: &mut ClientWorld) {
 }
 
 /// A subscription whose subscribe command encodes to `size` bytes once
-/// numbered `id`.
-fn subscription_of_size(run: &mut BatchRun, id: u64, size: usize) {
+/// numbered `id`; its channel.
+pub(super) fn subscription_of_size(run: &mut BatchRun, id: u64, size: usize) -> String {
     let base = json!({"id": id, "subscribe": {"channel": ""}})
         .to_string()
         .len();
     let channel = "c".repeat(size.checked_sub(base).expect("a larger size"));
+    let channel = format!("{id}{}", &channel[1..]);
     let sub = run
         .machine
-        .add_subscription(
-            format!("{id}{}", &channel[1..]),
-            SubscriptionOptions::default(),
-        )
+        .add_subscription(channel.clone(), SubscriptionOptions::default())
         .expect("a new channel");
     run.handle(Input::Subscribe(sub));
     run.subscriptions.push(sub);
+    channel
 }
 
 #[given(
@@ -1281,7 +1280,7 @@ fn five_subscriptions_of_size(world: &mut ClientWorld, cap: usize, size: usize) 
     let mut run = http_stream_run(Config::default().batch_frame_bytes(cap));
     // The connect command is 1, the subscribe commands 2 to 6.
     for id in 2..7 {
-        subscription_of_size(&mut run, id, size);
+        let _ = subscription_of_size(&mut run, id, size);
     }
     world.batching.run = Some(run);
 }

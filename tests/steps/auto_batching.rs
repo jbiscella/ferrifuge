@@ -505,7 +505,11 @@ async fn a_single_runtime_client(world: &mut ClientWorld, config: Config) {
 
 /// The fake server's commands from `start` on, once `count` came, each
 /// with the frame it arrived in.
-async fn received_from(world: &ClientWorld, start: usize, count: usize) -> Vec<(Value, usize)> {
+pub(super) async fn received_from(
+    world: &ClientWorld,
+    start: usize,
+    count: usize,
+) -> Vec<(Value, usize)> {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let received = world.fake().received_with_frames();
@@ -666,7 +670,7 @@ async fn one_frame_of_three_rpcs(world: &mut ClientWorld) {
 
 /// The @A server with Prometheus metrics, pinging rarely, so that no pong
 /// joins the frames a scenario counts.
-async fn a_counting_server(world: &mut ClientWorld) -> String {
+pub(super) async fn a_counting_server(world: &mut ClientWorld) -> String {
     let mut env: Vec<(&str, &str)> = crate::SERVER_A.to_vec();
     env.extend([
         ("CENTRIFUGO_PROMETHEUS_ENABLED", "true"),
