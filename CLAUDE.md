@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–35 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–36 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -79,6 +79,9 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 9, out of scope | delta compression, "the client never requests it" | owner, 2026-11-06 (item 5) | 19 |
 | Block 0, out of scope | channel compaction, "the client never offers it" | owner, 2026-11-06 (item 7) | 35 |
 | Block 9, out of scope | tag filters (`SubscribeRequest.tf`), "the client never sends one" | owner, 2026-11-06 (item 6) | 35 |
+| Block 18, out of scope | automatic batching of every command a step or a burst produces | owner, 2026-11-06 (item 26) | 36 |
+| Block 18, out of scope | batching the calls a new connection releases when no batch is open | owner, 2026-11-06 (item 26) | 36 |
+| Block 18, out of scope | subscribe commands in the frame of the connect command on websocket open | owner, 2026-11-06, late (item 31) | 36 |
 
 ### Test layers
 
@@ -1530,7 +1533,7 @@ Feature: Server-side subscriptions
 
 **Dependencies:** Blocks 8, 9, 12, 15.
 
-**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, Block 18 (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API).
+**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, Block 18 (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API); automatic batching, Block 36.
 
 **Decided while planning this block** (2026-11-06, through the reviewer the owner delegated such points to; the owner's decisions of 2026-11-04 and 2026-11-05 put them here):
 - **join and leave:** a `join_leave` subscription option, sent as `SubscribeRequest.join_leave`, asks the server for join and leave pushes, delivered, each carrying the `ClientInfo`, as `SubscriptionEvent::Join` and `SubscriptionEvent::Leave`, and as `ServerSubscriptionEvent::Join` and `ServerSubscriptionEvent::Leave` for server-side subscriptions; a push for a subscription that is not subscribed is dropped; under Block 15 these events wait and are withdrawn like publications (spec, "ask server to push Join/Leave"; `client.proto`, `Push.join`, `Push.leave`; centrifuge-js 63ed73e `subscription.ts:1252-1262`, `centrifuge.ts:2556-2593`);
@@ -2660,9 +2663,9 @@ Feature: Connect data, headers, set_token and set_data
 **Dependencies:** Blocks 3 (close code 1009), 7 (Protobuf frames), 8 (emulation requests, the HTTP 413 rule), 9 and 10 (subscribe and unsubscribe commands, their reply deadlines), 13 (calls, their phases, the write queue), 15 (in-order handling), 16 (runners and invariants), 17 (`Input` is `#[non_exhaustive]`).
 
 **Out of scope:**
-- automatic batching of every command a step or a burst produces (centrifugal/centrifuge-rust `docs/spec.md` §9.10, decision 11): only the application's batches and the subscribe commands of a connect reply are batched;
-- subscribe commands in the frame of the connect command on websocket open (centrifuge-js 63ed73e `centrifuge.ts:1243-1258`): ferrifuge subscribes once connected (Block 9), and subscribing earlier is optimistic subscription (centrifuge-rust §9.11, phase 3);
-- batching the calls a new connection releases (Block 13) when no batch is open: each still goes in its own frame;
+- automatic batching of every command a step or a burst produces (centrifugal/centrifuge-rust `docs/spec.md` §9.10, decision 11): only the application's batches and the subscribe commands of a connect reply are batched (reversed by the owner decision of 2026-11-06: Block 36);
+- subscribe commands in the frame of the connect command on websocket open (centrifuge-js 63ed73e `centrifuge.ts:1243-1258`): ferrifuge subscribes once connected (Block 9), and subscribing earlier is optimistic subscription (centrifuge-rust §9.11, phase 3) (reversed by the owner decision of 2026-11-06, late: Block 36);
+- batching the calls a new connection releases (Block 13) when no batch is open: each still goes in its own frame (reversed by the owner decision of 2026-11-06: Block 36);
 - a batch delay timer (centrifuge-rust §9.10);
 - publish debouncing (Block 0);
 - emulated transports and Protobuf in the validation runners (Block 16).
@@ -2675,7 +2678,7 @@ Feature: Connect data, headers, set_token and set_data
 - **D5 Frame cap.** `Config::batch_frame_bytes`, default 16 KiB, at least 1 or `Client::new` returns an error, bounds every frame of several commands, measured as sent (over an emulated transport, the request body); a batch that would exceed it is split, in order, and a single larger command goes alone. Centrifugo v6.10.1 refuses a websocket message over `websocket.message_size_limit` (65 536 bytes by default) with close code 1009, which ends the client (Block 3), and an emulation request over `max_request_body_size` (65 536 bytes by default) with HTTP 413 (`internal/configtypes/types.go`): without a cap, commands that each fit could end the client together, on every reconnect when they are the subscribe commands of a connect reply. Diverges from centrifuge-js 63ed73e, which has no cap; centrifuge-rust §9.10 caps frames at 15 KB, as centrifuge-csharp. The README tells operators to keep `batch_frame_bytes` below both server limits.
 - **D6 Emulated transports and HTTP 413 (Block 8).** A frame of several commands is one emulation request (centrifuge-js `transport_http_stream.ts`, `transport_sse.ts` `send`: one request per `_transportSendCommands`). The owner's rule (2026-11-04) holds: a request of several commands refused with 413 resends each command in its own request first, and only a command whose own request is refused gets the terminal outcome Block 8 lists. The resent requests go at once, in the order of the refused request, without write-queue admission (their calls count as unwritten again), and every deadline keeps running; a command no longer awaited (its call settled or abandoned, its subscription no longer waiting for that reply) is not resent.
 - **D7 Encodings.** As the client protocol and centrifuge-js (`json.ts` `encodeCommands`, `protobuf.codec.ts` `encodeCommands`): JSON commands joined with `\n`, without a trailing newline; Protobuf commands varint-delimited, over websocket only (Block 8). Replies to a batch may come in one frame or several; they are handled as any (Block 15), each call settling when its reply is read (Block 13).
-- **D8 Connect reply.** The subscribe commands a connect reply starts go out as one batch, split by the cap (centrifuge-js `_connectResponse`, `centrifuge.ts:2350-2352`), and are never held by an application's batch.
+- **D8 Connect reply.** The subscribe commands a connect reply starts go out as one batch, split by the cap (centrifuge-js `_connectResponse`, `centrifuge.ts:2350-2352`), and are never held by an application's batch. Over websocket, the subscribes that fit go in the connect command's frame instead (Block 36, D5); D8 applies to the rest.
 - **D9 Validation harness (Block 16).** Both runners gain the operations `start_batching` and stop, and the adapter runner also drops a `Batch`; "healed" also requires every batch to be stopped. New invariant I10, core, after every step: no frame of several commands exceeds `batch_frame_bytes`, and no call a batch holds (D2: not `send`, nor a call already waiting for room when the batch opened) is sent before a batch is stopped. The chaos configuration sets `batch_frame_bytes` to 1 KiB so that batches split. Each new invariant check has a planted fault, as Block 16 requires.
 - **Public API and version.** 18a adds a field to `Config`, which is exhaustive: breaking, version 0.12.0. `Client::start_batching`, `Batch` and the two `Input` variants are additions; no `Action`, `CallTimer` or `SubscriptionTimer` variant is added. 18b, 18c and 18d add no public item.
 - **Fixtures.**
@@ -2690,7 +2693,7 @@ Verified (Centrifugo v6.10.1, the 18b @B scenario's setup, 2026-11-06): one emul
 |---|---|---|
 | 18a | `start_batching`, `Batch`, what is held, deadlines, write-queue admission, `Config::batch_frame_bytes`, disconnect and lost transport, JSON and Protobuf over websocket; version 0.12.0 | "Calls made while batching go out in one frame when the batch ends", "Subscriptions subscribed while batching send their subscribe commands in one frame", "A batch over Protobuf is one binary frame", "A batch is split at the frame cap", "Held calls are admitted to the write queue one by one", "A call held past the timeout fails and is never sent", "A subscribe held past the timeout reconnects the client", "The client's own commands and send are not held", "Disconnect fails the calls a batch holds", "A held call waits across a lost transport", "Stopping one of two batches sends what is held" |
 | 18b | emulated transports and the 413 resend | "A batch refused with HTTP 413 is resent command by command", "Over an emulated transport only the command refused alone fails" |
-| 18c | the subscribe commands of a connect reply in one batch | "A reconnect sends its subscribe commands in one frame", "The subscribe commands of a connect reply are split at the frame cap", "An open batch does not hold the subscribe commands of a connect reply" |
+| 18c | the subscribe commands of a connect reply in one batch | "A reconnect over an emulated transport sends its subscribe commands in one request", "The subscribe commands of a connect reply are split at the frame cap", "An open batch does not hold the subscribe commands of a connect reply" |
 | 18d | batching in both runners, I10, planted faults | "Seeded chaos with batching on the core keeps every invariant", "The core runner reports a planted batching fault", "Seeded chaos with batching on the tokio client keeps the invariants" |
 
 Value clause: As an app developer shipping ferrifuge to fleets of devices, I want to group calls and subscriptions into one frame or emulation request, and the client to resubscribe in as few frames as the frame cap allows, so that a burst of commands costs one write or one HTTP request per `batch_frame_bytes` instead of one per command, and a batch never ends the connection or fails a command that would have succeeded alone.
@@ -2835,22 +2838,22 @@ Feature: Batching
       | http_stream |
       | sse         |
 
-  @D
-  Scenario: A reconnect sends its subscribe commands in one frame
-    Given a client with three subscriptions subscribed, connected to the fake server
-    When the fake server disconnects the client with a reconnect-advised code
-    Then after the next connect reply the fake server receives one frame carrying the three subscribe commands
+  @E
+  Scenario: A reconnect over an emulated transport sends its subscribe commands in one request
+    Given a client core over http_stream with three subscriptions subscribed
+    When the server closes the transport with a reconnect-advised code
+    Then after the next connect reply the core sends one emulation request carrying the three subscribe commands
     And the three subscriptions reach state "subscribed"
 
   @E
   Scenario: The subscribe commands of a connect reply are split at the frame cap
-    Given a client with a batch frame cap of 1000 bytes and five subscriptions whose subscribe commands encode to 300 bytes each
+    Given a client over http_stream with a batch frame cap of 1000 bytes and five subscriptions whose subscribe commands encode to 300 bytes each
     When connect is called and the server answers the connect command
     Then the client sends two frames, carrying three and then two subscribe commands
 
   @E
   Scenario: An open batch does not hold the subscribe commands of a connect reply
-    Given a client with a subscription in state "subscribing"
+    Given a client over http_stream with a subscription in state "subscribing"
     And the application has started a batch
     When connect is called and the server answers the connect command
     Then the client sends the subscribe command while the batch is open
@@ -3242,7 +3245,7 @@ The release-check scenarios pass the outline's tag descriptions to the step, whi
   - WARN, server anomalies: a frame that is not client protocol data and a reply without the result of the command it answers (D4); a delta that cannot be applied (Block 19); a message larger than the size limit; a websocket closed with 1009. A reply whose id matches no command is no anomaly (the reply to a call abandoned or timed out): it shows only at TRACE, as an input.
   - DEBUG: every state change of the client and of each subscription, client-side and server-side, with its code and reason; each transport attempt (kind and endpoint, D5), its opening, its failure (the error's message) and its close (code and reason); the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback (token, data, getState) started and how it ended (got a value, failed, denied, panicked), never the value; the read-ahead filling (reading stops) and draining (reading resumes); each call that fails, with its kind and code.
   - TRACE: every input the adapter gives the machine and every action the machine returns, through their `Debug` (D5); each frame sent or received, with its transport kind, frame type and length.
-- **D4 Anomalies only the core sees.** A frame that is not client protocol data, and a reply without its command's result, make the core reconnect with code 1 "transport closed", as a lost transport does (`machine/inbound.rs` `frame`, `machine/calls.rs` `call_reply`, `machine.rs` `command_reply`). The core reports each, before the actions of that reconnect, with a new action `Action::Anomaly(Anomaly)`: `Anomaly` is a `#[non_exhaustive]` enum naming the transport and, for a frame, its length, for a reply, the kind of command it answers, never payload bytes. The adapter logs it at WARN; another owner of the machine may ignore it. `Action` stays exhaustive (Block 17), so the variant is breaking (D9). The core logs nothing itself. The adapter sees the other anomalies of D3 itself: the delta error event, its size limit, the 1009 close.
+- **D4 Anomalies only the core sees.** A frame that is not client protocol data, and a reply without its command's result, make the core reconnect with code 1 "transport closed", as a lost transport does (`machine/inbound.rs` `frame`, `machine/calls.rs` `call_reply`, `machine.rs` `command_reply`). The core reports each, before the actions of that reconnect, with a new action `Action::Anomaly(Anomaly)`: `Anomaly` is a `#[non_exhaustive]` enum naming the transport and, for a frame, its length, for a reply, the kind of command it answers, never payload bytes. The adapter logs it at WARN; another owner of the machine may ignore it. `Action` stays exhaustive (Block 17), so the variant is breaking (D9). The core logs nothing itself. The adapter sees the other anomalies of D3 itself: the delta error event, its size limit, the 1009 close. Block 36 adds `Anomaly::ReplyBeforeConnect`.
 - **D5 Redaction.** Every value logged goes through a redacting `Debug` or `Display`: tokens as `<redacted>`; connect, subscription, publication, RPC, publish, send, message and server data, and connection and channel info, as a length; headers and tags by name only. This block makes the `Debug` of `ClientEvent`, `SubscriptionEvent`, `ServerSubscriptionEvent`, `Subscribed`, `Publication` and `ClientInfo` redacting: `Action::Emit` and `Action::EmitSubscription` carry them, and their derived `Debug` shows data bytes. Endpoints, of every transport and the emulation endpoint, are logged as scheme, host, port and path: userinfo, query and fragment are left out, as each may hold a credential; an endpoint that does not parse is logged as `<invalid>`; `ClientBuilder`'s `Debug` shows them the same way. The sse request URL, whose `cf_connect` carries the connect command and its token, is never logged. No error message carries a URL: the emulation request's error drops it (`reqwest::Error::without_url`), as the stream request's already does.
 - **D6 Documentation.** A "Logging" section in the crate documentation and the README: the targets, levels and fields (D2, D3); how to enable them with `tracing-subscriber`'s `EnvFilter` or with `env_logger` (`RUST_LOG=ferrifuge=debug`); that through `log` records carry no span fields, the WARN records keeping their own `client`, and span entries and exits appear at TRACE under the target `tracing::span::active`; and a warning: Ferrifuge's dependencies log on their own, and at TRACE tungstenite 0.30.0 logs the whole upgrade request with its query and header values (`handshake/client.rs:197`), every message received (`protocol/mod.rs:475`) and every frame sent (`:768`), the connect frame and its token included, so production filters keep dependencies at INFO or above (`RUST_LOG=info,ferrifuge=trace`). A `tracing` application sees the dependencies' `log` records only through `tracing-log`.
 - **D7 Capture.** The BDD run installs once a process-wide subscriber (`tracing-subscriber` 0.3.23 as a dev-dependency, registry only) with a test layer recording each event with its level, target, fields and the fields of the spans in its scope. A scenario reads the records in its clients' spans, by their `client` field. The secret checks read every record whose target starts with `ferrifuge`, in a span or not, and look for each secret as text and as the `Debug` list of its bytes; the secrets differ per scenario, so concurrent scenarios cannot match each other's. The `log` path is tested in its own binary, `tests/log_facade.rs`, which sets a capturing `log` logger and never a `tracing` dispatcher (one set anywhere in a process stops `log` records for good): a client connects to the fake server with a token, its DEBUG state changes reach the logger under targets starting with `ferrifuge`, and none of Ferrifuge's records holds the token.
@@ -4970,3 +4973,336 @@ Feature: Tag filters, channel compaction, publication channel, recovered publica
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 36 — Automatic command batching, optimistic subscriptions
+
+**Goal:** the commands a tokio client produces before its driver next runs go out in as few frames or emulation requests as `batch_frame_bytes` allows, without the application opening a batch and without a delay; and a client connecting over websocket sends its subscribe commands in the frame of its connect command instead of a round trip later (parity items 26 and 31; "Planned after Block 19", owner decisions 2026-11-06 and 2026-11-06, late, decided by the reviewer by state of the art: design A for each).
+
+**Dependencies:** Blocks 8 (emulated transports, the HTTP 413 rule, the fallback of a websocket that never answers), 9 (subscribing, unsubscribing while a subscribe is in flight), 10 (subscription tokens, resubscribe backoff), 11 (getState), 13 (calls, their phases, the write queue, the order of calls), 15 (in-order handling, a reply read stops its deadline), 16 (runners, invariants, planted faults), 18 (batches, frame building, `batch_frame_bytes`, D6 resend, D8 connect-reply batch, I10), 21 (`Action::Anomaly`), 25 (D3: a connect command waiting for a token), 27 (Protobuf over http_stream), 29 (connect timeout once open), 31 (`bytes_out`, `messages_out`).
+
+**Out of scope:**
+- a batch delay timer: an idle client sends each command when its driver next runs (centrifuge-rust `docs/spec.md` §9.10, commit 88d6edf, "Why no delay timer");
+- an option to turn either behaviour off: `batch_frame_bytes` of 1 makes every command go alone, which turns off both (D2, D5);
+- optimistic subscriptions over http_stream and sse: an emulated transport's commands need the session of the connect reply (centrifuge-js 63ed73e `centrifuge.ts:1242-1244` returns before the batch on emulation); WebTransport gets D5 in Block 48;
+- starting a subscription's token, data or getState callback before the connect reply: such a subscription subscribes after it, as today (D5);
+- sending a subscribe command made by `subscribe()` after the connect command left, before the connect reply;
+- server-side subscriptions (Block 12): the connect command recovers them itself (`ConnectRequest.subs`).
+
+This block reverses three exclusions of Block 18: "automatic batching of every command a step or a burst produces" and "batching the calls a new connection releases (Block 13) when no batch is open" (owner decision 2026-11-06, item 26), and "subscribe commands in the frame of the connect command on websocket open" (owner decision 2026-11-06, late, item 31). Block 0's "Reversed exclusions" gains the three rows, and Block 18's lines say so. Block 18's three 18c scenarios run over http_stream, where D8 alone applies (D10).
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 36a | As an app developer, I want a burst of calls and subscriptions to go out in as few frames or emulation requests as the frame cap allows without opening a batch, so that chatty code costs the network and the server no more writes than batched code | "A burst of calls goes out in one frame", "A burst of subscribes goes out in one frame", "A burst of publishes reaches Centrifugo in one frame", "Calls a new connection releases go out together", "The core batches automatically only when its owner enables it", "Automatic batching keeps the order of commands, send and pong included", "Automatic batching splits at the frame cap", "Automatic batching admits calls to the write queue as they are made", "An explicit batch holds its commands across flushes", "Commands refused with HTTP 413 are resent alone", "A call abandoned before the flush is never sent" |
+| 36b | As an app developer on a mobile link, I want the subscribe commands of a client connecting over websocket sent with its connect command, so that the first publication arrives a round trip sooner | "Subscribes go with the connect command over websocket", "Subscribes go with the connect command over websocket only", "Only subscribes that fit the frame cap go with the connect command", "A subscription that needs a callback subscribes after the connect reply", "An optimistic subscribe's deadline starts at the connect reply", "A failed connect loses the optimistic subscribes as a teardown does", "Unsubscribing before the connect reply undoes an optimistic subscribe", "A subscribe reply before the connect reply breaks the protocol", "Optimistic subscriptions on Centrifugo" |
+| 36c | As a maintainer, I want automatic batching and optimistic subscriptions in both validation runners, so that their interleavings are checked as the rest of the client is | "Seeded chaos with automatic batching and optimistic subscriptions on the core keeps every invariant", "The core runner reports a planted automatic-batching fault", "Seeded chaos on the tokio client batches automatically and keeps the invariants" |
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Output buffer (36a).** With automatic batching on, every command the core would hand to the transport goes into an output buffer of the core instead of an `Action::Send`, in the order the core produces it.
+  - **What.** The application's calls, `send` included; subscribe and unsubscribe commands; pong, refresh and sub_refresh; the frames of a stopped batch (Block 18 D4) and of a connect reply (D8). An emulated transport's connect command still goes in `OpenTransport.initial_frame`.
+  - **Handled as sent.** A buffered command is otherwise handled as sent at that moment: its reply deadline runs, a call is in its sent phase, and a call's bytes count against `Config::write_queue_bytes` from then. A call is admitted to the write queue when it is made, as without automatic batching (Block 13), so a call that does not fit waits for room as before.
+  - **Flush.** `Input::Flush` emits the buffer as frames, in order, built as Block 18 builds a batch: the D5 cap, the D7 encodings (Protobuf over http_stream too, Block 27), one emulation request per frame (D6). The calls of a frame count as unwritten until `Input::FrameWritten` reports that frame, their bytes added together. A flush with an empty buffer, or without automatic batching, produces no action.
+  - **Cost.** Each command is encoded once, when buffered. A frame's size is the sum of its commands' encoded sizes plus the separators (JSON: one `\n` between commands; Protobuf: each command's varint prefix), never the frame encoded again per added command; Block 18's batches are measured the same way. The Block 14 @P gates pass unchanged.
+  - **Calls no longer awaited.** A buffered call that settles (its timeout) or is abandoned before the flush is not sent (Block 13: a call no longer awaited is never sent; Block 18 D3, D6). The client's own commands are always sent: their replies are awaited.
+  - **Teardown.** A transport that ends drops its buffered commands as it loses sent ones: calls fail with "connection closed" (code 11), subscribe and unsubscribe commands are lost (Block 13; Block 18 D3).
+- **D2 Who flushes (Q1).** Automatic batching is opt-in on the sans-IO core: `Machine::with_automatic_batching(self) -> Self`, `#[must_use]`, as `with_data_source`, and `Input::Flush`, which the owner feeds once it has fed the inputs it has and before it performs the actions.
+  - **Without it** the core sends each command at once, as before, and ignores `Input::Flush`: an existing owner, which never feeds a flush, keeps working unchanged. With it on by default, such an owner would compile and then hold every command until its deadline.
+  - **The tokio adapter** always turns it on. There is no `Config` field and no user option: framing is not API, and `batch_frame_bytes` of 1 sends every command alone.
+  - **No `Action`** asks the owner to flush: `Action` is exhaustive (Block 17), and the owner, not the core, knows when it has fed every input it has.
+  - **Sources.** Sans-IO crates leave the time of writing to their owner, who pulls what the state machine queued once it has handled its inputs: quinn-proto `Connection::poll_transmit`, rustls `Connection::wants_write` and `write_tls`, h2's buffered `FramedWrite` drained by `poll_flush`, tungstenite's `WebSocket::write` and `flush` (`send` being both). Their async layers coalesce whatever is queued when they write, with no switch (quinn's connection driver, h2's connection task, async-nats's writer). centrifuge-rust `docs/spec.md` §9.10: everything queued when the writer is ready goes as one frame, split at a cap, with no option. In each the pull is in the owner's contract from the first release, so for an owner written against "a command is an `Action::Send` at once" it is opt-in: a change of contract that still compiles would fail silently, at run time.
+- **D3 Tokio driver.** At the top of each iteration of `Driver::run`, under the core lock and before performing the actions queued, the driver feeds `Input::Flush`.
+  - API calls still feed the core on the application's task and notify `actions_queued` (Block 13; `Shared::call`). A notification made while the driver performs actions is kept by the `Notify`, so the driver runs another iteration and flushes again.
+  - So one frame carries the commands of the input the driver handled (a frame's replies, a timer) and those of every API call made since its last flush, from any task. An idle client's call goes out on the driver's next iteration, with no timer.
+  - `ready()` (Block 30), statistics (Block 31), `close()` (Block 33) and sleep detection (Block 25) need no change: the flush is an input like any other.
+- **D4 Order, explicit batches, HTTP 413 (Q2).**
+  - **Order.** Frames leave in buffer order, so commands reach the transport in the order the core produced them, `send`, pongs, refreshes and the subscribes a resubscribe backoff starts included (Block 13: calls are sent in the order they were made; centrifuge-rust §9.10: "Order is the queue order", "Pongs are queued like any command"). Block 18 D2's reasons for not holding these (a batch may stay open, a token may expire) concern explicit batches, not a buffer emptied on the same driver iteration. This supersedes the analysis's note on design A that `send` and pongs "would still go at once": that would let a `send` overtake an RPC made before it.
+  - **Explicit batches.** An explicit batch (Block 18) keeps holding what its D2 holds until it stops, across flushes. When it stops, its commands go into the buffer as Block 18 D4 admits them. A `send` or a pong made during an explicit batch goes at the next flush, so Block 18 D2's documented overtaking stays for explicit batches only.
+  - **HTTP 413.** The commands a refused request carried are resent (Block 18 D6) through the buffer, each in a frame of its own, never joined to another command, in the order of the refused request.
+- **D5 Optimistic subscriptions (36b; Q3: "Planned after Block 19" settles it: on, with no option).** When the connect command is sent over websocket, the subscribe commands that a connect reply would send at once go in the connect command's frame. That is when the transport opens, or once a connection token is fetched (Block 25 D3).
+  - **Which subscriptions.** Those in `subscribing` with no resubscribe backoff pending (as `subscriptions_connected` chooses) that need no callback first: no getState load (Block 11), no token fetch (Block 10), no data callback (Block 9). They go in registry order (creation order), the connect command first, while the frame stays within `batch_frame_bytes`. A connect command larger than the cap goes alone.
+  - **The rest.** The others subscribe after the connect reply, as today: their callbacks start then, and their subscribe commands go as Block 18 D8 says. That includes a subscription whose `subscribe()` is called after the connect command left.
+  - **Never held** by an application batch, as D8.
+  - **In flight.** The connect reply does not subscribe again a subscription whose optimistic subscribe is in flight; its command is in flight as any subscribe (`subscribe_command`). No field is added per subscription.
+  - **Emulated transports** send no optimistic subscribe.
+  - **Sources.** centrifuge-js 63ed73e `centrifuge.ts:1249-1258` sends the connect command and `_sendSubscribeCommands` in one batch when a websocket opens. Centrifugo v6.10.1 (centrifuge 7ac0371, its `go.mod`) reads a frame's commands in order (`handler_websocket.go:416-425`) and handles the connect synchronously (`client.go:2130-2131`). The cap is Block 18 D5's.
+- **D6 Deadline and reply order.**
+  - **Deadline.** An optimistic subscribe's reply deadline (`Config::timeout`) starts when the connect reply is read, not when it is sent. Until then the connect timeout bounds the attempt (Block 29), and a subscribe reply read before that reply was handled stops its deadline (Block 15). So a slow connect reply, such as one through a connect proxy, cannot end with "subscribe timeout" a connection that did answer, and a websocket that never answers still falls back with the connect timeout (Block 8). This diverges from centrifuge-js 63ed73e, whose `_call` arms the reply timer when the command is made (`centrifuge.ts:1871-1884`, `_registerCall` `:2789`).
+  - **Reply order.** The replies are handled after the connect reply, in order (Block 15), so no subscription becomes `subscribed` while the client is `connecting`.
+  - **A breach.** A subscribe reply handled before the connect reply breaks the protocol: the core reports `Action::Anomaly(Anomaly::ReplyBeforeConnect { transport, command: "subscribe" })` and reconnects with code 1 "transport closed", as Block 21 D4 does for its anomalies. `Anomaly` is `#[non_exhaustive]`.
+- **D7 A connect that fails, an unsubscribe in flight.**
+  - **Failed connect.** A connect error reply, a close or a disconnect push before the connect reply tears the connection down. The optimistic subscribes are lost as sent commands are; their subscriptions stay `subscribing`, emit nothing and go with the next connect command. No unsubscribe is sent: Centrifugo v6.10.1 handles nothing after a failed connect in its frame and closes the connection with 3501 on the next command (`client.go:2025-2036`, `:1965-1968`).
+  - **Unsubscribe in flight.** `unsubscribe()` or a removal while an optimistic subscribe is in flight follows Block 9: once the subscribe's reply comes, after the connect reply, an unsubscribe command undoes a subscribe that succeeded.
+  - **Cost at fleet scale.** A failed attempt now carries up to `batch_frame_bytes` of subscribe commands, which the server drops without handling. The README says so, and says how to lower it.
+- **D8 Statistics (Block 31).** No change of definition. `bytes_out` counts each written frame, separators included. `messages_out` counts each command of a frame. Block 31 has no frame counter.
+- **D9 Validation harness (36c).**
+  - **Core runner.** Even seeds run machines with automatic batching. The simulated owner feeds `Input::Flush` after a seeded number of inputs, and always before the simulated clock moves, as the driver flushes before it waits.
+  - **Simulated server.** It handles a frame's commands in order. After a connect error it drops the rest of the frame and closes on the next frame with 3501, as Centrifugo does.
+  - **I10.** It gains two clauses, core, after every step:
+    - with automatic batching, an `Action::Send` appears only among the actions of `Input::Flush`;
+    - the first command sent on every transport is its connect command, and over an emulated transport nothing is sent before the connect reply.
+  - **Planted faults.** In the tap, never in the client (Block 16): see the 36c scenario.
+  - **Adapter runner.** It runs the tokio client, which batches automatically from 36a on. It counts frames of several commands no batch held, and connect frames carrying subscribe commands.
+- **D10 Fixtures and existing scenarios.**
+  - **Fake server.** It sends a frame's replies in the order of its commands, a subscribe answered from history included (today that reply can leave before the connect reply of its frame). It can delay its connect reply, answering the commands after it in its frame once it has. It can, as Centrifugo, drop the rest of a frame after answering its connect with an error.
+  - **@A server.** A Centrifugo v6.10.1 container of its own, with Prometheus metrics on. `VERIFY:` the environment variable `CENTRIFUGO_PROMETHEUS_ENABLED=true` and the series `centrifugo_transport_frame_size_count{transport="websocket"}` (centrifuge 7ac0371 `metrics.go:80-83`, `:780-790`: its `_count` is the number of frames read from clients; observed in `handler_websocket.go:422`, `:437`, `:444`).
+  - **Block 18.** Its scenarios "A reconnect sends its subscribe commands in one frame", "The subscribe commands of a connect reply are split at the frame cap" and "An open batch does not hold the subscribe commands of a connect reply" run over http_stream, where D8 alone applies, with the first renamed "A reconnect over an emulated transport sends its subscribe commands in one request".
+  - **Unit tests.** Core unit tests that subscribe before connecting over websocket expect the subscribe in the connect frame.
+- **D11 Public API, version and documentation.**
+  - **API.** `Input::Flush` (`Input` is `#[non_exhaustive]`), `Machine::with_automatic_batching` and `Anomaly::ReplyBeforeConnect` are additions. No `Action` and no `Config` field is added.
+  - **Version.** No bump: the API change is additive (Block 35 D5).
+  - **Changelog.** `Unreleased` "Added": the three items. "Changed": the tokio client batches automatically; over websocket the core sends optimistic subscribes.
+  - **README.** The "Batching" section gains both behaviours, the fleet cost of D7 and `batch_frame_bytes` of 1 as the way to send every command alone. The sans-IO documentation tells an owner of `with_automatic_batching` to feed `Input::Flush`.
+  - **Footprint.** No field per subscription; the buffer is per client.
+
+Value clause: As an app developer shipping ferrifuge to fleets of devices, I want bursts of commands coalesced and my subscribe commands sent with the connect command, so that a burst costs one write or one HTTP request per `batch_frame_bytes` and a connection's first publication arrives a round trip sooner, with no command reordered and no connection ended that sending them one by one would have kept.
+
+**Structural acceptance:**
+- core unit tests: buffer order across calls, `send`, pong, refresh and resubscribes; a flush with an empty buffer, and one without automatic batching, produces no action; the computed size of a frame equals its encoded length, JSON and Protobuf (a property test); `Input::FrameWritten` frees the bytes of every call of a frame; teardown empties the buffer and fails its calls with code 11; a resend after 413 goes alone; a buffered call settled or abandoned is skipped; the optimistic choice skips a backoff pending, each kind of callback, what does not fit, and everything when the connect alone exceeds the cap; the deadline starts when the connect reply is read and stops when the subscribe reply is read; the breach anomaly; `Debug` of `Input::Flush`;
+- an adapter unit test on a current-thread runtime: calls made without yielding share a frame, and the driver flushes on the iteration a call's notification starts;
+- the Block 14 @P gates pass unchanged, the heap per subscription included;
+- each scenario is seen failing once on a mutation, recorded in the PR: the flush ignored (sent at once); the cap ignored at the flush; `send` or pong sent outside the buffer; resends joined; an abandoned call sent; the driver not flushing on a call's notification; optimistic subscribes off; optimistic subscribes over an emulated transport; callbacks started before the connect reply; the deadline started when sent; a subscribe reply before the connect reply accepted; `subscribe_command` kept across a teardown; an unsubscribe in flight not undone.
+
+```gherkin
+Feature: Automatic command batching, optimistic subscriptions
+
+  @D
+  Scenario: A burst of calls goes out in one frame
+    Given a client on a current-thread runtime with a timeout of 10 s, connected to the fake server, which sends no pings
+    When the application makes RPC "a", publishes {"n":1} to channel "news" and requests the history of channel "news", without yielding between the calls
+    Then the fake server receives one frame carrying the rpc, publish and history commands, in that order
+    And each call returns the fake server's reply
+    When the application then calls RPC "d" and awaits it
+    Then the call returns the fake server's reply within 1 s, its command alone in its frame
+
+  @D
+  Scenario: A burst of subscribes goes out in one frame
+    Given a client on a current-thread runtime, connected to the fake server, with three subscriptions not subscribed
+    When the application calls subscribe on the three subscriptions, without yielding between the calls
+    Then the fake server receives one frame carrying the three subscribe commands, in the order of the calls
+    And the three subscriptions reach state "subscribed"
+
+  @A
+  Scenario: A burst of publishes reaches Centrifugo in one frame
+    Given a Centrifugo server of its own with Prometheus metrics, and a client on a current-thread runtime subscribed to channel "news" on it
+    When the application publishes {"n":1}, {"n":2} and {"n":3} to channel "news", without yielding between the calls
+    Then each publish succeeds
+    And the subscription receives the publications {"n":1}, {"n":2} and {"n":3}, in that order
+    And the server's count of websocket frames received grew by exactly 1 during the publishes
+
+  @D
+  Scenario: Calls a new connection releases go out together
+    Given a client configured with the fake server's endpoint, not connected
+    When the application calls RPC "a", RPC "b" and RPC "c"
+    And connect is called
+    Then after the connect reply the fake server receives one frame carrying the three rpc commands, in the order of the calls
+    And each call returns the fake server's reply
+
+  @E
+  Scenario Outline: The core batches automatically only when its owner enables it
+    Given a client core <batching>, connected
+    When the application calls RPC "a", then RPC "b"
+    Then <before>
+    When the owner feeds a flush
+    Then <after>
+
+    Examples:
+      | batching                    | before                                                                                         | after                                              |
+      | with automatic batching     | the core has sent no frame                                                                     | the core sends one frame carrying RPC "a" and RPC "b" |
+      | without automatic batching  | the core sent a frame carrying RPC "a" among the actions of the first call, and one carrying RPC "b" among those of the second | the flush produces no action                       |
+
+  @E
+  Scenario: Automatic batching keeps the order of commands, send and pong included
+    Given a client core with automatic batching, connected over websocket, whose connect reply asked for pongs
+    When the core reads a server ping
+    And the application calls RPC "a", then send with {"n":1}, then publishes {"n":2} to channel "news"
+    Then the core has sent no frame
+    When the owner feeds a flush
+    Then the core sends one frame carrying the pong, the rpc, the send and the publish commands, in that order
+
+  @E
+  Scenario Outline: Automatic batching splits at the frame cap
+    Given a client core with automatic batching, connected, with a batch frame cap of 1000 bytes
+    When the application makes calls whose commands encode to <sizes> bytes and the owner feeds a flush
+    Then the core sends frames carrying <frames> calls, in the order the calls were made
+    And no frame carrying several commands exceeds 1000 bytes
+
+    Examples:
+      | sizes                   | frames  |
+      | 300, 300, 300, 300, 300 | 3, 2    |
+      | 300, 1500, 300          | 1, 1, 1 |
+
+  @E
+  Scenario: Automatic batching admits calls to the write queue as they are made
+    Given a client core with automatic batching, connected, with a write queue of 1000 bytes and nothing unwritten
+    When the application makes five calls whose commands encode to 300 bytes each and the owner feeds a flush
+    Then the core sends one frame carrying the first three calls
+    When the owner feeds a flush
+    Then the core sends nothing
+    When the transport reports that frame written and the owner feeds a flush
+    Then the core sends one frame carrying the fourth and fifth calls
+
+  @E
+  Scenario: An explicit batch holds its commands across flushes
+    Given a client core with automatic batching, connected
+    When the application starts a batch and calls RPC "a"
+    And the owner feeds a flush
+    Then the core has sent no frame
+    When the batch is stopped
+    Then the core has sent no frame
+    When the owner feeds a flush
+    Then the core sends one frame carrying RPC "a"
+
+  @E
+  Scenario: Commands refused with HTTP 413 are resent alone
+    Given a client core with automatic batching, connected over an emulated transport
+    When the application calls RPC "a" and RPC "b" and the owner feeds a flush
+    Then the core sends one emulation request carrying both rpc commands
+    When the server refuses that request with HTTP 413 and the owner feeds a flush
+    Then the core sends two emulation requests, carrying RPC "a" and then RPC "b"
+    And neither call has failed
+
+  @E
+  Scenario: A call abandoned before the flush is never sent
+    Given a client core with automatic batching, connected
+    When the application calls RPC "a" and RPC "b", then abandons RPC "a"
+    And the owner feeds a flush
+    Then the core sends one frame carrying RPC "b" and no rpc command for "a"
+
+  @D
+  Scenario Outline: Subscribes go with the connect command over websocket
+    Given <given>
+    When <trigger>
+    Then the next frame the fake server receives carries the connect command, then the subscribe commands for "a", "b" and "c", in that order
+    And the three subscriptions reach state "subscribed"
+    And the fake server received exactly one subscribe command per subscription on that connection
+
+    Examples:
+      | given                                                                                                   | trigger                                                              |
+      | a client configured with the fake server's endpoint, with subscriptions to "a", "b" and "c" subscribed before connect | connect is called                                                    |
+      | a client connected to the fake server, with subscriptions to "a", "b" and "c" subscribed               | the fake server disconnects the client with a reconnect-advised code |
+
+  @E
+  Scenario Outline: Subscribes go with the connect command over websocket only
+    Given a client core over <transport> with a subscription subscribed before connect
+    When connect is called and the transport opens
+    Then <first>
+    When the server answers the connect command
+    Then <after>
+
+    Examples:
+      | transport   | first                                                                                 | after                                                              |
+      | websocket   | the core sends one frame carrying the connect command, then the subscribe command     | the core sends no subscribe command                                |
+      | http_stream | the request opening the stream carries only the connect command, and the core sends nothing | the core sends an emulation request carrying the subscribe command |
+
+  @E
+  Scenario Outline: Only subscribes that fit the frame cap go with the connect command
+    Given a client core over websocket with a batch frame cap of 1000 bytes, whose connect command encodes to <connect> bytes, and five subscriptions subscribed before connect whose subscribe commands encode to 300 bytes each
+    When connect is called and the transport opens
+    Then the core sends one frame carrying the connect command and the subscribe commands of the first <with> subscriptions
+    When the server answers the connect command
+    Then the core sends frames carrying <after> subscribe commands, for the other subscriptions in the order they were created
+
+    Examples:
+      | connect | with | after |
+      | 90      | 3    | 2     |
+      | 1200    | 0    | 3, 2  |
+
+  @D
+  Scenario Outline: A subscription that needs a callback subscribes after the connect reply
+    Given a client configured with the fake server's endpoint, with subscriptions to "news" and "private" subscribed before connect, "private" with <callback>
+    When connect is called
+    Then the first frame the fake server receives carries the connect command and the subscribe command for "news", and no subscribe command for "private"
+    And the <callback> of "private" is first called after the fake server sent its connect reply
+    And the subscribe command for "private" reaches the fake server in a later frame
+    And both subscriptions reach state "subscribed"
+
+    Examples:
+      | callback                       |
+      | a token callback and no token  |
+      | a data callback                |
+      | a getState callback            |
+
+  @E
+  Scenario: An optimistic subscribe's deadline starts at the connect reply
+    Given a client core over websocket with a timeout of 5 s and a subscription subscribed before connect
+    When connect is called and the transport opens
+    Then the core sends one frame carrying the connect command and the subscribe command
+    When 4 s elapse and the core reads the connect reply
+    And 4 s elapse
+    Then the client is "connected" and the subscription is "subscribing"
+    When 1 s elapses
+    Then the client emits "connecting" with code 3 and reason "subscribe timeout"
+
+  @D
+  Scenario: A failed connect loses the optimistic subscribes as a teardown does
+    Given the fake server answers the first connect command with a temporary error and drops the rest of its frame, as Centrifugo does
+    And a client configured with the fake server's endpoint, with a subscription to "news" subscribed before connect
+    When connect is called
+    Then the client emits "connecting", then an "error" event, then "connected"
+    And the fake server received exactly 2 subscribe commands for "news", each in the frame of a connect command, and no unsubscribe command
+    And the subscription emits "subscribed" exactly once and never "unsubscribed"
+
+  @D
+  Scenario: Unsubscribing before the connect reply undoes an optimistic subscribe
+    Given the fake server delays its connect reply by 300 ms
+    And a client configured with the fake server's endpoint, with a subscription to "news" subscribed before connect
+    When connect is called
+    And the fake server has received the subscribe command for "news" in the frame of the connect command
+    And unsubscribe is called on the subscription before the connect reply
+    Then after answering the connect and the subscribe commands, the fake server receives an unsubscribe command for "news"
+    And the subscription is "unsubscribed" and never emitted "subscribed"
+
+  @E
+  Scenario: A subscribe reply before the connect reply breaks the protocol
+    Given a client core over websocket with a subscription subscribed before connect
+    When connect is called and the transport opens
+    And the core reads one frame holding the reply to the subscribe command, then the connect reply
+    Then the core reports a reply-before-connect anomaly naming the subscribe command
+    And the client emits "connecting" with code 1 and reason "transport closed"
+    And the subscription emits no "subscribed" for that transport
+
+  @A
+  Scenario: Optimistic subscriptions on Centrifugo
+    Given a Centrifugo server of its own with Prometheus metrics
+    And a client with subscriptions to channels "news" and "chat" subscribed before connect
+    When connect is called
+    Then both subscriptions reach state "subscribed"
+    And the server counted exactly 1 websocket frame received
+    When the server API publishes {"text":"hello"} to channel "news"
+    Then the subscription to "news" receives a publication with data {"text":"hello"}
+
+  @P
+  Scenario: Seeded chaos with automatic batching and optimistic subscriptions on the core keeps every invariant
+    Given the core runner with the chaos configuration, a batch frame cap of 1 KiB, client-side and server-side subscriptions to recoverable channels, batching operations, and automatic batching on even seeds
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariants I1 to I10
+    And the run counted flushes sending several commands, connect frames carrying subscribe commands and optimistic subscribes lost to a failed connect, none of them 0
+
+  @P
+  Scenario Outline: The core runner reports a planted automatic-batching fault
+    Given the core runner with automatic batching, with <fault> planted
+    When seeds 0 to 299 run
+    Then the runner reports a violation of I10, naming the first seed that shows it and the operations up to it
+
+    Examples:
+      | fault                                                                                    |
+      | a frame sent by a flush reported to the checker as sent by the input before it           |
+      | the first subscribe command of a connect frame reported to the checker before the connect command |
+
+  @P
+  Scenario: Seeded chaos on the tokio client batches automatically and keeps the invariants
+    Given the adapter runner with the chaos configuration, a batch frame cap of 1 KiB, a tokio client, the fake server and batching operations
+    When seeds 0 to 19 each run 30 random operations with faults
+    Then no seed violates invariants I1, I2, I3, I5, I6 or I8 as the adapter checks them, and each reaches quiescence within 10 s
+    And the fake server received frames of several commands that no batch held, and connect frames carrying subscribe commands, none of them 0
+```
+
+**Exceptions introduced:** five divergences from centrifuge-js 63ed73e, each recorded in the decisions above:
+- automatic batching, which centrifuge-js lacks (D1, D4; the source is centrifuge-rust `docs/spec.md` §9.10);
+- the connect command's frame is capped by `batch_frame_bytes` (D5, as Block 18 D5);
+- a subscription that needs a token, data or getState callback starts it after the connect reply, where centrifuge-js starts it when the websocket opens and sends the subscribe once it answers (`subscription.ts:650-692`) (D5);
+- a `subscribe()` made after the connect command left waits for the connect reply, where centrifuge-js sends it once the transport is open (`subscription.ts:653`, `:735-738`) (D5);
+- an optimistic subscribe's deadline starts when the connect reply is read (D6).
