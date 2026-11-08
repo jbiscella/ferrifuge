@@ -1727,6 +1727,23 @@ mod tests {
         assert_eq!(machine.statistics().publications_delivered, 1);
     }
 
+    // Block 41, D6: a publication handed to a handler holds the messages
+    // after its own until the handler returns.
+    #[test]
+    fn a_handed_publication_holds_later_messages_until_taken() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+        subscribed_recoverable(&mut machine, transport, id);
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
+
+        machine.handle(Input::EventHanded(publication));
+        let handed = machine.holds_messages(publication);
+        machine.handle(Input::EventTaken(publication));
+
+        assert!(handed);
+        assert!(!machine.holds_messages(publication));
+    }
+
     // Codex, #169: a publication whose handler removes its subscription is
     // still counted as delivered when the handler returns.
     #[test]
