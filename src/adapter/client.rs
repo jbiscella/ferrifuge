@@ -691,11 +691,20 @@ impl Shared {
             let Some(mut pending) = pending else {
                 return Err(client_closed());
             };
-            // Abandoned, as a dropped call is (Block 41, D6).
-            if super::handler::would_deadlock(&shared) {
+            let mut receiver = receiver;
+            // Checked at every poll: a future first polled elsewhere may be
+            // awaited in a handler later (Codex, #169). Abandoned, as a
+            // dropped call is (Block 41, D6).
+            let result = std::future::poll_fn(|cx| {
+                if super::handler::would_deadlock(&shared) {
+                    return Poll::Ready(None);
+                }
+                Pin::new(&mut receiver).poll(cx).map(Some)
+            })
+            .await;
+            let Some(result) = result else {
                 return Err(super::handler::deadlock_error());
-            }
-            let result = receiver.await;
+            };
             pending.settled = true;
             // The sender was dropped unsettled only when the driver stopped.
             result.unwrap_or_else(|_| Err(client_closed()))

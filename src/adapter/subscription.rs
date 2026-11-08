@@ -555,13 +555,14 @@ impl SubscriptionBuilder {
                 },
             );
         }
-        drop(core);
-        if let Some(handler) = self.handler {
+        let replaced = self.handler.and_then(|handler| {
             let handler = handler
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            super::handler::set_subscription_handler(&self.shared, id, handler);
-        }
+            super::handler::install_subscription_handler(&self.shared, &mut core, id, handler)
+        });
+        drop(core);
+        drop(replaced);
         Ok(Subscription {
             shared: self.shared,
             id,
