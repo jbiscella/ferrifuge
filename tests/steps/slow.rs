@@ -82,8 +82,14 @@ impl SlowPlan {
                 format!(r#"{{"id":{connect},"connect":{{"client":"c","ping":25,"pong":true}}}}"#),
             );
             if connection.chat_reply {
-                // Subscribe commands go in channel order: "chat" is the second.
-                let chat = command_ids(&replied, "subscribe")[1];
+                // Subscribe commands go in channel order: "chat" is the
+                // second, with the connect command over websocket (Block 36,
+                // D5) or after its reply.
+                let chat = [
+                    command_ids(&sent, "subscribe"),
+                    command_ids(&replied, "subscribe"),
+                ]
+                .concat()[1];
                 frame(&mut machine, format!(r#"{{"id":{chat},"subscribe":{{}}}}"#));
             }
             if connection.ping {
