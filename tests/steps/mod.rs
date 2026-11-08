@@ -35,6 +35,7 @@ mod delta;
 mod jitter;
 mod limits;
 mod logging;
+mod optimistic;
 mod ping;
 mod protobuf;
 mod proxies;
@@ -200,6 +201,7 @@ pub(crate) struct ClientWorld {
     pub(crate) codes_table: codes_table::CodesTable,
     /// What a Block 36a scenario holds.
     pub(crate) auto_batching: auto_batching::AutoBatching,
+    pub(crate) optimistic: optimistic::Optimistic,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.

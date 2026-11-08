@@ -123,6 +123,8 @@ struct State {
     subscribe_delay: Option<(std::time::Duration, Option<Value>)>,
     /// When each delayed subscribe answer was sent.
     subscribes_answered_at: Vec<std::time::Instant>,
+    /// When each JSON connect reply went out (Block 36).
+    connects_answered_at: Vec<std::time::Instant>,
     /// Per channel, the offset up to which the history has expired.
     expired: std::collections::HashMap<String, u64>,
     /// Publications a recovery may bring back at most; more fail it.
@@ -397,6 +399,11 @@ impl FakeServer {
     /// subscribes answered from history, which go out at once.
     pub(crate) fn delay_next_connect(&self, delay: std::time::Duration) {
         self.state.lock().unwrap().connect_delay = Some(delay);
+    }
+
+    /// When each JSON connect reply went out, in order.
+    pub(crate) fn connects_answered_at(&self) -> Vec<std::time::Instant> {
+        self.state.lock().unwrap().connects_answered_at.clone()
     }
 
     /// Answers the next connect command with error `code` and `message`.
@@ -848,10 +855,7 @@ impl Connection {
                 continue;
             };
             if connect_failed {
-                let mut state = self.state.lock().unwrap();
-                state.received.push(message);
-                state.received_frames.push(frame);
-                state.received_at.push(std::time::Instant::now());
+                self.record(message, frame);
                 continue;
             }
             let failing = message["connect"].is_object().then(|| {
@@ -870,49 +874,15 @@ impl Connection {
             } else if message["connect"].is_object() {
                 if let Some(delay) = self.state.lock().unwrap().connect_delay.take() {
                     deferred = Some((delay, Vec::new()));
+                } else {
+                    let mut state = self.state.lock().unwrap();
+                    state.connects_answered_at.push(std::time::Instant::now());
                 }
                 replies.push(self.connect_reply(&message));
             } else if message["subscribe"].is_object() {
                 replies.extend(self.subscribe_answer(&message));
-            } else if message["rpc"].is_object() {
-                let mut state = self.state.lock().unwrap();
-                match state.rpc {
-                    Rpc::Answer => replies.push(rpc_answer(&message)),
-                    Rpc::Reverse => match state.held_rpc.take() {
-                        Some(first) => {
-                            replies.push(rpc_answer(&message));
-                            replies.push(rpc_answer(&first));
-                        }
-                        None => state.held_rpc = Some(message.clone()),
-                    },
-                    Rpc::Ignore => {}
-                    Rpc::Echo => replies.push(Message::text(
-                        json!({"id": message["id"], "rpc": {"data": message["rpc"]["data"]}})
-                            .to_string(),
-                    )),
-                }
-            } else if message["history"].is_object() {
-                replies.push(Message::text(
-                    json!({"id": message["id"], "history": {"epoch": "fake", "offset": 0}})
-                        .to_string(),
-                ));
-            } else if message["unsubscribe"].is_object() {
-                replies.push(Message::text(
-                    json!({"id": message["id"], "unsubscribe": {}}).to_string(),
-                ));
-            } else if message["publish"].is_object() {
-                replies.push(Message::text(
-                    json!({"id": message["id"], "publish": {}}).to_string(),
-                ));
-            } else if message["refresh"].is_object() {
-                // The connection lives another ttl, so the client refreshes again.
-                replies.push(Message::text(
-                    json!({
-                        "id": message["id"],
-                        "refresh": {"expires": self.announce.ttl > 0, "ttl": self.announce.ttl},
-                    })
-                    .to_string(),
-                ));
+            } else {
+                replies.extend(self.answer(&message));
             }
             match &mut deferred {
                 Some((_, held)) => held.append(&mut replies),
@@ -922,21 +892,74 @@ impl Connection {
                     }
                 }
             }
-            let mut state = self.state.lock().unwrap();
-            state.received.push(message);
-            state.received_frames.push(frame);
-            state.received_at.push(std::time::Instant::now());
+            self.record(message, frame);
         }
         if let Some((delay, held)) = deferred {
             let out = self.out.clone();
+            let shared = Arc::clone(&self.state);
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
+                let answered = std::time::Instant::now();
+                shared.lock().unwrap().connects_answered_at.push(answered);
                 for reply in held {
                     let _ = out.send(Outgoing::Message(reply));
                 }
             });
         }
         replies
+    }
+
+    /// The replies to a JSON command other than connect and subscribe.
+    fn answer(&self, message: &Value) -> Vec<Message> {
+        let mut replies = Vec::new();
+        if message["rpc"].is_object() {
+            let mut state = self.state.lock().unwrap();
+            match state.rpc {
+                Rpc::Answer => replies.push(rpc_answer(message)),
+                Rpc::Reverse => match state.held_rpc.take() {
+                    Some(first) => {
+                        replies.push(rpc_answer(message));
+                        replies.push(rpc_answer(&first));
+                    }
+                    None => state.held_rpc = Some(message.clone()),
+                },
+                Rpc::Ignore => {}
+                Rpc::Echo => replies.push(Message::text(
+                    json!({"id": message["id"], "rpc": {"data": message["rpc"]["data"]}})
+                        .to_string(),
+                )),
+            }
+        } else if message["history"].is_object() {
+            replies.push(Message::text(
+                json!({"id": message["id"], "history": {"epoch": "fake", "offset": 0}}).to_string(),
+            ));
+        } else if message["unsubscribe"].is_object() {
+            replies.push(Message::text(
+                json!({"id": message["id"], "unsubscribe": {}}).to_string(),
+            ));
+        } else if message["publish"].is_object() {
+            replies.push(Message::text(
+                json!({"id": message["id"], "publish": {}}).to_string(),
+            ));
+        } else if message["refresh"].is_object() {
+            // The connection lives another ttl, so the client refreshes again.
+            replies.push(Message::text(
+                json!({
+                    "id": message["id"],
+                    "refresh": {"expires": self.announce.ttl > 0, "ttl": self.announce.ttl},
+                })
+                .to_string(),
+            ));
+        }
+        replies
+    }
+
+    /// Records a JSON command the server read, in frame `frame`.
+    fn record(&self, message: Value, frame: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.received.push(message);
+        state.received_frames.push(frame);
+        state.received_at.push(std::time::Instant::now());
     }
 
     /// The answer to the JSON subscribe command `message`, unless it is
