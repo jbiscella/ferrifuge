@@ -13,6 +13,10 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Automatic command batching (Block 36a): `Machine::with_automatic_batching`
+  and `Input::Flush`, with which the core buffers the commands it would send
+  until its owner flushes them, in frames of at most `batch_frame_bytes`.
+
 - `Publication::channel` and `Subscribed::has_recovered_publications`
   (Block 35c): the channel of a publication that differs from its
   subscription's, as for a wildcard subscription, which then moves no stream
@@ -35,6 +39,12 @@ repository held while it carried that version, from the blocks of
 - A table of codes (Block 34): every client-side code with its reason, cause
   and what the client does next, and the server codes the client reacts to,
   in the `codes` documentation and the README's "Codes" section.
+
+### Changed
+
+- The tokio client batches automatically (Block 36a): the commands made
+  before its driver next runs go out together, in frames of at most
+  `batch_frame_bytes`, in the order they were made, with no delay.
 
 ## [0.19.0] - 2026-11-07
 

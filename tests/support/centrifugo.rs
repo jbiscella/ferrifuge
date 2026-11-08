@@ -151,6 +151,30 @@ impl Centrifugo {
     pub(crate) fn api(&self) -> &ServerApi {
         &self.api
     }
+
+    /// The websocket frames the server has read from clients, on a server
+    /// started with `CENTRIFUGO_PROMETHEUS_ENABLED=true` (Block 36, D10;
+    /// verified on v6.10.1: a frame of several commands counts once).
+    pub(crate) async fn websocket_frames_received(&self) -> u64 {
+        let text = self
+            .api
+            .http
+            .get(format!("{}/metrics", self.api.base_url))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .unwrap_or_else(|e| panic!("server metrics: {}", chain(&e)))
+            .text()
+            .await
+            .expect("the metrics text");
+        text.lines()
+            .find_map(|line| {
+                line.strip_prefix(
+                    r#"centrifugo_transport_frame_size_count{transport="websocket"} "#,
+                )
+            })
+            .map_or(0, |count| count.trim().parse().expect("a count"))
+    }
 }
 
 /// `error` with its sources, so that a failed request says why (a refused

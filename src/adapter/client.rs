@@ -3533,6 +3533,8 @@ mod tests {
             })
             .expect("an attempt");
         shared.handle(&mut core, Input::TransportOpened(transport));
+        // The connect command leaves as the driver would send it.
+        shared.handle(&mut core, Input::Flush);
         shared.handle(
             &mut core,
             Input::Frame {
@@ -3552,6 +3554,67 @@ mod tests {
             .running
             .get(&TimerKey::Client(timer))
             .expect("a running timer")
+    }
+
+    /// The frames among the core's queued actions, as text.
+    fn queued_frames(core: &Core) -> Vec<String> {
+        core.actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Block 36, D3. Single-threaded runtime: the driver runs only when the
+    // test yields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn calls_made_without_yielding_share_a_frame() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        drop(connected_core(
+            &client,
+            r#"{"id":1,"connect":{"client":"c"}}"#,
+        ));
+        let _a = client.rpc("a", b"{}".to_vec());
+        let _b = client.rpc("b", b"{}".to_vec());
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        let before = queued_frames(&core);
+
+        shared.handle(&mut core, Input::Flush);
+
+        assert_eq!(before, Vec::<String>::new());
+        assert_eq!(
+            queued_frames(&core),
+            [concat!(
+                r#"{"id":2,"rpc":{"method":"a","data":{}}}"#,
+                "\n",
+                r#"{"id":3,"rpc":{"method":"b","data":{}}}"#
+            )]
+        );
+    }
+
+    // Block 36, D3: a call's notification starts a driver iteration, which
+    // flushes before it performs the actions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_driver_flushes_on_the_iteration_a_call_starts() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        drop(connected_core(
+            &client,
+            r#"{"id":1,"connect":{"client":"c"}}"#,
+        ));
+        let _a = client.rpc("a", b"{}".to_vec());
+
+        tokio::task::yield_now().await;
+
+        let shared = client.shared();
+        let mut core = lock(&shared.core);
+        assert!(core.actions.is_empty(), "{:?}", core.actions);
+        shared.handle(&mut core, Input::Flush);
+        assert_eq!(queued_frames(&core), Vec::<String>::new());
     }
 
     // Codex, #120: the driver took the no-ping firing before another task
