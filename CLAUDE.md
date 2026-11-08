@@ -5258,11 +5258,12 @@ Feature: Automatic command batching, optimistic subscriptions
 
   @E
   Scenario: A subscribe reply before the connect reply breaks the protocol
-    Given a client core over websocket with a subscription subscribed before connect
+    Given a client core configured with a websocket endpoint only, with a subscription subscribed before connect
     When connect is called and the transport opens
     And the core reads one frame holding the reply to the subscribe command, then the connect reply
     Then the core reports a reply-before-connect anomaly naming the subscribe command
-    And the client emits "connecting" with code 1 and reason "transport closed"
+    And the core closes the transport and, after the reconnect backoff delay, opens a new one
+    And the client stays "connecting" and emits no further event
     And the subscription emits no "subscribed" for that transport
 
   @A
