@@ -33,6 +33,15 @@ fn connect(machine: &mut Machine, input: Input, command: u32, result: &str) -> T
     transport
 }
 
+/// The commands sent with the connect command, in its frame (Block 36,
+/// D5).
+fn with_connect(actions: &[Action]) -> Vec<String> {
+    sent(actions)
+        .iter()
+        .flat_map(|frame| frame.lines().skip(1).map(str::to_owned).collect::<Vec<_>>())
+        .collect()
+}
+
 fn sent(actions: &[Action]) -> Vec<String> {
     actions
         .iter()
@@ -95,10 +104,7 @@ fn a_publication_of_another_channel_moves_no_position() {
         reason: "closed by the test".into(),
     });
     let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
-    machine.handle(Input::TransportOpened(transport));
-
-    let resubscribe =
-        sent(&machine.handle(frame(transport, r#"{"id":3,"connect":{"client":"c"}}"#)));
+    let resubscribe = with_connect(&machine.handle(Input::TransportOpened(transport)));
 
     assert_eq!(
         resubscribe,
@@ -135,9 +141,7 @@ fn a_reply_publication_of_another_channel_is_not_the_baseline() {
     machine.handle(Input::Disconnect);
 
     let reconnected = opened(&machine.handle(Input::Connect));
-    machine.handle(Input::TransportOpened(reconnected));
-    let resubscribe =
-        sent(&machine.handle(frame(reconnected, r#"{"id":3,"connect":{"client":"c"}}"#)));
+    let resubscribe = with_connect(&machine.handle(Input::TransportOpened(reconnected)));
 
     assert_eq!(
         resubscribe,
@@ -160,10 +164,7 @@ fn a_last_reply_publication_of_another_channel_does_not_reach_the_reply_position
         reason: "closed by the test".into(),
     });
     let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
-    machine.handle(Input::TransportOpened(transport));
-
-    let resubscribe =
-        sent(&machine.handle(frame(transport, r#"{"id":3,"connect":{"client":"c"}}"#)));
+    let resubscribe = with_connect(&machine.handle(Input::TransportOpened(transport)));
 
     assert_eq!(
         resubscribe,

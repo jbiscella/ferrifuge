@@ -226,6 +226,12 @@ impl Log {
                 kind = command,
                 "a reply from the server lacks the result of its command"
             ),
+            Anomaly::ReplyBeforeConnect { command, .. } => warn!(
+                client = self.number,
+                transport,
+                kind = command,
+                "a reply from the server came before the connect reply"
+            ),
         }
     }
 

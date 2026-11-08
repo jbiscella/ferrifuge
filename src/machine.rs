@@ -21,6 +21,8 @@ mod compaction_tests;
 mod delivery;
 mod inbound;
 #[cfg(test)]
+mod optimistic_tests;
+#[cfg(test)]
 mod publication_channel_tests;
 mod server_subscriptions;
 #[cfg(test)]
@@ -757,6 +759,16 @@ pub enum Anomaly {
         transport: TransportId,
         /// The kind of command it answers, as `client.proto` names its
         /// request: `"connect"`, `"rpc"`, `"sub_refresh"`...
+        command: &'static str,
+    },
+    /// A reply handled before the connect reply of its connection, which
+    /// the commands sent with the connect command must follow (Block 36,
+    /// D6).
+    ReplyBeforeConnect {
+        /// The transport it came on.
+        transport: TransportId,
+        /// The kind of command it answers, as `client.proto` names its
+        /// request: `"subscribe"`.
         command: &'static str,
     },
 }
@@ -1641,8 +1653,22 @@ impl Machine {
         }
         // Open is not enough to keep a websocket: a server answer is (see
         // `server_answered`), so one that never answers falls back.
-        let command = self.connect_command();
-        self.send(transport, command);
+        self.send_connect(transport);
+    }
+
+    /// Sends a new connect command over websocket, the subscribe commands
+    /// that fit going in its frame (Block 36, D5).
+    fn send_connect(&mut self, transport: TransportId) {
+        let connect = self.connect_command();
+        let mut commands = self.optimistic_subscribes(&connect);
+        commands.insert(0, connect);
+        if self.buffering() {
+            for command in &commands {
+                self.buffer(command, None, 0, false);
+            }
+        } else {
+            self.send_commands(transport, &commands);
+        }
     }
 
     /// The websocket that opened and waits for a token to send its connect
@@ -1720,6 +1746,20 @@ impl Machine {
         if let Some(transport) = self.transport {
             self.actions
                 .push(Action::Anomaly(Anomaly::ReplyWithoutResult {
+                    transport,
+                    command,
+                }));
+        }
+        self.reconnect_after_transport_closed();
+    }
+
+    /// A reply to a `command` command handled before the connect reply
+    /// breaks the protocol (Block 36, D6): reported, then handled as a lost
+    /// transport.
+    fn reply_before_connect(&mut self, command: &'static str) {
+        if let Some(transport) = self.transport {
+            self.actions
+                .push(Action::Anomaly(Anomaly::ReplyBeforeConnect {
                     transport,
                     command,
                 }));
@@ -1924,7 +1964,13 @@ impl Machine {
             return;
         }
         if self.subscriptions.owns_command(reply.id) {
-            self.subscription_command_reply(reply);
+            // Only a subscribe sent with the connect command can be in
+            // flight before its reply (Block 36, D5).
+            if self.state != State::Connected && self.awaits_subscribe(reply.id) {
+                self.reply_before_connect("subscribe");
+            } else {
+                self.subscription_command_reply(reply);
+            }
             return;
         }
         if self.state == State::Connected && self.tokens.take_refresh_reply(reply.id) {
@@ -2293,8 +2339,7 @@ impl Machine {
                 match purpose {
                     FetchPurpose::Connect => {
                         if let Some(transport) = self.awaiting_token() {
-                            let command = self.connect_command();
-                            self.send(transport, command);
+                            self.send_connect(transport);
                         } else if self.state == State::Connecting && self.transport.is_none() {
                             self.token_ready();
                         }

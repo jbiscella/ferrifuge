@@ -247,8 +247,11 @@ fn a_frame_whose_transport_ends_before_it_is_written_counts_nowhere() {
     assert_eq!(machine.counters.unwritten(), 0);
 }
 
+/// The connect command and the three subscribes sent with it over
+/// websocket (Block 36, D5) count as four commands, their frame's bytes
+/// once (D8).
 #[test]
-fn a_frame_of_three_commands_counts_three_out_and_its_bytes_once() {
+fn a_frame_of_four_commands_counts_four_out_and_its_bytes_once() {
     let mut machine = Machine::new(Config::default());
     for channel in ["a", "b", "c"] {
         let id = machine
@@ -256,19 +259,19 @@ fn a_frame_of_three_commands_counts_three_out_and_its_bytes_once() {
             .unwrap();
         machine.handle(Input::Subscribe(id));
     }
-    let transport = opening(&mut machine);
+    let transport = opened(&machine.handle(Input::Connect));
     let before = machine.statistics();
 
-    let replied = machine.handle(frame(transport, CONNECT_REPLY));
-    let [(frame_id, bytes)] = &sends(&replied)[..] else {
-        panic!("one frame of subscribes: {replied:?}");
+    let opened = machine.handle(Input::TransportOpened(transport));
+    let [(frame_id, bytes)] = &sends(&opened)[..] else {
+        panic!("one frame of the connect and subscribes: {opened:?}");
     };
     machine.handle(Input::FrameWritten {
         transport,
         frame: *frame_id,
     });
 
-    assert_eq!(machine.statistics().messages_out, before.messages_out + 3);
+    assert_eq!(machine.statistics().messages_out, before.messages_out + 4);
     assert_eq!(
         machine.statistics().bytes_out,
         before.bytes_out + bytes.len() as u64
