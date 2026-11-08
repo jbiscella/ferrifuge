@@ -575,7 +575,12 @@ impl Shared {
     }
 
     fn next_action(&self) -> Option<Action> {
-        lock(&self.core).actions.pop_front()
+        let mut core = lock(&self.core);
+        let action = core.actions.pop_front();
+        if action.is_none() {
+            core.actions.shrink_to(crate::RESTING_SLOTS);
+        }
+        action
     }
 
     /// Makes a call now, of `subscription` when given; the future gives its

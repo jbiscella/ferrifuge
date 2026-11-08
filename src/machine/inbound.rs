@@ -159,6 +159,7 @@ impl Machine {
     pub(super) fn handle_inbound(&mut self) {
         while self.inbound.waiting_for.is_empty() {
             let Some(held) = self.inbound.held.pop_front() else {
+                self.inbound.held.shrink_to(crate::RESTING_SLOTS);
                 break;
             };
             self.inbound.bytes -= held.size;

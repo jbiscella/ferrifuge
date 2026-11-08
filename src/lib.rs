@@ -80,6 +80,11 @@ mod test_util;
 mod token;
 mod wire;
 
+/// Slots a queue of the client keeps once it is empty: what a burst grew is
+/// released, so that a client at rest holds the same memory whatever bursts
+/// it went through (Block 14, "Memory stays flat across reconnects").
+pub(crate) const RESTING_SLOTS: usize = 4;
+
 #[cfg(all(feature = "tokio", target_os = "android"))]
 pub use adapter::android;
 #[cfg(all(feature = "tokio", feature = "__test-hooks"))]

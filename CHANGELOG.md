@@ -64,6 +64,15 @@ repository held while it carried that version, from the blocks of
   in the frame of the connect command, as many as fit `batch_frame_bytes`
   (Block 36b); their reply deadline starts when the connect reply is read.
 
+### Fixed
+
+- A client at rest no longer keeps what a burst grew in its queues (Block
+  14): the actions of its driver, its read-ahead and its event streams fall
+  back to a few slots once empty. Since 36b sends a connection's subscribes
+  in its connect frame, a reconnect's burst could leave about 4 KiB more held
+  after one reconnect than after another, which failed "Memory stays flat
+  across reconnects".
+
 ## [0.19.0] - 2026-11-07
 
 ### Added
