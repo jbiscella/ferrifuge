@@ -93,20 +93,21 @@ impl Machine {
         reply: Option<(&StreamPosition, bool)>,
     ) {
         let replaces = reply.is_some();
-        // A publication of another channel, as a wildcard subscription
-        // gets, is of another stream: its position is not this one's
-        // (Block 35c, D3).
-        let (own_offset, own_epoch) = if publication.channel.is_some() {
-            (None, None)
-        } else {
-            (publication.offset, publication.epoch.clone())
-        };
         let (offset, epoch) = match reply {
+            // A publication of another channel, as a wildcard subscription
+            // gets, is of another stream: it moves nothing, not even to the
+            // reply's position (Block 35c, D3; Codex on PR #147).
+            _ if publication.channel.is_some() => (None, None),
             Some((position, last)) => (
-                own_offset.or(last.then_some(position.offset)),
-                Some(own_epoch.unwrap_or_else(|| position.epoch.clone())),
+                publication.offset.or(last.then_some(position.offset)),
+                Some(
+                    publication
+                        .epoch
+                        .clone()
+                        .unwrap_or_else(|| position.epoch.clone()),
+                ),
             ),
-            None => (own_offset, own_epoch),
+            None => (publication.offset, publication.epoch.clone()),
         };
         let commit = Commit {
             owner,
@@ -241,6 +242,15 @@ impl Machine {
             self.settle_event(*id);
         }
         self.actions.push(Action::Withdraw(ids));
+    }
+
+    /// The index of the last of a subscribe reply's `publications` that is
+    /// of the subscription's own stream, which reaches the reply's position
+    /// once taken (Block 35c, D3).
+    pub(super) fn last_of_stream(publications: &[Publication]) -> Option<usize> {
+        publications
+            .iter()
+            .rposition(|publication| publication.channel.is_none())
     }
 
     /// The position a subscribe reply at `replied` sets before any of its

@@ -846,9 +846,11 @@ impl Machine {
             Ok(publications) => publications,
             Err(error) => return self.delta_failed(id, error),
         };
-        let last = publications.len().saturating_sub(1);
+        let last = Machine::last_of_stream(&publications);
         for (index, publication) in publications.into_iter().enumerate() {
-            let reply = replied.as_ref().map(|position| (position, index == last));
+            let reply = replied
+                .as_ref()
+                .map(|position| (position, Some(index) == last));
             self.emit_publication(id, publication, reply);
         }
         self.subscription_calls_subscribed(id);

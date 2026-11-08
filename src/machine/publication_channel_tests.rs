@@ -145,6 +145,34 @@ fn a_reply_publication_of_another_channel_is_not_the_baseline() {
     );
 }
 
+/// The reply's position is reached at the last publication of the
+/// subscription's own stream, not at a later one of another channel (Codex
+/// on PR #147).
+#[test]
+fn a_last_reply_publication_of_another_channel_does_not_reach_the_reply_position() {
+    let (mut machine, transport, _, _) = subscribed_with(concat!(
+        r#"{"recoverable":true,"epoch":"e","offset":10,"publications":["#,
+        r#"{"data":{},"offset":7},{"data":{},"channel":"news.sport"}]}"#
+    ));
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: Some(3001),
+        reason: "closed by the test".into(),
+    });
+    let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    machine.handle(Input::TransportOpened(transport));
+
+    let resubscribe = sent(&machine.handle(frame(
+        transport,
+        r#"{"id":3,"connect":{"client":"c"}}"#,
+    )));
+
+    assert_eq!(
+        resubscribe,
+        [r#"{"id":4,"subscribe":{"channel":"news","recover":true,"epoch":"e","offset":7}}"#]
+    );
+}
+
 #[test]
 fn the_subscribed_event_says_whether_publications_follow() {
     let (_, _, _, with) = subscribed_with(r#"{"publications":[{"data":{},"offset":1}]}"#);
