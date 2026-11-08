@@ -188,16 +188,15 @@ impl Machine {
     }
 
     /// The subscription `id` left the registry: its stream and its
-    /// publications not yet taken no longer matter.
+    /// publications not yet taken no longer matter. A publication its
+    /// handler runs for stays in flight, counted as delivered when the
+    /// handler returns (Codex, #169).
     pub(super) fn forget_deliveries(&mut self, id: SubscriptionId) {
         self.deliveries.streams.remove(&Some(id));
         self.forget_held(Some(id));
         self.deliveries
             .pending
             .retain(|_, commit| commit.owner != Owner::Client(id));
-        self.deliveries
-            .in_flight
-            .retain(|_, handed| handed.owner != Owner::Client(id));
     }
 
     /// Whether a stream takes the events of `of`.

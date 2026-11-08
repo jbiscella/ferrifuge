@@ -1727,6 +1727,22 @@ mod tests {
         assert_eq!(machine.statistics().publications_delivered, 1);
     }
 
+    // Codex, #169: a publication whose handler removes its subscription is
+    // still counted as delivered when the handler returns.
+    #[test]
+    fn a_handed_publication_of_a_removed_subscription_counts_as_delivered() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::StreamOpened(Some(id)));
+        subscribed_recoverable(&mut machine, transport, id);
+        let publication = publication_ids(&machine.handle(pushed(transport, 1)))[0];
+        machine.handle(Input::EventHanded(publication));
+
+        machine.handle(Input::RemoveSubscription(id));
+        machine.handle(Input::EventTaken(publication));
+
+        assert_eq!(machine.statistics().publications_delivered, 1);
+    }
+
     // Block 41, D4: a handler panic moves the position back and disconnects
     // with code 2, without reconnecting.
     #[test]
