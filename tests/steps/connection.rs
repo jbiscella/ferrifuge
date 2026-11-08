@@ -18,7 +18,7 @@ const RECONNECT_CODE: u32 = 4000;
 const TERMINAL_CODE: u32 = 4500;
 
 #[given("a new client")]
-fn a_new_client(world: &mut ClientWorld) {
+pub(super) fn a_new_client(world: &mut ClientWorld) {
     let endpoint = match world.server {
         Some(_) => world.server_endpoint(),
         None => UNREACHABLE_ENDPOINT.to_owned(),
