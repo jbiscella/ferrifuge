@@ -133,7 +133,7 @@ Feature: Event handlers
 
   @D
   Scenario Outline: Pings are answered while a handler runs, except under Inline
-    Given a client with <mode> delivery connected to the fake server, which pings every 1 s and expects pongs, subscribed to channel "news" whose subscription handler blocks for 5 s on each publication
+    Given a client with <mode> delivery on a multi-thread runtime, connected to the fake server, which pings every 1 s and expects pongs, subscribed to channel "news" whose subscription handler blocks for 5 s on each publication
     And the fake server has sent a publication to "news"
     And the subscription handler is running for it
     When 4 s elapse with the fake server pinging every 1 s
