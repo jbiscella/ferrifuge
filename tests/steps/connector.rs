@@ -234,6 +234,12 @@ fn connect_in_encoding(world: &mut ClientWorld, protocol: String) {
             "{received:?}"
         );
         assert_eq!(world.fake().received(), Vec::<serde_json::Value>::new());
+        // Each upgrade asked for the Protobuf subprotocol.
+        let upgrades = world.fake().protobuf_upgrades();
+        assert!(
+            !upgrades.is_empty() && upgrades.iter().all(|asked| *asked),
+            "{upgrades:?}"
+        );
     } else {
         let received = world.fake().received();
         assert!(
@@ -242,6 +248,8 @@ fn connect_in_encoding(world: &mut ClientWorld, protocol: String) {
                 .any(|command| command["connect"].is_object()),
             "{received:?}"
         );
+        let upgrades = world.fake().protobuf_upgrades();
+        assert!(upgrades.iter().all(|asked| !asked), "{upgrades:?}");
     }
 }
 
