@@ -612,10 +612,13 @@ const RUNNER_STACK: usize = 32 << 20;
 /// Scenarios run alone: each spends seconds of CPU on a 32 MiB frame in a
 /// debug build, enough to delay the timers of scenarios running alongside
 /// (seen: a missed ping deadline in "Regular pings keep the connection
-/// alive").
+/// alive"). The quickstart one builds the example, under coverage in a
+/// target directory of its own, for minutes on every core: alongside it,
+/// Centrifugo containers missed their 60 s startup wait.
 const SERIAL: &[&str] = &[
     "A websocket write the server never reads closes the transport",
     "A stalled websocket write does not delay disconnect",
+    "The quickstart example receives a publication",
 ];
 
 fn main() {
