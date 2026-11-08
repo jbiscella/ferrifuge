@@ -20,6 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tower_service::Service;
 
+use super::connector::ConnectedStream;
 use super::tls::Tls;
 use crate::{ClientError, ErrorKind, codes};
 
@@ -506,22 +507,26 @@ fn proxy_error(message: &str) -> ClientError {
 }
 
 /// A connected stream to the server's host: TCP, directly or through an
-/// HTTP or SOCKS5 proxy, or TLS to an `https://` proxy carrying the tunnel.
+/// HTTP or SOCKS5 proxy, TLS to an `https://` proxy carrying the tunnel, or
+/// the stream of the application's connector (Block 37b).
 pub(super) enum Stream {
     Tcp(TcpStream),
     // Boxed: the TLS state is large, and one stream is held per connection.
     ThroughTls(Box<TokioIo<MaybeHttpsStream<TokioIo<TcpStream>>>>),
+    Connected(ConnectedStream),
 }
 
 impl Stream {
-    /// The TCP connection underneath, for a reset on abort.
-    pub(super) fn tcp(&self) -> &TcpStream {
+    /// The TCP connection underneath, for a reset on abort; none in a
+    /// connector's stream.
+    pub(super) fn tcp(&self) -> Option<&TcpStream> {
         match self {
-            Self::Tcp(tcp) => tcp,
-            Self::ThroughTls(stream) => match stream.inner() {
+            Self::Tcp(tcp) => Some(tcp),
+            Self::ThroughTls(stream) => Some(match stream.inner() {
                 MaybeHttpsStream::Http(tcp) => tcp.inner(),
                 MaybeHttpsStream::Https(tls) => tls.inner().get_ref().0.inner().inner(),
-            },
+            }),
+            Self::Connected(_) => None,
         }
     }
 }
@@ -535,6 +540,7 @@ impl AsyncRead for Stream {
         match self.get_mut() {
             Self::Tcp(tcp) => Pin::new(tcp).poll_read(cx, buf),
             Self::ThroughTls(stream) => Pin::new(&mut **stream).poll_read(cx, buf),
+            Self::Connected(stream) => Pin::new(&mut *stream.0).poll_read(cx, buf),
         }
     }
 }
@@ -548,6 +554,7 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Self::Tcp(tcp) => Pin::new(tcp).poll_write(cx, buf),
             Self::ThroughTls(stream) => Pin::new(&mut **stream).poll_write(cx, buf),
+            Self::Connected(stream) => Pin::new(&mut *stream.0).poll_write(cx, buf),
         }
     }
 
@@ -555,6 +562,7 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Self::Tcp(tcp) => Pin::new(tcp).poll_flush(cx),
             Self::ThroughTls(stream) => Pin::new(&mut **stream).poll_flush(cx),
+            Self::Connected(stream) => Pin::new(&mut *stream.0).poll_flush(cx),
         }
     }
 
@@ -562,6 +570,7 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Self::Tcp(tcp) => Pin::new(tcp).poll_shutdown(cx),
             Self::ThroughTls(stream) => Pin::new(&mut **stream).poll_shutdown(cx),
+            Self::Connected(stream) => Pin::new(&mut *stream.0).poll_shutdown(cx),
         }
     }
 }

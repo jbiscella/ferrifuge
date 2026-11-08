@@ -452,11 +452,10 @@ jobs:
         with:
           tool: cargo-semver-checks
 
-      # Default features and the current test-util: the public API. The
-      # private __test-hooks are not part of it; the base's test-util held
-      # them, so it is checked on the current side only (Block 37, D7).
+      # Default features and test-util: the public API. The private
+      # __test-hooks are not part of it (Block 37, D7).
       - name: cargo semver-checks
-        run: cargo semver-checks --default-features --current-features test-util --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
+        run: cargo semver-checks --default-features --features test-util --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.

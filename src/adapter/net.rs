@@ -11,6 +11,7 @@ use reqwest::Url;
 use rustls::ClientConfig;
 
 use super::client::lock;
+use super::connector::Shared;
 use super::proxy::{self, Proxy, ProxyTarget};
 use super::tls::{BuildOnce, Tls, plain_tls_config};
 
@@ -18,6 +19,9 @@ use super::tls::{BuildOnce, Tls, plain_tls_config};
 #[derive(Debug, Default)]
 pub(super) struct Network {
     pub(super) tls: Tls,
+    /// The application's connector, which replaces every proxy setting
+    /// (Block 37, D4).
+    connector: Option<Shared>,
     /// A setting given by `set_proxy`, applied at the next attempt.
     pending: Mutex<Option<Proxy>>,
     current: Mutex<Current>,
@@ -59,6 +63,7 @@ impl Network {
     pub(super) fn new(tls: Tls, proxy: Proxy) -> Self {
         Self {
             tls,
+            connector: None,
             pending: Mutex::new(None),
             current: Mutex::new(Current {
                 decisions: Arc::new(Mutex::new(Decisions {
@@ -72,10 +77,24 @@ impl Network {
         }
     }
 
+    /// The network of a client given `connector`.
+    pub(super) fn with_connector(mut self, connector: Option<Shared>) -> Self {
+        self.connector = connector;
+        self
+    }
+
+    /// The application's connector, if it gave one.
+    pub(super) fn connector(&self) -> Option<&Shared> {
+        self.connector.as_ref()
+    }
+
     /// Replaces the proxy setting from the next connection attempt
-    /// (Block 23, D1).
+    /// (Block 23, D1); with a connector, which is the route, nothing
+    /// (Block 37, D4).
     pub(super) fn set_proxy(&self, proxy: Proxy) {
-        *lock(&self.pending) = Some(proxy);
+        if self.connector.is_none() {
+            *lock(&self.pending) = Some(proxy);
+        }
     }
 
     /// A new connection attempt starts: a setting given since the last one
@@ -101,6 +120,10 @@ impl Network {
     /// The proxy for `url` under the setting in use (Block 23, D2),
     /// decided once per endpoint per attempt.
     pub(super) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
+        // A connector reads no proxy setting (Block 37, D4).
+        if self.connector.is_some() {
+            return Ok(None);
+        }
         let decisions = Arc::clone(&lock(&self.current).decisions);
         decide_once(&decisions, url)
     }

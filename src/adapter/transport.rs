@@ -101,10 +101,15 @@ impl WebSocket {
             Connector::Plain
         };
         let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
-        // The stream to the server's host, through the proxy the setting
-        // decides (Block 23, D3); TLS to the server comes after.
-        let proxy = network.decide(&parsed)?;
-        let stream = dial(&parsed, proxy.as_ref(), &network.tls).await?;
+        // The stream to the server's host: the application's connector's
+        // (Block 37, D4), or through the proxy the setting decides (Block
+        // 23, D3); TLS to the server comes after, over either.
+        let stream = if let Some(connector) = network.connector() {
+            Stream::Connected(super::connector::connect(connector, &parsed).await?)
+        } else {
+            let proxy = network.decide(&parsed)?;
+            dial(&parsed, proxy.as_ref(), &network.tls).await?
+        };
         let mut request = url.into_client_request().map_err(|e| e.to_string())?;
         // The application's, which leave out those the handshake sets.
         for (name, value) in headers {
@@ -282,8 +287,8 @@ impl WebSocket {
     /// never read, rather than leaving the system to keep trying to send it.
     fn abort(self) {
         let tcp = match self.stream.get_ref() {
-            MaybeTlsStream::Plain(stream) => Some(stream.tcp()),
-            MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0.tcp()),
+            MaybeTlsStream::Plain(stream) => stream.tcp(),
+            MaybeTlsStream::Rustls(tls) => tls.get_ref().0.tcp(),
             _ => None,
         };
         if let Some(tcp) = tcp {

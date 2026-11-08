@@ -903,6 +903,25 @@ credentials makes the attempt fail with "proxy authentication required". No
 record, error or `Debug` output shows the credentials, and `http_headers`
 refuses `Proxy-Authorization`.
 
+For networking the client does not have, a VPN tunnel, a custom proxy or
+an in-process transport, give it a connector: a function from the
+websocket endpoint (an `http::Uri`, its port always written) to a
+connected stream. The client then runs TLS, for `wss://`, and the
+websocket upgrade over that stream, as over one it dials, and reads no
+proxy setting, the environment's included: a connector replaces the proxy
+setting, so `ClientBuilder::proxy` with it fails `build()`, as do
+http_stream and sse endpoints, which it cannot carry. Its errors and panics
+fail the attempt as a refused connection does, and the handshake timeout
+bounds it.
+
+```rust,ignore
+let client = Client::builder("wss://centrifugo.example/connection/websocket")
+    .connector(|endpoint: ferrifuge::http::Uri| async move {
+        my_tunnel.open(endpoint.host().unwrap_or_default(), endpoint.port_u16().unwrap_or(443)).await
+    })
+    .build()?;
+```
+
 Not supported: PAC files and WPAD, NTLM, Negotiate and Kerberos proxy
 authentication (a local helper such as Px or Cntlm can bridge them), SOCKS4,
 and the settings hyper-util does not read (macOS's exceptions list and SOCKS

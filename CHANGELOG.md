@@ -13,6 +13,12 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- An injectable connector (Block 37b): `ClientBuilder::connector`, the
+  `Connector` trait (implemented for closures and for an `Arc` of one),
+  `ConnectedStream`, `Connecting` and `BoxError`, and `ferrifuge::http`, the
+  `http` crate its endpoint `Uri` comes from. The client runs TLS and the
+  websocket upgrade over the connector's stream and reads no proxy setting.
+
 - Test constructors (Block 37a), behind the new `test-util` feature:
   `ClientEvent::connected`, `Publication::new`, `ClientInfo::new`,
   `Statistics::new`, and setters on those and on `Subscribed`,

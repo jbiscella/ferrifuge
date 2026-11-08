@@ -21,6 +21,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio::time::Sleep;
 use tracing::Instrument;
 
+use super::connector::{self, Connector};
 use super::http::{HeaderSet, HttpTransport};
 use super::log::{self, Log};
 use super::net::Network;
@@ -778,6 +779,11 @@ pub struct ClientBuilder {
     /// The application's TLS configuration, if any.
     tls_config: Option<Arc<rustls::ClientConfig>>,
     proxy: Proxy,
+    /// Whether [`ClientBuilder::proxy`] was called: a connector replaces
+    /// any proxy setting (Block 37, D4).
+    proxy_set: bool,
+    /// The application's connector for the websocket, if any.
+    connector: Option<connector::Shared>,
     /// The runtime the client runs on; the current one otherwise.
     runtime: Option<Handle>,
 }
@@ -825,6 +831,8 @@ impl std::fmt::Debug for ClientBuilder {
             .field("root_certificates", &self.root_certificates.len())
             .field("tls_config", &self.tls_config.is_some())
             .field("proxy", &self.proxy)
+            .field("proxy_set", &self.proxy_set)
+            .field("connector", &self.connector.is_some())
             .field("runtime", &self.runtime.is_some())
             .finish()
     }
@@ -919,6 +927,21 @@ impl ClientBuilder {
     #[must_use]
     pub fn proxy(mut self, proxy: Proxy) -> Self {
         self.proxy = proxy;
+        self.proxy_set = true;
+        self
+    }
+
+    /// Sets the connector that gives the websocket its stream, for
+    /// networking the client does not have (Block 37): a VPN tunnel, a
+    /// custom proxy, an in-process transport. Over its stream the client
+    /// runs TLS, for `wss://`, and the websocket upgrade, as over a stream
+    /// it dials. With a connector the client reads no proxy setting, the
+    /// environment's and the system's included. A connector carries the
+    /// websocket only: [`ClientBuilder::build`] fails with an `http_stream` or
+    /// sse endpoint, or after [`ClientBuilder::proxy`].
+    #[must_use]
+    pub fn connector(mut self, connector: impl Connector + 'static) -> Self {
+        self.connector = Some(connector::Shared(Arc::new(connector)));
         self
     }
 
@@ -1054,6 +1077,8 @@ impl Client {
             root_certificates: Vec::new(),
             tls_config: None,
             proxy: Proxy::default(),
+            proxy_set: false,
+            connector: None,
             runtime: None,
         }
     }
@@ -1070,10 +1095,15 @@ impl Client {
             root_certificates,
             tls_config,
             proxy,
+            proxy_set,
+            connector,
             runtime,
         } = builder;
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
+        }
+        if connector.is_some() {
+            check_connector(&endpoints, proxy_set)?;
         }
         let android = cfg!(target_os = "android");
         let trust = trust(root_certificates, tls_config, android)?;
@@ -1116,7 +1146,7 @@ impl Client {
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
-            network: Arc::new(Network::new(Tls::new(trust), proxy)),
+            network: Arc::new(Network::new(Tls::new(trust), proxy).with_connector(connector)),
             http_headers,
         });
         let driver = Driver {
@@ -1434,7 +1464,8 @@ impl Client {
 
     /// Replaces the proxy setting from the next connection attempt
     /// (Block 23), as the other setters do; the current connection is
-    /// kept.
+    /// kept. A client given a connector reads no proxy setting: this
+    /// changes nothing (Block 37).
     pub fn set_proxy(&self, proxy: Proxy) {
         self.shared.network.set_proxy(proxy);
     }
@@ -2086,7 +2117,9 @@ impl Driver {
         let decision = reqwest::Url::parse(&url)
             .map_err(|e| e.to_string())
             .and_then(|parsed| network.decide(&parsed));
-        self.shared.log.attempt(kind, endpoint, &decision);
+        self.shared
+            .log
+            .attempt(kind, endpoint, &decision, network.connector().is_some());
         let opening: Opening = match kind {
             TransportKind::WebSocket => Box::pin(async move {
                 let headers = headers.current();
@@ -2399,6 +2432,37 @@ impl Drop for Ending {
         shared.driver_gone.store(true, Ordering::Release);
         shared.driver_ended.notify_waiters();
     }
+}
+
+/// A connector carries the websocket only, and replaces every proxy
+/// setting (Block 37, D4).
+fn check_connector(
+    endpoints: &[(TransportKind, String)],
+    proxy_set: bool,
+) -> Result<(), ClientError> {
+    if let Some((kind, _)) = endpoints
+        .iter()
+        .find(|(kind, _)| *kind != TransportKind::WebSocket)
+    {
+        return Err(ClientError {
+            kind: ErrorKind::Configuration,
+            code: codes::error::BAD_CONFIGURATION,
+            message: format!(
+                "a connector carries the websocket only, not transport {}",
+                kind.name()
+            ),
+            transport: Some(kind.name().to_owned()),
+        });
+    }
+    if proxy_set {
+        return Err(ClientError {
+            kind: ErrorKind::Configuration,
+            code: codes::error::BAD_CONFIGURATION,
+            message: "a connector replaces the proxy setting: give one or the other".to_owned(),
+            transport: None,
+        });
+    }
+    Ok(())
 }
 
 fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
@@ -4785,6 +4849,19 @@ mod tests {
         let printed = format!("{printed_builder} {client:?}");
 
         assert!(!printed.contains("secret-token"), "{printed}");
+    }
+
+    #[test]
+    fn the_builder_shows_whether_it_has_a_connector() {
+        let without = Client::builder("ws://127.0.0.1:1/connection/websocket");
+        let with = Client::builder("ws://127.0.0.1:1/connection/websocket").connector(
+            |_: http::Uri| async {
+                Err::<tokio::net::TcpStream, _>(std::io::Error::other("never called"))
+            },
+        );
+
+        assert!(format!("{without:?}").contains("connector: false"));
+        assert!(format!("{with:?}").contains("connector: true"));
     }
 
     #[tokio::test]
