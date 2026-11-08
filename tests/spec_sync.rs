@@ -18,7 +18,12 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
-const P_NOT_YET_MEASURED: &[&str] = &[];
+const P_NOT_YET_MEASURED: &[&str] = &[
+    // Block 42: TLA+ trace replay.
+    "Every model trace replays into the core up to its recorded divergence",
+    "The replayer reports a planted mismatch",
+    "Every counterexample of a bug variant diverges where recorded",
+];
 
 /// How a benchmark or simulation claims a `@P` scenario: a line of its own
 /// reading `// @P scenario: <scenario name>`.
