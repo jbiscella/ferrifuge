@@ -325,7 +325,18 @@ async fn the_call_times_out(world: &mut ClientWorld) {
 )]
 async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: String) {
     let timeout = test_config().timeout;
+    let made_at = world.calls.made.last().map(|call| call.made_at);
     let (result, after) = outcome(world, None, EVENT_TIMEOUT).await;
+    // When the fake server read each RPC command, after the call: tells a
+    // command written late from a step run late (Windows flake, #138, #157).
+    let read_after: Vec<Duration> = match (&world.fake, made_at) {
+        (Some(fake), Some(made_at)) => fake
+            .commands_with_times("rpc")
+            .iter()
+            .map(|(_, at)| at.saturating_duration_since(made_at))
+            .collect(),
+        _ => Vec::new(),
+    };
     let error = error(result);
     let code = match message.as_str() {
         "disconnected" => codes::error::DISCONNECTED,
@@ -338,7 +349,7 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
     assert_eq!(
         (error.code, error.message.as_str()),
         (code, message.as_str()),
-        "settled {after:?} after the call was made"
+        "settled {after:?} after the call was made; RPC commands read by the fake server {read_after:?} after it"
     );
     if !early.is_empty() {
         assert!(after < timeout, "failed after {after:?}");
