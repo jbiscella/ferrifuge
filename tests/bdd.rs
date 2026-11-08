@@ -264,6 +264,10 @@ const IMPLEMENTED: &[&str] = &[
     "A batch refused with HTTP 413 is resent command by command",
     "Over an emulated transport only the command refused alone fails",
     // Block 18, sub-increment 18c.
+    // Over http_stream since Block 36 (D10).
+    "A reconnect over an emulated transport sends its subscribe commands in one request",
+    "The subscribe commands of a connect reply are split at the frame cap",
+    "An open batch does not hold the subscribe commands of a connect reply",
     // Block 13, sub-increment 13a: calls and RPC.
     "RPC returns the proxy's result",
     "Temporary RPC error is reported as such",
