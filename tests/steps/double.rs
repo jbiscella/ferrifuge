@@ -5,7 +5,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cucumber::{given, then, when};
@@ -24,6 +24,8 @@ use super::{ClientWorld, EVENT_TIMEOUT};
 pub(crate) struct Doubles {
     server: Option<Server>,
     calls: Arc<AtomicUsize>,
+    /// Holds the connector's new connections while set.
+    hold: Arc<Hold>,
     /// The client id of the client's "connected" event.
     client_id: Option<String>,
     /// The outcome of the last call a step made that is not an RPC.
@@ -38,16 +40,51 @@ enum Outcome {
     PresenceStats(Result<PresenceStatsResult, CallError>),
 }
 
-/// A connector counting its calls, then giving the double's.
+/// Holds the connections a connector opens while set, until a step
+/// releases them: the step then acts while the client reconnects, however
+/// slow the runner, rather than within a reconnect delay.
+#[derive(Debug, Default)]
+struct Hold {
+    held: AtomicBool,
+    released: tokio::sync::Notify,
+}
+
+impl Hold {
+    async fn passed(&self) {
+        loop {
+            // Created before the check: a release in between is kept.
+            let released = self.released.notified();
+            if !self.held.load(Ordering::SeqCst) {
+                return;
+            }
+            released.await;
+        }
+    }
+
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+        self.released.notify_waiters();
+    }
+}
+
+/// A connector counting its calls once held ones pass, then giving the
+/// double's.
 struct Counting<C> {
     inner: C,
     calls: Arc<AtomicUsize>,
+    hold: Arc<Hold>,
 }
 
-impl<C: Connector> Connector for Counting<C> {
+impl<C: Connector + Clone + 'static> Connector for Counting<C> {
     fn connect(&self, endpoint: ferrifuge::http::Uri) -> Connecting {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.connect(endpoint)
+        let inner = self.inner.clone();
+        let calls = Arc::clone(&self.calls);
+        let hold = Arc::clone(&self.hold);
+        Box::pin(async move {
+            hold.passed().await;
+            calls.fetch_add(1, Ordering::SeqCst);
+            inner.connect(endpoint).await
+        })
     }
 }
 
@@ -69,6 +106,7 @@ fn build(world: &mut ClientWorld, config: ferrifuge::Config) {
     let connector = Counting {
         inner: double.connector(),
         calls: Arc::clone(&world.doubles.calls),
+        hold: Arc::clone(&world.doubles.hold),
     };
     let builder = ferrifuge::Client::builder(double.endpoint())
         .config(config)
@@ -192,6 +230,9 @@ async fn a_recoverable_subscriber(world: &mut ClientWorld, millis: u64) {
     subscribe(world, "news", true);
     connected(world).await;
     subscribed(world).await;
+    // The next connection waits until the step publishing during the
+    // reconnect has published.
+    world.doubles.hold.held.store(true, Ordering::SeqCst);
 }
 
 #[given(
@@ -214,6 +255,7 @@ fn publishes_while_reconnecting(world: &mut ClientWorld, first: String, second: 
     assert_eq!(world.doubles.calls.load(Ordering::SeqCst), 1);
     server(world).publish("news", first.into_bytes());
     server(world).publish("news", second.into_bytes());
+    world.doubles.hold.release();
 }
 
 #[then(regex = r#"^the subscription emits "subscribing", then "subscribed" with recovered true$"#)]
@@ -717,6 +759,7 @@ async fn a_client_for_each(world: &mut ClientWorld, seconds: u64, user: String) 
     let connector = Counting {
         inner: double.connector(),
         calls: Arc::clone(&world.doubles.calls),
+        hold: Arc::clone(&world.doubles.hold),
     };
     let doubled = ferrifuge::Client::builder(double.endpoint())
         .config(config)
