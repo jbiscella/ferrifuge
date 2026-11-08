@@ -49,9 +49,9 @@ pub(crate) struct BatchRun {
     /// Every action, in order.
     pub(super) actions: Vec<Action>,
     /// Where the actions of the current batch start.
-    mark: usize,
+    pub(super) mark: usize,
     /// Calls by name, in the order they were made.
-    calls: Vec<(String, CallId)>,
+    pub(super) calls: Vec<(String, CallId)>,
     pub(super) settled: BTreeMap<CallId, Result<CallReply, CallError>>,
     subscriptions: Vec<SubscriptionId>,
     /// Transports closed so far.
@@ -205,7 +205,7 @@ impl BatchRun {
     }
 
     /// The frames sent since the batch started.
-    fn frames(&self) -> Vec<(TransportId, Vec<Value>)> {
+    pub(super) fn frames(&self) -> Vec<(TransportId, Vec<Value>)> {
         self.frames_since(self.mark)
     }
 
@@ -226,7 +226,7 @@ impl BatchRun {
         )
     }
 
-    fn named(&self, name: &str) -> CallId {
+    pub(super) fn named(&self, name: &str) -> CallId {
         self.calls
             .iter()
             .find(|(of, _)| of == name)
@@ -236,7 +236,7 @@ impl BatchRun {
 }
 
 /// The JSON commands of a frame, unwrapping an emulation request.
-fn commands_of(frame: &[u8]) -> Vec<Value> {
+pub(super) fn commands_of(frame: &[u8]) -> Vec<Value> {
     let text = String::from_utf8_lossy(frame);
     let commands: Vec<Value> = text
         .lines()
@@ -304,14 +304,14 @@ fn rpc_of_size(id: u64, size: usize) -> CallRequest {
 
 /// Makes calls whose commands encode to `sizes`, in order, numbered from
 /// the next command id (the connect command took 1).
-fn calls_of_sizes(run: &mut BatchRun, sizes: &[usize]) {
+pub(super) fn calls_of_sizes(run: &mut BatchRun, sizes: &[usize]) {
     for (n, size) in sizes.iter().enumerate() {
         let id = 2 + n as u64;
         run.call(&format!("c{n}"), rpc_of_size(id, *size));
     }
 }
 
-fn sizes(list: &str) -> Vec<usize> {
+pub(super) fn sizes(list: &str) -> Vec<usize> {
     list.split(", ")
         .map(|size| size.trim().parse().expect("a size"))
         .collect()

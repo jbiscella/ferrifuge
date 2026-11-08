@@ -20,6 +20,7 @@ use crate::support::http_proxy::HttpProxy;
 use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
+mod auto_batching;
 mod backoff;
 mod batching;
 mod calls;
@@ -197,6 +198,8 @@ pub(crate) struct ClientWorld {
     pub(crate) close: close::Closing,
     /// The codes and their tables (Block 34).
     pub(crate) codes_table: codes_table::CodesTable,
+    /// What a Block 36a scenario holds.
+    pub(crate) auto_batching: auto_batching::AutoBatching,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.
