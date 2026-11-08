@@ -17,6 +17,9 @@ repository held while it carried that version, from the blocks of
   and `Input::Flush`, with which the core buffers the commands it would send
   until its owner flushes them, in frames of at most `batch_frame_bytes`.
 
+- `Anomaly::ReplyBeforeConnect` (Block 36b): a reply handled before the
+  connect reply of its connection, reported before the core reconnects.
+
 - `Publication::channel` and `Subscribed::has_recovered_publications`
   (Block 35c): the channel of a publication that differs from its
   subscription's, as for a wildcard subscription, which then moves no stream
@@ -45,6 +48,10 @@ repository held while it carried that version, from the blocks of
 - The tokio client batches automatically (Block 36a): the commands made
   before its driver next runs go out together, in frames of at most
   `batch_frame_bytes`, in the order they were made, with no delay.
+
+- Over websocket the core sends the subscribe commands that need no callback
+  in the frame of the connect command, as many as fit `batch_frame_bytes`
+  (Block 36b); their reply deadline starts when the connect reply is read.
 
 ## [0.19.0] - 2026-11-07
 
