@@ -3,6 +3,7 @@
 #[cfg(target_os = "android")]
 pub mod android;
 mod client;
+mod connector;
 mod http;
 mod log;
 mod net;
@@ -14,6 +15,7 @@ mod tls;
 mod transport;
 
 pub use client::{Batch, Client, ClientBuilder};
+pub use connector::{BoxError, ConnectedStream, Connecting, Connector};
 pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};
 #[cfg(feature = "__test-hooks")]

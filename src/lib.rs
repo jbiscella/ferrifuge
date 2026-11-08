@@ -88,7 +88,8 @@ pub use adapter::stalled_websocket_writes;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use adapter::{
-    Batch, Client, ClientBuilder, Proxy, ProxyTarget, Subscription, SubscriptionBuilder,
+    Batch, BoxError, Client, ClientBuilder, ConnectedStream, Connecting, Connector, Proxy,
+    ProxyTarget, Subscription, SubscriptionBuilder,
 };
 pub use call::{
     CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, PresenceResult,
@@ -99,6 +100,12 @@ pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, St
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub use fossil::write as write_fossil_delta;
+/// The `http` crate, whose `Uri` a [`Connector`] is given (Block 37b).
+/// Moving to another major version of it is a breaking change of
+/// ferrifuge's.
+#[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+pub use http;
 /// rustls, whose types [`ClientBuilder::root_certificates`] and
 /// [`ClientBuilder::tls_config`] take (Block 22). Moving to another rustls
 /// 0.x line is a breaking release of Ferrifuge.

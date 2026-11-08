@@ -30,6 +30,7 @@ mod codes_table;
 mod compaction;
 mod connect_data;
 mod connection;
+mod connector;
 mod delivery;
 mod delta;
 mod jitter;
@@ -205,6 +206,8 @@ pub(crate) struct ClientWorld {
     pub(crate) optimistic: optimistic::Optimistic,
     /// What a Block 37a scenario built.
     pub(crate) test_support: test_support::TestSupport,
+    /// What a Block 37b scenario's connector saw.
+    pub(crate) connectors: connector::Connectors,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.

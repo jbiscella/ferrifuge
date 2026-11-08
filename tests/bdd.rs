@@ -489,6 +489,12 @@ const IMPLEMENTED: &[&str] = &[
     "Optimistic subscriptions on Centrifugo",
     // Block 37a: test constructors.
     "Test constructors build what the client core yields",
+    // Block 37b: an injectable connector.
+    "A connector gives the websocket its stream",
+    "A wss endpoint over a connector is verified as without one",
+    "A connector that fails fails the attempt",
+    "A connector that never finishes fails the attempt with the handshake timeout",
+    "A connector goes with websocket endpoints and no proxy setting only",
 ];
 
 /// Server configuration of @A scenarios.

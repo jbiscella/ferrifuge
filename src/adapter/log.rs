@@ -181,16 +181,18 @@ impl Log {
     }
 
     /// The record of a transport attempt (Block 21), made where it opens:
-    /// its endpoint and its proxy, as scheme, host and port, or `direct`
-    /// (Block 23, D7).
+    /// its endpoint and its proxy, as scheme, host and port, `direct`, or
+    /// `connector` for a client given one (Block 23, D7; Block 37, D4).
     pub(super) fn attempt(
         &self,
         kind: TransportKind,
         endpoint: usize,
         proxy: &Result<Option<ProxyTarget>, String>,
+        connector: bool,
     ) {
         let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
         let proxy = match proxy {
+            _ if connector => "connector".to_owned(),
             Ok(Some(target)) => target.shown(),
             Ok(None) => "direct".to_owned(),
             Err(_) => "unusable".to_owned(),

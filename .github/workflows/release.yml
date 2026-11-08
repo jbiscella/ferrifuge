@@ -62,7 +62,7 @@ jobs:
             -A "ferrifuge release (github.com/$GITHUB_REPOSITORY)" \
             https://crates.io/api/v1/crates/ferrifuge)"
           case "$status" in
-            200) cargo semver-checks --default-features ;;
+            200) cargo semver-checks --default-features --features test-util ;;
             404) echo "no version on crates.io yet: nothing to compare with" ;;
             *) echo "crates.io answered $status: cannot check semver" >&2; exit 1 ;;
           esac

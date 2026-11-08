@@ -105,6 +105,16 @@ async fn parent() -> ExitCode {
     let connected = run("websocket-none", &all, &fake.address()).await;
     check("Proxy::none(): direct", connected && proxy.log().is_empty());
 
+    // A connector reads no proxy setting, the environment's included
+    // (Block 37, D4).
+    let proxy = TestProxy::http(fake.address(), false, None, Mode::Carry).await;
+    let all = [("ALL_PROXY", format!("http://{}", proxy.address()))];
+    let connected = run("websocket-connector", &all, &fake.address()).await;
+    check(
+        "a connector: its own stream, no proxy",
+        connected && proxy.log().is_empty(),
+    );
+
     // A scheme ProxyTarget refuses fails every transport, never direct.
     let socks4 = [("ALL_PROXY", "socks4://127.0.0.1:1".to_owned())];
     check(
@@ -133,6 +143,12 @@ async fn child(case: &str) -> ExitCode {
     let builder = match case {
         "websocket" | "websocket-refused" => Client::builder(websocket),
         "websocket-none" => Client::builder(websocket).proxy(Proxy::none()),
+        "websocket-connector" => {
+            let target = fake.clone();
+            Client::builder("ws://centrifugo.invalid/connection/websocket").connector(
+                move |_: ferrifuge::http::Uri| tokio::net::TcpStream::connect(target.clone()),
+            )
+        }
         _ => Client::builder_with_transports([(TransportKind::HttpStream, http_stream)]),
     };
     let client = builder.build().expect("a client");
@@ -151,7 +167,7 @@ async fn child(case: &str) -> ExitCode {
     .await
     .unwrap_or_else(|_| Err("no outcome in time".to_owned()));
     let ok = match case {
-        "websocket" | "websocket-none" => outcome.is_ok(),
+        "websocket" | "websocket-none" | "websocket-connector" => outcome.is_ok(),
         // Reaching the proxy is what the parent checks.
         "http_stream" => true,
         _ => matches!(&outcome, Err(message) if message.contains("socks4")),
