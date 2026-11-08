@@ -71,6 +71,9 @@ impl<E> Outbox<E> {
             return Poll::Ready(None);
         }
         if let Some(event) = self.events.pop_front() {
+            if self.events.is_empty() {
+                self.events.shrink_to(crate::RESTING_SLOTS);
+            }
             return Poll::Ready(Some(event));
         }
         if self.closed {
@@ -89,7 +92,9 @@ impl<E> Outbox<E> {
         }
         self.stream = None;
         self.waker = None;
-        Some(self.events.drain(..).map(|(id, _)| id).collect())
+        let taken = self.events.drain(..).map(|(id, _)| id).collect();
+        self.events.shrink_to(crate::RESTING_SLOTS);
+        Some(taken)
     }
 
     /// No event will come: the active stream ends once it took the queued
@@ -158,6 +163,32 @@ mod tests {
         assert_eq!(first, Poll::Ready(Some((id(1), "a"))));
         assert_eq!(second, Poll::Ready(Some((id(2), "b"))));
         assert_eq!(third, Poll::Pending);
+    }
+
+    #[test]
+    fn an_emptied_outbox_releases_what_a_burst_grew() {
+        let mut outbox = Outbox::default();
+        let stream = outbox.open_stream();
+        for n in 1..=100 {
+            outbox.offer(id(n), "publication");
+        }
+
+        while let Poll::Ready(Some(_)) = take(&mut outbox, stream) {}
+
+        assert!(outbox.events.capacity() <= crate::RESTING_SLOTS);
+    }
+
+    #[test]
+    fn a_dropped_stream_releases_what_a_burst_grew() {
+        let mut outbox = Outbox::default();
+        let stream = outbox.open_stream();
+        for n in 1..=100 {
+            outbox.offer(id(n), "publication");
+        }
+
+        outbox.drop_stream(stream);
+
+        assert!(outbox.events.capacity() <= crate::RESTING_SLOTS);
     }
 
     #[test]
