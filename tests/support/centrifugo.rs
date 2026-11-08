@@ -190,6 +190,26 @@ fn chain(error: &dyn std::error::Error) -> String {
     text
 }
 
+/// Server API methods whose retry repeats nothing: they only read, or
+/// carry an idempotency key. A disconnect, subscribe or unsubscribe made
+/// twice could act on a newer connection.
+const RETRIED: &[&str] = &[
+    "publish",
+    "history",
+    "history_remove",
+    "channels",
+    "presence",
+    "presence_stats",
+    "info",
+];
+
+/// A key no other publish of this process carries.
+fn idempotency_key() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("ferrifuge-test-{}-{next}", std::process::id())
+}
+
 /// Client for the server HTTP API (<https://centrifugal.dev/docs/server/server_api>).
 pub(crate) struct ServerApi {
     http: reqwest::Client,
@@ -205,29 +225,46 @@ pub(crate) struct ApiError {
 impl ServerApi {
     fn new(base_url: &str) -> Self {
         Self {
-            // A fresh connection per call: a pooled one the server, or the
-            // container's port forwarding, closed while idle fails the next
-            // call with "connection closed before message completed".
-            http: reqwest::Client::builder()
-                .pool_max_idle_per_host(0)
-                .build()
-                .expect("an HTTP client"),
+            http: reqwest::Client::new(),
             base_url: base_url.to_owned(),
         }
     }
 
     /// Calls `method` and returns its `result`. Centrifugo reports method
-    /// errors in the body with HTTP 200; transport failures panic.
-    pub(crate) async fn call(&self, method: &str, params: Value) -> Result<Value, ApiError> {
-        let response = self
-            .http
-            .post(format!("{}/api/{method}", self.base_url))
-            .header("X-API-Key", API_KEY)
-            .json(&params)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .unwrap_or_else(|e| panic!("server API {method}: {}", chain(&e)));
+    /// errors in the body with HTTP 200; transport failures panic, after
+    /// the retries of a method a retry cannot repeat (see [`RETRIED`]).
+    pub(crate) async fn call(&self, method: &str, mut params: Value) -> Result<Value, ApiError> {
+        // A retried publish is dropped as a duplicate if the first one was
+        // made (Centrifugo `idempotency_key`; verified on v6.10.1: the same
+        // key twice gives one publication, both calls its offset).
+        if method == "publish" && params.get("idempotency_key").is_none() {
+            params["idempotency_key"] = Value::from(idempotency_key());
+        }
+        let attempts = if RETRIED.contains(&method) { 4 } else { 1 };
+        let mut attempt = 1;
+        let response = loop {
+            let sent = self
+                .http
+                .post(format!("{}/api/{method}", self.base_url))
+                .header("X-API-Key", API_KEY)
+                .json(&params)
+                .send()
+                .await;
+            match sent {
+                // Under load the container's connection can close before
+                // the answer, as "connection closed before message
+                // completed" (#147, #150, #151).
+                Err(error) if attempt < attempts && !error.is_status() => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+                }
+                sent => {
+                    break sent
+                        .and_then(reqwest::Response::error_for_status)
+                        .unwrap_or_else(|e| panic!("server API {method}: {}", chain(&e)));
+                }
+            }
+        };
         let mut body: Value = response.json().await.expect("server API JSON body");
         match body.get_mut("error").map(Value::take) {
             Some(error) => Err(ApiError {
