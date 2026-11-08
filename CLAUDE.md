@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–40 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–41 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3102,7 +3102,7 @@ Decisions that bind the blocks:
 - **Release (item 21):** a tag-triggered `release.yml` with crates.io trusted publishing (`rust-lang/crates-io-auth-action`, environment `release`, version and `cargo-semver-checks` checked, actions pinned by SHA), a hand-written Keep a Changelog `CHANGELOG.md`, `SECURITY.md` pointing to GitHub private vulnerability reporting, docs.rs metadata, and an MSRV raised only in a minor version and only when needed. The account, first publish, trusted-publisher registration and repository settings are the owner's.
 - **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
 - **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by a maintained media-type parser (mediatype, Block 27 D4); the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
-- **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs.
+- **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs (amended by Block 41 D6: under `Task` too a marked call fails at once, and under `Thread` a wait that only a message held back by the handler's event can complete fails as well).
 - **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` on, `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
 - **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
 - **Publish debouncing (item 32):** in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
@@ -4702,7 +4702,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and error 15; error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
@@ -5963,3 +5963,276 @@ Value clause: As a maintainer, I want CI to build and lint the sans-IO core for 
 - the rustdoc and README text of D4, D5 and D7, and the changelog entry.
 
 **Exceptions introduced:** no Gherkin scenario: the property is a build configuration, verified by the CI job, as Block 6's feature matrix and Block 24's mobile builds are.
+
+---
+
+## Block 41 — Event handlers, clones and weak handles, delivery modes, deadlock detection
+
+**Goal:** an application written in the callback style of centrifuge-js, centrifuge-go or centrifuge-swift sets a handler per client or subscription instead of reading streams, with Block 15's guarantees kept in every delivery mode; it shares the client through clones and weak handles; and a handler that waits on its own client fails at once instead of hanging. Source: parity item 17, adopted by the owner (2026-11-06, late: "Each keeps Block 15's guarantees (delivered means taken, exactly once on recoverable channels); where a mode cannot keep one, its documentation states which one it gives up"), design A with C's trait ("Planned after Block 19", "Handlers (item 17)"; amended by D6).
+
+**Dependencies:** Blocks 13 (calls), 15 (delivery, take-over), 28 (runtime handle), 30 (`ready()`), 33 (`close()`), 34 (codes), 37 (fake server double layout), 39 (take-over between stream kinds).
+
+**Out of scope:**
+- async handlers (centrifuge-rust `docs/spec.md` §9.5); handlers receiving the client or subscription handle (§4.4);
+- `on_*` closures per kind; several handlers per object; removing a handler other than by taking a stream and dropping it;
+- deadlock detection in the token, data and getState callbacks, and for stream consumers (§9.4: undetectable);
+- strong and weak counts on `Client`; a `Subscription` keeping its client alive (Block 33);
+- an `error` event for a panic; the browser adapter's modes (Block 44).
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 41a | As an app developer sharing a client across tasks and app state, I want clones and a weak handle, so that every part reaches the client without keeping it alive past its last owner | "Dropping one clone of a client leaves it running", "A weak handle upgrades only while a clone of the client is alive", "close on one clone closes every clone" |
+| 41b | As an app developer porting callback code from centrifuge-js, I want a handler per client or subscription, so that events reach my code without a read loop while Block 15's guarantees hold | the untagged (Task) examples of the outlines; "A handler takes over the subscription's stream" |
+| 41c | As an app developer running thousands of clients, I want handlers on the client's driver, so that no task or thread is added per client | the `@inline` examples |
+| 41d | As an app developer whose handlers block, I want them on their own thread, and waits that would deadlock to fail at once, so that blocking neither stalls the runtime nor hangs | the `@thread` examples; the "Thread handler" scenarios |
+
+**Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 API.** `pub trait ClientHandler: Send + 'static` and `pub trait SubscriptionHandler: Send + 'static`, each with `on_event(&mut self, event)`, whose default dispatches to one no-op method per variant taking its fields: `on_connecting(code, reason)`, `on_connected(client_id, transport, data)`, `on_disconnected`, `on_error`, `on_server_subscription(channel, event)`, `on_message`; `on_subscribing`, `on_subscribed`, `on_unsubscribed`, `on_publication`, `on_join`, `on_leave`. A blanket implementation for `FnMut(Event) + Send + 'static` closures overrides `on_event`. A field added later to the non-exhaustive `Connected` reaches `on_event` only; a new variant adds a defaulted method (minor, RFC 1105). Set with `ClientBuilder::handler`, `Client::set_handler`, `SubscriptionBuilder::handler` and `Subscription::set_handler`, each taking `impl …Handler`. Verified by the reviewer: an unannotated closure infers through the blanket implementation, and a struct of another crate implements the trait without a coherence error (serenity `EventHandler`, rdkafka `ClientContext`).
+- **D2 Delivery modes.** `ClientBuilder::event_delivery(EventDelivery)`, a `#[non_exhaustive]` enum, `Default` = `Task`, per client. One consumer per client runs every handler of the client and of its subscriptions, one at a time, in `EventId` order. `Task`: a task spawned through the client's runtime handle (Block 28 D1). `Thread`: one thread named `ferrifuge-events`, inside the runtime context (`Handle::enter`), detached, ending after `close()` once its events are delivered; if it cannot start, the client fails as for a panic (D4). Both start at the first handler set. `Inline`: on the driver. Source: centrifuge-rust `docs/spec.md` §9.4.
+- **D3 Delivery rule.** An event counts as taken when its handler returns; a handler is one more consumer of the existing outbox (`StreamOpened`). An event handed to a handler and not yet returned is in flight: it is not withdrawn, and it still holds later messages (Block 15, in order); a connect or subscribe command sent meanwhile recovers from the position the event would move to; its return confirms that position, a panic voids it (a new `Input::EventHanded`). Take-over works both ways, as Block 15 and Block 39 D1: the in-flight event finishes with the old consumer, the untaken events move in order. No handler runs while a client lock is held. `Inline` gives up Block 15's "Timers keep running": while a handler runs, no timer fires, nothing is read and no ping is answered; its documentation says so.
+- **D4 Panics.** `catch_unwind` around each call. A new `Input::HandlerPanicked { event, message }` withdraws the event and disconnects with code 2 (`BAD_PROTOCOL`), reason `exception in event handler: <message>`, without reconnecting (centrifuge-js 63ed73e README.md:1063-1072, `centrifuge.ts:1810-1813`). The handler is kept, so it still receives `disconnected` and `subscribing`; a panic while already disconnected changes nothing. Logged at WARN. The `Inline` driver survives (invariant I2). With `panic = abort` the process aborts, as documented.
+- **D5 Clones and weak handles.** `Client` holds an `Arc` of an owner whose `Drop` shuts the client down, so dropping the last clone closes it (Block 33 D4). `Client::downgrade()` gives a `WeakClient` (`Clone`, `Debug`) whose `upgrade()` gives a `Client` while a clone lives, `None` once every clone is dropped, and a closed client while clones live (tokio `WeakSender`, `bounded.rs:1576`, `:1665`). `close()` on one clone closes every clone. A `Subscription` still does not keep its client alive (Block 33 D3, D4). Handlers are dropped after close, once their events are delivered, which breaks reference cycles. The handler slot sits behind a `Mutex`, so `Client`'s auto traits are unchanged (cargo-semver-checks).
+- **D6 Deadlock detection** (amends "Planned after Block 19", "Handlers (item 17)", for `Task` and `Thread`). A thread-local marker naming the client is set by a guard around each handler call, in every mode, and read at the first poll of every call future of `Client` and `Subscription` (Block 38's helpers included) and of `ready()`.
+  - `Task` and `Inline`: a marked call fails at once. Measured by the reviewer on tokio 1.54.1 (multi-thread runtime, 2, 4 and 8 workers): a task that wakes another and then blocks its worker leaves the woken task in that worker's LIFO slot, which other workers do not steal, 10 stalls in 10 trials (0 with `block_in_place`); every call wakes the driver, so a `Task` handler blocking on a call would stall it. tokio's own `Handle::block_on` panics inside a task.
+  - `Thread`: a marked wait fails when it can complete only through a message that an event of this client's handlers holds back: a sent call whose reply cannot be read because reading stopped on a full read-ahead, or a `ready()` or a call waiting for the connection or a subscription while such an event holds messages (centrifuge-rust §9.5). The recorded rule (a full read-ahead only) missed the second case.
+  - Calls of another client never fail. A `close()` polled from a handler does not wait for its own handlers: under `Thread` it resolves once the driver stops, under `Task` and `Inline` once closing has started (centrifuge-rust §4.3).
+  - A new `CallError` code 16, `codes::error::WOULD_DEADLOCK`, message "would deadlock: called from an event handler of this client" (14 is reserved and 15 is used, Block 34 D1). A failed call is abandoned as a dropped one is (Block 13).
+- **D7 Version and docs.** No version bump: everything is additive (Block 27 D5, Block 35 D5). Changelog `Unreleased`: "Added": the traits, `EventDelivery`, the setters, `Client: Clone`, `downgrade`, `WeakClient`, error code 16, the new code-2 reason, `Input::EventHanded`, `Input::HandlerPanicked`; "Changed": dropping the last clone closes the client. The README gains a "Handlers" section after "States and events", and the codes rows. The rustdoc of `Client` ("Dropping the client disconnects it") and of `Client::ready` (code 3 for a closed client; Block 33 says 4) are corrected.
+- **D8 Examples per sub-increment.** The outlines carry tagged `Examples` tables: 41b runs the untagged (`Task`) ones, 41c the `@inline` ones, 41d the `@thread` ones; the runner skips an example tag whose sub-increment is not implemented yet.
+
+**Structural acceptance:** one thread named `ferrifuge-events` per `Thread` client, started at the first handler; the handlers dropped after close (a `Drop` flag); a handler calling every synchronous method under `Inline`; the marker restored after a panic; no `tokio::spawn` in the adapter (Block 28 D1 check); the Block 14 @P gates unchanged without handlers.
+
+```gherkin
+Feature: Event handlers
+
+  @D
+  Scenario: Dropping one clone of a client leaves it running
+    Given a client connected to the fake server
+    And a clone of the client
+    When the client is dropped
+    Then 1 s later the fake server still sees the connection open
+    And the clone's state is "connected"
+    And when the clone is dropped, the fake server sees the connection closed within the configured timeout plus tolerance
+
+  Scenario: A weak handle upgrades only while a clone of the client is alive
+    Given a new client whose stream was taken
+    And a weak handle downgraded from it
+    And a clone of the client
+    When the client is dropped
+    Then upgrading the weak handle gives a client that is not closed
+    And when the clone is dropped, upgrading the weak handle gives nothing
+    And the client's stream ends
+
+  Scenario: close on one clone closes every clone
+    Given a new client
+    And a clone of the client
+    When close is awaited on the clone
+    Then the client is closed
+    And an RPC call fails at once with a "client closed" error
+
+  @D
+  Scenario Outline: Handlers receive the client's and its subscriptions' events one at a time, in order
+    Given a client with <mode> delivery whose client handler takes 200 ms on "connected", with a subscription to channel "news" that has a subscription handler
+    When subscribe is called on the subscription
+    And connect is called
+    And the fake server answers the connect and subscribe commands, then sends a publication at offset 1 to "news"
+    Then the handlers have received "subscribing", "connecting", "connected", "subscribed" and the publication at offset 1, in this order
+    And no two handler calls overlapped
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  @D
+  Scenario Outline: A publication a handler had not returned from before disconnect is taken once
+    Given a client with <mode> delivery, subscribed to recoverable channel "news" on the fake server, whose subscription handler blocks on the publication at offset 2 until released
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the subscription handler has returned from the publication at offset 1 and is running for the one at offset 2
+    When disconnect is called
+    And connect is called
+    And the subscription handler is released
+    Then the next subscribe command for "news" asks to recover from offset 2
+    And when the fake server answers it with the publication at offset 3 recovered, the subscription handler receives it
+    And the subscription handler has received each publication exactly once
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  @D
+  Scenario Outline: A panicking handler disconnects the client with code 2, and its publication is recovered
+    Given a client with <mode> delivery, subscribed to recoverable channel "news" on the fake server, whose subscription handler panics with "boom" on the first publication at offset 2 it receives
+    When the fake server sends publications at offsets 1, 2 and 3 to "news"
+    Then the client emits "disconnected" with code 2 and reason "exception in event handler: boom"
+    And the subscription handler then receives "subscribing"
+    And 1 s later the client has opened no new connection
+    And when connect is called and the fake server answers the subscribe command with the publications at offsets 2 and 3 recovered, that subscribe command asked to recover from offset 1
+    And the subscription handler receives the publications at offsets 2 and 3, in order
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  @D
+  Scenario Outline: events() takes over a subscription's handler
+    Given a client with <mode> delivery, subscribed to channel "news" on the fake server, whose subscription handler blocks on the publication at offset 1 until released
+    And the fake server has sent publications at offsets 1, 2 and 3 to "news"
+    And the subscription handler is running for the publication at offset 1
+    When the application calls the subscription's events()
+    And the subscription handler is released
+    Then the new stream yields the publications at offsets 2 and 3
+    And the subscription handler receives nothing more
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  @D
+  Scenario: A handler takes over the subscription's stream
+    Given a client subscribed to channel "news" on the fake server, whose subscription's stream has been read up to "subscribed" and is not read after
+    And the fake server has sent publications at offsets 1 and 2 to "news"
+    And the client holds them not yet taken
+    When the application sets a subscription handler
+    Then the first stream's next item is its end
+    And the subscription handler receives the publications at offsets 1 and 2
+
+  @D
+  Scenario Outline: Pings are answered while a handler runs, except under Inline
+    Given a client with <mode> delivery connected to the fake server, which pings every 1 s and expects pongs, subscribed to channel "news" whose subscription handler blocks for 5 s on each publication
+    And the fake server has sent a publication to "news"
+    And the subscription handler is running for it
+    When 4 s elapse with the fake server pinging every 1 s
+    Then the client has answered <answered> of those pings
+
+    Examples:
+      | mode | answered |
+      | Task | every    |
+
+    @inline
+    Examples:
+      | mode   | answered |
+      | Inline | none     |
+
+    @thread
+    Examples:
+      | mode   | answered |
+      | Thread | every    |
+
+  @D
+  Scenario Outline: A call a Task or Inline handler blocks on fails at once
+    Given a client with <mode> delivery whose client handler blocks on an RPC call of the client when it receives "connected"
+    When connect is called
+    And the fake server answers the connect command
+    Then the handler's call fails at once with a "would deadlock" error
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+  @D
+  Scenario: A Thread handler may block on a call that completes
+    Given a client with Thread delivery whose client handler blocks on an RPC call of the client when it receives "connected"
+    When connect is called
+    And the fake server answers the connect command, then the RPC command
+    Then the handler's call succeeds
+
+  @D
+  Scenario: A Thread handler's call stuck behind a full read-ahead fails with "would deadlock"
+    Given a client with Thread delivery, subscribed to channel "news" on the fake server, whose subscription handler blocks on an RPC call of the client when it receives the publication at offset 1
+    When the fake server sends 300 publications of 100 bytes to "news", then answers the RPC command
+    Then the client stops reading with 256 messages in its read-ahead
+    And the handler's call fails with a "would deadlock" error before the configured timeout
+    And the subscription handler then receives the other 299 publications in order
+
+  @D
+  Scenario: A Thread handler blocking on a subscription's ready() its own event holds back fails at once
+    Given a client with Thread delivery and a subscription to channel "news", whose client handler blocks on the subscription's ready() when it receives "connected"
+    When subscribe is called on the subscription
+    And connect is called
+    And the fake server answers the connect and subscribe commands
+    Then the handler's ready() fails at once with a "would deadlock" error
+    And then the subscription state becomes "subscribed"
+
+  @D
+  Scenario: A Thread handler may block on a ready() its event does not hold back
+    Given a client with Thread delivery whose client handler blocks on the client's ready() when it receives "connecting"
+    When connect is called
+    And the fake server answers the connect command
+    Then the handler's ready() resolves
+
+  @D
+  Scenario: A Thread handler may block on another client's call
+    Given two clients with Thread delivery connected to the fake server, the first's client handler blocking on an RPC call of the second when it receives an asynchronous message
+    When the fake server sends an asynchronous message to the first client, then answers the second client's RPC command
+    Then the handler's call succeeds
+
+  @D
+  Scenario Outline: close awaited inside a handler returns
+    Given a client with <mode> delivery connected to the fake server, whose client handler blocks on close() when it receives "connected"
+    Then the handler's close() returns within the configured timeout plus tolerance
+    And the client handler then receives "disconnected" with code 0
+    And the client is closed
+
+    Examples:
+      | mode |
+      | Task |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+```
+
+**Exceptions introduced:** `ready()` keeps following the state (Block 30 D4): it can resolve before the `connected` or `subscribed` handler runs, unlike centrifuge-js 63ed73e (`subscription.ts:596-601`) and centrifuge-rust (`docs/spec.md:1087`).
