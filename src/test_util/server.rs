@@ -477,22 +477,51 @@ async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
 
 /// Marks, inside a reply's `Value`, data that [`text`] writes verbatim: as
 /// a `Value` it would lose its key order and its whitespace, where
-/// Centrifugo and the crate's codec keep its bytes (Codex on #161).
+/// Centrifugo and the crate's codec keep its bytes (Codex on #161). The
+/// mark holds a random nonce of the process, so that no string of the
+/// application's, which `serde_json` writes escaped, can pass for one.
 const RAW: char = '\u{1}';
-/// The mark as `serde_json` writes it, quotes included.
+/// The mark's ends as `serde_json` writes them, quotes included.
 const RAW_OPEN: &str = "\"\\u0001";
 const RAW_CLOSE: &str = "\\u0001\"";
+
+/// The nonce of the marks: 32 hex digits, random per process.
+fn nonce() -> &'static str {
+    use std::hash::{BuildHasher, Hasher};
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(|| {
+        let random = || {
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        };
+        format!("{:016x}{:016x}", random(), random())
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
+}
+
+fn unhex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect()
+}
 
 /// Data as the JSON protocol carries it: the bytes themselves when they are
 /// JSON, a JSON string of them otherwise.
 fn json_data(data: &[u8]) -> Value {
     match std::str::from_utf8(data) {
         Ok(json) if serde_json::from_str::<serde::de::IgnoredAny>(json).is_ok() => {
-            let hex = data.iter().fold(String::new(), |mut hex, byte| {
-                let _ = write!(hex, "{byte:02x}");
-                hex
-            });
-            Value::String(format!("{RAW}{hex}{RAW}"))
+            Value::String(format!("{RAW}{}{}{RAW}", nonce(), hex(data)))
         }
         _ => Value::String(String::from_utf8_lossy(data).into_owned()),
     }
@@ -507,21 +536,27 @@ fn data_of(raw: &str, method: &str) -> Option<Vec<u8>> {
     Some(fields.get("data")?.get().as_bytes().to_vec())
 }
 
-/// `value` as a JSON frame, the data [`json_data`] marked written verbatim.
+/// `value` as a JSON frame, the data [`json_data`] marked written verbatim;
+/// anything else is left as `serde_json` wrote it.
 fn text(value: &Value) -> Message {
     let written = value.to_string();
+    let open = format!("{RAW_OPEN}{}", nonce());
     let mut frame = String::with_capacity(written.len());
     let mut rest = written.as_str();
-    while let Some(start) = rest.find(RAW_OPEN) {
+    while let Some(start) = rest.find(&open) {
         frame.push_str(&rest[..start]);
-        let marked = &rest[start + RAW_OPEN.len()..];
-        let end = marked.find(RAW_CLOSE).expect("a closed mark");
-        let bytes: Vec<u8> = (0..end)
-            .step_by(2)
-            .map(|at| u8::from_str_radix(&marked[at..at + 2], 16).expect("hex"))
-            .collect();
-        frame.push_str(&String::from_utf8(bytes).expect("JSON data is UTF-8"));
-        rest = &marked[end + RAW_CLOSE.len()..];
+        let marked = &rest[start + open.len()..];
+        let raw = marked.find(RAW_CLOSE).and_then(|end| {
+            let bytes = unhex(&marked[..end])?;
+            Some((String::from_utf8(bytes).ok()?, end + RAW_CLOSE.len()))
+        });
+        if let Some((data, past)) = raw {
+            frame.push_str(&data);
+            rest = &marked[past..];
+        } else {
+            frame.push_str(&open);
+            rest = marked;
+        }
     }
     frame.push_str(rest);
     Message::text(frame)
@@ -1443,6 +1478,26 @@ mod tests {
         // In reverse, the publications before the position (Codex on #161).
         assert_eq!(history(&mut state, -1, Some(3), true), (vec![2, 1], 3));
         assert_eq!(history(&mut state, 1, Some(3), true), (vec![2], 3));
+    }
+
+    // Codex on #161: an application's string shaped like a mark stays a
+    // string, beside data written verbatim.
+    #[test]
+    fn strings_like_a_mark_are_written_as_strings() {
+        let value = json!({
+            "message": "\u{1}0123\u{1}",
+            "binary": json_data(&[1]),
+            "data": json_data(br#"{"b":1, "a":2}"#),
+        });
+
+        let Message::Text(frame) = text(&value) else {
+            panic!("a text frame");
+        };
+        let parsed: Value = serde_json::from_str(frame.as_str()).unwrap();
+
+        assert_eq!(parsed["message"], "\u{1}0123\u{1}");
+        assert_eq!(parsed["binary"], "\u{1}");
+        assert!(frame.as_str().contains(r#"{"b":1, "a":2}"#), "{frame}");
     }
 
     // `client.proto`: a zero offset with reverse set is error 107 (Codex on
