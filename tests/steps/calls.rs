@@ -96,7 +96,7 @@ impl Drop for Calls {
 }
 
 /// Makes an RPC call now, awaited by a task of its own.
-fn call(world: &mut ClientWorld, method: &str, data: Vec<u8>) {
+pub(super) fn call(world: &mut ClientWorld, method: &str, data: Vec<u8>) {
     let made_at = Instant::now();
     let future = world.client().rpc(method, data);
     track(world, method, made_at, async move {
@@ -123,6 +123,14 @@ fn track(
             (settled, Instant::now())
         })),
     });
+}
+
+/// The error the last call failed with (Block 37c).
+pub(super) async fn last_error(world: &mut ClientWorld) -> CallError {
+    match outcome(world, None, EVENT_TIMEOUT).await.0 {
+        Err(error) => error,
+        Ok(returned) => panic!("the call returned {returned:?}"),
+    }
 }
 
 /// The outcome of the call to `method` (the last call when `None`), once it

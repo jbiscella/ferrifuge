@@ -33,6 +33,7 @@ mod connection;
 mod connector;
 mod delivery;
 mod delta;
+mod double;
 mod jitter;
 mod limits;
 mod logging;
@@ -208,6 +209,10 @@ pub(crate) struct ClientWorld {
     pub(crate) test_support: test_support::TestSupport,
     /// What a Block 37b scenario's connector saw.
     pub(crate) connectors: connector::Connectors,
+    /// The server double of a Block 37c scenario.
+    pub(crate) doubles: double::Doubles,
+    /// Centrifugo's side and the double's, compared (Block 37c).
+    pub(crate) sides: Vec<double::Side>,
     /// The tag filter of a Block 35a scenario.
     pub(crate) tag_filters: tag_filters::TagFilters,
     /// The channels of the publications a Block 35c scenario took.
