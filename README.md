@@ -843,6 +843,14 @@ Without default features, ferrifuge has no runtime or network dependency.
 `ferrifuge::machine::Machine` then takes inputs (API calls, transport
 activity, timers) and returns the actions to perform.
 
+The core alone builds for `wasm32-unknown-unknown`, and CI checks it on every
+pull request. `tokio` does not build there: its dependencies need an
+operating system. On that target the machine's random delays (backoff,
+refresh jitter) start from a constant, because fastrand has no entropy
+source there without its `js` feature. Every machine of a page, and the n-th
+machine of every page, draws the same delays until the browser adapter
+enables that feature.
+
 ### Testing your application
 
 With the `test-util` feature, an application's tests build the events and
@@ -1223,7 +1231,9 @@ providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
 build. It runs the unit tests, the scenarios that need no server and the
 chaos seeds on Windows and macOS, builds the library and its unit tests for
-Android and iOS, the interop test, each fuzz target for
+Android and iOS, the core alone for `wasm32-unknown-unknown` (its clippy
+also refusing the std clock and thread calls that panic there), the interop
+test, each fuzz target for
 30 s (10 min nightly) and the semver check. The perf, wall-clock, fuzz and long chaos jobs
 run on merges to `main`, nightly and on demand (`workflow_dispatch`), not
 on pull requests. cargo-deny also runs daily.

@@ -1,0 +1,13 @@
+# Read by the `wasm` CI job only, through CLIPPY_CONF_DIR (Block 40, D2):
+# calls that compile for wasm32-unknown-unknown but panic there.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "no clock on wasm32-unknown-unknown: time comes in as inputs" },
+  { path = "std::time::SystemTime::now", reason = "no clock on wasm32-unknown-unknown: time comes in as inputs" },
+  { path = "std::thread::spawn", reason = "no threads on wasm32-unknown-unknown" },
+  { path = "std::thread::Builder::spawn", reason = "no threads on wasm32-unknown-unknown" },
+  { path = "std::thread::scope", reason = "no threads on wasm32-unknown-unknown" },
+  { path = "std::thread::sleep", reason = "no blocking on wasm32-unknown-unknown" },
+]
+disallowed-types = [
+  { path = "std::time::Instant", reason = "cannot be created on wasm32-unknown-unknown" },
+]
