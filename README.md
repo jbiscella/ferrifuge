@@ -299,6 +299,24 @@ while let Some(event) = events.next().await {
 }
 ```
 
+An application that only consumes publications can take
+`subscription.publications()` instead of `events()`: a stream of the
+subscription's publications, and nothing else. It is the subscription's one
+stream, as `events()` is, and the two take over from each other. The events
+it skips count as delivered as it passes them, so an unread publications
+stream holds the connection as an unread `events()` does. It hides what only
+those events tell: the `Subscribed` above, which reports lost publications
+(without `get_state`), an `Unsubscribed` after which it goes silent without
+ending, and errors.
+
+```rust
+let mut publications = subscription.publications();
+subscription.subscribe();
+while let Some(publication) = publications.next().await {
+    println!("{} bytes", publication.data.len());
+}
+```
+
 When the application keeps its own state, a `get_state` callback loads it
 and returns the stream position it was read at. It is called before the
 first subscribe without `since`, and again when a recovery fails: the

@@ -18,6 +18,10 @@ repository held while it carried that version, from the blocks of
   against it through its connector, without a socket; the test sets its
   answers, publishes, disconnects and reads what the client sent.
 
+- `Subscription::publications()` (Block 39): the subscription's publications
+  only, as a view of its one stream, which takes over from `events()` and
+  back; the events it skips count as delivered as it passes them.
+
 - An injectable connector (Block 37b): `ClientBuilder::connector`, the
   `Connector` trait (implemented for closures and for an `Arc` of one),
   `ConnectedStream`, `Connecting` and `BoxError`, and `ferrifuge::http`, the

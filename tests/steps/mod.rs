@@ -43,6 +43,7 @@ mod ping;
 mod protobuf;
 mod proxies;
 mod publication_channel;
+mod publications;
 mod ready;
 mod recovery;
 mod release;

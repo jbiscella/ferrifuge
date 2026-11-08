@@ -14,8 +14,8 @@ use super::client::{
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
     CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, JsonCallError,
-    PresenceResult, PresenceStatsResult, StateError, StreamPosition, SubscriptionError,
-    SubscriptionEvent, SubscriptionState, TokenError,
+    PresenceResult, PresenceStatsResult, Publication, StateError, StreamPosition,
+    SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
@@ -147,6 +147,47 @@ impl Subscription {
             .subscriptions
             .get(&self.id)
             .map_or(0, super::outbox::Outbox::held)
+    }
+
+    /// This subscription's publications from now on, and nothing else
+    /// (Block 39): a view of its one stream, which takes over from
+    /// [`Subscription::events`] as a later `events()` call takes over from
+    /// it. A publication counts as delivered once this stream yields it; the
+    /// other events count as delivered as the stream passes them, so an
+    /// unread stream holds the connection as an unread `events()` does
+    /// (Block 15). It ends as `events()` does, not on `unsubscribed`.
+    ///
+    /// It hides what only the other events tell:
+    /// - a `Subscribed` reporting `was_recovering` true and `recovered`
+    ///   false, the one sign of a gap on a recoverable channel without
+    ///   `get_state` (with `get_state`, a failed recovery reloads the state
+    ///   instead, Block 11);
+    /// - `Unsubscribed`: after a permanent unsubscribe the stream goes
+    ///   silent, it does not end;
+    /// - `Error` events.
+    ///
+    /// An `events()` call elsewhere ends this stream, and dropping it counts
+    /// the events it had not yielded as delivered.
+    ///
+    /// ```no_run
+    /// # async fn run(subscription: ferrifuge::Subscription) {
+    /// use futures_util::StreamExt;
+    ///
+    /// let mut publications = subscription.publications();
+    /// subscription.subscribe();
+    /// while let Some(publication) = publications.next().await {
+    ///     println!("{} bytes", publication.data.len());
+    /// }
+    /// # }
+    /// ```
+    pub fn publications(&self) -> impl Stream<Item = Publication> + Send + Unpin + use<> {
+        use futures_util::StreamExt as _;
+        self.events().filter_map(|event| {
+            std::future::ready(match event {
+                SubscriptionEvent::Publication(publication) => Some(publication),
+                _ => None,
+            })
+        })
     }
 
     /// Events from now on. An event counts as delivered once this stream

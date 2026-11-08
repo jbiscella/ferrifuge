@@ -512,6 +512,14 @@ const IMPLEMENTED: &[&str] = &[
     "A value that cannot be encoded fails the call at once and sends nothing",
     "A typed call is made when the method returns",
     "A publication's data decodes as the application's type, or says why not",
+    // Block 39: a publications-only stream.
+    "The publications stream yields only the subscription's publications",
+    "Events the publications stream skips hold the connection until it is read",
+    "Publications the publications stream has not yielded are recovered on the next connect",
+    "publications() takes over the subscription's events stream",
+    "events() takes over the subscription's publications stream",
+    "The publications stream outlives unsubscribe, which withdraws what it had not yielded",
+    "The publications stream ends with its subscription or its client",
 ];
 
 /// Server configuration of @A scenarios.
