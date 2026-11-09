@@ -20,7 +20,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
 use super::client::lock;
-use super::net::Network;
+use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
 use crate::machine::{FrameId, TransportKind};
@@ -83,6 +83,8 @@ pub(crate) struct HttpTransport {
     /// The application's HTTP headers, read for every request (Blocks 17,
     /// 32).
     headers: HeaderSet,
+    /// The cookie jar, read and filled by every request (Block 43).
+    jar: Jar,
     /// The media type of emulation requests: JSON's or Protobuf's.
     content_type: &'static str,
     body: BoxStream<'static, Result<Vec<u8>, String>>,
@@ -127,15 +129,20 @@ impl HttpTransport {
         // Protobuf only over http_stream: building refuses it with sse
         // (Block 27, D3).
         let requests_type = if protobuf { PROTOBUF } else { JSON };
+        // The jar sees the URL before the connect command joins it: the
+        // sse one would carry the token (Block 43, D4).
+        let stream_url = url.to_string();
+        let mut stream_headers = headers.current();
+        network.add_cookies(&stream_url, &mut stream_headers);
         let request = if sse {
             url.query_pairs_mut()
                 .append_pair("cf_connect", &String::from_utf8_lossy(&initial_frame));
             http.get(url)
-                .headers(headers.current())
+                .headers(stream_headers)
                 .header(ACCEPT, "text/event-stream")
         } else {
             http.post(url)
-                .headers(headers.current())
+                .headers(stream_headers)
                 .header(ACCEPT, requests_type)
                 .header(CONTENT_TYPE, requests_type)
                 .body(initial_frame)
@@ -144,6 +151,8 @@ impl HttpTransport {
         // included, which must not reach error events.
         let response = request.send().await.map_err(request_error)?;
         let status = response.status();
+        // Whatever the status but a proxy's 407 (Block 43, D2, D5).
+        network.store_cookies(&stream_url, status.as_u16(), response.headers());
         if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
             return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
         }
@@ -183,6 +192,7 @@ impl HttpTransport {
             emulation_url,
             request_timeout,
             headers,
+            jar: network.jar(),
             content_type: requests_type,
             body,
             decoder: if protobuf {
@@ -204,15 +214,20 @@ impl HttpTransport {
     pub(crate) fn send(&mut self, id: FrameId, frame: Vec<u8>) {
         // Kept to name the commands of a rejected request.
         let sent = frame.clone();
+        // The set as it is now: replaced while open, it applies to the next
+        // request (Block 32, D2); and the jar's cookies as they are now
+        // (Block 43, D2).
+        let mut headers = self.headers.current();
+        let url = self.emulation_url.to_string();
+        self.jar.add(&url, &mut headers);
         let request = self
             .emulation_http
             .post(self.emulation_url.clone())
-            // The set as it is now: replaced while open, it applies to the
-            // next request (Block 32, D2).
-            .headers(self.headers.current())
+            .headers(headers)
             .header(CONTENT_TYPE, self.content_type)
             .body(frame);
         let timeout = self.request_timeout;
+        let jar = self.jar.clone();
         self.requests.push(Box::pin(async move {
             let answered = async {
                 let response = tokio::time::timeout(timeout, request.send())
@@ -220,6 +235,7 @@ impl HttpTransport {
                     .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
                     .map_err(|e| format!("emulation request failed: {}", request_error(e)))?;
                 let status = response.status();
+                jar.store(&url, status.as_u16(), response.headers());
                 if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
                     return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
                 }
@@ -782,6 +798,16 @@ mod tests {
     /// Serves every request: an endless stream to the stream request, 204
     /// to the others; sends each request's head.
     async fn capture_requests() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        capture_requests_setting("", "").await
+    }
+
+    /// As [`capture_requests`], the stream response and the emulation
+    /// responses carrying the header lines `stream` and `emulation`, each
+    /// ending with CRLF, or empty.
+    async fn capture_requests_setting(
+        stream: &'static str,
+        emulation: &'static str,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -794,23 +820,50 @@ mod tests {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let heads = heads.clone();
                 tokio::spawn(async move {
-                    let mut request = Vec::new();
+                    // Requests in turn on one connection, as a pooled
+                    // client sends them.
+                    let mut pending = Vec::new();
                     let mut buffer = [0; 4096];
-                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        match socket.read(&mut buffer).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    loop {
+                        let end = loop {
+                            if let Some(at) =
+                                pending.windows(4).position(|window| window == b"\r\n\r\n")
+                            {
+                                break at + 4;
+                            }
+                            match socket.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => pending.extend_from_slice(&buffer[..read]),
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&pending[..end]).to_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .and_then(|value| value.trim().parse().ok())
+                            .unwrap_or(0);
+                        while pending.len() < end + length {
+                            match socket.read(&mut buffer).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(read) => pending.extend_from_slice(&buffer[..read]),
+                            }
+                        }
+                        pending.drain(..end + length);
+                        let stream_request = head.starts_with("post /connection");
+                        let answer = if stream_request {
+                            format!("HTTP/1.1 200 OK\r\n{stream}transfer-encoding: chunked\r\n\r\n")
+                        } else {
+                            format!(
+                                "HTTP/1.1 204 No Content\r\n{emulation}content-length: 0\r\n\r\n"
+                            )
+                        };
+                        let _ = heads.send(head);
+                        let _ = socket.write_all(answer.as_bytes()).await;
+                        if stream_request {
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                            return;
                         }
                     }
-                    let head = String::from_utf8_lossy(&request).to_lowercase();
-                    let answer: &[u8] = if head.starts_with("post /connection") {
-                        b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n"
-                    } else {
-                        b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n"
-                    };
-                    let _ = heads.send(head);
-                    let _ = socket.write_all(answer).await;
-                    tokio::time::sleep(Duration::from_secs(60)).await;
                 });
             }
         });
@@ -854,6 +907,117 @@ mod tests {
                 "{stream}"
             );
         }
+    }
+
+    /// A network with a memory cookie jar, and the jar.
+    #[cfg(feature = "cookies")]
+    fn with_a_jar() -> (Network, Arc<crate::MemoryJar>) {
+        let jar = Arc::new(crate::MemoryJar::new());
+        let shared: Arc<dyn crate::CookieJar> = Arc::clone(&jar) as _;
+        (Network::default().with_cookie_jar(Jar(Some(shared))), jar)
+    }
+
+    // Block 43, D2 and D3: the stream request carries the jar's cookies, and
+    // the cookies its response and each emulation response set ride on the
+    // emulation requests after them.
+    #[cfg(feature = "cookies")]
+    #[tokio::test]
+    async fn the_stream_and_emulation_requests_carry_and_keep_cookies() {
+        use crate::CookieJar as _;
+
+        let (url, mut heads) = capture_requests_setting(
+            "set-cookie: session=s1; Path=/\r\n",
+            "set-cookie: lb=e1; Path=/\r\n",
+        )
+        .await;
+        let (network, jar) = with_a_jar();
+        let seed = reqwest::header::HeaderValue::from_static("seed=j1; Path=/");
+        jar.set_cookies(&mut std::iter::once(&seed), &Url::parse(&url).unwrap());
+        let mut transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &url,
+            b"connect".to_vec(),
+            None,
+            TIMEOUT,
+            HeaderSet::default(),
+            &network,
+            false,
+            LIMIT,
+        )
+        .await
+        .expect("an open stream");
+        let stream = heads.recv().await.expect("the stream request");
+        let mut emulation = Vec::new();
+        for n in 1..=2 {
+            transport.send(FrameId::for_tests(n), b"command".to_vec());
+            // Answered, its cookie stored, before the next request is built.
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), transport.recv(true)).await {
+                    Ok(Inbound::Written(id)) if id == FrameId::for_tests(n) => break,
+                    Ok(Inbound::Written(_)) => {}
+                    other => panic!("not written: {other:?}"),
+                }
+            }
+            emulation.push(heads.recv().await.expect("an emulation request"));
+        }
+
+        assert_eq!(cookie_pairs(&stream), ["seed=j1"], "{stream}");
+        assert_eq!(
+            cookie_pairs(&emulation[0]),
+            ["seed=j1", "session=s1"],
+            "{}",
+            emulation[0]
+        );
+        assert_eq!(
+            cookie_pairs(&emulation[1]),
+            ["lb=e1", "seed=j1", "session=s1"],
+            "{}",
+            emulation[1]
+        );
+    }
+
+    /// The pairs of the one Cookie header of a request `head`, sorted: the
+    /// jar orders its cookies as it pleases (Block 43, out of scope).
+    #[cfg(feature = "cookies")]
+    fn cookie_pairs(head: &str) -> Vec<String> {
+        let lines: Vec<&str> = head
+            .lines()
+            .filter_map(|line| line.strip_prefix("cookie: "))
+            .collect();
+        assert_eq!(lines.len(), 1, "one Cookie header: {head}");
+        let mut pairs: Vec<String> = lines[0].split("; ").map(str::to_owned).collect();
+        pairs.sort();
+        pairs
+    }
+
+    // Block 43, D5: a proxy's 407 sets no cookie for the server.
+    #[cfg(feature = "cookies")]
+    #[tokio::test]
+    async fn a_407_stream_response_sets_no_cookie() {
+        use crate::CookieJar as _;
+
+        let url = serve_once(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nset-cookie: p=x; Path=/\r\ncontent-length: 0\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        let (network, jar) = with_a_jar();
+        let result = HttpTransport::open(
+            TransportKind::HttpStream,
+            &url,
+            b"connect".to_vec(),
+            None,
+            TIMEOUT,
+            HeaderSet::default(),
+            &network,
+            false,
+            LIMIT,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(jar.cookies(&Url::parse(&url).unwrap()), None);
     }
 
     // Block 27, D1 and D5: what the maintained sse decoder changes.

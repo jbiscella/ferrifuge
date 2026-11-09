@@ -39,6 +39,33 @@ pub(super) struct Jar(pub(super) Option<Arc<dyn super::CookieJar>>);
 #[derive(Clone, Debug, Default)]
 pub(super) struct Jar(());
 
+impl Jar {
+    /// Sets the `Cookie` header of a request to `url`, from the jar and the
+    /// application's own `Cookie` already in `headers`; nothing without a
+    /// jar (Block 43, D2, D3).
+    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    pub(super) fn add(&self, url: &str, headers: &mut http::HeaderMap) {
+        #[cfg(feature = "cookies")]
+        if let Some(jar) = &self.0 {
+            super::cookies::add_cookies(jar.as_ref(), url, headers);
+        }
+        #[cfg(not(feature = "cookies"))]
+        let _ = (url, headers);
+    }
+
+    /// Gives the jar the `Set-Cookie` values of a response with `status` to
+    /// a request to `url`; nothing without a jar (Block 43, D2, D5).
+    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    pub(super) fn store(&self, url: &str, status: u16, headers: &http::HeaderMap) {
+        #[cfg(feature = "cookies")]
+        if let Some(jar) = &self.0 {
+            super::cookies::store_cookies(jar.as_ref(), url, status, headers);
+        }
+        #[cfg(not(feature = "cookies"))]
+        let _ = (url, status, headers);
+    }
+}
+
 #[cfg(feature = "cookies")]
 impl std::fmt::Debug for Jar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,26 +144,19 @@ impl Network {
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
     /// jar (Block 43, D2, D3).
-    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
     pub(super) fn add_cookies(&self, url: &str, headers: &mut http::HeaderMap) {
-        #[cfg(feature = "cookies")]
-        if let Some(jar) = &self.cookie_jar.0 {
-            super::cookies::add_cookies(jar.as_ref(), url, headers);
-        }
-        #[cfg(not(feature = "cookies"))]
-        let _ = (url, headers);
+        self.cookie_jar.add(url, headers);
     }
 
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
     /// a request to `url`; nothing without a jar (Block 43, D2, D5).
-    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
     pub(super) fn store_cookies(&self, url: &str, status: u16, headers: &http::HeaderMap) {
-        #[cfg(feature = "cookies")]
-        if let Some(jar) = &self.cookie_jar.0 {
-            super::cookies::store_cookies(jar.as_ref(), url, status, headers);
-        }
-        #[cfg(not(feature = "cookies"))]
-        let _ = (url, status, headers);
+        self.cookie_jar.store(url, status, headers);
+    }
+
+    /// The cookie jar, for the requests of an open HTTP transport (Block 43).
+    pub(super) fn jar(&self) -> Jar {
+        self.cookie_jar.clone()
     }
 
     /// Replaces the proxy setting from the next connection attempt

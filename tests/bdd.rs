@@ -669,6 +669,9 @@ const COOKIES: &[&str] = &[
     "The app's Cookie header and the jar's cookies are sent in one header",
     "Without a cookie jar no cookie is kept",
     "No cookie value reaches a log record",
+    // Block 43b: the emulated transports.
+    "A cookie set on the stream response rides on every emulation request",
+    "A cookie set on an emulation response is sent on the next emulation request",
 ];
 #[cfg(not(feature = "cookies"))]
 const COOKIES: &[&str] = &[];

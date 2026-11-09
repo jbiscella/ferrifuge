@@ -16,7 +16,8 @@ repository held while it carried that version, from the blocks of
 - An opt-in cookie jar (`cookies` feature): `CookieJar`, `MemoryJar`,
   `ClientBuilder::cookie_jar` (Block 43a). The websocket upgrade sends the
   jar's cookies, merged with the application's `Cookie` header, and stores
-  the cookies of its response.
+  the cookies of its response; so do the http_stream and sse stream
+  requests and every emulation request (Block 43b).
 
 - Event handlers (Block 41b): `ClientHandler` and `SubscriptionHandler`,
   set with `ClientBuilder::handler`, `Client::set_handler`,
