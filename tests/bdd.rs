@@ -736,6 +736,12 @@ const MAPS: &[&str] = &[
     "State invalidation drops the position and the token",
     "A temporary error during a load starts it again after the backoff",
     "A load the server closes as slow starts again on the next connection",
+    "Delta compression decodes each key's changes",
+    "A recovered map subscription decodes deltas against the values it held",
+    "A removal ends a key's delta chain",
+    "Page data is decoded once the live reply says whether delta is on",
+    "A tag filter limits the state and the updates",
+    "Setting a tag filter loads the state again",
 ];
 #[cfg(not(feature = "unstable"))]
 const MAPS: &[&str] = &[];

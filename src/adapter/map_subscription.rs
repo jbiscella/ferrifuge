@@ -68,6 +68,40 @@ impl PartialEq for MapSubscription {
 impl Eq for MapSubscription {}
 
 impl MapSubscription {
+    /// Sets the tag filter sent in every subscribe command built from now
+    /// on, `None` to remove it, sending nothing now. The position is
+    /// dropped, so the next subscribe loads the state through the new
+    /// filter (Block 45, D6).
+    ///
+    /// # Errors
+    ///
+    /// [`SubscriptionError::InvalidTagFilter`] for a filter the server
+    /// would refuse, [`SubscriptionError::TagFilterWithDelta`] on a map
+    /// subscription with delta; the filter is then left as it was.
+    pub fn set_tag_filter(
+        &self,
+        filter: Option<crate::TagFilter>,
+    ) -> Result<(), SubscriptionError> {
+        lock(&self.shared.core)
+            .machine
+            .check_subscription_tag_filter(self.id, filter.as_ref())?;
+        self.shared
+            .apply(Input::SetSubscriptionTagFilter(self.id, filter));
+        Ok(())
+    }
+
+    /// What delta compression did on the map subscription since it was
+    /// created: state entries and catch-up publications received with
+    /// delta on count as full payloads, each live or recovered delta as a
+    /// delta (Block 45, D11). Zeros without negotiated delta.
+    #[must_use]
+    pub fn delta_statistics(&self) -> crate::DeltaStatistics {
+        lock(&self.shared.core)
+            .machine
+            .delta_statistics(self.id)
+            .unwrap_or_default()
+    }
+
     /// The channel subscribed to.
     #[must_use]
     pub fn channel(&self) -> &str {
@@ -349,9 +383,20 @@ impl MapSubscriptionBuilder {
         self
     }
 
+    /// Asks the server to send changes as deltas in `format` against each
+    /// key's previous value, on namespaces that allow it (Block 45, D9).
+    /// The client then holds one copy of every key's value, each within
+    /// [`crate::Config::max_message_bytes`], for as long as delta is on.
+    #[must_use]
+    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
+        self.options.common = self.options.common.delta(format);
+        self
+    }
+
     /// Asks the server to send only the entries and changes `filter`
     /// matches, on namespaces with `allow_tags_filter`; building fails when
-    /// the filter is one the server would refuse.
+    /// the filter is one the server would refuse, or goes with
+    /// [`Self::delta`].
     #[must_use]
     pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
         self.options.common = self.options.common.tag_filter(filter);

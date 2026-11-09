@@ -14,9 +14,9 @@ use ferrifuge::machine::{
     SubscriptionTimer, Timer, TransportId,
 };
 use ferrifuge::{
-    CallError, Client, ClientEvent, Config, MapKind, MapSubscription, MapSubscriptionEvent,
-    Protocol, Subscription, SubscriptionError, SubscriptionEvent, SubscriptionState,
-    UnrecoverableStrategy,
+    CallError, Client, ClientEvent, Config, DeltaFormat, ErrorKind, MapKind, MapSubscription,
+    MapSubscriptionEvent, Protocol, Subscription, SubscriptionError, SubscriptionEvent,
+    SubscriptionState, TagFilter, UnrecoverableStrategy,
 };
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
@@ -60,6 +60,9 @@ pub(crate) struct Maps {
     seen: Vec<MapSubscriptionEvent>,
     /// The subscribe command a step checked, by number, for "that command".
     checked: Option<usize>,
+    /// The key and value of each change a step made, in order, as the
+    /// updates must carry them (Block 45d).
+    set: Vec<(String, Vec<u8>)>,
 }
 
 /// The core of an @E map scenario: the machine, its transport, the map
@@ -352,6 +355,28 @@ async fn a_client_with_a_map_subscription(world: &mut ClientWorld, channel: Stri
             a_scripted_map_subscription(world, &channel, |b| b);
             world.read_the_map_stream_only_when_asked();
             synced_on_the_fake(world, "e1", 7).await;
+        }
+        r#" synced at epoch "e1" and offset 7"# => {
+            a_scripted_map_subscription(world, &channel, |b| b);
+            synced_on_the_fake(world, "e1", 7).await;
+        }
+        " with fossil delta" => {
+            a_scripted_map_subscription(world, &channel, |builder| {
+                builder.delta(DeltaFormat::Fossil)
+            });
+        }
+        r#" with fossil delta, synced with key "a" whose delta is on"# => {
+            a_scripted_map_subscription(world, &channel, |builder| {
+                builder.delta(DeltaFormat::Fossil)
+            });
+            world.map().subscribe();
+            answer_next(
+                world,
+                json!({"type": 1, "recoverable": true, "delta": true, "epoch": "e1", "offset": 1,
+                    "state": [entry("a", json!(r#"{"v":1}"#), 1)]}),
+            )
+            .await;
+            world.map_events_until("sync").await;
         }
         r#" with a token callback, synced at epoch "e1" and offset 7"# => {
             let times = Arc::clone(&world.maps.token_times);
@@ -2194,4 +2219,310 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
     assert_eq!(subscribe["channel"], channel.as_str());
     assert_eq!(subscribe["phase"], 2, "{subscribe}");
     assert!(subscribe.get("epoch").is_none(), "{subscribe}");
+}
+
+// --- Per-key delta and tag filters (45d) ----------------------------------
+
+/// A JSON value of 300 bytes for `key`, differing from the other versions
+/// of the key by one byte.
+fn big_value(key: &str, version: u8) -> Value {
+    json!({"v": format!("{}{key}{version}", "x".repeat(290))})
+}
+
+impl ClientWorld {
+    /// Sets `key` of the scenario's map to `version` of its value through
+    /// the server API, recording what the update must carry.
+    async fn set_big_value(&mut self, key: &str, version: u8) {
+        let channel = self.map().channel().to_owned();
+        let value = big_value(key, version);
+        map_publish(self, &channel, key, value.clone()).await;
+        self.maps
+            .set
+            .push((key.to_owned(), serde_json::to_vec(&value).unwrap()));
+    }
+
+    async fn map_ready(&self) {
+        tokio::time::timeout(EVENT_TIMEOUT, self.map().ready())
+            .await
+            .expect("subscribed in time")
+            .expect("subscribed");
+    }
+}
+
+#[given(
+    regex = r#"^a client with a map subscription to "([^"]+)" with fossil delta, that has synced keys "(\w+)" and "(\w+)" of 300 bytes each$"#
+)]
+async fn synced_big_keys(world: &mut ClientWorld, channel: String, first: String, second: String) {
+    for key in [&first, &second] {
+        map_publish(world, &channel, key, big_value(key, 1)).await;
+    }
+    let entries = a_synced_map(world, &channel, |builder| {
+        builder.delta(DeltaFormat::Fossil)
+    })
+    .await;
+    assert_eq!(keys_of(&entries), [first.clone(), second.clone()]);
+    for (entry, key) in entries.iter().zip([&first, &second]) {
+        assert_eq!(
+            entry.data,
+            serde_json::to_vec(&big_value(key, 1)).unwrap(),
+            "{key}"
+        );
+    }
+}
+
+#[when(r#"the server API sets key "a", then key "b", then key "a" again, each changing one byte"#)]
+async fn sets_three_changes(world: &mut ClientWorld) {
+    world.set_big_value("a", 2).await;
+    world.set_big_value("b", 2).await;
+    world.set_big_value("a", 3).await;
+}
+
+/// The next update, kept for a later step.
+async fn next_kept_update(world: &mut ClientWorld) -> ferrifuge::MapUpdate {
+    let event = world.next_map_event_named("update").await;
+    world.maps.seen.push(event.clone());
+    let MapSubscriptionEvent::Update(update) = event else {
+        unreachable!();
+    };
+    update
+}
+
+fn assert_updates_as_set(world: &ClientWorld) {
+    let updates: Vec<(String, Vec<u8>)> = world
+        .maps
+        .seen
+        .iter()
+        .filter_map(|event| match event {
+            MapSubscriptionEvent::Update(update) => Some((update.key.clone(), update.data.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates, world.maps.set);
+}
+
+#[then("the map subscription emits three updates whose data equal, byte for byte, what was set")]
+async fn three_updates_as_set(world: &mut ClientWorld) {
+    for _ in 0..3 {
+        next_kept_update(world).await;
+    }
+    assert_updates_as_set(world);
+}
+
+#[then(regex = r"^its delta statistics count (\d+) deltas$")]
+fn counts_deltas(world: &mut ClientWorld, deltas: u64) {
+    assert_eq!(world.map().delta_statistics().delta_payloads, deltas);
+}
+
+#[when(regex = r#"^the server API sets key "(\w+)" while the client reconnects$"#)]
+async fn sets_a_big_key_while_away(world: &mut ClientWorld, key: String) {
+    world.set_big_value(&key, 2).await;
+    world.let_the_map_client_back();
+}
+
+#[when(
+    regex = r#"^the server API sets key "(\w+)", changing one byte, once the map subscription is subscribed again$"#
+)]
+async fn sets_a_big_key_once_subscribed(world: &mut ClientWorld, key: String) {
+    world.map_ready().await;
+    world.set_big_value(&key, 2).await;
+}
+
+#[then(
+    regex = r#"^the map subscription emits "subscribed" with recovered true and delta true, an update of "(\w+)", then an update of "(\w+)"$"#
+)]
+async fn recovered_with_delta(world: &mut ClientWorld, first: String, second: String) {
+    let events = world.map_events_until("subscribed").await;
+    let Some(MapSubscriptionEvent::Subscribed(subscribed)) = events.last() else {
+        unreachable!();
+    };
+    assert!(subscribed.recovered && subscribed.delta, "{subscribed:?}");
+    assert_eq!(next_kept_update(world).await.key, first);
+    assert_eq!(next_kept_update(world).await.key, second);
+}
+
+#[then("each update's data equals, byte for byte, what was set")]
+fn each_update_as_set(world: &mut ClientWorld) {
+    assert_updates_as_set(world);
+}
+
+#[then(r#"its delta statistics count the update of "a" as a delta"#)]
+fn the_update_counts_as_a_delta(world: &mut ClientWorld) {
+    // The update of "b" is the first of its key in the catch-up: whole.
+    assert_eq!(world.map().delta_statistics().delta_payloads, 1);
+}
+
+#[when(r#"the fake server pushes the removal of "a", then a delta publication of "a""#)]
+fn pushes_a_removal_then_a_delta(world: &mut ClientWorld) {
+    world.fake().send(
+        &json!({"push": {"channel": "scores", "pub": {"key": "a", "removed": true, "data": "", "offset": 2}}})
+            .to_string(),
+    );
+    world.fake().send(
+        &json!({"push": {"channel": "scores", "pub": {"key": "a", "delta": true, "data": "1\n1,0;", "offset": 3}}})
+            .to_string(),
+    );
+}
+
+#[then(
+    regex = r#"^the map subscription emits an update of "(\w+)" with removed true, then an error of kind "delta" with code (\d+)$"#
+)]
+async fn a_removal_then_a_delta_error(world: &mut ClientWorld, key: String, code: u32) {
+    let update = next_kept_update(world).await;
+    assert!(update.key == key && update.removed, "{update:?}");
+    let event = world.next_map_event_named("error").await;
+    let MapSubscriptionEvent::Error(error) = &event else {
+        unreachable!();
+    };
+    assert!(
+        error.kind == ErrorKind::Delta && error.code == code,
+        "{event:?}"
+    );
+}
+
+#[then(regex = r#"^then "subscribing" with code (\d+) and reason "([^"]+)"$"#)]
+async fn then_subscribing(world: &mut ClientWorld, code: u32, reason: String) {
+    let event = world.next_map_event_named("subscribing").await;
+    assert!(
+        matches!(&event, MapSubscriptionEvent::Subscribing { code: c, reason: r } if *c == code && *r == reason),
+        "{event:?}"
+    );
+}
+
+#[given(
+    r#"a client with the JSON protocol connected to the fake server, with a map subscription to "scores" with fossil delta"#
+)]
+async fn a_json_client_with_a_delta_map(world: &mut ClientWorld) {
+    a_client_with_a_map_subscription(world, "scores".to_owned(), " with fossil delta".to_owned())
+        .await;
+}
+
+#[when(
+    regex = r#"^the fake server answers a state page whose entry "a" has the JSON string data "\{\\"x\\":1\}", then live with delta (true|false)$"#
+)]
+async fn a_string_page_then_live(world: &mut ClientWorld, delta: bool) {
+    world.map().subscribe();
+    answer_next(
+        world,
+        json!({"type": 1, "phase": 2, "epoch": "e1", "offset": 1,
+            "state": [entry("a", json!(r#"{"x":1}"#), 1)]}),
+    )
+    .await;
+    answer_next(
+        world,
+        json!({"type": 1, "recoverable": true, "delta": delta, "epoch": "e1", "offset": 1}),
+    )
+    .await;
+}
+
+#[then(regex = r#"^the map subscription emits a sync whose entry "a" has data (.+)$"#)]
+async fn a_sync_with_data(world: &mut ClientWorld, data: String) {
+    let events = world.map_events_until("sync").await;
+    let Some(MapSubscriptionEvent::Sync(entries)) = events.last() else {
+        unreachable!();
+    };
+    let expected = match data.strip_prefix("the JSON string of ") {
+        Some(inner) => serde_json::to_vec(inner).unwrap(),
+        None => data.clone().into_bytes(),
+    };
+    assert_eq!(keys_of(entries), ["a"]);
+    assert_eq!(
+        String::from_utf8_lossy(&entries[0].data),
+        String::from_utf8_lossy(&expected)
+    );
+}
+
+async fn set_with_tag(world: &ClientWorld, channel: &str, key: &str, tag: &str) {
+    server_api(world)
+        .call(
+            "map_publish",
+            json!({"channel": channel, "key": key, "data": {"key": key}, "tags": {"t": tag}}),
+        )
+        .await
+        .expect("server API map_publish");
+}
+
+#[given(
+    regex = r#"^the server API has set key "(\w+)" with tag t = "(\w+)" and key "(\w+)" with tag t = "(\w+)" in "([^"]+)"$"#
+)]
+async fn set_two_tagged(
+    world: &mut ClientWorld,
+    first: String,
+    first_tag: String,
+    second: String,
+    second_tag: String,
+    channel: String,
+) {
+    set_with_tag(world, &channel, &first, &first_tag).await;
+    set_with_tag(world, &channel, &second, &second_tag).await;
+}
+
+#[given(
+    regex = r#"^a client with a map subscription to "([^"]+)" with a tag filter t eq "(\w+)"$"#
+)]
+async fn a_filtered_map(world: &mut ClientWorld, channel: String, value: String) {
+    a_connected_client(world).await;
+    let subscription = world
+        .client()
+        .map_subscription_builder(channel, MapKind::Map)
+        .tag_filter(TagFilter::eq("t", value))
+        .build()
+        .unwrap();
+    world.track_map(subscription);
+}
+
+#[when("the client subscribes the map subscription")]
+fn the_client_subscribes(world: &mut ClientWorld) {
+    world.map().subscribe();
+}
+
+#[when(
+    regex = r#"^the server API sets key "(\w+)" with tag t = "(\w+)", then key "(\w+)" with tag t = "(\w+)"$"#
+)]
+async fn sets_two_tagged(
+    world: &mut ClientWorld,
+    first: String,
+    first_tag: String,
+    second: String,
+    second_tag: String,
+) {
+    world.map_ready().await;
+    let channel = world.map().channel().to_owned();
+    set_with_tag(world, &channel, &first, &first_tag).await;
+    set_with_tag(world, &channel, &second, &second_tag).await;
+}
+
+#[then(regex = r#"^the map subscription emits a sync with exactly key "(\w+)"$"#)]
+async fn a_sync_with_exactly(world: &mut ClientWorld, key: String) {
+    let events = world.map_events_until("sync").await;
+    assert_eq!(entry_keys(events.last().expect("a sync")), [key]);
+}
+
+#[then(regex = r#"^then exactly one update, of key "(\w+)"$"#)]
+async fn exactly_one_update(world: &mut ClientWorld, key: String) {
+    assert_eq!(next_kept_update(world).await.key, key);
+    let events = world.maps.events.as_mut().expect("a stream");
+    let rest = quiet_events(events).await;
+    assert!(rest.is_empty(), "{rest:?}");
+}
+
+#[when(regex = r#"^the tag filter of the map subscription is set to t eq "(\w+)"$"#)]
+fn sets_the_tag_filter(world: &mut ClientWorld, value: String) {
+    world
+        .map()
+        .set_tag_filter(Some(TagFilter::eq("t", value)))
+        .unwrap();
+}
+
+#[then(
+    regex = r#"^the next subscribe command for "(\w+)" has phase 2, no epoch and the tag filter t eq "(\w+)"$"#
+)]
+async fn the_next_filters(world: &mut ClientWorld, channel: String, value: String) {
+    let subscribe = next_subscribe(world, &channel).await["subscribe"].clone();
+    assert_eq!(subscribe["phase"], 2, "{subscribe}");
+    assert!(subscribe.get("epoch").is_none(), "{subscribe}");
+    assert_eq!(
+        subscribe["tf"],
+        json!({"key": "t", "cmp": "eq", "val": value}),
+        "{subscribe}"
+    );
 }
