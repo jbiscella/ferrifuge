@@ -1,10 +1,11 @@
 //! `http_stream` transport of the browser adapter, over the browser's
-//! `fetch` (Block 44, D8), with bidirectional emulation as natively (Block
-//! 8): the response to the request opening the stream carries the replies;
-//! commands go in requests to the emulation endpoint of the same server,
-//! as they do over sse (D9). The body is read with wasm-streams, which
-//! reads it only when polled, so a full read-ahead holds the server back
-//! (Block 15; Block 44, D7).
+//! `fetch` or the application's shim of it (Block 44, D8, D12), with
+//! bidirectional emulation as natively (Block 8): the response to the
+//! request opening the stream carries the replies; commands go in requests
+//! to the emulation endpoint of the same server, as they do over sse (D9).
+//! The body is read with wasm-streams, which reads it only when polled, so
+//! a full read-ahead holds the server back (Block 15; Block 44, D7), also
+//! through a stream built with the application's `ReadableStream` (D12).
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -15,11 +16,12 @@ use std::time::Duration;
 use futures_util::future::{Either, select};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt};
-use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
+use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::{JsFuture, future_to_promise};
 use wasm_streams::readable::IntoStream;
-use web_sys::{AbortController, Response, ResponseType};
+use web_sys::{AbortController, ReadableStreamDefaultReader, Response, ResponseType};
 
 use super::websocket::{Inbound, js_message};
 use crate::adapter::body::{CAPTIVE_PORTAL, Decoder, TOO_LARGE, captive_portal, with_portal};
@@ -32,18 +34,6 @@ pub(super) const JSON: &str = "application/json";
 /// The media type of Protobuf requests and streams, exactly (Block 27, D3).
 const PROTOBUF: &str = "application/octet-stream";
 
-/// The page's `fetch` (D8; its shim comes with D12).
-///
-/// # Errors
-///
-/// When the page has none.
-pub(in crate::adapter) fn global_fetch() -> Result<Function, String> {
-    Reflect::get(&js_sys::global(), &JsValue::from_str("fetch"))
-        .ok()
-        .and_then(|fetch| fetch.dyn_into::<Function>().ok())
-        .ok_or_else(|| "the page has no fetch function".to_owned())
-}
-
 /// Aborts its request when dropped, as reqwest's `AbortGuard`: a request
 /// ends with the transport that made it (D8).
 struct Abort(AbortController);
@@ -54,16 +44,24 @@ impl Drop for Abort {
     }
 }
 
+/// The `credentials` of a request (D13): `include` sends the cookies of
+/// another origin too, and stores its `Set-Cookie`; `same-origin`, as
+/// centrifuge-js 63ed73e always does, only those of the page's own.
+fn credentials(include: bool) -> &'static str {
+    if include { "include" } else { "same-origin" }
+}
+
 /// Starts `fetch(url, init)` as centrifuge-js calls it, `init` a plain
 /// object, so that no global `Request` or `Headers` is needed (D8): a POST
-/// of `body` with `headers`, credentials of the same origin only (D13
-/// comes with Block 44f), and redirects not followed. The guard aborting
-/// it, and its response.
+/// of `body` with `headers`, the credentials of the origin only unless
+/// `include_credentials` (D13), and redirects not followed. The guard
+/// aborting it, and its response.
 fn start(
     fetch: &Function,
     url: &str,
     headers: &[(&str, &str)],
     body: &[u8],
+    include_credentials: bool,
 ) -> (Option<Abort>, Result<JsFuture, String>) {
     let controller = match AbortController::new() {
         Ok(controller) => controller,
@@ -83,7 +81,13 @@ fn start(
         .and_then(|()| set(&init, "headers", &header_object))
         .and_then(|()| set(&init, "body", &Uint8Array::from(body)))
         .and_then(|()| set(&init, "mode", &JsValue::from_str("cors")))
-        .and_then(|()| set(&init, "credentials", &JsValue::from_str("same-origin")))
+        .and_then(|()| {
+            set(
+                &init,
+                "credentials",
+                &JsValue::from_str(credentials(include_credentials)),
+            )
+        })
         .and_then(|()| set(&init, "redirect", &JsValue::from_str("manual")))
         .and_then(|()| set(&init, "signal", &signal));
     if let Err(error) = filled {
@@ -131,6 +135,8 @@ pub(super) struct Emulation {
     timeout: Duration,
     /// The media type of the requests: JSON's or Protobuf's.
     content_type: &'static str,
+    /// Whether requests carry the cookies of another origin (D13).
+    include_credentials: bool,
     /// Each holds its request's guard: dropped with the transport, it
     /// aborts the request (D8).
     requests: FuturesUnordered<Request>,
@@ -138,19 +144,22 @@ pub(super) struct Emulation {
 
 impl Emulation {
     /// Requests to `configured`, or to `/emulation` on the server of
-    /// `stream`, with `fetch`.
+    /// `stream`, with `fetch`, including credentials when
+    /// `include_credentials` (D13).
     pub(super) fn new(
         fetch: Function,
         stream: &str,
         configured: Option<&str>,
         timeout: Duration,
         content_type: &'static str,
+        include_credentials: bool,
     ) -> Result<Self, String> {
         Ok(Self {
             fetch,
             url: emulation_url(stream, configured)?,
             timeout,
             content_type,
+            include_credentials,
             requests: FuturesUnordered::new(),
         })
     }
@@ -163,6 +172,7 @@ impl Emulation {
             &self.url,
             &[("Content-Type", self.content_type)],
             &frame,
+            self.include_credentials,
         );
         let timeout = self.timeout;
         self.requests.push(Box::pin(async move {
@@ -233,10 +243,75 @@ pub(super) fn report(
     }
 }
 
+/// The listeners of a stream built with the application's `ReadableStream`
+/// (D12), alive while it is read.
+struct Through {
+    _pull: Closure<dyn FnMut(JsValue) -> Promise>,
+    _cancel: Closure<dyn FnMut(JsValue) -> Promise>,
+}
+
+/// `body` read through a stream built with `shim`, the application's
+/// `ReadableStream` (D12), as centrifuge-js reads it with the constructor it
+/// resolved (`transport_http_stream.ts:34-91`): an underlying source whose
+/// `pull` reads one chunk from the body's reader and enqueues that chunk
+/// unchanged, with `highWaterMark` 0, so the shim's stream reads only when
+/// the transport polls it and a full read-ahead still holds the server back
+/// (D7). Its `cancel` cancels the body.
+fn through(
+    shim: &Function,
+    body: &web_sys::ReadableStream,
+) -> Result<(web_sys::ReadableStream, Through), String> {
+    let reader: ReadableStreamDefaultReader = body.get_reader().unchecked_into();
+    let pulling = reader.clone();
+    let pull = Closure::<dyn FnMut(JsValue) -> Promise>::new(move |controller: JsValue| {
+        let read = pulling.read();
+        future_to_promise(async move {
+            let result = JsFuture::from(read).await?;
+            let done = Reflect::get(&result, &JsValue::from_str("done"))?.is_truthy();
+            let method = if done { "close" } else { "enqueue" };
+            let function: Function =
+                Reflect::get(&controller, &JsValue::from_str(method))?.dyn_into()?;
+            if done {
+                function.call0(&controller)?;
+            } else {
+                let chunk = Reflect::get(&result, &JsValue::from_str("value"))?;
+                function.call1(&controller, &chunk)?;
+            }
+            Ok(JsValue::UNDEFINED)
+        })
+    });
+    let cancel = Closure::<dyn FnMut(JsValue) -> Promise>::new(move |reason: JsValue| {
+        reader.cancel_with_reason(&reason)
+    });
+    let source = Object::new();
+    let strategy = Object::new();
+    let set = |object: &Object, name: &str, value: &JsValue| {
+        Reflect::set(object, &JsValue::from_str(name), value).map(|_| ())
+    };
+    set(&source, "pull", pull.as_ref())
+        .and_then(|()| set(&source, "cancel", cancel.as_ref()))
+        .and_then(|()| set(&strategy, "highWaterMark", &JsValue::from(0)))
+        .map_err(|error| js_message(&error))?;
+    // A constructor that throws fails the attempt, as a fetch that does.
+    let stream = Reflect::construct(shim, &Array::of2(&source, &strategy))
+        .map_err(|error| js_message(&error))?
+        .unchecked_into();
+    Ok((
+        stream,
+        Through {
+            _pull: pull,
+            _cancel: cancel,
+        },
+    ))
+}
+
 /// An open `http_stream` connection.
 pub(in crate::adapter) struct HttpStream {
     emulation: Emulation,
     body: IntoStream<'static>,
+    /// The listeners of the `ReadableStream` shim's stream, if `body` reads
+    /// one; after `body`, which cancels it when dropped.
+    _through: Option<Through>,
     /// Aborts the stream request when the transport closes or is dropped;
     /// after `body`, which it errors.
     _abort: Option<Abort>,
@@ -254,16 +329,22 @@ pub(in crate::adapter) struct HttpStream {
 
 impl HttpStream {
     /// Opens the stream at `url` with `fetch`, sending `initial_frame`, the
-    /// encoded connect command, with the request. Commands then go to
-    /// `emulation_endpoint`, by default `/emulation` on the stream's server.
+    /// encoded connect command, with the request, its body read through a
+    /// stream built with `readable_stream` when given (D12). Commands then
+    /// go to `emulation_endpoint`, by default `/emulation` on the stream's
+    /// server. Requests include credentials when `include_credentials`
+    /// (D13).
+    #[allow(clippy::too_many_arguments)] // Each is the transport's own.
     pub(in crate::adapter) async fn open(
         fetch: Function,
+        readable_stream: Option<&Function>,
         url: &str,
         initial_frame: Vec<u8>,
         emulation_endpoint: Option<&str>,
         request_timeout: Duration,
         protobuf: bool,
         max_message: usize,
+        include_credentials: bool,
     ) -> Result<Self, String> {
         let content_type = if protobuf { PROTOBUF } else { JSON };
         let emulation = Emulation::new(
@@ -272,6 +353,7 @@ impl HttpStream {
             emulation_endpoint,
             request_timeout,
             content_type,
+            include_credentials,
         )?;
         // Dropped with the attempt, the guard aborts the request.
         let (abort, response) = start(
@@ -279,6 +361,7 @@ impl HttpStream {
             url,
             &[("Accept", content_type), ("Content-Type", content_type)],
             &initial_frame,
+            include_credentials,
         );
         let response: Response = response?
             .await
@@ -311,9 +394,17 @@ impl HttpStream {
         let body = response
             .body()
             .ok_or_else(|| format!("HTTP status {status} without a body"))?;
+        let (body, through) = match readable_stream {
+            Some(shim) => {
+                let (stream, through) = self::through(shim, &body)?;
+                (stream, Some(through))
+            }
+            None => (body, None),
+        };
         Ok(Self {
             emulation,
             body: wasm_streams::ReadableStream::from_raw(body).into_stream(),
+            _through: through,
             _abort: abort,
             decoder: if protobuf {
                 Decoder::protobuf(max_message)
@@ -482,9 +573,19 @@ mod tests {
     }
 
     async fn open(fetch: Function) -> HttpStream {
-        HttpStream::open(fetch, URL, b"{}".to_vec(), None, TIMEOUT, false, LIMIT)
-            .await
-            .unwrap_or_else(|reason| panic!("not opened: {reason}"))
+        HttpStream::open(
+            fetch,
+            None,
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            false,
+        )
+        .await
+        .unwrap_or_else(|reason| panic!("not opened: {reason}"))
     }
 
     /// What `recv` gives within `millis`, if anything.
@@ -500,9 +601,19 @@ mod tests {
     #[wasm_bindgen_test]
     async fn requests_are_posts_of_their_frame_naming_their_encoding() {
         let (fetch, state) = fake_fetch("basic", 200);
-        let mut http = HttpStream::open(fetch, URL, b"{}".to_vec(), None, TIMEOUT, true, LIMIT)
-            .await
-            .unwrap();
+        let mut http = HttpStream::open(
+            fetch,
+            None,
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            true,
+            LIMIT,
+            false,
+        )
+        .await
+        .unwrap();
         http.send(FrameId::for_tests(1), vec![1, 2]);
 
         let stream = init(&state, 0);
@@ -582,7 +693,18 @@ mod tests {
     async fn a_redirect_is_reported_as_a_captive_portal() {
         let (fetch, _) = fake_fetch("opaqueredirect", 0);
 
-        let opened = HttpStream::open(fetch, URL, Vec::new(), None, TIMEOUT, false, LIMIT).await;
+        let opened = HttpStream::open(
+            fetch,
+            None,
+            URL,
+            Vec::new(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            false,
+        )
+        .await;
 
         let reason = opened.err().expect("not opened");
         assert!(reason.ends_with(CAPTIVE_PORTAL), "{reason}");
@@ -621,6 +743,161 @@ mod tests {
                 })
             );
         }
+    }
+
+    // Block 44, D13: credentials included on the stream and emulation
+    // requests alike.
+    #[wasm_bindgen_test]
+    async fn included_credentials_go_on_every_request() {
+        let (fetch, state) = fake_fetch("basic", 200);
+        let mut http = HttpStream::open(
+            fetch,
+            None,
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            true,
+        )
+        .await
+        .unwrap();
+        http.send(FrameId::for_tests(1), b"{}".to_vec());
+
+        assert_eq!(get(&init(&state, 0), &["credentials"]), "include");
+        assert_eq!(get(&init(&state, 1), &["credentials"]), "include");
+    }
+
+    /// A `ReadableStream` shim counting the `pull` calls of the streams it
+    /// builds in `state.shimPulls`, and the streams in `state.shimmed`.
+    fn counting_readable_stream(state: &Object) -> Function {
+        Function::new_with_args(
+            "state",
+            "state.shimPulls = 0;
+             state.shimmed = 0;
+             return function (source, strategy) {
+               state.shimmed += 1;
+               const pull = source.pull;
+               return new ReadableStream({
+                 pull(controller) { state.shimPulls += 1; return pull(controller); },
+                 cancel(reason) { return source.cancel(reason); },
+               }, strategy);
+             };",
+        )
+        .call1(&JsValue::NULL, state)
+        .expect("a ReadableStream shim")
+        .unchecked_into()
+    }
+
+    // Block 44, D12: through the shim's stream, the body is still read only
+    // while the transport reads.
+    #[wasm_bindgen_test]
+    async fn through_the_readable_stream_shim_the_body_is_read_only_while_reading() {
+        let (fetch, state) = fake_fetch("basic", 0);
+        let shim = counting_readable_stream(&state);
+        let mut http = HttpStream::open(
+            fetch,
+            Some(&shim),
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(get(&state, &["shimmed"]), 1);
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(Inbound::Frame(b"{}".to_vec()))
+        );
+        let read = (pulls(&state), get(&state, &["shimPulls"]).as_f64().unwrap());
+        assert!(read.1 >= 1.0, "the shim's stream was read");
+
+        assert_eq!(recv_within(&mut http, false, 200).await, None);
+
+        assert_eq!(
+            (pulls(&state), get(&state, &["shimPulls"]).as_f64().unwrap()),
+            read
+        );
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(Inbound::Frame(b"{}".to_vec()))
+        );
+    }
+
+    // The chunks go through unchanged, and the body's end ends the stream.
+    #[wasm_bindgen_test]
+    async fn the_readable_stream_shim_carries_the_body_to_its_end() {
+        let fetch: Function = Function::new_no_args(
+            "return (url, init) => {
+               const body = new ReadableStream({
+                 start(controller) {
+                   controller.enqueue(new TextEncoder().encode('{\"a\":'));
+                   controller.enqueue(new TextEncoder().encode('1}\\n'));
+                   controller.close();
+                 },
+               });
+               const headers = new Headers({ 'content-type': 'application/json' });
+               return Promise.resolve({ type: 'basic', status: 200, headers, body });
+             };",
+        )
+        .call0(&JsValue::NULL)
+        .unwrap()
+        .unchecked_into();
+        let state = Object::new();
+        let shim = counting_readable_stream(&state);
+        let mut http = HttpStream::open(
+            fetch,
+            Some(&shim),
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(Inbound::Frame(br#"{"a":1}"#.to_vec()))
+        );
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(Inbound::Closed {
+                code: None,
+                reason: "stream ended".to_owned(),
+            })
+        );
+    }
+
+    // A shim that throws fails the attempt.
+    #[wasm_bindgen_test]
+    async fn a_readable_stream_shim_that_throws_fails_the_attempt() {
+        let (fetch, _) = fake_fetch("basic", 0);
+        let shim = Function::new_no_args("throw new Error('no streams here');");
+
+        let opened = HttpStream::open(
+            fetch,
+            Some(&shim),
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            LIMIT,
+            false,
+        )
+        .await;
+
+        let reason = opened.err().expect("not opened");
+        assert!(reason.contains("no streams here"), "{reason}");
     }
 
     #[wasm_bindgen_test]

@@ -1,5 +1,5 @@
 //! sse transport of the browser adapter, over the browser's own
-//! `EventSource` (Block 44, D9), with the bounded inbox of D7: the stream
+//! `EventSource` or the application's shim of it (Block 44, D9, D12), with the bounded inbox of D7: the stream
 //! carries the replies, its URL the connect command in `cf_connect`, and
 //! commands go in emulation requests over `fetch`, as from `http_stream`
 //! (D8).
@@ -22,18 +22,6 @@ use crate::machine::FrameId;
 
 /// Why the stream ended: `EventSource` tells no more (D9).
 const ENDED: &str = "event stream ended";
-
-/// The page's `EventSource` constructor (D9; its shim comes with D12).
-///
-/// # Errors
-///
-/// When the page has none.
-pub(in crate::adapter) fn global_event_source() -> Result<Function, String> {
-    Reflect::get(&js_sys::global(), &JsValue::from_str("EventSource"))
-        .ok()
-        .and_then(|constructor| constructor.dyn_into::<Function>().ok())
-        .ok_or_else(|| "the page has no EventSource constructor".to_owned())
-}
 
 /// How far the opening went.
 enum Opening {
@@ -215,7 +203,8 @@ impl Sse {
     /// `/emulation` on the stream's server, with `fetch`. A message over
     /// `max_message` bytes ends it, reported as [`Inbound::TooLarge`]; one
     /// that would take the inbox past `bound` ends it too, reported as
-    /// [`Inbound::Overflow`].
+    /// [`Inbound::Overflow`]. The source and the requests include
+    /// credentials when `include_credentials` (D13).
     #[allow(clippy::too_many_arguments)] // Each is the transport's own.
     pub(in crate::adapter) async fn open(
         event_source: &Function,
@@ -226,16 +215,24 @@ impl Sse {
         request_timeout: Duration,
         max_message: usize,
         bound: Bound,
+        include_credentials: bool,
     ) -> Result<Self, String> {
         // Protobuf with sse is rejected at build (Block 8).
-        let emulation = Emulation::new(fetch, url, emulation_endpoint, request_timeout, JSON)?;
+        let emulation = Emulation::new(
+            fetch,
+            url,
+            emulation_endpoint,
+            request_timeout,
+            JSON,
+            include_credentials,
+        )?;
         let init = EventSourceInit::new();
-        // D13 comes with Block 44f.
-        init.set_with_credentials(false);
+        init.set_with_credentials(include_credentials);
         let arguments =
             js_sys::Array::of2(&JsValue::from_str(&stream_url(url, initial_frame)?), &init);
         // A constructor that throws is a failed attempt, as for websocket
-        // (D6); called as one, as a shim will be (D12).
+        // (D6); a shim is called as one too, its object used through
+        // web-sys's bindings, which call it by name (D12).
         let source: web_sys::EventSource = Reflect::construct(event_source, &arguments)
             .map_err(|error| js_message(&error))?
             .unchecked_into();
@@ -429,6 +426,7 @@ mod tests {
             TIMEOUT,
             LIMIT,
             BOUND,
+            false,
         );
         let opened = {
             let state = state.clone();
@@ -469,6 +467,38 @@ mod tests {
         );
     }
 
+    // D13: credentials included, the source is opened with them.
+    #[wasm_bindgen_test]
+    async fn included_credentials_open_the_source_with_credentials() {
+        let (constructor, state) = fake_event_source();
+        let opening = Sse::open(
+            &constructor,
+            fake_fetch(200),
+            URL,
+            b"{}",
+            None,
+            TIMEOUT,
+            LIMIT,
+            BOUND,
+            true,
+        );
+        let opened = {
+            let state = state.clone();
+            async move {
+                platform::sleep(Duration::ZERO).await;
+                emit(&state, "open", None);
+            }
+        };
+
+        let (sse, ()) = futures_util::join!(opening, opened);
+
+        assert!(sse.is_ok());
+        assert_eq!(
+            get(&state, &["source", "init", "withCredentials"]),
+            JsValue::TRUE
+        );
+    }
+
     // D9: an `error` closes the source before the core hears of it.
     #[wasm_bindgen_test]
     async fn an_error_closes_the_source_at_once_and_ends_the_transport() {
@@ -503,6 +533,7 @@ mod tests {
             TIMEOUT,
             LIMIT,
             BOUND,
+            false,
         );
         let failing = {
             let state = state.clone();

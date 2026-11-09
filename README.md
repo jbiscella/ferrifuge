@@ -1187,8 +1187,9 @@ captive portal.
 (`Client::builder_with_transports`) falls back to it as natively, over the
 page's `fetch`: the stream request posts the connect command, commands go
 in requests to the emulation endpoint, JSON or Protobuf, with
-`credentials: "same-origin"`, so a server on another origin must allow
-CORS (Centrifugo does, per `allowed_origins`). Its response is read only
+`credentials: "same-origin"` unless credentials are included (below), so a
+server on another origin must allow CORS (Centrifugo does, per
+`allowed_origins`). Its response is read only
 while the read-ahead has room, so a page that does not take its events
 holds the server back as natively, with no inbox. Closing or dropping the
 transport aborts the stream and every emulation request in flight. A
@@ -1198,7 +1199,7 @@ page answered with a success says so too.
 
 **sse.** An sse endpoint is opened with the page's `EventSource`, the
 connect command in the URL's `cf_connect` as natively, without
-credentials; commands go in emulation requests over `fetch`, as from
+credentials unless they are included (below); commands go in emulation requests over `fetch`, as from
 http_stream, and Protobuf is still refused with sse at build. Its messages
 wait in the inbox, as over websocket. When the stream ends or fails, the
 client closes the `EventSource` at once, so the browser's own retry, which
@@ -1206,6 +1207,46 @@ would resend a connect command whose token may have expired, never runs:
 the client emits `connecting` with code 1 "transport closed" and
 reconnects by its backoff. `EventSource` shows neither status nor
 headers, so a failed attempt names no captive portal.
+
+**Credentials and CORS.** `include_credentials(true)` makes the
+http_stream and sse requests carry the page's cookies and HTTP
+authentication to a server on another origin, and store its `Set-Cookie`:
+fetch's `credentials: "include"` and `EventSource`'s `withCredentials:
+true`, for sticky sessions or cookie-based admission behind a load
+balancer on another origin. The server must answer credentialed CORS
+requests from the page's origin, with that origin rather than `*`
+(Centrifugo does, per `allowed_origins`). By default, as in centrifuge-js,
+only the page's own origin gets them. The websocket upgrade is unaffected:
+the browser sends its cookies by their `SameSite` rules.
+
+**Shims.** `websocket`, `fetch`, `readable_stream` and `event_source` give
+the client a constructor or function of the application's in place of the
+page's global of that name, as centrifuge-js's options of those names do:
+for an environment that lacks one, or to wrap one. Each attempt uses the
+shim given, else the global: websocket needs `WebSocket`, http_stream
+`fetch`, `ReadableStream` and `AbortController`, sse `EventSource` and
+`fetch`. A transport whose constructors are missing is skipped in the
+fallback round, without an error event, and `build()` fails with a
+configuration error naming what each transport needs when none of the
+configured transports can be used; a global removed under a running client
+makes the attempt that finds none fail with "no supported transport
+found". The WebSocket and `EventSource` shims are called as constructors
+and their objects used by method and property name; the `fetch` shim is
+called as `fetch(url, init)` with a plain `init`. With the
+`ReadableStream` shim the http_stream response is read through a stream
+built with it, one chunk per `pull` with `highWaterMark` 0, so a page that
+does not take its events still holds the server back.
+
+```rust,ignore
+// http_stream through the application's fetch, cookies included.
+let client = ferrifuge::Client::builder_with_transports([(
+    ferrifuge::machine::TransportKind::HttpStream,
+    "https://realtime.example.com/connection/http_stream".to_owned(),
+)])
+.fetch(my_fetch)
+.include_credentials(true)
+.build()?;
+```
 
 **Network and page events.** While it is not disconnected, the client
 listens to the page's `offline` and `online` events and to `pagehide` and

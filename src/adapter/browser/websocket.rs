@@ -1,5 +1,6 @@
 //! Websocket transport of the browser adapter, over the browser's own
-//! `WebSocket` (Block 44, D6), with the bounded inbox of D7.
+//! `WebSocket` or the application's shim of it (Block 44, D6, D12), with
+//! the bounded inbox of D7.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -8,6 +9,7 @@ use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use futures_util::future::{Either, select};
+use js_sys::{Array, Function, Reflect};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::JsValue;
@@ -288,23 +290,31 @@ pub(in crate::adapter) struct WebSocket {
 }
 
 impl WebSocket {
-    /// Opens a connection to `url`, asking for `subprotocol` if any. A
+    /// Opens a connection to `url` with `constructor`, the page's
+    /// `WebSocket` or its shim, asking for `subprotocol` if any. A
     /// message over `max_message` bytes ends it, reported as
     /// [`Inbound::TooLarge`]; one that would take the inbox past `bound`
     /// ends it too, reported as [`Inbound::Overflow`].
     pub(in crate::adapter) async fn open(
+        constructor: &Function,
         url: &str,
         subprotocol: Option<&str>,
         timeout: Duration,
         max_message: usize,
         bound: Bound,
     ) -> Result<Self, String> {
-        // A constructor that throws is a failed attempt (D6).
-        let websocket = match subprotocol {
-            Some(subprotocol) => web_sys::WebSocket::new_with_str(url, subprotocol),
-            None => web_sys::WebSocket::new(url),
-        }
-        .map_err(|error| js_message(&error))?;
+        // A constructor that throws is a failed attempt (D6). A shim's
+        // object is used through web-sys's bindings, which call its methods
+        // and properties by name (D12).
+        let arguments = match subprotocol {
+            Some(subprotocol) => {
+                Array::of2(&JsValue::from_str(url), &JsValue::from_str(subprotocol))
+            }
+            None => Array::of1(&JsValue::from_str(url)),
+        };
+        let websocket: web_sys::WebSocket = Reflect::construct(constructor, &arguments)
+            .map_err(|error| js_message(&error))?
+            .unchecked_into();
         websocket.set_binary_type(BinaryType::Arraybuffer);
         let state = Rc::new(RefCell::new(State {
             opening: Opening::Pending,

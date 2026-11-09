@@ -40,6 +40,16 @@ repository held while it carried that version, from the blocks of
   closes the `EventSource` and reconnects by its own backoff, not the
   browser's.
 
+- Shims and credentials in the browser (Block 44f):
+  `ClientBuilder::websocket`, `fetch`, `readable_stream` and
+  `event_source` give the client the application's constructors in place
+  of the page's globals. A transport whose constructors are missing is
+  skipped in the fallback round, and `build()` fails when no configured
+  transport can be used. `ClientBuilder::include_credentials` makes the
+  http_stream and sse requests carry cookies to another origin. The core
+  has the new input `Input::TransportUnsupported`, which skips a transport
+  its owner cannot open.
+
 ### Changed
 
 - `reconnect()` while connecting, before the first attempt since the

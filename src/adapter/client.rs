@@ -1513,9 +1513,9 @@ impl Client {
             #[cfg(adapter_browser)]
             page_event_target,
             #[cfg(adapter_browser)]
-            shims: _,
+            shims,
             #[cfg(adapter_browser)]
-            include_credentials: _,
+            include_credentials,
         } = builder;
         #[cfg(adapter_tokio)]
         check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
@@ -1523,6 +1523,8 @@ impl Client {
         for (kind, endpoint) in &endpoints {
             check_endpoint(*kind, endpoint)?;
         }
+        #[cfg(adapter_browser)]
+        check_usable(&endpoints, &shims)?;
         #[cfg(adapter_tokio)]
         let android = cfg!(target_os = "android");
         #[cfg(adapter_tokio)]
@@ -1602,6 +1604,10 @@ impl Client {
             max_message,
             #[cfg(adapter_browser)]
             read_ahead,
+            #[cfg(adapter_browser)]
+            shims,
+            #[cfg(adapter_browser)]
+            include_credentials,
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
@@ -2258,6 +2264,14 @@ struct Driver {
     /// The bound of a push transport's inbox (Block 44, D7).
     #[cfg(adapter_browser)]
     read_ahead: super::backend::websocket::Bound,
+    /// The application's constructors, looked up with the page's at each
+    /// attempt (Block 44, D12).
+    #[cfg(adapter_browser)]
+    shims: super::backend::shims::Shims,
+    /// Whether HTTP requests carry credentials to other origins (Block 44,
+    /// D13).
+    #[cfg(adapter_browser)]
+    include_credentials: bool,
     shared: Arc<Shared>,
     /// The runtime the driver runs on, for every spawn (Block 28, D1).
     runtime: Handle,
@@ -2753,6 +2767,16 @@ impl Driver {
             initial_frame,
         };
         #[cfg(adapter_browser)]
+        let found = self.shims.find();
+        // Skipped in the round, as centrifuge-js `_initializeTransport`
+        // skips a transport not supported (Block 44, D12).
+        #[cfg(adapter_browser)]
+        if !found.usable(kind) {
+            debug!(transport = kind.name(), "transport not available");
+            self.shared.apply(Input::TransportUnsupported(id));
+            return;
+        }
+        #[cfg(adapter_browser)]
         let open = super::browser::Open {
             kind,
             endpoint,
@@ -2763,6 +2787,8 @@ impl Driver {
             read_ahead: self.read_ahead,
             emulation: self.emulation_endpoint.clone(),
             initial_frame,
+            found,
+            include_credentials: self.include_credentials,
         };
         let opening = super::backend::open(open, &self.shared.log);
         self.opening = Some((id, opening));
@@ -3044,6 +3070,27 @@ fn check_connector(
         });
     }
     Ok(())
+}
+
+#[cfg(adapter_browser)]
+/// A client none of whose transports the page or the application's shims
+/// can open is refused (Block 44, D12; centrifuge-js 63ed73e
+/// `_validateTransportConfig`, "no supported transport found").
+fn check_usable(
+    endpoints: &[(TransportKind, String)],
+    shims: &super::backend::shims::Shims,
+) -> Result<(), ClientError> {
+    let found = shims.find();
+    if endpoints.iter().any(|(kind, _)| found.usable(*kind)) {
+        return Ok(());
+    }
+    let kinds: Vec<TransportKind> = endpoints.iter().map(|(kind, _)| *kind).collect();
+    Err(ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message: super::backend::shims::none_usable(&kinds),
+        transport: None,
+    })
 }
 
 fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
