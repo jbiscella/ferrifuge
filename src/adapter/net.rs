@@ -25,6 +25,25 @@ pub(super) struct Network {
     /// A setting given by `set_proxy`, applied at the next attempt.
     pending: Mutex<Option<Proxy>>,
     current: Mutex<Current>,
+    /// The application's cookie jar (Block 43).
+    cookie_jar: Jar,
+}
+
+/// A cookie jar, shown without its cookies.
+#[cfg(feature = "cookies")]
+#[derive(Clone, Default)]
+pub(super) struct Jar(pub(super) Option<Arc<dyn super::CookieJar>>);
+
+/// No cookie jar without the `cookies` feature.
+#[cfg(not(feature = "cookies"))]
+#[derive(Clone, Debug, Default)]
+pub(super) struct Jar(());
+
+#[cfg(feature = "cookies")]
+impl std::fmt::Debug for Jar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Some(..)" } else { "None" })
+    }
 }
 
 /// The proxy setting in use, its decisions and the HTTP clients built on
@@ -74,6 +93,7 @@ impl Network {
                 clients: Arc::default(),
                 shared: Arc::default(),
             }),
+            cookie_jar: Jar::default(),
         }
     }
 
@@ -86,6 +106,37 @@ impl Network {
     /// The application's connector, if it gave one.
     pub(super) fn connector(&self) -> Option<&Shared> {
         self.connector.as_ref()
+    }
+
+    /// The network of a client given the cookie jar `jar` (Block 43).
+    pub(super) fn with_cookie_jar(mut self, jar: Jar) -> Self {
+        self.cookie_jar = jar;
+        self
+    }
+
+    /// Sets the `Cookie` header of a request to `url`, from the jar and the
+    /// application's own `Cookie` already in `headers`; nothing without a
+    /// jar (Block 43, D2, D3).
+    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    pub(super) fn add_cookies(&self, url: &str, headers: &mut http::HeaderMap) {
+        #[cfg(feature = "cookies")]
+        if let Some(jar) = &self.cookie_jar.0 {
+            super::cookies::add_cookies(jar.as_ref(), url, headers);
+        }
+        #[cfg(not(feature = "cookies"))]
+        let _ = (url, headers);
+    }
+
+    /// Gives the jar the `Set-Cookie` values of a response with `status` to
+    /// a request to `url`; nothing without a jar (Block 43, D2, D5).
+    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    pub(super) fn store_cookies(&self, url: &str, status: u16, headers: &http::HeaderMap) {
+        #[cfg(feature = "cookies")]
+        if let Some(jar) = &self.cookie_jar.0 {
+            super::cookies::store_cookies(jar.as_ref(), url, status, headers);
+        }
+        #[cfg(not(feature = "cookies"))]
+        let _ = (url, status, headers);
     }
 
     /// Replaces the proxy setting from the next connection attempt

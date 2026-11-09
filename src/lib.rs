@@ -98,6 +98,9 @@ pub use adapter::{
     EventDelivery, Proxy, ProxyTarget, Subscription, SubscriptionBuilder, SubscriptionHandler,
     WeakClient,
 };
+#[cfg(feature = "cookies")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
+pub use adapter::{CookieJar, MemoryJar};
 pub use call::{
     CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, JsonCallError,
     PresenceResult, PresenceStatsResult,
@@ -126,3 +129,9 @@ pub use subscription::{
 };
 pub use tag_filter::TagFilter;
 pub use token::TokenError;
+/// The `url` crate, whose `Url` a [`CookieJar`] is given (Block 43, D1).
+/// Moving to another major version of it is a breaking change of
+/// ferrifuge's.
+#[cfg(feature = "cookies")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
+pub use url;

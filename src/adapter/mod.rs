@@ -4,6 +4,8 @@
 pub mod android;
 mod client;
 mod connector;
+#[cfg(feature = "cookies")]
+mod cookies;
 mod handler;
 mod http;
 mod log;
@@ -17,6 +19,8 @@ mod transport;
 
 pub use client::{Batch, Client, ClientBuilder, WeakClient};
 pub use connector::{BoxError, ConnectedStream, Connecting, Connector};
+#[cfg(feature = "cookies")]
+pub use cookies::{CookieJar, MemoryJar};
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 pub use proxy::{Proxy, ProxyTarget};
 pub use subscription::{Subscription, SubscriptionBuilder};

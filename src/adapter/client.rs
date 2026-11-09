@@ -912,6 +912,8 @@ pub struct ClientBuilder {
     handler: Option<Mutex<Box<dyn super::ClientHandler>>>,
     /// Where its handlers run (Block 41, D2).
     event_delivery: super::EventDelivery,
+    /// The application's cookie jar (Block 43).
+    cookie_jar: super::net::Jar,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -942,8 +944,8 @@ impl std::fmt::Debug for HeaderNames<'_> {
 
 impl std::fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientBuilder")
-            .field("endpoints", &Endpoints(&self.endpoints))
+        let mut f = f.debug_struct("ClientBuilder");
+        f.field("endpoints", &Endpoints(&self.endpoints))
             .field("config", &self.config)
             .field("get_token", &self.get_token.is_some())
             .field("get_data", &self.get_data.is_some())
@@ -961,8 +963,10 @@ impl std::fmt::Debug for ClientBuilder {
             .field("connector", &self.connector.is_some())
             .field("runtime", &self.runtime.is_some())
             .field("handler", &self.handler.is_some())
-            .field("event_delivery", &self.event_delivery)
-            .finish()
+            .field("event_delivery", &self.event_delivery);
+        // Whether one is set: never its cookies (Block 43, D6).
+        f.field("cookie_jar", &self.cookie_jar);
+        f.finish()
     }
 }
 
@@ -1070,6 +1074,21 @@ impl ClientBuilder {
     #[must_use]
     pub fn connector(mut self, connector: impl Connector + 'static) -> Self {
         self.connector = Some(connector::Shared(Arc::new(connector)));
+        self
+    }
+
+    /// Sets the cookie jar that keeps the cookies servers set and sends
+    /// them back on the later requests they match (Block 43): the
+    /// websocket upgrade, a refused one's response included. A later call
+    /// replaces an earlier one; the application keeps its own `Arc` to look
+    /// into the jar or seed it. The cookies merge with a `Cookie` header of
+    /// [`ClientBuilder::http_headers`] into one header, the application's
+    /// first. No proxy is sent them. Without a jar, no cookie is kept.
+    #[cfg(feature = "cookies")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
+    #[must_use]
+    pub fn cookie_jar(mut self, jar: Arc<dyn super::CookieJar>) -> Self {
+        self.cookie_jar = super::net::Jar(Some(jar));
         self
     }
 
@@ -1236,6 +1255,7 @@ impl Client {
             runtime: None,
             handler: None,
             event_delivery: super::EventDelivery::default(),
+            cookie_jar: super::net::Jar::default(),
         }
     }
 
@@ -1256,13 +1276,9 @@ impl Client {
             runtime,
             handler: _,
             event_delivery,
+            cookie_jar,
         } = builder;
-        for (kind, endpoint) in &endpoints {
-            check_endpoint(*kind, endpoint)?;
-        }
-        if connector.is_some() {
-            check_connector(&endpoints, proxy_set)?;
-        }
+        check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
         let android = cfg!(target_os = "android");
         let trust = trust(root_certificates, tls_config, android)?;
         android_gate(
@@ -1297,7 +1313,11 @@ impl Client {
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
-            network: Arc::new(Network::new(Tls::new(trust), proxy).with_connector(connector)),
+            network: Arc::new(
+                Network::new(Tls::new(trust), proxy)
+                    .with_connector(connector)
+                    .with_cookie_jar(cookie_jar),
+            ),
             http_headers,
             handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
             runtime: runtime.clone(),
@@ -2094,6 +2114,22 @@ impl Timers {
 /// The machine of a client: its callbacks, headers and transports, and
 /// automatic batching, the driver flushing at each iteration (Block 36,
 /// D3).
+/// Checks the endpoints, and the connector's limits when one is given
+/// (Block 37, D4).
+fn check_endpoints(
+    endpoints: &[(TransportKind, String)],
+    connector: bool,
+    proxy_set: bool,
+) -> Result<(), ClientError> {
+    for (kind, endpoint) in endpoints {
+        check_endpoint(*kind, endpoint)?;
+    }
+    if connector {
+        check_connector(endpoints, proxy_set)?;
+    }
+    Ok(())
+}
+
 fn machine_for(
     config: Config,
     token_source: bool,
