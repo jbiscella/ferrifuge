@@ -825,14 +825,14 @@ async fn commands_work_over_http_stream() {
     );
 }
 
-// @W scenario: A stream not read stops a browser client reading its http_stream response
+// @W scenario: A stream not read does not stop a browser client reading its http_stream response
 #[wasm_bindgen_test]
-async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
+async fn a_stream_not_read_does_not_stop_the_client_reading_its_http_stream_response() {
     const COUNT: usize = 1000;
     // 100 bytes of JSON: a string of 98 digits.
     let data = |n: usize| format!("\"{n:098}\"").into_bytes();
     let channel = unique("news");
-    let client = over_http_stream(Config::default().read_ahead_messages(16));
+    let client = over_http_stream(Config::default().read_ahead_messages(600));
     let subscription = client.new_subscription(&channel).unwrap();
     let mut events = client.events();
     let mut subscription_events = subscription.events();
@@ -849,15 +849,15 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     }
 
     within(WAIT, async {
-        while client.read_ahead().0 != 16 {
+        while client.read_ahead().0 != 600 {
             sleep(20).await;
         }
     })
     .await;
     sleep(500).await;
-    assert_eq!(client.read_ahead().0, 16);
+    assert_eq!(client.read_ahead().0, 600);
     yields_nothing(&mut events, 1000).await;
-    assert_eq!(client.read_ahead().0, 16);
+    assert_eq!(client.read_ahead().0, 600);
     for n in 1..=COUNT {
         // Names the publication a stall stops at (Safari: the job's log).
         let event = match select(
@@ -924,6 +924,56 @@ async fn a_browser_client_syncs_a_map_and_receives_its_updates() {
     match next(&mut events).await {
         MapSubscriptionEvent::Update(update) => assert_eq!(update.key, "c"),
         event => panic!("not an update: {event:?}"),
+    }
+}
+
+// @W scenario: A browser client whose stream is not read reconnects once its inbox overflows over http_stream, losing no publication
+#[wasm_bindgen_test]
+async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publication() {
+    let channel = unique("history:news");
+    let client = over_http_stream(Config::default().read_ahead_messages(16));
+    let subscription = client.new_subscription(&channel).unwrap();
+    let mut events = client.events();
+    let mut subscription_events = subscription.events();
+    client.connect();
+    subscription.subscribe();
+    assert_eq!(connected_over(&mut events).await, "http_stream");
+    subscribed(&mut subscription_events).await;
+    let publisher = publisher(Config::default()).await;
+
+    let publishing = async {
+        for n in 1..=100 {
+            publisher
+                .publish(&channel, format!("{n}").into_bytes())
+                .await
+                .expect("published");
+        }
+    };
+    let overflowed = async {
+        loop {
+            if let ClientEvent::Connecting { code, reason } = next_event(&mut events).await {
+                return (code, reason);
+            }
+        }
+    };
+    let ((), connecting) =
+        within(2 * WAIT, futures_util::future::join(publishing, overflowed)).await;
+
+    assert_eq!(connecting, (7, "read-ahead overflow".to_owned()));
+    // The client's stream is read on: its events would otherwise hold
+    // the next connection's messages back (Block 15).
+    wasm_bindgen_futures::spawn_local(async move { while events.next().await.is_some() {} });
+    assert!(matches!(
+        next(&mut subscription_events).await,
+        SubscriptionEvent::Subscribing { .. }
+    ));
+    let resubscribed = subscribed(&mut subscription_events).await;
+    assert!(resubscribed.recovered, "{resubscribed:?}");
+    for offset in 1..=100 {
+        assert_eq!(
+            publication(&mut subscription_events).await.offset,
+            Some(offset)
+        );
     }
 }
 

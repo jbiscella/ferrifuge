@@ -23,7 +23,7 @@ use wasm_bindgen_futures::{JsFuture, future_to_promise};
 use wasm_streams::readable::IntoStream;
 use web_sys::{AbortController, ReadableStreamDefaultReader, Response, ResponseType};
 
-use super::websocket::{Inbound, js_message};
+use super::websocket::{Bound, Inbound, Inbox, js_message};
 use crate::adapter::body::{CAPTIVE_PORTAL, Decoder, TOO_LARGE, captive_portal, with_portal};
 use crate::adapter::platform;
 use crate::machine::FrameId;
@@ -305,8 +305,15 @@ fn through(
     ))
 }
 
+/// What the task reading the body and the transport share (D7, D8).
+#[derive(Default)]
+struct State {
+    inbox: Inbox,
+}
+
 /// An open `http_stream` connection.
 pub(in crate::adapter) struct HttpStream {
+    state: std::rc::Rc<std::cell::RefCell<State>>,
     emulation: Emulation,
     body: IntoStream<'static>,
     /// The listeners of the `ReadableStream` shim's stream, if `body` reads
@@ -344,6 +351,7 @@ impl HttpStream {
         request_timeout: Duration,
         protobuf: bool,
         max_message: usize,
+        _bound: Bound,
         include_credentials: bool,
     ) -> Result<Self, String> {
         let content_type = if protobuf { PROTOBUF } else { JSON };
@@ -402,6 +410,7 @@ impl HttpStream {
             None => (body, None),
         };
         Ok(Self {
+            state: std::rc::Rc::default(),
             emulation,
             body: wasm_streams::ReadableStream::from_raw(body).into_stream(),
             _through: through,
@@ -506,7 +515,7 @@ mod tests {
 
     use super::{HttpStream, emulation_url};
     use crate::adapter::body::CAPTIVE_PORTAL;
-    use crate::adapter::browser::websocket::Inbound;
+    use crate::adapter::browser::websocket::{Bound, Inbound};
     use crate::adapter::platform;
     use crate::machine::{FrameId, TransportKind};
     use crate::{Client, ClientEvent, Config, SubscriptionEvent};
@@ -514,10 +523,19 @@ mod tests {
     const URL: &str = "http://127.0.0.1:8000/connection/http_stream";
     const LIMIT: usize = 1 << 20;
     const TIMEOUT: Duration = Duration::from_secs(5);
+    const WAIT: Duration = Duration::from_secs(5);
+    const BOUND: Bound = Bound {
+        messages: 1 << 10,
+        bytes: 1 << 20,
+    };
+    /// The JSON lines the body of [`fake_fetch`] gives, after which a read
+    /// waits for good.
+    const LINES: f64 = 4.0;
 
     /// A `fetch` standing in for the page's, with what it saw in `state`:
     /// `calls`, each `{ url, init }`, and `pulls`, the reads of the stream
-    /// body, each of which gives one JSON line. The stream response is of
+    /// body, each of which gives one JSON line until [`LINES`] were given,
+    /// and then never answers. The stream response is of
     /// type `stream_type`; emulation responses have status `emulation`, or
     /// never come when it is 0.
     fn fake_fetch(stream_type: &str, emulation: u16) -> (Function, Object) {
@@ -526,6 +544,7 @@ mod tests {
             "state, streamType, emulation",
             "state.calls = [];
              state.pulls = 0;
+             const lines = 4;
              return (url, init) => {
                state.calls.push({ url, init });
                if (url.endsWith('/emulation')) {
@@ -534,6 +553,7 @@ mod tests {
                }
                const body = new ReadableStream({
                  pull(controller) {
+                   if (state.pulls >= lines) return new Promise(() => {});
                    state.pulls += 1;
                    controller.enqueue(new TextEncoder().encode('{}\\n'));
                  },
@@ -584,6 +604,7 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             false,
         )
         .await
@@ -612,6 +633,7 @@ mod tests {
             TIMEOUT,
             true,
             LIMIT,
+            BOUND,
             false,
         )
         .await
@@ -670,23 +692,163 @@ mod tests {
         assert!(aborted(&state, 0) && aborted(&state, 1));
     }
 
-    // Block 15; Block 44, D7: not reading, the body is not read.
+    /// A `fetch` whose stream body runs `start(controller)` over `encode`.
+    fn fetch_of(start: &str) -> Function {
+        Function::new_no_args(&format!(
+            "return (url, init) => {{
+               const encode = (text) => new TextEncoder().encode(text);
+               const body = new ReadableStream({{ start(controller) {{ {start} }} }});
+               const headers = new Headers({{ 'content-type': 'application/json' }});
+               return Promise.resolve({{ type: 'basic', status: 200, headers, body }});
+             }};"
+        ))
+        .call0(&JsValue::NULL)
+        .expect("a fetch")
+        .unchecked_into()
+    }
+
+    async fn open_bounded(fetch: Function, limit: usize, bound: Bound) -> HttpStream {
+        HttpStream::open(
+            fetch,
+            None,
+            URL,
+            b"{}".to_vec(),
+            None,
+            TIMEOUT,
+            false,
+            limit,
+            bound,
+            false,
+        )
+        .await
+        .unwrap_or_else(|reason| panic!("not opened: {reason}"))
+    }
+
+    fn empty_frame() -> Inbound {
+        Inbound::Frame(b"{}".to_vec())
+    }
+
+    // Block 44, D7, D8: the body is read whether or not the core reads, and
+    // without `recv` being polled at all, as while an `Inline` handler runs.
     #[wasm_bindgen_test]
-    async fn the_body_is_read_only_while_reading() {
+    async fn the_body_is_read_while_the_core_is_not_reading() {
         let (fetch, state) = fake_fetch("basic", 0);
         let mut http = open(fetch).await;
+
+        platform::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(pulls(&state), LINES);
+        assert_eq!(recv_within(&mut http, false, 50).await, None);
+        for _ in 0..4 {
+            assert_eq!(
+                recv_within(&mut http, true, 1000).await,
+                Some(empty_frame())
+            );
+        }
+    }
+
+    // Block 44, D8: the stream's end waits behind the messages before it.
+    #[wasm_bindgen_test]
+    async fn the_end_of_the_stream_is_read_after_the_messages_before_it() {
+        let fetch = fetch_of("controller.enqueue(encode('{}\\n{}\\n')); controller.close();");
+        let mut http = open_bounded(fetch, LIMIT, BOUND).await;
+
+        assert_eq!(recv_within(&mut http, false, 100).await, None);
+
+        for _ in 0..2 {
+            assert_eq!(
+                recv_within(&mut http, true, 1000).await,
+                Some(empty_frame())
+            );
+        }
         assert_eq!(
             recv_within(&mut http, true, 1000).await,
-            Some(Inbound::Frame(b"{}".to_vec()))
+            Some(Inbound::Closed {
+                code: None,
+                reason: "stream ended".to_owned(),
+            })
         );
-        let read = pulls(&state);
+    }
 
-        assert_eq!(recv_within(&mut http, false, 200).await, None);
+    // Block 44, D8: a failure waits behind the messages before it too.
+    #[wasm_bindgen_test]
+    async fn a_failed_stream_is_read_after_the_messages_before_it() {
+        let fetch = fetch_of(
+            "controller.enqueue(encode('{}\\n')); \
+             setTimeout(() => controller.error(new Error('body failed')), 10);",
+        );
+        let mut http = open_bounded(fetch, LIMIT, BOUND).await;
 
-        assert_eq!(pulls(&state), read);
+        assert_eq!(recv_within(&mut http, false, 100).await, None);
+
         assert_eq!(
             recv_within(&mut http, true, 1000).await,
-            Some(Inbound::Frame(b"{}".to_vec()))
+            Some(empty_frame())
+        );
+        let Some(Inbound::Closed { code: None, reason }) = recv_within(&mut http, true, 1000).await
+        else {
+            panic!("not the end of the stream");
+        };
+        assert!(reason.contains("body failed"), "{reason}");
+    }
+
+    // Block 44, D8; Block 29, D3: so does a message over the size limit.
+    #[wasm_bindgen_test]
+    async fn a_message_over_the_limit_is_read_after_the_messages_before_it() {
+        let fetch = fetch_of(&format!(
+            "controller.enqueue(encode('{{}}\\n{}\\n'));",
+            "x".repeat(64)
+        ));
+        let mut http = open_bounded(fetch, 16, BOUND).await;
+
+        assert_eq!(recv_within(&mut http, false, 100).await, None);
+
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(empty_frame())
+        );
+        assert_eq!(
+            recv_within(&mut http, true, 1000).await,
+            Some(Inbound::TooLarge)
+        );
+    }
+
+    // Block 44, D7: past the bound the stream ends, holding nothing, and
+    // that is reported though the core does not read.
+    #[wasm_bindgen_test]
+    async fn an_overflow_ends_the_stream_and_holds_nothing() {
+        let (fetch, state) = fake_fetch("basic", 0);
+        let bound = Bound {
+            messages: 2,
+            bytes: 1 << 20,
+        };
+        let mut http = open_bounded(fetch, LIMIT, bound).await;
+
+        assert_eq!(
+            recv_within(&mut http, false, 1000).await,
+            Some(Inbound::Overflow)
+        );
+
+        assert_eq!(pulls(&state), 3.0, "the reading stopped at the overflow");
+        assert!(http.state.borrow().inbox.is_empty());
+    }
+
+    // Block 44, D8: the reading ends with the transport, also over a body
+    // that ignores the abort.
+    #[wasm_bindgen_test]
+    async fn dropping_the_transport_ends_the_reading_of_a_body_ignoring_the_abort() {
+        let (fetch, state) = paced_fetch();
+        let http = open(fetch).await;
+        push(&state, &line(1));
+        platform::sleep(Duration::from_millis(50)).await;
+        assert_eq!(served(&state), 1.0);
+
+        drop(http);
+        platform::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            get(&state, &["cancelled"]).is_truthy(),
+            "the body was read on"
         );
     }
 
@@ -704,6 +866,7 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             false,
         )
         .await;
@@ -761,6 +924,7 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             true,
         )
         .await
@@ -792,10 +956,10 @@ mod tests {
         .unchecked_into()
     }
 
-    // Block 44, D12: through the shim's stream, the body is still read only
-    // while the transport reads.
+    // Block 44, D8, D12: through the shim's stream the body is read whether
+    // or not the core reads, and its chunks reach the inbox unchanged.
     #[wasm_bindgen_test]
-    async fn through_the_readable_stream_shim_the_body_is_read_only_while_reading() {
+    async fn through_the_readable_stream_shim_the_body_is_read_while_the_core_is_not_reading() {
         let (fetch, state) = fake_fetch("basic", 0);
         let shim = counting_readable_stream(&state);
         let mut http = HttpStream::open(
@@ -807,28 +971,27 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             false,
         )
         .await
         .unwrap();
         assert_eq!(get(&state, &["shimmed"]), 1);
-        assert_eq!(
-            recv_within(&mut http, true, 1000).await,
-            Some(Inbound::Frame(b"{}".to_vec()))
-        );
-        let read = (pulls(&state), get(&state, &["shimPulls"]).as_f64().unwrap());
-        assert!(read.1 >= 1.0, "the shim's stream was read");
 
-        assert_eq!(recv_within(&mut http, false, 200).await, None);
+        platform::sleep(Duration::from_millis(100)).await;
 
-        assert_eq!(
-            (pulls(&state), get(&state, &["shimPulls"]).as_f64().unwrap()),
-            read
+        assert_eq!(pulls(&state), LINES);
+        assert!(
+            get(&state, &["shimPulls"]).as_f64().unwrap() >= LINES,
+            "the shim's stream was read"
         );
-        assert_eq!(
-            recv_within(&mut http, true, 1000).await,
-            Some(Inbound::Frame(b"{}".to_vec()))
-        );
+        assert_eq!(recv_within(&mut http, false, 50).await, None);
+        for _ in 0..4 {
+            assert_eq!(
+                recv_within(&mut http, true, 1000).await,
+                Some(empty_frame())
+            );
+        }
     }
 
     // The chunks go through unchanged, and the body's end ends the stream.
@@ -861,6 +1024,7 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             false,
         )
         .await
@@ -894,6 +1058,7 @@ mod tests {
             TIMEOUT,
             false,
             LIMIT,
+            BOUND,
             false,
         )
         .await;
@@ -942,9 +1107,11 @@ mod tests {
                    while (queue.length === 0) {
                      await new Promise((resolve) => { wake = resolve; });
                    }
+                   if (state.cancelled) return;
                    state.served += 1;
                    controller.enqueue(queue.shift());
                  },
+                 cancel() { state.cancelled = true; },
                }, { highWaterMark: 0 });
                const headers = new Headers({ 'content-type': 'application/json' });
                return Promise.resolve({ type: 'basic', status: 200, headers, body });
@@ -986,47 +1153,42 @@ mod tests {
         Inbound::Frame(format!("{{\"n\":{n}}}").into_bytes())
     }
 
-    // Block 15; Block 44, D7: stopping the reading with a read pending keeps
-    // that read, and whatever it brings, for when reading resumes; the next
-    // read after the pause then wakes the transport as any other.
+    // Block 44, D7, D8: what the body brings while the core does not read
+    // waits in the inbox, in order, and a chunk arriving later is read.
     #[wasm_bindgen_test]
-    async fn a_read_pending_when_reading_stops_keeps_its_chunk_and_later_reads_go_on() {
+    async fn messages_read_while_the_core_is_not_reading_wait_in_the_inbox() {
         let (fetch, state) = paced_fetch();
         let mut http = open(fetch).await;
         // The stream request's frame is `{}`, which the fetch does not answer.
         push(&state, &line(1));
         assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(1)));
 
-        // Reading stops while this read is pending, with no chunk to give.
-        assert_eq!(recv_within(&mut http, true, 50).await, None);
-        // Chunks come during the pause; only the pending read is served.
         push(&state, &line(2));
         push(&state, &line(3));
         assert_eq!(recv_within(&mut http, false, 100).await, None);
-        assert_eq!(served(&state), 2.0, "only the pending read was served");
+        assert_eq!(served(&state), 3.0, "the body was read on");
 
-        // Resuming, the chunk of the pending read, then the next in order.
         assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(2)));
         assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(3)));
 
-        // A read after the pause is woken by a chunk arriving later.
         push_later(&state, &line(4), 20);
         assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(4)));
     }
 
-    // Block 15; Block 44, D7: the whole client over a body read only when
-    // polled, one publication per chunk, as the @W test of the read-ahead
-    // reads it: a stream not read fills the read-ahead and stops the reading,
-    // and taking the events resumes it up to the last publication.
-    #[wasm_bindgen_test]
-    async fn a_client_whose_reading_stopped_and_resumed_delivers_every_publication() {
-        const COUNT: u32 = 1000;
-        const WAIT: Duration = Duration::from_secs(5);
-        let publication =
-            |n: u32| format!("{{\"push\":{{\"channel\":\"news\",\"pub\":{{\"data\":{n}}}}}}}\n");
+    /// A client over a [`paced_fetch`] with a read-ahead of `read_ahead`
+    /// messages, connected and subscribed to "news"; neither stream is read
+    /// further.
+    async fn subscribed_over_paced_fetch(
+        read_ahead: usize,
+    ) -> (
+        Client,
+        Object,
+        impl Stream<Item = ClientEvent> + Unpin,
+        impl Stream<Item = SubscriptionEvent> + Unpin,
+    ) {
         let (fetch, state) = paced_fetch();
         let client = Client::builder_with_transports([(TransportKind::HttpStream, URL.to_owned())])
-            .config(Config::default().read_ahead_messages(16))
+            .config(Config::default().read_ahead_messages(read_ahead))
             .fetch(fetch)
             .build()
             .expect("a client");
@@ -1049,17 +1211,35 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
+        (client, state, events, subscription_events)
+    }
+
+    fn publication(n: u32) -> String {
+        format!("{{\"push\":{{\"channel\":\"news\",\"pub\":{{\"data\":{n}}}}}}}\n")
+    }
+
+    // Block 44, D7: the whole client over a body served one chunk per read:
+    // a stream not read fills the read-ahead while the body is read on into
+    // the inbox, and taking the events gives every publication in order.
+    #[wasm_bindgen_test]
+    async fn a_client_not_taking_its_events_reads_on_and_delivers_every_publication() {
+        const COUNT: u32 = 1000;
+        let (client, state, _events, mut subscription_events) =
+            subscribed_over_paced_fetch(600).await;
 
         for n in 1..=COUNT {
             push(&state, &publication(n));
         }
-        platform::sleep(Duration::from_millis(200)).await;
-        let stopped_at = served(&state);
-        // The two replies, 17 publications (16 held and 1 handled, its event
-        // not taken), and at most the read left pending.
-        assert!(stopped_at <= 20.0, "{stopped_at} chunks read");
-        platform::sleep(Duration::from_millis(200)).await;
-        assert_eq!(served(&state), stopped_at, "reading did not stop");
+        // The two replies, then every publication.
+        let everything = f64::from(COUNT) + 2.0;
+        for _ in 0..300 {
+            if served(&state) >= everything {
+                break;
+            }
+            platform::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(served(&state), everything);
+        assert_eq!(client.read_ahead().0, 600);
 
         for n in 1..=COUNT {
             match next_within(&mut subscription_events, WAIT).await {
@@ -1067,6 +1247,25 @@ mod tests {
                     assert_eq!(publication.data, n.to_string().into_bytes());
                 }
                 other => panic!("publication {n}: {other:?}"),
+            }
+        }
+    }
+
+    // Block 44, D7: past the read-ahead and the inbox the client reconnects
+    // with code 7, as over websocket and sse.
+    #[wasm_bindgen_test]
+    async fn a_client_not_taking_its_events_reconnects_with_code_7_past_its_inbox() {
+        let (_client, state, mut events, _subscription_events) =
+            subscribed_over_paced_fetch(16).await;
+
+        for n in 1..=100 {
+            push(&state, &publication(n));
+        }
+
+        loop {
+            if let ClientEvent::Connecting { code, reason } = next_within(&mut events, WAIT).await {
+                assert_eq!((code, reason.as_str()), (7, "read-ahead overflow"));
+                break;
             }
         }
     }
