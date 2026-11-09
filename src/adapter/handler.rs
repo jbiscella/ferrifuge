@@ -1522,6 +1522,98 @@ mod tests {
         assert!(would_deadlock(shared, Wait::Ready(true)));
     }
 
+    // Block 45, D13: a client whose only handler is a map subscription's
+    // starts the events thread again at the next connect().
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_map_handler_s_events_thread_starts_at_the_next_connect() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Thread)
+                .build()
+                .unwrap();
+            let map = client
+                .new_map_subscription("map:a", crate::MapKind::Map)
+                .unwrap();
+            let record = Arc::clone(&seen);
+            FAIL_SPAWN.set(true);
+            map.set_handler(move |event: crate::MapSubscriptionEvent| {
+                record.lock().unwrap().push(event.name().to_owned());
+            });
+            FAIL_SPAWN.set(false);
+            client.connect();
+            map.subscribe();
+            for _ in 0..100 {
+                if !seen.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            client.close().await;
+        });
+
+        assert_eq!(
+            seen.lock().unwrap().first().map(String::as_str),
+            Some("subscribing")
+        );
+    }
+
+    // Block 45 D5, Block 41 D3: the consumer reports a map event as handed
+    // before its handler runs, so the position moves at once.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_map_event_given_to_its_handler_is_reported_as_handed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let map = client
+            .new_map_subscription("map:a", crate::MapKind::Map)
+            .unwrap();
+        map.set_handler(|_: crate::MapSubscriptionEvent| {});
+        map.subscribe();
+        let transport = opened_by_hand(&client);
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        replied_by_hand(
+            &client,
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"recoverable":true,"epoch":"e1","offset":7}}"#,
+        );
+        let shared = client.shared();
+        let id = lock(&shared.core)
+            .machine
+            .find_subscription("map:a")
+            .expect("in the registry");
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let handed = loop {
+            let Poll::Ready(Some(handed)) = next(shared, &mut cx) else {
+                panic!("no event for the handler");
+            };
+            if matches!(
+                &handed,
+                Handed::Map {
+                    event: crate::MapSubscriptionEvent::Sync(_),
+                    ..
+                }
+            ) {
+                break handed;
+            }
+            deliver(shared, handed);
+        };
+
+        let position = lock(&shared.core).machine.subscription_position(id);
+        assert_eq!(position.map(|position| position.offset), Some(7));
+        drop(handed);
+    }
+
     // Block 45, D13: Block 41's deadlock detection covers a map
     // subscription's calls.
     #[cfg(feature = "unstable")]
