@@ -348,7 +348,24 @@ fn consumer_holds_messages(core: &Core, outboxes: &Outboxes, handlers: &Handlers
                     .get(of)
                     .is_some_and(|outbox| outbox.holds(slot.stream, event))
             })
+            || map_slot_holds(outboxes, handlers, event)
     })
+}
+
+/// Whether a map subscription's handler has `event` queued (Block 45, D13).
+#[cfg(feature = "unstable")]
+fn map_slot_holds(outboxes: &Outboxes, handlers: &Handlers, event: EventId) -> bool {
+    handlers.maps.iter().any(|(of, slot)| {
+        outboxes
+            .maps
+            .get(of)
+            .is_some_and(|outbox| outbox.holds(slot.stream, event))
+    })
+}
+
+#[cfg(not(feature = "unstable"))]
+fn map_slot_holds(_: &Outboxes, _: &Handlers, _: EventId) -> bool {
+    false
 }
 
 /// No handler call waits on the call `id` anymore: it settled or was
@@ -431,6 +448,8 @@ pub(super) struct Handlers {
     delivery: EventDelivery,
     client: Option<Slot<dyn ClientHandler>>,
     subscriptions: HashMap<SubscriptionId, Slot<dyn SubscriptionHandler>>,
+    #[cfg(feature = "unstable")]
+    maps: HashMap<SubscriptionId, Slot<dyn MapSubscriptionHandler>>,
     /// The consumer runs, from the first handler set.
     started: bool,
     waker: Option<Waker>,
@@ -465,6 +484,15 @@ impl Handlers {
             waker.wake();
         }
     }
+
+    /// No subscription of either kind has a handler.
+    fn no_subscription_handler(&self) -> bool {
+        #[cfg(feature = "unstable")]
+        if !self.maps.is_empty() {
+            return false;
+        }
+        self.subscriptions.is_empty()
+    }
 }
 
 /// Wakes the consumer, to see the client closed (Codex, #169).
@@ -477,6 +505,8 @@ pub(super) fn wake_consumer(shared: &Shared) {
 pub(super) enum Dropped {
     Client(Box<dyn ClientHandler>),
     Subscription(Box<dyn SubscriptionHandler>),
+    #[cfg(feature = "unstable")]
+    Map(Box<dyn MapSubscriptionHandler>),
 }
 
 /// Sets the client's handler, which takes over its stream (D1, D3); none
@@ -552,6 +582,53 @@ pub(super) fn install_subscription_handler(
     })
 }
 
+/// Sets the handler of the map subscription `of` under the core lock, as
+/// [`install_subscription_handler`] does a subscription's (Block 45, D13).
+#[cfg(feature = "unstable")]
+pub(super) fn install_map_handler(
+    shared: &Arc<Shared>,
+    core: &mut Core,
+    of: SubscriptionId,
+    handler: Box<dyn MapSubscriptionHandler>,
+) -> Option<Dropped> {
+    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
+        return Some(Dropped::Map(handler));
+    }
+    let stream = lock(&shared.outboxes)
+        .maps
+        .entry(of)
+        .or_default()
+        .open_stream();
+    shared.handle(core, Input::StreamOpened(Some(of)));
+    install(shared, core, |handlers| {
+        handlers
+            .maps
+            .insert(
+                of,
+                Slot {
+                    stream,
+                    handler: Some(handler),
+                },
+            )
+            .and_then(|slot| slot.handler)
+            .map(Dropped::Map)
+    })
+}
+
+/// Sets the handler of the map subscription `of`, which takes over its
+/// stream (Block 45, D13).
+#[cfg(feature = "unstable")]
+pub(super) fn set_map_handler(
+    shared: &Arc<Shared>,
+    of: SubscriptionId,
+    handler: Box<dyn MapSubscriptionHandler>,
+) {
+    let mut core = lock(&shared.core);
+    let old = install_map_handler(shared, &mut core, of, handler);
+    drop(core);
+    drop(old);
+}
+
 /// Installs a handler with `set`, starting the consumer at the first one.
 fn install(
     shared: &Arc<Shared>,
@@ -620,7 +697,7 @@ pub(super) fn start_again(shared: &Arc<Shared>, core: &mut Core) {
     let mut handlers = lock(&shared.handlers);
     let unstarted = handlers.delivery.is_thread()
         && !handlers.started
-        && (handlers.client.is_some() || !handlers.subscriptions.is_empty());
+        && (handlers.client.is_some() || !handlers.no_subscription_handler());
     let failed = if unstarted {
         start(shared, &mut handlers)
     } else {
@@ -664,6 +741,14 @@ pub(super) enum Handed {
         id: EventId,
         event: SubscriptionEvent,
         handler: Box<dyn SubscriptionHandler>,
+        stream: u64,
+    },
+    #[cfg(feature = "unstable")]
+    Map {
+        of: SubscriptionId,
+        id: EventId,
+        event: crate::MapSubscriptionEvent,
+        handler: Box<dyn MapSubscriptionHandler>,
         stream: u64,
     },
 }
@@ -784,11 +869,28 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
                 stream: slot.stream,
             })
         }
+        #[cfg(feature = "unstable")]
+        Some(of) if handlers.maps.contains_key(&of) => {
+            let slot = handlers.maps.get_mut(&of)?;
+            let outbox = outboxes.maps.get_mut(&of)?;
+            let polled = outbox.poll_take(slot.stream, cx);
+            remove_finished(&mut outboxes.maps, of);
+            let Poll::Ready(Some((id, event))) = polled else {
+                return None;
+            };
+            Some(Handed::Map {
+                of,
+                id,
+                event,
+                handler: slot.handler.take()?,
+                stream: slot.stream,
+            })
+        }
         Some(of) => {
             let slot = handlers.subscriptions.get_mut(&of)?;
             let outbox = outboxes.subscriptions.get_mut(&of)?;
             let polled = outbox.poll_take(slot.stream, cx);
-            remove_finished(&mut outboxes, of);
+            remove_finished(&mut outboxes.subscriptions, of);
             let Poll::Ready(Some((id, event))) = polled else {
                 return None;
             };
@@ -801,7 +903,7 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
             })
         }
     });
-    let idle = handlers.client.is_none() && handlers.subscriptions.is_empty();
+    let idle = handlers.client.is_none() && handlers.no_subscription_handler();
     if handed.is_none() {
         // Each outbox a handler waits on wakes the consumer.
         if let Some(slot) = &handlers.client {
@@ -812,9 +914,17 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
                 outbox.watch(slot.stream, cx);
             }
         }
+        #[cfg(feature = "unstable")]
+        for (of, slot) in &handlers.maps {
+            if let Some(outbox) = outboxes.maps.get_mut(of) {
+                outbox.watch(slot.stream, cx);
+            }
+        }
     }
     let id = match &handed {
         Some(Handed::Client { id, .. } | Handed::Subscription { id, .. }) => Some(*id),
+        #[cfg(feature = "unstable")]
+        Some(Handed::Map { id, .. }) => Some(*id),
         None => None,
     };
     if id.is_some() {
@@ -855,11 +965,34 @@ fn earliest(
             ),
         }
     }
-    let ids: Vec<SubscriptionId> = handlers.subscriptions.keys().copied().collect();
+    earliest_of(
+        &mut handlers.subscriptions,
+        &mut outboxes.subscriptions,
+        &mut earliest,
+        |handler| dropped.push(Dropped::Subscription(handler)),
+    );
+    #[cfg(feature = "unstable")]
+    earliest_of(
+        &mut handlers.maps,
+        &mut outboxes.maps,
+        &mut earliest,
+        |handler| dropped.push(Dropped::Map(handler)),
+    );
+    earliest
+}
+
+/// Moves `earliest` to the earliest event among the handlers in `slots`;
+/// a handler whose stream is gone goes to `gone`.
+fn earliest_of<H: ?Sized, E>(
+    slots: &mut HashMap<SubscriptionId, Slot<H>>,
+    outboxes: &mut HashMap<SubscriptionId, Outbox<E>>,
+    earliest: &mut Option<(EventId, Option<SubscriptionId>)>,
+    mut gone: impl FnMut(Box<H>),
+) {
+    let ids: Vec<SubscriptionId> = slots.keys().copied().collect();
     for of in ids {
-        let slot = &handlers.subscriptions[&of];
+        let slot = &slots[&of];
         let head = outboxes
-            .subscriptions
             .get(&of)
             .map_or(Head::Gone, |outbox| outbox.head(slot.stream));
         if head == Head::Gone {
@@ -868,31 +1001,24 @@ fn earliest(
         match head {
             Head::Event(id) if slot.handler.is_some() => {
                 if earliest.is_none_or(|(first, _)| id < first) {
-                    earliest = Some((id, Some(of)));
+                    *earliest = Some((id, Some(of)));
                 }
             }
             Head::Event(_) | Head::Empty => {}
-            Head::Gone => dropped.extend(
-                handlers
-                    .subscriptions
-                    .remove(&of)
-                    .and_then(|slot| slot.handler)
-                    .map(Dropped::Subscription),
-            ),
+            Head::Gone => {
+                if let Some(handler) = slots.remove(&of).and_then(|slot| slot.handler) {
+                    gone(handler);
+                }
+            }
         }
     }
-    earliest
 }
 
 /// Removes the outbox of a removed subscription once its last event is
 /// taken, as its stream does (Codex, #169).
-fn remove_finished(outboxes: &mut Outboxes, of: SubscriptionId) {
-    if outboxes
-        .subscriptions
-        .get(&of)
-        .is_some_and(Outbox::is_finished)
-    {
-        outboxes.subscriptions.remove(&of);
+fn remove_finished<E>(outboxes: &mut HashMap<SubscriptionId, Outbox<E>>, of: SubscriptionId) {
+    if outboxes.get(&of).is_some_and(Outbox::is_finished) {
+        outboxes.remove(&of);
     }
 }
 
@@ -950,6 +1076,33 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
                     None
                 }
                 _ => Some(Dropped::Subscription(handler)),
+            };
+            drop(handlers);
+            drop(old);
+            (id, outcome)
+        }
+        #[cfg(feature = "unstable")]
+        Handed::Map {
+            of,
+            id,
+            event,
+            mut handler,
+            stream,
+        } => {
+            let outcome = {
+                let _marked = Marked::new(shared, thread);
+                run(|| handler.on_event(event), thread)
+            };
+            let mut handlers = lock(&shared.handlers);
+            handlers.running = None;
+            handlers.watched.clear();
+            handlers.watched_ready.clear();
+            let old = match handlers.maps.get_mut(&of) {
+                Some(slot) if slot.stream == stream && slot.handler.is_none() => {
+                    slot.handler = Some(handler);
+                    None
+                }
+                _ => Some(Dropped::Map(handler)),
             };
             drop(handlers);
             drop(old);
@@ -1112,6 +1265,179 @@ mod tests {
             assert_eq!(*seen.lock().unwrap(), ["subscribing", "unsubscribed"]);
             assert!(lock(&client.shared().outboxes).subscriptions.is_empty());
         });
+    }
+
+    // Block 45, D13: a map subscription's handler is one consumer among
+    // the others: the earliest event goes first, whichever kind it is for.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn map_handlers_get_their_events_in_order_with_the_others() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let of_map = Arc::clone(&seen);
+            let map = client
+                .map_subscription_builder("map:a", crate::MapKind::Map)
+                .handler(move |event: crate::MapSubscriptionEvent| {
+                    of_map.lock().unwrap().push(format!("map {}", event.name()));
+                })
+                .build()
+                .unwrap();
+            let of_subscription = Arc::clone(&seen);
+            let subscription = client
+                .subscription_builder("news")
+                .handler(move |event: SubscriptionEvent| {
+                    of_subscription
+                        .lock()
+                        .unwrap()
+                        .push(format!("stream {}", event.name()));
+                })
+                .build()
+                .unwrap();
+            let of_map = Arc::clone(&seen);
+            let second = client
+                .new_map_subscription("map:b", crate::MapKind::Map)
+                .unwrap();
+            second.set_handler(move |event: crate::MapSubscriptionEvent| {
+                of_map
+                    .lock()
+                    .unwrap()
+                    .push(format!("second {}", event.name()));
+            });
+            // All queued before the consumer, on this thread, runs.
+            subscription.subscribe();
+            map.subscribe();
+            second.subscribe();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            [
+                "stream subscribing",
+                "map subscribing",
+                "second subscribing"
+            ]
+        );
+    }
+
+    /// Sets its flag when dropped, as [`Flagged`].
+    #[cfg(feature = "unstable")]
+    struct FlaggedMap(Arc<AtomicBool>);
+
+    #[cfg(feature = "unstable")]
+    impl Drop for FlaggedMap {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    impl MapSubscriptionHandler for FlaggedMap {}
+
+    // Block 45, D13: events() takes over, as for a subscription (D1), and
+    // the handler it replaced goes.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn events_takes_over_a_map_handler() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let map = client
+                .new_map_subscription("map:a", crate::MapKind::Map)
+                .unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            map.set_handler(FlaggedMap(Arc::clone(&dropped)));
+
+            let _stream = map.events();
+            map.subscribe();
+
+            assert!(set_within_a_second(&dropped).await);
+        });
+    }
+
+    // Block 45, D13: the outbox of a map subscription removed with a
+    // handler goes once the handler took the last event.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_removed_map_subscription_s_outbox_goes_after_its_handler_took_the_last_event() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let record = Arc::clone(&seen);
+            let map = client
+                .map_subscription_builder("map:a", crate::MapKind::Map)
+                .handler(move |event: crate::MapSubscriptionEvent| {
+                    record.lock().unwrap().push(event.name().to_owned());
+                })
+                .build()
+                .unwrap();
+            map.subscribe();
+            client.remove_map_subscription(&map);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            assert_eq!(*seen.lock().unwrap(), ["subscribing", "unsubscribed"]);
+            assert!(lock(&client.shared().outboxes).maps.is_empty());
+        });
+    }
+
+    // Block 45, D13: Block 41's deadlock detection covers a map
+    // subscription's calls.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_task_handler_s_map_calls_fail_at_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let map = client
+            .new_map_subscription("map:a", crate::MapKind::Map)
+            .unwrap();
+        map.subscribe();
+        let _marked = Marked::new(client.shared(), false);
+        let mut cx = Context::from_waker(Waker::noop());
+        let deadlocked = |code: Poll<Option<u32>>| {
+            assert_eq!(code, Poll::Ready(Some(crate::codes::error::WOULD_DEADLOCK)));
+        };
+
+        deadlocked(
+            Box::pin(map.publish("k", b"{}".to_vec()))
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        deadlocked(
+            Box::pin(map.remove("k"))
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        deadlocked(
+            Box::pin(map.ready())
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        deadlocked(
+            Box::pin(map.presence())
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
     }
 
     // Codex, #169: a runtime that shuts down drops the consumer, and its
@@ -1705,6 +2031,8 @@ mod tests {
         fn sync<T: Send + Sync>() {}
         sync::<crate::ClientBuilder>();
         sync::<crate::SubscriptionBuilder>();
+        #[cfg(feature = "unstable")]
+        sync::<crate::MapSubscriptionBuilder>();
     }
 
     // Codex, #169: a consumer left without a handler ends when the client

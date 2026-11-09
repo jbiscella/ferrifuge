@@ -159,7 +159,7 @@ impl MapSubscription {
     /// client's other handlers; its events count as delivered when its
     /// method returns.
     pub fn set_handler(&self, handler: impl super::MapSubscriptionHandler) {
-        drop(Box::new(handler));
+        super::handler::set_map_handler(&self.shared, self.id, Box::new(handler));
     }
 
     /// Events from now on, as [`crate::Subscription::events`] gives a
@@ -458,7 +458,14 @@ impl MapSubscriptionBuilder {
                 },
             );
         }
+        let replaced = self.handler.and_then(|handler| {
+            let handler = handler
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::handler::install_map_handler(&self.shared, &mut core, id, handler)
+        });
         drop(core);
+        drop(replaced);
         Ok(MapSubscription {
             shared: self.shared,
             id,

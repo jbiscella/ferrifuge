@@ -881,6 +881,64 @@ fn error_reply(command: &Value, code: u32, temporary: bool) -> String {
     )
 }
 
+// Block 45 D5, Block 41 D3: an event with a handler counts for the position
+// it would set at once, so a subscribe built meanwhile recovers from it, and
+// it is not withdrawn.
+#[test]
+fn an_update_with_its_handler_sets_the_position_at_once() {
+    let (mut machine, transport, id) = synced();
+    let pushed = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"scores","pub":{"key":"b","data":{"v":1},"offset":8}}}"#,
+    ));
+    let (event, _) = events(&pushed)[0].clone();
+
+    machine.handle(Input::EventHanded(event));
+    let handed = machine.subscription_position(id);
+    let disconnected = machine.handle(Input::Disconnect);
+
+    assert_eq!(handed.map(|position| position.offset), Some(8));
+    assert!(
+        !disconnected
+            .iter()
+            .any(|action| matches!(action, Action::Withdraw(_))),
+        "{disconnected:?}"
+    );
+}
+
+#[test]
+fn a_sync_with_its_handler_sets_the_position_at_once() {
+    let (mut machine, transport, id, first) = subscribing(2);
+    machine.handle(Input::StreamOpened(Some(id)));
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"recoverable":true,"epoch":"e1","offset":7,"state":[{"key":"a","data":{"v":1},"offset":7}]"#,
+        ),
+    ));
+    let events = events(&live);
+    assert_eq!(
+        events
+            .iter()
+            .map(|(_, event)| event.name())
+            .collect::<Vec<_>>(),
+        ["subscribed", "sync"]
+    );
+    machine.handle(Input::EventTaken(events[0].0));
+    assert_eq!(machine.subscription_position(id), None);
+
+    machine.handle(Input::EventHanded(events[1].0));
+
+    assert_eq!(
+        machine.subscription_position(id),
+        Some(StreamPosition {
+            offset: 7,
+            epoch: "e1".into()
+        })
+    );
+}
+
 #[test]
 fn a_subscribe_after_a_taken_sync_recovers_in_the_stream_phase() {
     let (mut machine, transport, _) = synced();

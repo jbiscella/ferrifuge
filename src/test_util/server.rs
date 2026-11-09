@@ -39,7 +39,8 @@ type Rpc = Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, CallError> + Send + Sync>;
 /// Every channel has one stream and one epoch, with offsets from 1 and a
 /// history of every publication, which a subscribe asking to recover from
 /// a position of that stream gets back. Clones share one double, and
-/// several clients may connect to it.
+/// several clients may connect to it. It does not model map subscriptions
+/// while they are unstable.
 ///
 /// ```
 /// use ferrifuge::test_util::Server;
