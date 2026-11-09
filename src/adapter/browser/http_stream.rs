@@ -349,6 +349,25 @@ fn ended_by(failure: String) -> Inbound {
     }
 }
 
+/// Admits `message` to the inbox; false when it overflows. One chunk can
+/// hold more messages than the inbox, which is no sign of a slow reader:
+/// while the driver takes messages between turns of the event loop, this
+/// waits for it, and only a turn in which it took none is an overflow.
+async fn admit(state: &Rc<RefCell<State>>, mut message: Vec<u8>, bound: Bound) -> bool {
+    loop {
+        message = match state.borrow_mut().inbox.admit(message, bound) {
+            Ok(()) => return true,
+            Err(message) => message,
+        };
+        let waiting = state.borrow().inbox.frames();
+        State::wake(state);
+        gloo_timers::future::TimeoutFuture::new(0).await;
+        if state.borrow().inbox.frames() >= waiting {
+            return false;
+        }
+    }
+}
+
 /// Reads `body` until it ends, one chunk after another whether or not the
 /// driver polls the transport (D8), and admits each message to the inbox.
 /// The stream's end, a failure or a message over the size limit is queued
@@ -386,9 +405,9 @@ async fn read_body(
                 reason: "stream ended".to_owned(),
             }),
         };
-        let mut shared = state.borrow_mut();
         while let Some(message) = messages.pop_front() {
-            if shared.inbox.admit(message, bound).is_err() {
+            if !admit(&state, message, bound).await {
+                let mut shared = state.borrow_mut();
                 shared.inbox.clear();
                 shared.overflowed = true;
                 drop(shared);
@@ -398,9 +417,8 @@ async fn read_body(
         }
         let ended = end.is_some();
         if let Some(end) = end {
-            shared.inbox.end(end);
+            state.borrow_mut().inbox.end(end);
         }
-        drop(shared);
         State::wake(&state);
         if ended {
             return;
@@ -906,6 +924,31 @@ mod tests {
 
         assert_eq!(pulls(&state), 3.0, "the reading stopped at the overflow");
         assert!(http.state.borrow().inbox.is_empty());
+    }
+
+    // Codex, #209: a chunk can hold more messages than the inbox while the
+    // client is reading all of them.
+    #[wasm_bindgen_test]
+    async fn a_chunk_larger_than_the_inbox_is_no_overflow_while_the_client_reads() {
+        let (fetch, state) = paced_fetch();
+        let bound = Bound {
+            messages: 1,
+            bytes: 1 << 20,
+        };
+        let mut http = open_bounded(fetch, LIMIT, bound).await;
+        push(&state, &format!("{}{}{}", line(1), line(2), line(3)));
+
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    recv_within(&mut http, true, 1000).await,
+                    Some(Inbound::Frame(_))
+                ),
+                "a message of the chunk"
+            );
+        }
+
+        assert!(!http.state.borrow().overflowed);
     }
 
     // Block 44, D8: the reading ends with the transport, also over a body
