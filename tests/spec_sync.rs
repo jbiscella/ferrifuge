@@ -30,7 +30,7 @@ const P_CLAIM: &str = "// @P scenario: ";
 const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: those of
-/// the sub-increments after 44b (Block 44). A scenario leaves the list
+/// the sub-increments after 44c (Block 44). A scenario leaves the list
 /// when a test claims it.
 const W_NOT_YET_WRITTEN: &[&str] = &[
     "A browser client falls back to http_stream when websocket is unreachable",
@@ -38,11 +38,6 @@ const W_NOT_YET_WRITTEN: &[&str] = &[
     "A stream not read stops a browser client reading its http_stream response",
     "A browser client falls back to sse when websocket and http_stream are unreachable",
     "An sse stream that ends makes a browser client reconnect, not the browser's EventSource",
-    "Going offline closes a browser client's connection, and coming online reconnects it at once",
-    "Coming online while connected changes nothing",
-    "A page entering the back/forward cache closes the connection, and its restore reconnects at once",
-    "A page hidden without entering the back/forward cache keeps the connection",
-    "A disconnected browser client stops listening to network and page events",
     "A constructor given to a browser client replaces the global",
     "A browser client skips a transport the page has no constructor for",
     "Building a browser client with no usable transport fails",

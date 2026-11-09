@@ -153,6 +153,10 @@ pub(super) struct Shared {
     pub(super) handlers: Mutex<super::handler::Handlers>,
     /// The runtime the client's tasks run on (Block 28).
     pub(super) runtime: Handle,
+    /// The browser's network and page listeners (Block 44, D10, D11).
+    /// Locked after `core`.
+    #[cfg(adapter_browser)]
+    events: Mutex<super::backend::events::Events>,
 }
 
 /// Events waiting for their streams (Block 15). Locked after
@@ -493,6 +497,21 @@ impl Shared {
     pub(super) fn woken(&self) -> bool {
         use futures_util::FutureExt as _;
         self.actions_queued.notified().now_or_never().is_some()
+    }
+
+    /// A network or page event a listener heard (Block 44, D10, D11).
+    #[cfg(adapter_browser)]
+    pub(super) fn heard(&self, heard: super::backend::events::Heard) {
+        let mut core = lock(&self.core);
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let input = lock(&self.events).input(heard, core.machine.state());
+        if let Some(input) = input {
+            self.handle(&mut core, input);
+        }
+        drop(core);
+        self.actions_queued.notify_one();
     }
 
     /// Feeds `input` to the machine: events go to their outboxes, taken at
@@ -927,6 +946,12 @@ pub struct ClientBuilder {
     #[cfg(adapter_tokio)]
     /// The application's cookie jar (Block 43).
     cookie_jar: super::tokio::net::Jar,
+    #[cfg(adapter_browser)]
+    /// Where `offline` and `online` are listened to (Block 44, D10).
+    network_event_target: Option<web_sys::EventTarget>,
+    #[cfg(adapter_browser)]
+    /// Where `pagehide` and `pageshow` are listened to (Block 44, D11).
+    page_event_target: Option<web_sys::EventTarget>,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -982,6 +1007,9 @@ impl std::fmt::Debug for ClientBuilder {
             // Whether one is set: never its cookies (Block 43, D6).
             f.field("cookie_jar", &self.cookie_jar);
         }
+        #[cfg(adapter_browser)]
+        f.field("network_event_target", &self.network_event_target.is_some())
+            .field("page_event_target", &self.page_event_target.is_some());
         f.finish()
     }
 }
@@ -1019,6 +1047,36 @@ impl ClientBuilder {
         Fut: Future<Output = Result<Vec<u8>, DataError>> + MaybeSend + 'static,
     {
         self.get_data = Some(Arc::new(move || Box::pin(get_data())));
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Listens to `offline` and `online` on `target` instead of
+    /// `globalThis` (Block 44, D10; centrifuge-js `networkEventTarget`):
+    /// while the client is not disconnected, `offline` closes its
+    /// connection, which then waits the reconnect delay, and `online`
+    /// while connecting reconnects it at once, or after a draw from
+    /// [`Config::reconnect_jitter_window`] when it lost its connection.
+    /// A target that never fires, `EventTarget::new()`, turns this off.
+    #[must_use]
+    pub fn network_event_target(mut self, target: web_sys::EventTarget) -> Self {
+        self.network_event_target = Some(target);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Listens to `pagehide` and `pageshow` on `target` instead of
+    /// `globalThis` (Block 44, D11): a
+    /// `pagehide` whose `persisted` is true, the page entering the
+    /// back/forward cache, closes the connection with the reason "page
+    /// entered back/forward cache", and the `pageshow` that restores the
+    /// page reconnects as `online` does. Events whose `persisted` is false
+    /// change nothing. A target that never fires turns this off.
+    #[must_use]
+    pub fn page_event_target(mut self, target: web_sys::EventTarget) -> Self {
+        self.page_event_target = Some(target);
         self
     }
 
@@ -1324,6 +1382,10 @@ impl Client {
             event_delivery: super::EventDelivery::default(),
             #[cfg(adapter_tokio)]
             cookie_jar: super::tokio::net::Jar::default(),
+            #[cfg(adapter_browser)]
+            network_event_target: None,
+            #[cfg(adapter_browser)]
+            page_event_target: None,
         }
     }
 
@@ -1354,6 +1416,10 @@ impl Client {
             event_delivery,
             #[cfg(adapter_tokio)]
             cookie_jar,
+            #[cfg(adapter_browser)]
+            network_event_target,
+            #[cfg(adapter_browser)]
+            page_event_target,
         } = builder;
         #[cfg(adapter_tokio)]
         check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
@@ -1397,27 +1463,37 @@ impl Client {
         // The page's event loop needs no handle (Block 44, D4).
         #[cfg(adapter_browser)]
         let runtime = Handle;
-        let shared = Arc::new(Shared {
-            core: Mutex::new(Core::new(machine)),
-            outboxes: Mutex::new(Outboxes::default()),
-            callbacks: Mutex::new(SubscriptionCallbacks::default()),
-            calls: Mutex::new(HashMap::new()),
-            ready: Mutex::new(Waiters::default()),
-            driver_gone: AtomicBool::new(false),
-            driver_ended: Notify::new(),
-            actions_queued: Notify::new(),
-            closed: AtomicBool::new(false),
-            log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
-            #[cfg(adapter_tokio)]
-            network: Arc::new(
-                Network::new(Tls::new(trust), proxy)
-                    .with_connector(connector)
-                    .with_cookie_jar(cookie_jar),
-            ),
-            #[cfg(adapter_tokio)]
-            http_headers,
-            handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
-            runtime: runtime.clone(),
+        let shared = Arc::new_cyclic(|weak| {
+            #[cfg(not(adapter_browser))]
+            let _ = weak;
+            Shared {
+                core: Mutex::new(Core::new(machine)),
+                outboxes: Mutex::new(Outboxes::default()),
+                callbacks: Mutex::new(SubscriptionCallbacks::default()),
+                calls: Mutex::new(HashMap::new()),
+                ready: Mutex::new(Waiters::default()),
+                driver_gone: AtomicBool::new(false),
+                driver_ended: Notify::new(),
+                actions_queued: Notify::new(),
+                closed: AtomicBool::new(false),
+                log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
+                #[cfg(adapter_tokio)]
+                network: Arc::new(
+                    Network::new(Tls::new(trust), proxy)
+                        .with_connector(connector)
+                        .with_cookie_jar(cookie_jar),
+                ),
+                #[cfg(adapter_tokio)]
+                http_headers,
+                handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
+                runtime: runtime.clone(),
+                #[cfg(adapter_browser)]
+                events: Mutex::new(super::backend::events::Events::new(
+                    network_event_target,
+                    page_event_target,
+                    std::sync::Weak::clone(weak),
+                )),
+            }
         });
         let driver = Driver {
             endpoints: endpoints
