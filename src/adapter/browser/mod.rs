@@ -5,6 +5,7 @@
 
 pub(super) mod events;
 pub(super) mod http_stream;
+pub(super) mod shims;
 pub(super) mod sse;
 pub(super) mod websocket;
 
