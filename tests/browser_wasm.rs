@@ -1,8 +1,9 @@
 //! The @W scenarios of the websocket transport, of the network and page
-//! events and of `http_stream` (Blocks 44b, 44c, 44d): the browser client
-//! against the Centrifugo that `tests/browser.rs` starts, run by
-//! `wasm-bindgen-test-runner` in a browser (Block 44, D18). The server's
-//! `host:port` comes at compile time in `FERRIFUGE_W_SERVER`.
+//! events, of `http_stream` and of sse (Blocks 44b to 44e): the browser
+//! client against the Centrifugo that `tests/browser.rs` starts, and the
+//! relay in front of it, run by `wasm-bindgen-test-runner` in a browser
+//! (Block 44, D18). The server's and the relay's `host:port` come at compile
+//! time in `FERRIFUGE_W_SERVER` and `FERRIFUGE_W_RELAY`.
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
@@ -28,6 +29,12 @@ wasm_bindgen_test_configure!(run_in_browser);
 const SERVER: &str = match option_env!("FERRIFUGE_W_SERVER") {
     Some(server) => server,
     None => "127.0.0.1:8000",
+};
+
+/// `host:port` of the relay in front of the server, `tests/support/http_proxy.rs`.
+const RELAY: &str = match option_env!("FERRIFUGE_W_RELAY") {
+    Some(relay) => relay,
+    None => "127.0.0.1:8001",
 };
 
 /// How long a step waits for what it expects.
@@ -857,4 +864,85 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
         Either::Left((event, _)) => panic!("yielded {event:?} after the publications"),
         Either::Right(_) => {}
     }
+}
+
+fn sse_endpoint(server: &str) -> String {
+    format!("http://{server}/connection/sse")
+}
+
+/// What the relay answers to its control request `command`
+/// (`tests/support/http_proxy.rs`, `CONTROL`).
+async fn relay(command: &str) -> String {
+    let global = js_sys::global();
+    let call = |object: &JsValue, method: &str, argument: Option<&JsValue>| {
+        let function: js_sys::Function = js_sys::Reflect::get(object, &JsValue::from_str(method))
+            .expect("a method")
+            .unchecked_into();
+        let promise = match argument {
+            Some(argument) => function.call1(object, argument),
+            None => function.call0(object),
+        }
+        .expect("a promise");
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(promise))
+    };
+    let url = JsValue::from_str(&format!("http://{RELAY}/_relay/{command}"));
+    let response = within(WAIT, call(&global, "fetch", Some(&url)))
+        .await
+        .expect("the relay answers");
+    within(WAIT, call(&response, "text", None))
+        .await
+        .expect("the relay's answer")
+        .as_string()
+        .expect("text")
+}
+
+/// How many sse stream requests the relay has received.
+async fn sse_streams_relayed() -> u32 {
+    relay("requests/connection/sse")
+        .await
+        .parse()
+        .expect("a count")
+}
+
+// @W scenario: A browser client falls back to sse when websocket and http_stream are unreachable
+#[wasm_bindgen_test]
+async fn a_browser_client_falls_back_to_sse() {
+    let client = Client::builder_with_transports([
+        (TransportKind::WebSocket, UNREACHABLE.to_owned()),
+        (
+            TransportKind::HttpStream,
+            "http://127.0.0.1:1/connection/http_stream".to_owned(),
+        ),
+        (TransportKind::Sse, sse_endpoint(SERVER)),
+    ])
+    .build()
+    .expect("a valid client");
+    let mut events = client.events();
+
+    client.connect();
+
+    assert!(matches!(
+        next_event(&mut events).await,
+        ClientEvent::Connecting { .. }
+    ));
+    assert_eq!(connected_over(&mut events).await, "sse");
+}
+
+// @W scenario: An sse stream that ends makes a browser client reconnect, not the browser's EventSource
+#[wasm_bindgen_test]
+async fn an_sse_stream_that_ends_makes_the_client_reconnect() {
+    let before = sse_streams_relayed().await;
+    let client = Client::builder_with_transports([(TransportKind::Sse, sse_endpoint(RELAY))])
+        .build()
+        .expect("a valid client");
+    let mut events = client.events();
+    client.connect();
+    assert_eq!(connected_over(&mut events).await, "sse");
+
+    relay("end-streams").await;
+
+    connecting_with(&mut events, 1, "transport closed").await;
+    assert_eq!(connected_over(&mut events).await, "sse");
+    sleep(10_000).await;
+    assert_eq!(sse_streams_relayed().await - before, 2);
 }

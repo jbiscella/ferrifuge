@@ -33,8 +33,6 @@ const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 /// the sub-increments after 44d (Block 44). A scenario leaves the list
 /// when a test claims it.
 const W_NOT_YET_WRITTEN: &[&str] = &[
-    "A browser client falls back to sse when websocket and http_stream are unreachable",
-    "An sse stream that ends makes a browser client reconnect, not the browser's EventSource",
     "A constructor given to a browser client replaces the global",
     "A browser client skips a transport the page has no constructor for",
     "Building a browser client with no usable transport fails",
