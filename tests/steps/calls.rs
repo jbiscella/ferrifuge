@@ -250,6 +250,40 @@ fn the_client_calls_rpc(world: &mut ClientWorld, method: String, data: String, w
     call(world, &method, data.into_bytes());
 }
 
+// Block 45a: map_publish and map_remove on the client. The key may be
+// empty, which the server refuses.
+#[cfg(feature = "unstable")]
+#[when(
+    regex = r#"^the client calls map_publish on "([^"]*)" with key "([^"]*)" and data (\{.*\})$"#
+)]
+fn the_client_calls_map_publish(
+    world: &mut ClientWorld,
+    channel: String,
+    key: String,
+    data: String,
+) {
+    let made_at = Instant::now();
+    let future = world.client().map_publish(channel, key, data.into_bytes());
+    track(world, "map_publish", made_at, async move {
+        future.await.map(|()| Returned::Published)
+    });
+}
+
+#[cfg(feature = "unstable")]
+#[when(regex = r#"^the client calls map_remove on "([^"]*)" with key "([^"]*)"$"#)]
+fn the_client_calls_map_remove(world: &mut ClientWorld, channel: String, key: String) {
+    let made_at = Instant::now();
+    let future = world.client().map_remove(channel, key);
+    track(world, "map_remove", made_at, async move {
+        future.await.map(|()| Returned::Published)
+    });
+}
+
+#[then(regex = r"^the call fails with code (\d+)$")]
+async fn the_call_fails_with_code(world: &mut ClientWorld, code: u32) {
+    assert_eq!(last_error(world).await.code, code);
+}
+
 #[when(regex = r#"^the client calls RPC "(\w+)" and RPC "(\w+)" concurrently$"#)]
 fn the_client_calls_two_rpcs(world: &mut ClientWorld, first: String, second: String) {
     call(world, &first, b"{}".to_vec());

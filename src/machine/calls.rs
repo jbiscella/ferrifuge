@@ -617,6 +617,12 @@ impl Machine {
             (None, CallRequest::Publish { .. }, ReplyResult::Publish | ReplyResult::Empty) => {
                 Ok(CallReply::Publish)
             }
+            #[cfg(feature = "unstable")]
+            (
+                None,
+                CallRequest::MapPublish { .. } | CallRequest::MapRemove { .. },
+                ReplyResult::Publish | ReplyResult::Empty,
+            ) => Ok(CallReply::Publish),
             (None, CallRequest::History { .. }, ReplyResult::History(history)) => {
                 Ok(CallReply::History(HistoryResult {
                     publications: history.publications,
@@ -734,6 +740,17 @@ fn method_of(request: &CallRequest) -> Method {
             channel: channel.clone(),
         }),
         CallRequest::Send { data } => Method::Send(data.clone()),
+        #[cfg(feature = "unstable")]
+        CallRequest::MapPublish { channel, data, .. } => Method::Publish(PublishRequest {
+            channel: channel.clone(),
+            data: data.clone(),
+            ..PublishRequest::default()
+        }),
+        #[cfg(feature = "unstable")]
+        CallRequest::MapRemove { channel, .. } => Method::Publish(PublishRequest {
+            channel: channel.clone(),
+            ..PublishRequest::default()
+        }),
     }
 }
 

@@ -685,6 +685,16 @@ const COOKIES: &[&str] = &[
 #[cfg(not(feature = "cookies"))]
 const COOKIES: &[&str] = &[];
 
+/// Block 45: map subscriptions, run only when the BDD binary is built with
+/// `unstable` (Block 45, D16).
+#[cfg(feature = "unstable")]
+const MAPS: &[&str] = &[
+    // 45a: map_publish and map_remove on the client.
+    "A refused map publish fails with the server's code",
+];
+#[cfg(not(feature = "unstable"))]
+const MAPS: &[&str] = &[];
+
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
 /// (Block 41, D8): none since 41d ran `@thread`.
 const EXAMPLES_NOT_YET: &[&str] = &[];
@@ -811,7 +821,8 @@ async fn run_scenarios() {
             let outside = !scenario.tags.is_empty()
                 && scenario.tags.iter().all(|tag| tag == "P" || tag == "W");
             (IMPLEMENTED.contains(&scenario.name.as_str())
-                || COOKIES.contains(&scenario.name.as_str()))
+                || COOKIES.contains(&scenario.name.as_str())
+                || MAPS.contains(&scenario.name.as_str()))
                 && !outside
                 && !scenario
                     .tags
@@ -911,7 +922,7 @@ fn assert_implemented_scenarios_exist() {
             names.extend(feature.scenarios.into_iter().map(|s| s.name));
         }
     }
-    for name in IMPLEMENTED {
+    for name in IMPLEMENTED.iter().chain(COOKIES).chain(MAPS) {
         assert!(
             names.contains(*name),
             "no scenario named {name:?} in {FEATURES}"
