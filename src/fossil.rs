@@ -223,6 +223,22 @@ fn checksum(target: &[u8]) -> u32 {
     })
 }
 
+/// A delta writing `base` out `times` times with copies only: a few bytes
+/// that rebuild far more than they carry.
+#[cfg(all(test, feature = "unstable"))]
+pub(crate) fn write_repeats(base: &[u8], times: usize) -> Vec<u8> {
+    let target = base.repeat(times);
+    let mut delta = number(len(target.len()));
+    delta.push(b'\n');
+    for _ in 0..times {
+        delta.extend(number(len(base.len())));
+        delta.extend(b"@0,");
+    }
+    delta.extend(number(checksum(&target)));
+    delta.push(b';');
+    delta
+}
+
 /// A delta turning `base` into `target`: a copy of their common prefix, an
 /// insert of what differs, a copy of their common suffix. For the tests'
 /// servers (Block 19, D9); the client never encodes deltas.

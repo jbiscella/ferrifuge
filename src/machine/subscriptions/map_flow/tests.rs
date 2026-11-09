@@ -1845,6 +1845,169 @@ fn a_delta_rebuilding_past_the_inbound_limit_fails_and_keeps_no_base() {
     assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
 }
 
+/// A value of `len` bytes that fossil's copies can repeat.
+fn long_value(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|n| b'a' + u8::try_from((n * n + n / 7) % 26).unwrap())
+        .collect()
+}
+
+fn whole_bytes(key: &str, data: &[u8], offset: u64) -> String {
+    format!(
+        r#"{{"key":"{key}","data":{},"offset":{offset}}}"#,
+        wrapped(data)
+    )
+}
+
+fn delta_bytes(key: &str, from: &[u8], to: &[u8], offset: u64) -> String {
+    format!(
+        r#"{{"key":"{key}","delta":true,"data":{},"offset":{offset}}}"#,
+        wrapped(&crate::fossil::write(from, to))
+    )
+}
+
+/// A delta rebuilding `base` written out `times` times, in a few bytes.
+fn expanding(key: &str, base: &[u8], times: usize, offset: u64) -> String {
+    format!(
+        r#"{{"key":"{key}","delta":true,"data":{},"offset":{offset}}}"#,
+        wrapped(&crate::fossil::write_repeats(base, times))
+    )
+}
+
+fn bounded_delta(machine: &mut Machine, max_state_bytes: usize) -> (SubscriptionId, Value) {
+    let mut options = delta_options();
+    options.max_state_bytes = NonZeroUsize::new(max_state_bytes).unwrap();
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    (id, first)
+}
+
+fn ended_with_code_5(actions: &[Action]) {
+    assert_eq!(unsubscribes(actions), 1, "{actions:?}");
+    let events = events(actions);
+    assert!(
+        events
+            .iter()
+            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|(_, event)| matches!(
+            event,
+            MapSubscriptionEvent::Sync(..) | MapSubscriptionEvent::Update(..)
+        )),
+        "{events:?}"
+    );
+}
+
+// Codex, #202: a superseded value is freed as the load is rebuilt, so only
+// what the state holds counts.
+#[test]
+fn values_a_load_superseded_do_not_count_toward_the_bound() {
+    let (mut machine, transport) = connected();
+    let (_, first) = bounded_delta(&mut machine, 3000);
+    let mut current = long_value(1000);
+    let mut publications = Vec::new();
+    for version in 0..20_u8 {
+        let mut next = current.clone();
+        next[0] = b'A' + version;
+        publications.push(delta_bytes("a", &current, &next, u64::from(version) + 2));
+        current = next;
+    }
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":21,"state":[{}],"publications":[{}]"#,
+                whole_bytes("a", &long_value(1000), 1),
+                publications.join(",")
+            ),
+        ),
+    ));
+
+    assert_eq!(unsubscribes(&live), 0, "{live:?}");
+    let synced = events(&live)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            MapSubscriptionEvent::Sync(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("a sync");
+    assert_eq!(synced.len(), 1);
+    assert_eq!(synced[0].data, current);
+}
+
+// Codex, #202: small deltas can rebuild far more than the replies carried.
+#[test]
+fn a_state_rebuilt_past_the_bound_ends_the_subscription_with_code_5() {
+    let (mut machine, transport) = connected();
+    let (id, first) = bounded_delta(&mut machine, 1500);
+    let base = long_value(200);
+
+    let ended = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":4,"state":[{},{}],"publications":[{},{}]"#,
+                whole_bytes("a", &base, 1),
+                whole_bytes("b", &base, 2),
+                expanding("a", &base, 5, 3),
+                expanding("b", &base, 5, 4)
+            ),
+        ),
+    ));
+
+    ended_with_code_5(&ended);
+    assert_eq!(bases(&machine, id), None);
+}
+
+// Codex, #202: a completed recovery's updates are all kept, so they all count.
+#[test]
+fn a_catch_up_rebuilt_past_the_bound_ends_the_subscription_and_forgets_the_position() {
+    let (mut machine, transport) = connected();
+    let (id, first) = bounded_delta(&mut machine, 1500);
+    let base = long_value(200);
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"state":[{}]"#,
+                whole_bytes("a", &base, 1)
+            ),
+        ),
+    ));
+    take_all(&mut machine, &live);
+    assert!(machine.subscription_position(id).is_some());
+    let (transport, recovering) = reconnect(&mut machine, transport);
+    let recovering = recovering.expect("a subscribe");
+    let big = base.repeat(5);
+    let mut other = big.clone();
+    other[0] = b'Z';
+
+    let ended = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":3,"publications":[{},{}]"#,
+                expanding("a", &base, 5, 2),
+                delta_bytes("a", &big, &other, 3)
+            ),
+        ),
+    ));
+
+    ended_with_code_5(&ended);
+    assert_eq!(bases(&machine, id), None);
+    assert_eq!(machine.subscription_position(id), None);
+}
+
 #[test]
 fn a_delta_while_delta_is_off_fails() {
     let (mut machine, transport, id) = synced();

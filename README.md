@@ -412,9 +412,9 @@ connection with 3008 "slow". The client therefore handles a page as soon
 as it reads it, even while the application has not taken earlier events;
 but a full read-ahead still stops the reading (Block 15), so an
 application that leaves its streams unread can make loads time out. The
-pages of one load may add up to `max_state_bytes`, 64 MiB by default;
-past it the subscription ends with `unsubscribed` 5 "map state too
-large". A server older than 6.8.0 answers a map subscription as a stream
+pages of one load may add up to `max_state_bytes`, 64 MiB by default,
+and so may the state or catch-up rebuilt from them; past it the
+subscription ends with `unsubscribed` 5 "map state too large". A server older than 6.8.0 answers a map subscription as a stream
 one, and the subscription ends with `unsubscribed` 6. The application
 holds the `Sync` it gets, and its own copy of the map.
 
