@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–45 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–46 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -59,7 +59,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 
 - sockjs, webtransport transports (webtransport planned: Block 48)
 - map subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 45, behind the `unstable` feature), shared poll subscriptions (experimental; planned: Block 47)
-- client publish debouncing (Centrifugo PRO; planned: Block 46)
+- client publish debouncing (Centrifugo PRO; reversed by the owner decision of 2026-11-06, late: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
 - `closed` state
 
@@ -83,6 +83,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 18, out of scope | subscribe commands in the frame of the connect command on websocket open | owner, 2026-11-06, late (item 31) | 36 |
 | Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |
 | Block 0, Block 9 and Block 11, out of scope | map subscriptions | owner, 2026-11-06, late (item 29) | 45 |
+| Block 0, Block 13 and Block 18, out of scope | client publish debouncing | owner, 2026-11-06, late (item 32) | 46 |
 
 ### Test layers
 
@@ -1535,7 +1536,7 @@ Feature: Server-side subscriptions
 
 **Dependencies:** Blocks 8, 9, 12, 15.
 
-**Out of scope:** publish debouncing (Block 0); batching several calls into one frame, Block 18 (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API); automatic batching, Block 36.
+**Out of scope:** publish debouncing, Block 46; batching several calls into one frame, Block 18 (owner decision, 2026-11-04: the scope is centrifuge-js parity, which includes its batching API); automatic batching, Block 36.
 
 **Decided while planning this block** (2026-11-06, through the reviewer the owner delegated such points to; the owner's decisions of 2026-11-04 and 2026-11-05 put them here):
 - **join and leave:** a `join_leave` subscription option, sent as `SubscribeRequest.join_leave`, asks the server for join and leave pushes, delivered, each carrying the `ClientInfo`, as `SubscriptionEvent::Join` and `SubscriptionEvent::Leave`, and as `ServerSubscriptionEvent::Join` and `ServerSubscriptionEvent::Leave` for server-side subscriptions; a push for a subscription that is not subscribed is dropped; under Block 15 these events wait and are withdrawn like publications (spec, "ask server to push Join/Leave"; `client.proto`, `Push.join`, `Push.leave`; centrifuge-js 63ed73e `subscription.ts:1252-1262`, `centrifuge.ts:2556-2593`);
@@ -2354,7 +2355,7 @@ Feature: Event delivery and backpressure
   - I3 at most one open transport per client: core, after every step; adapter, at quiescence (`FakeServer::connections`).
   - I4 liveness: within 3 s of healing, the `connect()` call included, the client is `connected` and every subscription not `unsubscribed` is `subscribed`. Core; the adapter reports I4 when quiescence is not reached within 10 s.
   - I5 cleanup: after `disconnect()` and until the next `connect()`, no transport is open or opened, no client timer runs, no subscription timer is set, and no token, data or state fetch starts; only the timers of calls made since run (Block 13), and a resubscribe backoff armed before `disconnect()`, which may elapse but starts nothing; a subscribe flow's callback running at `disconnect()` may still answer, start the flow's next callback and, on a failure, arm the resubscribe backoff (amended by Block 42 D11); a later `connect()` subscribes it only once its delay has elapsed (Block 10; centrifuge-js 63ed73e `centrifuge.ts` `_sendSubscribeCommands`, `subscription.ts` `_scheduleResubscribe`, `_subscribe`). Core; adapter: no new connection and no callback call at quiescence.
-  - I6 every call settles: each of its waits (for its subscription or the connection, for room, for its reply) ends within `Config::timeout` (Block 13), so it settles within 3 × `Config::timeout`: exactly in the core, plus 1 s in the adapter.
+  - I6 every call settles: each of its waits (for its subscription or the connection, for a debounce window, Block 46 D6, for room, for its reply) ends within `Config::timeout` (Block 13), so it settles within 3 × `Config::timeout`, 4 × for a publish that waited in a debounce window (Block 46 D6): exactly in the core, plus 1 s in the adapter.
   - I7 no duplicate `connected` or `subscribed` without a state change between: part of I1, since each state change is one event (Block 15).
   - I8 exactly once: per recoverable subscription, client-side and server-side, the offsets delivered continue without gap or duplicate across reconnects, resubscribes and `unsubscribe()`/`subscribe()`; they restart only after `subscribed` with `recovered` false or a getState reload. Delivered means taken, or emitted while no stream is open (Block 15). A removed and added subscription is a new one. Core; adapter: on subscriptions whose stream is never dropped.
   - I9 read-ahead (Block 15): after every step, `Machine::wants_frames()` is false whenever `Machine::read_ahead()` has reached the message or byte limit, and `Action::Withdraw` names only events emitted and not yet taken. Core.
@@ -2669,7 +2670,7 @@ Feature: Connect data, headers, set_token and set_data
 - subscribe commands in the frame of the connect command on websocket open (centrifuge-js 63ed73e `centrifuge.ts:1243-1258`): ferrifuge subscribes once connected (Block 9), and subscribing earlier is optimistic subscription (centrifuge-rust §9.11, phase 3) (reversed by the owner decision of 2026-11-06, late: Block 36);
 - batching the calls a new connection releases (Block 13) when no batch is open: each still goes in its own frame (reversed by the owner decision of 2026-11-06: Block 36);
 - a batch delay timer (centrifuge-rust §9.10);
-- publish debouncing (Block 0);
+- publish debouncing (Block 46);
 - emulated transports and Protobuf in the validation runners (Block 16).
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner; the official spec does not mention batching; the client protocol lets one frame carry several commands, newline-joined in JSON and varint-delimited in Protobuf, and several replies, https://centrifugal.dev/docs/transports/client_protocol, "Batching: many messages, one frame"):
@@ -4704,7 +4705,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 6 (5 and 6: Block 45 D12), and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 6 (5 and 6: Block 45 D12), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
@@ -7481,3 +7482,373 @@ Feature: Map subscriptions (unstable)
 - A reply without `type` 1 ends the subscription with `unsubscribed` 6; a reply in a phase the request does not allow, a repeated cursor and an empty key reconnect with code 1 (D15); centrifuge-js checks none of them and treats an unknown phase as live or as the phase it asked for.
 - Map subscriptions use no sentinel epoch on 2502 and 3014 (D6), unlike Block 11's stream subscriptions; centrifuge-js does the same for maps (`src/subscription.ts:519-527`).
 - A load ended by an error reply after a page, or by an epoch change, unsubscribes before it subscribes again (D4, D6), so that the server's reservation cannot refuse the new load with 105; centrifuge-js 63ed73e subscribes again at once.
+
+---
+
+## Block 46 — Client publish debouncing
+
+**Goal:** an application that publishes a fast-changing value (a cursor, a typing state, a slider) over a subscription on a namespace where Centrifugo PRO advises a debounce interval sends only the first value at once and the latest one per interval, per channel or per map key, so upstream traffic falls without code of its own, and every `publish().await` still reports what the server answered for the value that replaced it. Source: parity item 32, design A ("Planned after Block 19": "in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers"; `ANALYSIS-PARITY.md`, branch `analysis/parity`, "32. Client publish debouncing"; reverses Block 0's exclusion, recorded in Block 0's "Reversed exclusions"); `client.proto:629-631`; centrifuge-js 63ed73e `src/subscription.ts:255-312`; Centrifugo's documentation, "Bandwidth optimizations" (`/docs/pro/bandwidth_optimizations#client-publish-debouncing`).
+
+**Dependencies:** Blocks 0 (references, precedence, test layers), 7 (Protobuf), 9 (subscription lifecycle), 13 (calls, phases, write queue, `CallError`), 14 (footprint gates), 15 (a reply settles its call when read), 16 (validation harness, I6), 18 (explicit batches), 20 (semver check, changelog), 21 (logging), 31 (statistics), 33 (`close()`), 34 (table of codes), 36 (automatic batching, its opt-in on the core), 38 (JSON helpers), 41 (deadlock detection), 44 (browser target, its timers and clocks), 45 (`map_publish`, `map_remove`, map subscribe replies).
+
+**Out of scope:**
+- a debounce on `Client::publish`, `Client::map_publish`, `Client::map_remove`, `rpc` and `send` (D1);
+- server-side subscriptions: they have no publish method (Block 12), so a `publish_debounce` in `ConnectResult.subs` is not read;
+- an application-chosen interval or a client-side debounce on a namespace that advises none (D1);
+- a debounce on a map subscription's load: only its publishes and removes;
+- merging a value into a send already handed to the write queue, a batch or the output buffer (D7);
+- counter-measures to timer throttling in hidden tabs (D14; Block 44 D16);
+- the in-memory server double (Block 37) and the TLA+ trace replay (Block 42), neither of which models this; the chaos runners cover stream subscriptions only, as Block 45 keeps map subscriptions out of them.
+
+This block reverses Block 0's exclusion of client publish debouncing (owner decision, 2026-11-06, late, item 32); Block 0's "Reversed exclusions" gains its row, and the Block 0, Block 13 and Block 18 out-of-scope lines point here (Block 45's, "a map subscription ignores `publish_debounce` until Block 46", already does). It amends Block 16's I6 (D6) and Block 34 D1 and its `error` table (D10), as listed after this block.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 46a | As an app developer publishing a fast-changing value on a Centrifugo PRO namespace that advises a debounce interval, I want my subscription's publishes merged to the first value at once and the latest per interval, with each publish reporting the server's answer for the value that replaced it, so that upstream traffic falls with no code of mine and no publish claims a success the server has not given | "Publishes within the interval are merged and the latest is sent when it ends", "A window with nothing to send closes", "A window stays open while it keeps sending", "A stale debounce timer is ignored", "An interval longer than the call timeout is clamped", "A publish made while subscribing is debounced once subscribed", "Without an interval every publish is sent", "A later subscribe reply without an interval turns debouncing off", "A superseded publish waits for the send that replaced it", "A superseded publish fails with the error of the send that replaced it", "A publish the server refuses at once keeps its own result", "Client-level publishes are not debounced", "Leaving subscribed drops what a window holds", "A window dropped by a reconnect is not resent", "A trailing send lost with its transport fails the publishes that followed it", "A trailing send waits for room in the write queue", "A trailing send is held by an open batch", "Trailing sends of a burst share a frame with automatic batching", "Dropping a publish withdraws its data only when no other publish waits for it", "A Thread handler's publish waiting in a window is not a would-be deadlock", "Publishing without Centrifugo PRO sends every publish", "A closed window frees its memory", "Waking with many open windows is reported" |
+| 46b | As an app developer writing keys of a map channel, I want each key debounced on its own, and a remove to cancel the key's pending publish, so that a chatty key never starves a quiet one and a remove is never undone by a trailing publish | "Each map key has its own window", "A remove cancels the key's pending publish and settles the publishes it replaced", "Client-level map writes are not debounced", "A map subscribe reply's interval is honoured" |
+| 46c | As a maintainer, I want debounced subscriptions in both validation runners, so that the interleavings of windows with reconnects and batches are checked as the rest of the client is | "Seeded chaos with debounced publishes on the core keeps every invariant", "The core runner reports a planted debounce fault", "Seeded chaos with debounced publishes on the tokio client keeps the invariants" |
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 API: server-driven and transparent, no new public method or option.** The interval is the server's, and `Subscription::publish`, `publish_json`, `MapSubscription::publish`, `publish_json` and `remove` apply it. No `SubscriptionBuilder::publish_debounce`, no `publish_debounced`. Reasons: `client.proto:629-630` tells the SDK to debounce; Centrifugo's documentation describes it as the SDK's behaviour; centrifuge-js has no knob; a server-provided parameter applied inside the client, with no per-call opt-in, is the common form of server-advised behaviour (gRPC service config, Kafka's `throttle_time_ms` in librdkafka). Only the subscription-level calls are debounced, as `client.proto` says "client publications" while the documentation says "when publishing via the subscription object" and centrifuge-js documents the client methods as undebounced. No opt-out in v1: centrifuge-js has none, `client.proto` says "should", and an application that must not have a value merged has `Client::publish` and `Client::map_publish`, which the README says; an option can be added later without a break.
+- **D2 Interval.** `SubscribeResult.publish_debounce` (field 19), JSON key `publish_debounce`, is decoded in both codecs; `wire::SubscribeResult` gains the field, zero and absent both meaning "none". It is read from every reply that takes the subscription to `subscribed` (the stream subscribe reply, `subscribe_succeeded`; the map flow's two live-phase replies, `map_flow.rs`, centrifuge `client_map.go:1062-1063`), before the calls waiting for `subscribed` start (`subscription_calls_subscribed`), and replaces the previous value, 0 included: Block 0 precedence, `client.proto` ("When > 0") over centrifuge-js's "keep the old one" (`subscription.ts:573`, `:2626`), reported here as a divergence. The effective interval is `min(publish_debounce, Config::timeout)`: a wrong or hostile interval (`uint32` milliseconds, up to 49 days) cannot leave a call waiting longer than a phase of Block 13 may (D6); the proto's "should" allows the bound, and at the documented scale (`"50ms"`) it never bites. An effective interval of 0 means no debounce and costs nothing.
+- **D3 Window, per subscription and key.** The key is the map key, or `""` on a stream subscription. With an interval, a debounced publish that passes the gate (below):
+  - with no open window for the key: continues on Block 13's path as now, and a window of the interval opens for the key;
+  - with an open window: the call moves to the new `Phase::Debounced`, its data becomes the window's latest, replacing the earlier latest, which is freed at once, and its caller waits (D4). The timer is not reset.
+
+  When the window's timer fires: with a latest value, the latest is handed to Block 13's path, past the gate, as a new internal call of the subscription (D4), and a new window opens; with none, the window closes and no timer remains. So: one send at the leading edge, then at most one per interval while values keep coming, the last value always sent, as centrifuge-js's two timers do (`:265-291`; its second-firing branch is equivalent to a new window). The window opens at the hand-off, not when the frame is written, as centrifuge-js's timer starts at `_debouncedPublish`.
+
+  **The gate** is at the top of `start_call`, for a call with a subscription whose request is `Publish` or (`unstable`) `MapPublish`: so a publish made while `subscribing` waits as Block 13 says and meets the gate when subscribed, in call order, the first one leading (centrifuge-js checks `_debounceMs` after `await this._methodCall()`, `:2879-2883`). `MapRemove` meets it too, for D12. Publishes through `Client` have no subscription and never meet it. A call released by a new connection or by room goes through `send_call` and `calls_connected`, not `start_call`, so a leading publish that waited is not debounced twice.
+- **D4 Results (binding, "Planned after Block 19").** A publish that goes at the leading edge settles with its own reply, as any call. A publish that goes into a window settles with the result of the send that carried later data:
+  - a publish replaced in the window, and the last one in it, follow the same trailing send: on its result, each `Action::CallSettled` is emitted for them, in the order they were made; a window's success is never reported before the server answered that send;
+  - the trailing send's error reaches each of them with its code, message and `temporary`, as any reply (Block 13);
+  - the trailing send is an internal `Call` no owner awaits, with the subscription of its waiters; `settle_call` emits `CallSettled` for its waiters and none for itself, so `CallSettled` only ever names `CallId`s the owner added. Its `SetCallTimer` and `CancelCallTimer` carry its own id, which the owner feeds back as for any call. The future each caller awaits is unchanged.
+
+  Diverges from centrifuge-js (`:261`, `{}` at once; errors swallowed, `:278`, `:289`) and from the documentation's "every `publish()` call resolves immediately" by the owner's decision: Block 0 puts neither above it (the spec and `client.proto` say nothing about what a merged publish returns), and a future that resolves `Ok` has been answered by the server, as every other call's does (Block 13).
+- **D5 Timers on the sans-IO core.** The core has no clock (`Machine` reads none), so one per-subscription timer with a deadline per key is not possible: there is one timer per open window, the design "a debounce timer per subscription and key" of `ANALYSIS-PARITY.md`. New in the public `machine` API, additive (`Input` and `Action` are `#[non_exhaustive]`, Blocks 17 and 45):
+  - `pub struct DebounceTimer(u64)`: opaque, `Copy`, `Eq`, `Hash`, `Debug`, a number never reused by a machine;
+  - `Action::SetDebounceTimer(DebounceTimer, Duration)`, `Action::CancelDebounceTimer(DebounceTimer)`;
+  - `Input::DebounceTimerFired(DebounceTimer)`: a timer whose window is gone is ignored, as a stale call timer is (`call_timer_fired`), since the number is not reused;
+  - `Machine::with_publish_debounce(self) -> Self`, `#[must_use]`, as `with_automatic_batching` (Block 36 D2): without it the core ignores `publish_debounce` and sends every publish. An owner written before this block ignores `Action::SetDebounceTimer` (`Action` is `#[non_exhaustive]` since Block 45, so it still compiles), its windows would never end and a parked publish, which has no timer (D6), would hang: the same silent failure Block 36 D2 avoids. Both adapters turn it on (`adapter/client.rs`, beside `with_automatic_batching`); the core runner and the @E scenarios use it.
+
+  The driver keeps them in a `KeyedTimers<DebounceTimer>` on both targets. No `TimerKey` variant for Block 25's setting bookkeeping: a number is never set twice, and the machine ignores a number it no longer knows. No `ShortenTimer` counterpart: a window is at most `Config::timeout`. An idle client holds no timer (the Block 14 scenario "An idle client wakes only for pings and refreshes" is unchanged): timers exist only while a window is open. A new `KeyedTimers::fired_all` resolves with every timer ready at that poll, and the driver feeds them all before its next flush: windows that end together cost one iteration and one flush, not one each (a burst of N keys would otherwise be O(N²) `Sleep` polls, `fired` restarting its scan per timer), and D9's shared frame holds on the driver. Cost: a wakeup polls every open timer, as `fired` does for call timers; a client with thousands of open key windows pays it, reported by "Waking with many open windows is reported". A timing wheel (`tokio_util::time::DelayQueue`) or a cap on windows are ways out without an API change, should that report ask for one.
+- **D6 Deadlines.** A window is a wait of a call, and Block 13 says each wait is bounded by `Config::timeout`. The clamp of D2 is the bound: a parked publish waits for at most `Config::timeout`, so it has no timer of its own and `Phase::Debounced` has none. After the window, its result is the trailing send's, itself bounded by Block 13's phases (connection, room, held, reply), so a debounced publish settles within 4 × `Config::timeout` instead of Block 16 I6's 3 ×. I6 gains a debounce window among its waits and "4 × for a publish that waited in a debounce window" beside its 3 × (a chain of windows cannot arise: a publish follows only the trailing send of the window it waited in). Block 13's "subscription-level call waits for `subscribed`" is unchanged, as the window only starts after it.
+- **D7 Write queue (Block 13).** A trailing send takes Block 13's path like any call: sent at once when connected and it fits, otherwise waiting for room (in line, its deadline running, `Config::write_queue_bytes` counting its frame once framed), for the connection when the transport is closing. The window keeps its own timing meanwhile. A trailing send is not merged again once handed over: a call waiting for room is already "sent" as far as the debounce is concerned, as with centrifuge-js, which hands it to `_centrifuge.publish` directly (`:275-278`); a window that ends while the previous trailing send still waits for room makes one more, in FIFO order, bounded by its callers' deadlines. Data held in a window is one value per key, the latest, and is not counted against `Config::write_queue_bytes`, like a queued call's data; it never exceeds what the application's own unsettled futures hold, and is freed when a window ends or the subscription leaves `subscribed`.
+- **D8 Explicit batches (Block 18).** A leading or trailing send meets `start_call`'s Block 18 check as any call: while a batch is open it is `Held`, with Block 18's deadline. The window's timer runs regardless: a batch does not hold back the interval. A `Batch` with several publishes of a key: the first is held, the rest are merged in the window, and the trailing send is held in turn if the batch is still open when the window ends (else sent then). Block 18 D2 is unchanged.
+- **D9 Automatic batching (Block 36).** A trailing send goes into the output buffer as any call and is flushed at the next `Input::Flush`: the driver feeds it at the top of its next iteration (Block 36 D3), so a window ending alone costs no extra wait, and windows ending together (`fired_all`, D5) share a frame, within `Config::batch_frame_bytes`. A sans-IO owner feeds `Flush` itself (Block 36 D2).
+- **D10 Leaving `subscribed`** (centrifuge-js `:476`, `:1097`; documentation: "the SDK drops all pending publishes"). Every transition out of `subscribed` drops every window of the subscription and cancels their timers: entering `unsubscribed` (`set_unsubscribed`), entering `subscribing` on a lost transport (`subscriptions_disconnected`), on a server unsubscribe from code 2500 (`server_unsubscribe`) and on a delta failure (`delta_failed`). Map subscriptions leave `subscribed` through the same functions. Data waiting in a window is never sent: a resubscribe does not send stale data. The publishes waiting in a window fail:
+
+  | Cause | Code | Message | Block |
+  |---|---|---|---|
+  | the subscription enters `unsubscribed` | 7 `SUBSCRIPTION_UNSUBSCRIBED` | "subscription unsubscribed" | 13 |
+  | the client enters `disconnected` (`fail_calls_disconnected` already runs before `subscriptions_disconnected`) | 3 `DISCONNECTED` | "disconnected" | 13 |
+  | `close()` | 4 `CLIENT_CLOSED` | "client closed" | 33 |
+  | the subscription enters `subscribing` (transport lost, server resubscribe, delta failure) while the client stays up | **17 `PUBLISH_DROPPED`, new** | "publish dropped" | here |
+
+  Code 17 is new because the case is new: under Block 13 a call waiting for `subscribed` survives a move to `subscribing`, so no existing wait ends this way, and 11 "connection closed" means "the reply cannot arrive", possibly applied. Code 17 means "never sent; safe to publish again after `subscribed`". 11 would be wrong on a live connection and says the reply cannot arrive, 7 says the subscription is gone. `codes::error::PUBLISH_DROPPED: u32 = 17` (14 reserved, 15 and 16 used, Block 34 D1; centrifuge-js `codes.ts` stops at 14), `temporary` false. Block 34's `error` table gains its row (README and `codes` documentation, the D3 test), with "the call fails; publish again when subscribed".
+
+  A trailing send already handed over stays a Block 13 call, and its waiting callers follow it: lost as Block 13 says if it was sent (code 11), kept if it was waiting for the connection or room, across a reconnect, until `Config::timeout` of that phase, and failing with code 7 if its subscription becomes `unsubscribed` first (`subscription_calls_unsubscribed`). A publish at the leading edge is unaffected: it is an ordinary call in flight.
+- **D11 A dropped publish future** (Block 13: "abandoned … never sent if it was queued"). `Input::CallAbandoned` of a publish in a window removes the caller; if no caller remains, the latest is dropped and the window goes on with nothing to send. If callers remain, the latest is still sent for them, the dropped caller's value included if it was last: an earlier caller's publish was replaced by that value, and it waits for that value's result (D4). For a publish that follows a trailing send: if none remains and the send has not been handed to the transport, the send is abandoned as Block 13's rule says (never sent); if the send is out, its reply is ignored.
+- **D12 Block 45: map subscriptions.** `MapSubscription::publish(key, data)` is debounced per key, each key with its own window, so a chatty key cannot delay a quiet one (`:2900-2902`). `MapSubscription::remove(key)`, at the gate after `subscribed`: if the key has an open window, the window closes, its timer is cancelled, its latest data is dropped; the publishes that waited in it follow the remove's result (the remove is the later operation on the key: D4's "send that carried later data", the data being "none"). The remove itself is sent at once, undebounced, and opens no window; a following publish of the key therefore finds no window and is sent at once (`:2908-2910`). A publish already in flight keeps its reply: on the wire it is before the remove. `Client::map_publish` and `Client::map_remove` are not debounced (`centrifuge.ts:566-567`, `:579-580`). The key `""` means the stream key only on a stream subscription; on a map subscription it is a key, refused by the server as ever (Block 45: 107). `#[cfg(feature = "unstable")]` covers only `MapPublish` and `MapRemove` handling; the window table and timers are unconditional.
+- **D13 Block 41: deadlock detection.** `call_wait(id)` reports a publish in a window as `Other` (Block 41 D6: only a timer completes it), and a follower as the phase of its trailing send (`Queued`: `Message`; `Sent`: `Reply`; otherwise `Other`). Under `Inline` and `Task` a call from a handler fails at its first poll whatever it is (Block 41 D6), so debouncing changes nothing there; under `Thread` a publish in a window is not held back by the handler's event and completes.
+- **D14 Browser target (Block 44).** Nothing in the core or the `Action`s differs by target. The driver arms a debounce timer with `platform::sleep` (gloo-timers, Block 44 D4; the `i32::MAX` cap never bites thanks to D2). In a hidden tab, browsers throttle `setTimeout` (about once a second, or once a minute when intensively throttled, Block 44 D16): trailing sends and windows lag by that much, and fewer values go out, the latest still kept. A frozen page holds its windows and timers until it resumes. Documented, no counter-measure (Block 44 D16). No `MaybeSend` changes: the public futures are the same.
+- **D15 Observability and memory.** No new `Statistics` field: `messages_out` and `bytes_out` count what is written (Block 31), so a merged publish costs nothing. No log record carries the data (Block 21); no new record. One value per key stays in `Debounced` until a window ends: `Machine` adds a `HashMap` per subscription only when an interval is on, `Option<Box<_>>` otherwise, so the Block 14 subscription footprint gates are unchanged.
+- **D16 Harness (46c, Block 16).** Both runners feed a `publish_debounce` of 1 to 3 × a tick on some subscribes, a publish burst operation on those, and the core runner feeds `DebounceTimerFired` from the simulated clock. The runners use stream subscriptions only (Block 45). New invariant **I12**, core, after every step, in simulated time: two hand-offs of debounced publishes of one key to Block 13's path, seen as the `Action::SetDebounceTimer` each one issues, are never closer than the effective interval while the subscription stays `subscribed` (leaving `subscribed` closes the window, so the next publish leads again). The check is on hand-offs, not on frames: a trailing send can wait for room or a batch (D7, D8) and leave right after the next one. I5 counts debounce timers as subscription timers. I6 as in D6. Each new or amended invariant has a planted fault, as Block 16 requires, in the clock or the tap, never the client: a debounce timer the simulated clock fires before its delay (I12); a publish that waited in a window whose settle action is dropped before the checker (I6).
+- **D17 Version, changelog and docs.** Additive, no version bump: new `Input` and `Action` variants on `#[non_exhaustive]` enums, a new code, a new behaviour triggered only by a field no OSS server sends (0.21.0's semver check passes; 46b's map items are `unstable`). Changelog `Unreleased`, "Added": "Publish debouncing as advised by the server (Centrifugo PRO): `Subscription::publish` and `publish_json` send the first value at once and the latest per interval, and each publish resolves with the result of the send that carried later data (Block 46). `codes::error::PUBLISH_DROPPED`; `machine::DebounceTimer`, `Input::DebounceTimerFired`, `Action::SetDebounceTimer` and `CancelDebounceTimer`, `Machine::with_publish_debounce`." 46b adds, prefixed "Unstable (`unstable` feature):", the map per-key debounce. 46c adds nothing. The README's "Calls" section gains a paragraph, marked Centrifugo PRO and untested against a real PRO server: what merges, what the futures report, that waiting data is dropped on leaving `subscribed` (D10), and, for data that must arrive, to use `Client::publish` (the documentation's own caveat).
+
+Sources read (2026-11-09), with what each settles:
+
+*centrifuge-js 63ed73e.* Its tests: `src/debounce.test.ts` (needs Centrifugo PRO; the latest value reaches the server), `src/debounce_publish_error.test.ts` (a failed trailing send raises no unhandled rejection), `src/debounce_reconnect.test.ts` ("pending debounced publish is cancelled on reconnect, not sent later").
+- `src/subscription.ts:114-116`: `_debounceMs` and a `Map` of `{ data, dirty, timer }` per key.
+- `:255-298` `_debouncedPublish`: with an entry for the key, the data is replaced, `dirty` set, the timer kept, and `{}` returned at once (`:256-262`). Without one, the data is sent at once and its real promise returned (`:293-297`), a timer of `_debounceMs` started (`:265`). When that timer fires with `dirty` set, the latest is sent, errors swallowed (`:275-278`), and a second timer started (`:280-290`); a second firing with `dirty` set calls `_debouncedPublish` again as a first publish. So one window per key at a time, a leading send and a trailing send, at most one send per interval; the timer is not reset by new publishes, which makes this a throttle with a leading and a trailing edge under the name "debounce".
+- `:300-306` `_cancelDebounce`, `:308-313` `_cancelAllDebounce`, called when leaving `subscribed` (`:476` `_clearSubscribedState`, `:1097` `_setUnsubscribed`). Pending data is dropped; the promises it answered already resolved `{}`.
+- `:573-575` (stream subscribe reply) and `:2626-2628` (map subscribe reply) set `_debounceMs` only when the field is truthy: an interval is never turned off by a later reply.
+- `:2879-2883`: `Subscription.publish` debounces with key `''` after `await this._methodCall()`. `:2900-2902`: `MapSubscription.publish` debounces per key. `:2908-2910`: `MapSubscription.remove` cancels the key's pending publish, then sends the remove undebounced.
+- `src/centrifuge.ts:566-567`, `:579-580`: `mapPublish` and `mapRemove` on the client are documented as not debounced ("prefer `sub.publish(key, data)` … it enforces the method-call guard and applies debounce configuration"). `Centrifuge.publish` is what the debounce calls, so it is undebounced too.
+
+*`client.proto:629-631`:* "Interval in milliseconds. When > 0 the SDK should debounce client publications to this channel; the first one is not debounced."
+
+*Centrifugo documentation* (read 2026-11-09): "the server returns the debounce interval in the subscribe result"; namespace option `client_publish_debounce_interval`, example `"50ms"`; "The debounce is applied when publishing via the subscription object"; "The first publish is never debounced"; "only the latest value is kept"; "For map subscriptions, debouncing is per key"; "For stream subscriptions, debouncing is per channel"; "On unsubscribe or disconnect, the SDK drops all pending publishes — nothing to clean up on the server"; "every `publish()` call resolves immediately"; "Do not use debouncing for data that must reliably reach the server"; only centrifuge-js supports it (SDK feature matrix). The page lists no server-side merging or enforcement. The Client SDK specification and the client protocol page do not mention debouncing (`client_api`, `client_protocol`).
+
+*centrifuge library `7ac037196c95` (the version Centrifugo v6.10.1 pins):* `options.go:245-248`, `client.go:5101-5102` and `client_map.go:1062-1063` copy `ClientPublishDebounceInterval` into the subscribe reply as `publish_debounce`, in the stream reply and the map's live-phase reply. The library does nothing else with it: no enforcement on the publish path.
+
+*centrifugal/centrifuge-rust 88d6edf, `docs/spec.md` and `docs/api.md` only (clean room):* debouncing is planned for phase 3 and undesigned (`docs/spec.md:86`, `:94`, `:1200`: "The core keeps `publish_debounce` from the subscribe reply (proto field 19), unused until then"; `docs/api.md:310`). No design to compare with.
+
+*The feature therefore needs one server capability: the field.* Everything else is client-side; the interval is the only server input, and the server neither merges nor checks publishes.
+
+Verified (Centrifugo v6.10.1 OSS, 2026-11-09, by the drafter and again by the reviewer; a raw websocket client against a container with `client.insecure` and a `cursors` namespace plus a `map` namespace, each with `client_publish_debounce_interval: "50ms"`):
+- the server logs `unknown key in configuration file` for `channel.namespaces.[0].client_publish_debounce_interval`, and the same for `[1]`, and starts: the option is PRO only;
+- a subscribe to `cursors:a` answers `{"id":2,"subscribe":{}}`, without `publish_debounce`; a map subscribe (`type` 1, `phase` 2, `limit` 2) on the empty channel answers `{"id":30,"subscribe":{"recoverable":true,"epoch":"…","type":1}}`, without it either;
+- 5 publishes sent back to back to `cursors:a` get 5 replies and 5 publications, in order: nothing is merged or refused by the server.
+
+`VERIFY:` nothing Centrifugo PRO does is observable here: the open-source server cannot send the field. As with channel compaction (Block 35), every scenario that needs a non-zero interval is @D or @E; the only @A scenario is the absence case. A PRO behaviour the documentation leaves open (whether PRO refuses or drops publishes that arrive inside the interval from a client that does not debounce) cannot be tested; Ferrifuge debounces as the proto says, so it never hands publishes over faster than the effective interval on a debounced path.
+
+**Structural acceptance:**
+- D2: unit tests on both codecs: `publish_debounce` decodes; absent and 0 mean none; a frame without it is unchanged byte for byte. Fuzz targets and seed corpus: `SubscribeResult` gains the field in the existing seeds.
+- `start_call` is the only gate: a unit test that a `Client::publish` to the channel of a debounced subscription is sent at once, and a `CallRequest::Publish` through `add_subscription_call` with interval 0 is too.
+- D5: `DebounceTimerFired` for an unknown `DebounceTimer` returns no action; every window opened is either cancelled or fired; `Action::SetDebounceTimer` count equals hand-offs (mutation: a window not cancelled on leaving `subscribed`). A machine without `with_publish_debounce` given an interval sends every publish and issues no debounce timer (mutation: the gate ignores the opt-in). `KeyedTimers::fired_all` on a paused tokio clock returns every timer due, and none not due; the driver feeds them before one flush.
+- D10 and D12: mutations: a parked publish that survives a transition; a remove that does not close the window.
+- D11: unit test for each clause.
+- D13: `call_wait` is `Other` for a publish in a window and follows the trailing send's phase for its followers (mutation: a window reported as `Message`).
+- D3: the trailing send does not meet the gate (mutation: a trailing send parked in its own window).
+- D15: the Block 14 @P gates pass unchanged.
+- Block 34's test passes with code 17's row; `Unreleased` entries present; `cargo semver-checks` passes on default features.
+- `tests/support/fake_server.rs` gains a control to set `publish_debounce` on the next subscribe replies; the JSON and Protobuf replies carry it.
+
+Value clause: As an app developer on Centrifugo PRO publishing fast-changing values over a subscription, I want the client to apply the server's debounce interval per channel or key, sending the first value at once and the latest per interval, with every publish reporting the server's answer for the value that replaced it, so that upstream traffic and server load fall without code of mine and without a publish claiming a success nobody gave.
+
+```gherkin
+Feature: Client publish debouncing
+
+  @E
+  Scenario: Publishes within the interval are merged and the latest is sent when it ends
+    Given a core subscribed to channel "cursors:a" whose subscribe reply advised an interval of 100 ms
+    When publishes "a", "b" and "c" are started on the subscription, in that order, without replies
+    Then the actions contain one send, of publish "a", and one debounce timer of 100 ms
+    And when the debounce timer fires, the actions contain one send, of publish "c", and one new debounce timer of 100 ms
+    And when the reply to publish "a" is read, the publish "a" settles Ok and no other
+    And when the reply to the trailing send is read, the publishes "b" and "c" settle Ok, in that order, and no other
+
+  @E
+  Scenario: A window with nothing to send closes
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms, with one publish sent and its reply read
+    When the debounce timer fires
+    Then the actions contain no send and no debounce timer
+
+  @E
+  Scenario: A window stays open while it keeps sending
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms, with publishes "a" and "b" started
+    When the debounce timer fires
+    And the publish "c" is started
+    And the debounce timer fires again
+    And the debounce timer fires again
+    Then the sends in order were "a", "b" and "c"
+    And the last firing left no debounce timer
+
+  @E
+  Scenario: A stale debounce timer is ignored
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms, with a publish in a window
+    When the subscription is unsubscribed and the window's timer then fires
+    Then the firing produces no action
+
+  @E
+  Scenario: An interval longer than the call timeout is clamped
+    Given a core configured with a call timeout of 5 s, subscribed to channel "cursors:a" with an advised interval of 60000 ms
+    When one publish is started on the subscription
+    Then the actions contain a debounce timer of 5 s
+
+  @D
+  Scenario: A publish made while subscribing is debounced once subscribed
+    Given a client connected to the fake server, whose subscribe replies to channel "cursors:a" advise an interval of 300 ms and are held
+    When a subscription to channel "cursors:a" publishes {"n":1}, {"n":2} and {"n":3} while subscribing
+    And the fake server answers the subscribe command
+    Then the fake server receives one publish, with data {"n":1}
+    And it receives exactly one more, with data {"n":3}, no sooner than 200 ms and within 1 s of the first
+
+  @D
+  Scenario Outline: Without an interval every publish is sent
+    Given a client subscribed to channel "cursors:a" on the fake server, whose subscribe reply has <reply>
+    When the subscription publishes {"n":1} and {"n":2} and {"n":3} without waiting
+    Then the fake server has received 3 publish commands, in order, within 500 ms
+
+    Examples:
+      | reply                  |
+      | no publish_debounce    |
+      | publish_debounce of 0  |
+
+  @D
+  Scenario: A later subscribe reply without an interval turns debouncing off
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 2000 ms
+    And a resubscribe of the channel whose reply advises none
+    When the subscription publishes {"n":1} and {"n":2} without waiting
+    Then the fake server has received 2 publish commands within 1 s
+
+  @D
+  Scenario: A superseded publish waits for the send that replaced it
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 300 ms, which holds its publish replies
+    When the subscription publishes {"n":1}, {"n":2} and {"n":3} and each publish is awaited in its own task
+    Then the fake server receives {"n":1} at once and answers it, and only that publish completes
+    And no sooner than 200 ms after the first the fake server receives {"n":3}
+    And while the fake server holds its reply, the publishes of {"n":2} and {"n":3} have not completed
+    And once the fake server answers it, both complete with success
+
+  @D
+  Scenario: A superseded publish fails with the error of the send that replaced it
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 300 ms
+    And the fake server refuses publish commands of data {"n":3} with error 103 and message "permission denied"
+    When the subscription publishes {"n":1}, {"n":2} and {"n":3}, each publish awaited in its own task
+    Then the publishes of {"n":2} and {"n":3} fail with code 103 and message "permission denied"
+    And the publish of {"n":1} succeeds
+
+  @D
+  Scenario: A publish the server refuses at once keeps its own result
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 300 ms
+    And the fake server refuses publish commands of data {"n":1} with error 103
+    When the subscription publishes {"n":1} and {"n":2}, each publish awaited in its own task
+    Then the publish of {"n":1} fails with code 103
+    And the publish of {"n":2} succeeds after the interval
+
+  @D
+  Scenario: Client-level publishes are not debounced
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 2000 ms
+    When the client calls publish on "cursors:a" with {"n":1} and {"n":2} without waiting
+    Then the fake server has received 2 publish commands within 1 s
+
+  @D
+  Scenario Outline: Leaving subscribed drops what a window holds
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 300 ms
+    And the publish of {"n":1} completed, and the publish of {"n":2} waits in the window
+    When <cause> before the interval ends
+    Then the publish of {"n":2} fails with code <code>
+    And the fake server receives no publish command of data {"n":2} within 500 ms
+
+    Examples:
+      | cause                                                    | code |
+      | the fake server closes the connection with code 3005     | 17   |
+      | the fake server sends an unsubscribe push with code 2500 | 17   |
+      | unsubscribe is called on the subscription                | 7    |
+      | the fake server sends an unsubscribe push with code 2000 | 7    |
+      | disconnect is called                                     | 3    |
+      | close is called                                          | 4    |
+
+  @D
+  Scenario: A window dropped by a reconnect is not resent
+    Given a client subscribed to channel "cursors:a" on the fake server with an advised interval of 300 ms
+    And the publish of {"n":1} completed, and the publish of {"n":2} waits in the window
+    When the fake server closes the connection with code 3005
+    And the client is subscribed again on a new connection
+    Then the publish of {"n":2} has failed with code 17
+    And the fake server receives no publish command of data {"n":2} within 1 s of the new subscribe
+
+  @E
+  Scenario: A trailing send lost with its transport fails the publishes that followed it
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms, with publishes "a" and "b" started
+    And the debounce timer fired and the trailing send of "b" was handed to the transport
+    When the transport is lost
+    Then the publish "b" settles with code 11
+
+  @E
+  Scenario: A trailing send waits for room in the write queue
+    Given a core with a write queue of 1000 bytes, subscribed to channel "cursors:a" with an interval of 100 ms, its queue filled by an unwritten call
+    And the publishes "a" and "b" started, "a" waiting for room
+    When the debounce timer fires
+    Then the trailing send of "b" waits for room behind "a", in order
+    And when the queue drains, "a" is sent then "b"
+
+  @E
+  Scenario: A trailing send is held by an open batch
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms and an open batch
+    And the publishes "a" and "b" started
+    When the debounce timer fires
+    Then the actions contain a new debounce timer and no send
+    When the batch stops
+    Then the frames sent carry "a" then "b", in that order
+
+  @E
+  Scenario: Trailing sends of a burst share a frame with automatic batching
+    Given a core with automatic batching, subscribed to channel "cursors:a" with an interval of 100 ms, and subscribed to a second channel with the same interval, each with a first publish sent and a later publish in its window
+    When both debounce timers fire
+    Then no frame is sent before the core is flushed
+    When the core is flushed
+    Then one frame carries both trailing sends
+
+  @E
+  Scenario Outline: Dropping a publish withdraws its data only when no other publish waits for it
+    Given a core subscribed to channel "cursors:a" with an interval of 100 ms and publish "a" sent
+    And the publishes <waiting> started, waiting in the window
+    When the publish <dropped> is abandoned
+    And the debounce timer fires
+    Then the firing sends <sent>
+
+    Examples:
+      | waiting | dropped | sent    |
+      | b       | b       | nothing |
+      | b and c | c       | c       |
+      | b and c | b       | c       |
+
+  @D
+  Scenario: A Thread handler's publish waiting in a window is not a would-be deadlock
+    Given a client with a Thread handler and a subscription to channel "cursors:a" on the fake server with an advised interval of 300 ms
+    And the handler, running on a publication event, has published {"n":1} and it completed
+    When the handler awaits a publish of {"n":2}, which waits in the window
+    Then the fake server receives the publish of {"n":2} no sooner than 200 ms after the first
+    And once the fake server answers it, the handler's publish returns success
+
+  @A
+  Scenario: Publishing without Centrifugo PRO sends every publish
+    Given a subscription to a channel on a real server configured with client_publish_debounce_interval on its namespace
+    When the subscription publishes 3 values in a row without waiting
+    Then all 3 publications reach a second client's subscription, in order
+
+  @P
+  Scenario: A closed window frees its memory
+    Given a core with 10000 subscribed subscriptions, each with an open window holding a 1 KiB value
+    When every window closes
+    Then live bytes return to their value before the windows opened
+
+  @P
+  Scenario: Waking with many open windows is reported
+    Given a client whose driver holds 10000 open windows
+    When its driver wakes once with no timer due
+    Then the wall-clock cost of the wake is reported
+
+  @D
+  Scenario: Each map key has its own window
+    Given a client with a map subscription to "map:m" on the fake server, whose live reply advises an interval of 300 ms
+    When the subscription publishes to keys "a" and "b" twice each without waiting
+    Then the fake server receives one publish per key at once
+    And no sooner than 200 ms and within 1 s of those it receives one more per key, each the second value, and no other
+
+  @D
+  Scenario: A remove cancels the key's pending publish and settles the publishes it replaced
+    Given a client with a map subscription to "map:m" on the fake server with an advised interval of 300 ms
+    And the publish of {"x":1} to key "k" completed, and the publish of {"x":2} to key "k" waits in the window
+    When the subscription removes key "k"
+    Then the fake server receives the remove of key "k" at once, and no publish of {"x":2}
+    And when it answers the remove with success, the publish of {"x":2} and the remove complete with success
+    And a publish of {"x":3} to key "k" is sent at once
+
+  @D
+  Scenario: Client-level map writes are not debounced
+    Given a client with a map subscription to "map:m" on the fake server with an advised interval of 2000 ms
+    When the client calls map_publish on "map:m" with key "k" and {"x":1}, then with {"x":2}, without waiting
+    Then the fake server has received 2 map publish commands within 1 s
+
+  @D
+  Scenario: A map subscribe reply's interval is honoured
+    Given a client with a map subscription to "map:m" on the fake server, whose pages carry no interval and whose live reply advises 300 ms
+    When the subscription publishes twice to key "k" without waiting
+    Then the fake server receives one publish at once
+    And it receives the second no sooner than 200 ms and within 1 s of the first
+
+  @P
+  Scenario: Seeded chaos with debounced publishes on the core keeps every invariant
+    Given the core runner with debounced subscriptions and publish bursts
+    When the pull-request seeds run
+    Then no seed violates invariants I1 to I12
+
+  @P
+  Scenario Outline: The core runner reports a planted debounce fault
+    Given the core runner with the planted fault <fault>
+    When the pull-request seeds run
+    Then the runner reports a violation of <invariant>, naming the first seed that shows it and the operations up to it
+
+    Examples:
+      | fault                                                                 | invariant |
+      | a debounce timer the simulated clock fires before its delay             | I12       |
+      | a publish in a window whose settle action is dropped before the checker | I6        |
+
+  @P
+  Scenario: Seeded chaos with debounced publishes on the tokio client keeps the invariants
+    Given the adapter runner with debounced subscriptions and publish bursts
+    When the pull-request seeds run
+    Then no seed violates invariants I1, I2, I3, I5, I6, I8 or I11 as the adapter checks them, and each reaches quiescence within 10 s
+```
+
+**Exceptions introduced:**
+- A later subscribe reply without an interval turns debouncing off (D2); centrifuge-js keeps the old one (`src/subscription.ts:573`, `:2626`). Block 0 precedence: `client.proto`, "When > 0".
+- The interval is capped at `Config::timeout` (D2); `client.proto` and centrifuge-js set no cap. Block 13: a call never hangs.
+- A publish that waits in a window resolves with the result of the send that replaced it, and fails with its error or as D10 says (D4, D10); centrifuge-js and the documentation resolve it at once with `{}`. The owner's decision ("Planned after Block 19", item 32).
+- A publish whose future was dropped while later waiters depend on its value is still sent (D11), against Block 13's "never sent if it was queued": an earlier publish was replaced by that value.

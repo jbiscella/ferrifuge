@@ -20,7 +20,13 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
-const P_NOT_YET_MEASURED: &[&str] = &[];
+const P_NOT_YET_MEASURED: &[&str] = &[
+    "A closed window frees its memory",
+    "Seeded chaos with debounced publishes on the core keeps every invariant",
+    "Seeded chaos with debounced publishes on the tokio client keeps the invariants",
+    "The core runner reports a planted debounce fault",
+    "Waking with many open windows is reported",
+];
 
 /// How a benchmark or simulation claims a `@P` scenario: a line of its own
 /// reading `// @P scenario: <scenario name>`.
