@@ -32,6 +32,8 @@ mod compaction;
 mod connect_data;
 mod connection;
 mod connector;
+#[cfg(feature = "cookies")]
+mod cookies;
 mod delivery;
 mod delta;
 mod double;
