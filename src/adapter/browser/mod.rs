@@ -1,9 +1,11 @@
 //! What the browser driver needs beyond the shared adapter layer: the
-//! browser's WebSocket and the inbox that bounds what it holds, and
-//! `http_stream` over fetch (Block 44, D2, D6, D7, D8).
+//! browser's WebSocket and the inbox that bounds what it holds,
+//! `http_stream` over fetch, and sse over `EventSource` (Block 44, D2, D6 to
+//! D9).
 
 pub(super) mod events;
 pub(super) mod http_stream;
+pub(super) mod sse;
 pub(super) mod websocket;
 
 use std::future::Future;
@@ -11,6 +13,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use self::http_stream::HttpStream;
+use self::sse::Sse;
 pub(in crate::adapter) use self::websocket::Inbound;
 use self::websocket::WebSocket;
 use super::log::Log;
@@ -74,12 +77,19 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                 .map(|http| Transport::HttpStream(Box::new(http)))
             })
         }
-        // Over EventSource in Block 44e.
         TransportKind::Sse => Box::pin(async move {
-            Err(format!(
-                "{} is not available in the browser yet",
-                kind.name()
-            ))
+            Sse::open(
+                &sse::global_event_source()?,
+                http_stream::global_fetch()?,
+                &url,
+                &initial_frame.unwrap_or_default(),
+                emulation.as_deref(),
+                timeout,
+                max_message,
+                read_ahead,
+            )
+            .await
+            .map(|sse| Transport::Sse(Box::new(sse)))
         }),
     }
 }
@@ -89,11 +99,13 @@ pub(in crate::adapter) enum Transport {
     // Boxed: the transports differ much in size, and one is held at a time.
     WebSocket(Box<WebSocket>),
     HttpStream(Box<HttpStream>),
+    Sse(Box<Sse>),
 }
 
 impl Transport {
     /// Sends `frame`: over websocket it counts as written at once (Block
-    /// 44, D6), over `http_stream` once its emulation request is answered.
+    /// 44, D6), over `http_stream` and sse once its emulation request is
+    /// answered.
     pub(in crate::adapter) fn send(
         &mut self,
         id: FrameId,
@@ -107,6 +119,10 @@ impl Transport {
                 http.send(id, frame);
                 Ok(())
             }
+            Self::Sse(sse) => {
+                sse.send(id, frame);
+                Ok(())
+            }
         }
     }
 
@@ -116,6 +132,7 @@ impl Transport {
         match self {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
             Self::HttpStream(http) => http.recv(reading).await,
+            Self::Sse(sse) => sse.recv(reading).await,
         }
     }
 
@@ -126,6 +143,7 @@ impl Transport {
         match self {
             Self::WebSocket(websocket) => super::platform::spawn(runtime, websocket.close()),
             Self::HttpStream(http) => super::platform::spawn(runtime, async move { http.close() }),
+            Self::Sse(sse) => super::platform::spawn(runtime, async move { sse.close() }),
         }
     }
 }

@@ -890,7 +890,7 @@ let config = Config::default()
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
-| `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket and fetch (http_stream); nothing on other targets (see Browser) |
+| `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket, fetch (http_stream) and EventSource (sse); nothing on other targets (see Browser) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -1144,7 +1144,7 @@ applies (see Proxies), and the `fips` build is unsupported.
 
 A web front-end in Rust (Leptos, Yew, Dioxus) runs the same `Client`,
 built for `wasm32-unknown-unknown` with the default features: the `browser`
-feature gives it the browser's WebSocket and `fetch`, the page's event loop
+feature gives it the browser's WebSocket, `fetch` and `EventSource`, the page's event loop
 for its tasks, `setTimeout` for its timers, `performance.now()` and
 `Date.now()` for its clocks. With `--no-default-features`, add `features = ["browser"]`.
 
@@ -1194,8 +1194,18 @@ holds the server back as natively, with no inbox. Closing or dropping the
 transport aborts the stream and every emulation request in flight. A
 redirect is not followed: the browser hides it, and the failed attempt
 says "HTTP redirect; a captive portal may be answering"; a 511 or an HTML
-page answered with a success says so too. The sse transport is not there
-yet: an sse endpoint fails its attempts.
+page answered with a success says so too.
+
+**sse.** An sse endpoint is opened with the page's `EventSource`, the
+connect command in the URL's `cf_connect` as natively, without
+credentials; commands go in emulation requests over `fetch`, as from
+http_stream, and Protobuf is still refused with sse at build. Its messages
+wait in the inbox, as over websocket. When the stream ends or fails, the
+client closes the `EventSource` at once, so the browser's own retry, which
+would resend a connect command whose token may have expired, never runs:
+the client emits `connecting` with code 1 "transport closed" and
+reconnects by its backoff. `EventSource` shows neither status nor
+headers, so a failed attempt names no captive portal.
 
 **Network and page events.** While it is not disconnected, the client
 listens to the page's `offline` and `online` events and to `pagehide` and
