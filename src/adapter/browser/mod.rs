@@ -2,6 +2,7 @@
 //! browser's WebSocket and the inbox that bounds what it holds (Block 44,
 //! D2, D6, D7).
 
+pub(super) mod events;
 pub(super) mod websocket;
 
 use std::future::Future;

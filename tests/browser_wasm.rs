@@ -1,7 +1,8 @@
-//! The @W scenarios of the websocket transport (Block 44b): the browser
-//! client against the Centrifugo that `tests/browser.rs` starts, run by
-//! `wasm-bindgen-test-runner` in a browser (Block 44, D18). The server's
-//! `host:port` comes at compile time in `FERRIFUGE_W_SERVER`.
+//! The @W scenarios of the websocket transport and of the network and page
+//! events (Blocks 44b, 44c): the browser client against the Centrifugo that
+//! `tests/browser.rs` starts, run by `wasm-bindgen-test-runner` in a browser
+//! (Block 44, D18). The server's `host:port` comes at compile time in
+//! `FERRIFUGE_W_SERVER`.
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
@@ -501,4 +502,233 @@ async fn dropping_a_client_whose_websocket_opens_calls_no_dropped_closure() {
             .any(|message| message.contains("closure invoked")),
         "{captured:?}"
     );
+}
+
+/// An `EventTarget` of the test, which counts the listeners added to it
+/// and not removed (Block 44, D10, D11).
+fn recording_target() -> web_sys::EventTarget {
+    let target = web_sys::EventTarget::new().expect("an EventTarget");
+    let record = js_sys::Function::new_with_args(
+        "target",
+        "const add = target.addEventListener.bind(target);
+         const remove = target.removeEventListener.bind(target);
+         const held = [];
+         target.addEventListener = (type, listener, options) => {
+           held.push([type, listener]);
+           add(type, listener, options);
+         };
+         target.removeEventListener = (type, listener, options) => {
+           const at = held.findIndex(([t, l]) => t === type && l === listener);
+           if (at >= 0) held.splice(at, 1);
+           remove(type, listener, options);
+         };
+         target.held = () => held.length;",
+    );
+    record
+        .call1(&JsValue::NULL, &target)
+        .expect("the recording wrapper");
+    target
+}
+
+/// How many listeners a [`recording_target`] holds.
+fn held(target: &web_sys::EventTarget) -> u32 {
+    let held: js_sys::Function = js_sys::Reflect::get(target, &JsValue::from_str("held"))
+        .expect("a recording target")
+        .unchecked_into();
+    let count = held
+        .call0(target)
+        .expect("a count")
+        .as_f64()
+        .expect("a number");
+    // A count of listeners.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = count as u32;
+    count
+}
+
+/// Dispatches the event `name` on `target`, with `persisted` when given,
+/// as a `PageTransitionEvent` has it.
+fn dispatch(target: &web_sys::EventTarget, name: &str, persisted: Option<bool>) {
+    let event = web_sys::Event::new(name).expect("an Event");
+    if let Some(persisted) = persisted {
+        js_sys::Reflect::set(
+            &event,
+            &JsValue::from_str("persisted"),
+            &JsValue::from_bool(persisted),
+        )
+        .expect("persisted set");
+    }
+    target.dispatch_event(&event).expect("dispatched");
+}
+
+/// A client built by `build` from the test's websocket endpoint, connected,
+/// its stream read up to `connected`.
+async fn connected_with(
+    config: Config,
+    build: impl FnOnce(ferrifuge::ClientBuilder) -> ferrifuge::ClientBuilder,
+) -> (Client, impl Stream<Item = ClientEvent> + Unpin) {
+    let client = build(Client::builder(endpoint()).config(config))
+        .build()
+        .expect("a valid client");
+    let mut events = client.events();
+    client.connect();
+    assert_eq!(connected_over(&mut events).await, "websocket");
+    (client, events)
+}
+
+/// Whether `events` yields nothing within `millis`.
+async fn yields_nothing(events: &mut (impl Stream<Item = ClientEvent> + Unpin), millis: u32) {
+    match select(events.next(), sleep(millis)).await {
+        Either::Left((event, _)) => panic!("yielded {event:?}"),
+        Either::Right(_) => {}
+    }
+}
+
+/// The next event of `events`, `connecting` with `code` and `reason`.
+async fn connecting_with(
+    events: &mut (impl Stream<Item = ClientEvent> + Unpin),
+    code: u32,
+    reason: &str,
+) {
+    match next_event(events).await {
+        ClientEvent::Connecting {
+            code: got,
+            reason: why,
+        } => {
+            assert_eq!((got, why.as_str()), (code, reason));
+        }
+        event => panic!("not connecting: {event:?}"),
+    }
+}
+
+fn slow_reconnects() -> Config {
+    Config::default().min_reconnect_delay(Duration::from_secs(20))
+}
+
+// @W scenario: Going offline closes a browser client's connection, and coming online reconnects it at once
+#[wasm_bindgen_test]
+async fn going_offline_closes_the_connection_and_coming_online_reconnects_it() {
+    let network = web_sys::EventTarget::new().expect("an EventTarget");
+    let (client, mut events) = connected_with(slow_reconnects(), |builder| {
+        builder.network_event_target(network.clone())
+    })
+    .await;
+
+    dispatch(&network, "offline", None);
+
+    connecting_with(&mut events, 1, "transport closed").await;
+    sleep(2000).await;
+    assert_eq!(client.state(), ferrifuge::State::Connecting);
+    dispatch(&network, "online", None);
+    assert_eq!(within(2000, connected_over(&mut events)).await, "websocket");
+}
+
+// @W scenario: Coming online while connected changes nothing
+#[wasm_bindgen_test]
+async fn coming_online_while_connected_changes_nothing() {
+    let network = web_sys::EventTarget::new().expect("an EventTarget");
+    let (client, mut events) = connected_with(Config::default(), |builder| {
+        builder.network_event_target(network.clone())
+    })
+    .await;
+
+    dispatch(&network, "online", None);
+
+    sleep(1000).await;
+    assert_eq!(client.state(), ferrifuge::State::Connected);
+    yields_nothing(&mut events, 0).await;
+}
+
+// @W scenario: A page entering the back/forward cache closes the connection, and its restore reconnects at once
+#[wasm_bindgen_test]
+async fn the_back_forward_cache_closes_the_connection_and_its_restore_reconnects() {
+    let page = web_sys::EventTarget::new().expect("an EventTarget");
+    let (_client, mut events) = connected_with(slow_reconnects(), |builder| {
+        builder.page_event_target(page.clone())
+    })
+    .await;
+
+    dispatch(&page, "pagehide", Some(true));
+
+    connecting_with(&mut events, 1, "page entered back/forward cache").await;
+    dispatch(&page, "pageshow", Some(true));
+    assert_eq!(within(2000, connected_over(&mut events)).await, "websocket");
+}
+
+// @W scenario: A page hidden without entering the back/forward cache keeps the connection
+#[wasm_bindgen_test]
+async fn a_page_hidden_without_the_cache_keeps_the_connection() {
+    let page = web_sys::EventTarget::new().expect("an EventTarget");
+    let (client, mut events) = connected_with(Config::default(), |builder| {
+        builder.page_event_target(page.clone())
+    })
+    .await;
+
+    dispatch(&page, "pagehide", Some(false));
+
+    sleep(1000).await;
+    assert_eq!(client.state(), ferrifuge::State::Connected);
+    yields_nothing(&mut events, 0).await;
+}
+
+// @W scenario: A disconnected browser client stops listening to network and page events
+#[wasm_bindgen_test]
+async fn a_disconnected_client_stops_listening() {
+    let network = recording_target();
+    let page = recording_target();
+    let (client, _events) = connected_with(Config::default(), |builder| {
+        builder
+            .network_event_target(network.clone())
+            .page_event_target(page.clone())
+    })
+    .await;
+    assert_eq!((held(&network), held(&page)), (2, 2));
+
+    client.disconnect();
+
+    assert_eq!((held(&network), held(&page)), (0, 0));
+    dispatch(&network, "online", None);
+    sleep(1000).await;
+    assert_eq!(client.state(), ferrifuge::State::Disconnected);
+}
+
+// Block 44, D10, D11: closing or dropping a client removes its listeners
+// too.
+#[wasm_bindgen_test]
+async fn a_closed_or_dropped_client_holds_no_listener() {
+    for close in [true, false] {
+        let network = recording_target();
+        let page = recording_target();
+        let (client, _events) = connected_with(Config::default(), |builder| {
+            builder
+                .network_event_target(network.clone())
+                .page_event_target(page.clone())
+        })
+        .await;
+
+        if close {
+            within(WAIT, client.close()).await;
+        } else {
+            drop(client);
+        }
+
+        assert_eq!((held(&network), held(&page)), (0, 0), "close: {close}");
+    }
+}
+
+// Block 44, D10: with no target given, the client listens on `globalThis`.
+// Node's has no `addEventListener`: there the client listens to nothing.
+#[wasm_bindgen_test]
+async fn with_no_target_an_offline_on_the_global_closes_the_connection() {
+    let global = js_sys::global();
+    if !js_sys::Reflect::get(&global, &JsValue::from_str("addEventListener"))
+        .is_ok_and(|add| add.is_function())
+    {
+        return;
+    }
+    let (_client, mut events) = connected_with(slow_reconnects(), |builder| builder).await;
+
+    dispatch(global.unchecked_ref(), "offline", None);
+
+    connecting_with(&mut events, 1, "transport closed").await;
 }
