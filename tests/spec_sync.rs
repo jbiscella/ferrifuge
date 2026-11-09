@@ -30,12 +30,9 @@ const P_CLAIM: &str = "// @P scenario: ";
 const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: those of
-/// the sub-increments after 44c (Block 44). A scenario leaves the list
+/// the sub-increments after 44d (Block 44). A scenario leaves the list
 /// when a test claims it.
 const W_NOT_YET_WRITTEN: &[&str] = &[
-    "A browser client falls back to http_stream when websocket is unreachable",
-    "Commands work over http_stream from a browser client",
-    "A stream not read stops a browser client reading its http_stream response",
     "A browser client falls back to sse when websocket and http_stream are unreachable",
     "An sse stream that ends makes a browser client reconnect, not the browser's EventSource",
     "A constructor given to a browser client replaces the global",
