@@ -32,12 +32,7 @@ const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: those of
 /// the sub-increments after 44d (Block 44). A scenario leaves the list
 /// when a test claims it.
-const W_NOT_YET_WRITTEN: &[&str] = &[
-    "A constructor given to a browser client replaces the global",
-    "A browser client skips a transport the page has no constructor for",
-    "Building a browser client with no usable transport fails",
-    "With credentials included, a browser client's HTTP requests carry the page's cookies to the server's origin",
-];
+const W_NOT_YET_WRITTEN: &[&str] = &[];
 
 /// How a wasm test claims a `@W` scenario: a line of its own reading
 /// `// @W scenario: <scenario name>`.

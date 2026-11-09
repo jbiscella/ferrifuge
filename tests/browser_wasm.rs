@@ -1,5 +1,6 @@
 //! The @W scenarios of the websocket transport, of the network and page
-//! events, of `http_stream` and of sse (Blocks 44b to 44e): the browser
+//! events, of `http_stream`, of sse, and of the shims and credentials
+//! (Blocks 44b to 44f): the browser
 //! client against the Centrifugo that `tests/browser.rs` starts, and the
 //! relay in front of it, run by `wasm-bindgen-test-runner` in a browser
 //! (Block 44, D18). The server's and the relay's `host:port` come at compile
@@ -945,4 +946,276 @@ async fn an_sse_stream_that_ends_makes_the_client_reconnect() {
     assert_eq!(connected_over(&mut events).await, "sse");
     sleep(10_000).await;
     assert_eq!(sse_streams_relayed().await - before, 2);
+}
+
+/// What a test changed on the page, undone when it ends, also when it
+/// fails: a failed assertion aborts the module before any `Drop` runs, so
+/// the panic hook undoes it too (Block 44, D18: a test that removes a
+/// global restores it).
+struct Restore;
+
+thread_local! {
+    static UNDO: RefCell<Vec<Box<dyn FnOnce()>>> = RefCell::new(Vec::new());
+}
+
+fn undo_all() {
+    let undo = UNDO.with(|undo| std::mem::take(&mut *undo.borrow_mut()));
+    for undo in undo.into_iter().rev() {
+        undo();
+    }
+}
+
+impl Restore {
+    fn new(undo: impl FnOnce() + 'static) -> Self {
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                undo_all();
+                previous(info);
+            }));
+        });
+        UNDO.with(|pending| pending.borrow_mut().push(Box::new(undo)));
+        Self
+    }
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        undo_all();
+    }
+}
+
+/// Removes the global `name` until the guard is dropped.
+fn without_global(name: &'static str) -> Restore {
+    let global = js_sys::global();
+    let key = JsValue::from_str(name);
+    let saved = js_sys::Reflect::get(&global, &key).expect("the global");
+    js_sys::Reflect::delete_property(&global, &key).expect("removed");
+    Restore::new(move || {
+        js_sys::Reflect::set(&js_sys::global(), &key, &saved).expect("restored");
+    })
+}
+
+/// A shim calling the global `name` as `call` says (`new` for a
+/// constructor), counting its calls in `count`.
+fn counting_wrapper(name: &str, call: &str) -> (js_sys::Function, js_sys::Object) {
+    let count = js_sys::Object::new();
+    let make = js_sys::Function::new_with_args(
+        "count, name, call",
+        "count.calls = 0;
+         return function (...args) {
+           count.calls += 1;
+           const target = globalThis[name];
+           return call === 'new' ? new target(...args) : target(...args);
+         };",
+    );
+    let shim = make
+        .call3(
+            &JsValue::NULL,
+            &count,
+            &JsValue::from_str(name),
+            &JsValue::from_str(call),
+        )
+        .expect("a shim")
+        .unchecked_into();
+    (shim, count)
+}
+
+fn calls(count: &js_sys::Object) -> f64 {
+    js_sys::Reflect::get(count, &JsValue::from_str("calls"))
+        .expect("a count")
+        .as_f64()
+        .expect("a number")
+}
+
+// @W scenario: A constructor given to a browser client replaces the global
+async fn a_shim_replaces_the_global(shim: &str, kind: TransportKind) {
+    let (global, call) = match shim {
+        "websocket" => ("WebSocket", "new"),
+        "fetch" => ("fetch", "call"),
+        "readable_stream" => ("ReadableStream", "new"),
+        "event_source" => ("EventSource", "new"),
+        _ => unreachable!("a shim"),
+    };
+    let (wrapper, count) = counting_wrapper(global, call);
+    let endpoint = match kind {
+        TransportKind::WebSocket => endpoint(),
+        TransportKind::HttpStream => http_stream_endpoint(),
+        _ => sse_endpoint(SERVER),
+    };
+    let builder = Client::builder_with_transports([(kind, endpoint)]);
+    let builder = match shim {
+        "websocket" => builder.websocket(wrapper),
+        "fetch" => builder.fetch(wrapper),
+        "readable_stream" => builder.readable_stream(wrapper),
+        _ => builder.event_source(wrapper),
+    };
+    let client = builder.build().expect("a valid client");
+    let mut events = client.events();
+
+    client.connect();
+
+    assert_eq!(connected_over(&mut events).await, kind.name());
+    assert!(calls(&count) >= 1.0, "the {shim} shim was not called");
+}
+
+#[wasm_bindgen_test]
+async fn a_websocket_shim_replaces_the_global() {
+    a_shim_replaces_the_global("websocket", TransportKind::WebSocket).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_fetch_shim_replaces_the_global() {
+    a_shim_replaces_the_global("fetch", TransportKind::HttpStream).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_readable_stream_shim_replaces_the_global() {
+    a_shim_replaces_the_global("readable_stream", TransportKind::HttpStream).await;
+}
+
+#[wasm_bindgen_test]
+async fn an_event_source_shim_replaces_the_global() {
+    a_shim_replaces_the_global("event_source", TransportKind::Sse).await;
+}
+
+// @W scenario: A browser client skips a transport the page has no constructor for
+#[wasm_bindgen_test]
+async fn a_transport_without_its_constructor_is_skipped() {
+    let _restore = without_global("EventSource");
+    let client = Client::builder_with_transports([
+        (TransportKind::WebSocket, UNREACHABLE.to_owned()),
+        (TransportKind::Sse, sse_endpoint(SERVER)),
+        (TransportKind::HttpStream, http_stream_endpoint()),
+    ])
+    .build()
+    .expect("a valid client");
+    let mut events = client.events();
+
+    client.connect();
+
+    let transport = loop {
+        match next(&mut events).await {
+            ClientEvent::Connected { transport, .. } => break transport,
+            ClientEvent::Error(error) => {
+                assert_ne!(error.transport.as_deref(), Some("sse"), "{error:?}");
+            }
+            ClientEvent::Connecting { .. } => {}
+            event => panic!("not connecting or connected: {event:?}"),
+        }
+    };
+    assert_eq!(transport, "http_stream");
+    // The websocket's only: no sse attempt was made.
+    assert_eq!(client.statistics().failed_attempts, 1);
+}
+
+// @W scenario: Building a browser client with no usable transport fails
+#[wasm_bindgen_test]
+fn a_client_with_no_usable_transport_is_refused() {
+    let _restore = without_global("EventSource");
+
+    let built =
+        Client::builder_with_transports([(TransportKind::Sse, sse_endpoint(SERVER))]).build();
+
+    let error = built.expect_err("refused");
+    assert_eq!(error.kind, ferrifuge::ErrorKind::Configuration);
+    assert!(
+        error.message.contains("sse") && error.message.contains("event_source"),
+        "{error:?}"
+    );
+}
+
+/// `document.cookie` set to `cookie`, until the guard is dropped.
+fn page_cookie(name: &'static str, value: &str) -> Restore {
+    let document =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("document")).expect("a page");
+    let set = move |cookie: &str| {
+        js_sys::Reflect::set(
+            &document,
+            &JsValue::from_str("cookie"),
+            &JsValue::from_str(cookie),
+        )
+        .expect("a cookie set");
+    };
+    set(&format!("{name}={value}; path=/"));
+    Restore::new(move || set(&format!("{name}=; path=/; max-age=0")))
+}
+
+/// The relay's `host:port`, on the page's own host: another origin of the
+/// same site, whose cookies the page holds.
+fn relay_on_page_host() -> String {
+    let location =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("location")).expect("a page");
+    let host = js_sys::Reflect::get(&location, &JsValue::from_str("hostname"))
+        .expect("a host")
+        .as_string()
+        .expect("text");
+    let port = RELAY.rsplit_once(':').expect("host:port").1;
+    format!("{host}:{port}")
+}
+
+/// The Cookie values of each request the relay received at `path`, CORS
+/// preflights left out.
+async fn cookies_relayed(path: &str) -> Vec<String> {
+    let answer = relay(&format!("cookies{path}")).await;
+    answer
+        .lines()
+        .map(|line| line.strip_prefix('>').expect("a request").to_owned())
+        .collect()
+}
+
+// @W scenario: With credentials included, a browser client's HTTP requests carry the page's cookies to the server's origin
+async fn credentials_carry_the_page_cookies(kind: TransportKind, include: bool) {
+    let stream = format!("/connection/{}", kind.name());
+    let streams_before = cookies_relayed(&stream).await.len();
+    let emulations_before = cookies_relayed("/emulation").await.len();
+    let _cookie = page_cookie("affinity", "a1");
+    let host = relay_on_page_host();
+    let endpoint = format!("http://{host}{stream}");
+    let client = Client::builder_with_transports([(kind, endpoint)])
+        .include_credentials(include)
+        .build()
+        .expect("a valid client");
+    let mut events = client.events();
+    client.connect();
+    assert_eq!(connected_over(&mut events).await, kind.name());
+
+    within(WAIT, client.publish(&unique("news"), br#""hi""#.to_vec()))
+        .await
+        .expect("the publish succeeds");
+
+    let streams = cookies_relayed(&stream).await.split_off(streams_before);
+    let emulations = cookies_relayed("/emulation")
+        .await
+        .split_off(emulations_before);
+    assert_eq!(streams.len(), 1, "the stream request: {streams:?}");
+    assert!(!emulations.is_empty(), "an emulation request");
+    let expected = if include { "affinity=a1" } else { "" };
+    for cookie in streams.iter().chain(&emulations) {
+        assert_eq!(
+            cookie, expected,
+            "streams {streams:?}, emulations {emulations:?}"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+async fn included_credentials_carry_the_cookies_over_http_stream() {
+    credentials_carry_the_page_cookies(TransportKind::HttpStream, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn credentials_not_included_carry_no_cookie_over_http_stream() {
+    credentials_carry_the_page_cookies(TransportKind::HttpStream, false).await;
+}
+
+#[wasm_bindgen_test]
+async fn included_credentials_carry_the_cookies_over_sse() {
+    credentials_carry_the_page_cookies(TransportKind::Sse, true).await;
+}
+
+#[wasm_bindgen_test]
+async fn credentials_not_included_carry_no_cookie_over_sse() {
+    credentials_carry_the_page_cookies(TransportKind::Sse, false).await;
 }

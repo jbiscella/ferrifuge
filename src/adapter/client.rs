@@ -954,6 +954,14 @@ pub struct ClientBuilder {
     #[cfg(adapter_browser)]
     /// Where `pagehide` and `pageshow` are listened to (Block 44, D11).
     page_event_target: Option<web_sys::EventTarget>,
+    #[cfg(adapter_browser)]
+    /// The application's constructors in place of the page's (Block 44,
+    /// D12).
+    shims: super::backend::shims::Shims,
+    #[cfg(adapter_browser)]
+    /// Whether HTTP requests carry credentials to other origins (Block 44,
+    /// D13).
+    include_credentials: bool,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -1011,7 +1019,9 @@ impl std::fmt::Debug for ClientBuilder {
         }
         #[cfg(adapter_browser)]
         f.field("network_event_target", &self.network_event_target.is_some())
-            .field("page_event_target", &self.page_event_target.is_some());
+            .field("page_event_target", &self.page_event_target.is_some())
+            .field("shims", &self.shims)
+            .field("include_credentials", &self.include_credentials);
         f.finish()
     }
 }
@@ -1079,6 +1089,82 @@ impl ClientBuilder {
     #[must_use]
     pub fn page_event_target(mut self, target: web_sys::EventTarget) -> Self {
         self.page_event_target = Some(target);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Opens websocket connections with `constructor`, called as one with
+    /// the URL and the subprotocol, in place of the page's `WebSocket`
+    /// (Block 44, D12; centrifuge-js `websocket`). The object it returns is
+    /// used through its `WebSocket` methods and properties, by name.
+    #[must_use]
+    pub fn websocket(mut self, constructor: js_sys::Function) -> Self {
+        self.shims.websocket = Some(constructor);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Makes the `http_stream` and sse transports' HTTP requests with
+    /// `fetch`, called as the page's `fetch` is, `fetch(url, init)` with a
+    /// plain `init`, in its place (Block 44, D12; centrifuge-js `fetch`).
+    #[must_use]
+    pub fn fetch(mut self, fetch: js_sys::Function) -> Self {
+        self.shims.fetch = Some(fetch);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Reads the `http_stream` response through a stream built with
+    /// `constructor`, called as `new ReadableStream(source, strategy)` is,
+    /// in place of reading the body directly (Block 44, D12; centrifuge-js
+    /// `readableStream`): its source's `pull` enqueues each chunk of the
+    /// body unchanged, with `highWaterMark` 0, so the body is still read
+    /// only when the client wants messages. With it the page needs no
+    /// global `ReadableStream` for `http_stream`.
+    #[must_use]
+    pub fn readable_stream(mut self, constructor: js_sys::Function) -> Self {
+        self.shims.readable_stream = Some(constructor);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Opens sse streams with `constructor`, called as one with the URL and
+    /// `{ withCredentials }`, in place of the page's `EventSource` (Block
+    /// 44, D12; centrifuge-js `eventsource`). The object it returns is used
+    /// through its `EventSource` methods and properties, by name.
+    ///
+    /// Each attempt uses the shim given, else the page's global of that
+    /// name; a transport whose constructors neither provides is skipped,
+    /// and [`ClientBuilder::build`] fails when no configured transport can
+    /// be used: websocket needs `WebSocket`, `http_stream` `fetch`,
+    /// `ReadableStream` and `AbortController`, sse `EventSource` and
+    /// `fetch`.
+    #[must_use]
+    pub fn event_source(mut self, constructor: js_sys::Function) -> Self {
+        self.shims.event_source = Some(constructor);
+        self
+    }
+
+    #[cfg(adapter_browser)]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
+    /// Whether the `http_stream` and sse transports' requests carry the
+    /// page's cookies and HTTP authentication to a server on another origin
+    /// (Block 44, D13), false by default: true sends fetch's `credentials:
+    /// "include"` and `EventSource`'s `withCredentials: true`, so the
+    /// server's `Set-Cookie` is stored too; false sends `credentials:
+    /// "same-origin"` and `withCredentials: false`, as centrifuge-js does.
+    /// The server must allow credentialed CORS requests from the page's
+    /// origin, as Centrifugo's `allowed_origins` does.
+    ///
+    /// The websocket upgrade is unaffected: the browser sends its cookies by
+    /// their `SameSite` rules whatever this says.
+    #[must_use]
+    pub fn include_credentials(mut self, include: bool) -> Self {
+        self.include_credentials = include;
         self
     }
 
@@ -1388,6 +1474,10 @@ impl Client {
             network_event_target: None,
             #[cfg(adapter_browser)]
             page_event_target: None,
+            #[cfg(adapter_browser)]
+            shims: super::backend::shims::Shims::default(),
+            #[cfg(adapter_browser)]
+            include_credentials: false,
         }
     }
 
@@ -1422,6 +1512,10 @@ impl Client {
             network_event_target,
             #[cfg(adapter_browser)]
             page_event_target,
+            #[cfg(adapter_browser)]
+            shims: _,
+            #[cfg(adapter_browser)]
+            include_credentials: _,
         } = builder;
         #[cfg(adapter_tokio)]
         check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
