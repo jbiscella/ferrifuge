@@ -64,15 +64,15 @@ Feature: Browser adapter
 
   @W
   Scenario Outline: A browser client falls back to http_stream when websocket is unreachable
-    Given a browser client with the <protocol> protocol, configured with an unreachable websocket endpoint and the server's http_stream and sse endpoints
+    Given a browser client with the <protocol> protocol, configured with an unreachable websocket endpoint and the server's <endpoints>
     When connect is called
     Then the client emits "connecting"
     And then the client emits "connected" over transport "http_stream"
 
     Examples:
-      | protocol |
-      | JSON     |
-      | Protobuf |
+      | protocol | endpoints                     |
+      | JSON     | http_stream and sse endpoints |
+      | Protobuf | http_stream endpoint          |
 
   @W
   Scenario: Commands work over http_stream from a browser client
