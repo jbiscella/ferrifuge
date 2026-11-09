@@ -2123,6 +2123,101 @@ impl Client {
         async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
 
+    /// Sets `key` of the map channel `channel` to `data`: raw JSON with the
+    /// JSON protocol, any bytes with Protobuf (Block 45, D8). Made, waiting
+    /// and failing as [`Client::rpc`]: it waits for the connection only,
+    /// not for a map subscription. Every subscriber of the channel, this
+    /// client's included, receives the change.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    ///
+    /// The key is not checked here: the server may replace it (its
+    /// namespace's `map.client_key`) and refuses an empty one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::rpc`]; the server's refusal keeps its code, e.g. 103
+    /// "permission denied" on a namespace that does not allow a client's
+    /// writes or is not a map namespace, 107 "bad request" without data or
+    /// with an empty key.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    pub fn map_publish(
+        &self,
+        channel: impl Into<String>,
+        key: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::MapPublish {
+                channel: channel.into(),
+                key: key.into(),
+                data: data.into(),
+            },
+        );
+        reply_of(call, |reply| {
+            matches!(reply, CallReply::Publish).then_some(())
+        })
+    }
+
+    /// Sets `key` of the map channel `channel` to `data` encoded as JSON
+    /// (Block 38), as [`Client::map_publish`] does; `data` is encoded when
+    /// this returns, so the future borrows nothing.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    ///
+    /// # Errors
+    ///
+    /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
+    /// sent; [`JsonCallError::Call`] with the errors of
+    /// [`Client::map_publish`].
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    pub fn map_publish_json<T: serde::Serialize + ?Sized>(
+        &self,
+        channel: impl Into<String>,
+        key: impl Into<String>,
+        data: &T,
+    ) -> impl Future<Output = Result<(), JsonCallError>> + MaybeSend + 'static {
+        let call = serde_json::to_vec(data).map(|data| self.map_publish(channel, key, data));
+        async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
+    }
+
+    /// Removes `key` from the map channel `channel` (Block 45, D8). Made,
+    /// waiting and failing as [`Client::map_publish`]; removing a key the
+    /// map does not hold succeeds.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::map_publish`].
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    pub fn map_remove(
+        &self,
+        channel: impl Into<String>,
+        key: impl Into<String>,
+    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
+        let call = self.shared.call(
+            None,
+            CallRequest::MapRemove {
+                channel: channel.into(),
+                key: key.into(),
+            },
+        );
+        reply_of(call, |reply| {
+            matches!(reply, CallReply::Publish).then_some(())
+        })
+    }
+
     /// The history of `channel`: the publications `options` select, and the
     /// stream's current position. Made, waiting and failing as
     /// [`Client::rpc`].

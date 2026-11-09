@@ -49,6 +49,36 @@ pub enum CallRequest {
         /// Raw JSON with the JSON protocol, any bytes with Protobuf.
         data: Vec<u8>,
     },
+    /// Sets a key of a map channel (`client.proto`, `PublishRequest` with
+    /// `type` 1).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    MapPublish {
+        /// The map channel.
+        channel: String,
+        /// The key to set; the server may replace it.
+        key: String,
+        /// Raw JSON with the JSON protocol, any bytes with Protobuf.
+        data: Vec<u8>,
+    },
+    /// Removes a key of a map channel (`client.proto`, `PublishRequest`
+    /// with `type` 1 and `removed`).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    MapRemove {
+        /// The map channel.
+        channel: String,
+        /// The key to remove.
+        key: String,
+    },
 }
 
 impl CallRequest {
@@ -61,6 +91,8 @@ impl CallRequest {
             Self::Presence { .. } => "presence",
             Self::PresenceStats { .. } => "presence_stats",
             Self::Send { .. } => "send",
+            #[cfg(feature = "unstable")]
+            Self::MapPublish { .. } | Self::MapRemove { .. } => "publish",
         }
     }
 }
@@ -96,6 +128,19 @@ impl std::fmt::Debug for CallRequest {
                 .debug_struct("Send")
                 .field("data", &format_args!("<{} bytes>", data.len()))
                 .finish(),
+            #[cfg(feature = "unstable")]
+            Self::MapPublish { channel, key, data } => f
+                .debug_struct("MapPublish")
+                .field("channel", channel)
+                .field("key", key)
+                .field("data", &format_args!("<{} bytes>", data.len()))
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::MapRemove { channel, key } => f
+                .debug_struct("MapRemove")
+                .field("channel", channel)
+                .field("key", key)
+                .finish(),
         }
     }
 }
@@ -109,6 +154,8 @@ impl CallRequest {
             | Self::History { channel, .. }
             | Self::Presence { channel }
             | Self::PresenceStats { channel } => Some(channel),
+            #[cfg(feature = "unstable")]
+            Self::MapPublish { channel, .. } | Self::MapRemove { channel, .. } => Some(channel),
         }
     }
 }
