@@ -153,6 +153,15 @@ impl MapSubscription {
             .map_or(0, super::outbox::Outbox::held)
     }
 
+    /// Sets the map subscription's handler (Block 45, D13), as
+    /// [`crate::Subscription::set_handler`] does a subscription's: from now
+    /// on it takes the events, one at a time, in order with those of the
+    /// client's other handlers; its events count as delivered when its
+    /// method returns.
+    pub fn set_handler(&self, handler: impl super::MapSubscriptionHandler) {
+        drop(Box::new(handler));
+    }
+
     /// Events from now on, as [`crate::Subscription::events`] gives a
     /// subscription's: an event counts as delivered once this stream yields
     /// it, so take it before calling [`MapSubscription::subscribe`] to get
@@ -296,6 +305,7 @@ pub struct MapSubscriptionBuilder {
     channel: String,
     options: MapSubscriptionOptions,
     get_token: Option<GetSubscriptionToken>,
+    handler: Option<std::sync::Mutex<Box<dyn super::MapSubscriptionHandler>>>,
 }
 
 /// The options' `Debug` output redacts the token.
@@ -305,6 +315,7 @@ impl std::fmt::Debug for MapSubscriptionBuilder {
             .field("channel", &self.channel)
             .field("options", &self.options)
             .field("get_token", &self.get_token.is_some())
+            .field("handler", &self.handler.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -411,6 +422,15 @@ impl MapSubscriptionBuilder {
         self
     }
 
+    /// The map subscription's handler, which takes its events from the
+    /// start instead of a stream (Block 45, D13); see
+    /// [`MapSubscription::set_handler`].
+    #[must_use]
+    pub fn handler(mut self, handler: impl super::MapSubscriptionHandler) -> Self {
+        self.handler = Some(std::sync::Mutex::new(Box::new(handler)));
+        self
+    }
+
     /// Adds the map subscription, unsubscribed, to the client's registry.
     ///
     /// # Errors
@@ -466,6 +486,7 @@ impl Client {
             channel: channel.into(),
             options: MapSubscriptionOptions::new(kind),
             get_token: None,
+            handler: None,
         }
     }
 

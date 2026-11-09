@@ -63,6 +63,8 @@ pub(crate) struct Maps {
     /// The key and value of each change a step made, in order, as the
     /// updates must carry them (Block 45d).
     set: Vec<(String, Vec<u8>)>,
+    /// The events a map subscription handler received (Block 45e).
+    handled: Arc<Mutex<Vec<MapSubscriptionEvent>>>,
 }
 
 /// The core of an @E map scenario: the machine, its transport, the map
@@ -2543,4 +2545,133 @@ async fn the_next_filters(world: &mut ClientWorld, channel: String, value: Strin
         json!({"key": "t", "cmp": "eq", "val": value}),
         "{subscribe}"
     );
+}
+
+// Block 45e: handlers, test constructors.
+
+#[given(
+    regex = r#"^a client with (\w+) delivery whose map subscription to "([^"]+)" has a handler recording its events, and the server API has set key "(\w+)" of "[^"]+"$"#
+)]
+async fn a_map_handler(world: &mut ClientWorld, mode: String, channel: String, key: String) {
+    map_publish(world, &channel, &key, json!({"key": key})).await;
+    let client = Client::builder(world.server_endpoint())
+        .config(world.client_config())
+        .event_delivery(super::handlers::delivery(&mode))
+        .build()
+        .expect("a valid client configuration");
+    let handled = Arc::clone(&world.maps.handled);
+    let subscription = client
+        .map_subscription_builder(channel, MapKind::Map)
+        .handler(move |event: MapSubscriptionEvent| {
+            handled.lock().unwrap().push(event);
+        })
+        .build()
+        .unwrap();
+    world.client = Some(client);
+    world.maps.subscription = Some(subscription);
+}
+
+#[when(
+    regex = r#"^the server API sets key "(\w+)" of "([^"]+)" once the subscription is subscribed$"#
+)]
+async fn sets_a_key_once_subscribed(world: &mut ClientWorld, key: String, channel: String) {
+    let handled = Arc::clone(&world.maps.handled);
+    wait_until("the handler getting the sync", || {
+        handled
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.name() == "sync")
+    })
+    .await;
+    map_publish(world, &channel, &key, json!({"key": key})).await;
+}
+
+#[then(
+    regex = r#"^the handler has received "subscribing", "subscribed", a sync with key "(\w+)" and an update of "(\w+)", in this order$"#
+)]
+async fn the_handler_received(world: &mut ClientWorld, key: String, updated: String) {
+    let handled = Arc::clone(&world.maps.handled);
+    wait_until("the handler getting four events", || {
+        handled.lock().unwrap().len() >= 4
+    })
+    .await;
+    let events = handled.lock().unwrap().clone();
+    let names: Vec<&str> = events.iter().map(MapSubscriptionEvent::name).collect();
+    assert_eq!(
+        names,
+        ["subscribing", "subscribed", "sync", "update"],
+        "{events:?}"
+    );
+    assert_eq!(entry_keys(&events[2]), [key]);
+    let MapSubscriptionEvent::Update(update) = &events[3] else {
+        panic!("{events:?}");
+    };
+    assert_eq!(update.key, updated);
+}
+
+#[given("the test-util and unstable features")]
+fn test_util_and_unstable(_world: &mut ClientWorld) {}
+
+#[when(
+    regex = r#"^a test builds a sync with entry "(\w+)" = (\{.*\}) and an update removing "(\w+)"$"#
+)]
+fn builds_map_events(world: &mut ClientWorld, key: String, data: String, removed: String) {
+    world.maps.seen = vec![
+        MapSubscriptionEvent::Sync(vec![ferrifuge::MapEntry::new(key, data.into_bytes())]),
+        MapSubscriptionEvent::Update(ferrifuge::MapUpdate::removal(removed)),
+    ];
+}
+
+#[then(
+    regex = r"^the events equal those the client would emit, and the entry's json\(\) gives (\{.*\})$"
+)]
+fn the_built_events_equal(world: &mut ClientWorld, expected: String) {
+    let mut machine = Machine::new(Config::default());
+    let id = machine
+        .add_map_subscription("map:a".into(), MapSubscriptionOptions::new(MapKind::Map))
+        .unwrap();
+    let connecting = machine.handle(Input::Connect);
+    let transport = opened_transport(&connecting);
+    machine.handle(Input::TransportOpened(transport));
+    let connect = sent_commands(&machine.handle(Input::Subscribe(id)));
+    assert!(connect.is_empty(), "{connect:?}");
+    let frame = |json: String| Input::Frame {
+        transport,
+        data: json.into_bytes(),
+    };
+    let subscribe =
+        sent_commands(&machine.handle(frame(r#"{"id":1,"connect":{"client":"c"}}"#.to_owned())));
+    let subscribe = subscribe
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some())
+        .expect("a subscribe");
+    let live = machine.handle(frame(format!(
+        r#"{{"id":{},"subscribe":{{"type":1,"state":[{{"key":"a","data":{expected}}}]}}}}"#,
+        subscribe["id"]
+    )));
+    let removed = machine.handle(frame(
+        r#"{"push":{"channel":"map:a","pub":{"key":"a","removed":true}}}"#.to_owned(),
+    ));
+    let emitted: Vec<MapSubscriptionEvent> = live
+        .into_iter()
+        .chain(removed)
+        .filter_map(|action| match action {
+            Action::EmitMapSubscription(_, _, event)
+                if matches!(
+                    event,
+                    MapSubscriptionEvent::Sync(_) | MapSubscriptionEvent::Update(_)
+                ) =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(emitted, world.maps.seen);
+    let MapSubscriptionEvent::Sync(entries) = &world.maps.seen[0] else {
+        panic!("{:?}", world.maps.seen);
+    };
+    let value: Value = entries[0].json().expect("the entry's JSON");
+    assert_eq!(value, serde_json::from_str::<Value>(&expected).unwrap());
 }

@@ -742,6 +742,9 @@ const MAPS: &[&str] = &[
     "Page data is decoded once the live reply says whether delta is on",
     "A tag filter limits the state and the updates",
     "Setting a tag filter loads the state again",
+    // 45e: handlers, test constructors.
+    "A map subscription handler receives the events in order",
+    "A test builds map events without a server",
 ];
 #[cfg(not(feature = "unstable"))]
 const MAPS: &[&str] = &[];

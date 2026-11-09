@@ -888,6 +888,45 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     }
 }
 
+// The server API is out of a page's reach (no CORS): a client writes the map.
+// @W scenario: A browser client syncs a map and receives its updates
+#[cfg(feature = "unstable")]
+#[wasm_bindgen_test]
+async fn a_browser_client_syncs_a_map_and_receives_its_updates() {
+    use ferrifuge::{MapKind, MapSubscriptionEvent};
+
+    let channel = unique("map:w1");
+    let writer = publisher(Config::default()).await;
+    for key in ["a", "b"] {
+        within(WAIT, writer.map_publish(&channel, key, b"{}".to_vec()))
+            .await
+            .expect("key written");
+    }
+    let client = client(Config::default());
+    let map = client.new_map_subscription(&channel, MapKind::Map).unwrap();
+    let mut events = map.events();
+
+    client.connect();
+    map.subscribe();
+
+    assert_eq!(next(&mut events).await.name(), "subscribing");
+    assert_eq!(next(&mut events).await.name(), "subscribed");
+    match next(&mut events).await {
+        MapSubscriptionEvent::Sync(entries) => {
+            let keys: Vec<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+            assert_eq!(keys, ["a", "b"]);
+        }
+        event => panic!("not a sync: {event:?}"),
+    }
+    within(WAIT, writer.map_publish(&channel, "c", b"{}".to_vec()))
+        .await
+        .expect("key written");
+    match next(&mut events).await {
+        MapSubscriptionEvent::Update(update) => assert_eq!(update.key, "c"),
+        event => panic!("not an update: {event:?}"),
+    }
+}
+
 fn sse_endpoint(server: &str) -> String {
     format!("http://{server}/connection/sse")
 }

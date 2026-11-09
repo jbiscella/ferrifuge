@@ -37,6 +37,8 @@ pub use self::tokio::proxy::{Proxy, ProxyTarget};
 #[cfg(all(adapter_tokio, feature = "__test-hooks"))]
 pub use self::tokio::transport::stalled_websocket_writes;
 pub use client::{Batch, Client, ClientBuilder, WeakClient};
+#[cfg(feature = "unstable")]
+pub use handler::MapSubscriptionHandler;
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 #[cfg(feature = "unstable")]
 pub use map_subscription::{MapSubscription, MapSubscriptionBuilder};

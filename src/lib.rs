@@ -103,7 +103,7 @@ pub use adapter::{
 };
 #[cfg(all(any(adapter_tokio, adapter_browser), feature = "unstable"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-pub use adapter::{MapSubscription, MapSubscriptionBuilder};
+pub use adapter::{MapSubscription, MapSubscriptionBuilder, MapSubscriptionHandler};
 // Native only (Block 44, D14).
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
