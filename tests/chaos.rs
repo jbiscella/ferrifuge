@@ -500,6 +500,9 @@ struct Server {
     /// Transports whose connect it answered with an error: as Centrifugo,
     /// it closes them with 3501 on their next frame (Block 36, D9).
     failed: BTreeSet<u64>,
+    /// The interval its latest subscribe reply advised, per channel, in
+    /// milliseconds; none on a channel it advised none (Block 46, D16).
+    advised: BTreeMap<&'static str, u64>,
 }
 
 /// What the server does with a command of a frame (Block 36, D9).
@@ -708,6 +711,7 @@ impl Run {
                 payloads: BTreeMap::new(),
                 delta: BTreeMap::new(),
                 failed: BTreeSet::new(),
+                advised: BTreeMap::new(),
             },
             subs: [None; CHANNELS.len()],
             streams: BTreeMap::new(),
@@ -1597,13 +1601,22 @@ impl Run {
         let Some(subscription) = self.handoffs.pop_front().flatten() else {
             return Err(self.violation("I12", format!("{timer:?} of no known subscription")));
         };
+        // The effective interval is what the server advised, clamped (D2),
+        // whatever delay the client set for the next one.
+        let interval = self
+            .server
+            .advised
+            .get(self.channel_of(subscription))
+            .map_or(delay, |advised| {
+                Duration::from_millis(*advised).min(TIMEOUT)
+            });
         if let Some(last) = self.checker.last_handoff.insert(subscription, self.now)
-            && self.now.saturating_sub(last) < delay
+            && self.now.saturating_sub(last) < interval
         {
             return Err(self.violation(
                 "I12",
                 format!(
-                    "{subscription:?} handed off at {:?}, {:?} after the last, interval {delay:?}",
+                    "{subscription:?} handed off at {:?}, {:?} after the last, interval {interval:?}",
                     self.now,
                     self.now.saturating_sub(last)
                 ),
@@ -2363,9 +2376,14 @@ impl Run {
             }
             // Drawn only with debouncing, so the other modes' seeds keep
             // their operations (Block 46, D16).
-            if self.mode == Mode::Debounce && self.rng.u32(0..100) < 75 {
-                self.count("interval advised");
-                result["publish_debounce"] = json!(self.rng.u64(1..=3) * TICK);
+            if self.mode == Mode::Debounce {
+                self.server.advised.remove(channel);
+                if self.rng.u32(0..100) < 75 {
+                    self.count("interval advised");
+                    let interval = self.rng.u64(1..=3) * TICK;
+                    self.server.advised.insert(channel, interval);
+                    result["publish_debounce"] = json!(interval);
+                }
             }
             return json!({"id": id, "subscribe": result});
         }
