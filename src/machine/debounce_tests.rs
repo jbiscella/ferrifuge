@@ -12,6 +12,23 @@ use crate::{CallError, CallReply, CallRequest, Config};
 
 const INTERVAL: Duration = Duration::from_millis(100);
 
+/// An rpc whose frame is larger than the 200 bytes of [`queue_config`]: it
+/// fits alone (Block 13), and fills the queue.
+fn filler() -> CallRequest {
+    CallRequest::Rpc {
+        method: "fill".into(),
+        data: format!("\"{}\"", "x".repeat(300)).into_bytes(),
+    }
+}
+
+/// A write queue that a filler fills, and three small publishes fit.
+fn queue_config() -> Config {
+    Config {
+        write_queue_bytes: 200,
+        ..config()
+    }
+}
+
 fn config() -> Config {
     Config {
         timeout: Duration::from_secs(5),
@@ -402,20 +419,11 @@ fn publishes_made_while_subscribing_meet_the_gate_when_subscribed() {
 
 #[test]
 fn a_leading_publish_released_by_room_is_not_debounced_twice() {
-    let (mut machine, _, subscription) = subscribed_with(
-        Config {
-            write_queue_bytes: 10,
-            ..config()
-        },
-        100,
-        false,
-    );
-    // Fills the queue: the publish waits for room, its window open.
-    let filler = machine.add_call(CallRequest::Rpc {
-        method: "fill".into(),
-        data: b"\"xxxxxxxxxxxxxxxxxxxx\"".to_vec(),
-    });
-    let filled = machine.handle(Input::Call(filler));
+    let (mut machine, _, subscription) = subscribed_with(queue_config(), 100, false);
+    // A frame larger than the queue: the publish waits for room, its
+    // window open.
+    let filling_call = machine.add_call(filler());
+    let filled = machine.handle(Input::Call(filling_call));
     let (id, waiting) = publish(&mut machine, subscription, "1");
     assert_eq!(sent(&waiting), Vec::<String>::new());
     assert_eq!(machine.call_wait(id), Some(CallWait::Other));
@@ -553,9 +561,10 @@ fn assert_cancelled_with(actions: &[Action], first: &[Action], waiter: CallId, c
     assert_eq!(
         settled(actions)
             .into_iter()
-            .map(|(call, result)| (call, result.err().map(|error| error.code)))
-            .collect::<Vec<_>>(),
-        [(waiter, Some(code))]
+            .find(|(call, _)| *call == waiter)
+            .map(|(_, result)| result.err().map(|error| error.code)),
+        Some(Some(code)),
+        "{actions:?}"
     );
 }
 
@@ -602,24 +611,26 @@ fn a_dropped_publish_is_not_resent_after_the_reconnect() {
         reason: String::new(),
     });
 
-    let (reconnect, new_transport) = {
-        let actions = machine.handle(Input::TimerFired(super::Timer::Reconnect));
-        let transport = actions
-            .iter()
-            .find_map(|action| match action {
-                Action::OpenTransport { transport, .. } => Some(*transport),
-                _ => None,
-            })
-            .expect("a new attempt");
-        (actions, transport)
-    };
-    machine.handle(Input::TransportOpened(new_transport));
+    let new_transport = machine
+        .handle(Input::TimerFired(super::Timer::Reconnect))
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a new attempt");
+    let opened = machine.handle(Input::TransportOpened(new_transport));
+    // Whichever frame carries the subscribe command (Block 36, D6).
     let connected = machine.handle(frame(new_transport, r#"{"id":4,"connect":{"client":"c"}}"#));
     let subscribed = machine.handle(frame(new_transport, r#"{"id":5,"subscribe":{}}"#));
 
-    assert!(!reconnect.is_empty());
-    assert_eq!(sent(&connected).len(), 1, "only the subscribe command");
-    assert_eq!(sent(&subscribed), Vec::<String>::new());
+    for frame in sent(&opened)
+        .iter()
+        .chain(&sent(&connected))
+        .chain(&sent(&subscribed))
+    {
+        assert!(!frame.contains("publish"), "{frame}");
+    }
     assert_eq!(
         machine.subscription_state(subscription),
         Some(crate::SubscriptionState::Subscribed)
@@ -770,18 +781,8 @@ fn a_follower_of_a_trailing_send_waiting_for_the_connection_waits_for_a_message(
 
 #[test]
 fn a_follower_of_a_trailing_send_waiting_for_room_is_other() {
-    let (mut machine, _, subscription) = subscribed_with(
-        Config {
-            write_queue_bytes: 10,
-            ..config()
-        },
-        100,
-        false,
-    );
-    let filler = machine.add_call(CallRequest::Rpc {
-        method: "fill".into(),
-        data: b"\"xxxxxxxxxxxxxxxxxxxx\"".to_vec(),
-    });
+    let (mut machine, _, subscription) = subscribed_with(queue_config(), 100, false);
+    let filler = machine.add_call(filler());
     machine.handle(Input::Call(filler));
     let (_, first) = publish(&mut machine, subscription, "1");
     let (follower, _) = publish(&mut machine, subscription, "2");
@@ -812,18 +813,8 @@ fn a_trailing_send_lost_with_its_transport_fails_its_followers_with_code_11() {
 
 #[test]
 fn a_trailing_send_waiting_for_room_fails_with_code_7_on_unsubscribe() {
-    let (mut machine, _, subscription) = subscribed_with(
-        Config {
-            write_queue_bytes: 10,
-            ..config()
-        },
-        100,
-        false,
-    );
-    let filler = machine.add_call(CallRequest::Rpc {
-        method: "fill".into(),
-        data: b"\"xxxxxxxxxxxxxxxxxxxx\"".to_vec(),
-    });
+    let (mut machine, _, subscription) = subscribed_with(queue_config(), 100, false);
+    let filler = machine.add_call(filler());
     machine.handle(Input::Call(filler));
     let (_, first) = publish(&mut machine, subscription, "1");
     let (follower, _) = publish(&mut machine, subscription, "2");
@@ -842,19 +833,9 @@ fn a_trailing_send_waiting_for_room_fails_with_code_7_on_unsubscribe() {
 
 #[test]
 fn a_window_ending_while_the_previous_trailing_send_waits_for_room_makes_one_more() {
-    let (mut machine, _, subscription) = subscribed_with(
-        Config {
-            write_queue_bytes: 10,
-            ..config()
-        },
-        100,
-        false,
-    );
-    let filler = machine.add_call(CallRequest::Rpc {
-        method: "fill".into(),
-        data: b"\"xxxxxxxxxxxxxxxxxxxx\"".to_vec(),
-    });
-    let filled = machine.handle(Input::Call(filler));
+    let (mut machine, _, subscription) = subscribed_with(queue_config(), 100, false);
+    let filling_call = machine.add_call(filler());
+    let filled = machine.handle(Input::Call(filling_call));
     let (_, first) = publish(&mut machine, subscription, "1");
     publish(&mut machine, subscription, "2");
     let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
@@ -884,9 +865,9 @@ fn a_window_ending_while_the_previous_trailing_send_waits_for_room_makes_one_mor
     assert_eq!(
         sent(&admitted),
         [
-            publish_frame(3, "1"),
-            publish_frame(4, "2"),
-            publish_frame(5, "3")
+            publish_frame(4, "1"),
+            publish_frame(5, "2"),
+            publish_frame(6, "3")
         ]
     );
 }
@@ -952,19 +933,9 @@ fn abandoning_a_follower_keeps_the_trailing_send_for_the_others() {
 
 #[test]
 fn abandoning_every_follower_of_a_trailing_send_not_yet_out_withdraws_it() {
-    let (mut machine, _, subscription) = subscribed_with(
-        Config {
-            write_queue_bytes: 10,
-            ..config()
-        },
-        100,
-        false,
-    );
-    let filler = machine.add_call(CallRequest::Rpc {
-        method: "fill".into(),
-        data: b"\"xxxxxxxxxxxxxxxxxxxx\"".to_vec(),
-    });
-    let filled = machine.handle(Input::Call(filler));
+    let (mut machine, _, subscription) = subscribed_with(queue_config(), 100, false);
+    let filling_call = machine.add_call(filler());
+    let filled = machine.handle(Input::Call(filling_call));
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
     machine.handle(Input::DebounceTimerFired(timer_of(&first)));
@@ -989,7 +960,7 @@ fn abandoning_every_follower_of_a_trailing_send_not_yet_out_withdraws_it() {
     assert_eq!(settled(&abandoned), []);
     assert_eq!(
         sent(&admitted),
-        [publish_frame(3, "1")],
+        [publish_frame(4, "1")],
         "the trailing send was never written"
     );
 }

@@ -10,6 +10,7 @@ mod token_flow;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use super::debounce::{self, Windows};
 use super::delivery::{Commit, Owner};
 use super::tokens::{BeforeConnect, FetchPurpose, Tokens};
 use super::{Action, FetchId, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer};
@@ -108,6 +109,10 @@ struct Subscription {
     /// The numeric channel id its last subscribe reply on this connection
     /// gave, 0 for none (Block 35b).
     compact_id: i64,
+    /// Its debounce interval and open windows (Block 46, D15), `None`
+    /// without an interval: a subscription that never debounces pays a
+    /// pointer (Block 14, "Marginal cost of a subscription").
+    debounce: Option<Box<Windows>>,
     /// What makes a map subscription one (Block 45); `None` for a stream
     /// subscription.
     #[cfg(feature = "unstable")]
@@ -281,6 +286,7 @@ impl Machine {
                 delta: DeltaChain::Off,
                 delta_statistics: None,
                 compact_id: 0,
+                debounce: None,
                 #[cfg(feature = "unstable")]
                 map: None,
             },
@@ -379,6 +385,15 @@ impl Machine {
             .by_id
             .get(&id)
             .map(|sub| sub.delta_statistics.as_deref().copied().unwrap_or_default())
+    }
+
+    /// Its debounce windows, when the server advised an interval (Block 46).
+    pub(super) fn subscription_windows(&mut self, id: SubscriptionId) -> Option<&mut Windows> {
+        self.subscriptions
+            .by_id
+            .get_mut(&id)?
+            .debounce
+            .as_deref_mut()
     }
 
     /// `subscribe()` was called.
@@ -943,6 +958,8 @@ impl Machine {
         };
         sub.state = SubscriptionState::Subscribed;
         self.subscriptions.map_compact_id(id, result.id);
+        // Read before the calls waiting for `subscribed` start (Block 46, D2).
+        let debounce = self.debounce_windows(result.publish_debounce);
         let sub = self
             .subscriptions
             .by_id
@@ -958,6 +975,7 @@ impl Machine {
         } else {
             DeltaChain::Off
         };
+        sub.debounce = debounce;
         sub.tokens.connected();
         // The server decides: a recoverable reply gives the position
         // to recover from next; any other reply ends recovery, so a
@@ -1137,6 +1155,7 @@ impl Machine {
                 reason: reason.to_owned(),
             },
         );
+        self.drop_debounce_windows(id, &super::calls::subscription_unsubscribed());
         self.subscription_calls_unsubscribed(id);
     }
 
@@ -1172,6 +1191,7 @@ impl Machine {
         // subscribe back, or report a timeout while subscribing; the new
         // subscribe reply schedules the next one.
         self.end_token_refresh(id);
+        self.drop_debounce_windows(id, &debounce::publish_dropped());
         if code == STATE_INVALIDATED {
             self.invalidate_subscription_state(id);
         }
@@ -1344,6 +1364,7 @@ impl Machine {
         sub.backoff.undo_reset();
         let channel = sub.channel.clone();
         self.end_token_refresh(id);
+        self.drop_debounce_windows(id, &debounce::publish_dropped());
         self.emit_subscription(
             id,
             SubscriptionEvent::Error(ClientError {
@@ -1536,6 +1557,7 @@ impl Machine {
             }
         }
         for id in resubscribing {
+            self.drop_debounce_windows(id, &debounce::publish_dropped());
             self.emit_subscription(
                 id,
                 SubscriptionEvent::Subscribing {

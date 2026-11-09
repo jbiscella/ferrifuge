@@ -6,8 +6,8 @@
 //! (the last table). The client's logs show the state, code and reason
 //! (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
 //! adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6, and
-//! errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
-//! Block 47. Blocks are those of the repository's `CLAUDE.md`.
+//! errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code, unused
+//! until Block 47. Blocks are those of the repository's `CLAUDE.md`.
 //!
 //! ## `connecting`
 //!
@@ -81,6 +81,7 @@
 //! | 13 | [`error::SUBSCRIPTION_GET_STATE`] | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
 //! | 15 | [`error::DELTA`] | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
 //! | 16 | [`error::WOULD_DEADLOCK`] | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
+//! | 17 | [`error::PUBLISH_DROPPED`] | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
 //!
 //! ## Server codes
 //!

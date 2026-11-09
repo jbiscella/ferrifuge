@@ -10,10 +10,11 @@
 
 // @P scenario: Wall-clock cost per publication is reported
 // @P scenario: Idle CPU is reported
+// @P scenario: Waking with many open windows is reported
 
 mod support;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use ferrifuge::{
@@ -32,6 +33,10 @@ const PER_SECOND: u32 = 1000;
 /// The server's ping interval in the idle scenario, in seconds.
 const PING: u32 = 25;
 const CHANNELS: usize = 10;
+/// Debounce windows of the Block 46 scenario, and the calls whose round
+/// trips measure a wake.
+const WINDOWS: usize = 10_000;
+const WAKES: usize = 200;
 
 fn main() {
     if perf_server::serve_if_child() {
@@ -50,6 +55,7 @@ fn main() {
         .expect("runtime");
     runtime.block_on(async {
         delivery_latency().await;
+        waking_with_many_open_windows().await;
         idle_cpu(idle).await;
     });
 }
@@ -145,6 +151,73 @@ fn process_cpu() -> Option<Duration> {
         total += schedstat.split_whitespace().next()?.parse::<u64>().ok()?;
     }
     Some(Duration::from_nanos(total))
+}
+
+/// The median round trip, in microseconds, of `WAKES` RPC calls: each
+/// wakes the driver to send it and to read its reply, every open timer
+/// polled on each wake, none due (Block 46, D5).
+async fn median_round_trip(client: &Client) -> u128 {
+    let mut round_trips = Vec::with_capacity(WAKES);
+    for _ in 0..WAKES {
+        let started = Instant::now();
+        client
+            .rpc("m", b"{}".to_vec())
+            .await
+            .expect("the fake server answers RPC calls");
+        round_trips.push(started.elapsed().as_micros());
+    }
+    round_trips.sort_unstable();
+    round_trips[round_trips.len() / 2]
+}
+
+/// The wake cost D5 expects a client with thousands of open windows to
+/// pay, reported so that a change to a timing wheel can be weighed.
+async fn waking_with_many_open_windows() {
+    let mut server = ChildServer::start();
+    // Long enough that no window ends during the measurement.
+    server.advise_publish_debounce(60_000);
+    let config = Config::default().timeout(Duration::from_secs(120));
+    let client = Client::new(server.websocket_url(), config).expect("a valid endpoint");
+    let mut events = client.events();
+    client.connect();
+    loop {
+        match events.next().await.expect("the client's events") {
+            ClientEvent::Connected { .. } => break,
+            ClientEvent::Disconnected { code, reason } => panic!("disconnected: {code} {reason}"),
+            _ => {}
+        }
+    }
+    let subscriptions: Vec<_> = (0..WINDOWS)
+        .map(|index| {
+            let subscription = client
+                .new_subscription(format!("win{index}"))
+                .expect("a new channel");
+            subscription.subscribe();
+            subscription
+        })
+        .collect();
+    while subscriptions
+        .iter()
+        .any(|subscription| subscription.state() != SubscriptionState::Subscribed)
+    {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let idle = median_round_trip(&client).await;
+
+    // Each first publish opens a window, with a timer for its interval.
+    for subscription in &subscriptions {
+        let publish = subscription.publish(b"{}".to_vec());
+        tokio::spawn(publish);
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let woken = median_round_trip(&client).await;
+
+    println!(
+        "@P report: a wake with {WINDOWS} open debounce windows: median RPC round trip \
+         {woken} µs ({idle} µs with no window open), {} µs more per wake pair",
+        woken.saturating_sub(idle)
+    );
+    drop((subscriptions, events, client));
 }
 
 async fn idle_cpu(idle: Duration) {

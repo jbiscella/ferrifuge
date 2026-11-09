@@ -1568,6 +1568,11 @@ fn the_publish_is_abandoned(world: &mut ClientWorld, size: usize) {
 
 #[when("the transport is lost")]
 fn the_transport_is_lost(world: &mut ClientWorld) {
+    // A Block 46 core.
+    if world.batching.run.is_some() {
+        super::debouncing::transport_lost(world);
+        return;
+    }
     let run = queue(world);
     let transport = run.transport;
     run.handle(ferrifuge::machine::Input::TransportClosed {
