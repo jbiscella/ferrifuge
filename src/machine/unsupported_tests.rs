@@ -171,3 +171,20 @@ fn skipping_a_chosen_transport_moves_to_the_next() {
 
     assert_eq!(kind, TransportKind::HttpStream);
 }
+
+#[test]
+fn a_skipped_emulated_transport_counts_no_opening_request() {
+    let mut machine = machine(&[TransportKind::Sse, TransportKind::WebSocket]);
+    let (sse, kind) = opened(&machine.handle(Input::Connect)).expect("an attempt");
+    assert_eq!(kind, TransportKind::Sse);
+    let (websocket, kind) =
+        opened(&machine.handle(Input::TransportUnsupported(sse))).expect("the next transport");
+    assert_eq!(kind, TransportKind::WebSocket);
+
+    machine.handle(Input::TransportOpened(websocket));
+
+    // The websocket's connect frame counts once written; the sse request
+    // that never went out counts never.
+    assert_eq!(machine.statistics().bytes_out, 0);
+    assert_eq!(machine.statistics().messages_out, 0);
+}
