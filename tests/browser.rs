@@ -184,6 +184,11 @@ fn run_in(browser: &Browser, server: &str, relay: &str) -> bool {
         )
         .env("FERRIFUGE_W_SERVER", server)
         .env("FERRIFUGE_W_RELAY", relay);
+    // The runner gives the whole run in a browser 20 s by default, not each
+    // test; the run takes longer than that since 44e's sse tests.
+    if env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
+        command.env("WASM_BINDGEN_TEST_TIMEOUT", "300");
+    }
     for other in BROWSERS {
         command.env_remove(other.variable);
     }
