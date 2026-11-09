@@ -35,6 +35,13 @@ repository held while it carried that version, from the blocks of
   `MapUpdate::new` and `MapUpdate::removal` with setters for the optional
   fields; map subscriptions work in the browser (Block 45e).
 
+### Fixed
+
+- Browser http_stream no longer stalls in Safari, which stops delivering
+  a `fetch` body left unread: it reads the body continuously into the
+  inbox websocket and sse already use, and reconnects with `connecting`
+  code 7 past it (Block 44, D7).
+
 ## [0.21.0] - 2026-11-09
 
 ### Added

@@ -886,7 +886,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
 | 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
 | 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
-| 7 | `codes::connecting::READ_AHEAD_OVERFLOW` | `"read-ahead overflow"` | a message arrived while the inbox of a browser push transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
+| 7 | `codes::connecting::READ_AHEAD_OVERFLOW` | `"read-ahead overflow"` | a message arrived while the inbox of a browser transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
 
 #### `disconnected`
 
@@ -984,7 +984,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | `max_server_ping_delay` | 10 s | Wait past the server's ping interval before reconnecting; 0 disables |
 | `protocol` | `Protocol::Json` | Encoding of the client protocol: `Json` or `Protobuf` (binary frames, any payload bytes) |
 | `reconnect_jitter_window` | 0 | Upper bound of a random delay added to the first reconnect after losing a connection, so that many clients disconnected at once do not reconnect at once |
-| `read_ahead_messages` | 256 | Most messages read and not yet handled while the application has not taken earlier events; then the client stops reading the connection, holding the server back instead of buffering |
+| `read_ahead_messages` | 256 | Most messages read and not yet handled while the application has not taken earlier events; then the client stops reading the connection, holding the server back instead of buffering (in the browser an inbox of the same size waits instead, and past it the client reconnects with code 7) |
 | `read_ahead_bytes` | 4 MiB | Most bytes of those messages; a single larger message is still read when none waits |
 | `write_queue_bytes` | 4 MiB | Most bytes of the application's calls handed to the transport and not yet written; a call that does not fit waits for room, for at most `timeout`, and a single larger call goes out when nothing waits. The client's own commands are not counted |
 | `batch_frame_bytes` | 16 KiB | Most bytes of a frame of several commands; keep it below the server's message and request size limits |
@@ -1287,8 +1287,10 @@ re-export, `runtime`, the cookie jar (the browser keeps cookies),
 its callbacks need not be either: a token callback may hold an `Rc` and
 await a `fetch`.
 
-**The inbox.** A browser's WebSocket cannot stop reading: every message
-arrives as an event. While the client's read-ahead is full, because the
+**The inbox.** A browser client never stops reading: a WebSocket or an
+EventSource delivers every message as an event, and Safari stops
+delivering a `fetch` body left unread, so http_stream reads its body
+continuously too. While the client's read-ahead is full, because the
 application does not take its events, arriving messages wait in an inbox
 with the read-ahead's own limits (`read_ahead_messages`,
 `read_ahead_bytes`), so a client holds at most twice its read-ahead. A
@@ -1312,9 +1314,8 @@ page's `fetch`: the stream request posts the connect command, commands go
 in requests to the emulation endpoint, JSON or Protobuf, with
 `credentials: "same-origin"` unless credentials are included (below), so a
 server on another origin must allow CORS (Centrifugo does, per
-`allowed_origins`). Its response is read only
-while the read-ahead has room, so a page that does not take its events
-holds the server back as natively, with no inbox. Closing or dropping the
+`allowed_origins`). Its response is read
+continuously into the inbox described above. Closing or dropping the
 transport aborts the stream and every emulation request in flight. A
 redirect is not followed: the browser hides it, and the failed attempt
 says "HTTP redirect; a captive portal may be answering"; a 511 or an HTML
@@ -1357,8 +1358,7 @@ found". The WebSocket and `EventSource` shims are called as constructors
 and their objects used by method and property name; the `fetch` shim is
 called as `fetch(url, init)` with a plain `init`. With the
 `ReadableStream` shim the http_stream response is read through a stream
-built with it, one chunk per `pull` with `highWaterMark` 0, so a page that
-does not take its events still holds the server back.
+built with it, one chunk per `pull` with `highWaterMark` 0.
 
 ```rust,ignore
 // http_stream through the application's fetch, cookies included.

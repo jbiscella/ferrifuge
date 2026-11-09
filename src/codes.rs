@@ -22,7 +22,7 @@
 //! | 4 | [`connecting::UNSUBSCRIBE_ERROR`] | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
 //! | 5 | [`connecting::DELTA_ERROR`] | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
 //! | 6 | [`connecting::RECONNECT_CALLED`] | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
-//! | 7 | [`connecting::READ_AHEAD_OVERFLOW`] | `"read-ahead overflow"` | a message arrived while the inbox of a browser push transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
+//! | 7 | [`connecting::READ_AHEAD_OVERFLOW`] | `"read-ahead overflow"` | a message arrived while the inbox of a browser transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
 //!
 //! ## `disconnected`
 //!
@@ -125,9 +125,9 @@ pub mod connecting {
     pub const DELTA_ERROR: u32 = 5;
     /// `reconnect()` was called (Block 25, D5).
     pub const RECONNECT_CALLED: u32 = 6;
-    /// A message arrived while the inbox of a push transport was full: the
-    /// application did not read its streams, and the transport cannot stop
-    /// reading (Block 44, D7); events not taken are recovered by the next
+    /// A message arrived while the inbox of a browser transport was full:
+    /// the application did not read its streams, and the transport does not
+    /// stop reading (Block 44, D7); events not taken are recovered by the next
     /// connection on recoverable channels.
     pub const READ_AHEAD_OVERFLOW: u32 = 7;
 }

@@ -3,23 +3,26 @@
 //! bidirectional emulation as natively (Block 8): the response to the
 //! request opening the stream carries the replies; commands go in requests
 //! to the emulation endpoint of the same server, as they do over sse (D9).
-//! The body is read with wasm-streams, which reads it only when polled, so
-//! a full read-ahead holds the server back (Block 15; Block 44, D7), also
-//! through a stream built with the application's `ReadableStream` (D12).
+//! A task of the transport's own reads the body with wasm-streams,
+//! continuously, into the bounded inbox (D7, D8): Safari stops delivering a
+//! body left unread, so this transport never stops reading, also through a
+//! stream built with the application's `ReadableStream` (D12).
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use futures_util::future::{Either, select};
+use futures_util::future::{AbortHandle, Either, abortable, select};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt};
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::{JsFuture, future_to_promise};
+use wasm_bindgen_futures::{JsFuture, future_to_promise, spawn_local};
 use wasm_streams::readable::IntoStream;
 use web_sys::{AbortController, ReadableStreamDefaultReader, Response, ResponseType};
 
@@ -254,9 +257,9 @@ struct Through {
 /// `ReadableStream` (D12), as centrifuge-js reads it with the constructor it
 /// resolved (`transport_http_stream.ts:34-91`): an underlying source whose
 /// `pull` reads one chunk from the body's reader and enqueues that chunk
-/// unchanged, with `highWaterMark` 0, so the shim's stream reads only when
-/// the transport polls it and a full read-ahead still holds the server back
-/// (D7). Its `cancel` cancels the body.
+/// unchanged, with `highWaterMark` 0, so the shim's stream reads one chunk
+/// for each read of the transport's task (D8). Its `cancel` cancels the
+/// body.
 fn through(
     shim: &Function,
     body: &web_sys::ReadableStream,
@@ -309,24 +312,114 @@ fn through(
 #[derive(Default)]
 struct State {
     inbox: Inbox,
+    /// The inbox overflowed, reported in place of anything else.
+    overflowed: bool,
+    waker: Option<Waker>,
+}
+
+impl State {
+    fn wake(state: &RefCell<Self>) {
+        let waker = state.borrow_mut().waker.take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// Stops the task reading the body when dropped, also when a fetch shim's
+/// body ignores the abort (D8).
+struct Reading(AbortHandle);
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The end of the stream `failure` says: a message over the size limit, or
+/// any other failure of the decoder.
+fn ended_by(failure: String) -> Inbound {
+    // Over `Config::max_message_bytes` (Block 29, D3).
+    if failure == TOO_LARGE {
+        return Inbound::TooLarge;
+    }
+    Inbound::Closed {
+        code: None,
+        reason: failure,
+    }
+}
+
+/// Reads `body` until it ends, one chunk after another whether or not the
+/// driver polls the transport (D8), and admits each message to the inbox.
+/// The stream's end, a failure or a message over the size limit is queued
+/// behind the messages before it; an overflow ends the reading, holding
+/// nothing, since recovery brings those messages back (D7).
+///
+/// `through` comes before `body`, so that `body`, which cancels it when
+/// dropped, is dropped first.
+async fn read_body(
+    _through: Option<Through>,
+    mut body: IntoStream<'static>,
+    mut decoder: Decoder,
+    bound: Bound,
+    state: Rc<RefCell<State>>,
+) {
+    let mut messages = VecDeque::new();
+    loop {
+        let end = match body.next().await {
+            Some(Ok(chunk)) => match chunk.dyn_ref::<Uint8Array>() {
+                Some(chunk) => decoder
+                    .push(&chunk.to_vec(), &mut messages)
+                    .err()
+                    .map(ended_by),
+                None => Some(Inbound::Closed {
+                    code: None,
+                    reason: "a response body chunk that is not bytes".to_owned(),
+                }),
+            },
+            Some(Err(error)) => Some(Inbound::Closed {
+                code: None,
+                reason: js_message(&error),
+            }),
+            None => Some(Inbound::Closed {
+                code: None,
+                reason: "stream ended".to_owned(),
+            }),
+        };
+        let mut shared = state.borrow_mut();
+        while let Some(message) = messages.pop_front() {
+            if shared.inbox.admit(message, bound).is_err() {
+                shared.inbox.clear();
+                shared.overflowed = true;
+                drop(shared);
+                State::wake(&state);
+                return;
+            }
+        }
+        let ended = end.is_some();
+        if let Some(end) = end {
+            shared.inbox.end(end);
+        }
+        drop(shared);
+        State::wake(&state);
+        if ended {
+            return;
+        }
+    }
 }
 
 /// An open `http_stream` connection.
+///
+/// Its messages wait in the inbox until the client reads them (D7);
+/// commands go in emulation requests, written once answered (D8).
 pub(in crate::adapter) struct HttpStream {
-    state: std::rc::Rc<std::cell::RefCell<State>>,
+    state: Rc<RefCell<State>>,
     emulation: Emulation,
-    body: IntoStream<'static>,
-    /// The listeners of the `ReadableStream` shim's stream, if `body` reads
-    /// one; after `body`, which cancels it when dropped.
-    _through: Option<Through>,
-    /// Aborts the stream request when the transport closes or is dropped;
-    /// after `body`, which it errors.
+    /// Stops the task reading the body when the transport closes or is
+    /// dropped.
+    _reading: Reading,
+    /// Aborts the stream request when the transport closes or is dropped.
     _abort: Option<Abort>,
-    decoder: Decoder,
-    /// Messages decoded but not received yet.
-    frames: VecDeque<Vec<u8>>,
-    /// Why the stream cannot go on, reported once `frames` are received.
-    failed: Option<String>,
     /// Frames whose request was answered and not yet reported by
     /// [`HttpStream::recv`].
     written: VecDeque<FrameId>,
@@ -339,8 +432,10 @@ impl HttpStream {
     /// encoded connect command, with the request, its body read through a
     /// stream built with `readable_stream` when given (D12). Commands then
     /// go to `emulation_endpoint`, by default `/emulation` on the stream's
-    /// server. Requests include credentials when `include_credentials`
-    /// (D13).
+    /// server. A message over `max_message` bytes ends it, reported as
+    /// [`Inbound::TooLarge`]; one that would take the inbox past `bound`
+    /// ends it too, reported as [`Inbound::Overflow`]. Requests include
+    /// credentials when `include_credentials` (D13).
     #[allow(clippy::too_many_arguments)] // Each is the transport's own.
     pub(in crate::adapter) async fn open(
         fetch: Function,
@@ -351,7 +446,7 @@ impl HttpStream {
         request_timeout: Duration,
         protobuf: bool,
         max_message: usize,
-        _bound: Bound,
+        bound: Bound,
         include_credentials: bool,
     ) -> Result<Self, String> {
         let content_type = if protobuf { PROTOBUF } else { JSON };
@@ -409,19 +504,23 @@ impl HttpStream {
             }
             None => (body, None),
         };
+        let decoder = if protobuf {
+            Decoder::protobuf(max_message)
+        } else {
+            Decoder::lines(max_message)
+        };
+        let state = Rc::new(RefCell::new(State::default()));
+        let body = wasm_streams::ReadableStream::from_raw(body).into_stream();
+        let (reading, handle) =
+            abortable(read_body(through, body, decoder, bound, Rc::clone(&state)));
+        spawn_local(async move {
+            let _ = reading.await;
+        });
         Ok(Self {
-            state: std::rc::Rc::default(),
+            state,
             emulation,
-            body: wasm_streams::ReadableStream::from_raw(body).into_stream(),
-            _through: through,
+            _reading: Reading(handle),
             _abort: abort,
-            decoder: if protobuf {
-                Decoder::protobuf(max_message)
-            } else {
-                Decoder::lines(max_message)
-            },
-            frames: VecDeque::new(),
-            failed: None,
             written: VecDeque::new(),
             read_next: false,
         })
@@ -440,66 +539,42 @@ impl HttpStream {
         drop(self);
     }
 
-    /// The next message from the server, or the end of the transport: the
-    /// stream ended or failed, or an emulation request failed. Without
-    /// `reading` the body is not polled, so the browser stops reading it
-    /// (Block 15). Cancel-safe.
+    /// The next message from the server, the end of the transport, or a
+    /// frame written. Without `reading`, only frames written, a failed
+    /// emulation request and an overflow are reported: messages stay in the
+    /// inbox. Cancel-safe.
     pub(in crate::adapter) async fn recv(&mut self, reading: bool) -> Inbound {
-        loop {
+        let Self {
+            state,
+            emulation,
+            written,
+            read_next,
+            ..
+        } = self;
+        std::future::poll_fn(|cx| {
+            let mut state = state.borrow_mut();
+            if state.overflowed {
+                return Poll::Ready(Inbound::Overflow);
+            }
             // Written reports and messages take turns, as on a websocket.
-            if !self.read_next
-                && let Some(id) = self.written.pop_front()
-            {
-                self.read_next = true;
-                return Inbound::Written(id);
+            let frame_first = reading && !state.inbox.is_empty() && *read_next;
+            if !frame_first && let Some(id) = written.pop_front() {
+                *read_next = true;
+                return Poll::Ready(Inbound::Written(id));
             }
-            if reading {
-                if let Some(frame) = self.frames.pop_front() {
-                    self.read_next = false;
-                    return Inbound::Frame(frame);
-                }
-                if let Some(reason) = self.failed.take() {
-                    // Over `Config::max_message_bytes` (Block 29, D3).
-                    if reason == TOO_LARGE {
-                        return Inbound::TooLarge;
-                    }
-                    return Inbound::Closed { code: None, reason };
-                }
+            if reading && let Some(item) = state.inbox.pop() {
+                *read_next = false;
+                return Poll::Ready(item);
             }
-            if let Some(id) = self.written.pop_front() {
-                self.read_next = true;
-                return Inbound::Written(id);
+            state.waker = Some(cx.waker().clone());
+            drop(state);
+            if let Poll::Ready((id, answered)) = emulation.poll_answered(cx) {
+                *read_next = true;
+                return Poll::Ready(report(id, answered, written));
             }
-            tokio::select! {
-                // Not reading, the body waits: a full read-ahead stops the
-                // reading, never the emulation requests (Block 15).
-                chunk = self.body.next(), if reading => match chunk {
-                    Some(Ok(chunk)) => {
-                        let Some(chunk) = chunk.dyn_ref::<Uint8Array>() else {
-                            return Inbound::Closed {
-                                code: None,
-                                reason: "a response body chunk that is not bytes".to_owned(),
-                            };
-                        };
-                        if let Err(reason) = self.decoder.push(&chunk.to_vec(), &mut self.frames) {
-                            self.failed = Some(reason);
-                        }
-                    }
-                    Some(Err(error)) => {
-                        return Inbound::Closed { code: None, reason: js_message(&error) };
-                    }
-                    None => {
-                        return Inbound::Closed {
-                            code: None,
-                            reason: "stream ended".to_owned(),
-                        };
-                    }
-                },
-                (id, answered) = std::future::poll_fn(|cx| self.emulation.poll_answered(cx)) => {
-                    return report(id, answered, &mut self.written);
-                }
-            }
-        }
+            Poll::Pending
+        })
+        .await
     }
 }
 
