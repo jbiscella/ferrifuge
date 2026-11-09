@@ -96,6 +96,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                     timeout,
                     protobuf,
                     max_message,
+                    read_ahead,
                     include_credentials,
                 )
                 .await
