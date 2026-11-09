@@ -396,6 +396,14 @@ impl Machine {
             .as_deref_mut()
     }
 
+    /// Whether subscription `id` has a debounce interval (Block 46).
+    pub(super) fn has_debounce_interval(&self, id: SubscriptionId) -> bool {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .is_some_and(|sub| sub.debounce.is_some())
+    }
+
     /// `subscribe()` was called.
     pub(super) fn subscribe(&mut self, id: SubscriptionId) {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {

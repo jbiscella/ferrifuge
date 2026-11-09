@@ -694,8 +694,15 @@ failure) with 17 `PUBLISH_DROPPED`, safe to publish again once subscribed. A
 trailing send already handed to the connection, its publishes following it,
 keeps Block 13's rules for that connection. For data that must arrive, use
 `Client::publish`, which is never debounced (the documentation's own caveat).
-Debouncing is untested against a real Centrifugo PRO server: only the
-interval the protocol carries has been tested, as the open-source server,
+On a map subscription (unstable, the `unstable` feature),
+`MapSubscription::publish` and `publish_json` are debounced per key, each
+key with its own window, so a chatty key never delays a quiet one;
+`MapSubscription::remove` is sent at once and opens no window: a window of
+the key closes, its pending value is never sent, and the publishes waiting
+in it settle with the remove's result, so a remove is not undone by a
+trailing publish. `Client::map_publish` and `Client::map_remove` are never
+debounced. Debouncing is untested against a real Centrifugo PRO server: only
+the interval the protocol carries has been tested, as the open-source server,
 which never sends it, publishes every value. In a hidden browser tab, timer
 throttling (see [Browser](#browser)) makes windows and trailing sends lag by
 as much, the latest value still kept.

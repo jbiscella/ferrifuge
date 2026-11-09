@@ -139,7 +139,11 @@ async fn one_more_per_key(world: &mut ClientWorld, floor: u64, ceiling: u64) {
     let received = || map_commands(world);
     wait_until("one more per key", || received().len() >= 4).await;
     let commands = received();
-    let key_of = |index: usize| commands[index].0["publish"]["key"].as_str().unwrap_or_default();
+    let key_of = |index: usize| {
+        commands[index].0["publish"]["key"]
+            .as_str()
+            .unwrap_or_default()
+    };
     let trailing: Vec<(Value, std::time::Instant)> = commands[2..].to_vec();
     assert_eq!(
         trailing
@@ -183,7 +187,10 @@ async fn one_completed_one_waiting(
     received_at(world, &first).await;
     outcome_of(world, &first).await.expect("the first publish");
     let client = world.client().clone();
-    wait_until("the window's timer", move || client.held_debounce_timers() == 1).await;
+    wait_until("the window's timer", move || {
+        client.held_debounce_timers() == 1
+    })
+    .await;
     let second = json_value(&second);
     map_publish(world, &second_key, second.clone());
     assert!(received_of(world, &second).is_empty(), "it was sent");
@@ -200,7 +207,9 @@ fn removes_the_key(world: &mut ClientWorld, key: String) {
         .push((json!("remove"), tokio::spawn(future)));
 }
 
-#[then(regex = r#"^the fake server receives the remove of key "(\w+)" at once, and no publish of (\{.*\})$"#)]
+#[then(
+    regex = r#"^the fake server receives the remove of key "(\w+)" at once, and no publish of (\{.*\})$"#
+)]
 async fn receives_the_remove(world: &mut ClientWorld, key: String, data: String) {
     let data = json_value(&data);
     let removes = || {
@@ -220,16 +229,21 @@ async fn receives_the_remove(world: &mut ClientWorld, key: String, data: String)
 }
 
 #[then(
-    regex = r#"^when it answers the remove with success, the publish of (\{.*\}) and the remove complete with success$"#
+    regex = r"^when it answers the remove with success, the publish of (\{.*\}) and the remove complete with success$"
 )]
 async fn answers_the_remove(world: &mut ClientWorld, data: String) {
     let data = json_value(&data);
     assert!(!is_finished(world, &data), "it completed before the reply");
     let remove = json!("remove");
-    assert!(!is_finished(world, &remove), "it completed before the reply");
+    assert!(
+        !is_finished(world, &remove),
+        "it completed before the reply"
+    );
     let fake = world.fake();
     wait_until("the held remove", || fake.answer_held_publish()).await;
-    outcome_of(world, &data).await.expect("the replaced publish");
+    outcome_of(world, &data)
+        .await
+        .expect("the replaced publish");
     outcome_of(world, &remove).await.expect("the remove");
 }
 

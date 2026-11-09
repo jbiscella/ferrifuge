@@ -1098,10 +1098,6 @@ mod maps {
         (id, actions)
     }
 
-    fn ok() -> Result<CallReply, CallError> {
-        Ok(CallReply::Publish)
-    }
-
     fn timer(actions: &[Action]) -> DebounceTimer {
         super::timer_of(actions)
     }
@@ -1184,8 +1180,11 @@ mod maps {
     #[test]
     fn a_later_live_reply_without_an_interval_turns_it_off() {
         let (mut machine, transport, subscription) = subscribed_map(100);
-        machine.handle(Input::Unsubscribe(subscription));
-        let actions = machine.handle(Input::Subscribe(subscription));
+        // A server unsubscribe of code 2500 or more resubscribes at once.
+        let actions = machine.handle(frame(
+            transport,
+            r#"{"push":{"channel":"m","unsubscribe":{"code":2500,"reason":"again"}}}"#,
+        ));
         let subscribe = commands(&actions)
             .into_iter()
             .find(|command| command.get("subscribe").is_some())
@@ -1228,16 +1227,14 @@ mod maps {
             code: None,
             reason: String::new(),
         });
-        let transport = match machine
-            .handle(Input::TimerFired(Timer::Reconnect))
+        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let transport = reconnecting
             .iter()
             .find_map(|action| match action {
                 Action::OpenTransport { transport, .. } => Some(*transport),
                 _ => None,
-            }) {
-            Some(transport) => transport,
-            None => panic!("a new transport"),
-        };
+            })
+            .expect("a new transport");
         let mut opened = machine.handle(Input::TransportOpened(transport));
         let connect = commands(&opened)
             .into_iter()
@@ -1425,7 +1422,11 @@ mod maps {
 
         assert_eq!(
             settled(&settled_actions),
-            [(waiter, ok()), (other, ok()), (remove_id, ok())]
+            [
+                (waiter, Ok(CallReply::Publish)),
+                (other, Ok(CallReply::Publish)),
+                (remove_id, Ok(CallReply::Publish))
+            ]
         );
     }
 
@@ -1500,7 +1501,7 @@ mod maps {
 
         let replied = reply(&mut machine, transport, command);
 
-        assert_eq!(settled(&replied), [(leading, ok())]);
+        assert_eq!(settled(&replied), [(leading, Ok(CallReply::Publish))]);
         assert_eq!(map_writes(&removed), [("k".into(), None)]);
     }
 
@@ -1514,10 +1515,10 @@ mod maps {
         let remove_command = command_id(&commands(&removed)[0]);
 
         let of_trailing = reply(&mut machine, transport, trailing);
-        assert_eq!(settled(&of_trailing), [(waiter, ok())]);
+        assert_eq!(settled(&of_trailing), [(waiter, Ok(CallReply::Publish))]);
 
         let of_remove = reply(&mut machine, transport, remove_command);
-        assert_eq!(settled(&of_remove), [(remove_id, ok())]);
+        assert_eq!(settled(&of_remove), [(remove_id, Ok(CallReply::Publish))]);
     }
 
     /// A remove made while subscribing meets the gate once subscribed, in
@@ -1551,7 +1552,13 @@ mod maps {
                 .expect("the remove"),
         );
         let replied = reply(&mut machine, transport, remove_command);
-        assert_eq!(settled(&replied), [(waiter, ok()), (remove_id, ok())]);
+        assert_eq!(
+            settled(&replied),
+            [
+                (waiter, Ok(CallReply::Publish)),
+                (remove_id, Ok(CallReply::Publish))
+            ]
+        );
     }
 
     #[test]
@@ -1602,7 +1609,7 @@ mod maps {
 
         let replied = reply(&mut machine, transport, command);
 
-        assert_eq!(settled(&replied), [(waiter, ok())]);
+        assert_eq!(settled(&replied), [(waiter, Ok(CallReply::Publish))]);
     }
 
     #[test]
@@ -1623,9 +1630,9 @@ mod maps {
             transport,
             r#"{"id":2,"subscribe":{"type":1,"epoch":"e","offset":1,"publish_debounce":100}}"#,
         ));
-        let filler = machine.add_call(super::filler());
-        let filled = machine.handle(Input::Call(filler));
-        let (frame_id, _) = filled
+        let filling_call = machine.add_call(super::filler());
+        let written = machine.handle(Input::Call(filling_call));
+        let (frame_id, _) = written
             .iter()
             .find_map(|action| match action {
                 Action::Send { id, frame, .. } => Some((*id, frame.clone())),
@@ -1676,7 +1683,7 @@ mod maps {
 
         let replied = reply(&mut machine, transport, command);
 
-        assert_eq!(settled(&replied), [(remove_id, ok())]);
+        assert_eq!(settled(&replied), [(remove_id, Ok(CallReply::Publish))]);
     }
 
     #[test]

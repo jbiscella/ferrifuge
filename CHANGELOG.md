@@ -20,6 +20,12 @@ repository held while it carried that version, from the blocks of
   `codes::error::PUBLISH_DROPPED`; `machine::DebounceTimer`,
   `Input::DebounceTimerFired`, `Action::SetDebounceTimer` and
   `CancelDebounceTimer`, `Machine::with_publish_debounce`.
+- Unstable (`unstable` feature): publish debouncing per map key (Block 46b).
+  `MapSubscription::publish` and `publish_json` debounce each key on its
+  own, with the interval of a map's live subscribe reply, and
+  `MapSubscription::remove` cancels the key's pending publish, which then
+  settles with the remove's result. `Client::map_publish` and
+  `Client::map_remove` are not debounced.
 - Unstable (`unstable` feature): map subscriptions recover and resync
   (Block 45c). A subscribe after a taken event recovers from that
   position in the stream phase, and the missed changes come as

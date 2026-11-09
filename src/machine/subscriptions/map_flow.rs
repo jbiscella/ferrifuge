@@ -722,10 +722,13 @@ impl Machine {
         result: crate::wire::SubscribeResult,
         entries: Vec<MapEntry>,
     ) {
+        // Read before the calls waiting for `subscribed` start (Block 46, D2).
+        let debounce = self.debounce_windows(result.publish_debounce);
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
         sub.state = SubscriptionState::Subscribed;
+        sub.debounce = debounce;
         sub.backoff.keep_reset();
         sub.backoff.reset();
         sub.tokens.connected();
@@ -782,10 +785,13 @@ impl Machine {
         result: crate::wire::SubscribeResult,
         publications: Vec<Publication>,
     ) {
+        // Read before the calls waiting for `subscribed` start (Block 46, D2).
+        let debounce = self.debounce_windows(result.publish_debounce);
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
         sub.state = SubscriptionState::Subscribed;
+        sub.debounce = debounce;
         sub.backoff.keep_reset();
         sub.backoff.reset();
         sub.tokens.connected();

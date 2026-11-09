@@ -71,7 +71,15 @@ impl Machine {
     /// publish with no open window opens one and goes on, one with an open
     /// window waits there, its data the window's latest. Whether it waits.
     pub(super) fn debounce_gate(&mut self, id: CallId) -> bool {
-        let Some((subscription, key)) = self.debounce_key(id) else {
+        let Some(subscription) = self.debounced_subscription(id) else {
+            return false;
+        };
+        #[cfg(feature = "unstable")]
+        if let Some(key) = self.map_remove_key(id) {
+            self.close_window_for_remove(subscription, &key, id);
+            return false;
+        }
+        let Some(key) = self.debounce_key(id) else {
             return false;
         };
         let Some(windows) = self.subscription_windows(subscription) else {
@@ -88,6 +96,25 @@ impl Machine {
             window.waiters.push(id);
         }
         true
+    }
+
+    /// A remove of `key` met the gate (Block 46, D12): if the key has an
+    /// open window it closes, its timer cancelled, its latest value dropped,
+    /// and the publishes waiting in it follow the remove's result. The
+    /// remove itself goes on, undebounced, and opens no window.
+    #[cfg(feature = "unstable")]
+    fn close_window_for_remove(&mut self, subscription: SubscriptionId, key: &str, remove: CallId) {
+        let Some(windows) = self.subscription_windows(subscription) else {
+            return;
+        };
+        let Some(timer) = windows.by_key.remove(key) else {
+            return;
+        };
+        self.actions.push(Action::CancelDebounceTimer(timer));
+        if let Some(window) = self.debouncing.windows.remove(&timer) {
+            self.follow_call(remove, window.waiters);
+        }
+        self.close_windows_of(subscription);
     }
 
     /// Opens a window for `key`, with its timer.
