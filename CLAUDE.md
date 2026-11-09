@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–43 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–44 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -26,7 +26,7 @@ Markers used below:
 | Serialization | JSON and Protobuf | Both supported by centrifuge-js |
 | Transports | websocket, http_stream, sse | Fallback in this order |
 | `closed` client state | Not implemented; a closed client reports `disconnected`, and `Client::is_closed()` tells it apart (Block 33) | Spec marks it optional |
-| Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) | Owner's choice |
+| Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) on native targets, browser adapter behind the `browser` cargo feature (default) on wasm32-unknown-unknown (Block 44) | Owner's choice |
 | Scenario execution | cucumber-rs; `.feature` files under `tests/features/` are verbatim copies of the Gherkin in this file | Scenario text is the test; drift is checked mechanically |
 | Real server for @A/@B | testcontainers-rs, image `centrifugo/centrifugo:v6.10.1` | `cargo test` needs only Docker |
 | Protobuf codegen | prost, `client.proto` vendored at a pinned upstream commit, protoc from `protoc-bin-vendored` | No system protoc needed |
@@ -37,7 +37,7 @@ Markers used below:
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only; the OpenSSL license is allowed globally (owner decision: needed by aws-lc, no on/off variant to maintain) | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
 | TLS crypto provider | Chosen at build time by cargo features: `ring` (a default feature), `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode). A non-ring build disables default features, so ring is not linked; when several are enabled the strongest wins (`fips` > `aws-lc-rs` > `ring`) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring builds with a C compiler alone, the FIPS build also needs CMake and Go |
-| HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider`, `stream` and `socks` (`socks` from Block 23), given the client's own TLS configuration | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
+| HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider`, `stream` and `socks` (`socks` from Block 23), given the client's own TLS configuration; in the browser, the browser's fetch (Block 44 D8) | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
 | Publication payload type | Raw bytes (`Vec<u8>`): raw JSON text with the JSON protocol, any bytes with Protobuf | Every official SDK uses bytes (Go, Java, Swift, Dart) and so does tokio-centrifuge |
 | Protocol selection | A `Config` option, JSON by default, fixed when the client is created | Every SDK fixes it at creation (Go constructors, centrifuge-js builds); tokio-centrifuge uses a config enum |
 | Request/response API | `async fn` returning `Result` | Every SDK returns a result or an error (Go, Dart, Swift, tokio-centrifuge) |
@@ -61,7 +61,6 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 - map subscriptions, shared poll subscriptions (experimental; planned: Blocks 45 and 47)
 - client publish debouncing (Centrifugo PRO; planned: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
-- browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims (planned: Block 44)
 - `closed` state
 
 ### Reversed exclusions
@@ -82,6 +81,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 18, out of scope | automatic batching of every command a step or a burst produces | owner, 2026-11-06 (item 26) | 36 |
 | Block 18, out of scope | batching the calls a new connection releases when no batch is open | owner, 2026-11-06 (item 26) | 36 |
 | Block 18, out of scope | subscribe commands in the frame of the connect command on websocket open | owner, 2026-11-06, late (item 31) | 36 |
+| Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |
 
 ### Test layers
 
@@ -92,10 +92,11 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | @D | Scripted fake server speaking the client protocol | Server behaviour Centrifugo cannot be made to produce: unsubscribe push codes, missing pings, malformed/unexpected frames, frame-level assertions |
 | @E | Unit tests with a controlled clock, no network | Timing: backoff and jitter bounds, refresh retry delays |
 | @P | Benchmark, allocation-counting and simulation harness, outside cucumber | Footprint, per-message cost and fleet behaviour. Deterministic metrics (instruction counts, allocation counts, live bytes, simulated time) gate CI; wall-clock metrics are measured and reported, never gating |
+| @W | wasm-bindgen-test in headless Chrome and Firefox (and Safari on main and nightly), the browser client against a real Centrifugo and a recording relay in front of it, both started for the run; network and page events dispatched by the test on its own `EventTarget`s | Behaviour only a browser shows: the browser transports, item 39's options, the browser's clocks |
 
 A scenario tagged with several layers must pass in each of them.
 
-Cucumber skips `@P` scenarios. A test fails if a `@P` scenario name in `CLAUDE.md` has no matching benchmark or simulation, or if a benchmark claims a scenario name that does not exist.
+Cucumber skips `@P` scenarios. A test fails if a `@P` scenario name in `CLAUDE.md` has no matching benchmark or simulation, or if a benchmark claims a scenario name that does not exist. Cucumber also skips `@W` scenarios, under the same claim rule for wasm tests (Block 44 D18).
 
 **Exceptions introduced:** none.
 
@@ -2082,7 +2083,7 @@ Feature: Footprint, performance and fleet behaviour
 **Decisions** (owner decision, 2026-11-05: option 5, with hand-off delivery, a bounded read-ahead, one active stream per object, and timers and pings running while reading is paused; the remaining points decided through the review the owner delegated them to):
 - **Delivered means taken.** A publication counts as delivered only when the `next()` of its stream returns it; only then does its stream position move, for client-side and server-side subscriptions alike (Blocks 11, 12). Exactly-once delivery follows on channels with history and recovery while the backlog stays within the server's recovery limit (Centrifugo `client.recovery_max_publication_limit`, default 300; past it recovery fails and `subscribed` reports `recovered` false).
 - **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command.
-- **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
+- **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport; over websocket and sse in the browser a bounded inbox stands instead, amended by Block 44 D7), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
 - **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads, and the queued reply is dropped (Centrifugo v6.10.1: centrifuge `writer.go` `enqueue`, `client.go` `writeEncodedCommandReply`; a 3008 close does not flush the queue). Each reconnect asks for the same backlog, so the client keeps reconnecting, its backoff growing up to `max_reconnect_delay` ("Backoff after 3008"; a connect reply that is itself dropped resets nothing), until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers.
 - **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.)
 - **Timers keep running** while the application holds events, with two pauses. The no-ping deadline pauses while the client has stopped reading because the read-ahead is full, and restarts in full when reading resumes; without this pause an application stuck with a full read-ahead would make the client reconnect with code 2 about every 35 s, recovering a full read-ahead each time. A reply deadline (connect, refresh, subscribe, unsubscribe, sub_refresh) pauses while its reply has been read but waits to be handled.
@@ -3171,7 +3172,7 @@ Order of the blocks:
 - **D4 Changelog.** `CHANGELOG.md` in Keep a Changelog form, written by hand: `## [Unreleased]` on top, then `## [x.y.z] - YYYY-MM-DD` for each version from 0.1.0, newest first, with Added, Changed, Deprecated, Removed, Fixed and Security subsections, backfilled from the history (the version each block reached, `git log -G'^version'` on `Cargo.toml`, and the block table of this file); no compare links for versions never tagged. A pull request that changes the public API or behaviour adds an `Unreleased` entry; the release moves them under the new version.
 - **D5 Security policy.** `SECURITY.md`: reports go through GitHub private vulnerability reporting (the repository's "Report a vulnerability" button), never public issues; the supported versions are the latest minor release; fixes are released as a patch of it and announced as a GitHub security advisory, with a RustSec advisory requested for crates.io users. No response-time commitment.
 - **D6 MSRV policy.** `rust-version` in `Cargo.toml` is the floor; it is raised only when a dependency or a language feature needs it, never in a patch release, and the changelog says so. The `msrv` CI job checks it for every feature set CI builds: the default (ring), the core alone, `aws-lc-rs` and `fips`, installing CMake and Go for the last two as the `providers` job does (closing the analysis's finding F4).
-- **D7 docs.rs.** `[package.metadata.docs.rs]` builds the default features and `test-util` (Block 37 D7) on `x86_64-unknown-linux-gnu` only (never `fips`, whose build needs Go and CMake); items behind a feature say so (`doc(cfg)` under the `docsrs` cfg, which docs.rs sets). A `docs-rs` CI job on nightly builds with `RUSTDOCFLAGS="--cfg docsrs -D warnings"`; `lint` keeps its stable `cargo doc` step. The crate-level documentation (`src/lib.rs`) gains an overview and a `no_run` quickstart, instead of pointing to this file.
+- **D7 docs.rs.** `[package.metadata.docs.rs]` builds the default features and `test-util` (Block 37 D7) on `x86_64-unknown-linux-gnu` only (never `fips`, whose build needs Go and CMake); items behind a feature say so (`doc(cfg)` under the `docsrs` cfg, which docs.rs sets). A `docs-rs` CI job on nightly builds with `RUSTDOCFLAGS="--cfg docsrs -D warnings"`; `lint` keeps its stable `cargo doc` step. The crate-level documentation (`src/lib.rs`) gains an overview and a `no_run` quickstart, instead of pointing to this file. Amended by Block 44 D19: docs.rs also builds `wasm32-unknown-unknown`.
 - **D8 Examples.** `examples/` holds runnable programs, each `required-features = ["tokio"]`: `quickstart` (connect, subscribe, print publications), `recovery` (a recoverable subscription, its position saved and resumed with `since`), `calls` (publish, history, presence and presence stats; RPC needs a server-side handler and is left out) and `delta` (a subscription with fossil delta). They take the endpoint from `FERRIFUGE_EXAMPLE_ENDPOINT`, default `ws://localhost:8000/connection/websocket`, and run against one server configuration, `examples/centrifugo.json`, which the README shows and the @A scenario uses. The `portability` jobs build the examples on every OS on pull requests (`lint` already builds them with `--all-targets`).
 - **D9 Crate metadata and README.** `documentation` (docs.rs) is added; `homepage` is not (it would repeat `repository`), nor `readme` (found automatically). The README stops saying the crate is not on crates.io and shows a crates.io dependency instead of a git one, with the version the manifest has; a test checks that every `ferrifuge = "x.y"` in the README matches the manifest's major and minor version and that the MSRV it states matches `rust-version`.
 
@@ -3654,7 +3655,7 @@ Value clause: As an app developer shipping Ferrifuge in Android and iOS apps, I 
 **Dependencies:** Blocks 2 (backoff), 4 (no-ping deadline), 5b and 10 (token components, refresh timers), 8 (transports, fallback, failed opens), 11 (recovery), 13 (calls), 14 (the jitter window, the idle-client gate), 15 (withdrawal, the paused no-ping deadline), 16 (chaos runners), 17 (`Input` non-exhaustive, `Action` exhaustive), 21 (logging), 23 (proxy settings), 24 (the mobile guide).
 
 **Out of scope:**
-- built-in OS sleep and network watchers (the analysis's design B, not adopted): apps get these notifications from their platform and call `reconnect()` (D9);
+- built-in OS sleep and network watchers (the analysis's design B, not adopted): apps get these notifications from their platform and call `reconnect()` (D9); the browser adapter watches the browser's network and page events (amended by Block 44 D10, D11);
 - a periodic wake to notice a sleep sooner (D1);
 - a captive portal behind a websocket that opened (a lost transport, Block 21 D4) or one that breaks TLS (a certificate error);
 - emulation requests answered by a portal: Block 8's handling stays;
@@ -3688,7 +3689,7 @@ This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "R
   - Every reconnect, whether a sleep caused it (D2) or not, keeps the refresh timers running until the next connect or subscribe reply re-arms or cancels them, so a transport lost just before a sleep still has its refresh timer for D3 to shorten (Codex, #119); `disconnect()`, `unsubscribe()` and a terminal condition still cancel them (amends Blocks 5b and 10, whose teardown cancelled them on every reconnect). One that fires while the client is connecting makes the next attempt fetch a new connection token first; one that fires while its subscription is subscribing makes its next subscribe fetch a new token first, also when the subscribe was waiting for its data callback, which then runs again for the new token, and likewise for the connect data callback, and for a websocket that was opening: once open, it waits for the new token to send its connect command, within the connect timeout, and a failed fetch closes it and reconnects after the backoff (Codex, #120).
   - A token refresh that came due and had not completed, its token fetch still pending or its retry after a failure still waiting, when the connection is torn down for a reconnect, or the subscription for a resubscribe (a server unsubscribe push with a code from 2500), makes the next connect, or the next subscribe of that subscription, fetch a new token first when a token callback exists, as a refresh that fires while connecting or subscribing already does. A refresh whose token was fetched, its refresh or sub_refresh command still pending, leaves that token for the next connect or subscribe. The answer of the abandoned fetch is still not used (owner decision, 2026-11-04): a connection refresh's denial still disconnects; a subscription's abandoned fetch stays cancelled. `disconnect()` and `unsubscribe()` leave the next connect or subscribe unchanged (reviewer, 2026-11-07, delegated by the owner; Codex, #120). So a token that expired during the sleep is not sent, and no error 109 round trip is needed (the official SDK keeps expiry as wall time, §6.6).
 - **D4 Timers a sleep leaves alone.** Reply deadlines (connect, refresh, subscribe, unsubscribe, `sub_refresh`), call timers, and the reconnect and resubscribe delays. The monotonic clock stopped during the sleep, so it used none of their time. Shortening the delays would make a fleet that slept together reconnect together.
-- **D5 `Client::reconnect()`.** It mirrors `connect()`; in the core it is `Input::Reconnect`. The client goes to, or stays in, `connecting`, never `disconnected`:
+- **D5 `Client::reconnect()`.** It mirrors `connect()`; in the core it is `Input::Reconnect` (its jitter rule also covers a reconnect while the first attempt after a lost connection still waits: amended by Block 44 D10). The client goes to, or stays in, `connecting`, never `disconnected`:
   - connected: the transport closes and the client emits "connecting" with code 6 "reconnect called" (`codes::connecting::RECONNECT_CALLED`);
   - connecting: the attempt in flight, if any, closes, and no event is emitted (Block 15: one event per state change);
   - the next attempt has no backoff delay, and the attempt counter restarts, as after `connect()` (Block 2);
@@ -4702,7 +4703,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 and 4, and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
@@ -5953,7 +5954,7 @@ Value clause: As a maintainer, I want CI to build and lint the sans-IO core for 
 - **D2 Calls that compile but panic there.** The job's clippy reads a configuration of its own through `CLIPPY_CONF_DIR`, disallowing the type `std::time::Instant` and the functions `std::time::Instant::now`, `std::time::SystemTime::now`, `std::thread::spawn`, `std::thread::Builder::spawn`, `std::thread::scope` and `std::thread::sleep`, each with its reason. `SystemTime` as a value stays allowed (`Statistics::connected_since`). The adapter and the tests are not built in this job.
 - **D3 No tests on wasm32.** The dev-dependencies pull in mio, which does not build there; wasm-bindgen-test arrives with Block 44.
 - **D4 Random source.** fastrand 2.5.0 without its `js` feature seeds its generator with a constant on wasm32-unknown-unknown (`src/global_rng.rs`), and `Machine::new` forks from it, so the n-th machine of every page draws the same delays. The core does not enable `js`: getrandom 0.4.3 advises libraries against `wasm_js` unless they already depend on wasm-bindgen there, and it breaks non-JS hosts. Block 44's browser feature enables `fastrand/js`. Until then the rustdoc of `Machine::new` and `Machine::with_token_source` and the README say so.
-- **D5 No compile error for `tokio` on wasm32.** Its dependencies fail before Ferrifuge compiles, so the message could never show; the README says that `tokio` does not build there.
+- **D5 No compile error for `tokio` on wasm32.** Its dependencies fail before Ferrifuge compiles, so the message could never show; the README says that `tokio` does not build there (amended by Block 44 D1: that sentence goes, as the native dependencies become target-gated; D4 and D6 are resolved by Block 44 D4, D5).
 - **D6 Sizes and clocks.** Unchanged: the size limits are `usize` with defaults of 64 MiB or less, u64-to-usize conversions are checked, counters are plain `u64`, and the core sets no clock values. For Block 44: building a `SystemTime` without `SystemTime::now` (`VERIFY:` that `UNIX_EPOCH + Duration` works there at run time).
 - **D7 Version and docs.** No version bump. `Unreleased`, "Added": "A wasm32-unknown-unknown build of the sans-IO core in CI." The README's "Cargo features" and "Continuous integration" sections name the check, D4 and D5.
 
@@ -5990,9 +5991,9 @@ Value clause: As a maintainer, I want CI to build and lint the sans-IO core for 
 
 **Decisions** (reviewer, 2026-11-08, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 API.** `pub trait ClientHandler: Send + 'static` and `pub trait SubscriptionHandler: Send + 'static`, each with `on_event(&mut self, event)`, whose default dispatches to one no-op method per variant taking its fields: `on_connecting(code, reason)`, `on_connected(client_id, transport, data)`, `on_disconnected`, `on_error`, `on_server_subscription(channel, event)`, `on_message`; `on_subscribing`, `on_subscribed`, `on_unsubscribed`, `on_publication`, `on_join`, `on_leave`. A blanket implementation for `FnMut(Event) + Send + 'static` closures overrides `on_event`. A field added later to the non-exhaustive `Connected` reaches `on_event` only; a new variant adds a defaulted method (minor, RFC 1105). Set with `ClientBuilder::handler`, `Client::set_handler`, `SubscriptionBuilder::handler` and `Subscription::set_handler`, each taking `impl …Handler`. Verified by the reviewer: an unannotated closure infers through the blanket implementation, and a struct of another crate implements the trait without a coherence error (serenity `EventHandler`, rdkafka `ClientContext`).
-- **D2 Delivery modes.** `ClientBuilder::event_delivery(EventDelivery)`, a `#[non_exhaustive]` enum, `Default` = `Task`, per client. One consumer per client runs every handler of the client and of its subscriptions, one at a time, in `EventId` order. `Task`: a task spawned through the client's runtime handle (Block 28 D1). `Thread`: one thread named `ferrifuge-events`, inside the runtime context (`Handle::enter`), detached, ending after `close()` once its events are delivered; if it cannot start, the client fails as for a panic (D4). Both start at the first handler set. `Inline`: on the driver. Source: centrifuge-rust `docs/spec.md` §9.4.
+- **D2 Delivery modes.** `ClientBuilder::event_delivery(EventDelivery)`, a `#[non_exhaustive]` enum, `Default` = `Task`, per client. One consumer per client runs every handler of the client and of its subscriptions, one at a time, in `EventId` order. `Task`: a task spawned through the client's runtime handle (Block 28 D1). `Thread`: one thread named `ferrifuge-events`, inside the runtime context (`Handle::enter`), detached, ending after `close()` once its events are delivered; if it cannot start, the client fails as for a panic (D4). Both start at the first handler set. `Inline`: on the driver. Source: centrifuge-rust `docs/spec.md` §9.4. (On the browser target: amended by Block 44 D15.)
 - **D3 Delivery rule.** An event counts as taken when its handler returns; a handler is one more consumer of the existing outbox (`StreamOpened`). An event handed to a handler and not yet returned is in flight: it is not withdrawn, and it still holds later messages (Block 15, in order); a connect or subscribe command sent meanwhile recovers from the position the event would move to; its return confirms that position, a panic voids it (a new `Input::EventHanded`). Take-over works both ways, as Block 15 and Block 39 D1: the in-flight event finishes with the old consumer, the untaken events move in order. No handler runs while a client lock is held. `Inline` gives up Block 15's "Timers keep running": while a handler runs, no timer fires, nothing is read and no ping is answered; its documentation says so. Under `Task` a handler that blocks holds a worker of the client's runtime: timers and pongs keep running on a multi-thread runtime, while on a current-thread runtime nothing else of the runtime runs until it returns; the documentation says so, and that handlers that block take `Thread` (Codex on #167).
-- **D4 Panics.** `catch_unwind` around each call. A new `Input::HandlerPanicked { event, message }` withdraws the event and disconnects with code 2 (`BAD_PROTOCOL`), reason `exception in event handler: <message>`, without reconnecting (centrifuge-js 63ed73e README.md:1063-1072, `centrifuge.ts:1810-1813`). The handler is kept, so it still receives `disconnected` and `subscribing`; a panic while already disconnected changes nothing. Logged at WARN. The `Inline` driver survives (invariant I2). With `panic = abort` the process aborts, as documented.
+- **D4 Panics.** `catch_unwind` around each call. A new `Input::HandlerPanicked { event, message }` withdraws the event and disconnects with code 2 (`BAD_PROTOCOL`), reason `exception in event handler: <message>`, without reconnecting (centrifuge-js 63ed73e README.md:1063-1072, `centrifuge.ts:1810-1813`). The handler is kept, so it still receives `disconnected` and `subscribing`; a panic while already disconnected changes nothing. Logged at WARN. The `Inline` driver survives (invariant I2). With `panic = abort` the process aborts, as documented. (On the browser target, where panics abort: amended by Block 44 D15.)
 - **D5 Clones and weak handles.** `Client` holds an `Arc` of an owner whose `Drop` shuts the client down, so dropping the last clone closes it (Block 33 D4). `Client::downgrade()` gives a `WeakClient` (`Clone`, `Debug`) whose `upgrade()` gives a `Client` while a clone lives, `None` once every clone is dropped, and a closed client while clones live (tokio `WeakSender`, `bounded.rs:1576`, `:1665`). `close()` on one clone closes every clone. A `Subscription` still does not keep its client alive (Block 33 D3, D4). Handlers are dropped after close, once their events are delivered, which breaks reference cycles. The handler slot sits behind a `Mutex`, so `Client`'s auto traits are unchanged (cargo-semver-checks).
 - **D6 Deadlock detection** (amends "Planned after Block 19", "Handlers (item 17)", for `Task` and `Thread`). A thread-local marker naming the client is set by a guard around each handler call, in every mode, and read at the first poll of every call future of `Client` and `Subscription` (Block 38's helpers included) and of `ready()`.
   - `Task` and `Inline`: a marked call fails at once. Measured by the reviewer on tokio 1.54.1 (multi-thread runtime, 2, 4 and 8 workers): a task that wakes another and then blocks its worker leaves the woken task in that worker's LIFO slot, which other workers do not steal, 10 stalls in 10 trials (0 with `block_in_place`); every call wakes the driver, so a `Task` handler blocking on a call would stall it. tokio's own `Handle::block_on` panics inside a task.
@@ -6487,3 +6488,402 @@ Feature: Cookie jar
 ```
 
 **Exceptions introduced:** none.
+
+---
+
+## Block 44 — Browser adapter, browser-only options
+
+**Goal:** a web front-end written in Rust (Leptos, Yew, Dioxus) runs the same Ferrifuge client in the browser that a desktop or server app runs natively: the same `Client`, `Subscription`, streams, handlers, calls and guarantees, over the browser's WebSocket, fetch response streams and EventSource, reacting as centrifuge-js does to the browser's online and offline events and to the page entering and leaving the back/forward cache, with centrifuge-js's fetch, ReadableStream, EventSource and WebSocket shims and a credentials option for cross-origin HTTP transports. Source: parity item 25, design B (owner decision, 2026-11-06, late: "the browser adapter, which takes the browser-only options of centrifuge-js (item 39)"), on the sans-IO core (`Machine::handle(Input) -> Vec<Action>`, Block 0) that Block 40 keeps building for wasm32-unknown-unknown; and Block 40's deferrals: tests on wasm, the linked module's imports, entropy for the core's random source (Block 40 D4), relaxed `Send` bounds, cargo-deny targets for wasm, and the `SystemTime` VERIFY of Block 40 D6.
+
+**Dependencies:** Blocks 0 (sans-IO core, components rule, dependency policy, test layers, precedence), 2 (backoff), 3 and 34 (codes), 8 (transports, fallback, emulation, failed opens, the write timeout), 13 (calls), 14 (jitter window, @P gates), 15 (delivery, read-ahead, backoff after 3008), 17 and 32 (real and emulated headers), 20 (semver check, MSRV, docs.rs, changelog), 21 (logging), 22 and 23 (TLS, proxies), 25 (sleep detection, `reconnect()`, captive portals), 27 (stream decoders, Protobuf over http_stream), 28 (runtime handle, drop guard), 29 (handshake timeout, message size), 31 (statistics), 33 (`close()`), 36 (batching), 37 (connector, test support), 39 (publications stream), 40 (wasm32 build of the core, D2's disallowed calls, D4, D6), 41 (handlers, delivery modes, deadlock detection, panics), 43 (cookies stay the browser's).
+
+**Out of scope:**
+- wasm targets other than wasm32-unknown-unknown (wasip1, wasip2, emscripten, wasm64, wasm32v1-none), wasm threads (`+atomics`), and non-JS wasm hosts, which keep the core alone (Block 40);
+- WebTransport (Block 48) and SockJS (item 34) in the browser;
+- `WebSocketStream`, the streams-based WebSocket with backpressure: experimental and "not currently a part of any specification" (MDN, 2026-11-09; whatwg/websockets PR #48 open);
+- the Page Lifecycle `freeze` and `resume` events, `visibilitychange`, `beforeunload`: centrifuge-js 63ed73e listens to none of them;
+- counter-measures to timer throttling in hidden tabs (D16);
+- packaging for JavaScript callers: wasm-bindgen exports, an npm package, wasm-pack bundles; the adapter serves Rust front-ends;
+- service workers; dedicated and shared workers, Node.js and Deno are not tested (D4 and D12 look the globals up through `globalThis`, so they are expected to work, with shims where a global is missing; `pagehide` does not exist in workers);
+- options with no browser meaning (D14): real HTTP headers, TLS settings, proxies, the connector, the runtime handle, the cookie jar (Block 43: the browser keeps cookies), `EventDelivery::Thread`;
+- the in-memory server double (Block 37) on wasm, and the @P benchmarks there: @P stays native;
+- relative endpoints: Block 8's endpoint rules stay on the browser target (an app builds absolute URLs from `window.location`; relaxing the rule later is additive);
+- websocket write-stall detection by polling `bufferedAmount` (D6);
+- a semver check of the browser target in the release workflow before a released version has the adapter (D19).
+
+This block reverses Block 0's exclusion "browser-only options: online/offline network events, fetch/ReadableStream/EventSource shims (planned: Block 44)" and Block 8's "browser-only shims"; Block 0's "Out of scope (v1)" loses that line and its "Reversed exclusions" gains the row | Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |. It amends:
+- Block 0: the "Async runtime" row reads "Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) on native targets, browser adapter behind the `browser` cargo feature (default) on wasm32-unknown-unknown (Block 44)"; the "HTTP client" row gains "; in the browser, the browser's fetch (Block 44 D8)"; the test-layer table gains the @W row (D18);
+- Block 15's "Bounded read-ahead": over websocket and sse on the browser target a bounded inbox replaces "the client stops reading the connection" (D7);
+- Block 25: D5's jitter rule also covers a reconnect while the first attempt after a lost connection still waits (D10); its "built-in OS sleep and network watchers" exclusion stays for the native adapter, while the browser adapter watches the browser's network and page events (D10, D11);
+- Block 34 D1: "Ferrifuge adds `connecting` 5 and 6" reads "5, 6 and 7", and the `connecting` table gains code 7 (D7);
+- Block 40: D5's README sentence "`tokio` does not build there" goes (D1); D4 and D6 are resolved here (D4, D5);
+- Block 41: D2's modes and D4's panics on the browser target (D15);
+- Block 20 D7: docs.rs also builds `wasm32-unknown-unknown` (D19).
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 44a | As a maintainer, I want the adapter split into a runtime-free layer and a tokio driver, with `MaybeSend` and `MaybeSync` in the public bounds, so that a browser driver reuses the delivery, timer, close and handler logic instead of copying it, while native apps see no change in behaviour | none new: every native scenario and the Block 14 @P gates, unchanged (D2, D3 structural acceptance) |
+| 44b | As an app developer writing a web front-end in Rust, I want the Ferrifuge client in the browser over the browser's WebSocket, with the same API, handlers and recovery as natively, so that my front-end talks to Centrifugo without centrifuge-js bindings and keeps exactly-once delivery on recoverable channels | the websocket `@W` scenarios ("A browser client connects over websocket and receives a publication" to "A browser client's statistics tell when it connected") |
+| 44c | As an app developer whose users' devices go offline and whose pages enter the back/forward cache, I want the client to close its connection then and reconnect promptly when the device is online again or the page is restored, without a fleet reconnecting at once, so that users get their streams back and the server does not keep a frozen page's connection | the network and page `@W` scenarios and the five `@E` scenarios |
+| 44d | As an app developer whose users sit behind networks that block websocket, I want the browser client to fall back to http_stream over fetch response streams, so that it still connects there and a slow reader still holds the server back | "A browser client falls back to http_stream when websocket is unreachable", "Commands work over http_stream from a browser client", "A stream not read stops a browser client reading its http_stream response" |
+| 44e | As an app developer whose users' networks pass only server-sent events, I want the browser client to fall back to sse over EventSource, so that it connects there too, reconnecting by its own rules rather than the browser's | "A browser client falls back to sse when websocket and http_stream are unreachable", "An sse stream that ends makes a browser client reconnect, not the browser's EventSource" |
+| 44f | As an app developer running in an environment without some browser globals, or serving Centrifugo from another origin with cookie-based sessions, I want to give the client my own WebSocket, fetch, ReadableStream and EventSource and to include credentials in its HTTP requests, so that it works where a global is missing and its HTTP transports carry my session cookies | the shim and credentials `@W` scenarios |
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 One crate, one API, the backend chosen by the target.** As reqwest 0.13.5 does (its `wasm` module behind `cfg(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")))`, the same `Client` names at the crate root, docs.rs targets `x86_64-unknown-linux-gnu` and `wasm32-unknown-unknown`): `ferrifuge::Client`, `ClientBuilder`, `Subscription`, `SubscriptionBuilder`, `Batch`, `WeakClient`, the handler traits and `EventDelivery` exist on both targets, so that a Leptos or Dioxus app shares its client code between its web and desktop builds. "The browser target" below is `all(target_arch = "wasm32", target_os = "unknown")`.
+  - A new cargo feature `browser`, in the default set (`default = ["tokio", "ring", "browser"]`): it enables the browser adapter on the browser target and nothing elsewhere. Its dependencies (D4–D9: wasm-bindgen, wasm-bindgen-futures, js-sys, web-sys, wasm-streams, gloo-timers, fastrand's `js`) sit in a `[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]` table, so a native build compiles none of them; all but gloo-timers and getrandom's `wasm_js` dependencies already appear in the lock file through reqwest's own wasm table.
+  - The native dependencies of `tokio` (tokio with `rt`, `rt-multi-thread`, `time`, tokio-tungstenite, rustls and its verifiers, reqwest, hyper-util, hyper-rustls, tower-service, http, sse-core, base64, percent-encoding, cookie_store, url) move to a `cfg(not(all(target_arch = "wasm32", target_os = "unknown")))` table, so `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` build as nothing on the browser target and the default features build there. The dependencies both adapters use (tokio with `sync` and `macros`, futures-util, futures-core, tracing, bytes, tokio-util `codec`, mediatype) are declared once per table with the features each needs. Verified (2026-11-09, rustc 1.99.1): tokio 1.54.1 `sync` and `macros` (`tokio::select!` over a gloo-timers future), tokio-util 0.7.20 `codec`, futures-util 0.3.34, tracing 0.1.44 (`std`, `log`) and mediatype 0.23.0 build for wasm32-unknown-unknown.
+  - `--no-default-features` stays the core alone on every target, for non-JS wasm hosts (Block 40 D1's builds are unchanged); on the browser target the adapter needs `browser`, which the README says.
+  - Native-only API is absent from the browser target at compile time (D14), as reqwest's native-only builder methods are absent from its wasm `ClientBuilder`; browser-only API (D10–D13) is absent natively. Both carry `doc(cfg(...))`.
+
+- **D2 One adapter layer, two drivers.** Duplicating the 5,400 lines of `src/adapter/client.rs` would duplicate the subtle parts (Block 15's outboxes and take-over, Block 25's timer bookkeeping, Block 28's drop guard, Block 33's close, Block 41's handler dispatch and deadlock marker). So `src/adapter/` is split, with no behaviour change natively:
+  - the shared layer, which names no runtime: `Client`, `ClientBuilder`, `Subscription`, `Shared`, `Core`, `Outbox`, `EventStream`, `ready`, the handler dispatch, logging, and the driver loop (`Driver::run`, `perform`, the timer tables), which reaches its transports only through `send`, `recv(reading)` and `close`;
+  - `src/adapter/tokio/`: the tokio transports, TLS, proxies, HTTP clients, connector, cookies, Android;
+  - `src/adapter/browser/`: the browser transports (D6–D9), the network and page listeners (D10, D11), the shims (D12), the clock and timers (D4);
+  - `src/adapter/platform.rs`, the crate-private seam, selected by `cfg`, with no trait object and no generic parameter on public types: `spawn` (tokio `Handle::spawn` or `wasm_bindgen_futures::spawn_local`), `Instant` and `sleep_until`, the wall clock, and the boxed-future and callback aliases of D3.
+  The driver's `tokio::select!` stays (it builds on wasm, verified above). Block 28's "a spawner trait is not adopted" stands: the seam is internal and chooses at compile time. Acceptance: every native scenario, the Block 14 @P gates and the chaos adapter runner pass unchanged; a source check finds `tokio::runtime`, `tokio::time` and `tokio::net` only under `src/adapter/tokio/` and in `platform.rs`, and Block 28's check (no `tokio::spawn` or `tokio::task::spawn` in non-test code under `src/adapter/`) still passes.
+
+- **D3 `Send` bounds: `MaybeSend` and `MaybeSync`.** On the browser target JavaScript handles (`JsValue`, `WebSocket`, a `fetch` promise) are neither `Send` nor `Sync`, so a token callback that calls `fetch` returns a future that is not `Send`; requiring `Send` there would make the callbacks of every browser app impossible to write.
+  - Two public marker traits at the crate root, as wgpu 30.0.1 (`WasmNotSend`, `WasmNotSync`, in wgpu-types `send_sync.rs`), matrix-sdk-common 0.19.1 (`SendOutsideWasm`, `SyncOutsideWasm`), bevy_tasks 0.20.1 (`ConditionalSend`) and centrifuge-rust's design (`docs/spec.md` §9.11: "Every public `Send`/`Sync` bound is `MaybeSend`/`MaybeSync`") do: natively `pub trait MaybeSend: Send {}` with `impl<T: Send + ?Sized> MaybeSend for T {}`, on the browser target `pub trait MaybeSend {}` with `impl<T: ?Sized> MaybeSend for T {}`; `MaybeSync` likewise. The blanket implementations leave no type for a downstream crate to implement them for.
+  - Every public bound and returned opaque type of the shared API that says `Send` or `Sync` says `MaybeSend` or `MaybeSync` instead: the callbacks of `ClientBuilder` and `SubscriptionBuilder` (`get_token`, `get_data`, `get_state`) and their futures, `ClientHandler: MaybeSend + 'static`, `SubscriptionHandler` likewise, the blanket implementations for `FnMut(…) + MaybeSend + 'static`, and the futures and streams returned by `close`, `ready`, `events`, `publications` and the calls (`impl Future<Output = …> + MaybeSend + use<>`). Native-only API (`Connector`, `CookieJar`, `BoxError`, `Connecting`) keeps `Send` and `Sync`. Natively the supertrait makes each bound equivalent to the old one: a caller's `Send` value satisfies it, generic code relying on `H: ClientHandler` being `Send` still compiles (supertraits are elaborated), and a returned future is still `Send`.
+  - Internally, `dyn` types cannot add a non-auto trait, so the stored callbacks and boxed futures use `cfg`-selected aliases (`Pin<Box<dyn Future + Send>>` natively, `Pin<Box<dyn Future>>` on the browser target, as futures' `BoxFuture` and `LocalBoxFuture`). `dyn ClientHandler` stays `Send` natively through the supertrait chain, so `Client`'s auto traits are unchanged (Block 41 D5).
+  - Not adopted: send_wrapper 0.6.0 (last release 2022-06-05, fails Block 0's maintenance rule), which would still make the app's own callbacks `Send` and panics on access from another thread; and `cfg`-duplicated signatures (reqwest's way), which double every documented method and both handler traits.
+  - Natively `Client` stays `Send + Sync` and its futures `Send` (the existing compile tests in `src/adapter/client.rs`); on the browser target `Client` is neither, which its rustdoc says.
+  - Version: cargo-semver-checks 0.51.0 has the major lints `trait_added_supertrait` and `trait_removed_supertrait`, which the handler traits' swap trips, although no native caller or implementor breaks; the version follows the tool, so 0.20.0 lands in 44a (D20), with no lint allowed in `Cargo.toml`.
+
+- **D4 Executor, timers and clocks on the browser target.**
+  - Executor: wasm-bindgen-futures 0.4.80 `spawn_local` (2026-10-30, MIT OR Apache-2.0, wasm-bindgen organisation, MSRV 1.81) runs the driver and, under `Task`, the handler consumer (D15). It needs no runtime, so `build()` has no runtime error on the browser target (Block 28 D1's error stays native).
+  - Timers: gloo-timers 0.4.0 `future::TimeoutFuture` (2026-03-25, MIT OR Apache-2.0, rustwasm/gloo, last commit 2026-10-10, MSRV 1.82). `TimeoutFuture::new` takes `u32` milliseconds and its `callback::Timeout::new` passes `millis as i32` to `setTimeout` (`src/callback.rs:58-67`), so a delay above `i32::MAX` ms (about 24.8 days, e.g. a far token refresh) would wrap negative and fire at once: the adapter arms at most `i32::MAX` ms and re-arms on an early firing until the deadline. Not adopted: futures-timer 3.0.4's `wasm-bindgen` feature (gloo-timers plus send_wrapper), wasm-timer 0.2.5 (last release 2020-08-31), wasmtimer 0.4.5 (maintained, 2026-11-06, but a tokio-shaped layer over the same `setTimeout`, which the adapter does not need).
+  - Monotonic clock: `performance.now()` (web-sys `Performance`, read from `globalThis.performance`, so workers have it too), wrapped in a crate-private `Instant`. Not adopted: web-time 1.1.0 (last release 2024-03-01, fails the maintenance rule) and instant 0.1.13 (RUSTSEC-2024-0384, unmaintained).
+  - Wall clock: `js_sys::Date::now()`, turned into a `SystemTime` as `UNIX_EPOCH + Duration::from_millis(…)` for `Statistics::connected_since` (Block 31) and Block 25's sleep check. Resolves Block 40 D6's `VERIFY:` — verified (2026-11-09, rustc 1.99.1, Node 22): a wasm32-unknown-unknown module computing `UNIX_EPOCH + Duration::from_millis(1762646400123)`, `checked_add` and `duration_since(UNIX_EPOCH)` returns 1762646400123 with no import and no trap, while `SystemTime::now()` traps (`unreachable`). Block 40 D2's disallowed list therefore stays as it is, and the wasm job's clippy also runs it with `browser` (D19).
+
+- **D5 Entropy (closes Block 40 D4).** `browser` enables `fastrand/js`: fastrand 2.5.0's `js` feature adds getrandom 0.4 with `wasm_js` on `cfg(all(any(target_arch = "wasm32", target_arch = "wasm64"), target_os = "unknown"))` only (its `Cargo.toml`), and getrandom 0.4.3's `wasm_js` feature alone selects `Crypto.getRandomValues` (`src/backends.rs:170-180`; no `getrandom_backend` cfg flag is needed in 0.4). getrandom's README advises libraries against `wasm_js` with one exception: "if your crate already unconditionally depends on `wasm-bindgen` or `js-sys` on "unknown" WASM targets then it's acceptable to enable this feature unconditionally" (`README.md:86-87`); `browser` does. The global generator is then seeded from the browser on first use, so `Machine::new` and `Machine::with_token_source` fork from a per-page seed and two pages no longer draw the same delays. The rustdoc and README warnings of Block 40 D4 then apply to wasm32 builds without `browser` only, and say so.
+
+- **D6 WebSocket on web-sys.** The browser's WebSocket does the handshake, TLS and framing, so the Components rule is met by the browser; the adapter binds web-sys 0.3.107 `WebSocket`, `MessageEvent` and `CloseEvent` itself (no parsing).
+  - Not adopted: gloo-net 0.7.0's `WebSocket` queues every message in `futures_channel::mpsc::unbounded()` (`src/websocket/futures.rs:132`), which D7 cannot bound, panics with `unreachable!` on message data that is neither text nor an `ArrayBuffer` (`parse_message`, `:273-280`), and copies each binary send into a `Blob`; ws_stream_wasm 0.7.5 (last release 2025-06-08, fails the maintenance rule; Unlicense, not in `deny.toml`'s allow list); tokio-tungstenite-wasm 0.9.0, also an unbounded queue, tied to its own tokio-tungstenite version natively, and with a licence crates.io lists as non-standard.
+  - Open: `WebSocket::new` (or with the subprotocol `centrifuge-protobuf` for Protobuf, as centrifuge-js `transport_websocket.ts:30-40`), `binaryType = "arraybuffer"`. A constructor that throws (a malformed URL, a mixed-content `ws://` from an `https://` page) is a failed attempt carrying the exception's message (Block 8's fallback and backoff). An `error` then `close` before `open` (a refused connection, a CSP refusal) is a failed attempt with "websocket closed before open (code N)": the browser hides the upgrade response, so Block 25 D8's captive-portal message is not given over websocket.
+  - Send: JSON frames as text (`send_with_str`), Protobuf frames as binary (`send_with_u8_array`). `send` never blocks, so a frame counts as written when `send` returns (`Input::FrameWritten` at once); Block 8's write timeout has no browser counterpart, as centrifuge-js has none, and `bufferedAmount` is not polled: a stalled connection still ends at the no-ping deadline (Block 4), and polling would add a timer to every idle page (Block 14's idle-client rule). `Config::write_queue_bytes` still bounds the core's queue.
+  - Receive: each `message` event's data is copied out of its `ArrayBuffer` or string into the inbox (D7). A message larger than `Config::max_message_bytes` is `Input::MessageTooLarge` as natively (Block 29), after the browser has already received it whole, which the option's rustdoc says.
+  - Close: `close()` with no code (Block 8: no status code in the close frame), then the closing awaits the `close` event within `Config::timeout` (Block 33 D1), removes its listeners and drops its closures in that order, so that no closure is called after being dropped. A close event's code and reason become `Input::TransportClosed` as natively (Block 3's mapping).
+
+- **D7 The read-ahead on push transports: a bounded inbox.** A browser WebSocket and an EventSource cannot be told to stop reading: every message arrives as an event, whether or not the client wants frames. Block 15's "the client stops reading the connection" cannot happen there, so:
+  - while the core does not read (its read-ahead is full), the transport keeps the arriving messages in an inbox bounded by the read-ahead's own limits (`Config::read_ahead_messages` and `read_ahead_bytes`, Block 15; a single message larger than the byte limit is admitted alone when the inbox is empty), so a client holds at most twice the read-ahead. The inbox stands where natively the socket's buffers stand: its messages are not read yet, so a ping among them is answered only once the core reads it, and the no-ping deadline stays paused (Block 15, "Timers keep running");
+  - a message that would overflow the inbox closes the transport, and the core gets a new `Input::InboxOverflow(TransportId)`: the client reconnects with a new connecting code 7, `codes::connecting::READ_AHEAD_OVERFLOW`, reason "read-ahead overflow" (Block 34's `connecting` table gains the row). It is a client-side reason, so events not taken are withdrawn and recovery brings them back (Block 15, "Withdrawal"): exactly once still holds on recoverable channels within the server's recovery limit, as for a server's 3008; channels without recovery can lose publications, as Block 15 documents;
+  - Block 15's "Backoff after 3008" applies to it as to a 3008 close: an overflow before a server ping is read on the connection keeps the backoff growing, so a page that never reads its stream does not reconnect at the minimum delay forever;
+  - http_stream keeps Block 15's backpressure in full (D8): the driver does not poll the fetch body while the read-ahead is full, and wasm-streams reads the body's reader only when polled.
+  The alternative, an unbounded inbox as centrifuge-js and gloo-net have, would let a stalled page grow without limit; Block 15's memory bound is kept instead, and its "holds the server back" is given up over websocket and sse in the browser (Exceptions).
+
+- **D8 http_stream over fetch.** The browser's fetch does HTTP, TLS and CORS (the component); the adapter calls it through web-sys and reads the body with wasm-streams 0.7.1 (2026-11-08, MIT OR Apache-2.0, MSRV 1.88, the reader reqwest's wasm backend uses), with no parsing beyond Block 27's decoders.
+  - The fetch function is the shim (D12) or `globalThis.fetch`, called as centrifuge-js calls it, `fetch(url, init)`, with `init` a plain object (`method`, `headers` as a plain object, `body`, `mode: "cors"`, `credentials` per D13, `redirect: "manual"`, `signal`), so that no global `Request` or `Headers` constructor is needed where only a fetch shim exists (centrifuge-js `transport_http_stream.ts:104-131`, `:167-211`). Each request's `AbortController` is aborted when its transport closes or is dropped, which ends the stream and every pending emulation request (as centrifuge-js 63ed73e `6b4515c`, and reqwest's `AbortGuard`).
+  - Not adopted: reqwest's wasm backend (0.13.5), which calls only the global `fetch` or `ServiceWorkerGlobalScope.fetch` (`src/wasm/client.rs:13-32`), so D12's fetch shim could not reach it, and builds a `web_sys::Request` and `Headers`; gloo-net 0.7.0's `http` (a second HTTP client over the same `fetch`). reqwest therefore moves to the native table (D1).
+  - The stream request (POST of the connect frame, `Accept` and `Content-Type` per protocol, as natively) and the emulation requests (Block 8) carry the same headers as natively, real HTTP headers excepted (D14).
+  - The body decoders are Block 27's, unchanged (tokio-util `AnyDelimiterCodec` with its maximum length for JSON lines, the Protobuf length-delimited reader), and their fuzz targets cover them already.
+  - Block 8's handling stays: 404 or 5xx or a network error on an emulation request closes the transport; 413 ends only its commands.
+  - Captive portals (Block 25 D8) over http_stream: with `redirect: "manual"` a 3xx answer is an `opaqueredirect` response, reported as a 3xx is natively (not followed); a 511 or a 2xx `text/html` answer is reported too. `Content-Type` is a CORS-safelisted response header, so it is readable cross-origin.
+  - Centrifugo answers the CORS preflight with the requested headers and, for an allowed `Origin`, `Access-Control-Allow-Credentials: true` (v6.10.1 `internal/middleware/cors.go`, applied to the connection and emulation endpoints in `internal/app/mux.go:133-161`).
+
+- **D9 sse over EventSource.** The browser's EventSource parses the event stream (the component), so the adapter binds web-sys `EventSource` and `EventSourceInit` itself, as for D6; gloo-net 0.7.0's `EventSource` again queues into an unbounded channel (`src/eventsource/futures.rs:175`).
+  - The URL is the sse endpoint with the connect frame in `cf_connect` (as natively; centrifuge-js `transport_sse.ts:41-50`), `withCredentials` per D13.
+  - On `error` the adapter closes the EventSource at once and reports the transport closed without a close code, so the client emits `connecting` code 1 "transport closed" (Block 3), as centrifuge-js does (its transport reports code 4 "connection closed", `transport_sse.ts:59-66`, which its client maps to code 1, `centrifuge.ts:1309-1315`). The browser's own retry, which would resend the same `cf_connect` with a token that may have expired, never runs; the client reconnects by Block 2's backoff.
+  - `open` is the transport opened; each `message` event's data is one frame, into the inbox (D7). EventSource exposes no status or headers, so no captive-portal message (Block 25 D8) and no content-type check: an answer that is not an event stream is an `error`.
+  - Emulation requests go through D8's fetch path. Protobuf with sse is still rejected at build (Block 8).
+
+- **D10 Network events (item 39).** As centrifuge-js 63ed73e `_setNetworkEvents` (`centrifuge.ts:796-841`) and `_setState` (`:753-768`):
+  - the adapter adds `offline` and `online` listeners to the network event target when the client enters `connecting`, and removes them when it enters `disconnected` and when it is closed or dropped; the target is `globalThis` when it has `addEventListener`, or the one given with `ClientBuilder::network_event_target(web_sys::EventTarget)` (centrifuge-js `networkEventTarget`); a target that never fires (`EventTarget::new()`) turns the behaviour off, as its README documents (`README.md:470-473`). The listeners hold a `Weak` reference to the client, so the page's target does not keep it alive, as centrifuge-js removes its listeners to let a disconnected client be garbage-collected (`:838-841`);
+  - `offline` while connected or connecting: a new `Input::Offline`. Connected: the transport closes and the client emits `connecting` with code 1 "transport closed" (`:805-814`); the next attempt waits the reconnect delay as after a lost connection (Block 2, Block 14's jitter window). Connecting: the attempt in flight, if any, closes, no event is emitted (Block 15: one event per state change), and the next attempt waits the reconnect delay; the closed attempt counts as neither a failed attempt of its transport (Block 8's round is unchanged) nor a failed attempt in the statistics (Block 31), as Block 33 D2 treats closing. Disconnected: nothing;
+  - `online` while connecting: the adapter gives the core `Input::Reconnect` (Block 25 D5): the attempt in flight, if any, closes (the Mobile Safari case centrifuge-js aborts, `:821-830`), and the next attempt starts from the first transport with the attempt counter restarted (Block 25 D6). Connected or disconnected: nothing (`:820-822`). This diverges from centrifuge-js, which keeps the attempt counter and the transport, and closes the attempt in flight only when it began while offline; one rule for a network change, Block 25's, is kept instead (Exceptions);
+  - the jitter window (amends Block 25 D5): an `Input::Reconnect` while connecting, when the client was connected before this connecting period and its first attempt since has not started, sets that attempt's delay to a new draw from the jitter window (Block 14) instead of starting it at once, so a building whose network comes back does not reconnect its fleet at once. With the default window 0 it starts at once, as centrifuge-js. This holds for `reconnect()` too; Block 25's scenarios are unchanged (none has such a client).
+
+- **D11 Page events (item 39).** As centrifuge-js 63ed73e `_setPageEvents` (`centrifuge.ts:857-912`; `README.md:474-477`), with the listener lifetime, default target and `ClientBuilder::page_event_target(web_sys::EventTarget)` of D10:
+  - `pagehide` whose `PageTransitionEvent.persisted` is true, while connected or connecting: a new `Input::PageCached`, which does what `Input::Offline` does with the reason "page entered back/forward cache" (code 1, `:877-886`); the adapter remembers that it cached the page;
+  - `pageshow` with `persisted` true, while connecting and remembered: `Input::Reconnect`, with D10's jitter rule (`:887-900`); the memory is cleared then, and when the client becomes connected or disconnected (`:1992-1993`, `:2324-2326`);
+  - events with `persisted` false change nothing. The reconnect delay still runs as usual, so a page restored without `pageshow` still reconnects (`:851-856`).
+
+- **D12 Shims (item 39).** `ClientBuilder::websocket(js_sys::Function)`, `fetch(js_sys::Function)`, `readable_stream(js_sys::Function)` and `event_source(js_sys::Function)`, as centrifuge-js's `websocket`, `fetch`, `readableStream` and `eventsource` options (`types.ts:157-165`; `README.md:430-446`):
+  - each transport attempt resolves its constructors as centrifuge-js `_resolveTransportDeps` does (`centrifuge.ts:1020-1066`): the shim given, else the global of that name on `globalThis`, else none;
+  - a transport whose constructors are missing is skipped in the round, as centrifuge-js `_initializeTransport` skips one whose `supported()` is false (`:1128-1153`): websocket needs `WebSocket`, http_stream `fetch`, `ReadableStream` and `AbortController` (`transport_http_stream.ts:93-102`), sse `EventSource` and `fetch` (`transport_sse.ts:31-33`); `build()` fails with a configuration error naming the transports and the shim options when none of the configured transports can be used, as centrifuge-js's `connect()` throws "no supported transport found" (`:1106-1126`), and an attempt that finds none later (a global removed under a running client) is a failed attempt with that message (`:1154-1170`);
+  - a WebSocket or EventSource shim is called as a constructor (`Reflect::construct`) and the object it returns is used through web-sys's bindings with `unchecked_into`, which call its methods and properties by name (verified: wasm-bindgen 0.2.130 bindings are structural unless marked `final`, and web-sys 0.3.107 `gen_WebSocket.rs`, `gen_EventSource.rs` and `gen_EventTarget.rs` carry no `final`); a fetch shim is called in place of the global `fetch` (D8);
+  - the ReadableStream shim decides whether http_stream is usable, and when it is given the response body is read through a stream built with it, as centrifuge-js reads the body through a stream built with the resolved constructor (`transport_http_stream.ts:34-91`): an underlying source whose `pull` reads one chunk from the body's reader and enqueues that chunk object unchanged, with `highWaterMark` 0, so the shim's stream reads only when the driver polls and D7's backpressure holds; no chunk is copied. Without the shim the body is read directly.
+
+- **D13 Credentials (item 39).** `ClientBuilder::include_credentials(bool)`, false by default (named after fetch's `credentials: "include"`; `with_` names constructors in this crate, e.g. `Machine::with_seed`): false sends `credentials: "same-origin"` on the stream and emulation requests and `withCredentials: false` on the EventSource, as centrifuge-js 63ed73e always does (`transport_http_stream.ts:128`, `:193`; `transport_sse.ts:47-50`, `:112`); true sends `credentials: "include"` and `withCredentials: true`, so cookies reach a server on another origin and its `Set-Cookie` is stored. centrifuge-js has no such option (`README.md:143`: "Please open an issue in case you need to configure more relaxed credentials"); the owner's item 39 lists it. Verified: Centrifugo v6.10.1 answers credentialed CORS on its connection and emulation endpoints (D8). The websocket upgrade is unaffected: the browser sends its cookies by their `SameSite` rules, which the rustdoc says.
+
+- **D14 Options with no browser meaning: absent on the browser target.** A compile error when the code is built for the browser beats a configuration error at run time (centrifuge-rust §9.11 makes them run-time errors) and is reqwest's way. Absent there: `ClientBuilder::http_headers` and `Client::set_http_headers` (Blocks 17, 32: a browser cannot set headers on a WebSocket or an EventSource, and centrifuge-js's `headers` are the emulated ones, which stay: `emulated_headers`, `set_emulated_headers`); `root_certificates`, `tls_config`, the `rustls` re-export (Block 22: the browser does TLS); `proxy`, `set_proxy`, `Proxy`, `ProxyTarget` (Block 23: the browser's proxy settings apply); `connector`, `Connector` and its types, the `http` re-export (Block 37: D12's WebSocket shim is the browser counterpart of the connector, as item 35 says); `runtime` (Block 28); `cookie_jar` and the `cookies` feature's types (Block 43); `EventDelivery::Thread` (D15); `test_util::Server` (Block 37, tokio only); `ferrifuge::android`. Kept and meaningful: every `Config` field, `emulation_endpoint`, `handshake_timeout`, `max_message_bytes` (D6), the token and data callbacks, `reconnect()`, batching, `statistics()`, `read_ahead()`, `close()`, the test constructors.
+
+- **D15 Handlers and delivery modes on the browser target** (amends Block 41 D2 and D4). `EventDelivery::Task` (the default) runs the consumer with `spawn_local`; `Inline` runs it on the driver; `Thread` does not exist there (no threads), so code naming it does not build for the browser, which its rustdoc says. Block 41 D6's marker works unchanged: under `Task` and `Inline` a call made from a handler fails at once with `WOULD_DEADLOCK`, which matters more here, since a handler blocking on its own call would freeze the page. wasm32-unknown-unknown builds with `panic = "abort"` on stable (verified: `rustc --print cfg --target wasm32-unknown-unknown` gives `panic="abort"`, rustc 1.99.1), so Block 41 D4's `catch_unwind` catches nothing: a panicking handler or callback traps the module, whose later calls are undefined, as Block 41 D4 already documents for `panic = abort`; the rustdoc of the handler traits and the README say so for the browser target, and the README suggests setting a panic hook that logs to the console (Exceptions).
+
+- **D16 Sleep, freezing and throttling in a browser** (Block 25 on the browser target). The adapter runs Block 25 D1's check with D4's clocks (`Date.now()` against `performance.now()`), unchanged. W3C High Resolution Time Level 3 does not say whether its monotonic clock counts a system sleep, so the README says: where the browser's clock counts the sleep, no gap is seen and timers fire at the wake as if they counted it, as on Windows (Block 25 D1). Browsers throttle timers in hidden tabs; Chrome's intensive throttling (Chrome 88: hidden for 5 minutes, a timer chain of 5 or more, silent for 30 s, no WebRTC) does not exempt a page with an open WebSocket (Chromium enabled `AllowAggressiveThrottlingWithWebSocket` by default and removed the switch, which Electron restores in its patches), and does not delay WebSocket events. Pongs are answered from message events, not timers, so they are not delayed by it, while reconnect delays, refreshes and the no-ping deadline may fire late. The README says so; no counter-measure is in scope.
+
+- **D17 Logging.** Unchanged: the adapter logs through tracing (Block 21), which builds on the browser target; without a subscriber the records go to `log`. The README names tracing-web 0.1.4 (2026-10-31, MIT OR Apache-2.0) as an example browser subscriber without depending on it (tracing-wasm 0.2.1, last release 2021-11-07, is unmaintained). No record holds a token, a cookie or a header value (Block 21).
+
+- **D18 Tests: the @W layer.** A new Block 0 row:
+
+  | Tag | Layer | Use for |
+  |---|---|---|
+  | @W | wasm-bindgen-test in headless Chrome and Firefox (and Safari on main and nightly), the browser client against a real Centrifugo and a recording relay in front of it, both started for the run; network and page events dispatched by the test on its own `EventTarget`s | Behaviour only a browser shows: the browser transports, item 39's options, the browser's clocks |
+
+  Cucumber skips @W scenarios, as it skips @P. A test fails if a @W scenario name in `CLAUDE.md` has no wasm test claiming it, or a wasm test claims a name that does not exist (Block 0's @P rule).
+  - Harness: a native test binary (`tests/browser.rs`, `harness = false`, `required-features = ["tokio"]`) starts Centrifugo `v6.10.1` (testcontainers on Linux; on macOS, where hosted runners have no Docker, the `centrifugo_6.10.1_darwin_arm64.tar.gz` release asset, its SHA-256 pinned in the workflow), with one configuration: http_stream and sse enabled, `allowed_origins: ["*"]`, a `history` namespace with history and recovery, client publish allowed; and the relay (`tests/support/http_proxy.rs`, the reverse proxy of Blocks 17b and 43b, which records each request's path and headers). For the browser it gains: relaying `Origin` and the preflight's `Access-Control-Request-*` headers to the server and the `Access-Control-Allow-*` headers back, and a switch that ends its open stream responses. It then runs `cargo test --target wasm32-unknown-unknown --no-default-features --features browser --test browser_wasm` under `wasm-bindgen-test-runner`, with its own `CARGO_TARGET_DIR`, once with `CHROMEDRIVER` and once with `GECKODRIVER` (`$CHROMEWEBDRIVER/chromedriver` and `$GECKOWEBDRIVER/geckodriver` on `ubuntu-latest`, whose image sets both directories), passing the endpoints at compile time (`env!`), wrapped in a timeout. The runner serves the test page on `127.0.0.1:0` in headless mode (wasm-bindgen 0.2.130 `crates/cli/src/wasm_bindgen_test_runner.rs:392-397`), so the page is cross-origin to the server and the relay, as D13's scenarios need.
+  - wasm-bindgen-test 0.3.80 (2026-10-30, MIT OR Apache-2.0) is a dev-dependency of the browser target only; the other dev-dependencies move to a `cfg(not(…))` table, since mio does not build for wasm32 (Block 40 D3). `wasm-bindgen-cli` must match the locked wasm-bindgen exactly: CI installs the version `cargo metadata` reads from `Cargo.lock` (0.2.130 today).
+  - A test that removes a global (D12's scenarios) restores it before it ends, also when it fails.
+  - Core inputs (`Input::Offline`, `Input::PageCached`, `Input::InboxOverflow`, D10's jitter rule) are tested at @E like any core behaviour; the shared adapter layer stays covered natively by @D and @A.
+
+- **D19 CI.**
+  - The `wasm` job (Block 40 D1) adds `--features browser` and `--features browser,test-util` to its clippy and build steps (`--no-default-features` plus the feature), with Block 40 D2's clippy configuration, and an imports check: a small crate under `ci/wasm-imports/` (outside the package) builds a `cdylib` twice. With the core alone the module imports nothing; with `browser` every import comes from `__wbindgen_placeholder__` or `__wbindgen_externref_xform__`, none from `env` (an unresolved C or libc symbol), checked with Node's `WebAssembly.Module.imports`. Verified (2026-11-09): the core alone (`Machine::new`, `Input::Connect`) builds to a module with no import that runs under Node; a cdylib using wasm-bindgen 0.2.130, web-sys, gloo-timers, wasm-streams and fastrand `js` imports only from those two modules. The job prints the release module's size after `wasm-bindgen`; 44b records it in its PR and the README states it; no gate (Block 14's gates are native).
+  - A new `browser` job on pull requests, as the `test` job runs Centrifugo there: `ubuntu-latest` with its preinstalled Chrome, ChromeDriver, Firefox and Geckodriver, running D18's harness. A `browser-safari` job runs it on `macos-latest` on main and nightly only (as perf and fuzz run), not as a required check: hosted macOS images enable `safaridriver` (`sudo safaridriver --enable` in runner-images `install-safari.sh`), and Safari has no headless mode, so it runs windowed in the runner's session. `VERIFY:` in 44b, that wasm-bindgen-test-runner drives Safari there; if it cannot, the job is dropped and the README says Safari is untested.
+  - `deny.toml`'s `[graph] targets` gains `wasm32-unknown-unknown`, and its comment no longer says wasm32 crates are not shipped. Verified (2026-11-09, cargo-deny on a scratch crate with this block's dependency set and that target list): advisories, licenses and sources ok, with the current allow list.
+  - docs.rs: `targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]`, features unchanged (`test-util`, `cookies`, which D1 makes build as nothing on the browser target), as reqwest documents both; the `docs-rs` CI job builds both targets.
+  - Semver: from 44b on, the pull-request `semver` job also runs cargo-semver-checks with `--target wasm32-unknown-unknown` (supported by 0.51.0) against the base branch, which then has the adapter. The release workflow keeps the native target until the version on crates.io has the adapter (out of scope).
+  - MSRV (Block 20 D6): unchanged; natively `browser` adds nothing to build, and no MSRV step runs on wasm32 (Block 40). The browser dependencies' MSRVs are at most 1.88 (wasm-streams 0.7.1).
+
+- **D20 Version and docs.** 0.20.0 in 44a, for D3 (cargo-semver-checks' supertrait lints); the rest is additive natively (`Input` is `#[non_exhaustive]`, Block 17; a new connecting code; a new default feature that builds nothing natively; Block 25 D5's jitter rule reaches only a case no native caller met before), so 44b–44f bump nothing. Changelog `Unreleased`: "Added": the browser adapter and the `browser` feature (default); `MaybeSend`, `MaybeSync`; `Input::Offline`, `Input::PageCached`, `Input::InboxOverflow`; connecting code 7; `network_event_target`, `page_event_target`, the four shims, `include_credentials` (browser target); "Changed": `Send` and `Sync` bounds read `MaybeSend` and `MaybeSync`, equivalent natively; `reconnect()` while the first attempt after a lost connection waits keeps the jitter window; the `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` features build as nothing on wasm32-unknown-unknown. The README gains a "Browser" section (the default feature, what is absent and why, the push-transport inbox, credentials and CORS, events, shims, panics abort, clocks and timers in hidden tabs, the module size, the tested browsers), and its "Cargo features" and "Continuous integration" sections name `browser`, the @W jobs and the imports check. Each sub-increment's PR writes its own part.
+
+**Structural acceptance:**
+- D2: every native scenario, the Block 14 @P gates, the chaos adapter runner and cargo-semver-checks (with D3's verdict) pass after the split; the source checks of `tokio::` paths and Block 28's;
+- D1: `cargo tree -e normal` natively with default features lists no browser dependency; `cargo tree -e normal --target wasm32-unknown-unknown` with default features lists no reqwest, tokio-tungstenite, hyper, rustls, mio or socket2, and lists fastrand with `js` and getrandom with `wasm_js` (D5);
+- D3: the native compile tests (`Client: Send + Sync`, call futures `Send`) unchanged; a browser-target compile test builds a client whose token callback holds an `Rc` and awaits a `JsFuture`;
+- D4: a wasm unit test: a delay of `i32::MAX` ms + 1 neither fires at once nor panics; `connected_since` lies between two `Date.now()` readings (also a @W scenario);
+- D6, D9: dropping a client while its transport is open logs no "closure invoked after being dropped" (a wasm test with a capturing console); an EventSource `error` closes it (`readyState` 2) before the core hears of it;
+- D7: wasm unit tests of the inbox bound (messages and bytes, the oversized message alone) and an @E test of `Input::InboxOverflow`'s withdrawal, code 7 and backoff;
+- D8: a wasm test: closing an http_stream transport aborts its stream and a pending emulation request (`AbortSignal.aborted`); a 3xx answer is reported as a captive portal;
+- D10, D11: after `disconnect()`, `close()` or drop, the given targets hold no listener (a recording target, also a @W scenario); with no target given, an `offline` event dispatched on `globalThis` closes the connection (a wasm test);
+- D12: with the ReadableStream shim, the body is read only while the driver polls (a wasm test counting `pull` calls while the read-ahead is full);
+- D19's CI changes, the imports check, `deny.toml`, docs.rs metadata, the semver target;
+- the D20 README, rustdoc and changelog entries, and Block 34's row for code 7.
+
+Value clause: As an app developer writing a web front-end in Rust, I want the same Ferrifuge client in the browser, over the browser's WebSocket, fetch streams and EventSource, reacting to the browser's network and page events as centrifuge-js does, so that my front-end talks to Centrifugo without centrifuge-js bindings and keeps Ferrifuge's delivery guarantees.
+
+```gherkin
+Feature: Browser adapter
+
+  @W
+  Scenario: A browser client connects over websocket and receives a publication
+    Given a browser client with a subscription to channel "news", whose streams were taken
+    When connect is called
+    And subscribe is called on the subscription
+    And a publication "hello" is published to "news"
+    Then the client's stream yields "connecting", then "connected" over transport "websocket"
+    And the subscription's stream yields "subscribing", "subscribed", then the publication "hello"
+
+  @W
+  Scenario: A browser client speaks Protobuf over websocket
+    Given a browser client with the Protobuf protocol and a subscription to channel "news", whose stream was taken
+    When connect is called
+    And subscribe is called on the subscription
+    And a publication of the bytes 00 ff 7f is published to "news"
+    Then the client emits "connected" over transport "websocket"
+    And the subscription's stream yields the publication with the bytes 00 ff 7f
+
+  @W
+  Scenario: Publications a browser client had not taken before reconnect() are recovered once
+    Given a browser client subscribed to recoverable channel "history:news", whose subscription's stream has been read up to "subscribed"
+    And publications at offsets 1, 2 and 3 have been published to "history:news"
+    And the application has taken only the publication at offset 1 from the subscription's stream
+    When reconnect is called
+    Then the subscription's stream yields "subscribing", "subscribed" with recovered true, then the publications at offsets 2 and 3
+    And no publication is yielded twice
+
+  @W
+  Scenario: A browser client whose stream is not read reconnects once its inbox overflows, losing no publication
+    Given a browser client with a read-ahead of 16 messages, subscribed to recoverable channel "history:news", whose subscription's stream has been read up to "subscribed" and is not read after, and whose client stream is read
+    When 100 publications are published to "history:news"
+    Then the client emits "connecting" with code 7 and reason "read-ahead overflow"
+    And when the application reads the subscription's stream, it yields "subscribing", "subscribed" with recovered true, then the publications at offsets 1 to 100 in order, each once
+
+  @W
+  Scenario Outline: Handlers receive a browser client's events in order
+    Given a browser client with <mode> delivery whose client handler and subscription handler record the events, with a subscription to channel "news"
+    When subscribe is called on the subscription
+    And connect is called
+    And a publication is published to "news" once the subscription is subscribed
+    Then the handlers have received "subscribing", "connecting", "connected", "subscribed" and the publication, in this order
+    And no two handler calls overlapped
+
+    Examples:
+      | mode   |
+      | Task   |
+      | Inline |
+
+  @W
+  Scenario: close() ends a browser client
+    Given a browser client connected to the server, whose stream was taken
+    When close is awaited
+    Then it returns within the configured timeout plus tolerance
+    And the client's stream yields "disconnected" with code 0, then ends
+    And the client is closed
+
+  @W
+  Scenario: A browser client's statistics tell when it connected
+    Given the page's wall clock read before connect is called
+    When a browser client connects to the server
+    Then its statistics give a connected_since between that reading and a reading taken once "connected" is yielded
+
+  @W
+  Scenario Outline: A browser client falls back to http_stream when websocket is unreachable
+    Given a browser client with the <protocol> protocol, configured with an unreachable websocket endpoint and the server's http_stream and sse endpoints
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "http_stream"
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @W
+  Scenario: Commands work over http_stream from a browser client
+    Given a browser client connected over transport "http_stream", subscribed to channel "news"
+    When the client publishes "hello" to "news"
+    Then the publish succeeds
+    And the subscription's stream yields the publication "hello"
+
+  @W
+  Scenario: A stream not read stops a browser client reading its http_stream response
+    Given a browser client with a read-ahead of 16 messages, connected over transport "http_stream", subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
+    When 1000 publications of 100 bytes are published to "news"
+    Then the client stops reading with 16 messages in its read-ahead
+    And 1 s later its read-ahead still holds 16 messages and the client has not emitted "connecting"
+    And when the application reads the subscription's stream, it yields the 1000 publications in order, each once
+
+  @W
+  Scenario: A browser client falls back to sse when websocket and http_stream are unreachable
+    Given a browser client configured with unreachable websocket and http_stream endpoints and the server's sse endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "sse"
+
+  @W
+  Scenario: An sse stream that ends makes a browser client reconnect, not the browser's EventSource
+    Given a browser client connected over transport "sse" through the relay
+    When the relay ends the stream response
+    Then the client emits "connecting" with code 1
+    And then the client emits "connected" over transport "sse"
+    And 10 s after the end the relay has seen exactly 2 stream requests
+
+  @W
+  Scenario: Going offline closes a browser client's connection, and coming online reconnects it at once
+    Given a browser client with minReconnectDelay 20000 ms, whose network event target is the test's, connected over websocket
+    When the test dispatches "offline" on that target
+    Then the client emits "connecting" with code 1 and reason "transport closed"
+    And 2 s later the client is still "connecting"
+    And when the test dispatches "online" on that target, the client emits "connected" within 2 s
+
+  @W
+  Scenario: Coming online while connected changes nothing
+    Given a browser client whose network event target is the test's, connected over websocket, whose stream has been read up to "connected"
+    When the test dispatches "online" on that target
+    Then 1 s later the client is "connected"
+    And its stream has yielded nothing more
+
+  @W
+  Scenario: A page entering the back/forward cache closes the connection, and its restore reconnects at once
+    Given a browser client with minReconnectDelay 20000 ms, whose page event target is the test's, connected over websocket
+    When the test dispatches "pagehide" with persisted true on that target
+    Then the client emits "connecting" with code 1 and reason "page entered back/forward cache"
+    And when the test dispatches "pageshow" with persisted true on that target, the client emits "connected" within 2 s
+
+  @W
+  Scenario: A page hidden without entering the back/forward cache keeps the connection
+    Given a browser client whose page event target is the test's, connected over websocket, whose stream has been read up to "connected"
+    When the test dispatches "pagehide" with persisted false on that target
+    Then 1 s later the client is "connected"
+    And its stream has yielded nothing more
+
+  @W
+  Scenario: A disconnected browser client stops listening to network and page events
+    Given a browser client whose network and page event targets are recording targets of the test, connected over websocket
+    When disconnect is called
+    Then neither target holds a listener of the client
+    And when the test dispatches "online" on the network target, the client stays "disconnected"
+
+  @E
+  Scenario: Going offline while connected closes the transport and reconnects after the backoff
+    Given a client with minReconnectDelay 500 ms, connected over websocket
+    When the device goes offline
+    Then the client closes the transport
+    And the client emits "connecting" with code 1 and reason "transport closed"
+    And the next attempt starts after the reconnect backoff delay and the jitter window
+
+  @E
+  Scenario: Going offline while connecting closes the attempt in flight without an event
+    Given a client configured with websocket and http_stream endpoints, whose websocket transport is opening on its first attempt
+    When the device goes offline
+    Then the client closes the opening transport
+    And the client emits no event
+    And the next attempt opens the websocket transport again, after the reconnect backoff delay
+
+  @E
+  Scenario: Going offline does nothing to a disconnected client
+    Given a disconnected client
+    When the device goes offline
+    Then the machine returns no action
+
+  @E
+  Scenario: A page entering the back/forward cache reconnects with its own reason
+    Given a client connected over websocket
+    When the page enters the back/forward cache
+    Then the client closes the transport
+    And the client emits "connecting" with code 1 and reason "page entered back/forward cache"
+
+  @E
+  Scenario: Coming online after going offline keeps the jitter window
+    Given 100 connected machines with different seeds, minReconnectDelay 20000 ms and a reconnect jitter window of 1000 ms
+    When the device goes offline on each
+    And the device comes online on each
+    Then every next attempt is delayed by at most 1000 ms
+    And the delays are not all equal
+
+  @W
+  Scenario Outline: A constructor given to a browser client replaces the global
+    Given a browser client whose <shim> shim is a counting wrapper of the global, configured with only the server's <transport> endpoint
+    When connect is called
+    Then the client emits "connected" over transport "<transport>"
+    And the <shim> shim has been called at least once
+
+    Examples:
+      | shim            | transport   |
+      | websocket       | websocket   |
+      | fetch           | http_stream |
+      | readable_stream | http_stream |
+      | event_source    | sse         |
+
+  @W
+  Scenario: A browser client skips a transport the page has no constructor for
+    Given the page has no global EventSource
+    And a browser client configured with an unreachable websocket endpoint and the server's sse and http_stream endpoints, in that order
+    When connect is called
+    Then the client emits "connected" over transport "http_stream"
+    And the client made no sse attempt
+
+  @W
+  Scenario: Building a browser client with no usable transport fails
+    Given the page has no global EventSource
+    When a browser client configured with only the server's sse endpoint is built
+    Then building fails with a configuration error naming sse and the event_source shim
+
+  @W
+  Scenario Outline: With credentials included, a browser client's HTTP requests carry the page's cookies to the server's origin
+    Given the page has set the cookie "affinity=a1" for its host
+    And a browser client with credentials <credentials>, connected over transport "<transport>" through the relay, on the page's host at another port
+    When the client sends a command
+    Then the relay has seen the stream request and at least one emulation request
+    And every one of them carried <cookie>
+
+    Examples:
+      | transport   | credentials  | cookie                          |
+      | http_stream | included     | one Cookie header "affinity=a1" |
+      | http_stream | not included | no Cookie header                |
+      | sse         | included     | one Cookie header "affinity=a1" |
+      | sse         | not included | no Cookie header                |
+```
+
+**Exceptions introduced:**
+- `online` and a restoring `pageshow` reconnect through `reconnect()` (Block 25 D5, D6): the attempt counter restarts, the round starts again from the first transport, and an attempt in flight closes even when it began online; centrifuge-js 63ed73e keeps the counter and the transport, and closes only an attempt begun while offline (`centrifuge.ts:817-833`, `:1420-1434`). With a jitter window set, the first attempt after a lost connection keeps it (D10), where centrifuge-js, which has no jitter window, starts at once.
+- Over websocket and sse a browser client holds at most twice its read-ahead and reconnects with code 7 past it (D7): Block 15's "the client stops reading the connection", and with it holding the server back, holds there for http_stream only; centrifuge-js dispatches every message at once and bounds nothing.
+- A panicking handler or callback traps the module on the browser target (D15), where centrifuge-js catches the exception and disconnects with code 2 (Block 41 D4).
+- `include_credentials` has no counterpart in centrifuge-js 63ed73e, which always sends `same-origin` (`README.md:143`).
+- No write timeout on a browser websocket (D6), as centrifuge-js; Block 8's timeout stays native.
+- Captive portals are named over http_stream only (D6, D8, D9): the browser hides the websocket upgrade response and the EventSource response.
+- Safari runs the @W suite on main and nightly only, not on pull requests (D19).
