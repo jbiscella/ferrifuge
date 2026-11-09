@@ -1,7 +1,7 @@
 //! What the browser driver needs beyond the shared adapter layer: the
 //! browser's WebSocket and the inbox that bounds what it holds,
-//! `http_stream` over fetch, and sse over `EventSource` (Block 44, D2, D6 to
-//! D9).
+//! `http_stream` over fetch, sse over `EventSource`, and the application's
+//! shims of them (Block 44, D2, D6 to D9, D12).
 
 pub(super) mod events;
 pub(super) mod http_stream;
@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use self::http_stream::HttpStream;
+use self::shims::Found;
 use self::sse::Sse;
 pub(in crate::adapter) use self::websocket::Inbound;
 use self::websocket::WebSocket;
@@ -40,6 +41,10 @@ pub(in crate::adapter) struct Open {
     pub(in crate::adapter) emulation: Option<String>,
     /// The commands an emulated transport's stream request carries.
     pub(in crate::adapter) initial_frame: Option<Vec<u8>>,
+    /// The constructors this attempt found, which can open `kind` (D12).
+    pub(in crate::adapter) found: Found,
+    /// Whether HTTP requests carry the credentials of another origin (D13).
+    pub(in crate::adapter) include_credentials: bool,
 }
 
 /// Opens a transport of `open.kind`, its attempt recorded in `log`.
@@ -54,25 +59,44 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         read_ahead,
         emulation,
         initial_frame,
+        found,
+        include_credentials,
     } = open;
     log.attempt(kind, endpoint);
+    // The driver opens only what `found` can (D12).
+    let missing = move || {
+        format!(
+            "the page has no constructor for the {} transport",
+            kind.name()
+        )
+    };
     match kind {
         TransportKind::WebSocket => Box::pin(async move {
-            WebSocket::open(&url, subprotocol, timeout, max_message, read_ahead)
-                .await
-                .map(|websocket| Transport::WebSocket(Box::new(websocket)))
+            let constructor = found.websocket.ok_or_else(missing)?;
+            WebSocket::open(
+                &constructor,
+                &url,
+                subprotocol,
+                timeout,
+                max_message,
+                read_ahead,
+            )
+            .await
+            .map(|websocket| Transport::WebSocket(Box::new(websocket)))
         }),
         TransportKind::HttpStream => {
             let protobuf = subprotocol.is_some();
             Box::pin(async move {
                 HttpStream::open(
-                    http_stream::global_fetch()?,
+                    found.fetch.ok_or_else(missing)?,
+                    found.readable_stream.as_ref(),
                     &url,
                     initial_frame.unwrap_or_default(),
                     emulation.as_deref(),
                     timeout,
                     protobuf,
                     max_message,
+                    include_credentials,
                 )
                 .await
                 .map(|http| Transport::HttpStream(Box::new(http)))
@@ -80,14 +104,15 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         }
         TransportKind::Sse => Box::pin(async move {
             Sse::open(
-                &sse::global_event_source()?,
-                http_stream::global_fetch()?,
+                &found.event_source.ok_or_else(missing)?,
+                found.fetch.ok_or_else(missing)?,
                 &url,
                 &initial_frame.unwrap_or_default(),
                 emulation.as_deref(),
                 timeout,
                 max_message,
                 read_ahead,
+                include_credentials,
             )
             .await
             .map(|sse| Transport::Sse(Box::new(sse)))
