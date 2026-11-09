@@ -1350,7 +1350,8 @@ fn called_once_before(world: &mut ClientWorld) {
 async fn still_subscribed_later(world: &mut ClientWorld, seconds: u64) {
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     assert_eq!(world.map().state(), SubscriptionState::Subscribed);
-    assert_eq!(world.maps.token_calls.load(Ordering::SeqCst), 2);
+    let calls = world.maps.token_calls.load(Ordering::SeqCst);
+    assert_eq!(calls, 2, "token callback calls {seconds} s after the sync");
     let events = world.maps.events.as_mut().expect("a stream");
     let later = quiet_events(events).await;
     assert!(
