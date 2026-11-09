@@ -152,13 +152,15 @@ impl MapFlow {
             self.load = None;
             return Next::EpochChanged;
         }
+        // The live reply's state and catch-up go into the same `Sync`, so
+        // they count too (D5); only a page leaves a reservation.
         if result.phase != LIVE {
             load.paged = true;
-            load.bytes = load.bytes.saturating_add(size);
-            if load.bytes > max_state_bytes {
-                self.load = None;
-                return Next::TooLarge;
-            }
+        }
+        load.bytes = load.bytes.saturating_add(size);
+        if load.bytes > max_state_bytes {
+            self.load = None;
+            return Next::TooLarge;
         }
         if load.epoch.is_none() {
             load.epoch = Some(result.epoch.clone());
@@ -244,8 +246,8 @@ impl Machine {
     /// # Errors
     ///
     /// When the registry holds a subscription to `channel` already, of
-    /// either kind; for a tag filter the server would refuse, or one with
-    /// delta (Block 35, D1).
+    /// either kind; for a tag filter the server would refuse (Block 35,
+    /// D1).
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn add_map_subscription(
         &mut self,
@@ -266,6 +268,10 @@ impl Machine {
         common.positioned = false;
         common.recoverable = false;
         common.join_leave = false;
+        // Not negotiated until per-key delta bases decode the payloads
+        // (Block 45 D9, 45d): a patch must never reach the application as
+        // a value (Codex, #198).
+        common.delta = None;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.map = Some(Box::new(MapFlow {

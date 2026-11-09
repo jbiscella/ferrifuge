@@ -146,6 +146,22 @@ fn the_first_request_asks_for_the_first_state_page() {
     }
 }
 
+// Codex, #198: no patch may reach the application as a value before
+// per-key delta bases exist (45d).
+#[test]
+fn a_map_subscription_does_not_negotiate_delta_yet() {
+    let (mut machine, _) = connected();
+    let mut options = options(2);
+    options.common.delta = Some(crate::DeltaFormat::Fossil);
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    assert!(first["subscribe"].get("delta").is_none(), "{first}");
+}
+
 #[test]
 fn a_page_size_of_0_sends_no_limit() {
     let (_, _, _, first) = subscribing(0);
@@ -482,6 +498,46 @@ fn pages_past_the_bound_end_the_subscription_with_code_5() {
         events(&ended)
             .iter()
             .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. }))
+    );
+}
+
+// Codex, #198: a live reply's state goes into the same `Sync`.
+#[test]
+fn a_live_reply_past_the_bound_ends_the_subscription_with_code_5() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.max_state_bytes = NonZeroUsize::new(300).unwrap();
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let ended = machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"id":{},"subscribe":{{"type":1,"phase":0,"epoch":"e1","offset":5,"state":[{{"key":"k","data":"{}"}}]}}}}"#,
+            id_of(&first),
+            "x".repeat(400)
+        ),
+    ));
+
+    assert_eq!(unsubscribes(&ended), 1);
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Unsubscribed)
+    );
+    let events = events(&ended);
+    assert!(
+        events
+            .iter()
+            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. })),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Sync(..))),
+        "{events:?}"
     );
 }
 

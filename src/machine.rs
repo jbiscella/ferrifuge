@@ -270,11 +270,11 @@ pub struct MapSubscriptionOptions {
     /// What an unrecoverable position does (Block 45, D6).
     pub unrecoverable_strategy: crate::UnrecoverableStrategy,
     /// The options a map subscription shares with a stream subscription:
-    /// `data`, the token and its callback, the resubscribe delays, `delta`,
+    /// `data`, the token and its callback, the resubscribe delays,
     /// `tag_filter` and `channel_compaction`. The others (`data_source`,
     /// `since`, `state_source`, `positioned`, `recoverable`, `join_leave`)
     /// do not apply to map subscriptions and are ignored (Block 45, out of
-    /// scope).
+    /// scope), as `delta` is until per-key deltas are decoded.
     pub common: SubscriptionOptions,
 }
 
