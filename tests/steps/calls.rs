@@ -279,6 +279,14 @@ fn the_client_calls_map_remove(world: &mut ClientWorld, channel: String, key: St
     });
 }
 
+// Block 45: a map write the server accepts.
+#[then("the call succeeds")]
+async fn the_call_succeeds(world: &mut ClientWorld) {
+    if let Err(error) = outcome(world, None, EVENT_TIMEOUT).await.0 {
+        panic!("the call failed: {error:?}");
+    }
+}
+
 #[then(regex = r"^the call fails with code (\d+)$")]
 async fn the_call_fails_with_code(world: &mut ClientWorld, code: u32) {
     assert_eq!(last_error(world).await.code, code);

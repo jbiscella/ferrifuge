@@ -42,6 +42,8 @@ mod jitter;
 mod json_helpers;
 mod limits;
 mod logging;
+#[cfg(feature = "unstable")]
+mod maps;
 mod network_events;
 mod optimistic;
 mod ping;
@@ -235,6 +237,9 @@ pub(crate) struct ClientWorld {
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
+    /// What a Block 45 scenario holds.
+    #[cfg(feature = "unstable")]
+    pub(crate) maps: maps::Maps,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;

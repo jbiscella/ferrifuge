@@ -245,7 +245,11 @@ fn no_websocket_attempt(world: &mut ClientWorld) {
 #[given(
     regex = r#"^a client (configured with the Protobuf protocol )?connected over transport "(\w+)"$"#
 )]
-async fn a_client_connected_over(world: &mut ClientWorld, protobuf: String, transport: String) {
+pub(super) async fn a_client_connected_over(
+    world: &mut ClientWorld,
+    protobuf: String,
+    transport: String,
+) {
     if !protobuf.is_empty() {
         world.protocol = ferrifuge::Protocol::Protobuf;
     }
