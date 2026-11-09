@@ -359,6 +359,21 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
         "client closed" => codes::error::CLIENT_CLOSED,
         _ => codes::error::SUBSCRIPTION_UNSUBSCRIBED,
     };
+    // A runner that stalls between steps can run the settling step after
+    // the call's timeout, which then settles it first, as it must: the
+    // scenario's premise did not hold, and that is not the client's fault
+    // (Windows, #185: the disconnect ran 6.02 s after a call with a 5 s
+    // timeout). Any other outcome is checked.
+    if let Some(step_after) = settling_step_after
+        && step_after >= timeout
+        && after <= step_after
+        && error.code == codes::error::TIMEOUT
+    {
+        eprintln!(
+            "runner stall: the settling step ran {step_after:?} after the call, past its {timeout:?} timeout, so the call timed out first ({after:?})"
+        );
+        return;
+    }
     // The time tells a slow runner (a call made more than the timeout
     // before the step that settles it) from a client failing to settle it.
     assert_eq!(
