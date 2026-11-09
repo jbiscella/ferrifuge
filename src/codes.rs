@@ -121,6 +121,11 @@ pub mod connecting {
     pub const DELTA_ERROR: u32 = 5;
     /// `reconnect()` was called (Block 25, D5).
     pub const RECONNECT_CALLED: u32 = 6;
+    /// A message arrived while the inbox of a push transport was full: the
+    /// application did not read its streams, and the transport cannot stop
+    /// reading (Block 44, D7); events not taken are recovered by the next
+    /// connection on recoverable channels.
+    pub const READ_AHEAD_OVERFLOW: u32 = 7;
 }
 
 /// Codes of [`crate::ClientEvent::Disconnected`].
