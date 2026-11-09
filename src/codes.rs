@@ -236,4 +236,8 @@ pub mod error {
     pub const DELTA: u32 = 15;
     /// A handler of the client waited on that client (Block 41, D6).
     pub const WOULD_DEADLOCK: u32 = 16;
+    /// A publish waiting in a debounce window was dropped, never sent, as
+    /// its subscription left `subscribed` while the client stayed up; safe
+    /// to publish again once subscribed (Block 46, D10).
+    pub const PUBLISH_DROPPED: u32 = 17;
 }
