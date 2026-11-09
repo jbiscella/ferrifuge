@@ -2155,8 +2155,6 @@ struct Driver {
     /// Websocket subprotocol of the configured encoding, if it needs one.
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
-    // In the browser from Block 44d, with http_stream.
-    #[cfg_attr(adapter_browser, allow(dead_code))]
     emulation_endpoint: Option<String>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
@@ -2422,7 +2420,6 @@ impl Driver {
                         );
                         Input::Frame { transport: id, data }
                     }
-                    #[cfg(adapter_tokio)]
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Written(frame) => Input::FrameWritten { transport: id, frame },
                     Inbound::Closed { code, reason } => {
@@ -2640,8 +2637,6 @@ impl Driver {
 
     /// Starts opening transport `id`, of `kind`, at endpoint `endpoint`;
     /// an emulated one sends `initial_frame`, its connect command.
-    // `initial_frame` is read over http_stream, in the browser from Block 44d.
-    #[cfg_attr(adapter_browser, allow(clippy::needless_pass_by_value))]
     fn open_transport(
         &mut self,
         id: TransportId,
@@ -2663,19 +2658,17 @@ impl Driver {
             emulation: self.emulation_endpoint.clone(),
             initial_frame,
         };
-        // http_stream and sse in Blocks 44d and 44e.
         #[cfg(adapter_browser)]
-        let open = {
-            let _ = initial_frame;
-            super::browser::Open {
-                kind,
-                endpoint,
-                url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
-                subprotocol: self.subprotocol,
-                timeout: self.timeout,
-                max_message: self.max_message,
-                read_ahead: self.read_ahead,
-            }
+        let open = super::browser::Open {
+            kind,
+            endpoint,
+            url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
+            subprotocol: self.subprotocol,
+            timeout: self.timeout,
+            max_message: self.max_message,
+            read_ahead: self.read_ahead,
+            emulation: self.emulation_endpoint.clone(),
+            initial_frame,
         };
         let opening = super::backend::open(open, &self.shared.log);
         self.opening = Some((id, opening));

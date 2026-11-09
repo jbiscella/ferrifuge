@@ -890,7 +890,7 @@ let config = Config::default()
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
-| `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket; nothing on other targets (see Browser) |
+| `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket and fetch (http_stream); nothing on other targets (see Browser) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -1144,9 +1144,9 @@ applies (see Proxies), and the `fips` build is unsupported.
 
 A web front-end in Rust (Leptos, Yew, Dioxus) runs the same `Client`,
 built for `wasm32-unknown-unknown` with the default features: the `browser`
-feature gives it the browser's WebSocket, the page's event loop for its
-tasks, `setTimeout` for its timers, `performance.now()` and `Date.now()`
-for its clocks. With `--no-default-features`, add `features = ["browser"]`.
+feature gives it the browser's WebSocket and `fetch`, the page's event loop
+for its tasks, `setTimeout` for its timers, `performance.now()` and
+`Date.now()` for its clocks. With `--no-default-features`, add `features = ["browser"]`.
 
 ```rust,ignore
 let client = ferrifuge::Client::new("wss://example.com/connection/websocket", Config::default())?;
@@ -1182,6 +1182,20 @@ deadline. A message over `max_message_bytes` is refused once the browser
 has received it whole. The browser hides the upgrade's response, so a
 failed attempt says "websocket closed before open (code N)" and names no
 captive portal.
+
+**http_stream.** A client given an http_stream endpoint
+(`Client::builder_with_transports`) falls back to it as natively, over the
+page's `fetch`: the stream request posts the connect command, commands go
+in requests to the emulation endpoint, JSON or Protobuf, with
+`credentials: "same-origin"`, so a server on another origin must allow
+CORS (Centrifugo does, per `allowed_origins`). Its response is read only
+while the read-ahead has room, so a page that does not take its events
+holds the server back as natively, with no inbox. Closing or dropping the
+transport aborts the stream and every emulation request in flight. A
+redirect is not followed: the browser hides it, and the failed attempt
+says "HTTP redirect; a captive portal may be answering"; a 511 or an HTML
+page answered with a success says so too. The sse transport is not there
+yet: an sse endpoint fails its attempts.
 
 **Network and page events.** While it is not disconnected, the client
 listens to the page's `offline` and `online` events and to `pagehide` and

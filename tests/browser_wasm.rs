@@ -807,17 +807,22 @@ async fn commands_work_over_http_stream() {
     assert_eq!(connected_over(&mut events).await, "http_stream");
     subscribed(&mut subscription_events).await;
 
-    within(WAIT, client.publish(&channel, b"hello".to_vec()))
+    within(WAIT, client.publish(&channel, br#""hello""#.to_vec()))
         .await
         .expect("the publish succeeds");
 
-    assert_eq!(publication(&mut subscription_events).await.data, b"hello");
+    assert_eq!(
+        publication(&mut subscription_events).await.data,
+        br#""hello""#
+    );
 }
 
 // @W scenario: A stream not read stops a browser client reading its http_stream response
 #[wasm_bindgen_test]
 async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     const COUNT: usize = 1000;
+    // 100 bytes of JSON: a string of 98 digits.
+    let data = |n: usize| format!("\"{n:098}\"").into_bytes();
     let channel = unique("news");
     let client = over_http_stream(Config::default().read_ahead_messages(16));
     let subscription = client.new_subscription(&channel).unwrap();
@@ -830,12 +835,9 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     let publisher = publisher(Config::default()).await;
 
     for n in 1..=COUNT {
-        within(
-            WAIT,
-            publisher.publish(&channel, format!("{n:0100}").into_bytes()),
-        )
-        .await
-        .expect("published");
+        within(WAIT, publisher.publish(&channel, data(n)))
+            .await
+            .expect("published");
     }
 
     within(WAIT, async {
@@ -849,10 +851,7 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     yields_nothing(&mut events, 1000).await;
     assert_eq!(client.read_ahead().0, 16);
     for n in 1..=COUNT {
-        assert_eq!(
-            publication(&mut subscription_events).await.data,
-            format!("{n:0100}").into_bytes()
-        );
+        assert_eq!(publication(&mut subscription_events).await.data, data(n));
     }
     match select(subscription_events.next(), sleep(500)).await {
         Either::Left((event, _)) => panic!("yielded {event:?} after the publications"),

@@ -1,14 +1,16 @@
 //! What the browser driver needs beyond the shared adapter layer: the
-//! browser's WebSocket and the inbox that bounds what it holds (Block 44,
-//! D2, D6, D7).
+//! browser's WebSocket and the inbox that bounds what it holds, and
+//! `http_stream` over fetch (Block 44, D2, D6, D7, D8).
 
 pub(super) mod events;
+pub(super) mod http_stream;
 pub(super) mod websocket;
 
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use self::http_stream::HttpStream;
 pub(in crate::adapter) use self::websocket::Inbound;
 use self::websocket::WebSocket;
 use super::log::Log;
@@ -30,6 +32,10 @@ pub(in crate::adapter) struct Open {
     pub(in crate::adapter) max_message: usize,
     /// The bound of the inbox: the read-ahead's own (Block 44, D7).
     pub(in crate::adapter) read_ahead: websocket::Bound,
+    /// Where commands over emulated transports go, when not the default.
+    pub(in crate::adapter) emulation: Option<String>,
+    /// The commands an emulated transport's stream request carries.
+    pub(in crate::adapter) initial_frame: Option<Vec<u8>>,
 }
 
 /// Opens a transport of `open.kind`, its attempt recorded in `log`.
@@ -42,6 +48,8 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         timeout,
         max_message,
         read_ahead,
+        emulation,
+        initial_frame,
     } = open;
     log.attempt(kind, endpoint);
     match kind {
@@ -50,8 +58,24 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                 .await
                 .map(|websocket| Transport::WebSocket(Box::new(websocket)))
         }),
-        // Over fetch and EventSource in Blocks 44d and 44e.
-        TransportKind::HttpStream | TransportKind::Sse => Box::pin(async move {
+        TransportKind::HttpStream => {
+            let protobuf = subprotocol.is_some();
+            Box::pin(async move {
+                HttpStream::open(
+                    http_stream::global_fetch()?,
+                    &url,
+                    initial_frame.unwrap_or_default(),
+                    emulation.as_deref(),
+                    timeout,
+                    protobuf,
+                    max_message,
+                )
+                .await
+                .map(|http| Transport::HttpStream(Box::new(http)))
+            })
+        }
+        // Over EventSource in Block 44e.
+        TransportKind::Sse => Box::pin(async move {
             Err(format!(
                 "{} is not available in the browser yet",
                 kind.name()
@@ -62,12 +86,14 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
 
 /// An open transport of any kind.
 pub(in crate::adapter) enum Transport {
+    // Boxed: the transports differ much in size, and one is held at a time.
     WebSocket(Box<WebSocket>),
+    HttpStream(Box<HttpStream>),
 }
 
 impl Transport {
-    /// Sends `frame`; it counts as written at once (Block 44, D6).
-    #[allow(clippy::needless_pass_by_value)] // The native transport's signature.
+    /// Sends `frame`: over websocket it counts as written at once (Block
+    /// 44, D6), over `http_stream` once its emulation request is answered.
     pub(in crate::adapter) fn send(
         &mut self,
         id: FrameId,
@@ -76,6 +102,11 @@ impl Transport {
     ) -> Result<(), String> {
         match self {
             Self::WebSocket(websocket) => websocket.send(id, &frame, frame_type),
+            // Failures end the transport through `recv`.
+            Self::HttpStream(http) => {
+                http.send(id, frame);
+                Ok(())
+            }
         }
     }
 
@@ -84,6 +115,7 @@ impl Transport {
     pub(in crate::adapter) async fn recv(&mut self, reading: bool) -> Inbound {
         match self {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
+            Self::HttpStream(http) => http.recv(reading).await,
         }
     }
 
@@ -93,6 +125,7 @@ impl Transport {
     pub(in crate::adapter) fn close(self, runtime: &Handle) -> JoinHandle<()> {
         match self {
             Self::WebSocket(websocket) => super::platform::spawn(runtime, websocket.close()),
+            Self::HttpStream(http) => super::platform::spawn(runtime, async move { http.close() }),
         }
     }
 }

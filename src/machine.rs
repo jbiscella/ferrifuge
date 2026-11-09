@@ -128,7 +128,7 @@ pub struct FrameId(u64);
 
 impl FrameId {
     /// An id for the adapter's unit tests.
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
