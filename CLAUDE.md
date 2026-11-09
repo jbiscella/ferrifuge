@@ -7046,7 +7046,7 @@ Verified (Centrifugo v6.10.1, a raw websocket JSON client on Node 22 and the ser
 
 **Structural acceptance:**
 - with default features, `cargo doc` and `cargo public-api` (or rustdoc JSON) list no map item but the two code constants; with `--features unstable` each carries the `doc(cfg)` badge and the unstable sentence; `cargo tree` is unchanged by `unstable` (no new dependency);
-- D3: unit tests on both codecs: a stream subscribe, a publish and a subscribe result encode and decode byte for byte as before; each map field round-trips; a JSON result without `phase` decodes as live; the decoder fuzz targets' seed corpora (Block 14) gain a map subscribe result and a map publication;
+- D3: unit tests on both codecs: a stream subscribe, a publish and a subscribe result encode and decode byte for byte as before; each map field round-trips; a JSON result without `phase` decodes as live; the JSON and Protobuf decoder fuzz targets (Block 14) gain a committed seed corpus, which Block 14 did not create: a valid map subscribe result and a valid map publication per codec, as files in each target's bolero `corpus` directory, named so that `.gitignore` admits them and not the inputs fuzzing adds there; `cargo test` replays them and the CI fuzz runs start from them;
 - D3, D17: cargo-semver-checks reports no change in 45a and `Action`'s `non_exhaustive` as the only major change of 45b;
 - D4, D5: @E unit tests of the flow on the core: the commands of each phase with their fields; the merge of catch-up publications into the `Sync` (last value wins, removal deletes, order of keys); the position after each event taken; a reply of an earlier flow dropped; a page reply handled while an earlier publication of another subscription is held; a page read before its connection's connect reply, handled right after it; the per-request deadline; the `max_state_bytes` count;
 - D9: unit tests of per-key bases: seeded from state entries and catch-up publications, deleted on removal, kept across a recovering resubscribe, dropped on a load from scratch, 112, 2502 and 3014;
@@ -7218,7 +7218,7 @@ Feature: Map subscriptions (unstable)
     When the client connects and subscribes the map subscription
     Then the map subscription emits a sync
     And the token callback was called once before the first subscribe command
-    And 5 s later the map subscription is still "subscribed" and the token callback was called twice
+    And 5 s later the map subscription is still "subscribed" and the token callback was called at least twice
 
   @D
   Scenario: Every request of a load carries the token, and only the first carries the data

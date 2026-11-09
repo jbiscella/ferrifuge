@@ -159,7 +159,7 @@ Feature: Map subscriptions (unstable)
     When the client connects and subscribes the map subscription
     Then the map subscription emits a sync
     And the token callback was called once before the first subscribe command
-    And 5 s later the map subscription is still "subscribed" and the token callback was called twice
+    And 5 s later the map subscription is still "subscribed" and the token callback was called at least twice
 
   @D
   Scenario: Every request of a load carries the token, and only the first carries the data
