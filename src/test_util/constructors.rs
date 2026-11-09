@@ -405,9 +405,48 @@ impl DeltaStatistics {
 #[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
 impl crate::MapEntry {
     /// An entry of `key` holding `data`, with no offset, tags or info.
+    ///
+    /// ```
+    /// use ferrifuge::MapEntry;
+    ///
+    /// let entry = MapEntry::new("a", br#"{"x":1}"#.to_vec()).offset(4);
+    /// assert_eq!(entry.key, "a");
+    /// assert_eq!(entry.offset, Some(4));
+    /// ```
     #[must_use]
-    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
-        Self::default()
+    pub fn new(key: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            key: key.into(),
+            data: data.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Sets its position in the map's stream.
+    #[must_use]
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Sets its tags.
+    #[must_use]
+    pub fn tags<K: Into<String>, V: Into<String>>(
+        mut self,
+        tags: impl IntoIterator<Item = (K, V)>,
+    ) -> Self {
+        self.tags = tags
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+
+    /// Sets the client that set it.
+    #[must_use]
+    pub fn info(mut self, info: ClientInfo) -> Self {
+        self.info = Some(info);
+        self
     }
 }
 
@@ -415,15 +454,66 @@ impl crate::MapEntry {
 #[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
 impl crate::MapUpdate {
     /// A change setting `key` to `data`, with no offset, tags or info.
+    ///
+    /// ```
+    /// use ferrifuge::MapUpdate;
+    ///
+    /// let update = MapUpdate::new("a", br#"{"x":1}"#.to_vec()).offset(5);
+    /// assert!(!update.removed);
+    /// assert_eq!(update.offset, Some(5));
+    /// ```
     #[must_use]
-    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
-        Self::default()
+    pub fn new(key: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            key: key.into(),
+            data: data.into(),
+            ..Self::default()
+        }
     }
 
-    /// The removal of `key`, with no offset, tags or info.
+    /// The removal of `key`, with no value, offset, tags or info.
+    ///
+    /// ```
+    /// use ferrifuge::MapUpdate;
+    ///
+    /// let update = MapUpdate::removal("a");
+    /// assert!(update.removed);
+    /// assert!(update.data.is_empty());
+    /// ```
     #[must_use]
-    pub fn removal(_key: impl Into<String>) -> Self {
-        Self::default()
+    pub fn removal(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            removed: true,
+            ..Self::default()
+        }
+    }
+
+    /// Sets its position in the map's stream.
+    #[must_use]
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Sets its tags.
+    #[must_use]
+    pub fn tags<K: Into<String>, V: Into<String>>(
+        mut self,
+        tags: impl IntoIterator<Item = (K, V)>,
+    ) -> Self {
+        self.tags = tags
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+
+    /// Sets the client that made the change.
+    #[must_use]
+    pub fn info(mut self, info: ClientInfo) -> Self {
+        self.info = Some(info);
+        self
     }
 }
 

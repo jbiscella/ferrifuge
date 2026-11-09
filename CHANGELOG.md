@@ -28,6 +28,12 @@ repository held while it carried that version, from the blocks of
   recovering resubscribe and not across a load from scratch, and delivers
   whole values; `MapSubscription::delta_statistics`,
   `MapSubscription::set_tag_filter`.
+- Unstable (`unstable` feature): `MapSubscriptionHandler`, set with
+  `MapSubscriptionBuilder::handler` or `MapSubscription::set_handler`, run
+  by the client's consumer under its `EventDelivery` mode; `MapEntry::json`
+  and `MapUpdate::json`; with `test-util`, `MapEntry::new`,
+  `MapUpdate::new` and `MapUpdate::removal` with setters for the optional
+  fields; map subscriptions work in the browser (Block 45e).
 
 ## [0.21.0] - 2026-11-09
 

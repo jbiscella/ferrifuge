@@ -461,6 +461,14 @@ recovers after the resubscribe backoff, the other keys' bases kept. Delta
 and a tag filter cannot go together: `build()` and `set_tag_filter` refuse
 it.
 
+`MapSubscriptionBuilder::handler` or `set_handler` takes the events in place
+of the stream, a closure or a `MapSubscriptionHandler` with `on_sync` and
+`on_update`, run by the client's consumer as any handler (see Event
+handlers). `MapEntry::json` and `MapUpdate::json` decode a value,
+`publish_json` encodes one. With `test-util`, `MapEntry::new`,
+`MapUpdate::new` and `MapUpdate::removal` build events for an application's
+tests. Map subscriptions work in the browser too.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it
