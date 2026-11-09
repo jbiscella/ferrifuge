@@ -526,6 +526,63 @@ mod tests {
     /// A value built by a setter, and the assignment it must equal.
     type Case<T> = (T, fn(&mut T));
 
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn map_constructors_set_their_fields_only() {
+        use crate::{MapEntry, MapUpdate};
+        let info = ClientInfo::new("c1", "u1");
+
+        let mut entry = MapEntry::default();
+        entry.key = "a".into();
+        entry.data = b"d".to_vec();
+        assert_eq!(MapEntry::new("a", b"d".to_vec()), entry);
+        let mut with_all = entry.clone();
+        with_all.offset = Some(4);
+        with_all.tags.insert("k".into(), "v".into());
+        with_all.info = Some(info.clone());
+        assert_eq!(
+            MapEntry::new("a", b"d".to_vec())
+                .offset(4)
+                .tags([("k", "v")])
+                .info(info.clone()),
+            with_all
+        );
+
+        let mut update = MapUpdate::default();
+        update.key = "a".into();
+        update.data = b"d".to_vec();
+        assert_eq!(MapUpdate::new("a", b"d".to_vec()), update);
+        let mut with_all = update.clone();
+        with_all.offset = Some(4);
+        with_all.tags.insert("k".into(), "v".into());
+        with_all.info = Some(info.clone());
+        assert_eq!(
+            MapUpdate::new("a", b"d".to_vec())
+                .offset(4)
+                .tags([("k", "v")])
+                .info(info),
+            with_all
+        );
+
+        let mut removal = MapUpdate::default();
+        removal.key = "a".into();
+        removal.removed = true;
+        assert_eq!(MapUpdate::removal("a"), removal);
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn map_values_decode_as_json() {
+        use crate::{MapEntry, MapUpdate};
+        let value = serde_json::json!({"x": 1});
+
+        let entry = MapEntry::new("a", br#"{"x":1}"#.to_vec());
+        assert_eq!(entry.json::<serde_json::Value>().unwrap(), value);
+        let update = MapUpdate::new("a", br#"{"x":1}"#.to_vec());
+        assert_eq!(update.json::<serde_json::Value>().unwrap(), value);
+        assert!(MapUpdate::removal("a").json::<serde_json::Value>().is_err());
+    }
+
     #[test]
     fn each_publication_setter_sets_its_field_only() {
         let info = ClientInfo::new("c1", "u1");

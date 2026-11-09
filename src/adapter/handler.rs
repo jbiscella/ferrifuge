@@ -1393,6 +1393,135 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_map_handler_set_after_close_is_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let map = client
+                .new_map_subscription("map:a", crate::MapKind::Map)
+                .unwrap();
+            client.close().await;
+
+            map.set_handler(FlaggedMap(Arc::clone(&dropped)));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    /// Records which method of its kind each event reached.
+    #[cfg(feature = "unstable")]
+    #[derive(Default)]
+    struct ByKind(Vec<&'static str>);
+
+    #[cfg(feature = "unstable")]
+    impl MapSubscriptionHandler for ByKind {
+        fn on_subscribing(&mut self, _: u32, _: String) {
+            self.0.push("subscribing");
+        }
+        fn on_subscribed(&mut self, _: Subscribed) {
+            self.0.push("subscribed");
+        }
+        fn on_unsubscribed(&mut self, _: u32, _: String) {
+            self.0.push("unsubscribed");
+        }
+        fn on_sync(&mut self, _: Vec<crate::MapEntry>) {
+            self.0.push("sync");
+        }
+        fn on_update(&mut self, _: crate::MapUpdate) {
+            self.0.push("update");
+        }
+        fn on_error(&mut self, _: ClientError) {
+            self.0.push("error");
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn the_default_on_event_calls_the_method_of_each_map_event_s_kind() {
+        use crate::MapSubscriptionEvent as Event;
+        let error = ClientError {
+            kind: crate::ErrorKind::Transport,
+            code: 1,
+            message: String::new(),
+            transport: None,
+        };
+        let mut handler = ByKind::default();
+
+        for event in [
+            Event::Subscribing {
+                code: 0,
+                reason: String::new(),
+            },
+            Event::Subscribed(Subscribed::default()),
+            Event::Unsubscribed {
+                code: 0,
+                reason: String::new(),
+            },
+            Event::Sync(Vec::new()),
+            Event::Update(crate::MapUpdate::default()),
+            Event::Error(error),
+        ] {
+            handler.on_event(event);
+        }
+
+        assert_eq!(
+            handler.0,
+            [
+                "subscribing",
+                "subscribed",
+                "unsubscribed",
+                "sync",
+                "update",
+                "error"
+            ]
+        );
+    }
+
+    // Block 45, D13, Codex #171's rule: an event queued for a map handler
+    // holds a Thread handler's wait as any queued event does.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_thread_wait_held_by_a_queued_map_handler_event_would_deadlock() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let map = client
+            .new_map_subscription("map:a", crate::MapKind::Map)
+            .unwrap();
+        map.set_handler(|_: crate::MapSubscriptionEvent| {});
+        map.subscribe();
+        let transport = opened_by_hand(&client);
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        replied_by_hand(
+            &client,
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"recoverable":true,"epoch":"e1","offset":1}}"#,
+        );
+        let shared = client.shared();
+        assert!(
+            lock(&shared.core)
+                .machine
+                .events_holding_messages()
+                .next()
+                .is_some()
+        );
+        // A running event that holds nothing.
+        lock(&shared.handlers).running = Some(EventId::for_tests(u64::MAX - 1));
+        let _marked = Marked::new(shared, true);
+
+        assert!(would_deadlock(shared, Wait::Ready(true)));
+    }
+
     // Block 45, D13: Block 41's deadlock detection covers a map
     // subscription's calls.
     #[cfg(feature = "unstable")]
