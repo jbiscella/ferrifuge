@@ -522,6 +522,11 @@ struct Checker {
     open: BTreeSet<u64>,
     /// `disconnect()` was called, and `connect()` not since (I5).
     disconnected: bool,
+    /// The getState fetches running at `disconnect()`: their answers may
+    /// still go on with their flow (I5, amended by Block 42 D11).
+    kept: std::collections::HashSet<FetchId>,
+    /// The answer of a fetch in `kept` is being fed.
+    continuing: bool,
     /// Calls not yet settled, with when they were made (I6).
     calls: BTreeMap<CallId, Duration>,
     /// Events emitted and not yet delivered (I8, I9).
@@ -854,9 +859,20 @@ impl Run {
         match op {
             Op::Connect => {
                 self.checker.disconnected = false;
+                self.checker.kept.clear();
                 self.feed(Input::Connect)
             }
             Op::Disconnect => {
+                if !self.checker.disconnected {
+                    self.checker.kept = self
+                        .agenda
+                        .values()
+                        .filter_map(|due| match due {
+                            Due::State(fetch, ..) => Some(*fetch),
+                            _ => None,
+                        })
+                        .collect();
+                }
                 self.checker.disconnected = true;
                 self.feed(Input::Disconnect)
             }
@@ -1107,6 +1123,7 @@ impl Run {
         self.trace.push("healed".to_owned());
         if self.machine.state() == State::Disconnected {
             self.checker.disconnected = false;
+            self.checker.kept.clear();
             self.feed(Input::Connect)?;
         }
         let deadline = self.now + LIVENESS;
@@ -1245,7 +1262,13 @@ impl Run {
                 } else {
                     Err(StateError("chaos".to_owned()))
                 };
-                self.feed(Input::SubscriptionStateFetched { fetch, result })
+                // A flow's callback running at disconnect() may answer and
+                // go on (Block 42, D11).
+                self.checker.continuing =
+                    self.checker.disconnected && self.checker.kept.remove(&fetch);
+                let fed = self.feed(Input::SubscriptionStateFetched { fetch, result });
+                self.checker.continuing = false;
+                fed
             }
             Due::Answer(transport, reply) => {
                 if self.server.current == Some(transport) {
@@ -1477,7 +1500,9 @@ impl Run {
             }
             Action::CancelCallTimer(call, timer) => self.cancel(Key::Call(call, timer)),
             Action::SetSubscriptionTimer(id, timer, delay) => {
-                if self.checker.disconnected {
+                // Only the backoff a kept callback's failure arms (D11).
+                let continuing = self.checker.continuing && timer == SubscriptionTimer::Resubscribe;
+                if self.checker.disconnected && !continuing {
                     return Err(
                         self.violation("I5", format!("{id:?} {timer:?} set after disconnect()"))
                     );
