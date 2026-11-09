@@ -657,6 +657,25 @@ impl Side {
         );
     }
 
+    /// Waits until its client has emitted `count` "connected" events.
+    async fn until_connected(&self, count: usize) {
+        let connected = || {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::Connected { .. }))
+                .count()
+        };
+        let reached = tokio::time::timeout(EVENT_TIMEOUT, async {
+            while connected() < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "{:?}", self.events.lock().unwrap());
+    }
+
     fn publications(&self) -> Vec<(Value, Option<u64>)> {
         self.subscription_events
             .lock()
@@ -818,6 +837,14 @@ async fn each_server_disconnects(world: &mut ClientWorld, code: u16, reason: Str
         })
         .await;
     }
+    // The next connections wait until the step publishing during the
+    // reconnect has published, however slow the runner.
+    world
+        .relay
+        .as_ref()
+        .expect("a relay")
+        .set_mode(crate::support::relay::Mode::Hold);
+    world.doubles.hold.held.store(true, Ordering::SeqCst);
     world
         .server
         .as_ref()
@@ -848,10 +875,12 @@ async fn each_server_publishes(world: &mut ClientWorld, data: String) {
         .await
         .expect("server API publish");
     server(world).publish("news", data.into_bytes());
-    // Neither client has connected again yet.
-    let relayed = world.relay.as_ref().expect("a relay").connections();
-    assert_eq!(relayed, 1, "Centrifugo had a new connection");
-    assert_eq!(world.doubles.calls.load(Ordering::SeqCst), 1);
+    world
+        .relay
+        .as_ref()
+        .expect("a relay")
+        .set_mode(crate::support::relay::Mode::Forward);
+    world.doubles.hold.release();
 }
 
 #[then(
@@ -867,6 +896,8 @@ async fn the_same_events(world: &mut ClientWorld) {
                 >= 3
         })
         .await;
+        // Its client's events are recorded apart from its subscription's.
+        side.until_connected(2).await;
     }
     let sides = sides(world);
     let (centrifugo, double) = (sides[0].normalized(), sides[1].normalized());
