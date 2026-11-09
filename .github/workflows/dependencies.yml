@@ -31,3 +31,9 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+      - name: cargo deny check (browser target)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features --target wasm32-unknown-unknown
+          command: check
