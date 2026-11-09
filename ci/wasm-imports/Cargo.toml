@@ -1,0 +1,22 @@
+# The imports of a module linking ferrifuge (Block 44, D19), built by the
+# `wasm` CI job: with the core alone it imports nothing; with `browser`
+# only what wasm-bindgen generates the glue for. Outside the package, with
+# a workspace of its own.
+[package]
+name = "wasm-imports"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+ferrifuge = { path = "../..", default-features = false }
+wasm-bindgen = { version = "0.2.130", optional = true }
+
+[features]
+browser = ["ferrifuge/browser", "dep:wasm-bindgen"]
+
+[workspace]

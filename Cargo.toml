@@ -25,11 +25,12 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features, test-util and cookies on one
-# target: never fips, whose build needs Go and CMake (Block 20, D7; Block
-# 37, D7; Block 43, D8).
+# docs.rs builds the default features, test-util and cookies, natively
+# and for the browser target, where cookies builds nothing: never fips,
+# whose build needs Go and CMake (Block 20, D7; Block 37, D7; Block 43,
+# D8; Block 44, D19).
 [package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 features = ["test-util", "cookies"]
 
 [features]

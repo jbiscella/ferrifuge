@@ -36,6 +36,11 @@ use crate::{
 /// nothing else of it runs, the client's timers and pongs included, until
 /// it returns.
 ///
+/// In the browser they run on the page's event loop, which they block
+/// while they run, and a panic aborts: wasm32-unknown-unknown builds with
+/// `panic = "abort"`, so the module traps and its later calls are
+/// undefined (Block 44, D15).
+///
 /// ```no_run
 /// # fn run(client: ferrifuge::Client) {
 /// struct Log;
@@ -99,7 +104,8 @@ impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
 /// [`ClientHandler`] does the client's (Block 41, D1). Set with
 /// [`SubscriptionBuilder::handler`](crate::SubscriptionBuilder::handler) or
 /// [`Subscription::set_handler`](crate::Subscription::set_handler); it
-/// takes over the subscription's stream.
+/// takes over the subscription's stream. In the browser a panic aborts, as
+/// for [`ClientHandler`] (Block 44, D15).
 ///
 /// ```no_run
 /// # fn run(subscription: ferrifuge::Subscription) {

@@ -373,9 +373,11 @@ jobs:
       - name: Examples
         run: cargo build --examples
 
-  # The sans-IO core builds for wasm32-unknown-unknown (Block 40, D1, D2):
-  # its clippy also refuses the std clock and thread calls that panic there.
-  # Nothing runs: the dev-dependencies do not build for wasm32 (D3).
+  # The sans-IO core and the browser adapter build for wasm32-unknown-unknown
+  # (Block 40, D1, D2; Block 44, D19): their clippy also refuses the std
+  # clock and thread calls that panic there. A module linking them imports
+  # nothing with the core alone, and only wasm-bindgen's glue with the
+  # browser adapter. The tests run in the browser jobs.
   wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -400,6 +402,123 @@ jobs:
         run: |
           cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features test-util -- -D warnings
           cargo build --lib --target wasm32-unknown-unknown --no-default-features --features test-util
+
+      - name: The browser adapter
+        run: |
+          cargo clippy --lib --test browser_wasm --target wasm32-unknown-unknown --no-default-features --features browser -- -D warnings
+          cargo build --lib --target wasm32-unknown-unknown --no-default-features --features browser
+
+      - name: The browser adapter with test-util
+        run: |
+          cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features browser,test-util -- -D warnings
+          cargo build --lib --target wasm32-unknown-unknown --no-default-features --features browser,test-util
+
+      # The default features build there too (Block 44, D1).
+      - name: The default features
+        run: cargo build --lib --target wasm32-unknown-unknown
+
+      - name: Imports of a module linking the core
+        working-directory: ci/wasm-imports
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown
+          node check.mjs target/wasm32-unknown-unknown/release/wasm_imports.wasm none
+
+      - name: Imports of a module linking the browser adapter
+        working-directory: ci/wasm-imports
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown --features browser
+          node check.mjs target/wasm32-unknown-unknown/release/wasm_imports.wasm bindgen
+
+      # wasm-bindgen-cli must match the locked wasm-bindgen exactly.
+      - name: wasm-bindgen version
+        id: wasm-bindgen
+        run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+
+      # Reported, no gate (Block 44, D19).
+      - name: Size of the browser module
+        working-directory: ci/wasm-imports
+        run: |
+          wasm-bindgen --target web --out-dir bindgen target/wasm32-unknown-unknown/release/wasm_imports.wasm
+          size=$(wc -c < bindgen/wasm_imports_bg.wasm)
+          gzipped=$(gzip -9 -c bindgen/wasm_imports_bg.wasm | wc -c)
+          echo "### Browser module: $size bytes, $gzipped gzipped" >> "$GITHUB_STEP_SUMMARY"
+
+  # The @W tests (Block 44, D18): the browser client against Centrifugo and
+  # the relay, in headless Chrome and Firefox, with the drivers the
+  # ubuntu-latest image installs (CHROMEWEBDRIVER, GECKOWEBDRIVER).
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: wasm-bindgen version
+        id: wasm-bindgen
+        run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+
+      - name: Pull Centrifugo image
+        run: docker pull centrifugo/centrifugo:v6.10.1
+
+      - name: The @W tests in Chrome and Firefox
+        run: timeout -k 10 2400 cargo test --test browser
+        env:
+          FERRIFUGE_BROWSERS: chrome,firefox
+
+  # The @W tests in Safari (Block 44, D19): on main and nightly, not on pull
+  # requests, and not a required check. Hosted macOS has no Docker, so the
+  # Centrifugo release binary runs, its checksum pinned. Safari has no
+  # headless mode: it runs windowed in the runner's session.
+  browser-safari:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CENTRIFUGO_ASSET: centrifugo_6.10.1_darwin_arm64.tar.gz
+      CENTRIFUGO_SHA256: fb854f08c163b2063a64e9f455ea5baa9fbc3db29452cbc1fb5c17d46d0e1ec1
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: wasm-bindgen version
+        id: wasm-bindgen
+        run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+
+      - name: Centrifugo
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/$CENTRIFUGO_ASSET" \
+            "https://github.com/centrifugal/centrifugo/releases/download/v6.10.1/$CENTRIFUGO_ASSET"
+          echo "$CENTRIFUGO_SHA256  $RUNNER_TEMP/$CENTRIFUGO_ASSET" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$CENTRIFUGO_ASSET" -C "$RUNNER_TEMP" centrifugo
+          echo "FERRIFUGE_CENTRIFUGO=$RUNNER_TEMP/centrifugo" >> "$GITHUB_ENV"
+
+      - name: Enable safaridriver
+        run: sudo safaridriver --enable
+
+      - name: The @W tests in Safari
+        run: timeout -k 10 2400 cargo test --test browser
+        env:
+          FERRIFUGE_BROWSERS: safari
+          SAFARIDRIVER: /usr/bin/safaridriver
 
   # Mobile builds (Block 24, D1): the library and its unit tests build for
   # Android and iOS, with ring and with aws-lc-rs; nothing runs on a device.
@@ -489,6 +608,22 @@ jobs:
       # __test-hooks are not part of it (Block 37, D7).
       - name: cargo semver-checks
         run: cargo semver-checks --default-features --features test-util,cookies --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
+
+      # The browser target's API too (Block 44, D19), once the base has the
+      # browser adapter: before it, the base does not build there.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: cargo semver-checks (browser target)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+        run: |
+          if git show "$BASE:Cargo.toml" | grep -q '^browser = '; then
+            cargo semver-checks --default-features --features test-util,cookies --target wasm32-unknown-unknown --baseline-rev "$BASE"
+          else
+            echo "the base has no browser adapter: nothing to compare on the browser target"
+          fi
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.
@@ -600,17 +735,22 @@ jobs:
         run: cargo publish --dry-run
 
   # The documentation as docs.rs builds it (Block 20, D7): nightly, with the
-  # docsrs cfg that shows which items need which feature.
+  # docsrs cfg that shows which items need which feature, natively and for
+  # the browser target (Block 44, D19).
   docs-rs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
       - name: rustdoc as on docs.rs
-        run: cargo doc --no-deps --features test-util
+        run: |
+          cargo doc --no-deps --features test-util,cookies
+          cargo doc --no-deps --features test-util,cookies --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings

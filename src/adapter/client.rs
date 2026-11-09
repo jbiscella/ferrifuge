@@ -50,7 +50,11 @@ use crate::{
 };
 use tracing::{debug, trace, warn};
 
-/// Centrifugo client running on tokio.
+/// Centrifugo client, running on tokio natively and on the page's event
+/// loop in the browser (Block 44, D1).
+///
+/// Natively it is `Send` and `Sync`; on wasm32-unknown-unknown it is
+/// neither, as the browser's objects it holds are not (Block 44, D3).
 ///
 /// Clones share one client and its connection. Dropping the last clone
 /// closes the client, as [`Client::close`] does without waiting (Block 33);
@@ -1221,9 +1225,17 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// A [`crate::ErrorKind::Configuration`] error when the options cannot
-    /// work together, e.g. the Protobuf protocol with the sse transport, or
-    /// when there is no runtime to run on: none was given with
-    /// [`ClientBuilder::runtime`] and none is current, or it has shut down.
+    /// work together, e.g. the Protobuf protocol with the sse transport.
+    #[cfg_attr(
+        adapter_tokio,
+        doc = "Natively also when there is no runtime to run on: none was given with",
+        doc = "[`ClientBuilder::runtime`] and none is current, or it has shut down."
+    )]
+    #[cfg_attr(
+        adapter_browser,
+        doc = "In the browser the client runs on the page's event loop, which is",
+        doc = "always there (Block 44, D4)."
+    )]
     pub fn build(mut self) -> Result<Client, ClientError> {
         let handler = self.handler.take();
         let client = Client::start(self)?;
@@ -1244,10 +1256,13 @@ impl ClientBuilder {
 
     /// Where the handlers of the client and of its subscriptions run
     /// (Block 41, D2): [`EventDelivery::Task`](super::EventDelivery::Task)
-    /// by default, on the client's driver with
-    /// [`EventDelivery::Inline`](super::EventDelivery::Inline), or on a
-    /// thread of the client's own with
-    /// [`EventDelivery::Thread`](super::EventDelivery::Thread).
+    /// by default, or on the client's driver with
+    /// [`EventDelivery::Inline`](super::EventDelivery::Inline).
+    #[cfg_attr(
+        adapter_tokio,
+        doc = "Natively also on a thread of the client's own, with",
+        doc = "[`EventDelivery::Thread`](super::EventDelivery::Thread)."
+    )]
     #[must_use]
     pub fn event_delivery(mut self, delivery: super::EventDelivery) -> Self {
         self.event_delivery = delivery;
@@ -1262,9 +1277,12 @@ impl Client {
     /// # Errors
     ///
     /// As [`ClientBuilder::build`], e.g. for an empty endpoint or an
-    /// `http://` one, or when called outside a tokio runtime: the client
-    /// runs as a task on the current one ([`ClientBuilder::runtime`] takes
-    /// another).
+    /// `http://` one.
+    #[cfg_attr(
+        adapter_tokio,
+        doc = "Natively also when called outside a tokio runtime: the client runs as",
+        doc = "a task on the current one ([`ClientBuilder::runtime`] takes another)."
+    )]
     pub fn new(endpoint: impl Into<String>, config: Config) -> Result<Self, ClientError> {
         Self::builder(endpoint).config(config).build()
     }
