@@ -34,6 +34,7 @@ mod connection;
 mod connector;
 #[cfg(feature = "cookies")]
 mod cookies;
+mod debouncing;
 mod delivery;
 mod delta;
 mod double;
@@ -237,6 +238,8 @@ pub(crate) struct ClientWorld {
     /// The relay standing in for an unreachable websocket endpoint, and
     /// its connection attempts once the client connected (review item C5).
     pub(crate) websocket_relay: Option<(CountingRelay, usize)>,
+    /// What a Block 46 scenario holds.
+    pub(crate) debouncing: debouncing::Debouncing,
     /// What a Block 45 scenario holds.
     #[cfg(feature = "unstable")]
     pub(crate) maps: maps::Maps,

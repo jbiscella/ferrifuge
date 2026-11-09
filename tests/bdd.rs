@@ -33,6 +33,28 @@ const FEATURES: &str = "tests/features";
 
 /// Scenarios whose behaviour is implemented, by name.
 const IMPLEMENTED: &[&str] = &[
+    // Block 46, sub-increment 46a.
+    "Publishes within the interval are merged and the latest is sent when it ends",
+    "A window with nothing to send closes",
+    "A window stays open while it keeps sending",
+    "A stale debounce timer is ignored",
+    "An interval longer than the call timeout is clamped",
+    "A publish made while subscribing is debounced once subscribed",
+    "Without an interval every publish is sent",
+    "A later subscribe reply without an interval turns debouncing off",
+    "A superseded publish waits for the send that replaced it",
+    "A superseded publish fails with the error of the send that replaced it",
+    "A publish the server refuses at once keeps its own result",
+    "Client-level publishes are not debounced",
+    "Leaving subscribed drops what a window holds",
+    "A window dropped by a reconnect is not resent",
+    "A trailing send lost with its transport fails the publishes that followed it",
+    "A trailing send waits for room in the write queue",
+    "A trailing send is held by an open batch",
+    "Trailing sends of a burst share a frame with automatic batching",
+    "Dropping a publish withdraws its data only when no other publish waits for it",
+    "A Thread handler's publish waiting in a window is not a would-be deadlock",
+    "Publishing without Centrifugo PRO sends every publish",
     // Block 1, sub-increment 1a.
     "New client starts disconnected",
     "Successful connect",
