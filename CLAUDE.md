@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–46 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–46 and 49–52 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -84,6 +84,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |
 | Block 0, Block 9 and Block 11, out of scope | map subscriptions | owner, 2026-11-06, late (item 29) | 45 |
 | Block 0, Block 13 and Block 18, out of scope | client publish debouncing | owner, 2026-11-06, late (item 32) | 46 |
+| Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |
 
 ### Test layers
 
@@ -93,7 +94,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | @B | @A plus an HTTP proxy backend owned by the test (connect/subscribe/publish/rpc/refresh/sub_refresh proxy) | Server responses the test must control: custom errors with `temporary` flag, custom disconnects, delayed replies, inspecting connect request fields |
 | @D | Scripted fake server speaking the client protocol | Server behaviour Centrifugo cannot be made to produce: unsubscribe push codes, missing pings, malformed/unexpected frames, frame-level assertions |
 | @E | Unit tests with a controlled clock, no network | Timing: backoff and jitter bounds, refresh retry delays |
-| @P | Benchmark, allocation-counting and simulation harness, outside cucumber | Footprint, per-message cost and fleet behaviour. Deterministic metrics (instruction counts, allocation counts, live bytes, simulated time) gate CI; wall-clock metrics are measured and reported, never gating |
+| @P | Benchmark, allocation-counting and simulation harness, and the real-server chaos and soak runs of Blocks 51 and 52, outside cucumber | Footprint, per-message cost and fleet behaviour. Deterministic metrics (instruction counts, allocation counts, live bytes, simulated time) gate CI; wall-clock metrics are measured and reported, never gating |
 | @W | wasm-bindgen-test in headless Chrome and Firefox (and Safari on main and nightly), the browser client against a real Centrifugo and a recording relay in front of it, both started for the run; network and page events dispatched by the test on its own `EventTarget`s | Behaviour only a browser shows: the browser transports, item 39's options, the browser's clocks |
 
 A scenario tagged with several layers must pass in each of them.
@@ -2336,7 +2337,7 @@ Feature: Event delivery and backpressure
 
 **Out of scope:**
 - replaying the traces of centrifuge-rust's TLA+ model (optional, later, keeping its MIT notice) (reversed by the owner decision of 2026-11-06, late: Block 42);
-- a chaos TCP proxy against a real Centrifugo (centrifuge-rust §11.4);
+- a chaos TCP proxy against a real Centrifugo (centrifuge-rust §11.4) (reversed by the owner decision of 2026-11-09: Block 51);
 - the emulated transports and Protobuf in the runners: the core runner uses websocket and JSON, and the fake server speaks websocket only (Block 15);
 - delta compression, map and shared-poll subscriptions (Block 0);
 - performance (Block 14);
@@ -3165,7 +3166,7 @@ Order of the blocks:
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Release workflow.** `.github/workflows/release.yml`, triggered by a pushed tag `v*`, in three jobs, so that every check comes before the publish, which cannot be undone (a version can only be yanked):
-  - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), and runs `cargo-semver-checks` (a pinned version, default features and `test-util`, as the pull-request job; Block 37 D7) against the crate's latest version on crates.io, skipped only when the index has none;
+  - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), that the latest real runs of `chaos-real` and `soak` for that commit concluded with success (`scripts/validation-run gate`, Block 51 D11 and D12), and runs `cargo-semver-checks` (a pinned version, default features and `test-util`, as the pull-request job; Block 37 D7) against the crate's latest version on crates.io, skipped only when the index has none;
   - `publish` (`needs: verify`; environment `release`; `id-token: write`): `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token);
   - `github-release` (`needs: publish`; `contents: write`): the GitHub release with that version's changelog section as its notes; re-running it never publishes again.
   Every action is pinned by commit SHA; checkouts use `persist-credentials: false`; no build cache is used; the toolchain action names its toolchain.
@@ -7860,3 +7861,663 @@ Feature: Client publish debouncing
 - The interval is capped at `Config::timeout` (D2); `client.proto` and centrifuge-js set no cap. Block 13: a call never hangs.
 - A publish that waits in a window resolves with the result of the send that replaced it, and fails with its error or as D10 says (D4, D10); centrifuge-js and the documentation resolve it at once with `{}`. The owner's decision ("Planned after Block 19", item 32).
 - A publish whose future was dropped while later waiters depend on its value is still sent (D11), against Block 13's "never sent if it was queued": an earlier publish was replaced by that value.
+
+---
+
+## Block 49 — Bug-pattern catalogue
+
+**Goal:** every known failure pattern of Centrifugo client SDKs has an explicit status here: covered by a named scenario or test, a gap that a probe scenario closes, not applicable with the reason, or not reconstructible, so that fixes other SDKs paid for are not paid for again on a fleet of end-user devices (owner request, 2026-11-09).
+
+**Dependencies:** Blocks 0 (references, test layers), 8 and 27 (transports), 14 (live-heap measurement), 16 (runners, invariants), 21 (redaction), 41 (handlers), 42 (clean-room record of copied data).
+
+**Out of scope:**
+- changes to the client's behaviour: a bug a probe finds is fixed in its own pull request, and a gap whose closing needs a new behaviour decision is a finding for a later pull request;
+- differential testing against centrifuge-js, real suspension on an Android emulator, turmoil (deferred by the owner);
+- the TLA+ model beyond the committed traces (Block 42);
+- reading anything of `sdk_validation` (private) or centrifuge-rust `crates/`.
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Where it lives.** The catalogue is the table below, in `CLAUDE.md`, one row per pattern or family. `tests/support/bug_catalogue.rs` parses it. Keeping it beside the scenarios is what makes "every named scenario exists" checkable by `spec_sync`'s rules. The four catalogue scenarios are cucumber scenarios, untagged as Block 20's release checks are; their steps call the parser in `tests/support/bug_catalogue.rs`.
+- **D2 Statuses.** Exactly one of `covered`, `gap`, `not applicable`, `not reconstructible`.
+  - `covered`: the row names at least one scenario of `CLAUDE.md`, in double quotes, or a test function in the form `file::function`, that exercises the pattern; the row says when only part of the pattern is covered and which entry holds the rest.
+  - `gap`: a rule handles the pattern and nothing tests it, or nothing handles it; the row names a probe scenario or, when closing it needs a behaviour decision this block does not make, a finding of "Findings for later pull requests".
+  - `not applicable`: the row gives the reason.
+  - `not reconstructible`: the row gives what is known and why more is not.
+- **D3 Reconstruction grade.** §12 gives numbers and where each is handled; the patterns themselves are in a private file. The column "R" grades what we know: `R` an inline "pattern N" reference in `docs/spec.md`, or a §12 row holding that number alone, states the rule for it; `F` only a §12 row shared with other numbers does, so the row describes the family and the difference between its numbers is unknown; `N` nothing beyond the number. A numbered pattern is `not reconstructible` only at grade `N` or when the inline reference names a family without its failure.
+- **D4 Ids.** centrifuge-rust's numbers are kept for rows derived from them. Other rows use `S<n>` (official SDK changelogs and issue trackers), `R<n>` (centrifuge-rust CHANGELOG "Fixed") and `C<n>` (our own fix commits).
+- **D5 Mitigations are mapped, not copied.** Their rules assume handlers, a dispatcher thread and per-object generation counters. Ferrifuge's core is a sans-IO step (Block 0), so a row may be `covered` by that architecture only if a named test exercises the failure; otherwise it is `not applicable` when the failure cannot occur, with the reason.
+- **D6 Own defect classes.** A class fixed more than once becomes a `C` row naming an invariant that covers every path. Existing invariants are reused where they fit (I5, I6, I8, I9, I11). Two classes have none, so two are added, numbered next:
+  - **I13 no stale continuation** (core, after every step). An input answering something the core has abandoned changes nothing: a token, data or state callback's answer after its flow was abandoned (abandoned as Block 42 D10 and D11 define it: `unsubscribe()`, removal, `close()`, disconnect code 3014 and a token refresh's fetch abandon it, while a subscribe flow's callback outlives a lost transport or `disconnect()` and its answer is used), a timer fired after it was cancelled or re-armed, a reply or frame of a transport no longer current. The step emits no state event, no `Action::Send` carrying the answer, no call settled by it. The core runner already feeds late answers (`late answer` counter); the tap classifies each as current or abandoned from the ids it handed out.
+  - **I14 no secret in a record** (core and adapter runners). Every token and every connect, subscription, publication and RPC payload in a runner is a value containing a run-specific marker. The tap renders the `Debug` of each `Input` and `Action` (core) and captures every log record through `log` at Trace (adapter, as `tests/log_facade.rs`); none contains the marker. Block 21 D5's redaction rule, checked on every path.
+- **D7 The mutation rule.** Each probe is seen failing once on the mutation recorded with it, from a clean state, recorded in its pull request, as Blocks 34, 35, 36 and 37 require. A catalogue row records the pull request in `Seen failing` (`pending` until then). A mutation cannot run inside the scenario it checks, so the owner's "Every probe fails on its mutation" scenario is refined to check that the record is complete. Mutations are not replayed nightly: the rule of Blocks 34 to 37 stands.
+- **D8 Probes that fail today.** The probes for 28/55 and 71 are expected to fail on `main`: each is a bug against the rule the row cites, fixed in its own pull request. A probe that fails today stays out of `IMPLEMENTED` (`tests/bdd.rs`) or stays in `P_NOT_YET_MEASURED` (`tests/spec_sync.rs`) until its fix merges, and `Seen failing` then records the fix's pull request, the regression being its own mutation. Rows 19/70 and every other probe are expected to pass today, and are seen failing on the mutation recorded with them.
+- **D9 Coverage.** 84 numbers (§12 lists 1–83: 77 in its table, 2, 3, 10, 17, 20 and 12 in its prose; §15 row 23 adds 84). Totals: see "Size and coverage".
+- **D10 Upkeep.** The catalogue is reviewed whenever a transport or a subscription kind is added: the block adding one checks each row marked `not reconstructible` or `not applicable` for that area (Blocks 47 and 48 when written). A new client-protocol bug fixed here adds a `C` row when it is the second fix of its class.
+- **D11 Exclusion of the source of truth.** `sdk_validation/SKILL.md` is private: nothing here claims to match its numbering beyond §12's own. If it is ever published, the `F` and `N` rows are re-graded.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scope |
+|---|---|---|
+| 49a | As a maintainer, I want every known SDK failure pattern listed with a checked status, so that a gap is visible instead of forgotten | the catalogue, `tests/support/bug_catalogue.rs`, the four catalogue scenarios |
+| 49b | As a maintainer, I want the probes that pass today in CI, so that a regression of a pattern another SDK paid for fails a pull request | every probe not listed in D8; I13 and I14 |
+| 49c–49d | one PR per D8 finding (`49c` 28/55, `49d` 71) | the fix and its probe |
+
+Value clause: As a maintainer shipping Ferrifuge to large fleets of end-user devices, I want every failure pattern known from other Centrifugo SDKs to have an explicit status and each gap a probe, so that no device hits a bug that another SDK already found and fixed.
+
+**Structural acceptance:**
+- `tests/support/bug_catalogue.rs` holds the §12 numbers as a constant (numbers only, no text of the source); a row's `Id` cell may list several numbers separated by commas;
+- it checks: every number has exactly one row; every status is one of the four; every scenario named exists in `CLAUDE.md`; every `file::function` exists in `src` or `tests`; every commit cited is an ancestor of `HEAD` (`git merge-base --is-ancestor`, also run with a full fetch in CI); every `not applicable` or `not reconstructible` row has a non-empty reason; every `gap` row names a probe or a listed finding; every probe row has a mutation and a `Seen failing` value;
+- at the end of 49d no row says `pending`;
+- `@P` probes are claimed by `// @P scenario:` lines, or listed in `P_NOT_YET_MEASURED`; both follow `spec_sync` as it is.
+
+### Catalogue
+
+Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, section given in "Src".
+
+| Id | R | Pattern (our wording) | Src | Status | Where / reason |
+|---|---|---|---|---|---|
+| 1 | R | The last handle to a client is released inside one of its own handlers, and the release waits for the very thread running it | §9.8 | gap | probe "Dropping the last clone of a client inside its handler ends the client"; rule: Block 41 D5 |
+| 2, 3, 10, 17 | N | Network-event patterns; §12 names only the family | §12 | not reconstructible | §12 groups them as network-event-specific and centrifuge-rust did not apply them, so no rule exists to reconstruct them from. The family is Block 25 and Block 44 D10/D11 here, covered by "reconnect() tries the first transport again", "Going offline closes a browser client's connection, and coming online reconnects it at once" |
+| 4 | R | A transport that cannot even be created counts as one failed attempt, advancing the fallback once | §5.8 | covered | "Every transport unreachable"; `src/machine/unsupported_tests.rs::an_unsupported_transport_is_skipped_without_an_error_or_a_failed_attempt` |
+| 5, 34, 51, 52 | R | A disconnect while a transport is still opening leaves the socket or handshake running | §5.1 | gap | probe "Disconnect during a websocket handshake that never finishes ends it at once"; 34's timeout half covered by "An open that never completes is bounded by the handshake timeout" |
+| 6, 35, 49, 50 | F | A continuation of an earlier attempt (timer, callback, reply) acts on the current state; the difference between the four is unknown | §12, §9.2 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored`; `src/machine.rs::token_fetched_after_disconnect_is_ignored`; I13 (new) covers every path |
+| 7, 46 | R | An app callback re-enters the client mid-step and the step continues on stale state (the emit-then-re-check pattern of §1.1) | §1.1, §7.2 | not applicable | the core takes one input to completion and hands events out only after the step (Block 0, sans-IO); the failure needs nested execution, which it does not have. 46's half about dropping a result of an abandoned attempt is row 6 |
+| 8 | R | A call made while `disconnected` either hangs or fails, depending on the path | §9.3 | covered | "A call on a client never connected fails after the timeout"; "A call made while connecting waits for the connection" (Block 13 keeps the same rule) |
+| 9, 42 | R | A refresh of an ended session acts on the current one, or doubles the refresh chain | §6.6, §7.6 | covered | `src/machine.rs::late_refresh_token_after_reconnect_is_discarded`; `tests/adapter_tokens.rs::a_late_refresh_denial_disconnects_after_the_new_connection_refreshed` |
+| 11 | R | The failure of a superseded connect attempt is reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |
+| 12 | R (part) | Each failed transport advances the fallback exactly once; a transport-specific sse half is unknown | §5.8, §12 | covered | generic half: "The fallback sequence is retried until a transport succeeds". sse-specific half: not reconstructible (§12 names it, no rule states it) |
+| 13, 66 | F, R | A transport that hangs or was never proven pins the client; a temporary error must not loop at zero delay | §5.8 | covered | "An HTTP stream that never answers the handshake falls back", "An emulated transport the server answered is kept", "A failed fallback sequence is retried after the reconnect backoff" |
+| 14 | R | The close or read error of a transport the client itself closed is reported as an error event | §6.5 | gap | probe "A transport the client closed reports no error" |
+| 15, 81 | R | A live publication overtakes recovered ones; items after a teardown in the same frame are dispatched | §9.2, §5.3 | covered | I8 ("Seeded chaos with subscriptions on the core keeps every invariant"); "Messages after a disconnect in the same frame are discarded"; `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects` |
+| 16, 68 | R | The stored position moves for a publication the app never received | §7.4 | covered | "Publications not taken before disconnect are recovered on the next connect"; "Only publications taken count as delivered" |
+| 18 | R | A final disconnect push written just before the transport ends is lost; a disconnect of a stale transport acts | §5.7, §6.5 | gap | stale half covered by `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored`; end-of-stream half: probe "A terminal disconnect push right before the end of an HTTP stream stops the client" |
+| 19, 70 | R, F | A panic in the core step or driver leaves the client connected and deaf | §9.2 | gap | handler and callback halves covered by "A panicking handler disconnects the client with code 2, and its publication is recovered", `src/adapter/client.rs::panicking_token_callback_is_reported_as_a_failed_fetch`; the driver's panic has its rule (Block 28 D4) and a core-level test, `src/machine/close_tests.rs::driver_dropped_closes_with_its_own_disconnect_code`; probe "A panic in the client's driver ends the client visibly" for the adapter's path |
+| 20 | N | A map-subscription pattern; §12 names only the kind | §12 | not reconstructible | §12 defers it to map subscriptions, no rule states it. Block 45 is the area |
+| 21 | R | Recovered publications are delivered after a teardown or unsubscribe | §7.2, §9.4 | covered | "Publications not taken before unsubscribe are withdrawn"; "The publications stream outlives unsubscribe, which withdraws what it had not yielded" |
+| 22 | R | 3014 with no token callback drops the connection token | §6.5 | not applicable | deliberate here: Block 11 (owner decision, 2026-11-04) clears the tokens on 3014 unconditionally, knowing that centrifuge-js clears them only when `getToken` is set; "Connection state invalidation drops a fixed connection token" and "State invalidation drops a fixed subscription token" pin that decision. A difference from every other SDK, not a defect against Ferrifuge's rule |
+| 23 | F | A hung or reordered emulation request blocks or misorders later commands | §5.7 | gap | order: "Unsubscribe during an in-flight subscribe over an emulated transport". Ferrifuge sends requests concurrently, as centrifuge-js does (PR #443 notes that the server may handle them in any order), and orders the dependent commands instead, by decision. Hang: each request is bounded by its timeout (`src/adapter/tokio/http.rs`, `request_timeout`) and nothing tests it; probe "An emulation request that never answers ends the transport within the timeout" |
+| 24, 25 | R | A partial message at end of stream, or any body, panics the decoder | §5.7 | covered | `src/adapter/tokio/http.rs::fuzz_http_stream_decoder`, `src/adapter/tokio/http.rs::fuzz_sse_decoder`, `src/adapter/tokio/http.rs::fuzz_protobuf_stream_decoder` |
+| 26 | R | An emulation request outlives the transport or `disconnect()` | §5.7 | covered | `src/adapter/tokio/http.rs::closing_the_transport_aborts_its_emulation_requests` (the driver's path); `src/adapter/browser/http_stream.rs::closing_aborts_the_stream_and_a_pending_emulation_request`. `close()` lets them finish, each bounded by its timeout (`src/adapter/tokio/http.rs::closing_lets_emulation_requests_in_flight_finish`), which keeps pool slots bounded |
+| 27 | R | An emulation 404, 5xx, 401, 403 or redirect is left to command timeouts | §5.7 | covered | "A failed emulation request makes the client reconnect"; `src/adapter/tokio/http.rs::a_failed_emulation_request_after_a_successful_one_ends_the_transport`. 401 and 403 keep the transport as centrifuge-js does (Block 8) |
+| 28, 55 | R | Reply or ping already read loses to a timer firing late, after a suspension | §9.7, §6.4 | gap | core half covered: `src/machine/calls.rs::a_reply_read_wins_over_a_deadline_firing_after_it`. Adapter: the driver's `tokio::select!` has no `biased`, so a ready timer can win against a ready socket; probe "What arrived during a process suspension beats a deadline that fired meanwhile" (D8) |
+| 29 | R | A ping on an old transport is answered on the current one | §6.4 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |
+| 30 | R | A subscribe path skips the token step | §7.2 | covered | "Subscribe error 109 fetches a new token and resubscribes"; "A subscription that needs a callback subscribes after the connect reply" |
+| 31, 48 | F | Collections are mutated while iterated by a concurrent path | §4.3 | not applicable | the borrow checker forbids it, and the core owns its collections under one lock |
+| 32 | R | Registering a handler from inside a handler corrupts the slot | §9.4 | covered | "A handler takes over the subscription's stream"; `src/adapter/handler.rs::an_inline_handler_calls_every_synchronous_method` |
+| 33 | R | Subscribe/unsubscribe races leave the server's and the client's view apart | §7.3 | covered | "Unsubscribe during an in-flight subscribe over an emulated transport"; `src/machine/subscriptions.rs::a_resubscribe_waits_for_an_abandoned_subscribe_and_its_undoing` |
+| 36 | R | A fixed token with `exp` and no callback retries an expired token forever | §6.6 | covered | "An expiring fixed subscription token without a callback unsubscribes"; "set_token replaces an expired token when there is no token callback" |
+| 37 | R | An unsubscribe push for a subscription not subscribed moves it, or undoes an app `unsubscribe()` | §7.3 | covered | `src/machine/subscriptions.rs::a_server_unsubscribe_for_a_subscription_not_subscribed_changes_nothing` |
+| 38 | R | Handlers of one client run concurrently | §9.4 | covered | "Handlers receive the client's and its subscriptions' events one at a time, in order" |
+| 39, 40, 45 | F | A handler blocks on a call only its own return can complete | §9.2–§9.5 | covered | "A call a Task or Inline handler blocks on fails at once"; "A Thread handler may block on a call that completes" |
+| 41 | R | A call settles twice, or a batch's failure fails unrelated calls | §9.3 | covered | I6 ("Seeded chaos on the core keeps the connection invariants"); "Concurrent calls get their own replies" |
+| 43 | R | `close()` from a handler waits for itself | §4.3 | covered | "close awaited inside a handler returns" |
+| 44 | R | An unsubscribe is emitted before its command is written, so a handler's re-subscribe overtakes it | §7.3 | not applicable | the core emits the `Unsubscribed` event and the unsubscribe command in one step and the adapter performs the actions in order (Block 0, sans-IO), so the command cannot be overtaken |
+| 47 | R | Pending calls fail before the close that caused them is handled | §6.5, §9.3 | covered | `src/machine/calls.rs::a_terminal_disconnect_fails_queued_calls`; one core step produces the state change and the call failures together |
+| 53 | R | The client closes or reconfigures a resource the app gave it | §5.1 | not applicable | app-provided resources are held by `Arc` and dropped, never closed (Blocks 22, 37); a dropped `Arc` releases only our reference |
+| 54 | R | An app callback's own timeout error is mistaken for an SDK timeout | §4.2 | not applicable | callbacks return a typed result; there is no shared error type to confuse |
+| 56 | R | A resubscribe started from a handler recovers the publication that handler is processing | §7.4 | covered | Block 41 D3; `src/machine/subscriptions.rs::a_handed_publication_moves_the_position_and_is_not_withdrawn`; "A publication a handler had not returned from before disconnect is taken once" |
+| 57 | R | After 3014, a saved position still asks to recover | §7.1 | covered | "Connection state invalidation clears the token and invalidates every position" |
+| 58 | R | `set_token` after 109 is ignored, or skips the callback | §6.6 | covered | "set_token replaces an expired token when there is no token callback"; "set_token does not skip the token callback after an expired token" |
+| 59 | R | Removing with an old handle removes a newer subscription of the channel | §4.3 | covered | `src/machine/subscriptions.rs::removing_a_removed_subscription_keeps_the_newer_one_of_its_channel` |
+| 60 | R | A removed subscription keeps working | §4.3, §9.4 | covered | "Removing a subscription unsubscribes it first"; `src/machine/subscriptions.rs::subscribe_on_a_removed_subscription_does_nothing` |
+| 61 | R | A listing of subscriptions is live and changes under the iterator | §4.3 | covered | "Subscriptions are found by channel and listed" |
+| 62, 75 | R | A waiter survives its timeout or drop, or a `ready()` in a final state waits | §4.3 | covered | `src/adapter/ready.rs::a_dropped_ready_future_leaves_no_waiter`; "Client ready on a disconnected client fails at once" |
+| 76 | F | A waiter is released before its event's handler returned | §9.4 | not applicable | Block 30 resolves `ready()` on the state, before the event is taken, by decision |
+| 63 | R | A zero duration means something surprising | §4.1, §4.2 | gap | finding F1: today nothing rejects a `Config::timeout` of 0, and whether it should is a behaviour decision for a later pull request |
+| 64 | R | Stream adapters violate the `Stream` contract, or a cancelled `next()` loses an item | §9.4 | covered | "A cancelled read loses no publication"; "A second events() call takes over the client's stream" |
+| 65 | R | A server-side publication is lost to an unsubscribed client-side subscription of the channel | §8 | covered | "Client-side and server-side subscriptions to one channel stay separate" |
+| 67 | R | The backoff resets on the connect reply, so a failure that follows every connect loops at minimum delay | §6.2, §6.3 | covered | "Reconnect delays keep growing while the server closes each connection with 3008"; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff` |
+| 69 | R | A delta is decoded by what was requested, not what was negotiated | §7.5 | covered | "A delta on a subscription without delta on makes it resubscribe" |
+| 71 | R | A decoder rescans its buffer, or keeps forever what one large reply grew | §5.7 | gap | probe "A stream decoder releases what a large reply grew" (`src/adapter/body.rs` keeps capacity today: `drain` and `BytesMut` never shrink; D8). The rescan half: Block 50's @P |
+| 72 | R | A body without newlines or a bogus length buffers without limit; undecodable data re-arms the no-ping timer; garbage before the first message is not treated as a transport failure | §5.3, §5.7 | gap | limits: "A message over the limit ends a connected client", `src/adapter/tokio/http.rs::a_protobuf_reply_over_the_limit_fails_before_its_bytes`; timer: `src/machine.rs::blank_frames_do_not_rearm_the_ping_deadline`; garbage: probe "A websocket that answers with data that is not client protocol advances the fallback at once" |
+| 73 | R | Teardown after a decode error is asynchronous, so later items of the frame run | §5.3 | covered | `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects`; "Malformed Protobuf frame forces a reconnect" |
+| 74 | R | Configuration is validated only when used | §4.1 | covered | "A read-ahead limit of 0 is rejected"; "A maximum message size of 0 is rejected"; "A write queue limit of 0 is rejected" |
+| 77, 78 | R | Recovery position rules; the difference between the two is unknown | §7.4 | covered | "The first subscribe reply's position is used for recovery"; "Recovered publications advance the stored position"; "A publication of another channel does not move the stream position" |
+| 79 | R | A failed unsubscribe leaves a stale subscription on the server | §7.3 | covered | `src/machine/subscriptions.rs::an_unanswered_or_failed_unsubscribe_reconnects` |
+| 80 | R | A timer that fires late after being replaced still acts | §9.7 | covered | `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_dropped` |
+| 82 | R | 109 on a subscribe without a callback loops | §7.1, §7.2 | covered | "A subscribe rejected for an expired token without a callback unsubscribes" |
+| 83 | R | A hung emulation request blocks commands and pongs behind it | §5.7 | gap | see 23; probe "An emulation request that never answers ends the transport within the timeout" |
+| 84 | R | A disconnect push during connecting is ignored, or does not prove the transport | §15 row 23 | covered | "Disconnect returned by the connect proxy"; "An emulated transport the server answered is kept" |
+
+### Catalogue: official SDKs
+
+Status per source, all read 2026-11-09 through the GitHub API (read-only, no sign-in beyond the `gh` token): the SDK list from https://centrifugal.dev/docs/transports/client_sdk (8 official SDKs). For each: every release note and every issue title; merged PR titles; pull request bodies only where cited. Community SDKs are out of scope (the prompt lists the official SDKs only).
+
+| Source | Read | Status | Rows |
+|---|---|---|---|
+| centrifuge-rust CHANGELOG `Fixed` (0.1.1) | at `cbeac19` | every entry has a row | R1–R3 |
+| centrifuge-js | 93 releases, 174 issues, 222 merged PRs | fix entries of 5.7.x–5.8.0 and bug-titled issues reviewed | S1, S12, S15, S18, S20–S22 |
+| centrifuge-go | 58 releases, 42 issues, 102 merged PRs | the release notes' fix lists reviewed | S2–S6, S17, S19 |
+| centrifuge-dart | 49 releases, 43 issues, 114 merged PRs, `CHANGELOG.md` | reviewed | S9, S23 |
+| centrifuge-swift | 52 releases, 51 issues, 80 merged PRs, `CHANGELOG.md` | reviewed | S7, S8, S10, S24 |
+| centrifuge-java | 42 releases, 29 issues, 62 merged PRs; no `CHANGELOG.md` in the repository | reviewed | S11, S13, S14 |
+| centrifuge-python | 38 releases, 19 issues, 49 merged PRs | reviewed | S16 |
+| centrifuge-csharp | 40 releases, 1 issue, 33 merged PRs | reviewed | S25 |
+| Community SDKs (spinify, tokio-centrifuge, charmy) | not read | not reached | the owner's list is official SDKs only |
+
+Limits: GitHub releases, issue titles and merged PR titles, not every commit; older releases without "Fixed" lists give only what their PR titles say. Fixes that repeat a row above (generation counters, positions, 3014 tokens, ghost subscriptions, handler deadlocks) are not repeated as rows: they are the evidence for 6, 15, 16, 22, 33, 39 and 62, which all eight SDKs fixed between 2026-10 and 2026-11 for the same reasons.
+
+| Id | R | Pattern (our wording) | Source | Status | Where / reason |
+|---|---|---|---|---|---|
+| R1 | – | `ready()` deadlocks the thread through a snapshot read twice under one borrow | CHANGELOG 0.1.1 | covered | `src/adapter/ready.rs::several_waiting_futures_all_settle`, `src/adapter/ready.rs::a_ready_future_settles_on_another_executor_outside_any_runtime`. That double borrow is centrifuge-rust's own; these pin that a waiter settles |
+| R2 | – | The event thread cannot start, and events are dropped silently | CHANGELOG 0.1.1 | covered | `src/adapter/handler.rs::an_events_thread_that_cannot_start_fails_the_connection_and_starts_later` |
+| R3 | – | Calls wait on an emulation request after `disconnect()`, and it holds its connection | CHANGELOG 0.1.1 | covered | see 26; "Disconnect fails a call already sent at once" |
+| S1 | – | A multi-byte UTF-8 character split across two stream chunks is corrupted | centrifuge-js 5.7.4 (#387) | gap | probe in Block 50 "A stream body split at every byte offset decodes the same" (its multi-byte data); not in this block because Block 50 owns chunking |
+| S2 | – | A command id wraps at 2^32 and reaches 0 | centrifuge-go (#158) | gap | probe "Command ids skip 0 when they wrap"; `src/machine.rs` has the rule (`wrapping_add(1).max(1)`), nothing tests it |
+| S3 | – | A refresh with ttl 0 refreshes in a loop | centrifuge-go (#158) | covered | "A refresh reply without expiry stops refreshing" |
+| S4 | – | A command is written on a new connection before its connect command, answered with 3501 | centrifuge-go (#145) | covered | "A call made while connecting waits for the connection" |
+| S5 | – | A malformed reply panics the reader | centrifuge-go (#158) | covered | "The core reports a reply without its command's result"; `src/machine/calls.rs::a_reply_with_another_method_s_result_breaks_the_protocol` |
+| S6 | – | A slow token callback blocks every call and ping | centrifuge-go (#137) | not applicable | the adapter polls the callback as a future beside the core (Blocks 1 and 10), so calls and pings do not wait for it |
+| S7 | – | Receiving a large message takes quadratic time | centrifuge-swift (release notes) | gap | Block 50 scenario "A large reply delivered one byte per chunk costs what its size predicts" |
+| S8 | – | A message over the library's default limit causes endless reconnects | centrifuge-swift, centrifuge-python (release notes) | covered | "A message at the limit is delivered"; "A message over the limit ends a connected client" |
+| S9 | – | A stale compaction id delivers another channel's push | centrifuge-dart (#123) | covered | `src/machine/compaction_tests.rs::an_id_is_dropped_once_its_subscription_unsubscribes`; "Numeric channel ids are forgotten when the connection ends" |
+| S10 | – | A token callback slower than the server's stale-close wait fails every attempt | centrifuge-swift, centrifuge-go (#165) | covered | the token is fetched before the transport opens: "The connection token is fetched before the connect data", "A disconnect while the data callback runs opens no transport" |
+| S11 | – | The pending-command table grows on every reconnect | centrifuge-java (#102) | covered | "Memory stays flat across reconnects"; "Hours of normal use keep resources flat and delivery exact" (Block 52) |
+| S12 | – | A resubscribe keeps asking to recover a channel the server does not recover | centrifuge-js 5.8.0 (#436) | covered | `src/machine/subscriptions.rs::a_subscribe_reply_without_recoverable_stops_recovery` |
+| S13 | – | A server without pings makes the client reconnect every 10 s | centrifuge-java (#106) | covered | `src/machine.rs::ping_deadline_is_interval_plus_max_delay_and_off_without_pings_or_delay` |
+| S14 | – | A token getter that throws stops the client for good | centrifuge-java (release notes) | covered | `src/adapter/client.rs::a_panicking_subscription_token_callback_is_retried`; "A failing subscription token callback is retried" |
+| S15 | – | `subscribe()` on a removed subscription creates an untracked server subscription | centrifuge-js 5.8.0 (#424), centrifuge-go (#158) | covered | `src/machine/subscriptions.rs::subscribe_on_a_removed_subscription_does_nothing` |
+| S16 | – | A handler raising during teardown leaves the client connecting for good | centrifuge-python (release notes) | covered | "A panicking handler disconnects the client with code 2, and its publication is recovered"; I4 |
+| S17 | – | A recovery uses the empty epoch of a reply that carried none | centrifuge-go (#159, #160), centrifuge-js (#434), centrifuge-dart | not applicable | Centrifugo v6.10.1 and v6.10.3 send the epoch in every recoverable reply, also for a channel without a stream yet (verified, Research record); a future server omitting it would reopen this |
+| S18 | – | Disconnect during a reconnect, or a reconnect before the previous socket closed, leaves two connections | centrifuge-js #371, centrifuge-go (#148) | covered | I3 ("Seeded chaos on the core keeps the connection invariants") |
+| S19 | – | `Close()` never returns when a `Connect()` completes during it | centrifuge-go (#146) | covered | "A closed client stays closed"; "close waits until the connection is closed and the stream ends" |
+| S20 | – | A delivered publication after a long disconnect arrives twice | centrifuge-js #37 | covered | I8; "Publications not taken before reconnect() are recovered once" |
+| S21 | – | Pushes arrive on the old connection during a reconnect | centrifuge-js #257 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |
+| S22 | – | A network listener keeps a disconnected client reachable | centrifuge-js #389 | covered | "A disconnected browser client stops listening to network and page events" |
+| S23 | – | A delta after an empty recovery has no base | centrifuge-dart (#168 note), centrifuge-go (#165) | covered | "A delta with no base makes the subscription resubscribe" |
+| S24 | – | Retain cycles keep a client alive | centrifuge-swift #21, #93 | covered | "A weak handle upgrades only while a clone of the client is alive"; "Dropping one clone of a client leaves it running" |
+| S25 | – | A captive portal loops the fallback | centrifuge-csharp (#32) | covered | "A captive portal answering the websocket upgrade is reported" |
+
+### Catalogue: our own fix commits
+
+Source: `git log origin/main --grep='\]\[fix\]'` (182 commits at 09444ac) and `--grep -i codex` (196, of which those outside `[fix]` are review rounds on specs and refactors). A class is a row when fixed at least twice.
+
+| Id | Class | Commits | Status | Invariant / where |
+|---|---|---|---|---|
+| C1 | A continuation (token, data or state callback, timer, reply) of an abandoned flow is used | d86ddc9, 6d0addd, a93797d, 6b3909a, c2ace45, ee93edd, 13e2492, 7c77351 | gap | new I13; probes "Seeded chaos on the core applies no stale answer" and "The core runner reports a planted continuity fault" |
+| C2 | A secret reaches `Debug` or a log record | e212ea9, e0fa5e4, 44082a4, 7475edd, 0e5810f, e9ee4c5 | gap | new I14; probe "Seeded chaos on the core leaks no secret" (each fixed path has its unit test; I14 covers paths not yet thought of) |
+| C3 | A call or batch settles wrongly or twice, or hangs across a close | 946364e, b365e14, ae61961, 10a4ae9, c72d6f1, 458acb5, 1814ac5, 6a3c7d4, 4048b65 | covered | I6, I10 ("Seeded chaos with batching on the core keeps every invariant") |
+| C4 | The stored position moves wrongly | 614f2ad, 432f978, e35b39b, 9afc3fc, 23aef22, 81fc66c, e1cb7c4, d2742bf | covered | I8; its planted faults in "The core runner reports a planted delivery fault" |
+| C5 | Close or drop leaves work, callbacks or a stuck waiter behind | 20ebe81, fb31336, 98a1d05, 884561d, e2a712b, 2b8c455, 564fb10, afe1e3f, 67f8f9a, 1f91304 | gap | I5 and Block 33's scenarios; `close()` is not an operation of Block 16's runners (`Op::Close` is a server close): Block 51 ends every seed with `close()`; probe "Seeded chaos with handlers on the tokio client keeps the invariants" adds it to the adapter runner |
+| C6 | A timer fires when it should not, or is lost | 4279ee1, 946364e, 552dddb, 8de3d04, 13e2492 | covered | I5; `src/adapter/client.rs::timers_fire_in_deadline_order_and_cancelled_ones_never`; I13 |
+| C7 | A full read-ahead stalls what must not stall | 88f472d, e64c8bf, 552dddb, 56ee1ce | covered | I9; "Pings are answered while a stream is not read" |
+| C8 | The emulated path is handled differently from websocket (timeouts, statuses, redirects, close) | 5d2df14, 9ec4a2f, 8099c6d, d3a2e60, 6bb0efa, b05b699, 95a2b29, 1dcc98c | gap | Block 16's runners exclude emulated transports; probe "Seeded real-server chaos keeps the invariants" (Block 51), the first runner over them |
+| C9 | A sleep or wake changes the wrong timer or token | b6f25df, b53e1b1, 8de3d04, 7c77351, 1dc3e0c, 13e2492, 0099b96, d518e72, 38d12c5 | covered | core runner sleep operation (Block 25: I1–I11) |
+| C10 | Handler lifecycle: deadlock detection, take-over, release | 906f4e3, 1f91304, 564fb10, afe1e3f, d7ec6cd, 67f8f9a, ed2d302, e5f72ba, 9214176, e5e1684 | gap | the runners use streams only (Block 16); probe "Seeded chaos with handlers on the tokio client keeps the invariants" |
+| C11 | The stream decoders disagree with the standard or the server | 69c2e81, 2fe3950, da1a80c, d7d9a64, 5d2df14, ae491ad | covered | Block 27's fuzz targets; Block 50 |
+| C12 | Delta decoded after an event had gone out | 9a6354e, b509a5f, d2742bf | covered | I11 |
+| C13 | The fake server or double disagrees with the real server | 1718ad7, 4fc71b6, 9a8711a, c9bf63a, 339a616, e1cb7c4 | covered | "The server double and Centrifugo answer alike" |
+| C14 | A test oracle is too weak, or the harness itself races (test code only, 40-odd commits such as 18e64fc, 75d7ef8, a83b456, f5f14bb, 3b29eed) | listed | not applicable | not defects of the client: the mutation rule (D7) is the mitigation |
+
+**Size and coverage.** 84 numbered patterns in 62 rows, 25 SDK rows, 3 CHANGELOG rows and 14 own classes: 104 rows. Numbers by status: 54 covered, 16 gap (15 with a probe, 63 with finding F1), 9 not applicable, 5 not reconstructible (2, 3, 10, 17, 20; also the sse-specific half of 12, Ferrifuge having the sse transport centrifuge-rust has not). Reconstruction: 66 numbers graded R (12 only partly), 13 graded F (6, 13, 23, 31, 35, 39, 40, 45, 48, 49, 50, 70, 76), 5 graded N. SDK and CHANGELOG rows: 23 covered, 3 gap, 2 not applicable. Own classes: 8 covered, 5 gap, 1 not applicable. Every gap but row 63 names a probe.
+
+```gherkin
+Feature: Bug-pattern catalogue
+
+  Scenario: Every pattern of centrifuge-rust's catalogue has a status
+    Given the bug-pattern catalogue in CLAUDE.md and the numbers of centrifuge-rust docs/spec.md section 12 at commit cbeac19
+    Then every number from 1 to 84 has exactly one row
+    And every row's status is one of covered, gap, not applicable or not reconstructible
+
+  Scenario: Every covered entry and every gap names a scenario or test that exists
+    Given the bug-pattern catalogue in CLAUDE.md
+    Then every scenario a covered or gap row names is the name of a scenario in CLAUDE.md
+    And every function a covered or gap row names exists at that path
+    And every not applicable or not reconstructible row gives a reason
+    And every gap row names a probe scenario or a finding that is listed
+
+  Scenario: Every fix commit an entry cites exists
+    Given the bug-pattern catalogue in CLAUDE.md
+    Then every commit an entry cites is an ancestor of HEAD
+
+  Scenario: Every probe records its mutation and where it was seen failing
+    Given the probes of the bug-pattern catalogue
+    Then each names the mutation it was seen failing on
+    And each names the pull request of that record, or is pending
+
+  @P
+  Scenario Outline: What arrived during a process suspension beats a deadline that fired meanwhile
+    Given a client process connected to the fake server, with <waiting>
+    When the client process is suspended, the fake server sends <arrival>, the deadline elapses, and the process resumes
+    Then <outcome>
+    And this holds for all of 32 repetitions
+
+    Examples:
+      | waiting                               | arrival          | outcome                                                     |
+      | an rpc in flight and a timeout of 200 ms | the rpc's reply  | the rpc succeeds                                            |
+      | a server ping interval of 200 ms      | its next ping    | the client stays connected and no reconnect is counted      |
+
+  @E
+  Scenario: A stream decoder releases what a large reply grew
+    Given a stream decoder that decoded a reply of 1 MiB
+    When it decodes a reply of 64 bytes
+    Then the capacity of its buffer is at most 64 KiB
+
+  @D
+  Scenario: A websocket that answers with data that is not client protocol advances the fallback at once
+    Given a client configured with the fake server's websocket endpoint and an unreachable http_stream endpoint
+    And the fake server answering the first connection with one text frame that is not client protocol data, and no connect reply
+    When connect is called
+    Then the client attempts the http_stream endpoint within 1 s of that frame
+
+  @D
+  Scenario: Dropping the last clone of a client inside its handler ends the client
+    Given a connected client whose event handler holds its only clone
+    When the handler drops that clone on the next publication
+    Then the fake server sees the connection closed within 2 s
+    And the handler's thread has returned
+
+  @D
+  Scenario: Disconnect during a websocket handshake that never finishes ends it at once
+    Given a client connecting through the relay, whose upgrade the relay holds
+    When disconnect is called
+    Then the client is disconnected before disconnect returns
+    And the relay's connection closes within 1 s
+
+  @D
+  Scenario: A transport the client closed reports no error
+    Given a client connected to the fake server, with its events read
+    When disconnect is called
+    Then no error event was emitted between the call and "disconnected"
+
+  @A
+  Scenario Outline: A terminal disconnect push right before the end of an HTTP stream stops the client
+    Given a client connected over transport "<transport>"
+    When the server API disconnects the client with code 4500
+    Then the client goes to state "disconnected" with code 4500 and the reason sent
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  @B
+  Scenario: An emulation request that never answers ends the transport within the timeout
+    Given a client with a timeout of 1 s, connected over transport "http_stream" through a proxy that never answers the next emulation request
+    When the client sends a command
+    Then within 3 s the client emits "connecting" with code 1
+    And it connects again and the next command is answered
+
+  @D
+  Scenario: A panic in the client's driver ends the client visibly
+    Given a client connected to the fake server, with a panic planted in the driver's next step
+    And a call in flight and a waiting ready() on a subscription
+    When the driver takes the next input
+    Then the client's state is "disconnected" with code 2
+    And the call fails, and ready() fails, each within 1 s
+    And the client's stream ends
+
+  @E
+  Scenario: Command ids skip 0 when they wrap
+    Given a machine whose next command id is the largest value a 32-bit id can hold
+    When it sends two commands
+    Then the ids are the largest value and 1
+
+  @P
+  Scenario: Seeded chaos on the core applies no stale answer
+    Given the core runner with the chaos configuration and client-side and server-side subscriptions to recoverable channels
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariant I13
+    And the run counted late token answers, late data answers, late state answers, timers fired after cancellation and frames of an abandoned transport, none of them 0
+
+  @P
+  Scenario Outline: The core runner reports a planted continuity fault
+    Given the core runner with subscriptions, with <fault> planted
+    When seeds 0 to 299 run
+    Then the runner reports a violation of <invariant>, naming the first seed that shows it and the operations up to it
+
+    Examples:
+      | fault                                                                       | invariant |
+      | a token answer of a torn-down flow passed on as current by the tap          | I13       |
+      | a frame of an abandoned transport passed on as current by the tap           | I13       |
+      | a tap rendering a token into a Debug record of an Action                    | I14       |
+
+  @P
+  Scenario: Seeded chaos on the core leaks no secret
+    Given the core runner with marked tokens and payloads
+    When seeds 0 to 299 each run 60 random operations against the simulated server with faults
+    Then no seed violates invariant I14
+    And the run counted Debug records rendered, none of them 0
+
+  @P
+  Scenario: Seeded chaos with handlers on the tokio client keeps the invariants
+    Given the adapter runner with the chaos configuration, a tokio client and the fake server, with an event handler on the client and on every second subscription, a handler that sometimes unsubscribes or calls close from inside
+    When seeds 0 to 19 each run 30 random operations with faults
+    Then no seed violates invariants I1, I2, I3, I5, I6 or I8 as the adapter checks them, and each reaches quiescence within 10 s
+    And the run counted handler panics, close calls from a handler and handler take-overs, none of them 0
+```
+
+**Probes and their mutations** (the rows `tests/support/bug_catalogue.rs` reads). Each probe stays out of the implemented lists until `Seen failing` is filled.
+
+| Probe | Mutation | Seen failing |
+|---|---|---|
+| What arrived during a process suspension beats a deadline that fired meanwhile | driver loop `biased` with the timer branch first (D8: the unbiased order may already fail) | pending |
+| A stream decoder releases what a large reply grew | today's code: capacity never released (D8) | pending |
+| A websocket that answers with data that is not client protocol advances the fallback at once | undecodable data before the first message handled as "transport still silent" | pending |
+| Dropping the last clone of a client inside its handler ends the client | `Owner::drop` joining the delivery thread from inside it | pending |
+| Disconnect during a websocket handshake that never finishes ends it at once | `opening` kept when the core closes the attempt | pending |
+| A transport the client closed reports no error | an error event emitted on every `Inbound::Closed` | pending |
+| A terminal disconnect push right before the end of an HTTP stream stops the client | the end of the body handled before the frames decoded from it | pending |
+| A panic in the client's driver ends the client visibly | the drop guard not feeding `Input::DriverDropped` while panicking | pending |
+| An emulation request that never answers ends the transport within the timeout | `tokio::time::timeout` removed from the emulation request | pending |
+| Command ids skip 0 when they wrap | `.max(1)` removed | pending |
+| Seeded chaos on the core applies no stale answer | a token callback answer not checked against the flow | pending |
+| The core runner reports a planted continuity fault | the planted faults above | pending |
+| Seeded chaos on the core leaks no secret | a redaction removed from one `Debug` impl | pending |
+| Seeded chaos with handlers on the tokio client keeps the invariants | `Input::EventHanded` not sent for one handler path | pending |
+
+**Findings for later pull requests** (a gap whose closing needs a behaviour decision; the pull request that decides it adds the rule, the scenario and the row's new status):
+
+| Id | Row | Finding | Proposed probe, not part of this block | Mutation |
+|---|---|---|---|---|
+| F1 | 63 | `Config::timeout` of 0 is accepted today; centrifuge-rust and centrifuge-csharp reject zero durations, centrifuge-dart treats 0 as no timeout, and Ferrifuge already rejects a read-ahead, maximum message size and write queue limit of 0 | building a client with a timeout of 0 fails with a configuration error naming the timeout (@E) | today's code |
+
+**Exceptions introduced:** `tests/support/bug_catalogue.rs` reads `CLAUDE.md` tables as code would, as `tests/spec_sync.rs` reads scenarios; the table's format is therefore part of the contract.
+
+---
+
+## Block 50 — Byte-split matrix
+
+**Goal:** no reply is lost or misread however its bytes arrive, whatever the transport, the codec or the place a boundary falls (owner request, 2026-11-09). This block specifies only what is missing.
+
+**Dependencies:** Blocks 7 (Protobuf), 8 and 27 (stream decoders), 14 (decoder fuzzing, gungraun), 16 (relay), 29 (limits).
+
+**Out of scope:**
+- changes to the client: a bug these find is fixed in its own PR;
+- the random noise of Toxiproxy's slicer: Block 51;
+- TLS record splitting, which belongs to rustls;
+- websocket message framing, which tungstenite owns: the relay exercises it end to end, nothing tests it alone.
+
+**Existing coverage** (read at 20009b5, `src/adapter/tokio/http.rs` and `src/adapter/body.rs`):
+- `fuzz_http_stream_decoder`, `fuzz_sse_decoder`, `fuzz_protobuf_stream_decoder` (bolero; coverage-guided 30 s per target in `ci.yml`, on `main` and nightly only, 10 min in `fuzz.yml`; under `cargo test` on pull requests each runs only a small random sample): any body, cut anywhere, gives the same messages and outcome as the whole body. Their oracle is **the decoder's own answer for the uncut body**, on arbitrary input; a bug that loses a message even uncut is invisible, and nothing guarantees a realistic body or a multi-byte character ever falls on a cut. The stream targets have **no seed corpus** (`src/__fuzz__` holds seeds only for `json::decode` and `protobuf::decode`). The Protobuf target also checks each message's prefix and limit.
+- `http_stream_lines_split_over_chunks_are_joined`, `sse_events_split_over_chunks_are_joined`, `sse_lines_may_end_with_cr_lf_or_crlf_across_chunks`, `protobuf_replies_split_over_chunks_inside_their_prefix_too`, `several_protobuf_replies_in_one_chunk_a_ping_among_them`, `a_protobuf_length_waits_for_its_bytes_and_fails_when_too_long`: exact expected messages, at chosen cuts only.
+- Nothing tests a websocket at the TCP level: `tests/support/relay.rs` relays whole reads.
+
+**Missing, and the only additions:**
+- every byte offset and one byte per chunk, with an exact expected result, on bodies with multi-byte UTF-8 and with a length prefix longer than one byte, for all three stream formats;
+- TCP-level 1-byte chunking under websocket through the relay, for JSON and Protobuf;
+- the cost of 1-byte chunking on a large reply (S7), which no fuzz target or unit test measures.
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Bodies.** Fixed in the tests, one for each format, each holding the same three messages:
+  - http_stream JSON: three lines, `\n`-terminated: a connect reply; a publication whose data holds `€` and `𝄞`, so 3- and 4-byte characters straddle cuts; the ping `{}`;
+  - sse JSON: the same three as `data: ` events, each ending with a blank line;
+  - http_stream Protobuf: a connect reply, a publication of 300 bytes so its prefix is 2 bytes, and an empty reply (the ping, prefix `00`), per Block 27 D3.
+- **D2 Oracle.** The expected messages are literals in the step, never the output of decoding the whole body, so a bug in the uncut path cannot pass.
+- **D3 Reach.** `Decoder` is `pub(in crate::adapter)`. The @E steps use a `__test-hooks` function, `decode_stream(format, chunks) -> Result<Vec<Vec<u8>>, String>` (Block 16 "Public API"; the test targets get the feature through the crate's dev-dependency on itself), which constructs a `Decoder` at the default limit and feeds it.
+- **D4 Relay.** `CountingRelay` gains `Mode::OneBytePerWrite`, with `TCP_NODELAY` and one `write` per byte per direction, and counts the writes. Determinism is in the relay's writes; how the client's kernel coalesces them on loopback cannot be controlled, so the scenario's guarantee is "the bytes crossed one write at a time", not "arrived one at a time". The websocket handshake crosses the same way.
+- **D5 Cost.** A gungraun benchmark (Linux, Valgrind; Block 14) feeds one reply one byte per chunk at two sizes, 256 KiB and 1 MiB, and the `perf` job's gate reads the instruction counts from gungraun's JSON summary. The bound compares the two sizes because a linear decoder costs 4 times as much for 4 times the bytes and a rescanning one 16 times; comparing one byte per chunk with one whole chunk would not work, since a whole chunk is a single scan and one byte per chunk costs a call per byte, whatever the algorithm. Gating, since instruction counts are deterministic (Block 0).
+- **D6 CI.** @E and @D on every pull request (they are small). The @P gate on the job that runs gungraun.
+
+Value clause: As an app developer on a network that fragments everything, I want every reply decoded exactly however its bytes arrive, so that no message is lost or misread because of a chunk boundary.
+
+**Structural acceptance:** the offsets loop covers `0..body.len()` for each format; every scenario is seen failing once on a mutation recorded in the PR: the Lines buffer cleared on each push, the Varint prefix read only from whole chunks, an sse decoder fed chunk by chunk through lossy UTF-8, the relay dropping one byte of a frame, the Lines decoder scanning its whole buffer on each push; 2-byte prefix asserted by the Protobuf body's second byte; `P_NOT_YET_MEASURED` lists the @P scenario until benchmarked.
+
+```gherkin
+Feature: Byte-split matrix
+
+  @E
+  Scenario Outline: A stream body split at every byte offset decodes the same
+    Given a <format> body holding a connect reply, a publication with multi-byte data and a ping
+    When it is delivered in two chunks, split at each byte offset in turn
+    Then the decoder yields exactly those three messages, in order, for every offset
+    And no offset gives an error
+
+    Examples:
+      | format            |
+      | http_stream JSON  |
+      | sse JSON          |
+      | http_stream Protobuf |
+
+  @E
+  Scenario Outline: A stream body delivered one byte per chunk decodes the same
+    Given a <format> body holding a connect reply, a publication with multi-byte data and a ping
+    When it is delivered one byte per chunk
+    Then the decoder yields exactly those three messages, in order
+    And the decoder emitted no message before the byte that ends it
+
+    Examples:
+      | format            |
+      | http_stream JSON  |
+      | sse JSON          |
+      | http_stream Protobuf |
+
+  @D
+  Scenario Outline: A websocket relayed one byte per write works
+    Given a client configured with the <protocol> protocol, subscribed to channel "news" on the fake server through a relay writing one byte per write in both directions
+    When the fake server sends a publication on "news" and a ping in one frame
+    Then the subscription receives that publication with its exact data
+    And the fake server received a pong after the ping
+    And the relay made at least one write per byte relayed
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @P
+  Scenario Outline: A large reply delivered one byte per chunk costs what its size predicts
+    Given a <format> body holding one reply
+    When a reply of 256 KiB and a reply of 1 MiB are each decoded one byte per chunk
+    Then the instruction count for 1 MiB is at most 5 times the count for 256 KiB
+
+    Examples:
+      | format               |
+      | http_stream JSON     |
+      | sse JSON             |
+      | http_stream Protobuf |
+```
+
+**Exceptions introduced:** the bound of 5 times in the @P scenario is a first value, calibrated on first measurement in the implementing PR and kept well under the 16 times of a rescanning decoder.
+
+---
+
+## Block 51 — Real-server chaos
+
+**Goal:** seeded network, server and client faults against a real Centrifugo never break exactly-once delivery, liveness or cleanup, on every transport (owner request, 2026-11-09; the public counterpart of centrifuge-rust's private real-server chaos, `docs/spec.md` §11.4, README "How it's tested").
+
+**Dependencies:** Blocks 0 (test layers), 8 and 27 (transports, Protobuf over http_stream), 9–13 (subscriptions, calls), 14 (measurement), 15 (delivery), 16 (invariants, reproduction), 21 (records), 25 (what a real suspension is not), 36 and 37 (client, connector).
+
+**Out of scope:**
+- changes to the client's behaviour: a finding is fixed in its own PR;
+- real suspension on an Android emulator, differential testing against centrifuge-js and turmoil (deferred by the owner);
+- Redis failures (Redis stays up across a Centrifugo restart; losing Redis's own data is its operator's persistence choice);
+- the deterministic relay scenarios (Block 50 owns 1-byte chunking); nothing here runs on a pull request.
+- packet loss: Toxiproxy's `packet_loss` toxic is not network loss (D3) and `tc netem` is not added: the stalled stream that loss causes on TCP is what the latency and timeout toxics already show to the client.
+
+This block reverses Block 16's exclusion of a chaos TCP proxy against a real Centrifugo; Block 0's "Reversed exclusions" gains the row | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |, and Block 16's out-of-scope line says so.
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Layout.** `tests/chaos_real.rs`, `harness = false`, `test = false` (so `cargo test` and `--all-targets` leave it out; the workflow runs it with `cargo test --test chaos_real`), re-executes itself as the client process: the parent drives faults and checks invariants; the child (`FERRIFUGE_REAL_CHAOS_ROLE=client`) owns one `Client`, reads operations from stdin and writes events, each stamped with a sequence number, as NDJSON to stdout. A child is what a SIGSTOP can stop without stopping its checker. Its panic hook writes a record before the exit. Building with `__test-hooks` (Block 16), as the existing runners do.
+- **D2 Environment.** Per run: one Centrifugo container, one Toxiproxy container (`ghcr.io/shopify/toxiproxy:2.13.0`; image verified on GHCR) on a user-defined Docker network, so that Toxiproxy reaches Centrifugo by name and a Centrifugo restart does not change the upstream address. The client connects only through Toxiproxy; the publisher and the server API go directly to Centrifugo, so a toxic never breaks the oracle. Container operations use the `docker` CLI, no new dependency. Both published ports, Toxiproxy's and Centrifugo's, are fixed host ports the runner picks, so that a restart cannot move them. The Redis row adds one `redis:8.4-alpine` container on the same network, never restarted.
+- **D3 Toxics** (Toxiproxy v2.13.0, https://github.com/Shopify/toxiproxy README and `toxics/*.go`; each applied with `toxicity` 1.0 for a seeded 500 ms to 15 s, then removed):
+
+  | Toxic | Attributes | Range | Direction | Note |
+  |---|---|---|---|---|
+  | `latency` | `latency`, `jitter` (ms) | 5–400, jitter 0–100 | both | default stream is downstream only, so both are set |
+  | `timeout` | `timeout` (ms) | 0 (blackhole, until removed) and 500–5000 | both | 0 means no close, data dropped until removal |
+  | `slicer` | `average_size`, `size_variation` (bytes), `delay` (µs) | 16–256, 0–size, 0–100 | both | random noise only; deterministic chunking is Block 50. v2.13.0 rejects `average_size` ≤ 0 |
+  | `reset_peer` | `timeout` (ms) | 0–2000 | both | acts only once a chunk passes through it (source), so traffic is required |
+  | `limit_data` | `bytes` | 1 KiB–256 KiB | downstream | closes once that many bytes have passed |
+  | `bandwidth` | `rate` (KB/s) | 1–128 | both | |
+  | proxy down | `enabled: false` | 500 ms–10 s | – | not a toxic; connections refused |
+
+  `packet_loss` (`loss_rate`, `correlation`) is **not** used: it discards whole chunks after TCP has delivered them, so the byte stream loses bytes in a way no network can (TCP retransmits), which yields frame corruption or an undetectable gap, neither of which is a fault a real network produces. `slow_close` is not used. `tc netem` is not added: see "Out of scope".
+- **D4 Other faults.** Chosen by the seed:
+  - **server pause/resume** (`docker pause`, `unpause`), 500 ms–15 s;
+  - **server restart**, at most twice a seed, with D6's expectations, chosen by the seed between a graceful one (`docker restart -t 3`; verified: SIGTERM, exit 0 in under 3 s, every client told `disconnect 3001 "shutdown"`) and a hard kill (`docker kill -s KILL`, then `docker start`; no disconnect push reaches anyone), as a crash is what a fleet also meets;
+  - **client suspension** (SIGSTOP, SIGCONT of the child), 500 ms–20 s. CLOCK_MONOTONIC keeps running through a SIGSTOP, so this is not Block 25's `Slept`: timers come due and fire together on resume, which is the case Block 25 cannot reach and exactly what catalogue row 28/55 is about. The checker adds the suspended time to the bounds of I6 and I4.
+  - **short-lived tokens**: connection and subscription tokens with a ttl of 4–8 s, refreshed through callbacks; `expired_close_delay` and `expired_sub_close_delay` are set to 3 s so an unrefreshed token fails fast.
+- **D5 Server configuration.** Default namespace `recoverable` with `history_size` 2000, `history_ttl` 600 s, `force_recovery`, `force_positioning`, `presence`, `join_leave`, plus `client.recovery_max_publication_limit` 2000. With a publisher at 20/s in total over the run's channels (at most 10) and a maximum outage of about 30 s, a recovery never exceeds the limit and a seed, bounded at 120 s, stays inside the retained history; a failed recovery outside D6 is therefore a defect, not a retention artefact. `client.ping_interval` 2 s, `pong_timeout` 1 s, `http_stream` and `sse` enabled. The configuration above, under `channel.namespaces`, was run on v6.10.1 and v6.10.3: `centrifugo checkconfig` accepts it and the server honours it.
+- **D6 A server restart and exactly-once.** Decided per engine: the matrix runs both, since the engine decides what a restart can keep (verified on Centrifugo v6.10.1 and v6.10.3, Docker, real server, 2026-11-09):
+  - **Memory engine (the default of the matrix).** A restart empties history and changes the epoch: `history` afterwards returned `publications: []`, a new `epoch`, `offset: 0`; a subscribe recovering from the old position got a reply with `recoverable: true`, the new epoch, `offset: 1`, `was_recovering: true` and no `recovered`. Expected and required: the client emits `subscribed` with `was_recovering` true and `recovered` false after a restart, and I8 restarts there, as Block 16's I8 already says. A graceful restart pushes `disconnect 3001 "shutdown"` first; after a hard kill the client only sees the connection end; either way it reconnects.
+  - **Redis engine (a second row of the matrix, `engine.type: redis`).** A Centrifugo restart with Redis still running keeps epoch, offset and history (verified: same epoch, publications retained, the next publish continues the offset, a recovering subscribe got `recovered: true` with the missed publication). Expected and required: `subscribed` with `recovered` true, no gap, and I8 continues.
+  - Why both: the memory engine exercises the recovery-lost path on a real server; Redis is what production fleets run behind more than one node, and only there does exactly-once survive a restart. A failed recovery is required by the first, and forbidden by the second. NATS is not an option: with `broker.type: nats`, `history` answers `108 not available` on v6.10.1 (verified), matching its documentation ("Nats integration works only for unreliable at most once PUB/SUB"). The PostgreSQL broker also keeps history (documentation, https://centrifugal.dev/docs/server/engines); not used, as Redis is the common deployment.
+- **D7 Invariants, checked against the server where possible.**
+  - I1, I2, I5, I6 as Block 16's adapter runner checks them (I1, I2 from the child's records), I3 and I4 below.
+  - **I8 by the server's own offsets.** The publisher sends over the direct API and writes a run-wide id into each publication's data, recording `(epoch, offset, id)` from each `publish` reply. A reply lost to a restart leaves that publication's fate unknown, so the expected sequence is read from the server: at the end of each segment, a `history` of each channel gives its `(offset, id)` list, and every acknowledged publication must be in it. The publisher pauses for that snapshot and for the restart that follows it, so nothing is published unseen. A segment starts at a `subscribed`. Per channel and segment, the offsets delivered must be exactly the history's offsets from the segment's start position, in order, each once, each with the id at that offset. Across a reconnect the segment continues only when `subscribed` reports `recovered` true; a new segment starts after the first `subscribed` of a subscription, or after a `subscribed` with `was_recovering` true and `recovered` false, which is allowed only after a restart on the memory engine (D6).
+  - **I3 and connection cleanup by the server.** `POST /api/connections` is not on the open-source server (404 on v6.10.1 and v6.10.3, verified). The runner uses `channels`, whose `num_clients` is the node's live count: the child keeps one subscription to a canary channel for its whole run, so at each quiescent point the canary's `num_clients` is at most 1, and the channels listed are exactly those the child subscribed to, polled for at most 10 s because the server notices a dead connection only at its next missed pong (`ping_interval` 2 s plus `pong_timeout` 1 s). `presence` is not used: after a hard kill on Redis a dead client's entry stayed for over 15 s, listing two clients for one (verified; `engine.redis.presence_ttl` is 60 s by default). `info`'s `num_clients` is not used: it is republished about every 3 s (measured on v6.10.1, `tests/steps/connection.rs`).
+  - I4 as the adapter reports it, with quiescence bounded at 30 s plus the suspended time.
+- **D8 Reproduction.** As Block 16's adapter runner: a seed fixes the operations, not their timing. `FERRIFUGE_REAL_CHAOS_SEED` reruns one seed. A seed that violated an invariant is rerun once at once with the same seed; **only a second violation of the same invariant is a finding** and fails the run; a single violation is logged, counted as `unconfirmed`, and fails nothing. A finding prints the seed, the invariant and the operations up to it.
+- **D9 Checking the checker.** The runner has planted faults, in the tap or in the runner, never in the client: a dropped delivery, and a second real connection for the run's user, subscribed to the canary channel.
+- **D10 Run counters.** Each fault kind and outcome is counted over the whole job; a count of 0 fails the job, so a budget too small to reach a fault fails loudly. Every seed ends with `close()` (C5) and a check that `channels` lists none of the run's channels.
+- **D11 CI (owner decision, 2026-11-09, on when it runs; replaces "nightly on main" in the request).** New `.github/workflows/chaos-real.yml`: `schedule` nightly, `cron: "23 3 * * *"`, off the hour (GitHub may delay or drop runs on the hour), and `workflow_dispatch`, never `pull_request`. Three jobs: `guard`, `chaos` and `verdict`.
+  - `chaos`: a matrix with one job per row of the outline, `runs-on: ubuntu-latest`, `timeout-minutes: 60`, budget `FERRIFUGE_REAL_CHAOS_BUDGET_SECONDS` 1800 per row, each row bounded at 120 s a seed. Linux only: GitHub's macOS runners have no Docker (`actions/runner-images`, macos-15-arm64 README, no docker, colima or podman), and Windows is left out because the Centrifugo and Toxiproxy images are Linux images.
+  - `guard`: on `schedule` it runs `scripts/validation-run should-run <workflow> <head>`, and `chaos` and `verdict` depend on its answer. On `workflow_dispatch` the answer is always to run.
+  - **What "changed" compares.** The run's own head SHA, which on `schedule` is `main`'s head, against the head SHA of the last real run of that workflow. Head SHA only, with no filter on paths: paths other than `src` also change what the runs prove (`Cargo.lock`, tests, workflows, the server image), a filter can wrongly skip, and the release gate matches the exact commit, so a run skipped by a path rule would leave that commit without evidence. Runners are free on this public repository.
+  - **A real run** is one whose `verdict` job ran and concluded `success` or `failure`. `verdict` runs with `if: ${{ !cancelled() && needs.guard.outputs.run == 'true' }}` and fails unless every matrix job succeeded. A scheduled run the guard skipped concludes `success` on GitHub with its jobs skipped, so the run's own conclusion is never read: a skip is never evidence. A cancelled run has no verdict, so the next schedule runs. `VERIFY:` how a job stopped by `timeout-minutes` appears to `verdict`; anything but `success` must fail it.
+  - **A skip leaves no new run, by design.** While `main`'s head is unchanged, the last real run stands, however old: the gate matches the commit, not an age. A real run that failed also stands: the schedule does not retry it, and it stays red until a new commit or a dispatch. A workflow GitHub has disabled after 60 days without repository activity starts no scheduled run and accepts no dispatch until a maintainer re-enables it.
+- **D12 Release.** Not inside `release.yml`. Block 20's `verify` job additionally runs `scripts/validation-run gate <workflow> <sha>` for `chaos-real.yml` and `soak.yml`: the latest real run of that workflow for the tagged commit must have concluded `success`. None, one still in progress (as Block 20's `ci` check), one failed, or only skipped runs fail the release, naming the workflow and the commit and saying to dispatch it. **A release therefore needs that dispatch first** whenever the schedule has not already covered the tagged commit: the maintainer dispatches both on the candidate commit (`gh workflow run <workflow> --ref <a ref at that commit>`), before pushing the tag, and waits about 4.5 hours with a 30-minute chaos budget and a 4-hour soak (the two can run at once, and then the soak sets the wait), then pushes the tag. A release pushed too early fails in `verify`, publishes nothing, and is re-run once the runs have passed.
+- **D13 Version.** Centrifugo v6.10.3, from a prerequisite pull request before 51a that moves `tests/support/centrifugo.rs`'s `TAG`, the workflows and the Safari job's asset and checksum together (see "Amendments"), only once the whole @A, @B and @W suite has passed on it; if it does not, Block 51 stays on v6.10.1 and the failure is reported. `TAG` is the one source. It changes graceful shutdown, which D4 exercises, and fixes a server-side subscribe, refresh or message reaching a client ahead of its connect reply (release notes), which could otherwise appear as a false finding.
+
+**Sub-increments:**
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 51a | As a maintainer, I want a seeded runner and a checker of its own against a real Centrifugo through Toxiproxy on websocket and JSON, so that the harness is shown to report what it should before the matrix relies on it | outline row websocket JSON memory; the failing-seed, planted-fault and `scripts/validation-run` scenarios; D10, D11, D12 |
+| 51b | As a maintainer, I want the client process suspended, the server paused and restarted and tokens short-lived, so that the real faults of a fleet reach every invariant | the memory and Redis restart scenarios |
+| 51c | As an app developer on every transport, I want the matrix run over websocket Protobuf, http_stream JSON and Protobuf and sse, so that the fallback paths are as safe as the first | the remaining rows |
+
+Value clause: As an app developer shipping Ferrifuge to large fleets of end-user devices, I want seeded real-server chaos to keep exactly-once delivery, liveness and cleanup, so that the failures a real network, a real server and a real suspended process produce are found before my users find them.
+
+**Structural acceptance:** Toxiproxy's and Redis's images pinned by tag and digest and every action by commit SHA; `P_NOT_YET_MEASURED` lists the scenarios until the runner claims them; each scenario seen failing once on a mutation recorded in the PR (a recovered offset skipped in the checker's input, a toxic not removed so I4 fires, a duplicate delivery planted, the Redis restart row run against the memory engine); the child and container output of a failing seed uploaded as an artifact.
+
+`VERIFY:` whether Toxiproxy logs enough to attribute a failure to a toxic.
+
+```gherkin
+Feature: Real-server chaos
+
+  @P
+  Scenario Outline: Seeded real-server chaos keeps the invariants
+    Given the real-server runner with a Centrifugo container, engine <engine>, history and recovery, Toxiproxy between client and server, and the chaos configuration
+    When the seeds of the budget each run random operations over transport "<transport>" with the <protocol> protocol, with network faults, server pause and restart, client suspension and short-lived tokens
+    Then no seed confirms a violation of I1, I2, I3, I5 or I6, and each reaches quiescence within 30 s plus its suspended time
+    And for each recoverable channel the offsets delivered are the channel's history offsets from the segment's start, in order, each once
+    And a "subscribed" with was_recovering true and recovered false occurs only after a server restart on the memory engine
+    And at each quiescent point the channels API lists at most one client on the canary channel and exactly the channels the client subscribed to
+    And the run ended with close and the channels API listing none of the run's channels
+    And the run counted every fault kind, none of them 0
+
+    Examples:
+      | transport   | protocol | engine |
+      | websocket   | JSON     | memory |
+      | websocket   | Protobuf | memory |
+      | http_stream | JSON     | memory |
+      | http_stream | Protobuf | memory |
+      | sse         | JSON     | memory |
+      | websocket   | JSON     | redis  |
+
+  @P
+  Scenario: A server restart with the memory engine reports recovered false
+    Given the real-server runner with the memory engine and a client subscribed to recoverable channel "news", which received publications 1 to 3
+    When the Centrifugo container restarts
+    Then the subscription emits "subscribed" with was_recovering true, recovered false and an epoch different from the one before the restart
+    And the next publication is delivered with the offset the server gave it, offsets restarting after that "subscribed"
+    And the run counted exactly one restart
+
+  @P
+  Scenario: A server restart with the Redis engine loses nothing
+    Given the real-server runner with the Redis engine and a client subscribed to recoverable channel "news", which received publications 1 to 3
+    When the proxy is turned down, the Centrifugo container restarts, publication 4 is published through the server API, and the proxy is turned up
+    Then the subscription emits "subscribed" with recovered true
+    And the epoch is unchanged
+    And the offsets delivered are 1 to 4, each once
+
+  @P
+  Scenario: A failing real-server seed is a finding only when it fails twice
+    Given a real-server chaos seed that violated an invariant
+    When it is rerun with the same seed
+    Then it fails the run only if it violates the same invariant again, naming the seed and the operations up to it
+    And otherwise it is counted as unconfirmed and fails nothing
+
+  @P
+  Scenario: A seed of the real-server runner fixes its operations
+    Given seed 7 of the real-server runner
+    When its operation list is generated twice
+    Then both lists are equal
+    And seed 8 gives a different list
+
+  @P
+  Scenario Outline: The real-server runner reports a planted fault
+    Given the real-server runner with <fault> planted
+    When the seeds run
+    Then the runner reports a violation of <invariant>, naming the seed and the operations up to it
+
+    Examples:
+      | fault                                                  | invariant |
+      | a tap dropping one delivered publication before the checker | I8        |
+      | a second connection opened by the runner as the run's user  | I3        |
+
+  Scenario Outline: A scheduled validation run is skipped only when main's head already has a real run
+    Given the validation-run script and a workflow history where <history>
+    When it decides a scheduled run of the head commit
+    Then it <decision>
+
+    Examples:
+      | history                                                | decision |
+      | no real run has concluded                              | runs     |
+      | the last real run concluded on another commit          | runs     |
+      | the last real run concluded on the head commit, passed | skips    |
+      | the last real run concluded on the head commit, failed | skips    |
+      | the head commit has only cancelled runs                | runs     |
+
+  Scenario Outline: A release needs a passing real run of its commit
+    Given the validation-run script and the runs of the tagged commit, where <history>
+    When it checks the release gate for the commit
+    Then it <outcome>
+
+    Examples:
+      | history                                         | outcome                                                  |
+      | the latest real run passed                      | succeeds                                                 |
+      | the latest real run failed, a skipped run after | fails, naming the workflow and the commit                |
+      | the latest real run is still in progress        | fails, naming the workflow and the commit                |
+      | only a skipped run exists                       | fails, naming the workflow and saying to dispatch it     |
+      | no run exists                                   | fails, naming the workflow and saying to dispatch it     |
+```
+
+**Exceptions introduced:** the runner and its @P scenarios need Docker and run outside `cargo test`, as the `chaos` and `chaos-adapter` long runs already do. The `scripts/validation-run` scenarios read fixtures of the GitHub API's answers, as Block 20's release-check scenarios read a copy of the crate, so they need no token; the workflows themselves are verified by running them.
+
+---
+
+## Block 52 — Soak run
+
+**Goal:** hours of normal use against a real Centrifugo, with periodic reconnects and token refreshes, keep memory, open connections, timers and pending calls flat, and lose or duplicate no publication (owner request, 2026-11-09).
+
+**Dependencies:** Blocks 11 (recovery), 14 (live-heap measurement, Scenario "Memory stays flat across reconnects"), 16 (reproduction), 51 (the real-server harness).
+
+**What the soak adds beyond Block 14's "Memory stays flat across reconnects"** (fake server, forced reconnects, live heap only): a real Centrifugo; real elapsed time, so real timer and refresh behaviour; connection and subscription token refreshes; the timers and pending calls of a long-lived client, which that scenario does not look at; delivery checked against the server's own offsets.
+
+**Out of scope:** faults (Block 51); the wall-clock of a publication, reported only (Block 14); macOS, Windows (D1).
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 Environment.** Block 51's harness without Toxiproxy, memory engine, Linux only, one child process with 10 subscriptions over websocket, JSON. **Only websocket and JSON**, because the soak measures the client's long-lived state, which the transport does not change; the matrix is Block 51's.
+- **D2 Duration.** 4 h of measured run; `timeout-minutes: 300` leaves an hour for build, image pulls and teardown, under GitHub's 6 h job limit.
+- **D3 Traffic.** Publications at 1/s per channel, 10/s in total: 144 000 in 4 h. History `size` 2000, `ttl` 3600 s, so a forced reconnect's few seconds lose nothing.
+- **D4 Tokens.** Connection token ttl 20 minutes (a refresh every 16–18 minutes, Block 14's jitter), subscription tokens ttl 30 minutes (every 24–27 minutes); at least 3 cycles each are guaranteed in 4 h. `expired_close_delay` and `expired_sub_close_delay` stay default, so a refresh that never runs is caught by the server's 3005 close.
+- **D5 Server-forced reconnects.** Every 5 minutes the runner calls the server API `disconnect` for the run's user with an application code the client reconnects on (Block 3), 48 in 4 h; the checkpoints of D6 are offset from them by 2.5 minutes, so that a checkpoint lands at rest.
+- **D6 Measurement.** Every 5 minutes, a checkpoint in the child: the counting global allocator's live bytes (Block 14's convention, no new dependency), the driver's running timers and pending calls with their ages (two `__test-hooks` methods, `Client::armed_timers` and `Client::pending_calls`, as Block 16 allows), the event sequence. Nothing in the child grows with the run: its records leave as NDJSON. Process RSS is reported, never gating, because the allocator's retained pages move it.
+- **D7 Flat.** After a warm-up of 30 minutes: compare the median of the checkpoints at 30, 35 and 40 minutes with the median of the last three; the later median is within 1% of the earlier, or 64 KiB, whichever is greater. The median and the floor keep a single checkpoint landing mid-burst or inside a recovery from failing a flat client.
+- **D8 Timers.** A checkpoint at rest (no call in flight, connected, all subscribed) lists the ping deadline, the connection refresh and one refresh per subscription, nothing else. A call in flight adds its own, and no call has been pending longer than `Config::timeout`.
+- **D9 Delivery.** As Block 51 D7, with no restart: the offsets delivered per channel are the channel's history offsets from the first `subscribed`, each once, and a `subscribed` with `was_recovering` true and `recovered` false is counted and must be 0 (the first `subscribed` of a subscription reports `recovered` false by definition, not a failure).
+- **D10 CI (owner decision, 2026-11-09).** `.github/workflows/soak.yml`, `schedule` weekly (`cron: "37 4 * * 0"`) and `workflow_dispatch`, never `pull_request`. The guard, the `verdict` job, "real run" and what happens after a skip are Block 51 D11's, with this workflow's own history: a scheduled run is skipped when `main`'s head is the head of the last real soak run. No concurrency group: a queued run could be replaced by a later one, and a dispatch for a release must not be.
+- **D11 Release gate.** Block 51 D12 gates releases on it. A weekly schedule that has not reached the tagged commit needs a dispatch, or the release fails.
+
+Value clause: As an app developer whose clients stay connected for days, I want hours of real use to keep memory, connections, timers and pending calls flat and every publication delivered once, so that a long-lived client does not degrade.
+
+**Structural acceptance:** every scenario is seen failing once on a mutation recorded in the PR (a timer not cancelled after reconnect, a pending-call entry leaked once per reconnect, a publication skipped by the tap); `P_NOT_YET_MEASURED` lists the scenario until claimed; the job's checkpoints uploaded as an artifact.
+
+```gherkin
+Feature: Soak run
+
+  @P
+  Scenario: Hours of normal use keep resources flat and delivery exact
+    Given a client with 10 subscriptions to recoverable channels, an expiring connection token and expiring subscription tokens, connected to a real Centrifugo
+    When it runs for the soak duration, with one publication per second on each channel, a server-forced reconnect every 5 minutes and every token refresh due
+    Then the median live heap of the last three checkpoints is within 1% of the median of the checkpoints at 30, 35 and 40 minutes, or within 64 KiB
+    And at every checkpoint the channels API lists one client on each subscribed channel, its running timers are only the ping deadline, the connection refresh and one refresh per subscription, and no call is pending longer than the configured timeout
+    And for each channel the offsets delivered are the channel's history offsets from the first "subscribed", each once, with no "subscribed" reporting was_recovering true and recovered false
+    And the run counted at least 3 connection token refreshes, at least 3 subscription token refreshes and at least 40 reconnects
+```
+
+**Exceptions introduced:** the single gating duration is outside what the Block 14 @P gates' CI budget allows; a scheduled or dispatched job is the only place it can run.

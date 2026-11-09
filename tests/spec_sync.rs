@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &[];
+const NOT_YET_IMPLEMENTED: &[&str] = &[
+    "Bug-pattern catalogue",
+    "Byte-split matrix",
+    "Real-server chaos",
+    "Soak run",
+];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
@@ -24,6 +29,19 @@ const P_NOT_YET_MEASURED: &[&str] = &[
     "Seeded chaos with debounced publishes on the core keeps every invariant",
     "Seeded chaos with debounced publishes on the tokio client keeps the invariants",
     "The core runner reports a planted debounce fault",
+    "What arrived during a process suspension beats a deadline that fired meanwhile",
+    "Seeded chaos on the core applies no stale answer",
+    "The core runner reports a planted continuity fault",
+    "Seeded chaos on the core leaks no secret",
+    "Seeded chaos with handlers on the tokio client keeps the invariants",
+    "A large reply delivered one byte per chunk costs what its size predicts",
+    "Seeded real-server chaos keeps the invariants",
+    "A server restart with the memory engine reports recovered false",
+    "A server restart with the Redis engine loses nothing",
+    "A failing real-server seed is a finding only when it fails twice",
+    "A seed of the real-server runner fixes its operations",
+    "The real-server runner reports a planted fault",
+    "Hours of normal use keep resources flat and delivery exact",
 ];
 
 /// How a benchmark or simulation claims a `@P` scenario: a line of its own
