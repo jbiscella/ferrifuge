@@ -617,11 +617,13 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // delta to subscriptions asking for one, which needs a positioned
     // subscription (Block 19). Channels of the `map` namespace are map
     // channels anyone may subscribe to, set keys of and remove keys from;
-    // those of `map_private` need a token and refuse a client's writes
+    // those of `map_private` need a token and refuse a client's writes.
+    // Subscribing to a channel of `game` adds its client to the
+    // `clients:` map and its user to the `users:` map of that channel
     // (Block 45, D16).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}}]"#,
+        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}},{"name":"game","map_clients_presence_channel_prefix":"clients:","map_users_presence_channel_prefix":"users:","allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"clients","subscription_type":"map_clients","map":{"mode":"recoverable","key_ttl":"60s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"users","subscription_type":"map_users","map":{"mode":"recoverable","key_ttl":"2s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
     ),
     ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
 ];
@@ -691,6 +693,32 @@ const COOKIES: &[&str] = &[];
 const MAPS: &[&str] = &[
     // 45a: map_publish and map_remove on the client.
     "A refused map publish fails with the server's code",
+    // 45b: map subscriptions load their state, then follow its changes.
+    "A map subscription cannot share a channel with a stream subscription",
+    "A new map subscription starts unsubscribed",
+    "Removing a map subscription unsubscribes it and frees its channel",
+    "A map subscription loads its state page by page",
+    "A page size of 0 leaves the page size to the server",
+    "Changes made during paging are part of the sync",
+    "An epoch change during paging restarts the load",
+    "A map subscription syncs then delivers updates",
+    "A map subscription syncs over each transport and protocol",
+    "map_publish sets a key",
+    "map_remove removes a key",
+    "publish and remove on a map subscription change the map for every subscriber",
+    "A map subscription's publish waits until it is subscribed",
+    "Presence of clients is a map keyed by client id",
+    "Presence of users is a map keyed by user id whose entries expire",
+    "A subscription type the namespace does not declare is refused",
+    "A map subscription to a private namespace gets its token and refreshes it",
+    "Every request of a load carries the token, and only the first carries the data",
+    "A missing page reply makes the client reconnect",
+    "A server without map subscriptions ends the map subscription",
+    "A reply in a phase the request does not allow forces a reconnect",
+    "A load larger than its bound ends the map subscription",
+    "Pages are handled while another subscription's stream is not read",
+    "An unsubscribe during a load waits for the page in flight",
+    "Statistics count map subscriptions and their updates",
 ];
 #[cfg(not(feature = "unstable"))]
 const MAPS: &[&str] = &[];
