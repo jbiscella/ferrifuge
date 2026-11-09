@@ -475,6 +475,12 @@ impl Shared {
         self.actions_queued.notify_one();
     }
 
+    /// The next action queued for the driver, for tests.
+    #[cfg(test)]
+    pub(super) fn next_action_for_tests(&self) -> Option<Action> {
+        self.next_action()
+    }
+
     /// Whether the driver was woken since this was last asked, for tests.
     #[cfg(test)]
     pub(super) fn woken(&self) -> bool {
@@ -714,7 +720,12 @@ impl Shared {
             let wait = super::handler::Wait::Call(pending.id);
             let result = std::future::poll_fn(|cx| {
                 if super::handler::would_deadlock(&shared, wait) {
-                    // Settled meanwhile, it keeps its outcome (Codex, #171).
+                    // Under `Thread`, settled meanwhile, it keeps its
+                    // outcome (Codex, #171); under `Task` and `Inline` a
+                    // marked call fails at once, whatever came (D6).
+                    if !super::handler::in_thread_handler() {
+                        return Poll::Ready(None);
+                    }
                     return match Pin::new(&mut receiver).poll(cx) {
                         Poll::Ready(result) => Poll::Ready(Some(result)),
                         Poll::Pending => Poll::Ready(None),

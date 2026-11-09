@@ -327,6 +327,11 @@ pub(super) fn check_thread_waits(shared: &Shared) {
     }
 }
 
+/// Whether this thread runs a handler under `Thread`.
+pub(super) fn in_thread_handler() -> bool {
+    RUNNING.get().1
+}
+
 /// Error 16, for a wait [`would_deadlock`].
 pub(super) fn deadlock_error() -> crate::CallError {
     crate::CallError::new(
@@ -1582,6 +1587,38 @@ mod tests {
             assert!(set_within_a_second(&dropped).await);
             drop(client);
         });
+    }
+
+    // D6: under `Task` a call a handler makes fails at once, even when its
+    // reply has already come (CI on #180: a fast reply made it succeed).
+    #[test]
+    fn a_task_handler_s_call_fails_at_once_though_answered() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let shared = client.shared();
+        let transport = opened_by_hand(&client);
+        replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        let mut call = Box::pin(client.rpc("echo", b"{}".to_vec()));
+        // The reply, handed over as the driver would.
+        replied_by_hand(&client, transport, r#"{"id":2,"rpc":{"data":{}}}"#);
+        while let Some(action) = shared.next_action_for_tests() {
+            if let crate::machine::Action::CallSettled { call, result } = action {
+                shared.settle_call_now(call, result);
+            }
+        }
+
+        let _marked = Marked::new(shared, false);
+        let mut cx = Context::from_waker(Waker::noop());
+        let outcome = call.as_mut().poll(&mut cx);
+
+        assert!(
+            matches!(&outcome, Poll::Ready(Err(error)) if error.code == crate::codes::error::WOULD_DEADLOCK),
+            "{outcome:?}"
+        );
     }
 
     // A handler only Send keeps the builders Sync (Codex, #169: semver).
