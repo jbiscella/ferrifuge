@@ -750,7 +750,7 @@ that carries it: 1 is "transport closed" in `Connecting` and "timeout" in
 an error. The same fields also carry server codes, in their own ranges
 (the last table). The client's logs show the state, code and reason
 (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
-adds `connecting` 5 and 6, `subscribing` 2, `unsubscribed` 3 and 4, and
+adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 and 4, and
 errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
 Block 47. Blocks are those of the repository's `CLAUDE.md`.
 
@@ -767,6 +767,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
 | 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
 | 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
+| 7 | `codes::connecting::READ_AHEAD_OVERFLOW` | `"read-ahead overflow"` | a message arrived while the inbox of a browser push transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
 
 #### `disconnected`
 
