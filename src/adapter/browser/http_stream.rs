@@ -1,18 +1,20 @@
 //! `http_stream` transport of the browser adapter, over the browser's
 //! `fetch` (Block 44, D8), with bidirectional emulation as natively (Block
 //! 8): the response to the request opening the stream carries the replies;
-//! commands go in requests to the emulation endpoint of the same server.
-//! The body is read with wasm-streams, which reads it only when polled, so
-//! a full read-ahead holds the server back (Block 15; Block 44, D7).
+//! commands go in requests to the emulation endpoint of the same server,
+//! as they do over sse (D9). The body is read with wasm-streams, which
+//! reads it only when polled, so a full read-ahead holds the server back
+//! (Block 15; Block 44, D7).
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use futures_util::future::{Either, select};
 use futures_util::stream::FuturesUnordered;
+use futures_util::{Stream, StreamExt};
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -26,7 +28,7 @@ use crate::machine::FrameId;
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
-const JSON: &str = "application/json";
+pub(super) const JSON: &str = "application/json";
 /// The media type of Protobuf requests and streams, exactly (Block 27, D3).
 const PROTOBUF: &str = "application/octet-stream";
 
@@ -114,20 +116,126 @@ fn emulation_url(stream: &str, configured: Option<&str>) -> Result<String, Strin
 type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)>>>;
 
 /// How the server took an emulation request it answered.
-enum Sent {
+pub(super) enum Sent {
     Accepted,
     /// Rejected with HTTP 413, with the frame it carried.
     Rejected(Vec<u8>),
 }
 
+/// The emulation requests of an emulated transport (Block 8), each a
+/// `fetch` of its own (D8, D9).
+pub(super) struct Emulation {
+    fetch: Function,
+    url: String,
+    /// Time allowed for a request, as for a command's reply.
+    timeout: Duration,
+    /// The media type of the requests: JSON's or Protobuf's.
+    content_type: &'static str,
+    /// Each holds its request's guard: dropped with the transport, it
+    /// aborts the request (D8).
+    requests: FuturesUnordered<Request>,
+}
+
+impl Emulation {
+    /// Requests to `configured`, or to `/emulation` on the server of
+    /// `stream`, with `fetch`.
+    pub(super) fn new(
+        fetch: Function,
+        stream: &str,
+        configured: Option<&str>,
+        timeout: Duration,
+        content_type: &'static str,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            fetch,
+            url: emulation_url(stream, configured)?,
+            timeout,
+            content_type,
+            requests: FuturesUnordered::new(),
+        })
+    }
+
+    /// Sends frame `id`, the body of a request started now, which
+    /// [`Emulation::poll_answered`] gives once answered or failed.
+    pub(super) fn send(&mut self, id: FrameId, frame: Vec<u8>) {
+        let (abort, response) = start(
+            &self.fetch,
+            &self.url,
+            &[("Content-Type", self.content_type)],
+            &frame,
+        );
+        let timeout = self.timeout;
+        self.requests.push(Box::pin(async move {
+            // Also once answered: its body, unread, is let go.
+            let _abort = abort;
+            let answered = async {
+                let response =
+                    response.map_err(|reason| format!("emulation request failed: {reason}"))?;
+                let timer = platform::sleep(timeout);
+                let response: Response = match select(response, std::pin::pin!(timer)).await {
+                    Either::Left((response, _)) => response
+                        .map_err(|error| {
+                            format!("emulation request failed: {}", js_message(&error))
+                        })?
+                        .unchecked_into(),
+                    Either::Right(_) => {
+                        return Err(format!("emulation request timed out after {timeout:?}"));
+                    }
+                };
+                let status = response.status();
+                // A server without the session's node (404) or failing
+                // (5xx) cannot answer the command; other statuses reject
+                // only it (centrifuge-js `send`). A redirect is not
+                // followed, so its command never arrived either.
+                if response.type_() == ResponseType::Opaqueredirect {
+                    Err("emulation request failed: HTTP redirect".to_owned())
+                } else if status == 404 || status >= 500 || (300..400).contains(&status) {
+                    Err(format!("emulation request failed: HTTP status {status}"))
+                } else if status == 413 {
+                    // Its commands fail at once (owner decision, 2026-11-04).
+                    Ok(Sent::Rejected(frame))
+                } else {
+                    Ok(Sent::Accepted)
+                }
+            };
+            (id, answered.await)
+        }));
+    }
+
+    /// The next request answered or failed; pending while none is in
+    /// flight. The transport sends only between its reads, so a request
+    /// sent later is polled by the next read.
+    pub(super) fn poll_answered(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<(FrameId, Result<Sent, String>)> {
+        match Pin::new(&mut self.requests).poll_next(cx) {
+            Poll::Ready(Some(answered)) => Poll::Ready(answered),
+            Poll::Ready(None) | Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// What the transport reports of request `id`: a failure ends it (Block
+/// 8); a 413 fails its commands, then counts as written, in `written`.
+pub(super) fn report(
+    id: FrameId,
+    answered: Result<Sent, String>,
+    written: &mut VecDeque<FrameId>,
+) -> Inbound {
+    match answered {
+        Err(reason) => Inbound::Closed { code: None, reason },
+        Ok(Sent::Rejected(frame)) => {
+            written.push_back(id);
+            Inbound::Rejected(frame)
+        }
+        Ok(Sent::Accepted) => Inbound::Written(id),
+    }
+}
+
 /// An open `http_stream` connection.
 pub(in crate::adapter) struct HttpStream {
-    fetch: Function,
-    emulation_url: String,
-    /// Time allowed for an emulation request, as for a command's reply.
-    request_timeout: Duration,
-    /// The media type of emulation requests: JSON's or Protobuf's.
-    content_type: &'static str,
+    emulation: Emulation,
     body: IntoStream<'static>,
     /// Aborts the stream request when the transport closes or is dropped;
     /// after `body`, which it errors.
@@ -137,9 +245,6 @@ pub(in crate::adapter) struct HttpStream {
     frames: VecDeque<Vec<u8>>,
     /// Why the stream cannot go on, reported once `frames` are received.
     failed: Option<String>,
-    /// Each holds its request's guard: dropped with the transport, it
-    /// aborts the request (D8).
-    requests: FuturesUnordered<Request>,
     /// Frames whose request was answered and not yet reported by
     /// [`HttpStream::recv`].
     written: VecDeque<FrameId>,
@@ -160,8 +265,14 @@ impl HttpStream {
         protobuf: bool,
         max_message: usize,
     ) -> Result<Self, String> {
-        let emulation_url = emulation_url(url, emulation_endpoint)?;
         let content_type = if protobuf { PROTOBUF } else { JSON };
+        let emulation = Emulation::new(
+            fetch.clone(),
+            url,
+            emulation_endpoint,
+            request_timeout,
+            content_type,
+        )?;
         // Dropped with the attempt, the guard aborts the request.
         let (abort, response) = start(
             &fetch,
@@ -201,10 +312,7 @@ impl HttpStream {
             .body()
             .ok_or_else(|| format!("HTTP status {status} without a body"))?;
         Ok(Self {
-            fetch,
-            emulation_url,
-            request_timeout,
-            content_type,
+            emulation,
             body: wasm_streams::ReadableStream::from_raw(body).into_stream(),
             _abort: abort,
             decoder: if protobuf {
@@ -214,7 +322,6 @@ impl HttpStream {
             },
             frames: VecDeque::new(),
             failed: None,
-            requests: FuturesUnordered::new(),
             written: VecDeque::new(),
             read_next: false,
         })
@@ -224,48 +331,7 @@ impl HttpStream {
     /// which [`HttpStream::recv`] reports written once answered. A request
     /// that fails ends the transport when [`HttpStream::recv`] reports it.
     pub(in crate::adapter) fn send(&mut self, id: FrameId, frame: Vec<u8>) {
-        let (abort, response) = start(
-            &self.fetch,
-            &self.emulation_url,
-            &[("Content-Type", self.content_type)],
-            &frame,
-        );
-        let timeout = self.request_timeout;
-        self.requests.push(Box::pin(async move {
-            // Also once answered: its body, unread, is let go.
-            let _abort = abort;
-            let answered = async {
-                let response =
-                    response.map_err(|reason| format!("emulation request failed: {reason}"))?;
-                let timer = platform::sleep(timeout);
-                let response: Response = match select(response, std::pin::pin!(timer)).await {
-                    Either::Left((response, _)) => response
-                        .map_err(|error| {
-                            format!("emulation request failed: {}", js_message(&error))
-                        })?
-                        .unchecked_into(),
-                    Either::Right(_) => {
-                        return Err(format!("emulation request timed out after {timeout:?}"));
-                    }
-                };
-                let status = response.status();
-                // A server without the session's node (404) or failing
-                // (5xx) cannot answer the command; other statuses reject
-                // only it (centrifuge-js `send`). A redirect is not
-                // followed, so its command never arrived either.
-                if response.type_() == ResponseType::Opaqueredirect {
-                    Err("emulation request failed: HTTP redirect".to_owned())
-                } else if status == 404 || status >= 500 || (300..400).contains(&status) {
-                    Err(format!("emulation request failed: HTTP status {status}"))
-                } else if status == 413 {
-                    // Its commands fail at once (owner decision, 2026-11-04).
-                    Ok(Sent::Rejected(frame))
-                } else {
-                    Ok(Sent::Accepted)
-                }
-            };
-            (id, answered.await)
-        }));
+        self.emulation.send(id, frame);
     }
 
     /// Closes the transport: its stream and every emulation request in
@@ -329,20 +395,9 @@ impl HttpStream {
                         };
                     }
                 },
-                // Irrefutable: a refutable pattern would disable this branch
-                // after a success until the stream yields (tokio `select!`).
-                Some((id, result)) = self.requests.next(), if !self.requests.is_empty() => {
-                    match result {
-                        Err(reason) => return Inbound::Closed { code: None, reason },
-                        // Answered, so written; its commands fail first.
-                        Ok(Sent::Rejected(frame)) => {
-                            self.written.push_back(id);
-                            return Inbound::Rejected(frame);
-                        }
-                        Ok(Sent::Accepted) => return Inbound::Written(id),
-                    }
+                (id, answered) = std::future::poll_fn(|cx| self.emulation.poll_answered(cx)) => {
+                    return report(id, answered, &mut self.written);
                 }
-                else => std::future::pending::<()>().await,
             }
         }
     }

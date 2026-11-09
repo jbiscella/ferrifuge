@@ -4,6 +4,8 @@
 //! through it. For the browser (Block 44, D18) it relays `Origin` and a
 //! preflight's `Access-Control-Request-*` headers to the server and its
 //! `Access-Control-*` headers back, and can end its open stream responses.
+//! A browser test, which cannot call the proxy's methods, drives it with
+//! GET requests under [`CONTROL`].
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +28,11 @@ use tokio::task::JoinHandle;
 
 /// Request bodies relayed: connect and emulation commands, all small.
 const MAX_BODY: usize = 1 << 20;
+
+/// Where a browser test drives the proxy, answered by the proxy itself and
+/// not recorded: `end-streams` does [`HttpProxy::end_streams`], and
+/// `requests/<path>` gives how many requests to `/<path>` it received.
+const CONTROL: &str = "/_relay/";
 
 pub(crate) struct HttpProxy {
     port: u16,
@@ -222,8 +229,32 @@ impl Drop for HttpProxy {
     }
 }
 
+/// A request under [`CONTROL`], answered to any origin.
+fn control(state: &ProxyState, command: &str) -> Response<Body> {
+    let answer = if command == "end-streams" {
+        state.end_streams.send_modify(|ended| *ended += 1);
+        String::new()
+    } else if let Some(path) = command.strip_prefix("requests") {
+        let requests = state.requests.lock().unwrap();
+        requests
+            .iter()
+            .filter(|(received, _)| received == path)
+            .count()
+            .to_string()
+    } else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Response::builder()
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from(answer))
+        .expect("valid control response")
+}
+
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response<Body> {
     let (parts, body) = request.into_parts();
+    if let Some(command) = parts.uri.path().strip_prefix(CONTROL) {
+        return control(&state, command);
+    }
     state
         .requests
         .lock()
