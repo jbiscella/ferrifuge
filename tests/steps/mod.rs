@@ -42,6 +42,7 @@ mod jitter;
 mod json_helpers;
 mod limits;
 mod logging;
+mod network_events;
 mod optimistic;
 mod ping;
 mod protobuf;
@@ -219,6 +220,8 @@ pub(crate) struct ClientWorld {
     pub(crate) doubles: double::Doubles,
     /// Centrifugo's side and the double's, compared (Block 37c).
     pub(crate) sides: Vec<double::Side>,
+    /// The configuration of a Block 44c @E machine.
+    pub(crate) network_events: network_events::NetworkEvents,
     /// What the handlers of a Block 41 scenario record.
     pub(crate) handlers: handlers::Handlers,
     /// The clone and weak handle of a Block 41a scenario.

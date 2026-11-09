@@ -201,12 +201,8 @@ fn online_after_going_offline_keeps_the_jitter_window() {
             let mut machine = machine.with_seed(seed);
             machine.handle(Input::Offline);
             let actions = machine.handle(Input::Reconnect);
-            // A draw of 0 starts the attempt at once.
-            if opened(&actions).is_some() {
-                Duration::ZERO
-            } else {
-                reconnect_delay(&actions).expect("a jitter delay")
-            }
+            assert_eq!(opened(&actions), None, "{actions:?}");
+            reconnect_delay(&actions).expect("a jitter delay")
         })
         .collect();
 

@@ -540,6 +540,12 @@ const IMPLEMENTED: &[&str] = &[
     "events() takes over the subscription's publications stream",
     "The publications stream outlives unsubscribe, which withdraws what it had not yielded",
     "The publications stream ends with its subscription or its client",
+    // Block 44c: network and page events, on the core.
+    "Going offline while connected closes the transport and reconnects after the backoff",
+    "Going offline while connecting closes the attempt in flight without an event",
+    "Going offline does nothing to a disconnected client",
+    "A page entering the back/forward cache reconnects with its own reason",
+    "Coming online after going offline keeps the jitter window",
 ];
 
 /// Server configuration of @A scenarios.
