@@ -1593,7 +1593,7 @@ impl Machine {
     }
 
     /// The stream position the subscription `id` keeps.
-    pub(super) fn subscription_position(&self, id: SubscriptionId) -> Option<StreamPosition> {
+    pub(crate) fn subscription_position(&self, id: SubscriptionId) -> Option<StreamPosition> {
         self.subscriptions
             .by_id
             .get(&id)
