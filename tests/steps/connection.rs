@@ -78,6 +78,15 @@ async fn server_disconnects_with_reconnect_code(world: &mut ClientWorld) {
         }
     }
     let client_id = world.client_id.clone().expect("a connected client");
+    // A map scenario changes the map while the client is away (Block 45c).
+    #[cfg(feature = "unstable")]
+    if world.holds_map_reconnect() {
+        world
+            .relay
+            .as_ref()
+            .expect("a relay")
+            .set_mode(crate::support::relay::Mode::Down);
+    }
     world
         .server
         .as_ref()

@@ -4,14 +4,19 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
+use ferrifuge::machine::{
+    Action, Input, Machine, MapSubscriptionOptions, SubscriptionId, SubscriptionOptions,
+    SubscriptionTimer, Timer, TransportId,
+};
 use ferrifuge::{
-    CallError, Client, ClientEvent, MapKind, MapSubscription, MapSubscriptionEvent, Protocol,
-    Subscription, SubscriptionError, SubscriptionEvent, SubscriptionState,
+    CallError, Client, ClientEvent, Config, MapKind, MapSubscription, MapSubscriptionEvent,
+    Protocol, Subscription, SubscriptionError, SubscriptionEvent, SubscriptionState,
+    UnrecoverableStrategy,
 };
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
@@ -21,6 +26,7 @@ use super::connection::a_connected_client;
 use super::delivery::wait_until;
 use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, recorded};
 use crate::support::fake_server::sized_json;
+use crate::support::relay::Mode;
 use crate::support::token::{connection_token, subscription_token};
 
 type MapEvents = Pin<Box<dyn Stream<Item = MapSubscriptionEvent> + Send>>;
@@ -43,6 +49,26 @@ pub(crate) struct Maps {
     answered: usize,
     /// The key of the last update a step checked.
     key: Option<String>,
+    /// The server's disconnect keeps the client away until a step lets it
+    /// back, so that changes are made while it reconnects (Block 45c).
+    hold: bool,
+    /// When the token callback was called.
+    token_times: Arc<Mutex<Vec<Instant>>>,
+    /// The sans-IO core of an @E scenario.
+    core: Option<MapCore>,
+    /// Events a step read past, for a later step to look at.
+    seen: Vec<MapSubscriptionEvent>,
+    /// The subscribe command a step checked, by number, for "that command".
+    checked: Option<usize>,
+}
+
+/// The core of an @E map scenario: the machine, its transport, the map
+/// subscription and the actions of the last input.
+struct MapCore {
+    machine: Machine,
+    transport: TransportId,
+    id: SubscriptionId,
+    actions: Vec<Action>,
 }
 
 fn kind(name: &str) -> MapKind {
@@ -317,6 +343,30 @@ async fn a_client_with_a_map_subscription(world: &mut ClientWorld, channel: Stri
             a_scripted_map_subscription(world, &channel, |b| b);
             world.map().subscribe();
             nth_subscribe(world, &channel, 1).await;
+        }
+        r#" that has taken a sync at epoch "e1" and offset 7"# => {
+            a_scripted_map_subscription(world, &channel, |b| b);
+            synced_on_the_fake(world, "e1", 7).await;
+        }
+        r#" synced at epoch "e1" and offset 7, whose stream has been read up to the sync"# => {
+            a_scripted_map_subscription(world, &channel, |b| b);
+            world.read_the_map_stream_only_when_asked();
+            synced_on_the_fake(world, "e1", 7).await;
+        }
+        r#" with a token callback, synced at epoch "e1" and offset 7"# => {
+            let times = Arc::clone(&world.maps.token_times);
+            a_scripted_map_subscription(world, &channel, move |builder| {
+                builder.get_token(move |_| {
+                    times.lock().unwrap().push(Instant::now());
+                    async { Ok("t".to_owned()) }
+                })
+            });
+            synced_on_the_fake(world, "e1", 7).await;
+        }
+        " whose stream was taken and is not read" => {
+            a_scripted_map_subscription(world, &channel, |b| b);
+            world.read_the_map_stream_only_when_asked();
+            world.map().subscribe();
         }
         " whose stream request is in flight" => {
             a_scripted_map_subscription(world, &channel, |b| b);
@@ -1408,4 +1458,740 @@ async fn statistics_count(world: &mut ClientWorld, subscriptions: usize, deliver
     })
     .await;
     assert_eq!(client.statistics().subscriptions, subscriptions);
+}
+
+// --- Recovery and resync (45c) -------------------------------------------
+
+impl ClientWorld {
+    /// Whether the server's disconnect of an @A map scenario keeps the
+    /// client away until a step lets it back.
+    pub(super) fn holds_map_reconnect(&self) -> bool {
+        self.maps.hold
+    }
+
+    /// Replaces the recorded stream, which takes every event at once, by
+    /// one a step reads, so that events wait untaken (Block 15).
+    fn read_the_map_stream_only_when_asked(&mut self) {
+        self.maps.events = Some(Box::pin(self.map().events()));
+    }
+
+    /// Lets a client the server disconnected back, if it was held away.
+    fn let_the_map_client_back(&mut self) {
+        if std::mem::take(&mut self.maps.hold) {
+            self.relay
+                .as_ref()
+                .expect("a relay")
+                .set_mode(Mode::Forward);
+        }
+    }
+
+    /// The map subscription's events until one named `name`, which is
+    /// returned last; only lifecycle events may come before it.
+    async fn map_events_until(&mut self, name: &str) -> Vec<MapSubscriptionEvent> {
+        let mut seen = Vec::new();
+        loop {
+            let event = self.next_map_event().await;
+            let found = event.name() == name;
+            assert!(
+                found
+                    || matches!(
+                        event,
+                        MapSubscriptionEvent::Subscribing { .. }
+                            | MapSubscriptionEvent::Subscribed(_)
+                    ),
+                "{event:?} before {name:?}, after {seen:?}"
+            );
+            seen.push(event);
+            if found {
+                return seen;
+            }
+        }
+    }
+}
+
+async fn map_clear(world: &ClientWorld, channel: &str) {
+    server_api(world)
+        .call("map_clear", json!({"channel": channel}))
+        .await
+        .expect("server API map_clear");
+}
+
+/// A map subscription to `channel` on the scenario's client, connected
+/// through the relay and synced, built by `configure`: its sync. The
+/// server's later disconnect holds the client away (see
+/// [`ClientWorld::holds_map_reconnect`]).
+async fn a_synced_map(
+    world: &mut ClientWorld,
+    channel: &str,
+    configure: impl FnOnce(ferrifuge::MapSubscriptionBuilder) -> ferrifuge::MapSubscriptionBuilder,
+) -> Vec<ferrifuge::MapEntry> {
+    a_connected_client(world).await;
+    let subscription = configure(
+        world
+            .client()
+            .map_subscription_builder(channel, MapKind::Map),
+    )
+    .build()
+    .unwrap();
+    world.track_map(subscription);
+    world.map().subscribe();
+    world.maps.hold = true;
+    let MapSubscriptionEvent::Sync(entries) =
+        world.map_events_until("sync").await.pop().expect("a sync")
+    else {
+        unreachable!();
+    };
+    entries
+}
+
+fn keys_of(entries: &[ferrifuge::MapEntry]) -> Vec<String> {
+    entries.iter().map(|entry| entry.key.clone()).collect()
+}
+
+#[given(
+    regex = r#"^a client with a map subscription to "([^"]+)" that has synced keys "(\w+)" and "(\w+)"$"#
+)]
+async fn synced_two_keys(world: &mut ClientWorld, channel: String, first: String, second: String) {
+    for key in [&first, &second] {
+        map_publish(world, &channel, key, json!({"key": key})).await;
+    }
+    let entries = a_synced_map(world, &channel, |builder| builder).await;
+    assert_eq!(keys_of(&entries), [first, second]);
+}
+
+#[given(
+    regex = r#"^a client with a map subscription to "([^"]+)"( with the fatal unrecoverable strategy,)? that has synced key "(\w+)"$"#
+)]
+async fn synced_one_key(world: &mut ClientWorld, channel: String, fatal: String, key: String) {
+    map_publish(world, &channel, &key, json!({"key": key})).await;
+    let entries = a_synced_map(world, &channel, |builder| {
+        if fatal.is_empty() {
+            builder
+        } else {
+            builder.unrecoverable_strategy(UnrecoverableStrategy::Fatal)
+        }
+    })
+    .await;
+    assert_eq!(keys_of(&entries), [key]);
+}
+
+#[given(
+    regex = r#"^a client with a map subscription to "([^"]+)" that has synced key "(\w+)" = (\d+), whose stream is read$"#
+)]
+async fn synced_a_value(world: &mut ClientWorld, channel: String, key: String, value: u64) {
+    map_publish(world, &channel, &key, json!(value)).await;
+    let entries = a_synced_map(world, &channel, |builder| builder).await;
+    assert_eq!(keys_of(&entries), std::slice::from_ref(&key));
+    assert_eq!(entries[0].data, value.to_string().into_bytes());
+}
+
+#[when(
+    regex = r#"^the server API sets key "(\w+)" of "([^"]+)" and removes key "(\w+)" while the client reconnects$"#
+)]
+async fn sets_and_removes_while_away(
+    world: &mut ClientWorld,
+    key: String,
+    channel: String,
+    removed: String,
+) {
+    map_publish(world, &channel, &key, json!({"key": key})).await;
+    map_remove(world, &channel, &removed).await;
+    world.let_the_map_client_back();
+}
+
+#[when(
+    regex = r#"^the server API sets key "(\w+)" of "([^"]+)" (to 1 to 10|10 times) while the client reconnects$"#
+)]
+async fn sets_ten_times_while_away(world: &mut ClientWorld, key: String, channel: String) {
+    for value in 1..=10 {
+        map_publish(world, &channel, &key, json!(value)).await;
+    }
+    world.let_the_map_client_back();
+}
+
+#[then(
+    r#"the map subscription emits "subscribing", then "subscribed" with was_recovering true and recovered true"#
+)]
+async fn subscribing_then_recovered(world: &mut ClientWorld) {
+    world.let_the_map_client_back();
+    world.next_map_event_named("subscribing").await;
+    let MapSubscriptionEvent::Subscribed(subscribed) =
+        world.next_map_event_named("subscribed").await
+    else {
+        unreachable!();
+    };
+    assert!(
+        subscribed.was_recovering && subscribed.recovered,
+        "{subscribed:?}"
+    );
+}
+
+#[then(
+    regex = r#"^then an update with key "(\w+)", then an update with key "(\w+)" and removed true$"#
+)]
+async fn then_set_then_removed(world: &mut ClientWorld, key: String, removed: String) {
+    let MapSubscriptionEvent::Update(set) = world.next_map_event_named("update").await else {
+        unreachable!();
+    };
+    assert_eq!((set.key.as_str(), set.removed), (key.as_str(), false));
+    let MapSubscriptionEvent::Update(gone) = world.next_map_event_named("update").await else {
+        unreachable!();
+    };
+    assert_eq!((gone.key.as_str(), gone.removed), (removed.as_str(), true));
+}
+
+#[then("it emits no sync")]
+async fn it_emits_no_sync(world: &mut ClientWorld) {
+    let events = world.maps.events.as_mut().expect("a stream");
+    let later = quiet_events(events).await;
+    assert!(
+        later.iter().all(|event| event.name() != "sync"),
+        "{later:?}"
+    );
+}
+
+#[then(
+    regex = r#"^the map subscription emits "subscribed" with recovered false, then a sync with exactly "(\w+)" = (\d+)$"#
+)]
+async fn resynced_with(world: &mut ClientWorld, key: String, value: u64) {
+    world.let_the_map_client_back();
+    let mut seen = world.map_events_until("subscribed").await;
+    let Some(MapSubscriptionEvent::Subscribed(subscribed)) = seen.last() else {
+        unreachable!();
+    };
+    assert!(!subscribed.recovered, "{subscribed:?}");
+    let sync = world.next_map_event_named("sync").await;
+    let MapSubscriptionEvent::Sync(entries) = &sync else {
+        unreachable!();
+    };
+    assert_eq!(keys_of(entries), std::slice::from_ref(&key));
+    assert_eq!(entries[0].data, value.to_string().into_bytes());
+    seen.push(sync);
+    world.maps.seen = seen;
+}
+
+#[then("it emits no error event and no update")]
+async fn no_error_and_no_update(world: &mut ClientWorld) {
+    let events = world.maps.events.as_mut().expect("a stream");
+    let mut seen = std::mem::take(&mut world.maps.seen);
+    seen.extend(quiet_events(events).await);
+    assert!(
+        seen.iter()
+            .all(|event| !matches!(event.name(), "error" | "update")),
+        "{seen:?}"
+    );
+}
+
+#[then(
+    regex = r#"^the map subscription emits "unsubscribed" with code (\d+) and reason "([^"]+)"$"#
+)]
+async fn the_map_unsubscribes_with(world: &mut ClientWorld, code: u32, reason: String) {
+    world.let_the_map_client_back();
+    let event = world
+        .map_events_until("unsubscribed")
+        .await
+        .pop()
+        .expect("unsubscribed");
+    assert_eq!(event, MapSubscriptionEvent::Unsubscribed { code, reason });
+}
+
+#[then(
+    regex = r#"^(\d+) s later the map subscription is still "unsubscribed" and has emitted no further event$"#
+)]
+async fn still_unsubscribed(world: &mut ClientWorld, seconds: u64) {
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    assert_eq!(world.map().state(), SubscriptionState::Unsubscribed);
+    let events = world.maps.events.as_mut().expect("a stream");
+    let later = quiet_events(events).await;
+    assert!(later.is_empty(), "{later:?}");
+}
+
+#[then(
+    regex = r#"^the map subscription emits "subscribed" with recoverable false and was_recovering false, then a sync with key "(\w+)"$"#
+)]
+async fn ephemeral_resync(world: &mut ClientWorld, key: String) {
+    world.let_the_map_client_back();
+    let seen = world.map_events_until("subscribed").await;
+    let Some(MapSubscriptionEvent::Subscribed(subscribed)) = seen.last() else {
+        unreachable!();
+    };
+    assert!(
+        !subscribed.recoverable && !subscribed.was_recovering,
+        "{subscribed:?}"
+    );
+    let sync = world.next_map_event_named("sync").await;
+    assert_eq!(entry_keys(&sync), [key]);
+}
+
+#[when(regex = r#"^the server API clears "([^"]+)"$"#)]
+async fn the_server_api_clears(world: &mut ClientWorld, channel: String) {
+    map_clear(world, &channel).await;
+}
+
+#[when(regex = r#"^the server API sets key "(\w+)" of "([^"]+)"$"#)]
+async fn the_server_api_sets_a_key(world: &mut ClientWorld, key: String, channel: String) {
+    map_publish(world, &channel, &key, json!({"key": key})).await;
+}
+
+#[then(
+    regex = r#"^the map subscription emits "subscribing" with code (\d+) and reason "([^"]+)"$"#
+)]
+async fn the_map_subscribes_again_with(world: &mut ClientWorld, code: u32, reason: String) {
+    let event = world.next_map_event_named("subscribing").await;
+    assert_eq!(event, MapSubscriptionEvent::Subscribing { code, reason });
+}
+
+#[then(regex = r#"^then "subscribed" with recovered false and a sync with exactly key "(\w+)"$"#)]
+async fn then_resynced(world: &mut ClientWorld, key: String) {
+    let seen = world.map_events_until("subscribed").await;
+    let Some(MapSubscriptionEvent::Subscribed(subscribed)) = seen.last() else {
+        unreachable!();
+    };
+    assert!(!subscribed.recovered, "{subscribed:?}");
+    let sync = world.next_map_event_named("sync").await;
+    assert_eq!(entry_keys(&sync), [key]);
+}
+
+// The fake server.
+
+/// Answers the map subscription's load live at `epoch` and `offset` with
+/// `state`, then takes "subscribing", "subscribed" and the sync.
+async fn synced_on_the_fake(world: &mut ClientWorld, epoch: &str, offset: u64) {
+    world.map().subscribe();
+    answer_next(
+        world,
+        json!({"type": 1, "recoverable": true, "epoch": epoch, "offset": offset,
+            "state": [entry("a", json!({"key": "a"}), offset)]}),
+    )
+    .await;
+    world.next_map_event_named("subscribing").await;
+    world.next_map_event_named("subscribed").await;
+    world.next_map_event_named("sync").await;
+}
+
+/// The next subscribe command for `channel` after those answered or
+/// checked so far.
+async fn next_subscribe(world: &mut ClientWorld, channel: &str) -> Value {
+    world.maps.answered += 1;
+    nth_subscribe(world, channel, world.maps.answered).await
+}
+
+#[then(
+    regex = r#"^the next subscribe command for "(\w+)" has type 1, phase 1, recover true, epoch "(\w+)" and offset (\d+)$"#
+)]
+async fn the_next_recovers(world: &mut ClientWorld, channel: String, epoch: String, offset: u64) {
+    let subscribe = next_subscribe(world, &channel).await["subscribe"].clone();
+    assert_eq!(
+        (
+            &subscribe["type"],
+            &subscribe["phase"],
+            &subscribe["recover"],
+            &subscribe["epoch"],
+            &subscribe["offset"]
+        ),
+        (
+            &json!(1),
+            &json!(1),
+            &json!(true),
+            &json!(epoch),
+            &json!(offset)
+        ),
+        "{subscribe}"
+    );
+}
+
+#[then(regex = r#"^no subscribe command with phase 2 is sent for "(\w+)"$"#)]
+async fn no_state_request(world: &mut ClientWorld, channel: String) {
+    tokio::time::sleep(QUIET_PERIOD).await;
+    let later: Vec<Value> = subscribes(world, &channel)
+        .into_iter()
+        .skip(world.maps.answered - 1)
+        .filter(|command| command["subscribe"]["phase"] == 2)
+        .collect();
+    assert!(later.is_empty(), "{later:?}");
+}
+
+#[given(regex = r#"^the fake server has pushed updates at offsets (\d+) and (\d+)$"#)]
+async fn pushed_updates(world: &mut ClientWorld, first: u64, second: u64) {
+    for offset in [first, second] {
+        let push = json!({"push": {"channel": "scores",
+            "pub": {"key": format!("k{offset}"), "data": {"n": offset}, "offset": offset}}});
+        world.fake().send(&push.to_string());
+    }
+    // The first waits untaken and holds the second, read.
+    let subscription = world.map().clone();
+    wait_until("the second update held", || subscription.held_events() >= 1).await;
+}
+
+#[given(regex = r"^the application has taken only the update at offset (\d+)$")]
+async fn taken_only(world: &mut ClientWorld, offset: u64) {
+    let MapSubscriptionEvent::Update(update) = world.next_map_event_named("update").await else {
+        unreachable!();
+    };
+    assert_eq!(update.offset, Some(offset));
+}
+
+#[then(
+    regex = r#"^the next subscribe command for "(\w+)" asks to recover from epoch "(\w+)" and offset (\d+)$"#
+)]
+async fn recovers_from(world: &mut ClientWorld, channel: String, epoch: String, offset: u64) {
+    let subscribe = next_subscribe(world, &channel).await["subscribe"].clone();
+    assert_eq!(
+        (
+            &subscribe["recover"],
+            &subscribe["epoch"],
+            &subscribe["offset"]
+        ),
+        (&json!(true), &json!(epoch), &json!(offset)),
+        "{subscribe}"
+    );
+}
+
+#[then("no update is yielded twice")]
+async fn no_update_twice(world: &mut ClientWorld) {
+    let events = world.maps.events.as_mut().expect("a stream");
+    let later = quiet_events(events).await;
+    assert!(
+        later.iter().all(|event| event.name() != "update"),
+        "{later:?}"
+    );
+}
+
+#[given(regex = r#"^the fake server has answered its load live with entries "(\w+)" and "(\w+)"$"#)]
+async fn answered_live_with(world: &mut ClientWorld, first: String, second: String) {
+    answer_next(
+        world,
+        json!({"type": 1, "recoverable": true, "epoch": "e1", "offset": 2,
+            "state": [entry(&first, json!(1), 1), entry(&second, json!(1), 2)]}),
+    )
+    .await;
+    let subscription = world.map().clone();
+    wait_until("subscribed", || {
+        subscription.state() == SubscriptionState::Subscribed
+    })
+    .await;
+}
+
+#[then(
+    regex = r#"^(?:that|the next subscribe) command(?: for "(\w+)")? has phase 2 and no epoch$"#
+)]
+async fn loads_from_scratch(world: &mut ClientWorld, channel: String) {
+    let channel = if channel.is_empty() {
+        "scores".to_owned()
+    } else {
+        channel
+    };
+    // "that command" is the one a step before waited for.
+    let command = if world.maps.checked == Some(world.maps.answered) {
+        nth_subscribe(world, &channel, world.maps.answered).await
+    } else {
+        next_subscribe(world, &channel).await
+    };
+    let subscribe = command["subscribe"].clone();
+    world.maps.checked = None;
+    assert_eq!(subscribe["phase"], 2, "{subscribe}");
+    assert!(subscribe.get("epoch").is_none(), "{subscribe}");
+}
+
+#[then(
+    regex = r#"^when the fake server answers it live with entries "(\w+)", "(\w+)" and "(\w+)" and the application reads the stream, it yields exactly one sync, with "(\w+)", "(\w+)" and "(\w+)"$"#
+)]
+async fn exactly_one_sync(world: &mut ClientWorld, first: String, second: String, third: String) {
+    let state: Vec<Value> = [&first, &second, &third]
+        .iter()
+        .zip(1..)
+        .map(|(key, offset)| entry(key, json!(1), offset))
+        .collect();
+    let command = nth_subscribe(world, "scores", world.maps.answered).await;
+    world.fake().send(
+        &json!({"id": command["id"], "subscribe":
+            {"type": 1, "recoverable": true, "epoch": "e2", "offset": 3, "state": state}})
+        .to_string(),
+    );
+    let mut syncs = Vec::new();
+    let events = world.maps.events.as_mut().expect("a stream");
+    let mut seen = Vec::new();
+    while syncs.is_empty() {
+        let event = tokio::time::timeout(EVENT_TIMEOUT, events.next())
+            .await
+            .unwrap_or_else(|_| panic!("no sync in time, after {seen:?}"))
+            .expect("a stream");
+        if let MapSubscriptionEvent::Sync(entries) = &event {
+            syncs.push(keys_of(entries));
+        }
+        seen.push(event.name());
+    }
+    for event in quiet_events(events).await {
+        if let MapSubscriptionEvent::Sync(entries) = &event {
+            syncs.push(keys_of(entries));
+        }
+    }
+    assert_eq!(syncs, [vec![first, second, third]], "{seen:?}");
+}
+
+#[when(
+    regex = r#"^the fake server sends (?:an unsubscribe push with code (\d+) for "(\w+)"|a disconnect with code (\d+))$"#
+)]
+fn the_fake_server_invalidates(
+    world: &mut ClientWorld,
+    unsubscribe: String,
+    channel: String,
+    disconnect: String,
+) {
+    if unsubscribe.is_empty() {
+        world
+            .fake()
+            .close(disconnect.parse().unwrap(), "state invalidated");
+    } else {
+        let code: u32 = unsubscribe.parse().unwrap();
+        world.fake().send(
+            &json!({"push": {"channel": channel,
+                "unsubscribe": {"code": code, "reason": "state invalidated"}}})
+            .to_string(),
+        );
+    }
+}
+
+#[then(regex = r#"^the token callback is called before the next subscribe command for "(\w+)"$"#)]
+async fn token_before_subscribe(world: &mut ClientWorld, channel: String) {
+    let command = next_subscribe(world, &channel).await;
+    world.maps.checked = Some(world.maps.answered);
+    let (_, sent_at) = world
+        .fake()
+        .commands_with_times("subscribe")
+        .into_iter()
+        .find(|(received, _)| received["id"] == command["id"])
+        .expect("the subscribe command's time");
+    let times = world.maps.token_times.lock().unwrap().clone();
+    // The first call was for the first load.
+    assert!(
+        times.len() >= 2 && times[1] <= sent_at,
+        "token calls at {times:?}, the subscribe at {sent_at:?}"
+    );
+}
+
+#[when(
+    regex = r#"^the fake server answers the second page with error (\d+) "([^"]+)", temporary$"#
+)]
+async fn the_second_page_fails(world: &mut ClientWorld, code: u32, message: String) {
+    world.maps.answered += 1;
+    let command = nth_subscribe(world, "scores", world.maps.answered).await;
+    world.fake().send(
+        &json!({"id": command["id"],
+            "error": {"code": code, "message": message, "temporary": true}})
+        .to_string(),
+    );
+}
+
+#[then(regex = r"^the map subscription emits an error with code (\d+)$")]
+async fn emits_an_error_with(world: &mut ClientWorld, code: u32) {
+    let MapSubscriptionEvent::Error(error) = world
+        .map_events_until("error")
+        .await
+        .pop()
+        .expect("an error")
+    else {
+        unreachable!();
+    };
+    assert_eq!(error.code, code);
+}
+
+#[then(
+    regex = r#"^(?:once it is answered, the next|on the next connection the first) subscribe command for "(\w+)" has phase 2 and no cursor$"#
+)]
+async fn the_load_restarts(world: &mut ClientWorld, channel: String) {
+    let again = next_subscribe(world, &channel).await;
+    let received = world.fake().received();
+    let unsubscribe = received
+        .iter()
+        .position(|command| command["unsubscribe"]["channel"] == channel.as_str());
+    let position = received
+        .iter()
+        .position(|command| command["id"] == again["id"]);
+    if unsubscribe.is_some() {
+        assert!(
+            unsubscribe < position,
+            "the subscribe went before the unsubscribe"
+        );
+    }
+    let subscribe = &again["subscribe"];
+    assert_eq!(subscribe["phase"], 2, "{subscribe}");
+    assert!(subscribe.get("cursor").is_none(), "{subscribe}");
+}
+
+#[when(regex = r#"^the fake server closes the connection with code (\d+) "([^"]+)"$"#)]
+fn the_fake_server_closes(world: &mut ClientWorld, code: u16, reason: String) {
+    // The request in flight dies with the connection.
+    world.maps.answered = subscribes(world, "scores").len();
+    world.fake().close(code, &reason);
+}
+
+// The core (@E).
+
+impl MapCore {
+    fn handle(&mut self, input: Input) {
+        self.actions = self.machine.handle(input);
+    }
+
+    /// The subscribe commands among the last actions.
+    fn subscribes(&self) -> Vec<Value> {
+        sent_commands(&self.actions)
+            .into_iter()
+            .filter(|command| command.get("subscribe").is_some())
+            .collect()
+    }
+
+    /// Answers the subscribe command among the last actions with `fields`.
+    fn answer(&mut self, fields: &str) {
+        let [command] = &self.subscribes()[..] else {
+            panic!("one subscribe command in {:?}", self.actions);
+        };
+        let reply = format!("{{\"id\":{},{fields}}}", command["id"]);
+        let transport = self.transport;
+        self.handle(Input::Frame {
+            transport,
+            data: reply.into_bytes(),
+        });
+    }
+
+    /// Opens the transport `actions` ask for and answers its connect
+    /// command: the actions of both, which may hold subscribe commands.
+    fn open(&mut self, actions: &[Action]) {
+        self.transport = opened_transport(actions);
+        let transport = self.transport;
+        let mut opened = self.machine.handle(Input::TransportOpened(transport));
+        let connect = sent_commands(&opened)
+            .into_iter()
+            .find(|command| command.get("connect").is_some())
+            .expect("a connect command");
+        self.handle(Input::Frame {
+            transport,
+            data: format!(r#"{{"id":{},"connect":{{"client":"c"}}}}"#, connect["id"]).into_bytes(),
+        });
+        opened.append(&mut self.actions);
+        self.actions = opened;
+    }
+}
+
+fn opened_transport(actions: &[Action]) -> TransportId {
+    actions
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a transport to open")
+}
+
+/// The commands sent among `actions`, decoded.
+fn sent_commands(actions: &[Action]) -> Vec<Value> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame),
+            _ => None,
+        })
+        .flat_map(|frame| {
+            std::str::from_utf8(frame)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[given(
+    regex = r#"^a client connected, with a map subscription to "(\w+)" whose recovering subscribe is answered with error 112, minResubscribeDelay (\d+) ms and maxResubscribeDelay (\d+) ms$"#
+)]
+fn a_core_whose_recovery_fails(world: &mut ClientWorld, channel: String, min: u64, max: u64) {
+    let mut machine = Machine::new(Config::default());
+    let mut options = MapSubscriptionOptions::new(MapKind::Map);
+    options.common = SubscriptionOptions::default()
+        .min_resubscribe_delay(Duration::from_millis(min))
+        .max_resubscribe_delay(Duration::from_millis(max));
+    let id = machine.add_map_subscription(channel, options).unwrap();
+    let connecting = machine.handle(Input::Connect);
+    let mut core = MapCore {
+        machine,
+        transport: opened_transport(&connecting),
+        id,
+        actions: Vec::new(),
+    };
+    core.open(&connecting);
+    core.handle(Input::Subscribe(id));
+    // Synced at "e1" and 7, the sync taken at once (no stream).
+    core.answer(r#""subscribe":{"type":1,"recoverable":true,"epoch":"e1","offset":7}"#);
+    let transport = core.transport;
+    core.machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let reconnecting = core.machine.handle(Input::TimerFired(Timer::Reconnect));
+    core.open(&reconnecting);
+    let [recovering] = &core.subscribes()[..] else {
+        panic!("one subscribe command in {:?}", core.actions);
+    };
+    assert_eq!(recovering["subscribe"]["phase"], 1, "{recovering}");
+    world.maps.core = Some(core);
+}
+
+#[when("the error is handled")]
+fn the_error_is_handled(world: &mut ClientWorld) {
+    let core = world.maps.core.as_mut().expect("a core");
+    core.answer(r#""error":{"code":112,"message":"unrecoverable position"}"#);
+}
+
+#[then(r#"the subscription stays "subscribing" and emits nothing"#)]
+fn stays_subscribing(world: &mut ClientWorld) {
+    let core = world.maps.core.as_ref().expect("a core");
+    assert_eq!(
+        core.machine.subscription_state(core.id),
+        Some(SubscriptionState::Subscribing)
+    );
+    assert!(
+        !core
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::EmitMapSubscription(..))),
+        "{:?}",
+        core.actions
+    );
+}
+
+#[then(
+    regex = r#"^the next subscribe command for "(\w+)" has phase 2 and no epoch, sent after a delay between (\d+) ms and (\d+) ms$"#
+)]
+fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64, max: u64) {
+    let core = world.maps.core.as_mut().expect("a core");
+    let id = core.id;
+    let delay = core
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, delay)
+                if *of == id =>
+            {
+                Some(*delay)
+            }
+            _ => None,
+        })
+        .expect("a resubscribe delay");
+    assert!(
+        delay >= Duration::from_millis(min) && delay <= Duration::from_millis(max),
+        "{delay:?}"
+    );
+    assert!(core.subscribes().is_empty(), "{:?}", core.actions);
+    core.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    let [again] = &core.subscribes()[..] else {
+        panic!("one subscribe command in {:?}", core.actions);
+    };
+    let subscribe = &again["subscribe"];
+    assert_eq!(subscribe["channel"], channel.as_str());
+    assert_eq!(subscribe["phase"], 2, "{subscribe}");
+    assert!(subscribe.get("epoch").is_none(), "{subscribe}");
 }

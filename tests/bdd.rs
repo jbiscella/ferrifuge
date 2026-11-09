@@ -721,6 +721,19 @@ const MAPS: &[&str] = &[
     "Pages are handled while another subscription's stream is not read",
     "An unsubscribe during a load waits for the page in flight",
     "Statistics count map subscriptions and their updates",
+    // 45c: recovery and resync.
+    "Missed changes are recovered as updates after a reconnect",
+    "A recovering subscribe starts in the stream phase from the position",
+    "Updates move the position only when taken",
+    "A sync not taken before disconnect() is withdrawn and the state is loaded again",
+    "A map subscription too far behind resyncs from a fresh state",
+    "An unrecoverable position resyncs after the resubscribe backoff",
+    "With the fatal strategy an unrecoverable position unsubscribes",
+    "An ephemeral map syncs again on every reconnect",
+    "A cleared map is loaded again",
+    "State invalidation drops the position and the token",
+    "A temporary error during a load starts it again after the backoff",
+    "A load the server closes as slow starts again on the next connection",
 ];
 #[cfg(not(feature = "unstable"))]
 const MAPS: &[&str] = &[];
