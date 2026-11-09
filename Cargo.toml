@@ -248,6 +248,10 @@ name = "adapter_tokens"
 required-features = ["tokio"]
 
 [[test]]
+name = "debounce_driver"
+required-features = ["tokio"]
+
+[[test]]
 name = "log_facade"
 required-features = ["tokio"]
 
