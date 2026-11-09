@@ -13,6 +13,7 @@
 
 // @P scenario: Every model trace replays into the core up to its recorded divergence
 // @P scenario: The replayer reports a planted mismatch
+// @P scenario: Every counterexample of a bug variant diverges where recorded
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -104,6 +105,9 @@ enum Divergence {
     Dv3,
     /// A failed emulation request of a subscribe reconnects (Block 8).
     Dv4,
+    /// Where a counterexample's bug departs from the model (D6); no trace
+    /// predicate finds it.
+    Bug,
 }
 
 /// What D4 compares.
@@ -254,8 +258,11 @@ impl Trace {
                 after["toS"] = json!(commands);
             }
             // The unsubscribe waits for the subscribe's reply, and a flow
-            // for the unsubscribe's.
-            Divergence::Dv2 => {
+            // for the unsubscribe's, over websocket (DV2) as the correct
+            // SDK does where a counterexample's bug does not wait (D6): the
+            // step's subscribe or unsubscribe, or the flow's callback, of
+            // that channel is absent.
+            Divergence::Dv2 | Divergence::Bug => {
                 let channel = changed_channel(&self.states[at - 1], &self.states[at], "sub");
                 let new: BTreeSet<i64> = new_commands(before, &after)
                     .iter()
@@ -270,6 +277,17 @@ impl Trace {
                     .filter(|command| !command["id"].as_i64().is_some_and(|id| new.contains(&id)))
                     .collect();
                 after["toS"] = json!(kept);
+                let mut known = list(before, "cbs");
+                let mut callbacks = Vec::new();
+                for callback in list(&after, "cbs") {
+                    if let Some(index) = known.iter().position(|old| *old == callback) {
+                        known.remove(index);
+                        callbacks.push(callback);
+                    } else if callback["ch"].as_str() != channel.as_deref() {
+                        callbacks.push(callback);
+                    }
+                }
+                after["cbs"] = json!(callbacks);
             }
             // The subscribe after a 2502 carries no position; with
             // getState, the core loads the state first instead (Block 11).
@@ -360,6 +378,21 @@ impl Trace {
                 }
                 "Env_WriteError" if !changed(before, after, "cl") => keep(step, Divergence::Dv4),
                 _ => {}
+            }
+            // DV2's second case: over websocket a flow starts, with a
+            // subscribe or a callback, while an unsubscribe of its channel
+            // awaits its reply.
+            if act == "Sdk_StartFlow" && self.ordered() {
+                let held = channels(after, "sub").into_iter().any(|channel| {
+                    before["sub"][&channel]["infl"] == false
+                        && after["sub"][&channel]["infl"] == true
+                        && list(before, "pend").iter().any(|pending| {
+                            pending["k"] == "unsub" && pending["ch"] == channel.as_str()
+                        })
+                });
+                if held {
+                    keep(step, Divergence::Dv2);
+                }
             }
             if act == "Sdk_StartFlow" {
                 for command in &new {
@@ -1751,6 +1784,92 @@ fn every_model_trace_replays_into_the_core_up_to_its_recorded_divergence() {
         report(&run.failures)
     );
     assert_eq!(run.clean, CLEAN, "traces reaching no recorded divergence");
+}
+
+/// The counterexamples of `bugs.jsonl`, by line: the step where each
+/// departs from the core and how (Block 42, D6). The three over
+/// `http_stream` show their bug; the websocket ones reach DV1 or DV2 first.
+/// Rows 4 and 6 record step 9, an `Sdk_StartFlow` checked together with
+/// step 8's `App_Subscribe` (D3).
+const COUNTEREXAMPLES: [(usize, usize, Divergence); 7] = [
+    // `bug_accept_stale_reply`: an unsubscribe while the subscribe awaits
+    // its reply.
+    (1, 7, Divergence::Dv2),
+    // `bug_invalidate_empty_epoch`: the connect without the subscribe.
+    (2, 4, Divergence::Dv1),
+    // `bug_no_unsub_defer`: an unsubscribe while the subscribe awaits its
+    // reply.
+    (3, 7, Divergence::Bug),
+    // `bug_no_unsub_wait`: a second subscribe while the first awaits its
+    // reply.
+    (4, 9, Divergence::Bug),
+    // `bug_stale_flow_continuation`: a subscribe with the token fetched for
+    // the flow `unsubscribe()` ended.
+    (5, 9, Divergence::Bug),
+    // `bug_stale_flow_continuation_ws`: a token fetch while step 7's
+    // unsubscribe awaits its reply.
+    (6, 9, Divergence::Dv2),
+    // `bug_unsub_push_any_state`: the connect without the subscribe.
+    (7, 3, Divergence::Dv1),
+];
+
+/// The counterexample traces, by line.
+fn counterexamples() -> Vec<Trace> {
+    let text = std::fs::read_to_string(fixtures().join("upstream/bugs.jsonl"))
+        .expect("the copied counterexamples");
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| Trace::parse(index + 1, line))
+        .collect()
+}
+
+/// Replays counterexample `trace`, which must match the model up to `step`
+/// and differ there as `divergence` says.
+fn counterexample(trace: &Trace, step: usize, divergence: Divergence) -> Result<(), String> {
+    let found = trace.divergence();
+    match divergence {
+        Divergence::Bug => {
+            if let Some((at, before)) = found.filter(|(at, _)| *at <= step) {
+                return Err(format!("{before:?} at step {at}, before the bug"));
+            }
+        }
+        recorded if found != Some((step, recorded)) => {
+            return Err(format!(
+                "its predicates find {found:?}, recorded {recorded:?} at step {step}"
+            ));
+        }
+        _ => {}
+    }
+    let mut replay = Replay::new(trace).map_err(|mismatch| mismatch.text)?;
+    replay
+        .run(Some((step, divergence)))
+        .map_err(|mismatch| mismatch.text)
+}
+
+#[test]
+fn every_counterexample_of_a_bug_variant_diverges_where_recorded() {
+    let traces = counterexamples();
+    assert_eq!(traces.len(), COUNTEREXAMPLES.len());
+    let failures: Vec<String> = COUNTEREXAMPLES
+        .iter()
+        .filter_map(|&(line, step, divergence)| {
+            counterexample(&traces[line - 1], step, divergence)
+                .err()
+                .map(|why| format!("{} line {line}: {why}", traces[line - 1].config))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // The 3 counterexamples over http_stream are those that show their bug.
+    for &(line, _, divergence) in &COUNTEREXAMPLES {
+        let emulated = !traces[line - 1].ordered();
+        assert_eq!(
+            matches!(divergence, Divergence::Bug),
+            emulated,
+            "line {line}: over http_stream {emulated}, recorded {divergence:?}"
+        );
+    }
+    let emulated = traces.iter().filter(|trace| !trace.ordered()).count();
+    assert_eq!(emulated, 3, "counterexamples over http_stream");
 }
 
 /// A fault planted in a copy of a model trace, for the replayer to report
