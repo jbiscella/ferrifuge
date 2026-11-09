@@ -721,7 +721,8 @@ pub enum Input {
     /// A timer set by [`Action::SetCallTimer`] fired.
     CallTimerFired(CallId, CallTimer),
     /// The application no longer awaits the call, e.g. its future was
-    /// dropped: it is forgotten, and never sent if it was waiting.
+    /// dropped: it is forgotten, and never sent if it was waiting. A map
+    /// remove that publishes follow goes on for them (Block 46, D11).
     CallAbandoned(CallId),
     /// The system slept for `gap`: the wall clock moved that much further
     /// than the monotonic one, whose timers resume with the time they had
