@@ -166,12 +166,20 @@ pub(super) struct Outboxes {
     pub(super) client: Outbox<ClientEvent>,
     /// Those of the subscriptions whose `events()` was called.
     pub(super) subscriptions: HashMap<SubscriptionId, Outbox<SubscriptionEvent>>,
+    /// Those of the map subscriptions whose `events()` was called (Block
+    /// 45).
+    #[cfg(feature = "unstable")]
+    pub(super) maps: HashMap<SubscriptionId, Outbox<crate::MapSubscriptionEvent>>,
 }
 
 impl Outboxes {
     fn withdraw(&mut self, ids: &[crate::machine::EventId]) {
         self.client.withdraw(ids);
         for outbox in self.subscriptions.values_mut() {
+            outbox.withdraw(ids);
+        }
+        #[cfg(feature = "unstable")]
+        for outbox in self.maps.values_mut() {
             outbox.withdraw(ids);
         }
     }
@@ -660,6 +668,13 @@ impl Shared {
                             None => Some(id),
                         }
                     }
+                    #[cfg(feature = "unstable")]
+                    Action::EmitMapSubscription(id, subscription, event) => {
+                        match outboxes.maps.get_mut(&subscription) {
+                            Some(outbox) => outbox.offer(id, event),
+                            None => Some(id),
+                        }
+                    }
                     Action::Withdraw(ids) => {
                         outboxes.withdraw(&ids);
                         None
@@ -807,7 +822,7 @@ impl Drop for PendingCall {
 /// A stream of the client's or a subscription's events, taking them from
 /// its outbox: each event it yields is reported taken to the machine
 /// under the core lock, so a withdrawal never races a take (Block 15).
-pub(super) struct EventStream<E> {
+pub(super) struct EventStream<E: Routed> {
     shared: Arc<Shared>,
     /// The subscription whose events it yields; the client's when `None`.
     of: Option<SubscriptionId>,
@@ -818,21 +833,40 @@ pub(super) struct EventStream<E> {
 /// Events with an outbox: the client's and the subscriptions'.
 pub(super) trait Routed: Sized {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>>;
+    /// Forgets the finished outbox of subscription `of`.
+    fn forget(outboxes: &mut Outboxes, of: SubscriptionId);
 }
 
 impl Routed for ClientEvent {
     fn outbox(outboxes: &mut Outboxes, _: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
         Some(&mut outboxes.client)
     }
+
+    fn forget(_: &mut Outboxes, _: SubscriptionId) {}
 }
 
 impl Routed for SubscriptionEvent {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
         outboxes.subscriptions.get_mut(&of?)
     }
+
+    fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
+        outboxes.subscriptions.remove(&of);
+    }
 }
 
-impl<E> EventStream<E> {
+#[cfg(feature = "unstable")]
+impl Routed for crate::MapSubscriptionEvent {
+    fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
+        outboxes.maps.get_mut(&of?)
+    }
+
+    fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
+        outboxes.maps.remove(&of);
+    }
+}
+
+impl<E: Routed> EventStream<E> {
     pub(super) fn new(shared: Arc<Shared>, of: Option<SubscriptionId>, number: u64) -> Self {
         Self {
             shared,
@@ -856,7 +890,7 @@ impl<E: Routed> Stream for EventStream<E> {
         if outbox.is_finished()
             && let Some(of) = self.of
         {
-            outboxes.subscriptions.remove(&of);
+            E::forget(&mut outboxes, of);
         }
         drop(outboxes);
         let Poll::Ready(Some((id, event))) = polled else {
@@ -869,24 +903,20 @@ impl<E: Routed> Stream for EventStream<E> {
     }
 }
 
-impl<E> Drop for EventStream<E> {
+impl<E: Routed> Drop for EventStream<E> {
     // Dropping the active stream takes what it held, as with no stream.
     fn drop(&mut self) {
         let mut core = lock(&self.shared.core);
         let mut outboxes = lock(&self.shared.outboxes);
-        let taken = match self.of {
-            None => outboxes.client.drop_stream(self.number),
-            Some(of) => {
-                let Some(outbox) = outboxes.subscriptions.get_mut(&of) else {
-                    return;
-                };
-                let taken = outbox.drop_stream(self.number);
-                if outbox.is_finished() {
-                    outboxes.subscriptions.remove(&of);
-                }
-                taken
-            }
+        let Some(outbox) = E::outbox(&mut outboxes, self.of) else {
+            return;
         };
+        let taken = outbox.drop_stream(self.number);
+        if outbox.is_finished()
+            && let Some(of) = self.of
+        {
+            E::forget(&mut outboxes, of);
+        }
         drop(outboxes);
         // A superseded stream leaves the active one in place.
         let Some(taken) = taken else {
@@ -3123,6 +3153,8 @@ impl Drop for Ending {
         let mut outboxes = lock(&shared.outboxes);
         outboxes.client.close();
         outboxes.subscriptions.values_mut().for_each(Outbox::close);
+        #[cfg(feature = "unstable")]
+        outboxes.maps.values_mut().for_each(Outbox::close);
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
         super::handler::wake_consumer(shared);

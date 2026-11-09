@@ -176,9 +176,24 @@ pub struct Publication {
     /// publication the application takes never has it (Block 19, D4).
     pub(crate) delta: bool,
     /// A map publication's key, and whether it removes the key (Block 45,
-    /// D3); empty and false otherwise.
+    /// D3); boxed, as a stream publication has none.
+    pub(crate) map: Option<Box<MapPart>>,
+}
+
+/// What a map publication carries besides a stream publication's fields
+/// (`client.proto`, `Publication.key` and `Publication.removed`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MapPart {
     pub(crate) key: String,
     pub(crate) removed: bool,
+}
+
+impl MapPart {
+    /// The map part of a publication with `key` and `removed`, `None` for
+    /// a stream publication's empty key and false.
+    pub(crate) fn of(key: String, removed: bool) -> Option<Box<Self>> {
+        (!key.is_empty() || removed).then(|| Box::new(Self { key, removed }))
+    }
 }
 
 /// A client connection, as the server describes it (`client.proto`,

@@ -625,7 +625,7 @@ fn a_removal_is_an_update_without_data() {
         panic!("{pushed:?}");
     };
     assert!(update.removed);
-    assert!(update.data.is_empty());
+    assert_eq!(update.data, b"");
 }
 
 #[test]

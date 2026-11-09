@@ -87,21 +87,23 @@ impl Load {
     /// Applies a state entry or a catch-up publication by key: the last
     /// value wins, a removal deletes the key.
     fn apply(&mut self, publication: Publication) {
-        let place = self.index.get(&publication.key).copied();
-        if publication.removed {
+        let (key, removed) = publication
+            .map
+            .as_ref()
+            .map_or(("", false), |map| (map.key.as_str(), map.removed));
+        let place = self.index.get(key).copied();
+        if removed {
             if let Some(place) = place {
                 self.entries[place] = None;
-                self.index.remove(&publication.key);
+                self.index.remove(key);
             }
             return;
         }
-        match place {
-            Some(place) => self.entries[place] = Some(publication),
-            None => {
-                self.index
-                    .insert(publication.key.clone(), self.entries.len());
-                self.entries.push(Some(publication));
-            }
+        if let Some(place) = place {
+            self.entries[place] = Some(publication);
+        } else {
+            self.index.insert(key.to_owned(), self.entries.len());
+            self.entries.push(Some(publication));
         }
     }
 
@@ -219,7 +221,12 @@ fn fault(load: &Load, result: &crate::wire::SubscribeResult) -> Option<&'static 
         .state
         .iter()
         .chain(&result.publications)
-        .any(|publication| publication.key.is_empty())
+        .any(|publication| {
+            publication
+                .map
+                .as_ref()
+                .is_none_or(|map| map.key.is_empty())
+        })
     {
         return Some("an entry without a key");
     }
@@ -260,14 +267,15 @@ impl Machine {
         common.recoverable = false;
         common.join_leave = false;
         let id = self.add_subscription(channel, common)?;
-        let sub = self.subscriptions.by_id.get_mut(&id).expect("just added");
-        sub.map = Some(Box::new(MapFlow {
-            kind,
-            page_size,
-            max_state_bytes: max_state_bytes.get(),
-            strategy: unrecoverable_strategy,
-            load: None,
-        }));
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+            sub.map = Some(Box::new(MapFlow {
+                kind,
+                page_size,
+                max_state_bytes: max_state_bytes.get(),
+                strategy: unrecoverable_strategy,
+                load: None,
+            }));
+        }
         Ok(id)
     }
 
@@ -455,7 +463,11 @@ impl Machine {
     /// A publication pushed to map subscription `id`: an update of its key,
     /// which moves the position once taken (D5).
     pub(super) fn map_publication(&mut self, id: SubscriptionId, publication: Publication) {
-        if publication.key.is_empty() {
+        if publication
+            .map
+            .as_ref()
+            .is_none_or(|map| map.key.is_empty())
+        {
             if let Some(transport) = self.transport {
                 self.actions
                     .push(Action::Anomaly(Anomaly::UnexpectedMapReply {

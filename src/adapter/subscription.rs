@@ -608,9 +608,14 @@ impl Client {
     /// The subscription to `channel` in the registry, if any.
     #[must_use]
     pub fn get_subscription(&self, channel: &str) -> Option<Subscription> {
-        let id = lock(&self.shared().core)
-            .machine
-            .find_subscription(channel)?;
+        let core = lock(&self.shared().core);
+        let id = core.machine.find_subscription(channel)?;
+        // A map subscription is not one (Block 45, D2).
+        #[cfg(feature = "unstable")]
+        if core.machine.map_subscription_kind(id).is_some() {
+            return None;
+        }
+        drop(core);
         Some(Subscription {
             shared: Arc::clone(self.shared()),
             id,
@@ -621,7 +626,15 @@ impl Client {
     /// Every subscription in the registry.
     #[must_use]
     pub fn subscriptions(&self) -> Vec<Subscription> {
-        let subscriptions = lock(&self.shared().core).machine.subscriptions();
+        let core = lock(&self.shared().core);
+        let subscriptions = core.machine.subscriptions();
+        // Map subscriptions are listed apart (Block 45, D2).
+        #[cfg(feature = "unstable")]
+        let subscriptions: Vec<_> = subscriptions
+            .into_iter()
+            .filter(|(id, _)| core.machine.map_subscription_kind(*id).is_none())
+            .collect();
+        drop(core);
         subscriptions
             .into_iter()
             .map(|(id, channel)| Subscription {

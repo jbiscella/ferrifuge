@@ -101,6 +101,9 @@ pub use adapter::{
     Batch, Client, ClientBuilder, ClientHandler, EventDelivery, Subscription, SubscriptionBuilder,
     SubscriptionHandler, WeakClient,
 };
+#[cfg(all(any(adapter_tokio, adapter_browser), feature = "unstable"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+pub use adapter::{MapSubscription, MapSubscriptionBuilder};
 // Native only (Block 44, D14).
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]

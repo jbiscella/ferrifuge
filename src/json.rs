@@ -869,8 +869,7 @@ impl From<JsonPublication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
-            key: publication.key,
-            removed: publication.removed,
+            map: crate::subscription::MapPart::of(publication.key, publication.removed),
         }
     }
 }
@@ -1135,14 +1134,14 @@ mod tests {
         };
         assert_eq!((page.kind, page.phase, page.cursor.as_str()), (1, 2, "c1"));
         assert_eq!(page.state.len(), 1);
-        assert_eq!(page.state[0].key, "a");
+        assert_eq!(page.state[0].map.as_ref().unwrap().key, "a");
         assert_eq!(page.state[0].data, br#"{"v":1}"#);
         let ReplyResult::Subscribe(live) = &replies[1].result else {
             panic!("{replies:?}");
         };
         assert_eq!((live.kind, live.phase), (1, 0));
-        assert_eq!(live.publications[0].key, "b");
-        assert!(live.publications[0].removed);
+        assert_eq!(live.publications[0].map.as_ref().unwrap().key, "b");
+        assert!(live.publications[0].map.as_ref().unwrap().removed);
     }
 
     #[test]

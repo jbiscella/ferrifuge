@@ -11,7 +11,30 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-09
+
 ### Added
+
+- Unstable (`unstable` feature): map subscriptions (Block 45b).
+  `Client::map_subscription_builder`, `Client::new_map_subscription`,
+  `Client::get_map_subscription`, `Client::map_subscriptions` and
+  `Client::remove_map_subscription` make a `MapSubscription` of a
+  `MapKind` (`Map`, `Clients`, `Users`), which loads a keyed state that
+  Centrifugo owns page by page (`MapSubscriptionBuilder::page_size`),
+  catches up on the changes made meanwhile, and yields one
+  `MapSubscriptionEvent::Sync` with every `MapEntry`, then a
+  `MapSubscriptionEvent::Update` (`MapUpdate`) per change;
+  `MapSubscription::publish`, `publish_json` and `remove` set and remove
+  keys once subscribed. Pages are handled as they are read, ahead of the
+  events not taken; `MapSubscriptionBuilder::max_state_bytes` (64 MiB)
+  bounds a load. `UnrecoverableStrategy` is configurable, used from 45c.
+  The core has `Machine::add_map_subscription`, `MapSubscriptionOptions`,
+  `Action::EmitMapSubscription` and `Anomaly::UnexpectedMapReply`.
+
+- `codes::unsubscribed::MAP_STATE_TOO_LARGE` (5) and
+  `codes::unsubscribed::MAP_NOT_SUPPORTED` (6) (Block 45b): a map
+  subscription's load passed its bound, and a server answered a map
+  subscription as a stream one; only map subscriptions use them.
 
 - The browser adapter (Block 44b): on `wasm32-unknown-unknown` the same
   `Client`, `Subscription`, streams, handlers and calls run in the browser
@@ -61,6 +84,11 @@ repository held while it carried that version, from the blocks of
   core has `CallRequest::MapPublish` and `CallRequest::MapRemove`.
 
 ### Changed
+
+- `machine::Action` is `#[non_exhaustive]` (Block 45b), as `Input` and
+  `Anomaly` already are: a variant added under a feature, as
+  `Action::EmitMapSubscription` under `unstable`, would otherwise break the
+  exhaustive `match` of a crate whose graph another crate enables it in.
 
 - `reconnect()` while connecting, before the first attempt since the
   client lost its connection has started, waits a draw from the reconnect
