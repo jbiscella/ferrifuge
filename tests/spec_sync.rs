@@ -29,10 +29,10 @@ const P_CLAIM: &str = "// @P scenario: ";
 /// Directories searched for `@P` claims.
 const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
-/// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: those of
-/// the sub-increments after 44d (Block 44). A scenario leaves the list
-/// when a test claims it.
-const W_NOT_YET_WRITTEN: &[&str] = &[];
+/// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: Block 45's,
+/// until its sub-increment writes them. A scenario leaves the list when a
+/// test claims it.
+const W_NOT_YET_WRITTEN: &[&str] = &["A browser client syncs a map and receives its updates"];
 
 /// How a wasm test claims a `@W` scenario: a line of its own reading
 /// `// @W scenario: <scenario name>`.

@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–44 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–45 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -58,7 +58,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 ### Out of scope (v1)
 
 - sockjs, webtransport transports (webtransport planned: Block 48)
-- map subscriptions, shared poll subscriptions (experimental; planned: Blocks 45 and 47)
+- map subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 45, behind the `unstable` feature), shared poll subscriptions (experimental; planned: Block 47)
 - client publish debouncing (Centrifugo PRO; planned: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
 - `closed` state
@@ -82,6 +82,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 18, out of scope | batching the calls a new connection releases when no batch is open | owner, 2026-11-06 (item 26) | 36 |
 | Block 18, out of scope | subscribe commands in the frame of the connect command on websocket open | owner, 2026-11-06, late (item 31) | 36 |
 | Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |
+| Block 0, Block 9 and Block 11, out of scope | map subscriptions | owner, 2026-11-06, late (item 29) | 45 |
 
 ### Test layers
 
@@ -690,7 +691,7 @@ Feature: Transport fallback
 
 **Dependencies:** Blocks 1–5, 8 (publications over the emulated transports arrive as top-level pushes rather than websocket's reply envelope, so delivery is checked over every transport here).
 
-**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
+**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
 
 **Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); an `unsubscribe()` or a removal while the flow waits for its data, token or getState callback sends an unsubscribe command (amended by Block 42 D10; centrifuge-js 63ed73e `_inflight`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
@@ -1163,7 +1164,7 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Dependencies:** Blocks 9, 10.
 
-**Out of scope:** delta compression; map and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
+**Out of scope:** delta compression; map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
 
 **Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); the server decides, so the `subscribed` event reports the granted `positioned` and `recoverable` and the stream position (`epoch`, `offset`) from `SubscribeResult` (centrifuge-js); the stored position follows every publication delivered (taken from the application's stream, Block 15), live or recovered, including a changed `epoch` (`client.proto`, `Publication.epoch`); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); when `since` is also set, `since` provides the first position and getState is not called until a recovery fails (centrifuge-js calls getState only without a position); with getState the subscribe command sets the "reject unrecovered" flag, so a failed recovery is answered with error 112 instead of a `recovered = false` result, and the client drops the position and resubscribes after the resubscribe backoff, calling getState first: the subscription stays `subscribing`, with no `subscribed` event, no publication and no released subscription call, until that subscribe succeeds (`client.proto`, `SubscribeRequest.flag`; centrifuge-js `subscriptionFlags.rejectUnrecovered`); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) reconnects; on 3014 a server-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_"), so its recovery at the next connect fails and its subscribed event reports was_recovering true and recovered false (owner decision, 2026-11-04; centrifuge-js 63ed73e centrifuge.ts _disconnect); on 3014 a client-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_") instead of dropping it, so the next recovery fails and the app is told: with getState, error 112 leads to a reload; without getState, `subscribed` reports `was_recovering` true and `recovered` false (owner decision, 2026-11-04; centrifuge-js 63ed73e `_invalidateState`; `client.proto` does not define 3014); on 3014 the client clears the connection token and the token of every client-side subscription, unconditionally; before the next connect or resubscribe a new token is fetched only where a token callback exists, otherwise the command carries no token (owner decision, 2026-11-04; centrifuge-js 63ed73e clears them only when getToken is set, `centrifuge.ts` `_disconnect`, `subscription.ts` `_invalidateState`; `client.proto` does not define 3014); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
@@ -2082,7 +2083,7 @@ Feature: Footprint, performance and fleet behaviour
 
 **Decisions** (owner decision, 2026-11-05: option 5, with hand-off delivery, a bounded read-ahead, one active stream per object, and timers and pings running while reading is paused; the remaining points decided through the review the owner delegated them to):
 - **Delivered means taken.** A publication counts as delivered only when the `next()` of its stream returns it; only then does its stream position move, for client-side and server-side subscriptions alike (Blocks 11, 12). Exactly-once delivery follows on channels with history and recovery while the backlog stays within the server's recovery limit (Centrifugo `client.recovery_max_publication_limit`, default 300; past it recovery fails and `subscribed` reports `recovered` false).
-- **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command.
+- **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command. A map subscription's intermediate page reply, which makes no event, is the exception: it is handled when read, once its connection's connect reply has been handled (amended by Block 45 D5).
 - **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport; over websocket and sse in the browser a bounded inbox stands instead, amended by Block 44 D7), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
 - **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads, and the queued reply is dropped (Centrifugo v6.10.1: centrifuge `writer.go` `enqueue`, `client.go` `writeEncodedCommandReply`; a 3008 close does not flush the queue). Each reconnect asks for the same backlog, so the client keeps reconnecting, its backoff growing up to `max_reconnect_delay` ("Backoff after 3008"; a connect reply that is itself dropped resets nothing), until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers.
 - **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.)
@@ -2904,15 +2905,15 @@ Feature: Batching
 - a tag filter together with delta: a subscription with both is rejected when built (Block 35, D1; `client.proto`, `SubscribeRequest.tf`: "disables delta compression"; centrifuge-js `subscription.ts:368-370`);
 - delta statistics (centrifuge-js `deltaStats()`): with `statistics()`, parity item 8;
 - a configurable inbound message limit (parity item 12);
-- map and shared-poll subscriptions and their per-key delta chains (Block 0).
+- shared-poll subscriptions and their per-key delta chains (Block 0); map subscriptions' per-key delta chains are Block 45 D9's.
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Component.** The decoder is written from scratch (owner decision, item 5). No crate meets Block 0's definition of a maintained component: fossil-delta 0.2.0 has had no release or commit since 2023-01-14; heroforge-core has no public repository; libfossil-rs is AGPL-3.0; delta-compression, xpatch and gdelta implement other formats; centrifuge-client-core 0.1.0 is excluded, as the sans-IO state machine behind centrifuge-client, which Block 0's first row does not reuse, and whose source the clean-room rule closes. The decoder is implemented from the Fossil documentation ("Fossil Delta Format", fossil-scm.org, read 2026-11-06) and cross-checked against centrifuge-js 63ed73e `src/fossil.ts`; no Rust crate's code is read or copied. As Block 0 requires of in-house components, it has a cargo-bolero target, run in ci.yml's `fuzz` loop and the fuzz.yml matrix (Block 14e), whose oracle round-trips the test-only writer's deltas (D9) and checks that any input either fails or builds a target within the limit; explicit bounds (D6); and no unsafe code. Only apply is implemented.
 - **D2 Format.** A delta is a header (the target size, then `\n`), segments (a copy `count@offset,` of bytes of the base, or an insert `count:` followed by that many bytes of the delta), and a trailer (a checksum, then `;`), the trailer ending the delta. Integers are base-64 digits of the alphabet `0-9A-Z_a-z~`, most significant first: the document says both "MSB first" and least significant first, and its example (`1Xb` = 6246) settles MSB first, as centrifuge-js reads them. The checksum is the sum, modulo 2^32, of the target read as 32-bit big-endian words, the last zero-padded: centrifuge-js (`fossil.ts`, `checksum`), centrifugal/fdelta 9e22462 (`checksum.go`, the encoder Centrifugo uses) and the five vectors Fossil itself produced (fdelta `testdata/fossil-vectors/`) agree, against the document's "modulo 2^32-1", which four of the five vectors fail. A copy of count 0 copies nothing, as centrifuge-js and fdelta do; the document says it copies to the end of the base (recorded divergence; no vector has one).
 - **D3 Failures.** A delta fails when: the header is not a number followed by `\n`; a segment is neither a copy nor an insert; a copy is not followed by `,`; a copy reads past the end of the base; an insert runs past the end of the delta; the segments produce more or fewer bytes than the header declares; the checksum differs; the trailer is missing or bytes follow it; a number has no digit, or a value above 2^32 − 1 (the document: "the format currently handles only 32 bit integers"); a byte outside the alphabet appears where a digit is expected, high-bit bytes included. centrifuge-js and fdelta accept some of these (empty numbers read as 0, values wrap, centrifuge-js masks high-bit bytes and ignores bytes after the trailer); neither encoder writes them, so being stricter rejects no delta Centrifugo sends. Offsets, counts and totals are computed without overflow.
 - **D4 Negotiation.** `SubscriptionOptions::delta: Option<DeltaFormat>`, set with `SubscriptionBuilder::delta`; `DeltaFormat` is `#[non_exhaustive]` with one variant, `Fossil`, the only value `client.proto` supports. It is sent as `SubscribeRequest.delta = "fossil"` with every subscribe and resubscribe (centrifuge-js `subscription.ts:990`). Each subscribe reply's `SubscribeResult.delta` says whether delta is on for that subscription until its next subscribe (centrifuge-js `:567-571`); the `subscribed` event reports it in a new `Subscribed::delta` field. The wire model gains the `Publication.delta` flag, decoded by both codecs.
-- **D5 Base and order.** A delta applies to the data of the previous publication of the subscription (`client.proto`, `Publication.delta`: "against the data of the previous publication in this subscription"), live or carried by a subscribe reply, in the order Block 15 handles them. The base is cleared at each subscribe and on state invalidation (unsubscribe code 2502, disconnect code 3014, Block 11): a delta with no base fails. centrifuge-js keeps its base across resubscribes and clears it only on state invalidation (`subscription.ts:495-518`) and on error 112 with getState (`:1025-1033`); `client.proto`'s "in this subscription" outranks it, and Centrifugo v6.10.1 sends the first publication after each subscribe whole, recovered or live (centrifuge 7ac037196c95, pinned by v6.10.1: `client.go:5436-5446`, `makeRecoveredPubsDeltaFossil`, and the live write path from `:5761`). A delta publication on a subscription whose last subscribe reply did not turn delta on fails as well, with or without the delta option (centrifuge-js delivers the delta bytes as the payload, `subscription.ts:1119`). Delta checks apply after routing: a publication no subscribed subscription takes (Block 9, Block 12) is dropped as today, unchecked.
-- **D6 Bounds.** Every D3 check but the checksum is made before the target is allocated, and the checksum after it is built: a 20-byte delta cannot make the client allocate 64 MiB. A target larger than the inbound message limit fails; the limit becomes one core constant, 64 MiB, used by both adapters (today `src/adapter/transport.rs:303` and `src/adapter/http.rs:27`) and by the decoder. So does a message whose decoded publications together exceed that limit, since the same publications sent whole would not fit one message either; such a recovery fails on every resubscribe until history no longer holds it, as a recovery reply over 64 MiB does without delta (documented). The Block 15 read-ahead keeps counting the bytes read; decoded data is held only for the message being handled (Block 15, "one message at a time"), and each delta subscription holds one base of at most the limit.
+- **D5 Base and order.** A delta applies to the data of the previous publication of the subscription (`client.proto`, `Publication.delta`: "against the data of the previous publication in this subscription"), live or carried by a subscribe reply, in the order Block 15 handles them. The base is cleared at each subscribe and on state invalidation (unsubscribe code 2502, disconnect code 3014, Block 11): a delta with no base fails. A map subscription keeps one base per key instead, which a recovering resubscribe keeps and a load from scratch drops (amended by Block 45 D9). centrifuge-js keeps its base across resubscribes and clears it only on state invalidation (`subscription.ts:495-518`) and on error 112 with getState (`:1025-1033`); `client.proto`'s "in this subscription" outranks it, and Centrifugo v6.10.1 sends the first publication after each subscribe whole, recovered or live (centrifuge 7ac037196c95, pinned by v6.10.1: `client.go:5436-5446`, `makeRecoveredPubsDeltaFossil`, and the live write path from `:5761`). A delta publication on a subscription whose last subscribe reply did not turn delta on fails as well, with or without the delta option (centrifuge-js delivers the delta bytes as the payload, `subscription.ts:1119`). Delta checks apply after routing: a publication no subscribed subscription takes (Block 9, Block 12) is dropped as today, unchecked.
+- **D6 Bounds.** Every D3 check but the checksum is made before the target is allocated, and the checksum after it is built: a 20-byte delta cannot make the client allocate 64 MiB. A target larger than the inbound message limit fails; the limit becomes one core constant, 64 MiB, used by both adapters (today `src/adapter/transport.rs:303` and `src/adapter/http.rs:27`) and by the decoder. So does a message whose decoded publications together exceed that limit, since the same publications sent whole would not fit one message either; such a recovery fails on every resubscribe until history no longer holds it, as a recovery reply over 64 MiB does without delta (documented). The Block 15 read-ahead keeps counting the bytes read; decoded data is held only for the message being handled (Block 15, "one message at a time"), and each delta subscription holds one base of at most the limit (a map subscription one per key, Block 45 D9).
 - **D7 Encodings.** With Protobuf, `Publication.data` is the delta or the whole payload. With JSON, on a subscription with delta on, `data` is a JSON string whatever the publication (`client.proto`, `Publication.data`): its value, unescaped as JSON, gives UTF-8 bytes that are the delta, or the whole payload, and the payload delivered is that value, so the application gets the JSON text it would get without delta, byte for byte (centrifuge-js `json.ts`, `applyDeltaIfNeeded`). A `data` that is not a JSON string there fails. The decoded payload is not validated as JSON: the checksum binds it to the server's payload. The unwrapping goes through `Codec` (Block 5c), after routing, since only the subscription knows whether delta is on.
 - **D8 Failure outcomes** (owner decision Q5).
   - Client-side subscription: an `error` event of the new kind `ErrorKind::Delta`, code 15 "delta error", then the subscription resubscribes: it moves to `subscribing` with the new code 2 "delta error", sends an unsubscribe command, and subscribes again after the resubscribe backoff (Block 10), once that unsubscribe is settled (Block 9). Its position stays at the last publication taken, so on a recoverable channel the publication that failed, and those after it, are recovered, the first of them whole (D5); publications not yet taken are withdrawn (Block 15 gains this reason), recovered ones of the same reply included. On a channel without recovery they are lost, as on any resubscribe.
@@ -4301,7 +4302,7 @@ Feature: Waiting until ready
     - A request refused with HTTP 413 is written, so it counts once; each command then sent again alone counts again (Block 8).
   - `messages_in: u64`: replies and pushes decoded from those frames when read, pings included, and those later dropped included (messages after a disconnect push, messages of a transport that ended while they were held, Block 15).
   - `messages_out: u64`: commands in the frames counted in `bytes_out`, pongs included, each command of a batch frame counted (Block 18).
-  - `publications_delivered: u64`: publications of client-side and server-side subscriptions once they count as taken under Block 15. That means taken from a stream, emitted while no stream is open, or left in a stream the application dropped. A withdrawn publication never counts.
+  - `publications_delivered: u64`: publications of client-side and server-side subscriptions once they count as taken under Block 15, and a map subscription's `Update` events (its `Sync` counts as none, Block 45 D11). That means taken from a stream, emitted while no stream is open, or left in a stream the application dropped. A withdrawn publication never counts.
   - `subscriptions: usize`: the client-side registry's size. `server_subscriptions: usize`: the server-side registry's size (`Machine::server_subscriptions`, Block 12).
 - **D2 Where the counters live.**
   - Every counter but `connected_since` lives in the core: `Machine::statistics(&self) -> Statistics`, deterministic and @E-testable. It reports `connected_since: None`, as the core has no clock; its owner sets that public field.
@@ -4703,7 +4704,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 and 4, and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 6 (5 and 6: Block 45 D12), and errors 15 and 16 (16: Block 41 D6); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
@@ -4716,17 +4717,18 @@ This block reverses no exclusion.
   A last table, "Server codes" (Codes | Carried by | Then), has these rows:
   - disconnect 3500–3999 and 4500–4999: `disconnected`, stays disconnected until `connect()` (Block 3);
   - every other disconnect code (3000–3499, 4000–4499, from 5000): `connecting`, reconnects after the backoff (Block 3);
-  - 3008: as above; before the first server ping on that connection, the backoff keeps growing (Block 15);
-  - 3014: tokens dropped and stream positions made unmatchable, then reconnects (Block 11);
+  - 3008: as above; before the first server ping on that connection, the backoff keeps growing (Block 15); during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again (Block 45);
+  - 3014: tokens dropped and stream positions made unmatchable (a map subscription's position and delta bases dropped, Block 45), then reconnects (Block 11);
   - websocket close 1009: `disconnected` code 3 (Block 3); other close codes below 3000: `connecting` code 1;
   - unsubscribe below 2500: `unsubscribed`, stays unsubscribed;
-  - unsubscribe from 2500: `subscribing`, subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); any code ends a server-side subscription (Block 12);
+  - unsubscribe from 2500: `subscribing`, subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112 (Block 45); any code ends a server-side subscription (Block 12);
   - connect error that is temporary, below 100, or 109: an `error` event, then `connecting`, reconnecting after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12 and then `disconnected` code 1 (Blocks 1, 5, 17);
   - any other connect error: `disconnected` with its code;
   - refresh error that is temporary or below 100: an `error` event, retried after 5 to 10 s; any other: `disconnected` with its code (Block 5);
   - subscribe errors:
     - 109: a new token, then resubscribes; without a token callback, error 12 and then `unsubscribed` code 1 (Block 10);
-    - 112 with getState: the state is reloaded and the subscription resubscribes after the backoff, with no `error` event (Block 11);
+    - 112 with getState: the state is reloaded and the subscription resubscribes after the backoff, with no `error` event (Block 11); on a map subscription, with `FromScratch` no `error` event and the state is loaded again after the backoff, with `Fatal` `unsubscribed` 112 (Block 45);
+    - 113: temporary, an `error` event, then the map subscription's load starts again after the backoff (Block 45);
     - temporary or below 100: an `error` event, then resubscribes after the backoff;
     - any other: `unsubscribed` with its code (Block 9);
   - sub_refresh error that is temporary or below 100: an `error` event, retried after 10 to 20 s; any other: `unsubscribed` with its code (Block 10);
@@ -6887,3 +6889,595 @@ Feature: Browser adapter
 - No write timeout on a browser websocket (D6), as centrifuge-js; Block 8's timeout stays native.
 - Captive portals are named over http_stream only (D6, D8, D9): the browser hides the websocket upgrade response and the EventSource response.
 - Safari runs the @W suite on main and nightly only, not on pull requests (D19).
+
+---
+
+## Block 45 — Map subscriptions (unstable)
+
+**Goal:** an application follows a keyed collection that Centrifugo owns (presence lists, cursors, lobbies, scoreboards, feature flags): the client loads the whole state page by page, catches up on the changes made meanwhile, then delivers each later change per key, resynchronises by itself after a gap, and lets the application set and remove keys, all with Block 15's delivery guarantees and within a memory bound; behind the non-default `unstable` feature. Source: parity item 29, design A ("Planned after Block 19": "Experimental APIs (items 29, 30, 33) are behind a non-default `unstable` feature, documented unstable and pinned to 63ed73e"; `ANALYSIS-PARITY.md`, branch `analysis/parity`, "29. Map subscriptions": "Recommendation. A, its API documented as unstable"; reverses Block 0's exclusion, recorded in Block 0's "Reversed exclusions"); centrifuge-js 63ed73e `newMapSubscription`, `newMapClientsSubscription`, `newMapUsersSubscription` (`src/centrifuge.ts:267`, `:294`, `:322`), `MapSubscription` (`src/subscription.ts:2896-2912`), README.md:880-893 ("experimental and require Centrifugo >= v6.8.0. The shape and behavior may change in a backwards-incompatible way"); Centrifugo v6.10.1 with centrifuge `7ac037196c95`, which it pins (`go.mod:18`).
+
+**Dependencies:** Blocks 0 (references, precedence, Components rule, test layers), 7 (Protobuf, protocol faults), 8 (transports, emulation), 9 (subscription lifecycle, registry, permanent and temporary subscribe errors, unsubscribe while in flight, messages after a closing message), 10 (tokens, `sub_refresh`, unsubscribe codes, resubscribe backoff), 11 (positions, recovery, 2502 and 3014), 13 (calls, subscription calls waiting for `subscribed`, `CallError`), 15 (delivered means taken, in-order handling, read-ahead, withdrawal, backoff after 3008), 19 (fossil delta, the inbound limit, failure outcomes), 20 (semver check, docs.rs, changelog), 21 (logging, redacting `Debug`), 29 (message size), 30 (`ready()`), 31 (statistics, delta statistics), 33 (`close()`), 34 (codes table), 35 (tag filters, channel compaction), 36 (optimistic subscriptions, automatic batching), 37 (test constructors), 38 (JSON helpers), 39 (one active stream), 41 (handlers, delivery modes, deadlock detection), 44 (browser target, `MaybeSend`).
+
+**Out of scope:**
+- shared poll subscriptions (Block 47) and client publish debouncing (`SubscribeResult.publish_debounce`, field 19, Block 46): a map subscription ignores `publish_debounce` until Block 46;
+- ordered maps: `SubscribeRequest.asc` (field 19) and `Publication.score` (field 13); centrifuge-js 63ed73e sends neither, and the open-source broker's ordering is `VERIFY:` (`client.proto`: "Ignored for unordered maps");
+- `get_state`, `get_data`, `since`, `positioned`, `recoverable` and `join_leave` on map subscriptions: the state is the server's, the namespace's `map.mode` decides positioning and recovery (centrifuge `client_map.go:443-449`), and centrifuge-js 63ed73e's `MapSubscriptionOptions` has none of them (`src/types.ts:676-701`); `data` and `set_data` stay;
+- `history()` on a map subscription: centrifuge-js's `MapSubscription` has none (`src/centrifuge.ts:39-53`); Centrifugo answers 108 there (Verified below);
+- server-side map subscriptions: Centrifugo reaches the map flow only from a client's subscribe command (centrifuge `client.go:2946-2949`); a `ConnectResult.subs` entry or `Subscribe` push is handled as today;
+- a client-side mirror of the map (an `entries()` accessor): the application keeps its own, as with centrifuge-js;
+- the in-memory server double (Block 37), the chaos runners (Block 16) and the trace replay (Block 42): none models map subscriptions while they are unstable, which the double's rustdoc says;
+- the server API's `map_read_state`, `map_read_stream`, `map_stats` and `map_clear` (a backend's concern; tests call them through `ServerApi`).
+
+This block reverses Block 0's exclusion of map subscriptions and the "map and shared-poll subscriptions (Block 0)" exclusions of Blocks 9 and 11 (owner decision, 2026-11-06, late, item 29); Block 0's "Reversed exclusions" gains its row. It amends Block 15's "In order, one message at a time" (D5), Block 19's out of scope, D5 and D6 (D9), Block 31's `publications_delivered` (D11) and Block 34 D1 (D12), as listed after this block.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 45a | As an app developer writing keys of a map channel (a cursor position, a lobby slot), I want `map_publish` and `map_remove` on the client, so that my app updates a Centrifugo-owned collection without a backend round trip | "map_publish sets a key", "map_remove removes a key", "A refused map publish fails with the server's code" |
+| 45b | As an app developer showing a keyed collection (a presence list, a scoreboard), I want a map subscription that loads the whole state page by page and then delivers each change per key, so that my view starts complete and stays current without a snapshot endpoint of mine | "A map subscription cannot share a channel with a stream subscription", "A new map subscription starts unsubscribed", "Removing a map subscription unsubscribes it and frees its channel", "A map subscription loads its state page by page", "A page size of 0 leaves the page size to the server", "Changes made during paging are part of the sync", "An epoch change during paging restarts the load", "A map subscription syncs then delivers updates", "A map subscription syncs over each transport and protocol", "publish and remove on a map subscription change the map for every subscriber", "A map subscription's publish waits until it is subscribed", "Presence of clients is a map keyed by client id", "Presence of users is a map keyed by user id whose entries expire", "A subscription type the namespace does not declare is refused", "A map subscription to a private namespace gets its token and refreshes it", "Every request of a load carries the token, and only the first carries the data", "A missing page reply makes the client reconnect", "A server without map subscriptions ends the map subscription", "A reply in a phase the request does not allow forces a reconnect", "A load larger than its bound ends the map subscription", "Pages are handled while another subscription's stream is not read", "An unsubscribe during a load waits for the page in flight", "Statistics count map subscriptions and their updates" |
+| 45c | As an app developer on an unreliable network, I want a map subscription to catch up on the changes it missed after a reconnect, and to resynchronise from a fresh state when it cannot, so that my view never silently diverges from the server's | "Missed changes are recovered as updates after a reconnect", "A recovering subscribe starts in the stream phase from the position", "Updates move the position only when taken", "A sync not taken before disconnect() is withdrawn and the state is loaded again", "A map subscription too far behind resyncs from a fresh state", "An unrecoverable position resyncs after the resubscribe backoff", "With the fatal strategy an unrecoverable position unsubscribes", "An ephemeral map syncs again on every reconnect", "A cleared map is loaded again", "State invalidation drops the position and the token", "A temporary error during a load starts it again after the backoff", "A load the server closes as slow starts again on the next connection" |
+| 45d | As an app developer with large values that change a little at a time, or with clients that need part of a map, I want per-key delta compression and tag filters on map subscriptions, so that each change costs a fraction of its size and each client loads only its part | "Delta compression decodes each key's changes", "A recovered map subscription decodes deltas against the values it held", "A removal ends a key's delta chain", "Page data is decoded once the live reply says whether delta is on", "A tag filter limits the state and the updates", "Setting a tag filter loads the state again" |
+| 45e | As an app developer using handlers, typed JSON, test constructors or the browser target, I want map subscriptions there too, so that they fit the rest of my code | "A map subscription handler receives the events in order", "A test builds map events without a server", "A browser client syncs a map and receives its updates" |
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 Design A, behind `unstable`.** A handle type of its own, as the analysis recommends, chosen by state of the art:
+  - centrifuge-js 63ed73e itself splits the types: `MapSubscription` is `CommonSurface & Pick<_BaseSubscription, 'setTagsFilter'> & { publish(key, data); remove(key) } & TypedEventEmitter<MapSubscriptionEvents>` (`src/centrifuge.ts:49-53`), a class of its own (`src/subscription.ts:2896`), with its own registry accessors (`getMapSubscription`, `removeMapSubscription`, `mapSubscriptions`, `src/centrifuge.ts:375`, `:405`, `:420`);
+  - centrifugal/centrifuge-rust `docs/spec.md` (88d6edf) plans the same: "Map and shared poll get their own public handle types (`MapSubscription`, ...) from new builder methods, so `Subscription` doesn't change", with an internal `kind` on core subscriptions (§9.11, "Designed for future work");
+  - Rust's state-then-changes clients give the sync protocol its own event type: kube-runtime's `watcher::Event` (`Apply`, `Delete`, `Init`, `InitApply`, `InitDone`; docs.rs, read 2026-11-09) is not a variant of a generic watch event;
+  - the Rust API Guidelines' "types for static guarantees": `publish(key, data)` exists only where a key means something, and `SubscriptionEvent` matches do not grow variants a stream subscription never emits.
+
+  Everything public this block adds is `#[cfg(feature = "unstable")]` with `#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]`, except the two `unsubscribed` code constants of D12, and its rustdoc opens with: "Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and later), and may change in any minor release." `Cargo.toml` gains `unstable = []`, not in `default`, documented as excluded from the semver promise. On the browser target `unstable` needs no other feature (D14).
+
+- **D2 Public API** (adapter, both targets):
+  - `pub enum MapKind { Map, Clients, Users }`, `#[non_exhaustive]`, sent as `SubscribeRequest.type` (field 15) 1, 2 and 3 (`client.proto:557-564`; centrifuge-js `_mapPresenceType`, `src/subscription.ts:72`, `:2793`).
+  - `Client::map_subscription_builder(&self, channel: impl Into<String>, kind: MapKind) -> MapSubscriptionBuilder` and `Client::new_map_subscription(&self, channel, kind) -> Result<MapSubscription, SubscriptionError>`; `get_map_subscription(&self, channel: &str) -> Option<MapSubscription>`, `map_subscriptions(&self) -> Vec<MapSubscription>`, `remove_map_subscription(&self, &MapSubscription)` (unsubscribes first, as Block 9's removal).
+  - One registry for both kinds, as centrifuge-js's `_subs` (`src/centrifuge.ts:267-270`, `:295-297`): creating a map subscription on a channel with a stream subscription, or the reverse, fails with `SubscriptionError::AlreadyExists`; `get_subscription` and `subscriptions()` list stream subscriptions only, `get_map_subscription` and `map_subscriptions()` map subscriptions only (centrifuge-js's `getSubscription` returns either kind; typed accessors cannot).
+  - `MapSubscriptionBuilder`: `token`, `get_token` (Block 10), `data` (Block 9), `min_resubscribe_delay`, `max_resubscribe_delay` (Block 10 defaults), `page_size(u32)` (D4), `max_state_bytes(NonZeroUsize)` (D5), `unrecoverable_strategy(UnrecoverableStrategy)` (D6), `delta(DeltaFormat)` (D9), `tag_filter(TagFilter)` and `channel_compaction(bool)` (D10), `handler` (D13), `build() -> Result<MapSubscription, SubscriptionError>` (the checks of Block 35 D1: an invalid filter, a filter with delta).
+  - `MapSubscription` (`Clone`, `Debug`, `PartialEq`, `Eq` as `Subscription`): `channel()`, `kind()`, `state() -> SubscriptionState`, `events() -> impl Stream<Item = MapSubscriptionEvent> + MaybeSend + Unpin + use<>` (one active stream, Block 15), `set_handler`, `held_events()`, `subscribe()`, `unsubscribe()`, `ready()` (Block 30), `publish(key, data)`, `publish_json(key, &T)`, `remove(key)` (D8), `presence()`, `presence_stats()` (centrifuge-js's `CommonSurface`, `src/centrifuge.ts:39-44`), `set_data` (Block 32), `set_tag_filter` (D10, as `Subscription::set_tag_filter`), `delta_statistics()` (D11).
+  - `pub enum MapSubscriptionEvent`, `#[non_exhaustive]`: `Subscribing { code, reason }`, `Subscribed(Subscribed)`, `Unsubscribed { code, reason }`, `Sync(Vec<MapEntry>)`, `Update(MapUpdate)`, `Error(ClientError)`, with `name()` as `SubscriptionEvent::name` ("sync", "update"). `Subscribed` is Block 11's struct, unchanged, filled from the live reply (`stream_position` its epoch and offset, `has_recovered_publications` set when `Update` events follow it).
+  - `pub struct MapEntry { pub key: String, pub data: Vec<u8>, pub offset: Option<u64>, pub tags: HashMap<String, String>, pub info: Option<ClientInfo> }` and `pub struct MapUpdate { pub key: String, pub data: Vec<u8>, pub removed: bool, pub offset: Option<u64>, pub tags: HashMap<String, String>, pub info: Option<ClientInfo> }`, both `#[non_exhaustive]`, `Clone`, `PartialEq`, `Eq`, with Block 21's redacting `Debug` (data as its length, tags by name; the key shown, as `ClientInfo` shows client and user ids). centrifuge-js `MapEntry` and `MapUpdateContext` (`src/types.ts:726-746`): "Snapshots never contain removed keys"; a removal's `data` is empty.
+  - `UnrecoverableStrategy { FromScratch, Fatal }`, `#[non_exhaustive]`, `Default` = `FromScratch` (centrifuge-js `'from_scratch' | 'fatal'`, `src/types.ts:697-700`, `:716`).
+  - Not adopted: centrifuge-js's `publication` event alongside each `update` (`src/subscription.ts:1167-1173`, `:2724-2731`), which would deliver each change twice through one stream, and `SubscribedContext.state` (`src/types.ts:350-352`, set at `src/subscription.ts:2641`), which would carry the entries twice: the entries are in `Sync` only (Exceptions).
+
+- **D3 Core.** The sans-IO core keeps one registry (`SubscriptionId` shared): a subscription has a kind, stream or map; a map subscription has `MapSubscriptionOptions` (new, `#[non_exhaustive]`, unstable) and its flow state (D4). `Machine::add_map_subscription(channel, MapSubscriptionOptions) -> Result<SubscriptionId, SubscriptionError>`; the existing inputs (`Subscribe`, `Unsubscribe`, `EventTaken`, token and data answers, `SetSubscriptionTagFilter`) serve both kinds, and the existing subscribe and resubscribe timers serve the flow, so `Timer` and `SubscriptionTimer`, both exhaustive, gain no variant. Map events leave the core as a new `Action::EmitMapSubscription(EventId, SubscriptionId, MapSubscriptionEvent)`.
+  - `Action` is an exhaustive public enum today (`src/machine.rs:672`). Cargo unifies features, so a variant added under `unstable` would break an exhaustive `match` of any crate in a graph where another crate enables `unstable`. 45b therefore marks `Action` `#[non_exhaustive]` on default features, as `Input` and `Anomaly` already are (`src/machine.rs:438`, `:804`), in the pull request that adds the variant needing it: a breaking change, 0.21.0 (D17).
+  - The wire model (`src/wire.rs`, `src/json.rs`, `src/protobuf.rs`) gains `SubscribeRequest.type` (15), `phase` (16), `cursor` (17), `limit` (18); `SubscribeResult.type` (15), `phase` (16), `cursor` (17), `state` (18); `Publication.key` (11), `removed` (12); `PublishRequest.type` (3), `key` (4), `removed` (5) (`client.proto:517-579`, `:584-632`, `:252-295`, `:694-706`). Zero and empty values are not encoded, so a stream subscription's frames are unchanged byte for byte (unit tests on both codecs). A JSON result without `phase` is phase 0, live (`client.proto:621-623`; centrifuge-js `src/subscription.ts:2376`).
+  - `CallRequest` (non-exhaustive) gains `MapPublish { channel, key, data }` and `MapRemove { channel, key }`, unstable; `Anomaly` (non-exhaustive) gains the faults of D15.
+
+- **D4 The subscribe flow** (centrifuge-js 63ed73e `_mapSubscribe`, `_fetchSnapshot`, `_handleMapStateResponse`, `_fetchStream`, `_handleMapStreamResponse`, `_handleMapLiveResponse`, `_buildMapSubscribeCommand`, `src/subscription.ts:2253-2832`; centrifuge `client_map.go:18-38`, phases `:95-99`):
+  - **First request.** Without a position to recover from (D6), the flow starts in the state phase: `subscribe { channel, type, phase: 2, limit, token, data, delta, tf, flag }`, with no cursor, epoch or offset. `limit` is `page_size` when it is above 0, omitted otherwise (server default). The server clamps it to the namespace's `map.min_page_size` and `map.max_page_size`, 100 and 1000 by default, and uses `map.default_page_size` (100) for 0 (centrifuge `client_map.go:104-111`, `:1421-1445`): a `page_size` under 100 has no effect unless the namespace lowers `min_page_size`, which the rustdoc says. The first request goes in the connect frame when it fits (Block 36, as any subscribe; centrifuge-js sends it from `_sendSubscribeCommands`, `src/centrifuge.ts:1249-1252`).
+  - **State pages.** A reply with phase 2 carries `state` entries, the `epoch` and `offset` of the stream when the first page was read, and a `cursor`. The flow keeps the first page's epoch and offset for the whole load, and asks for the next page with `cursor`, that `epoch` and `offset`, the same `limit`, `token`, `delta`, `tf` and `flag`, and no `data` (centrifuge-js `src/subscription.ts:2803-2815`). A later page leaves out entries changed after the first page's offset, so they come back in the stream phase (centrifuge `client_map.go:602-615`). A page may hold no entry and still carry a cursor (Verified).
+  - **Stream phase.** A phase-2 reply without cursor ends the state phase: the flow asks `phase: 1` with the same `limit` from the kept `epoch` and `offset`. A phase-1 reply carries `publications` (whole, JSON-escaped when delta will be on, `client_map.go:1402-1405`) and the offset to ask from next, which the next request uses (centrifuge `client_map.go:1336-1395`; centrifuge-js `src/subscription.ts:2519-2524`).
+  - **Live.** The server answers phase 0 (live) instead, to a state or a stream request, once the client is within one page of the stream's top (centrifuge `client_map.go:671-678`, `:1317-1322`), or at once on an ephemeral namespace's last state page (`:667-670`). The live reply carries the last `state` entries (to a state request) and the catch-up `publications`, the stream position (`epoch`, `offset`: the top), `recoverable` (absent on an ephemeral namespace), `delta`, `expires` and `ttl`, `id`, and, for a recovering flow, `was_recovering` and `recovered` (`:1052-1080`).
+  - **Events.** On the live reply the subscription becomes `subscribed` and emits, in order: `Subscribed`, then, unless `recovered`, one `Sync` whose entries are the state entries of every page with the catch-up publications applied by key in offset order (the last value wins, a removal deletes the key); a key keeps the place of its first appearance, and a key removed and set again goes last, in the order the server gave the keys otherwise; then, when `recovered`, one `Update` per catch-up publication (centrifuge-js `src/subscription.ts:2632-2744`, which emits `sync` only when not recovered: README.md:884, "on successful recovery `sync` is suppressed because the application's existing snapshot is still valid"). A load of an empty map yields a `Sync` with no entry.
+  - **Flows.** Each subscribe starts a flow; a reply belongs to the flow whose command it answers, and a reply of an earlier flow is dropped (centrifuge-js `flow === this._subscribeFlow`, `src/subscription.ts:2335`).
+  - **Epoch change.** Centrifugo v6.10.1 answers a request whose epoch it no longer has with error 112, which D6 handles (centrifuge `map_broker_memory.go:1302-1304`, `client_map.go:957-960`, `:1289-1291`). A reply whose `epoch` differs from the kept one nevertheless ends the flow with no event: the client sends an unsubscribe command, since the server may still hold the load's reservation and would refuse a new first request with 105 (centrifuge `client.go:4719-4724`), and once it is settled starts the flow again at once from the first state page, with no epoch, offset, position or delta base. centrifuge-js restarts without the unsubscribe (`_restartMapFlow`, `src/subscription.ts:2392-2397`, `:2417-2429`, `:2507-2511`, `:2542-2548`) (Exceptions).
+  - **Each request** has the reply deadline of a subscribe (`Config::timeout`); a deadline missed makes the client reconnect with `connecting` code 3 "subscribe timeout" (Block 9; centrifuge-js `src/subscription.ts:2758-2762`).
+  - **Unsubscribe during the flow.** As Block 9: `unsubscribe()` or a removal while a page is in flight takes effect once that page's reply is read; no further page is asked, and the unsubscribe command is sent then. Verified: the server accepts an unsubscribe between pages and then answers a continuation with 103.
+  - **Map kinds.** `Clients` and `Users` subscribe to a presence channel: a stream namespace's `map_clients_presence_channel_prefix` and `map_users_presence_channel_prefix` name it as the prefix plus the stream channel (Centrifugo `internal/client/handler.go:786-791`), and the presence channel's own namespace declares `subscription_type` `map_clients` or `map_users`. Their entries are keyed by client id, with `info`, and by user id, without data or info (Verified). The flow is the same; the result's `type` is 1 for every map kind (`client.proto:618-620`, Verified).
+
+- **D5 Delivery, the read-ahead and memory** (Block 15):
+  - **Pages are not events.** The flow keeps the entries and catch-up publications of its pages in the core until the live reply, which moves them into the `Sync` event (no copy). A page never counts as delivered: only the events built from the live reply do, when taken (Block 15, "Delivered means taken"; Block 41 D3 for handlers).
+  - **Intermediate pages are handled when read** (amends Block 15's "In order, one message at a time"). A page reply that makes no event — phase 2 or 1, `type` 1, the kept epoch, a cursor other than the one asked, within `max_state_bytes`, to a request of the current flow — is handled as soon as it is read, ahead of messages held behind events not taken, as a call reply resolves when read (Block 13), once the connect reply of its connection has been handled; one read before that (a first request in the connect frame, Block 36) is handled right after the connect reply. Every other reply of the flow (the live reply, an error, a D15 fault, an epoch change, a page past the bound) waits its turn. Reason: Centrifugo times the whole load from its first request and closes the connection with 3008 "slow" when a request of the load comes after `map.subscribe_catch_up_timeout`, 5 s by default (centrifuge `client_map.go:526`, `:1696-1706`, `:311`, `:330`, `:346`; Verified); pages waiting behind an application's unread stream would turn a slow reader into a load that restarts from scratch on every connection. A page read after a message that closes or replaces the transport is discarded (Block 9).
+  - **Head-of-line stays.** When the read-ahead is full the client stops reading (Block 15), pages included; the server's catch-up timeout may then close with 3008, and Block 15's "Backoff after 3008" applies. The rustdoc and the README say so.
+  - **Positions.** A `Sync` taken sets the position to the live reply's epoch and offset. With `recovered`, each catch-up `Update` taken moves the position to its offset, and the last event the live reply produced (the last `Update`, or `Subscribed` when there is none) sets it to the reply's offset, which can lie past the last update (a tag filter skips offsets, Verified). Each live `Update` taken moves it to its offset, and to the publication's `epoch` when set (`client.proto:286-288`; the first publication of a new stream carries it, Verified). A subscribe built while such an event is in flight recovers from the position it would set (Block 41 D3). Without `recoverable` (ephemeral mode) no position is kept and every resubscribe loads the state again (centrifuge-js `src/subscription.ts:2614-2617`, Verified).
+  - **Withdrawal.** A `Sync` or `Update` not taken when the subscription leaves `subscribed` for a client-side reason is withdrawn (Block 15); a withdrawn `Sync` leaves no position, so the next subscribe loads the state again.
+  - **Memory bound.** The page replies a load reads, as measured for Block 29, add up to at most `max_state_bytes`, 64 MiB by default (Block 19 D6's inbound limit). A page reply past it ends the load: the client sends an unsubscribe command and emits `Unsubscribed` with the new code 5 "map state too large", and does not subscribe again by itself, since every load would end the same way (as `unsubscribed` 3, Block 18). Block 15's goal is that a client never grows without bound on a server's say, and pages escape the read-ahead once handled; centrifuge-js has no bound (Exceptions). The application holds the `Sync` and its own mirror, and, with delta, the core one base per key (D9); the README says so, with `page_size`, `max_state_bytes` and `subscribe_catch_up_timeout`.
+
+- **D6 Recovery and resync** (Block 11, Block 10):
+  - **Recovering flow.** With a position and `recoverable`, the flow starts in the stream phase: `phase: 1, recover: true` with the position's `epoch` and `offset`, `data` on this first request only, and no state request (centrifuge-js `src/subscription.ts:2265-2282`, `:2816-2828`). The server answers live with `was_recovering` and `recovered` when the gap fits one page, or with stream pages first (centrifuge `client_map.go:1317-1322`, Verified).
+  - **Unrecoverable position.** Error 112 to any request of a flow (an epoch the server no longer has, an epoch that changed during the load, a stream trimmed past the position, more catch-up than `map.live_transition_max_publication_limit`: `client_map.go:939-966`, `:1336-1352`, `map_broker_memory.go:1302-1304`; Verified): with `FromScratch` the flow drops the position and the delta bases, emits no `error` event, and subscribes again after the resubscribe backoff (Block 10), from the first state page; the application gets a new `Sync` (centrifuge-js `src/subscription.ts:2771-2783`; as Block 11's 112 with getState). With `Fatal` it is a permanent subscribe error: `Unsubscribed` with code 112 and the server's reason "unrecoverable position" (Block 9; centrifuge-js "fall through to _subscribeError"), also when the epoch changed during a load from scratch, as in centrifuge-js.
+  - **Insufficient state.** Unsubscribe 2500 resubscribes (Block 10), recovering from the position. After the server API's `map_clear`, the next publication to the channel makes the server send 2500 to live subscribers (centrifuge `client.go:5800-5815`; Verified); the recovery then gets 112 for the epoch the server no longer has, and resyncs as above.
+  - **State invalidated.** Unsubscribe 2502 and disconnect 3014 drop the subscription token when a token callback can supply another (Block 11), the position and the delta bases, so the next subscribe loads the state (centrifuge-js `_invalidateState`, `src/subscription.ts:514-530`). Block 11's sentinel epoch "_" is not used for map subscriptions (centrifuge-js `:519-527`): without a position the next load starts from scratch.
+  - **`set_tag_filter`** drops the position as well, so the next subscribe loads the state through the new filter (centrifuge-js `src/subscription.ts:367-379`); as for stream subscriptions it sends nothing now.
+  - **Other errors** follow Block 9 and Block 10: 109 drops the token and resubscribes; a temporary error, 113 "concurrent pagination" included (`client.proto:49`, centrifuge `errors.go:112-118`), or one below 100, emits an `error` event and resubscribes after the backoff, recovering when a position is kept, from the first state page otherwise; any other unsubscribes with its code (103 for a type the namespace does not declare, Verified). The server's reservation of a load may outlive an error reply (113 returns before touching it, centrifuge `client_map.go:480-482`, `:1204-1206`), and a new first request is then refused with 105 (centrifuge `client.go:4719-4724`; Verified: a second first page while paging gets 105). So a load that ends on an error reply after its first reply was a page sends an unsubscribe command, and its resubscribe waits until that unsubscribe is settled, as Block 19 D8 does after a delta failure (Verified: after an unsubscribe between pages a new first page is answered). centrifuge-js 63ed73e resubscribes without it (`src/subscription.ts:2747-2787`) (Exceptions).
+  - **3008 during a load** (catch-up timeout) and any lost connection end the flow; the next connection starts it again, recovering when a position exists.
+
+- **D7 Tokens, data, getState.**
+  - The subscription token goes on every request of a flow, as centrifuge-js sends it (`src/subscription.ts:2797`); the server reads it on the first request only (continuations skip the subscribe handler, `client_map.go:314-353`; Verified: a continuation without token is answered). `get_token` is called before the first request when no token is held (Block 10; centrifuge-js `src/subscription.ts:2288-2314`, also when recovering).
+  - An expiring subscription (`expires`, `ttl` in the live reply) is refreshed with `sub_refresh` as in Block 10 (Verified on a map channel).
+  - `data` and `set_data` go on the first request of a flow only (centrifuge-js `src/subscription.ts:2811-2812`, `:2824-2825`); there is no `get_data` (Out of scope).
+  - No `get_state`: Block 11's `get_state` and the "reject unrecovered" flag bit do not apply; the map recovery never answers `recovered: false`, it fails with 112 (centrifuge `client_map.go:1071-1076`).
+
+- **D8 Writing keys** (Block 13):
+  - `MapSubscription::publish(key, data)` sends `publish { channel, type: 1, key, data }`; `remove(key)` sends `publish { channel, type: 1, key, removed: true }` with no data (centrifuge-js `mapPublish`, `mapRemove`, `src/centrifuge.ts:568-588`). Both wait until the subscription is `subscribed`, as Block 13's subscription calls do, and resolve with `Ok(())` on the empty `PublishResult`.
+  - `Client::map_publish(channel, key, data)` and `Client::map_remove(channel, key)` send the same commands without a subscription, waiting only for the connection (Block 13), with `map_publish_json` (Block 38).
+  - The key is not checked by the client: the server may replace it (`map.client_key` "client_id" or "user_id", Centrifugo `internal/client/handler.go:1064-1077`) and refuses an empty one otherwise with 107 (centrifuge `node.go:2385-2387`, `:2404-2406`; Verified). Errors are `CallError` with the server's code (103 without permission, 107 without data or with an empty key, Verified); removing a key that does not exist succeeds (Verified).
+  - The publisher receives its own change as an `Update` like any subscriber, with `info` of its connection (Verified).
+
+- **D9 Delta compression, per key** (amends Block 19's out of scope, D5 and D6 for map subscriptions):
+  - `delta(DeltaFormat::Fossil)` sends `delta: "fossil"` on every request of a flow; the live reply's `delta` says whether it is on. Bases are per key: the data of the last state entry, catch-up publication or update handled for that key. A removal deletes its key's base; Centrifugo sends the next value of a removed key whole (Verified).
+  - With JSON and delta on, the server sends state entries and stream publications as JSON strings (centrifuge `client_map.go:137-150`, `:704-707`, `:1402-1405`), but the client learns that delta is on only from the live reply: the flow keeps page data as received and, when the live reply says `delta: true`, unwraps it (Block 19 D7), as centrifuge-js does (`src/subscription.ts:2550-2563`, `_seedDeltaTracking` `:1214-1245`); when it says false, the data stays as received.
+  - **A recovering resubscribe keeps the bases of every key, and a load from scratch drops them all** (centrifuge-js `src/subscription.ts:2267-2272`). Centrifugo keeps no base per connection: it builds each live delta against the key's previous value in the map (the broker's `prevPub` of the same key, centrifuge `map_broker_memory.go:777-783`, fanned out in `hub.go:1140-1290`), and allows deltas from the live transition on (`flagDeltaAllowed`, `client_map.go:1584-1586`; `client.go:5856-5860`), so the first live publication of a key the catch-up did not touch is a delta against the value the client held before the reconnect (Verified). In a catch-up the first publication of each key is whole and later ones are per-key deltas (`makeRecoveredMapPubsDeltaFossil`, centrifuge `client.go:5636-5680`). Block 19 D5's "the base is cleared at each subscribe" holds for stream subscriptions only.
+  - Failures: Block 19 D3 and D8 unchanged (`error` of kind `Delta`, code 15, then `Subscribing` code 2, an unsubscribe command and a recovering resubscribe after the backoff), keeping the other keys' bases. The key whose delta failed, and every key a withdrawn update changed, come back whole in the catch-up, since their offsets lie after the position.
+  - The bases hold one copy of every key's value while delta is on, each within Block 19 D6's limit; the rustdoc says so. With the delta option and a tag filter `build()` fails (Block 35 D1; the server turns delta off under a filter, `client_map.go:855-858`).
+
+- **D10 Tag filters and compaction** (Block 35):
+  - `tf` goes on every request of a flow; the server filters state entries, stream pages and live publications (centrifuge `client_map.go:617-638`, `:1364-1387`; Verified). Offsets then skip the filtered publications, which is no gap (D5).
+  - `channel_compaction(true)` sets `SubscribeRequest.flag` bit 0 on every request of a flow, off by default as Block 35 D2 decides; centrifuge-js sets it on every map request unconditionally (`src/subscription.ts:2800`), and Ferrifuge's stream subscriptions do not follow it either (Exceptions). Routing by `Push.id` is Block 35 D2's.
+
+- **D11 Statistics** (Block 31): `Statistics::subscriptions` counts map subscriptions too (one registry), and `publications_delivered` counts each `Update` taken; a `Sync` counts as none, whatever its size (documented): its entries are the map's state, not delivery traffic, and centrifuge-js has no such counter. `MapSubscription::delta_statistics()` counts state entries and catch-up publications received with delta on as full payloads, and each live or recovered delta as a delta (centrifuge-js `_seedDeltaTracking`, `src/subscription.ts:1230-1243`, `:2577-2587`). Bytes and messages count pages as any message.
+
+- **D12 Codes** (Block 34): two new `unsubscribed` constants, `MAP_STATE_TOO_LARGE` = 5 "map state too large" (D5) and `MAP_NOT_SUPPORTED` = 6 "map subscriptions not supported" (D15). They are not behind `unstable`: Block 34's tables link every constant from the `codes` documentation, which `cargo doc` builds with default features and warnings denied; their documentation says that only map subscriptions (`unstable`) use them. 112 with `Fatal` unsubscribes with the server's code (Block 9). The "Server codes" table and the module note change as listed after this block.
+
+- **D13 Handlers, streams, helpers, test constructors.**
+  - Block 41: `pub trait MapSubscriptionHandler: MaybeSend + 'static` with `on_event(&mut self, event: MapSubscriptionEvent)`, whose default dispatches to no-op `on_subscribing(code, reason)`, `on_subscribed(Subscribed)`, `on_unsubscribed(code, reason)`, `on_sync(Vec<MapEntry>)`, `on_update(MapUpdate)`, `on_error(ClientError)`, and a blanket implementation for `FnMut(MapSubscriptionEvent) + MaybeSend + 'static`. Set with `MapSubscriptionBuilder::handler` and `MapSubscription::set_handler`; run by the client's consumer under its `EventDelivery` mode, with Block 41's delivery rule, panics and deadlock detection (`publish`, `remove`, `ready`, `presence` of a map subscription included).
+  - Block 39: no `updates()` view; `events()` is the one stream (centrifuge-js has no such view).
+  - Block 38: `MapEntry::json<T>()`, `MapUpdate::json<T>()`, `MapSubscription::publish_json(key, &T)`, `Client::map_publish_json(channel, key, &T)`.
+  - Block 37: under `test-util` and `unstable`, constructors `MapEntry::new(key, data)`, `MapUpdate::new(key, data)`, `MapUpdate::removal(key)` with setters for the optional fields, so that an application's tests build events.
+
+- **D14 Browser target** (Block 44): the flow lives in the core and the handle in the shared adapter layer, so map subscriptions work in the browser unchanged; `MapSubscriptionHandler` uses `MaybeSend`. Over websocket and sse in the browser the bounded inbox (Block 44 D7) stands where reading stops; pages are handled when the core reads them (D5). The wasm job adds `--features browser,unstable` to clippy and build; one @W scenario.
+
+- **D15 Unexpected replies.**
+  - A reply to a map request whose `type` is not 1 ends the subscription: the client sends an unsubscribe command and emits `Unsubscribed` with code 6 "map subscriptions not supported", without subscribing again by itself. A server before v6.8.0 ignores the fields it does not know and subscribes a stream subscription instead, whose reply has no phase and would otherwise pass for an empty live map. Centrifugo sets `type` 1 on every map reply (`client_map.go:691-692`, `:1053-1054`, `:1390-1391`); centrifuge-js does not check it (Exceptions).
+  - A reply whose phase the request does not allow (to a state request anything but 2 or 0, to a stream request anything but 1 or 0, any other value) is a protocol fault: the client closes the transport and reconnects with `connecting` code 1, as for a malformed message (Block 7), reporting an `Anomaly`. centrifuge-js takes any falsy phase as live and any other as a page of the phase it asked (`src/subscription.ts:2376`, `:2500`); Ferrifuge does not guess (Exceptions).
+  - A state page with a cursor equal to the one it was asked with is a protocol fault too (a server that would page forever).
+  - A state entry or publication with an empty `key` on a map subscription is a protocol fault likewise: the server refuses empty keys (`node.go:2385-2387`, `:2404-2406`), and JSON and Protobuf cannot tell an empty key from a missing one.
+  - Every page is bounded by `Config::max_message_bytes` (Block 29), and a load by `max_state_bytes` (D5).
+
+- **D16 Tests.**
+  - The @A server's `CENTRIFUGO_CHANNEL_NAMESPACES` (`tests/bdd.rs`), and that of any variant an @A map scenario starts, gains (Verified to load and serve on v6.10.1; recoverable mode requires `key_ttl`, centrifuge `config.go:31`, `map_broker.go:411-416`): `map` (`subscription_type: map`, `map.mode: persistent`, `map.stream_size` 100, `map.stream_ttl` 300s, `map.min_page_size` 1, `map.default_page_size` 2, `map.allow_publish_for_client`, `map.allow_publish_for_anonymous`, `map.allow_remove_for_client` and `map.allow_remove_for_anonymous` true), `map_rec` (`recoverable`, `key_ttl` 300s, `stream_size` 5, `min_page_size` 1), `map_eph` (`ephemeral`, `key_ttl` 300s, `min_page_size` 1, `max_page_size` 5), `map_delta` (`recoverable`, `key_ttl` 300s, `allowed_delta_types: ["fossil"]`, `delta_publish: true`), `map_tag` (`recoverable`, `key_ttl` 300s, `allow_tags_filter: true`), `map_private` (`persistent`, without `allow_subscribe_*` and without publish permissions, so a token is needed and a client publish is refused), `game` (a stream namespace with `map_clients_presence_channel_prefix: "clients:"` and `map_users_presence_channel_prefix: "users:"`), `clients` (`map_clients`, `recoverable`, `key_ttl` 60s) and `users` (`map_users`, `recoverable`, `key_ttl` 2s), each with `allow_subscribe_for_client` and `allow_subscribe_for_anonymous` except `map_private`. `ServerApi` gains `map_publish` (with tags), `map_remove` and `map_clear`.
+  - The fake server answers map subscribe commands from a script of pages, as it scripts subscribe replies today.
+  - The map scenarios are in `IMPLEMENTED` only when the BDD binary is built with `unstable` (Block 43 D8's pattern); CI's `test` job, the coverage run, the portability job's scenarios and clippy add `unstable` to `cookies`. `@W`: the browser harness's server gains the `map` namespace.
+
+- **D17 Semver, version, docs.**
+  - 45a adds the `unstable` feature and calls behind it: no bump. 45b marks `Action` `#[non_exhaustive]` on default features, so 0.21.0 (cargo-semver-checks' `enum_marked_non_exhaustive`), and adds the two code constants (additive); the rest is under `unstable`, which `ci.yml`'s and `release.yml`'s cargo-semver-checks runs do not enable (they check default features with `test-util` and `cookies`, Block 43 D8), so 45c–45e bump nothing. docs.rs metadata adds `unstable`, so the API is documented with its `doc(cfg)` badge and the unstable warning.
+  - Changelog `Unreleased`: "Changed" (45b): "`machine::Action` is `#[non_exhaustive]`"; "Added" (each sub-increment, prefixed "Unstable (`unstable` feature):"): `Client::map_publish`, `map_remove`; `MapSubscription`, `MapSubscriptionBuilder`, `MapKind`, `MapSubscriptionEvent`, `MapEntry`, `MapUpdate`, `UnrecoverableStrategy`, the registry methods; `Machine::add_map_subscription`, `MapSubscriptionOptions`, `Action::EmitMapSubscription`, `CallRequest::MapPublish` and `MapRemove`; per-key delta and tag filters; `MapSubscriptionHandler`, the JSON helpers and constructors; and, not prefixed (45b), `codes::unsubscribed::MAP_STATE_TOO_LARGE` and `MAP_NOT_SUPPORTED`.
+  - README: a "Map subscriptions (unstable)" section after "Subscriptions": the feature, Centrifugo ≥ 6.8.0 and the namespace options (`subscription_type`, `map.mode` and its `key_ttl` rule, page sizes, `subscribe_catch_up_timeout`, presence prefixes), the events and their order, positions and resync, the strategies, memory and `max_state_bytes`, the head-of-line note (D5), delta's per-key bases; the "Cargo features" section names `unstable` and says it is outside the semver promise; the codes rows (D12).
+
+Verified (Centrifugo v6.10.1, a raw websocket JSON client on Node 22 and the server API, 2026-11-09, by the drafter; the reviewer checked the cited source and recorded the corrections in D4, D6, D9 and D15):
+- the namespaces of D16 load from `CENTRIFUGO_CHANNEL_NAMESPACES`; a `map` request (`type` 1, `phase` 2, `limit` 2) on 5 keys is answered with phase 2, `cursor` "k2", two `state` entries with `key`, `offset` and `data`, `epoch` and `offset` 5; the next request with that cursor, epoch and offset gets the next two; the last page has no `phase` (live), `recoverable` true, the last entry and no cursor;
+- a page asked after keys changed and were added during paging omits the changed ones and may be empty with a cursor; stream pages answer phase 1 with `publications` and the last one's `offset`; the live reply then carries the rest; when the gap fits one page the live reply carries `state` and `publications` (a changed key and a removal) together;
+- `limit` 10 on a namespace with `max_page_size` 5 returns 5 entries; an ephemeral namespace returns entries without `offset`, a live reply without `recoverable`, and answers a `phase` 1 request with 107;
+- recovery: `phase` 1 (or 0) with `recover`, `epoch` and `offset` within one page answers live with `was_recovering`, `recovered`, the catch-up `publications` (a removal included) and the top `offset`; a wrong epoch, or a position trimmed out of a 5-entry stream, gets 112; phase 0 without a position on an empty channel also gets 112;
+- `map_publish` from the client (`publish` with `type` 1, `key`, `data`) answers `{}` and every subscriber, the publisher included, gets a push with `key`, `offset` and `info`; `removed: true` without data removes; an empty key or no data gets 107, removing an absent key succeeds, publishing to a map namespace without permission gets 103, a stream `publish` to a map namespace and a map publish to a stream namespace get 103;
+- a stream subscribe on a map namespace, a map subscribe on a stream namespace and `type` 2 on a `map` namespace get 103; `history` and `presence` on a map channel without those options get 108;
+- an unsubscribe between pages is answered, and a continuation after it gets 103; a second first page while paging gets 105; two continuations in one frame are both answered (no 113);
+- a continuation sent 6 s after the first page closes the connection with 3008 "slow" (default `subscribe_catch_up_timeout` 5 s);
+- `map_clear` alone sends nothing to a live subscriber within 2 s; the next `map_publish` makes the server send it unsubscribe 2500 "insufficient state"; the first publication of a new stream carries `epoch`;
+- delta (`map_delta`, JSON): with `delta: "fossil"` the live reply has `delta` true and state `data` as JSON strings; live publications of keys `a` and `b` are per-key deltas; a removal has `"data": ""` and no `delta`, and the key's next value comes whole; a recovered catch-up's first publication of a key is whole; after a recovery that did not touch key `a`, the next publication of `a` is a delta against the value held before the reconnect;
+- a token is needed on the first request of `map_private` (103 without), a continuation without token is answered, the live reply carries `expires` and `ttl`, and `sub_refresh` with a new token answers `expires`, `ttl` 598;
+- `map_clients` and `map_users` subscriptions (`type` 2 and 3) are answered with `type` 1; a client subscribing to `game:g1` adds an entry keyed by its client id with `info` to `clients:game:g1` and one keyed by its user id, without data or info, to `users:game:g1`; an unsubscribe removes the client entry at once, and the user entry goes after `key_ttl` once the user's last connection left;
+- a tag filter applies to the state and to live publications, whose offsets then skip the filtered ones.
+
+`VERIFY:` map subscriptions over Protobuf (field numbers as `client.proto`; no JSON escaping of delta data, centrifuge `client_map.go:140-143`) and over http_stream and sse (emulated commands), by the transport outline; presence calls on a map namespace with `presence` enabled; whether the open-source broker orders maps (`asc`, `score`); what a pre-v6.8.0 Centrifugo answers to a map request (D15 assumes a stream subscribe reply, or an error, either of which ends the subscription).
+
+**Structural acceptance:**
+- with default features, `cargo doc` and `cargo public-api` (or rustdoc JSON) list no map item but the two code constants; with `--features unstable` each carries the `doc(cfg)` badge and the unstable sentence; `cargo tree` is unchanged by `unstable` (no new dependency);
+- D3: unit tests on both codecs: a stream subscribe, a publish and a subscribe result encode and decode byte for byte as before; each map field round-trips; a JSON result without `phase` decodes as live; the decoder fuzz targets' seed corpora (Block 14) gain a map subscribe result and a map publication;
+- D3, D17: cargo-semver-checks reports no change in 45a and `Action`'s `non_exhaustive` as the only major change of 45b;
+- D4, D5: @E unit tests of the flow on the core: the commands of each phase with their fields; the merge of catch-up publications into the `Sync` (last value wins, removal deletes, order of keys); the position after each event taken; a reply of an earlier flow dropped; a page reply handled while an earlier publication of another subscription is held; a page read before its connection's connect reply, handled right after it; the per-request deadline; the `max_state_bytes` count;
+- D9: unit tests of per-key bases: seeded from state entries and catch-up publications, deleted on removal, kept across a recovering resubscribe, dropped on a load from scratch, 112, 2502 and 3014;
+- D15: unit tests of each protocol fault and of a reply without `type` 1;
+- D16's CI changes; Block 14's @P gates pass unchanged with default features (a stream subscription's marginal cost is unchanged: the map fields are behind a pointer or an enum variant of the subscription);
+- the README section, rustdoc, changelog entries and Block 34's rows (D12), Block 34's test passing with the new constants.
+
+Value clause: As an app developer showing a keyed collection that Centrifugo owns, I want the client to load its whole state, keep it current per key, catch up or resynchronise after a reconnect, and let me set and remove keys, so that my view of the collection starts complete and never silently diverges from the server's.
+
+```gherkin
+Feature: Map subscriptions (unstable)
+
+  Scenario Outline: A map subscription cannot share a channel with a stream subscription
+    Given a new client with a <existing> to channel "map:a"
+    When a <created> to channel "map:a" is created
+    Then creating it fails with "a subscription to channel map:a already exists"
+
+    Examples:
+      | existing                       | created                        |
+      | subscription                   | map subscription of kind "map" |
+      | map subscription of kind "map" | subscription                   |
+
+  Scenario: A new map subscription starts unsubscribed
+    Given a new client
+    When a map subscription of kind "map" to channel "map:a" is created
+    Then the map subscription state is "unsubscribed"
+    And the client's map subscriptions are "map:a" and its subscriptions are none
+
+  @D
+  Scenario: Removing a map subscription unsubscribes it and frees its channel
+    Given a client connected to the fake server, with a map subscription to "scores" that has synced
+    When the map subscription is removed
+    Then the fake server receives an unsubscribe command for "scores"
+    And the client's map subscriptions are none
+    And a subscription to channel "scores" can be created
+
+  @A
+  Scenario: map_publish sets a key
+    Given a connected client and another client with a map subscription to "map:pub1" that has synced
+    When the client calls map_publish on "map:pub1" with key "k1" and data {"x":1}
+    Then the call succeeds
+    And the other client's map subscription emits an update with key "k1", data {"x":1}, removed false and info naming the publishing client
+
+  @A
+  Scenario: map_remove removes a key
+    Given the server API has set key "k1" of "map:rm1" to {"x":1}
+    And a client with a map subscription to "map:rm1" that has synced
+    When the client calls map_remove on "map:rm1" with key "k1"
+    Then the call succeeds
+    And the map subscription emits an update with key "k1", removed true and empty data
+
+  @A
+  Scenario Outline: A refused map publish fails with the server's code
+    Given a connected client
+    When the client calls map_publish on "<channel>" with key "<key>" and data <data>
+    Then the call fails with code <code>
+
+    Examples:
+      | channel        | key | data    | code |
+      | news           | k1  | {"x":1} | 103  |
+      | map_private:p1 | k1  | {"x":1} | 103  |
+      | map:perm       |     | {"x":1} | 107  |
+
+  @D
+  Scenario: A map subscription loads its state page by page
+    Given a client connected to the fake server
+    And a map subscription of kind "map" to channel "scores" with page size 2, whose stream was taken
+    When subscribe is called on the map subscription
+    And the fake server answers the first request with phase 2, entries "a" and "b", cursor "c1", epoch "e1" and offset 5
+    And answers the next request with phase 2, entry "c", no cursor, epoch "e1" and offset 5
+    And answers the next request live with a publication setting "d" at offset 6, epoch "e1" and offset 6
+    Then the fake server received, for "scores", a subscribe with type 1, phase 2 and limit 2 and no cursor, then one with phase 2, limit 2, cursor "c1", epoch "e1" and offset 5, then one with phase 1, limit 2, epoch "e1" and offset 5
+    And the map subscription's stream yields "subscribing", "subscribed", then a sync with entries "a", "b", "c" and "d" in that order
+
+  @D
+  Scenario: A page size of 0 leaves the page size to the server
+    Given a client connected to the fake server
+    When a map subscription to channel "scores" with page size 0 is subscribed
+    Then the first subscribe command for "scores" has type 1, phase 2 and no limit
+
+  @D
+  Scenario: Changes made during paging are part of the sync
+    Given a client connected to the fake server, with a map subscription to "scores" whose stream was taken
+    When subscribe is called on the map subscription
+    And the fake server answers with state pages holding "a" = 1, "b" = 1 and "c" = 1, then a stream page with "a" = 2 at offset 6 and the removal of "b" at offset 7, then live with "d" = 1 at offset 8
+    Then the map subscription's stream yields "subscribing", "subscribed" with recovered false, then a sync with exactly "a" = 2, "c" = 1 and "d" = 1, in that order
+    And it yields no update
+
+  @D
+  Scenario: An epoch change during paging restarts the load
+    Given a client connected to the fake server, with a map subscription to "scores" whose stream was taken
+    When subscribe is called on the map subscription
+    And the fake server answers the first request with phase 2, entry "a", cursor "c1" and epoch "e1"
+    And answers the next request with phase 2, entry "b", no cursor and epoch "e2"
+    Then the fake server receives an unsubscribe command for "scores"
+    And once it is answered, the next subscribe command for "scores" has phase 2, no cursor, no epoch and no offset
+    And when the fake server answers it live with entry "z" and epoch "e2", the stream yields "subscribing", "subscribed" and a sync with exactly "z"
+
+  @A
+  Scenario: A map subscription syncs then delivers updates
+    Given the server API has set keys "k1" to "k5" of "map:s1" to {"v":1} to {"v":5}
+    And a client with a map subscription of kind "map" to "map:s1" with page size 2, whose stream was taken
+    When the client connects and subscribes the map subscription
+    And the server API sets key "k6" of "map:s1" to {"v":6} once the subscription is subscribed
+    And the server API removes key "k1" of "map:s1"
+    Then the map subscription's stream yields "subscribing", "subscribed" with recoverable true and recovered false, a sync with keys "k1" to "k5" and their data
+    And then an update with key "k6", data {"v":6} and offset 6, then an update with key "k1" and removed true
+
+  @A
+  Scenario Outline: A map subscription syncs over each transport and protocol
+    Given a server with http_stream and sse enabled, and the server API has set keys "a", "b" and "c" of "map:t1"
+    And a client with the <protocol> protocol connected over transport "<transport>" with a map subscription to "map:t1" with page size 2
+    When subscribe is called on the map subscription
+    Then the map subscription emits a sync with keys "a", "b" and "c"
+    And when the server API sets key "d" of "map:t1", the map subscription emits an update of "d"
+
+    Examples:
+      | transport   | protocol |
+      | websocket   | JSON     |
+      | websocket   | Protobuf |
+      | http_stream | JSON     |
+      | http_stream | Protobuf |
+      | sse         | JSON     |
+
+  @A
+  Scenario: publish and remove on a map subscription change the map for every subscriber
+    Given two clients each with a map subscription to "map:pr1" that has synced
+    When the first client's map subscription publishes {"x":1} to key "cursor"
+    And then removes key "cursor"
+    Then both calls succeed
+    And each map subscription emits an update with key "cursor" and data {"x":1}, then an update with key "cursor" and removed true
+
+  @D
+  Scenario: A map subscription's publish waits until it is subscribed
+    Given a client connected to the fake server, with a map subscription to "scores" whose first page is not answered yet
+    When the map subscription publishes {"x":1} to key "a"
+    Then the fake server has received no publish command 1 s later
+    And when the fake server answers the page live, it receives a publish with type 1, key "a" and data {"x":1}
+
+  @A
+  Scenario: Presence of clients is a map keyed by client id
+    Given a client with a map subscription of kind "clients" to "clients:game:g1" that has synced with no entry
+    When a second client of user "alice" subscribes to "game:g1"
+    Then the map subscription emits an update whose key is the second client's id and whose info names user "alice"
+    And when the second client unsubscribes from "game:g1", the map subscription emits an update with that key and removed true
+
+  @A
+  Scenario: Presence of users is a map keyed by user id whose entries expire
+    Given a client with a map subscription of kind "users" to "users:game:g2" that has synced with no entry
+    When a second client of user "bob" subscribes to "game:g2"
+    Then the map subscription emits an update with key "bob", empty data and no info
+    And when the second client disconnects, the map subscription emits an update with key "bob" and removed true within 10 s
+
+  @A
+  Scenario Outline: A subscription type the namespace does not declare is refused
+    Given a connected client
+    When a <subscription> to "<channel>" is subscribed
+    Then it emits "unsubscribed" with code 103 and reason "permission denied"
+
+    Examples:
+      | subscription                       | channel     |
+      | map subscription of kind "map"     | news        |
+      | subscription                       | map:refused |
+      | map subscription of kind "clients" | map:refused |
+
+  @A
+  Scenario: A map subscription to a private namespace gets its token and refreshes it
+    Given a client whose map subscription to "map_private:a" has a token callback giving tokens that expire after 3 s
+    When the client connects and subscribes the map subscription
+    Then the map subscription emits a sync
+    And the token callback was called once before the first subscribe command
+    And 5 s later the map subscription is still "subscribed" and the token callback was called twice
+
+  @D
+  Scenario: Every request of a load carries the token, and only the first carries the data
+    Given a client connected to the fake server, with a map subscription to "scores" with token "t1" and data {"room":1}
+    When subscribe is called and the fake server answers two state pages and then live
+    Then each of the three subscribe commands carries token "t1"
+    And only the first carries data {"room":1}
+
+  @D
+  Scenario: A missing page reply makes the client reconnect
+    Given a client connected to the fake server, with a map subscription to "scores" whose first page was answered with a cursor
+    When the fake server does not answer the second page within the configured timeout
+    Then the client emits "connecting" with code 3 and reason "subscribe timeout"
+
+  @D
+  Scenario: A server without map subscriptions ends the map subscription
+    Given a client connected to the fake server, with a map subscription to "scores"
+    When subscribe is called on the map subscription
+    And the fake server answers it with a subscribe result without type and without phase
+    Then the fake server receives an unsubscribe command for "scores"
+    And the map subscription emits "unsubscribed" with code 6 and reason "map subscriptions not supported", and no sync
+    And 2 s later the fake server has received no further subscribe command for "scores"
+
+  @D
+  Scenario Outline: A reply in a phase the request does not allow forces a reconnect
+    Given a client connected to the fake server, with a map subscription to "scores" whose <request> is in flight
+    When the fake server answers it with phase <phase>
+    Then the client emits "connecting" with code 1
+
+    Examples:
+      | request             | phase |
+      | first state request | 1     |
+      | stream request      | 2     |
+      | first state request | 3     |
+
+  @D
+  Scenario: A load larger than its bound ends the map subscription
+    Given a client connected to the fake server, with a map subscription to "scores" whose max_state_bytes is 1024 and whose stream was taken
+    When subscribe is called on the map subscription
+    And the fake server answers each request with a state page of 600 bytes and a cursor
+    Then after the second page the fake server receives an unsubscribe command for "scores" and no further subscribe command
+    And the map subscription's stream yields "subscribing", then "unsubscribed" with code 5 and reason "map state too large", and no sync
+
+  @D
+  Scenario: Pages are handled while another subscription's stream is not read
+    Given a client connected to the fake server, with a subscription to "news" whose stream has been read up to "subscribed" and is not read after
+    And the fake server has pushed 3 publications to "news"
+    And a map subscription to "scores" whose stream was taken
+    When subscribe is called on the map subscription
+    And the fake server answers its first page with a cursor
+    Then the client sends the second page request for "scores" within 1 s
+    And when the fake server answers it live, the map subscription's stream yields nothing beyond "subscribing" within 1 s
+    And once the 3 publications of "news" are taken, the map subscription's stream yields "subscribed" and a sync
+
+  @D
+  Scenario: An unsubscribe during a load waits for the page in flight
+    Given a client connected to the fake server, with a map subscription to "scores" whose first page is not answered yet
+    When unsubscribe is called on the map subscription
+    And the fake server answers the page with a cursor
+    Then the fake server receives an unsubscribe command for "scores" and no further subscribe command
+
+  @A
+  Scenario: Statistics count map subscriptions and their updates
+    Given a client with a map subscription to "map:st1" that has synced 3 keys
+    When the server API sets 2 keys of "map:st1" and the application takes both updates
+    Then the client's statistics count 1 subscription and 2 publications delivered
+
+  @A
+  Scenario: Missed changes are recovered as updates after a reconnect
+    Given a client with a map subscription to "map:r1" that has synced keys "a" and "b"
+    When the server disconnects the client with a reconnect-advised code
+    And the server API sets key "c" of "map:r1" and removes key "a" while the client reconnects
+    Then the map subscription emits "subscribing", then "subscribed" with was_recovering true and recovered true
+    And then an update with key "c", then an update with key "a" and removed true
+    And it emits no sync
+
+  @D
+  Scenario: A recovering subscribe starts in the stream phase from the position
+    Given a client connected to the fake server, with a map subscription to "scores" that has taken a sync at epoch "e1" and offset 7
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the next subscribe command for "scores" has type 1, phase 1, recover true, epoch "e1" and offset 7
+    And no subscribe command with phase 2 is sent for "scores"
+
+  @D
+  Scenario: Updates move the position only when taken
+    Given a client connected to the fake server, with a map subscription to "scores" synced at epoch "e1" and offset 7, whose stream has been read up to the sync
+    And the fake server has pushed updates at offsets 8 and 9
+    And the application has taken only the update at offset 8
+    When disconnect is called
+    And connect is called
+    Then the next subscribe command for "scores" asks to recover from epoch "e1" and offset 8
+    And no update is yielded twice
+
+  @D
+  Scenario: A sync not taken before disconnect() is withdrawn and the state is loaded again
+    Given a client connected to the fake server, with a map subscription to "scores" whose stream was taken and is not read
+    And the fake server has answered its load live with entries "a" and "b"
+    When disconnect is called
+    And connect is called
+    Then the next subscribe command for "scores" has phase 2 and no epoch
+    And when the fake server answers it live with entries "a", "b" and "c" and the application reads the stream, it yields exactly one sync, with "a", "b" and "c"
+
+  @A
+  Scenario: A map subscription too far behind resyncs from a fresh state
+    Given a client with a map subscription to "map_rec:r2" that has synced key "a" = 0, whose stream is read
+    When the server disconnects the client with a reconnect-advised code
+    And the server API sets key "a" of "map_rec:r2" to 1 to 10 while the client reconnects
+    Then the map subscription emits "subscribed" with recovered false, then a sync with exactly "a" = 10
+    And it emits no error event and no update
+
+  @E
+  Scenario: An unrecoverable position resyncs after the resubscribe backoff
+    Given a client connected, with a map subscription to "scores" whose recovering subscribe is answered with error 112, minResubscribeDelay 500 ms and maxResubscribeDelay 20000 ms
+    When the error is handled
+    Then the subscription stays "subscribing" and emits nothing
+    And the next subscribe command for "scores" has phase 2 and no epoch, sent after a delay between 500 ms and 1000 ms
+
+  @A
+  Scenario: With the fatal strategy an unrecoverable position unsubscribes
+    Given a client with a map subscription to "map_rec:r3" with the fatal unrecoverable strategy, that has synced key "a"
+    When the server disconnects the client with a reconnect-advised code
+    And the server API sets key "a" of "map_rec:r3" 10 times while the client reconnects
+    Then the map subscription emits "unsubscribed" with code 112 and reason "unrecoverable position"
+    And 2 s later the map subscription is still "unsubscribed" and has emitted no further event
+
+  @A
+  Scenario: An ephemeral map syncs again on every reconnect
+    Given a client with a map subscription to "map_eph:e1" that has synced key "a"
+    When the server disconnects the client with a reconnect-advised code
+    Then the map subscription emits "subscribed" with recoverable false and was_recovering false, then a sync with key "a"
+
+  @A
+  Scenario: A cleared map is loaded again
+    Given a client with a map subscription to "map:c1" that has synced keys "a" and "b"
+    When the server API clears "map:c1"
+    And the server API sets key "z" of "map:c1"
+    Then the map subscription emits "subscribing" with code 2500 and reason "insufficient state"
+    And then "subscribed" with recovered false and a sync with exactly key "z"
+
+  @D
+  Scenario Outline: State invalidation drops the position and the token
+    Given a client connected to the fake server, with a map subscription to "scores" with a token callback, synced at epoch "e1" and offset 7
+    When the fake server sends <invalidation>
+    Then the token callback is called before the next subscribe command for "scores"
+    And that command has phase 2 and no epoch
+
+    Examples:
+      | invalidation                                    |
+      | an unsubscribe push with code 2502 for "scores" |
+      | a disconnect with code 3014                     |
+
+  @D
+  Scenario: A temporary error during a load starts it again after the backoff
+    Given a client connected to the fake server, with a map subscription to "scores" whose first page was answered with a cursor
+    When the fake server answers the second page with error 113 "concurrent pagination", temporary
+    Then the map subscription emits an error with code 113
+    And the fake server receives an unsubscribe command for "scores"
+    And once it is answered, the next subscribe command for "scores" has phase 2 and no cursor
+
+  @D
+  Scenario: A load the server closes as slow starts again on the next connection
+    Given a client connected to the fake server, with a map subscription to "scores" whose first page was answered with a cursor
+    When the fake server closes the connection with code 3008 "slow"
+    Then the client emits "connecting" with code 3008
+    And on the next connection the first subscribe command for "scores" has phase 2 and no cursor
+
+  @A
+  Scenario: Delta compression decodes each key's changes
+    Given a client with a map subscription to "map_delta:d1" with fossil delta, that has synced keys "a" and "b" of 300 bytes each
+    When the server API sets key "a", then key "b", then key "a" again, each changing one byte
+    Then the map subscription emits three updates whose data equal, byte for byte, what was set
+    And its delta statistics count 3 deltas
+
+  @A
+  Scenario: A recovered map subscription decodes deltas against the values it held
+    Given a client with a map subscription to "map_delta:d2" with fossil delta, that has synced keys "a" and "b" of 300 bytes each
+    When the server disconnects the client with a reconnect-advised code
+    And the server API sets key "b" while the client reconnects
+    And the server API sets key "a", changing one byte, once the map subscription is subscribed again
+    Then the map subscription emits "subscribed" with recovered true and delta true, an update of "b", then an update of "a"
+    And each update's data equals, byte for byte, what was set
+    And its delta statistics count the update of "a" as a delta
+
+  @D
+  Scenario: A removal ends a key's delta chain
+    Given a client connected to the fake server, with a map subscription to "scores" with fossil delta, synced with key "a" whose delta is on
+    When the fake server pushes the removal of "a", then a delta publication of "a"
+    Then the map subscription emits an update of "a" with removed true, then an error of kind "delta" with code 15
+    And then "subscribing" with code 2 and reason "delta error"
+
+  @D
+  Scenario Outline: Page data is decoded once the live reply says whether delta is on
+    Given a client with the JSON protocol connected to the fake server, with a map subscription to "scores" with fossil delta
+    When the fake server answers a state page whose entry "a" has the JSON string data "{\"x\":1}", then live with delta <delta>
+    Then the map subscription emits a sync whose entry "a" has data <data>
+
+    Examples:
+      | delta | data            |
+      | true  | {"x":1}         |
+      | false | "{\"x\":1}"     |
+
+  @A
+  Scenario: A tag filter limits the state and the updates
+    Given the server API has set key "x" with tag t = "red" and key "y" with tag t = "blue" in "map_tag:f1"
+    And a client with a map subscription to "map_tag:f1" with a tag filter t eq "red"
+    When the client subscribes the map subscription
+    And the server API sets key "y" with tag t = "blue", then key "x" with tag t = "red"
+    Then the map subscription emits a sync with exactly key "x"
+    And then exactly one update, of key "x"
+
+  @D
+  Scenario: Setting a tag filter loads the state again
+    Given a client connected to the fake server, with a map subscription to "scores" synced at epoch "e1" and offset 7
+    When the tag filter of the map subscription is set to t eq "red"
+    And the fake server disconnects the client with a reconnect-advised code
+    Then the next subscribe command for "scores" has phase 2, no epoch and the tag filter t eq "red"
+
+  @A
+  Scenario Outline: A map subscription handler receives the events in order
+    Given a client with <mode> delivery whose map subscription to "map:h1" has a handler recording its events, and the server API has set key "a" of "map:h1"
+    When the client connects and subscribes the map subscription
+    And the server API sets key "b" of "map:h1" once the subscription is subscribed
+    Then the handler has received "subscribing", "subscribed", a sync with key "a" and an update of "b", in this order
+
+    Examples:
+      | mode   |
+      | Task   |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  Scenario: A test builds map events without a server
+    Given the test-util and unstable features
+    When a test builds a sync with entry "a" = {"x":1} and an update removing "a"
+    Then the events equal those the client would emit, and the entry's json() gives {"x":1}
+
+  @W
+  Scenario: A browser client syncs a map and receives its updates
+    Given the server API has set keys "a" and "b" of "map:w1"
+    And a browser client with a map subscription to "map:w1", whose stream was taken
+    When connect is called
+    And subscribe is called on the map subscription
+    And the server API sets key "c" of "map:w1" once the subscription is subscribed
+    Then the map subscription's stream yields "subscribing", "subscribed", a sync with keys "a" and "b", then an update of "c"
+```
+
+**Exceptions introduced:**
+- Each change is one `Update` event; centrifuge-js 63ed73e also emits a `publication` event for it (`src/subscription.ts:1167-1173`, `:2724-2731`), and repeats the entries in `SubscribedContext.state` (`:2641`). Ferrifuge's entries are in `Sync` only.
+- An intermediate page is handled when read, ahead of held messages (D5), amending Block 15's in-order rule; the live reply, errors and faults keep it.
+- A load holds at most `max_state_bytes` of page replies and ends with `unsubscribed` 5 past it (D5); centrifuge-js has no bound.
+- Delta bases are per key and survive a recovering resubscribe on map subscriptions (D9), amending Block 19 D5, which Centrifugo's per-key deltas against the map's previous value require.
+- `channel_compaction` stays opt-in (D10); centrifuge-js sets the flag on every map request (`src/subscription.ts:2800`).
+- A reply without `type` 1 ends the subscription with `unsubscribed` 6; a reply in a phase the request does not allow, a repeated cursor and an empty key reconnect with code 1 (D15); centrifuge-js checks none of them and treats an unknown phase as live or as the phase it asked for.
+- Map subscriptions use no sentinel epoch on 2502 and 3014 (D6), unlike Block 11's stream subscriptions; centrifuge-js does the same for maps (`src/subscription.ts:519-527`).
+- A load ended by an error reply after a page, or by an epoch change, unsubscribes before it subscribes again (D4, D6), so that the server's reservation cannot refuse the new load with 105; centrifuge-js 63ed73e subscribes again at once.
