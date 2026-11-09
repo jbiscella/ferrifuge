@@ -1351,7 +1351,10 @@ async fn still_subscribed_later(world: &mut ClientWorld, seconds: u64) {
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     assert_eq!(world.map().state(), SubscriptionState::Subscribed);
     let calls = world.maps.token_calls.load(Ordering::SeqCst);
-    assert!(calls >= 2, "{calls} token callback calls {seconds} s after the sync");
+    assert!(
+        calls >= 2,
+        "{calls} token callback calls {seconds} s after the sync"
+    );
     let events = world.maps.events.as_mut().expect("a stream");
     let later = quiet_events(events).await;
     assert!(

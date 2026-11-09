@@ -476,6 +476,45 @@ mod tests {
         });
     }
 
+    // Block 45, D3: the fuzz target's committed seeds, which `cargo test`
+    // replays and the CI fuzz runs start from, are a valid map subscribe
+    // result and a valid map publication.
+    #[test]
+    fn the_fuzz_seeds_decode_as_map_replies() {
+        let result = decode(include_bytes!(
+            "__fuzz__/protobuf__tests__decode/corpus/seed-map-subscribe-result"
+        ))
+        .unwrap();
+        let publication = decode(include_bytes!(
+            "__fuzz__/protobuf__tests__decode/corpus/seed-map-publication"
+        ))
+        .unwrap();
+
+        let [
+            Reply {
+                result: ReplyResult::Subscribe(result),
+                ..
+            },
+        ] = &result[..]
+        else {
+            panic!("{result:?}");
+        };
+        assert_eq!((result.kind, result.phase, result.state.len()), (1, 2, 1));
+        let [
+            Reply {
+                result: ReplyResult::Push(Push::Publication { publication, .. }),
+                ..
+            },
+        ] = &publication[..]
+        else {
+            panic!("{publication:?}");
+        };
+        assert_eq!(
+            publication.map.as_ref().map(|map| map.key.as_str()),
+            Some("a")
+        );
+    }
+
     fn frame_of(replies: &[pb::Reply]) -> Vec<u8> {
         let mut frame = Vec::new();
         for reply in replies {

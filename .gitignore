@@ -25,8 +25,12 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Fuzzing corpora and crashes of cargo-bolero, next to the targets
-**/__fuzz__/
+# Fuzzing corpora and crashes of cargo-bolero, next to the targets, but
+# the committed seeds (`seed-*` in a target's corpus directory, Block 45):
+# the inputs fuzzing adds are named by their hash, never `seed-`.
+**/__fuzz__/**
+!**/__fuzz__/**/
+!**/__fuzz__/*/corpus/seed-*
 
 # npm dependencies of the interop test
 tests/interop/node_modules/
