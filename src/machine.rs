@@ -1836,8 +1836,10 @@ impl Machine {
     fn transport_unsupported(&mut self) {
         self.unsupported += 1;
         if self.unsupported < self.transports.len() {
-            // Nothing went out: an emulated opening request is not counted.
+            // Nothing went out: an emulated opening request is not counted,
+            // and its connect command awaits no reply.
             self.counters.transport_ended();
+            self.connect_command = None;
             self.transport = None;
             self.transport_open = false;
             self.transports.skip();
