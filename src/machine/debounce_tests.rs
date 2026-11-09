@@ -990,3 +990,748 @@ fn closed_windows_leave_nothing_behind() {
     assert_eq!(machine.debounce_window_count(), 0);
     assert_eq!(machine.subscription_debounce_windows(subscription), 0);
 }
+
+/// Block 46b: map keys (`unstable`, D12).
+#[cfg(feature = "unstable")]
+mod maps {
+    use serde_json::Value;
+
+    use super::{
+        Action, CallError, CallId, CallReply, CallRequest, CallWait, Config, DebounceTimer,
+        Duration, INTERVAL, Input, Machine, SubscriptionId, TransportId, codes, config, connected,
+        frame, settled, timers_cancelled, timers_set,
+    };
+    use crate::MapKind;
+    use crate::machine::{MapSubscriptionOptions, Timer};
+
+    fn map_options() -> MapSubscriptionOptions {
+        MapSubscriptionOptions::new(MapKind::Map)
+    }
+
+    /// A map subscription on a connected machine, its live reply (id 2)
+    /// advising `interval` ms.
+    fn subscribed_map(interval: u32) -> (Machine, TransportId, SubscriptionId) {
+        let (mut machine, transport) = connected(config(), false);
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        machine.handle(frame(
+            transport,
+            &format!(
+                r#"{{"id":2,"subscribe":{{"type":1,"epoch":"e","offset":1,"publish_debounce":{interval}}}}}"#
+            ),
+        ));
+        (machine, transport, subscription)
+    }
+
+    /// The commands sent among `actions`, decoded.
+    fn commands(actions: &[Action]) -> Vec<Value> {
+        actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { frame, .. } => Some(frame),
+                _ => None,
+            })
+            .flat_map(|frame| {
+                std::str::from_utf8(frame)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The publish commands among `actions`, as `(key, data)`, `None` for
+    /// a removal.
+    fn map_writes(actions: &[Action]) -> Vec<(String, Option<i64>)> {
+        commands(actions)
+            .iter()
+            .filter_map(|command| {
+                let publish = command.get("publish")?;
+                assert_eq!(publish["type"], 1, "{command}");
+                let key = publish["key"].as_str().unwrap_or_default().to_owned();
+                if publish["removed"] == true {
+                    return Some((key, None));
+                }
+                Some((key, publish["data"].as_i64()))
+            })
+            .collect()
+    }
+
+    fn command_id(command: &Value) -> u32 {
+        u32::try_from(command["id"].as_u64().expect("an id")).expect("a command id")
+    }
+
+    fn publish(
+        machine: &mut Machine,
+        subscription: SubscriptionId,
+        key: &str,
+        data: &str,
+    ) -> (CallId, Vec<Action>) {
+        let id = machine.add_subscription_call(
+            subscription,
+            CallRequest::MapPublish {
+                channel: String::new(),
+                key: key.to_owned(),
+                data: data.as_bytes().to_vec(),
+            },
+        );
+        let actions = machine.handle(Input::Call(id));
+        (id, actions)
+    }
+
+    fn remove(
+        machine: &mut Machine,
+        subscription: SubscriptionId,
+        key: &str,
+    ) -> (CallId, Vec<Action>) {
+        let id = machine.add_subscription_call(
+            subscription,
+            CallRequest::MapRemove {
+                channel: String::new(),
+                key: key.to_owned(),
+            },
+        );
+        let actions = machine.handle(Input::Call(id));
+        (id, actions)
+    }
+
+    fn ok() -> Result<CallReply, CallError> {
+        Ok(CallReply::Publish)
+    }
+
+    fn timer(actions: &[Action]) -> DebounceTimer {
+        super::timer_of(actions)
+    }
+
+    /// The reply to the command `id` of a map write.
+    fn reply(machine: &mut Machine, transport: TransportId, id: u32) -> Vec<Action> {
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{id},"publish":{{}}}}"#),
+        ))
+    }
+
+    /// A subscribed map with one publish of `"k"` in flight (leading) and
+    /// a later one parked in its window.
+    fn window_on_k() -> (Machine, TransportId, SubscriptionId, CallId, DebounceTimer) {
+        let (mut machine, transport, subscription) = subscribed_map(100);
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        let (waiter, parked) = publish(&mut machine, subscription, "k", "2");
+        assert_eq!(map_writes(&parked), []);
+        (machine, transport, subscription, waiter, timer(&first))
+    }
+
+    // D2: the interval of a map subscription's replies.
+
+    #[test]
+    fn the_map_live_reply_sets_the_interval() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+
+        assert_eq!(timers_set(&first), [(timer(&first), INTERVAL)]);
+    }
+
+    #[test]
+    fn a_state_page_advising_an_interval_is_ignored_and_the_live_reply_decides() {
+        let (mut machine, transport) = connected(config(), false);
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        // A page, with no cursor: the stream page is asked next.
+        machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"phase":2,"epoch":"e","offset":1,"publish_debounce":500}}"#,
+        ));
+        // The live reply, advising nothing.
+        machine.handle(frame(
+            transport,
+            r#"{"id":3,"subscribe":{"type":1,"epoch":"e","offset":1}}"#,
+        ));
+
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        let (_, second) = publish(&mut machine, subscription, "k", "2");
+
+        assert_eq!(timers_set(&first), []);
+        assert_eq!(map_writes(&first).len(), 1);
+        assert_eq!(map_writes(&second).len(), 1);
+    }
+
+    #[test]
+    fn a_map_publish_without_the_opt_in_ignores_the_interval() {
+        let (mut machine, transport) = connected(config(), true);
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"epoch":"e","offset":1,"publish_debounce":100}}"#,
+        ));
+
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        let (_, second) = publish(&mut machine, subscription, "k", "2");
+
+        assert_eq!(timers_set(&first), []);
+        assert_eq!(map_writes(&second).len(), 1);
+    }
+
+    /// A later reply replaces the interval, 0 included (D2).
+    #[test]
+    fn a_later_live_reply_without_an_interval_turns_it_off() {
+        let (mut machine, transport, subscription) = subscribed_map(100);
+        machine.handle(Input::Unsubscribe(subscription));
+        let actions = machine.handle(Input::Subscribe(subscription));
+        let subscribe = commands(&actions)
+            .into_iter()
+            .find(|command| command.get("subscribe").is_some())
+            .expect("a subscribe");
+        machine.handle(frame(
+            transport,
+            &format!(
+                r#"{{"id":{},"subscribe":{{"type":1,"epoch":"e","offset":1}}}}"#,
+                command_id(&subscribe)
+            ),
+        ));
+
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        let (_, second) = publish(&mut machine, subscription, "k", "2");
+
+        assert_eq!(timers_set(&first), []);
+        assert_eq!(map_writes(&second).len(), 1);
+    }
+
+    /// The map flow's second live-phase reply (`map_recovered`, D2).
+    #[test]
+    fn a_recovered_live_reply_sets_the_interval() {
+        let (mut machine, transport) = connected(config(), false);
+        let id = machine
+            .add_map_subscription("scores".into(), map_options())
+            .unwrap();
+        machine.handle(Input::StreamOpened(Some(id)));
+        machine.handle(Input::Subscribe(id));
+        let live = machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"recoverable":true,"epoch":"e1","offset":7,"state":[{"key":"a","data":{"v":1},"offset":7}]}}"#,
+        ));
+        for action in &live {
+            if let Action::EmitMapSubscription(event, ..) = action {
+                machine.handle(Input::EventTaken(*event));
+            }
+        }
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let transport = match machine
+            .handle(Input::TimerFired(Timer::Reconnect))
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            }) {
+            Some(transport) => transport,
+            None => panic!("a new transport"),
+        };
+        let mut opened = machine.handle(Input::TransportOpened(transport));
+        let connect = commands(&opened)
+            .into_iter()
+            .find(|command| command.get("connect").is_some())
+            .expect("a connect");
+        opened.extend(machine.handle(frame(
+            transport,
+            &format!(
+                r#"{{"id":{},"connect":{{"client":"c"}}}}"#,
+                command_id(&connect)
+            ),
+        )));
+        let subscribe = commands(&opened)
+            .into_iter()
+            .find(|command| command.get("subscribe").is_some())
+            .expect("a recovering subscribe");
+        assert_eq!(subscribe["subscribe"]["recover"], true, "{subscribe}");
+        machine.handle(frame(
+            transport,
+            &format!(
+                r#"{{"id":{},"subscribe":{{"type":1,"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":9,"publish_debounce":250}}}}"#,
+                command_id(&subscribe)
+            ),
+        ));
+
+        let (_, first) = publish(&mut machine, id, "k", "1");
+
+        assert_eq!(
+            timers_set(&first).first().map(|(_, delay)| *delay),
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    /// The interval is read before the calls waiting for `subscribed`
+    /// start, in the map flow too (D2).
+    #[test]
+    fn a_map_publish_made_while_subscribing_is_debounced_by_the_live_reply_of_that_load() {
+        let (mut machine, transport) = connected(config(), false);
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        let (_, second) = publish(&mut machine, subscription, "k", "2");
+        assert_eq!(map_writes(&first), []);
+        assert_eq!(map_writes(&second), []);
+
+        let live = machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"epoch":"e","offset":1,"publish_debounce":100}}"#,
+        ));
+
+        assert_eq!(map_writes(&live), [("k".into(), Some(1))]);
+        assert_eq!(timers_set(&live).len(), 1);
+    }
+
+    // D12: per key.
+
+    #[test]
+    fn each_key_has_its_own_window() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+
+        let (_, a1) = publish(&mut machine, subscription, "a", "1");
+        let (_, a2) = publish(&mut machine, subscription, "a", "2");
+        let (_, b1) = publish(&mut machine, subscription, "b", "1");
+        let (_, b2) = publish(&mut machine, subscription, "b", "2");
+
+        assert_eq!(map_writes(&a1), [("a".into(), Some(1))]);
+        assert_eq!(map_writes(&a2), []);
+        assert_eq!(map_writes(&b1), [("b".into(), Some(1))]);
+        assert_eq!(map_writes(&b2), []);
+        assert_ne!(timer(&a1), timer(&b1));
+        assert_eq!(machine.subscription_debounce_windows(subscription), 2);
+
+        let fired = machine.handle(Input::DebounceTimerFired(timer(&a1)));
+
+        assert_eq!(map_writes(&fired), [("a".into(), Some(2))]);
+        let fired = machine.handle(Input::DebounceTimerFired(timer(&b1)));
+        assert_eq!(map_writes(&fired), [("b".into(), Some(2))]);
+    }
+
+    #[test]
+    fn the_empty_key_on_a_map_is_a_key_like_another() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+
+        let (_, empty) = publish(&mut machine, subscription, "", "1");
+        let (_, parked) = publish(&mut machine, subscription, "", "2");
+        let (_, other) = publish(&mut machine, subscription, "b", "1");
+
+        assert_eq!(map_writes(&empty), [(String::new(), Some(1))]);
+        assert_eq!(map_writes(&parked), []);
+        assert_eq!(map_writes(&other), [("b".into(), Some(1))]);
+    }
+
+    #[test]
+    fn the_trailing_map_send_carries_its_key_and_data() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+        let (_, first) = publish(&mut machine, subscription, "a", "1");
+        publish(&mut machine, subscription, "a", "2");
+
+        let fired = machine.handle(Input::DebounceTimerFired(timer(&first)));
+
+        assert_eq!(map_writes(&fired), [("a".into(), Some(2))]);
+        assert_eq!(timers_set(&fired).len(), 1);
+    }
+
+    #[test]
+    fn a_window_of_one_key_ends_alone() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+        let (_, a1) = publish(&mut machine, subscription, "a", "1");
+        let (_, b1) = publish(&mut machine, subscription, "b", "1");
+        publish(&mut machine, subscription, "b", "2");
+
+        let fired = machine.handle(Input::DebounceTimerFired(timer(&a1)));
+        assert_eq!(map_writes(&fired), []);
+        assert_eq!(timers_set(&fired), []);
+        assert_eq!(machine.subscription_debounce_windows(subscription), 1);
+
+        let fired = machine.handle(Input::DebounceTimerFired(timer(&b1)));
+        assert_eq!(map_writes(&fired), [("b".into(), Some(2))]);
+    }
+
+    #[test]
+    fn client_level_map_writes_never_meet_the_gate() {
+        let (mut machine, _, _) = subscribed_map(100);
+        let first = machine.add_call(CallRequest::MapPublish {
+            channel: "m".into(),
+            key: "k".into(),
+            data: b"1".to_vec(),
+        });
+        let second = machine.add_call(CallRequest::MapPublish {
+            channel: "m".into(),
+            key: "k".into(),
+            data: b"2".to_vec(),
+        });
+        let remove = machine.add_call(CallRequest::MapRemove {
+            channel: "m".into(),
+            key: "k".into(),
+        });
+
+        let one = machine.handle(Input::Call(first));
+        let two = machine.handle(Input::Call(second));
+        let three = machine.handle(Input::Call(remove));
+
+        assert_eq!(map_writes(&one), [("k".into(), Some(1))]);
+        assert_eq!(map_writes(&two), [("k".into(), Some(2))]);
+        assert_eq!(map_writes(&three), [("k".into(), None)]);
+        assert_eq!(timers_set(&one), []);
+        assert_eq!(timers_set(&three), []);
+    }
+
+    // D12: a remove.
+
+    #[test]
+    fn a_remove_cancels_the_window_and_its_latest_and_is_sent_at_once() {
+        let (mut machine, _, subscription, _, window) = window_on_k();
+
+        let (_, removed) = remove(&mut machine, subscription, "k");
+
+        assert_eq!(map_writes(&removed), [("k".into(), None)]);
+        assert_eq!(timers_cancelled(&removed), [window]);
+        assert_eq!(timers_set(&removed), []);
+        assert_eq!(machine.subscription_debounce_windows(subscription), 0);
+        assert_eq!(machine.debounce_window_count(), 0);
+    }
+
+    #[test]
+    fn the_timer_of_a_cancelled_window_is_ignored() {
+        let (mut machine, _, subscription, _, window) = window_on_k();
+        remove(&mut machine, subscription, "k");
+
+        let fired = machine.handle(Input::DebounceTimerFired(window));
+
+        assert_eq!(fired, []);
+    }
+
+    #[test]
+    fn the_publishes_a_remove_replaced_follow_its_success_in_order() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (other, _) = publish(&mut machine, subscription, "k", "3");
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let command = command_id(&commands(&removed)[0]);
+
+        let settled_actions = reply(&mut machine, transport, command);
+
+        assert_eq!(
+            settled(&settled_actions),
+            [(waiter, ok()), (other, ok()), (remove_id, ok())]
+        );
+    }
+
+    #[test]
+    fn the_publishes_a_remove_replaced_fail_with_its_error() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let command = command_id(&commands(&removed)[0]);
+
+        let settled_actions = machine.handle(frame(
+            transport,
+            &format!(
+                r#"{{"id":{command},"error":{{"code":103,"message":"permission denied","temporary":true}}}}"#
+            ),
+        ));
+
+        let error = Err(CallError::new(103, "permission denied").temporary(true));
+        assert_eq!(
+            settled(&settled_actions),
+            [(waiter, error.clone()), (remove_id, error)]
+        );
+    }
+
+    #[test]
+    fn a_remove_with_no_waiters_closes_the_window_and_a_later_publish_is_sent_at_once() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+
+        let (_, removed) = remove(&mut machine, subscription, "k");
+        assert_eq!(timers_cancelled(&removed), [timer(&first)]);
+
+        let (_, later) = publish(&mut machine, subscription, "k", "2");
+
+        assert_eq!(map_writes(&later), [("k".into(), Some(2))]);
+        assert_eq!(timers_set(&later).len(), 1);
+    }
+
+    #[test]
+    fn a_remove_opens_no_window_and_does_not_park_a_later_publish() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+
+        let (_, removed) = remove(&mut machine, subscription, "k");
+
+        assert_eq!(map_writes(&removed), [("k".into(), None)]);
+        assert_eq!(timers_set(&removed), []);
+        assert_eq!(timers_cancelled(&removed), []);
+        assert_eq!(machine.debounce_window_count(), 0);
+        let (_, later) = publish(&mut machine, subscription, "k", "1");
+        assert_eq!(map_writes(&later), [("k".into(), Some(1))]);
+        assert_eq!(timers_set(&later).len(), 1);
+    }
+
+    #[test]
+    fn a_remove_of_another_key_leaves_the_window_alone() {
+        let (mut machine, _, subscription, waiter, window) = window_on_k();
+
+        let (_, removed) = remove(&mut machine, subscription, "other");
+
+        assert_eq!(timers_cancelled(&removed), []);
+        assert_eq!(machine.debounce_window_count(), 1);
+        let fired = machine.handle(Input::DebounceTimerFired(window));
+        assert_eq!(map_writes(&fired), [("k".into(), Some(2))]);
+        assert!(machine.call_wait(waiter).is_some());
+    }
+
+    #[test]
+    fn a_publish_in_flight_keeps_its_reply_as_a_remove_follows() {
+        let (mut machine, transport, subscription) = subscribed_map(100);
+        let (leading, first) = publish(&mut machine, subscription, "k", "1");
+        let command = command_id(&commands(&first)[0]);
+        let (_, removed) = remove(&mut machine, subscription, "k");
+
+        let replied = reply(&mut machine, transport, command);
+
+        assert_eq!(settled(&replied), [(leading, ok())]);
+        assert_eq!(map_writes(&removed), [("k".into(), None)]);
+    }
+
+    #[test]
+    fn a_trailing_send_handed_over_keeps_its_followers_as_a_remove_follows() {
+        let (mut machine, transport, subscription, waiter, window) = window_on_k();
+        let fired = machine.handle(Input::DebounceTimerFired(window));
+        let trailing = command_id(&commands(&fired)[0]);
+        // The window the trailing send opened has nothing in it.
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let remove_command = command_id(&commands(&removed)[0]);
+
+        let of_trailing = reply(&mut machine, transport, trailing);
+        assert_eq!(settled(&of_trailing), [(waiter, ok())]);
+
+        let of_remove = reply(&mut machine, transport, remove_command);
+        assert_eq!(settled(&of_remove), [(remove_id, ok())]);
+    }
+
+    /// A remove made while subscribing meets the gate once subscribed, in
+    /// call order, after the publishes before it (D3, D12).
+    #[test]
+    fn a_remove_made_while_subscribing_meets_the_gate_after_the_publishes_before_it() {
+        let (mut machine, transport) = connected(config(), false);
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        publish(&mut machine, subscription, "k", "1");
+        let (waiter, _) = publish(&mut machine, subscription, "k", "2");
+        let (remove_id, _) = remove(&mut machine, subscription, "k");
+
+        let live = machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"epoch":"e","offset":1,"publish_debounce":100}}"#,
+        ));
+
+        assert_eq!(
+            map_writes(&live),
+            [("k".into(), Some(1)), ("k".into(), None)]
+        );
+        assert_eq!(timers_cancelled(&live).len(), 1);
+        assert_eq!(machine.debounce_window_count(), 0);
+        let remove_command = command_id(
+            commands(&live)
+                .iter()
+                .find(|command| command["publish"]["removed"] == true)
+                .expect("the remove"),
+        );
+        let replied = reply(&mut machine, transport, remove_command);
+        assert_eq!(settled(&replied), [(waiter, ok()), (remove_id, ok())]);
+    }
+
+    #[test]
+    fn a_follower_of_a_remove_waits_on_the_removes_phase() {
+        let (mut machine, _, subscription, waiter, _) = window_on_k();
+        assert_eq!(machine.call_wait(waiter), Some(CallWait::Other));
+
+        remove(&mut machine, subscription, "k");
+
+        assert_eq!(machine.call_wait(waiter), Some(CallWait::Reply));
+    }
+
+    #[test]
+    fn a_remove_lost_with_its_transport_fails_its_followers_with_code_11() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (remove_id, _) = remove(&mut machine, subscription, "k");
+
+        let lost = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+
+        let settled = settled(&lost);
+        for id in [waiter, remove_id] {
+            let (_, result) = settled
+                .iter()
+                .find(|(call, _)| *call == id)
+                .unwrap_or_else(|| panic!("{id:?} did not settle: {settled:?}"));
+            assert_eq!(
+                result.as_ref().err().map(|error| error.code),
+                Some(codes::error::CONNECTION_CLOSED)
+            );
+        }
+    }
+
+    // D11, for a remove: the follower clauses and the remove's own owner.
+
+    #[test]
+    fn a_dropped_remove_with_followers_is_still_sent_and_settles_only_them() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let command = command_id(&commands(&removed)[0]);
+
+        let abandoned = machine.handle(Input::CallAbandoned(remove_id));
+        assert_eq!(settled(&abandoned), []);
+        assert_eq!(machine.call_wait(waiter), Some(CallWait::Reply));
+
+        let replied = reply(&mut machine, transport, command);
+
+        assert_eq!(settled(&replied), [(waiter, ok())]);
+    }
+
+    #[test]
+    fn a_dropped_remove_waiting_to_be_written_still_goes_for_its_followers() {
+        // A filler keeps the write queue full: the remove waits for room.
+        let (mut machine, transport) = connected(
+            Config {
+                write_queue_bytes: 200,
+                ..config()
+            },
+            false,
+        );
+        let subscription = machine
+            .add_map_subscription("m".into(), map_options())
+            .unwrap();
+        machine.handle(Input::Subscribe(subscription));
+        machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"type":1,"epoch":"e","offset":1,"publish_debounce":100}}"#,
+        ));
+        let filler = machine.add_call(super::filler());
+        let filled = machine.handle(Input::Call(filler));
+        let (frame_id, _) = filled
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { id, frame, .. } => Some((*id, frame.clone())),
+                _ => None,
+            })
+            .expect("the filling frame");
+        let (_, first) = publish(&mut machine, subscription, "k", "1");
+        assert_eq!(map_writes(&first), []);
+        let (waiter, _) = publish(&mut machine, subscription, "k", "2");
+        let (remove_id, _) = remove(&mut machine, subscription, "k");
+
+        machine.handle(Input::CallAbandoned(remove_id));
+        let drained = machine.handle(Input::FrameWritten {
+            transport,
+            frame: frame_id,
+        });
+
+        assert_eq!(
+            map_writes(&drained),
+            [("k".into(), Some(1)), ("k".into(), None)]
+        );
+        assert_eq!(machine.call_wait(waiter), Some(CallWait::Reply));
+    }
+
+    #[test]
+    fn a_dropped_remove_with_no_follower_left_is_abandoned() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let command = command_id(&commands(&removed)[0]);
+
+        machine.handle(Input::CallAbandoned(remove_id));
+        let abandoned = machine.handle(Input::CallAbandoned(waiter));
+        assert_eq!(settled(&abandoned), []);
+
+        // The reply is ignored: nothing settles.
+        let replied = reply(&mut machine, transport, command);
+        assert_eq!(settled(&replied), []);
+    }
+
+    #[test]
+    fn a_dropped_follower_leaves_the_remove_with_its_owner() {
+        let (mut machine, transport, subscription, waiter, _) = window_on_k();
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        let command = command_id(&commands(&removed)[0]);
+
+        let dropped = machine.handle(Input::CallAbandoned(waiter));
+        assert_eq!(settled(&dropped), []);
+
+        let replied = reply(&mut machine, transport, command);
+
+        assert_eq!(settled(&replied), [(remove_id, ok())]);
+    }
+
+    #[test]
+    fn a_remove_with_no_followers_abandoned_is_never_sent_if_queued() {
+        let (mut machine, _, subscription) = subscribed_map(100);
+        // A batch holds the remove: abandoning it withdraws it.
+        machine.handle(Input::StartBatching);
+        let (remove_id, removed) = remove(&mut machine, subscription, "k");
+        assert_eq!(map_writes(&removed), []);
+
+        machine.handle(Input::CallAbandoned(remove_id));
+        let stopped = machine.handle(Input::StopBatching);
+
+        assert_eq!(map_writes(&stopped), []);
+    }
+
+    // D10: map subscriptions leave `subscribed` through the same functions.
+
+    #[test]
+    fn losing_the_transport_drops_a_map_window_with_code_17() {
+        let (mut machine, transport, _, waiter, window) = window_on_k();
+
+        let lost = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+
+        assert_eq!(timers_cancelled(&lost), [window]);
+        let settled = settled(&lost);
+        let (_, result) = settled
+            .iter()
+            .find(|(call, _)| *call == waiter)
+            .expect("the waiter settled");
+        assert_eq!(
+            result.as_ref().err().map(|error| error.code),
+            Some(codes::error::PUBLISH_DROPPED)
+        );
+    }
+
+    #[test]
+    fn unsubscribing_a_map_drops_its_windows_with_code_7() {
+        let (mut machine, _, subscription, waiter, window) = window_on_k();
+
+        let unsubscribed = machine.handle(Input::Unsubscribe(subscription));
+
+        assert_eq!(timers_cancelled(&unsubscribed), [window]);
+        let settled = settled(&unsubscribed);
+        let (_, result) = settled
+            .iter()
+            .find(|(call, _)| *call == waiter)
+            .expect("the waiter settled");
+        assert_eq!(
+            result.as_ref().err().map(|error| error.code),
+            Some(codes::error::SUBSCRIPTION_UNSUBSCRIBED)
+        );
+    }
+}
