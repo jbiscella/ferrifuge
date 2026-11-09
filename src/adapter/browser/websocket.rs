@@ -50,7 +50,7 @@ pub(in crate::adapter) struct Bound {
 /// that would take it past its bound is refused; one larger than the byte
 /// bound alone is admitted into an empty inbox.
 #[derive(Debug, Default)]
-struct Inbox {
+pub(super) struct Inbox {
     /// Frames, then at most one end of the connection.
     items: VecDeque<Inbound>,
     frames: usize,
@@ -59,7 +59,7 @@ struct Inbox {
 
 impl Inbox {
     /// Admits `frame`, or gives it back when it would overflow `bound`.
-    fn admit(&mut self, frame: Vec<u8>, bound: Bound) -> Result<(), Vec<u8>> {
+    pub(super) fn admit(&mut self, frame: Vec<u8>, bound: Bound) -> Result<(), Vec<u8>> {
         let empty = self.frames == 0;
         if !empty && (self.frames >= bound.messages || self.bytes + frame.len() > bound.bytes) {
             return Err(frame);
@@ -71,15 +71,15 @@ impl Inbox {
     }
 
     /// The end of the connection, read after the frames before it.
-    fn end(&mut self, end: Inbound) {
+    pub(super) fn end(&mut self, end: Inbound) {
         self.items.push_back(end);
     }
 
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    fn pop(&mut self) -> Option<Inbound> {
+    pub(super) fn pop(&mut self) -> Option<Inbound> {
         let item = self.items.pop_front()?;
         if let Inbound::Frame(frame) = &item {
             self.frames -= 1;
@@ -88,7 +88,7 @@ impl Inbox {
         Some(item)
     }
 
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         *self = Self::default();
     }
 }
@@ -126,7 +126,7 @@ impl State {
 }
 
 /// A listener of a browser event, by the event's name.
-type Listener = (&'static str, Closure<dyn FnMut(Event)>);
+pub(super) type Listener = (&'static str, Closure<dyn FnMut(Event)>);
 
 /// A browser `WebSocket` and its listeners, which it removes before it
 /// drops their closures, so that the browser never calls a dropped one

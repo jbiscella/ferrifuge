@@ -164,6 +164,8 @@ web-sys = { version = "0.3.107", optional = true, features = [
     "BinaryType",
     "CloseEvent",
     "Event",
+    "EventSource",
+    "EventSourceInit",
     "EventTarget",
     "MessageEvent",
     "Headers",
@@ -172,6 +174,7 @@ web-sys = { version = "0.3.107", optional = true, features = [
     "Response",
     "ResponseType",
     "Url",
+    "UrlSearchParams",
     "WebSocket",
 ] }
 gloo-timers = { version = "0.4.0", features = ["futures"], optional = true }
