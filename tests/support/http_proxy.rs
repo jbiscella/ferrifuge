@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::header::{ACCEPT, CONTENT_TYPE};
+use axum::http::header::{ACCEPT, CONTENT_TYPE, SET_COOKIE};
 use axum::http::{Response, StatusCode};
 use axum::response::IntoResponse;
 use tokio::net::TcpListener;
@@ -45,6 +45,12 @@ struct ProxyState {
     refuse_over: Mutex<Option<usize>>,
     /// The bodies of the requests refused that way.
     refused: Mutex<Vec<Vec<u8>>>,
+    /// A `Set-Cookie` value added to the stream response (Block 43b).
+    stream_cookie: Mutex<Option<String>>,
+    /// A `Set-Cookie` value added to every emulation response (Block 43b).
+    emulation_cookie: Mutex<Option<String>>,
+    /// Emulation requests the server answered and the proxy relayed back.
+    emulation_answered: AtomicUsize,
 }
 
 impl HttpProxy {
@@ -64,6 +70,9 @@ impl HttpProxy {
             requests: Mutex::new(Vec::new()),
             refuse_over: Mutex::new(None),
             refused: Mutex::new(Vec::new()),
+            stream_cookie: Mutex::new(None),
+            emulation_cookie: Mutex::new(None),
+            emulation_answered: AtomicUsize::new(0),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -125,6 +134,41 @@ impl HttpProxy {
                 (path.clone(), value)
             })
             .collect()
+    }
+
+    /// The path of every request received, in order, with every value of
+    /// its header `name` (Block 43b: one Cookie header, not two).
+    pub(crate) fn requests_with_header_values(&self, name: &str) -> Vec<(String, Vec<String>)> {
+        self.state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, headers)| {
+                let values = headers
+                    .get_all(name)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .collect();
+                (path.clone(), values)
+            })
+            .collect()
+    }
+
+    /// Adds the `Set-Cookie` value `cookie` to the stream response.
+    pub(crate) fn set_cookie_on_stream(&self, cookie: &str) {
+        *self.state.stream_cookie.lock().unwrap() = Some(cookie.to_owned());
+    }
+
+    /// Adds the `Set-Cookie` value `cookie` to every emulation response.
+    pub(crate) fn set_cookie_on_emulation(&self, cookie: &str) {
+        *self.state.emulation_cookie.lock().unwrap() = Some(cookie.to_owned());
+    }
+
+    /// How many emulation requests were answered back to the client.
+    pub(crate) fn emulation_answered(&self) -> usize {
+        self.state.emulation_answered.load(Ordering::SeqCst)
     }
 
     /// Answers every emulation request whose body exceeds `size` bytes with
@@ -217,6 +261,17 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
     let mut relayed = Response::builder().status(response.status());
     if let Some(value) = response.headers().get(CONTENT_TYPE) {
         relayed = relayed.header(CONTENT_TYPE, value);
+    }
+    let cookie = if parts.uri.path() == "/emulation" {
+        state.emulation_answered.fetch_add(1, Ordering::SeqCst);
+        state.emulation_cookie.lock().unwrap().clone()
+    } else if parts.uri.path().starts_with("/connection/") {
+        state.stream_cookie.lock().unwrap().clone()
+    } else {
+        None
+    };
+    if let Some(cookie) = cookie {
+        relayed = relayed.header(SET_COOKIE, cookie);
     }
     relayed
         .body(Body::from_stream(response.bytes_stream()))
