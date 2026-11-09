@@ -5,6 +5,8 @@
 //! the transports through `backend`: `tokio` natively, `browser` on
 //! wasm32-unknown-unknown (Block 44, D2).
 
+#[cfg(adapter_browser)]
+mod browser;
 mod client;
 mod handler;
 mod log;
@@ -16,6 +18,8 @@ mod subscription;
 mod tokio;
 
 /// The transports of this build's target (Block 44, D2).
+#[cfg(adapter_browser)]
+use self::browser as backend;
 #[cfg(adapter_tokio)]
 use self::tokio as backend;
 
