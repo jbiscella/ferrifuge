@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–42 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–43 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3103,7 +3103,7 @@ Decisions that bind the blocks:
 - **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
 - **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by a maintained media-type parser (mediatype, Block 27 D4); the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
 - **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs (amended by Block 41 D6: under `Task` too a marked call fails at once, and under `Thread` a wait that only a message held back by the handler's event can complete fails as well).
-- **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` on, `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
+- **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` off, as Block 43 D1 decides; `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
 - **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
 - **Publish debouncing (item 32):** in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
 - **WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`. `VERIFY:` that it accepts the client's own `rustls::ClientConfig`.
@@ -6378,3 +6378,112 @@ Feature: TLA+ trace replay
 ```
 
 **Exceptions introduced:** none. The four recorded divergences of D5 follow earlier Ferrifuge decisions (Blocks 8, 9, 11, 36).
+
+---
+
+## Block 43 — Cookie jar
+
+**Goal:** a client behind a load balancer or gateway that sets cookies (session affinity, an auth session) keeps them and sends them back on every later request, as a browser does for centrifuge-js, so that sticky sessions and cookie-based admission work for a native client (parity item 24, adopted by the owner, 2026-11-06, late; reverses Block 17's exclusion of a cookie jar, recorded in Block 0's "Reversed exclusions").
+
+**Dependencies:** Blocks 0 (Components rule, dependency policy), 8 (transports, emulation requests), 17 (`http_headers`, the redacting `Debug`), 20 (semver check, docs.rs metadata, changelog), 21 (no secret in a record, the log-facade test), 22 and 23 (TLS and proxies on the same requests), 25 (a refused upgrade's response), 32 (`set_http_headers`), 37 (connector), 40 (wasm32 build of the core).
+
+**Out of scope:**
+- persisting cookies across processes: an app implements `CookieJar` over its own storage;
+- cookies in the sans-IO core, which sees no HTTP, and in the browser adapter (Block 44), where the browser keeps them;
+- a cookie jar on by default;
+- public-suffix rejection (D1): an app that needs it implements `CookieJar` over cookie_store with a list it supplies;
+- following redirects: no transport follows one (Blocks 8, 25);
+- RFC 6265 §5.4's SHOULD on ordering the jar's cookies by path length and creation time: cookie_store 0.22.1 does not sort them;
+- SameSite: a native client has no site of its own, and cookie_store does not match on it.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 43a | As an app developer behind a load balancer that pins websocket connections with a cookie, I want the client to keep the cookies set on the upgrade and send them on every later upgrade, so that reconnects reach the same node and cookie-based admission works without code of mine | the `@D` scenarios |
+| 43b | As an app developer whose clients fall back to http_stream or sse, I want the stream and emulation requests to keep and send the cookies too, so that a client that fell back keeps its affinity and admission on every request | the `@B` outlines |
+
+**Decisions** (reviewer, 2026-11-09, delegated by the owner, after a three-amigos round table on the draft):
+- **D1 API.** Behind a new non-default cargo feature `cookies = ["tokio", "dep:cookie_store", "dep:url"]`:
+  - `pub trait CookieJar: Send + Sync`, with the method set of reqwest 0.13.5's `cookie::CookieStore`, so that a jar shared with an app's reqwest client is a one-line forwarding newtype (shown in its rustdoc): `fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &http::HeaderValue>, url: &url::Url)` and `fn cookies(&self, url: &url::Url) -> Option<http::HeaderValue>`. `url` is re-exported as `ferrifuge::url` under `cookies`, documented as `ferrifuge::http` is: moving to another major version of it is a breaking change of Ferrifuge's;
+  - `pub struct MemoryJar`, with `new()` and `Default`, implementing `CookieJar` on cookie_store 0.22.1 with `default-features = false` and no feature. `public_suffix` stays off: without a `publicsuffix::List` given to `CookieStore::with_suffix_list` it rejects nothing (`src/cookie_store.rs:267-285`), and its `publicsuffix` dependency (2.3.0, last release and commit 2024-11-14) fails Block 0's maintenance rule. Like reqwest's `Jar`, it does no public-suffix check, and its rustdoc says so. The amended plan bullet "Cookies (item 24)" says `public_suffix` off and refers to this decision;
+  - `ClientBuilder::cookie_jar(jar: Arc<dyn CookieJar>)`, a later call replacing an earlier one; the app keeps its own `Arc` to inspect or seed the jar.
+- **D2 Where cookies go.** The adapter sets `Cookie` from the jar and gives it each response's `Set-Cookie` values itself, on the websocket upgrade, the http_stream and sse stream requests, and every emulation request. It does not use reqwest's `cookies` feature, which skips the jar when a `Cookie` header is already set (reqwest 0.13.5 `src/cookie.rs:242`). The Cookie header is computed when a request is built, so a request built before a response arrives carries the cookies of that moment, as a browser's does. The `Set-Cookie` values of every response are stored whatever its status, except 407, which is a proxy's own answer (D5). On the websocket this includes both the 101 response, the `Response` that `tokio_tungstenite::client_async_tls_with_config` returns with the stream, and a refused upgrade's response, `tungstenite::Error::Http(Box<Response>)`. tungstenite 0.30.0 appends every header line, so repeated `Set-Cookie` lines are all kept (`handshake/headers.rs:18-28`).
+- **D3 Merging with `http_headers`.** A `Cookie` from `http_headers` (Block 17) or `set_http_headers` (Block 32), as set when the request is built, and the jar's cookies go in one Cookie header, as RFC 6265 §5.4 requires ("MUST NOT attach more than one Cookie header field"). The app's pairs come first, in their order, then the jar's, joined by "; ", as Go's `Request.AddCookie` appends to a request's own header. A jar cookie whose name, compared case-sensitively, is among the app's pairs is left out; two jar cookies with the same name and different paths are both sent.
+- **D4 The URL a cookie belongs to.** The request's URL without its query and fragment: the sse stream URL's `cf_connect` carries the token, and a jar sees no secret. `ws://` and `wss://` become `http://` and `https://`: cookie_store 0.22.1 counts as HTTP only schemes starting with "http", so it would refuse an `HttpOnly` cookie from `ws://`, and as secure only "https" and loopback hosts, so it would never send a `Secure` cookie over `wss://` (`src/utils.rs`). Emulation requests use the emulation endpoint's URL, so cookie_store's domain and path matching decides whether the stream host's cookies go to a different emulation host.
+- **D5 Proxies and connectors.** Cookies ride only on the request to the server. A CONNECT request or SOCKS5 handshake (Block 23) carries none. A plain `http://` request that an HTTP proxy forwards in absolute form carries them, as it carries every header of the request. A 407 response's `Set-Cookie` is not stored. With a connector (Block 37), the upgrade goes through the same handshake call and carries them too.
+- **D6 Logging.** No cookie name or value reaches a Ferrifuge record (Block 21). `MemoryJar` stores each parsed cookie with `CookieStore::insert_raw`, which logs nothing, rather than `store_response_cookies`, which logs a non-Secure cookie with its value at DEBUG through `log` (cookie_store 0.22.1 `src/cookie_store.rs:79-86`). `log_secure_cookie_values` stays off. `MemoryJar`'s `Debug` shows the number of cookies only, and the builder's shows `cookie_jar: Some(..)`. The README's logging warning (Block 21 D6) adds that tungstenite's TRACE record of the upgrade request includes the Cookie header, and that reqwest's `Jar` logs cookie values at DEBUG.
+- **D7 Bounds.** `MemoryJar` ignores a `Set-Cookie` value over 4096 bytes. Once it holds 3000 cookies, it drops its expired ones, and if 3000 still remain it ignores a new cookie, while a replacement of a held one is still taken. These are RFC 6265 §6.1's minimums, which keep a hostile server from making the jar grow without bound.
+- **D8 Feature, tests and CI.** `cookies` implies `tokio`, so the wasm32 job's core builds (Block 40) never compile it. The cookie scenarios are in `IMPLEMENTED` only when the BDD binary is built with `cookies`. CI's `test` job, the coverage run and the portability job's scenarios build with `--features cookies`. cargo-semver-checks (`ci.yml`, `release.yml`) and `[package.metadata.docs.rs]` add `cookies` to `test-util`.
+- **D9 Version and docs.** Additive: `Unreleased`, "Added": "An opt-in cookie jar (`cookies` feature): `CookieJar`, `MemoryJar`, `ClientBuilder::cookie_jar`." The README's "Cargo features" section names `cookies`.
+
+**Structural acceptance:**
+- with default features, `cargo tree -e normal -i cookie_store` finds nothing; with `--features cookies`, it finds 0.22.1, and `-i publicsuffix` finds nothing; cargo-deny passes;
+- unit tests of D4 on non-loopback URLs: an `HttpOnly` cookie set from `ws://` is kept and sent; a `Secure` cookie set from `wss://` is sent to `wss://`, not to `ws://`; the URL given to the jar has no query;
+- unit tests in `src/adapter/http.rs` (`serve_once`): the stream request carries the jar's cookies; a 407's `Set-Cookie` is not stored;
+- unit tests of D7: a 4097-byte value is ignored; the 3001st new cookie is ignored while a replacement is taken;
+- a capturing `log` logger at Trace level sees no record holding the value of a non-Secure cookie that `MemoryJar` stored; `MemoryJar`'s `Debug` shows no name or value;
+- D8's CI changes; the Block 14 @P gates pass unchanged.
+
+Value clause: As an app developer behind a load balancer or gateway that sets cookies, I want the client to keep them and send them on every later request, so that sticky sessions and cookie-based admission work without code of mine.
+
+```gherkin
+Feature: Cookie jar
+
+  @D
+  Scenario: A cookie set on the websocket upgrade is sent on the next connection
+    Given a client with a memory cookie jar connected to the fake server, whose upgrade response sets the cookie "affinity=node-1; Path=/; HttpOnly"
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the next upgrade request carries one Cookie header "affinity=node-1"
+
+  @D
+  Scenario: A cookie set on a refused upgrade is sent on the next attempt
+    Given a client with a memory cookie jar and the fake server answering its next upgrade with HTTP status 503 and the cookie "affinity=node-2; Path=/"
+    When connect is called
+    Then the client reaches state "connected"
+    And the upgrade request after the refused one carries one Cookie header "affinity=node-2"
+
+  @D
+  Scenario: The app's Cookie header and the jar's cookies are sent in one header
+    Given a client with a memory cookie jar and the HTTP header "Cookie: app=a1; affinity=mine", connected to the fake server, whose upgrade response sets the cookies "affinity=node-1; Path=/" and "lb=l1; Path=/"
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the next upgrade request carries one Cookie header "app=a1; affinity=mine; lb=l1"
+
+  @D
+  Scenario: Without a cookie jar no cookie is kept
+    Given a client without a cookie jar connected to the fake server, whose upgrade response sets the cookie "affinity=node-1; Path=/"
+    When the fake server disconnects the client with a reconnect-advised code
+    Then the next upgrade request carries no Cookie header
+
+  @D
+  Scenario: No cookie value reaches a log record
+    Given a client with a memory cookie jar whose log records are captured, connected to the fake server, whose upgrade response sets the cookie "secret=c-secret; Path=/"
+    When the fake server disconnects the client with a reconnect-advised code
+    And the client reaches state "connected" again
+    Then no record contains "c-secret"
+
+  @B
+  Scenario Outline: A cookie set on the stream response rides on every emulation request
+    Given a client with a memory cookie jar connected over transport "<transport>" through the HTTP proxy, whose stream response sets the cookie "session=s1; Path=/"
+    When the client sends a command
+    Then the HTTP proxy relayed at least one emulation request
+    And every emulation request it relayed carried one Cookie header "session=s1"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+
+  @B
+  Scenario Outline: A cookie set on an emulation response is sent on the next emulation request
+    Given a client with a memory cookie jar connected over transport "<transport>" through the HTTP proxy, whose emulation responses set the cookie "lb=e1; Path=/"
+    When the client sends a command and, once it is answered, another
+    Then the emulation request of the second command carried one Cookie header "lb=e1"
+
+    Examples:
+      | transport   |
+      | http_stream |
+      | sse         |
+```
+
+**Exceptions introduced:** none.
