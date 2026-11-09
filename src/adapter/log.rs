@@ -249,6 +249,11 @@ impl Log {
                 kind = command,
                 "a reply from the server came before the connect reply"
             ),
+            #[cfg(feature = "unstable")]
+            Anomaly::UnexpectedMapReply { fault, .. } => warn!(
+                client = self.number,
+                transport, fault, "a map subscription's reply breaks the protocol"
+            ),
         }
     }
 

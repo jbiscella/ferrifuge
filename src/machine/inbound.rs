@@ -42,6 +42,9 @@ pub(super) struct Inbound {
     waiting_for: HashSet<EventId>,
     /// Reading is stopped: the read-ahead is full.
     full: bool,
+    /// The encoded size of the message being handled: a map subscription's
+    /// load counts its pages' (Block 45, D5).
+    pub(super) handled: usize,
 }
 
 impl Machine {
@@ -167,6 +170,7 @@ impl Machine {
                 continue;
             }
             let start = self.actions.len();
+            self.inbound.handled = held.size;
             match held.item {
                 Item::Reply(reply) => self.reply(*reply),
                 Item::Closed { code, reason } => self.transport_closed(code, &reason),
@@ -181,12 +185,57 @@ impl Machine {
                     {
                         Some(*id)
                     }
+                    #[cfg(feature = "unstable")]
+                    Action::EmitMapSubscription(id, subscription, _)
+                        if self.has_stream(Some(*subscription)) =>
+                    {
+                        Some(*id)
+                    }
                     _ => None,
                 })
                 .collect();
             self.inbound.waiting_for.extend(waiting);
         }
+        #[cfg(feature = "unstable")]
+        self.handle_map_pages();
         self.update_reading();
+    }
+
+    /// Handles the held pages of map subscriptions' loads that make no
+    /// event, ahead of messages held behind events not taken, once the
+    /// connect reply is handled; never past a held close (Block 45, D5).
+    #[cfg(feature = "unstable")]
+    fn handle_map_pages(&mut self) {
+        let mut index = 0;
+        while index < self.inbound.held.len() {
+            let held = &self.inbound.held[index];
+            if Some(held.transport) != self.transport {
+                index += 1;
+                continue;
+            }
+            match &held.item {
+                Item::Closed { .. } | Item::TooLarge => return,
+                // Messages after one closing the transport are discarded
+                // (Block 9).
+                Item::Reply(reply)
+                    if matches!(
+                        reply.result,
+                        ReplyResult::Push(crate::wire::Push::Disconnect(_))
+                    ) =>
+                {
+                    return;
+                }
+                Item::Reply(reply) if self.map_page_early(reply, held.size) => {
+                    let held = self.inbound.held.remove(index).expect("in range");
+                    self.inbound.bytes -= held.size;
+                    self.inbound.handled = held.size;
+                    if let Item::Reply(reply) = held.item {
+                        self.reply(*reply);
+                    }
+                }
+                Item::Reply(_) => index += 1,
+            }
+        }
     }
 
     /// The event `id` was taken or withdrawn: once none waits, the next

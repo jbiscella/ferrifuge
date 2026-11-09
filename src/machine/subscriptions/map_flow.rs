@@ -1,0 +1,538 @@
+//! Map subscriptions (Block 45): a subscription whose subscribe loads a
+//! keyed state page by page, then catches up through stream pages, then
+//! goes live and delivers each change per key. Behaviour follows
+//! centrifuge-js 63ed73e `_mapSubscribe` and its page handlers
+//! (`src/subscription.ts:2253-2832`).
+
+use std::collections::HashMap;
+
+use super::super::delivery::Owner;
+use super::super::{Action, Anomaly, Machine, MapSubscriptionOptions, SubscriptionId};
+use crate::token::Secret;
+use crate::wire::{CHANNEL_COMPACTION, Command, Method, Reply, ReplyResult, SubscribeRequest};
+use crate::{
+    MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, Publication, State, StreamPosition,
+    Subscribed, SubscriptionError, SubscriptionEvent, SubscriptionState, UnrecoverableStrategy,
+    codes,
+};
+
+/// Phases of a map subscription's reply (`client.proto`,
+/// `SubscribeResult.phase`).
+const LIVE: i32 = 0;
+const STREAM: i32 = 1;
+const STATE: i32 = 2;
+
+/// `type` of every map subscription's reply (`client.proto:618-620`).
+const MAP_TYPE: i32 = 1;
+
+/// Reason of [`codes::unsubscribed::MAP_STATE_TOO_LARGE`].
+const STATE_TOO_LARGE_REASON: &str = "map state too large";
+/// Reason of [`codes::unsubscribed::MAP_NOT_SUPPORTED`].
+const NOT_SUPPORTED_REASON: &str = "map subscriptions not supported";
+
+/// What makes a map subscription one: its kind and options, and the load
+/// in progress. Boxed in the subscription, so a stream subscription pays a
+/// pointer (Block 14, "Marginal cost of a subscription").
+#[derive(Debug)]
+pub(in crate::machine) struct MapFlow {
+    pub(super) kind: MapKind,
+    page_size: u32,
+    max_state_bytes: usize,
+    #[allow(dead_code)] // Read by recovery (Block 45c).
+    strategy: UnrecoverableStrategy,
+    load: Option<Load>,
+}
+
+/// A load of the state: the request in flight and what the pages read so
+/// far gave.
+#[derive(Debug)]
+struct Load {
+    /// The phase the request in flight asks for: [`STATE`] or [`STREAM`].
+    asked_phase: i32,
+    /// The cursor the state request in flight asks with; empty for the
+    /// first page.
+    asked_cursor: String,
+    /// The stream's epoch and offset when the first page was read, kept
+    /// for the whole load; stream pages move the offset (D4).
+    epoch: Option<String>,
+    offset: u64,
+    /// The entries so far, by key: a key keeps the place of its first
+    /// appearance, a removal empties its place, and a key set again after a
+    /// removal goes last (D4).
+    entries: Vec<Option<Publication>>,
+    index: HashMap<String, usize>,
+    /// Bytes of the page replies read (D5).
+    bytes: usize,
+    /// A reply of this load was a page: the server holds a reservation, so
+    /// an error ending the load is followed by an unsubscribe (D6).
+    paged: bool,
+}
+
+impl Default for Load {
+    fn default() -> Self {
+        Self {
+            asked_phase: STATE,
+            asked_cursor: String::new(),
+            epoch: None,
+            offset: 0,
+            entries: Vec::new(),
+            index: HashMap::new(),
+            bytes: 0,
+            paged: false,
+        }
+    }
+}
+
+impl Load {
+    /// Applies a state entry or a catch-up publication by key: the last
+    /// value wins, a removal deletes the key.
+    fn apply(&mut self, publication: Publication) {
+        let place = self.index.get(&publication.key).copied();
+        if publication.removed {
+            if let Some(place) = place {
+                self.entries[place] = None;
+                self.index.remove(&publication.key);
+            }
+            return;
+        }
+        match place {
+            Some(place) => self.entries[place] = Some(publication),
+            None => {
+                self.index
+                    .insert(publication.key.clone(), self.entries.len());
+                self.entries.push(Some(publication));
+            }
+        }
+    }
+
+    fn into_entries(self) -> Vec<MapEntry> {
+        self.entries
+            .into_iter()
+            .flatten()
+            .map(MapEntry::from)
+            .collect()
+    }
+}
+
+/// What a map subscription does with a reply to its load.
+enum Next {
+    /// Not a map reply: the server has no map subscriptions (D15).
+    NotSupported,
+    /// A reply the protocol does not allow (D15).
+    Fault(&'static str),
+    /// The stream's epoch changed during the load (D4).
+    EpochChanged,
+    /// The pages passed `max_state_bytes` (D5).
+    TooLarge,
+    /// A page: the next request of the load follows.
+    Request,
+    /// The live reply, with the state built from every page.
+    Live(Vec<MapEntry>),
+}
+
+impl MapFlow {
+    /// Applies `result`, `size` bytes as read, to the load in progress.
+    fn next(&mut self, result: &mut crate::wire::SubscribeResult, size: usize) -> Next {
+        let max_state_bytes = self.max_state_bytes;
+        let load = self.load.get_or_insert_with(Load::default);
+        if result.kind != MAP_TYPE {
+            self.load = None;
+            return Next::NotSupported;
+        }
+        if let Some(fault) = fault(load, result) {
+            return Next::Fault(fault);
+        }
+        if load
+            .epoch
+            .as_ref()
+            .is_some_and(|kept| *kept != result.epoch)
+        {
+            self.load = None;
+            return Next::EpochChanged;
+        }
+        if result.phase != LIVE {
+            load.paged = true;
+            load.bytes = load.bytes.saturating_add(size);
+            if load.bytes > max_state_bytes {
+                self.load = None;
+                return Next::TooLarge;
+            }
+        }
+        if load.epoch.is_none() {
+            load.epoch = Some(result.epoch.clone());
+            load.offset = result.offset;
+        }
+        match result.phase {
+            STATE => {
+                for entry in std::mem::take(&mut result.state) {
+                    load.apply(entry);
+                }
+                // The next state page, or the stream from the first page's
+                // offset once the state is read.
+                if result.cursor.is_empty() {
+                    load.asked_phase = STREAM;
+                    load.asked_cursor.clear();
+                } else {
+                    load.asked_cursor.clone_from(&result.cursor);
+                }
+                Next::Request
+            }
+            STREAM => {
+                for publication in std::mem::take(&mut result.publications) {
+                    load.apply(publication);
+                }
+                load.offset = result.offset;
+                Next::Request
+            }
+            _ => {
+                let mut load = self.load.take().unwrap_or_default();
+                for entry in std::mem::take(&mut result.state) {
+                    load.apply(entry);
+                }
+                for publication in std::mem::take(&mut result.publications) {
+                    load.apply(publication);
+                }
+                Next::Live(load.into_entries())
+            }
+        }
+    }
+
+    /// Ends the load in progress, if any: what it read is dropped.
+    pub(super) fn end_load(&mut self) -> Option<bool> {
+        self.load.take().map(|load| load.paged)
+    }
+}
+
+/// What is wrong with a map subscription's reply (D15), if anything.
+fn fault(load: &Load, result: &crate::wire::SubscribeResult) -> Option<&'static str> {
+    let allowed = match load.asked_phase {
+        STATE => matches!(result.phase, STATE | LIVE),
+        _ => matches!(result.phase, STREAM | LIVE),
+    };
+    if !allowed {
+        return Some("a phase the request does not allow");
+    }
+    if result.phase == STATE && !result.cursor.is_empty() && result.cursor == load.asked_cursor {
+        return Some("a state page with the cursor it was asked with");
+    }
+    if result
+        .state
+        .iter()
+        .chain(&result.publications)
+        .any(|publication| publication.key.is_empty())
+    {
+        return Some("an entry without a key");
+    }
+    None
+}
+
+impl Machine {
+    /// Adds a map subscription to `channel`, unsubscribed, to the registry
+    /// (Block 45, D3), which it shares with stream subscriptions.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    ///
+    /// # Errors
+    ///
+    /// When the registry holds a subscription to `channel` already, of
+    /// either kind; for a tag filter the server would refuse, or one with
+    /// delta (Block 35, D1).
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    pub fn add_map_subscription(
+        &mut self,
+        channel: String,
+        options: MapSubscriptionOptions,
+    ) -> Result<SubscriptionId, SubscriptionError> {
+        let MapSubscriptionOptions {
+            kind,
+            page_size,
+            max_state_bytes,
+            unrecoverable_strategy,
+            mut common,
+        } = options;
+        // What does not apply to a map subscription (Block 45, out of scope).
+        common.data_source = false;
+        common.since = None;
+        common.state_source = false;
+        common.positioned = false;
+        common.recoverable = false;
+        common.join_leave = false;
+        let id = self.add_subscription(channel, common)?;
+        let sub = self.subscriptions.by_id.get_mut(&id).expect("just added");
+        sub.map = Some(Box::new(MapFlow {
+            kind,
+            page_size,
+            max_state_bytes: max_state_bytes.get(),
+            strategy: unrecoverable_strategy,
+            load: None,
+        }));
+        Ok(id)
+    }
+
+    /// The kind of map subscription `id` is, `None` for a stream
+    /// subscription or an id not in the registry.
+    #[must_use]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    pub fn map_subscription_kind(&self, id: SubscriptionId) -> Option<MapKind> {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .and_then(|sub| sub.map.as_ref())
+            .map(|map| map.kind)
+    }
+
+    /// Whether `id` is a map subscription.
+    pub(in crate::machine) fn is_map(&self, id: SubscriptionId) -> bool {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .is_some_and(|sub| sub.map.is_some())
+    }
+
+    /// The next subscribe command of map subscription `id`, carrying `data`
+    /// (D4): of the load in progress, or the first of a new one.
+    pub(super) fn map_subscribe_request(
+        &mut self,
+        id: SubscriptionId,
+        command_id: u32,
+        data: Option<Vec<u8>>,
+    ) -> Option<Command> {
+        let sub = self.subscriptions.by_id.get_mut(&id)?;
+        let channel = sub.channel.clone();
+        // On every request of a flow (D7).
+        let token = Secret(sub.tokens.for_connect());
+        let delta = sub.options.delta.is_some();
+        let tag_filter = sub.options.tag_filter.clone();
+        let flag = if sub.options.channel_compaction {
+            CHANNEL_COMPACTION
+        } else {
+            0
+        };
+        let map = sub.map.as_mut()?;
+        let kind = map.kind.wire();
+        let limit = i32::try_from(map.page_size).unwrap_or(i32::MAX);
+        let load = map.load.get_or_insert_with(Load::default);
+        Some(Command {
+            id: command_id,
+            method: Method::Subscribe(SubscribeRequest {
+                channel,
+                token,
+                data,
+                epoch: load.epoch.clone().unwrap_or_default(),
+                offset: if load.epoch.is_some() { load.offset } else { 0 },
+                flag,
+                delta,
+                tag_filter,
+                kind,
+                phase: load.asked_phase,
+                cursor: load.asked_cursor.clone(),
+                limit,
+                ..SubscribeRequest::default()
+            }),
+        })
+    }
+
+    /// The reply to the current subscribe command of map subscription
+    /// `id`, its error or its result, `size` bytes as read (D4, D5, D15).
+    pub(super) fn map_subscribe_reply(&mut self, id: SubscriptionId, reply: Reply, size: usize) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        let channel = sub.channel.clone();
+        let mut result = match (reply.error, reply.result) {
+            (Some(error), _) => {
+                // The server may still hold the load's reservation, which
+                // would refuse a new first request (D6).
+                let paged = sub.map.as_mut().and_then(|map| map.end_load()) == Some(true);
+                if paged {
+                    self.send_unsubscribe(id, channel);
+                }
+                return self.subscribe_error(id, &error);
+            }
+            (None, ReplyResult::Subscribe(result)) => result,
+            (None, _) => return self.reply_without_result("subscribe"),
+        };
+        let Some(map) = sub.map.as_mut() else {
+            return;
+        };
+        let next = map.next(&mut result, size);
+        match next {
+            Next::NotSupported => {
+                // A server without map subscriptions subscribed a stream
+                // subscription instead (D15).
+                self.send_unsubscribe(id, channel);
+                self.set_unsubscribed(
+                    id,
+                    codes::unsubscribed::MAP_NOT_SUPPORTED,
+                    NOT_SUPPORTED_REASON,
+                    false,
+                );
+            }
+            Next::Fault(fault) => {
+                if let Some(transport) = self.transport {
+                    self.actions
+                        .push(Action::Anomaly(Anomaly::UnexpectedMapReply {
+                            transport,
+                            fault,
+                        }));
+                }
+                self.reconnect_after_transport_closed();
+            }
+            // Undone, then loaded again from scratch once the unsubscribe is
+            // settled (D4).
+            Next::EpochChanged => {
+                self.send_unsubscribe(id, channel);
+                self.start_subscribe(id);
+            }
+            Next::TooLarge => {
+                self.send_unsubscribe(id, channel);
+                self.set_unsubscribed(
+                    id,
+                    codes::unsubscribed::MAP_STATE_TOO_LARGE,
+                    STATE_TOO_LARGE_REASON,
+                    false,
+                );
+            }
+            Next::Request => self.send_subscribe(id, None),
+            Next::Live(entries) => self.map_live(id, result, entries),
+        }
+    }
+
+    /// The live reply of map subscription `id` (D4): subscribed, then the
+    /// state with the changes made while it loaded.
+    fn map_live(
+        &mut self,
+        id: SubscriptionId,
+        result: crate::wire::SubscribeResult,
+        entries: Vec<MapEntry>,
+    ) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        sub.state = SubscriptionState::Subscribed;
+        sub.backoff.keep_reset();
+        sub.backoff.reset();
+        sub.tokens.connected();
+        let position = (result.positioned || result.recoverable).then(|| StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch.clone(),
+        });
+        self.subscriptions.map_compact_id(id, result.id);
+        self.withdraw(&Owner::Client(id));
+        self.rearm_subscription_refresh(id, result.expires, result.ttl);
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Subscribed(Subscribed {
+                data: result.data,
+                positioned: result.positioned,
+                recoverable: result.recoverable,
+                was_recovering: result.was_recovering,
+                recovered: result.recovered,
+                stream_position: position.clone(),
+                delta: result.delta,
+                has_recovered_publications: false,
+            }),
+        );
+        // Taking the sync sets the position; it counts as no publication
+        // delivered (D5, D11).
+        if let Some(event_id) = self.admit_event(Some(id), false) {
+            self.deliver_position(
+                event_id,
+                Owner::Client(id),
+                position.filter(|_| result.recoverable),
+            );
+            self.actions.push(Action::EmitMapSubscription(
+                event_id,
+                id,
+                MapSubscriptionEvent::Sync(entries),
+            ));
+        }
+        self.subscription_calls_subscribed(id);
+    }
+
+    /// A publication pushed to map subscription `id`: an update of its key,
+    /// which moves the position once taken (D5).
+    pub(super) fn map_publication(&mut self, id: SubscriptionId, publication: Publication) {
+        if publication.key.is_empty() {
+            if let Some(transport) = self.transport {
+                self.actions
+                    .push(Action::Anomaly(Anomaly::UnexpectedMapReply {
+                        transport,
+                        fault: "an entry without a key",
+                    }));
+            }
+            return self.reconnect_after_transport_closed();
+        }
+        let Some(event_id) = self.admit_event(Some(id), false) else {
+            return;
+        };
+        self.deliver_publication(event_id, Owner::Client(id), &publication, None);
+        self.actions.push(Action::EmitMapSubscription(
+            event_id,
+            id,
+            MapSubscriptionEvent::Update(MapUpdate::from(publication)),
+        ));
+    }
+
+    /// Emits `event` of map subscription `id` as a map subscription's
+    /// event; one with no counterpart is dropped.
+    pub(super) fn emit_map_lifecycle(&mut self, id: SubscriptionId, event: SubscriptionEvent) {
+        let event = match event {
+            SubscriptionEvent::Subscribing { code, reason } => {
+                MapSubscriptionEvent::Subscribing { code, reason }
+            }
+            SubscriptionEvent::Subscribed(subscribed) => {
+                MapSubscriptionEvent::Subscribed(subscribed)
+            }
+            SubscriptionEvent::Unsubscribed { code, reason } => {
+                MapSubscriptionEvent::Unsubscribed { code, reason }
+            }
+            SubscriptionEvent::Error(error) => MapSubscriptionEvent::Error(error),
+            _ => return,
+        };
+        let error = matches!(event, MapSubscriptionEvent::Error(_));
+        if let Some(event_id) = self.admit_event(Some(id), error) {
+            self.actions
+                .push(Action::EmitMapSubscription(event_id, id, event));
+        }
+    }
+
+    /// Whether `reply`, `size` bytes as read, is a page of a map
+    /// subscription's load that makes no event and can be handled at once,
+    /// ahead of messages held behind events not taken (D5).
+    pub(in crate::machine) fn map_page_early(&self, reply: &Reply, size: usize) -> bool {
+        if self.state != State::Connected || reply.id == 0 || reply.error.is_some() {
+            return false;
+        }
+        let ReplyResult::Subscribe(result) = &reply.result else {
+            return false;
+        };
+        if result.kind != MAP_TYPE || !matches!(result.phase, STATE | STREAM) {
+            return false;
+        }
+        let Some((id, _)) = self.subscriptions.subscribes.get(&reply.id) else {
+            return false;
+        };
+        let Some(sub) = self.subscriptions.by_id.get(id) else {
+            return false;
+        };
+        if sub.subscribe_command != Some(reply.id) {
+            return false;
+        }
+        let Some(map) = sub.map.as_ref() else {
+            return false;
+        };
+        let Some(load) = map.load.as_ref() else {
+            return false;
+        };
+        fault(load, result).is_none()
+            && load.epoch.as_ref().is_none_or(|kept| *kept == result.epoch)
+            && load.bytes.saturating_add(size) <= map.max_state_bytes
+            && (result.phase == STREAM || result.cursor != load.asked_cursor)
+    }
+}
+
+#[cfg(test)]
+mod tests;

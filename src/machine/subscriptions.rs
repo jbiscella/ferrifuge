@@ -2,6 +2,8 @@
 //! subscription's state and commands in flight, and how the machine reacts
 //! to them. Behaviour follows centrifuge-js `subscription.ts`.
 
+#[cfg(feature = "unstable")]
+mod map_flow;
 mod state_flow;
 mod token_flow;
 
@@ -101,6 +103,10 @@ struct Subscription {
     /// The numeric channel id its last subscribe reply on this connection
     /// gave, 0 for none (Block 35b).
     compact_id: i64,
+    /// What makes a map subscription one (Block 45); `None` for a stream
+    /// subscription.
+    #[cfg(feature = "unstable")]
+    map: Option<Box<map_flow::MapFlow>>,
 }
 
 /// Whether a subscribe reply turned delta on (Block 19, D4), and what the
@@ -258,6 +264,8 @@ impl Machine {
                 delta: DeltaChain::Off,
                 delta_statistics: None,
                 compact_id: 0,
+                #[cfg(feature = "unstable")]
+                map: None,
             },
         );
         Ok(id)
@@ -482,6 +490,10 @@ impl Machine {
         command_id: u32,
         data: Option<Vec<u8>>,
     ) -> Option<Command> {
+        #[cfg(feature = "unstable")]
+        if self.is_map(id) {
+            return self.map_subscribe_request(id, command_id, data);
+        }
         let sub = self.subscriptions.by_id.get_mut(&id)?;
         let channel = sub.channel.clone();
         let token = Secret(sub.tokens.for_connect());
@@ -519,6 +531,7 @@ impl Machine {
                 join_leave,
                 delta,
                 tag_filter,
+                ..SubscribeRequest::default()
             }),
         })
     }
@@ -877,6 +890,11 @@ impl Machine {
             .get_mut(&id)
             .expect("checked above");
         sub.subscribe_command = None;
+        #[cfg(feature = "unstable")]
+        if sub.map.is_some() {
+            let size = self.inbound.handled;
+            return self.map_subscribe_reply(id, reply, size);
+        }
         match (reply.error, reply.result) {
             (Some(error), _) => self.subscribe_error(id, &error),
             (None, ReplyResult::Subscribe(result)) => self.subscribe_succeeded(id, result),
@@ -1047,6 +1065,10 @@ impl Machine {
         }
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
+        #[cfg(feature = "unstable")]
+        if let Some(map) = sub.map.as_mut() {
+            map.end_load();
+        }
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
         sub.backoff.reset();
@@ -1188,6 +1210,10 @@ impl Machine {
             Err(true) => return self.server_publication(channel, publication),
             Err(false) => return,
         };
+        #[cfg(feature = "unstable")]
+        if self.is_map(id) {
+            return self.map_publication(id, publication);
+        }
         // Delta checks follow routing: a publication no subscribed
         // subscription takes is dropped as before (Block 19, D5).
         match self.apply_delta(id, publication) {
@@ -1419,6 +1445,12 @@ impl Machine {
         let mut resubscribing = Vec::new();
         for (id, sub) in &mut self.subscriptions.by_id {
             sub.subscribe_command = None;
+            // Any lost connection ends a map subscription's load (Block 45,
+            // D6).
+            #[cfg(feature = "unstable")]
+            if let Some(map) = sub.map.as_mut() {
+                map.end_load();
+            }
             if invalidated {
                 if let Some(fetch) = sub.fetch.take() {
                     self.actions.push(Action::CancelSubscriptionData(fetch));
@@ -1472,6 +1504,10 @@ impl Machine {
             SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Unsubscribed { .. }
         ) {
             self.withdraw(&Owner::Client(id));
+        }
+        #[cfg(feature = "unstable")]
+        if self.is_map(id) {
+            return self.emit_map_lifecycle(id, event);
         }
         let error = matches!(event, SubscriptionEvent::Error(_));
         if let Some(event_id) = self.admit_event(Some(id), error) {

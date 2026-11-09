@@ -245,6 +245,55 @@ impl Default for SubscriptionOptions {
     }
 }
 
+/// Options of a map subscription in the machine (Block 45, D3): its kind,
+/// its load's page size and memory bound, what an unrecoverable position
+/// does, and the options it shares with a stream subscription.
+///
+/// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
+/// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
+/// may change in any minor release.
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MapSubscriptionOptions {
+    /// The map's kind, sent as the subscribe command's `type`.
+    pub kind: crate::MapKind,
+    /// Entries asked for per page; 0 leaves it to the server, which clamps
+    /// it to the namespace's `map.min_page_size` and `map.max_page_size`
+    /// (100 and 1000 by default) and uses `map.default_page_size` (100) for 0.
+    pub page_size: u32,
+    /// Bytes of page replies one load may read before the subscription ends
+    /// with `unsubscribed` 5 "map state too large" (Block 45, D5); 64 MiB by
+    /// default.
+    pub max_state_bytes: std::num::NonZeroUsize,
+    /// What an unrecoverable position does (Block 45, D6).
+    pub unrecoverable_strategy: crate::UnrecoverableStrategy,
+    /// The options a map subscription shares with a stream subscription:
+    /// `data`, the token and its callback, the resubscribe delays, `delta`,
+    /// `tag_filter` and `channel_compaction`. The others (`data_source`,
+    /// `since`, `state_source`, `positioned`, `recoverable`, `join_leave`)
+    /// do not apply to map subscriptions and are ignored (Block 45, out of
+    /// scope).
+    pub common: SubscriptionOptions,
+}
+
+#[cfg(feature = "unstable")]
+impl MapSubscriptionOptions {
+    /// Options of a map subscription of `kind`, every other option at its
+    /// default.
+    #[must_use]
+    pub fn new(kind: crate::MapKind) -> Self {
+        Self {
+            kind,
+            page_size: 0,
+            max_state_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024).expect("not zero"),
+            unrecoverable_strategy: crate::UnrecoverableStrategy::default(),
+            common: SubscriptionOptions::default(),
+        }
+    }
+}
+
 impl SubscriptionOptions {
     /// Sends `data` with every subscribe command, instead of asking the
     /// owner: the last of this and [`Self::data_source`] decides.
@@ -668,7 +717,13 @@ pub enum Input {
 ///
 /// Its `Debug` output shows only the length of a [`Action::Send`] frame:
 /// connect and refresh frames carry the connection token.
+///
+/// Non-exhaustive since 0.21.0 (Block 45, D3): a variant added under a
+/// feature, as [`Action::EmitMapSubscription`] under `unstable`, would
+/// otherwise break the exhaustive `match` of any crate in a graph where
+/// another crate enables that feature.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Action {
     /// Open a transport to the endpoint; report the outcome with
     /// [`Input::TransportOpened`] or [`Input::TransportFailed`].
@@ -726,6 +781,16 @@ pub enum Action {
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
+    /// Deliver an event to a map subscription's listeners (Block 45, D3);
+    /// report it with [`Input::EventTaken`] once the application has taken
+    /// it.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    EmitMapSubscription(EventId, SubscriptionId, crate::MapSubscriptionEvent),
     /// Never deliver these events, emitted and not yet taken: publications
     /// of a subscription that left `subscribed`, or whose position was set
     /// otherwise, which recovery brings back (Block 15).
@@ -829,6 +894,20 @@ pub enum Anomaly {
         /// The kind of command it answers, as `client.proto` names its
         /// request: `"subscribe"`.
         command: &'static str,
+    },
+    /// A reply to a map subscription's request, or a publication of a map
+    /// subscription, that the protocol does not allow (Block 45, D15).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
+    /// later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    UnexpectedMapReply {
+        /// The transport it came on.
+        transport: TransportId,
+        /// What is wrong with it.
+        fault: &'static str,
     },
 }
 
@@ -1050,6 +1129,13 @@ impl std::fmt::Debug for Action {
                 .finish(),
             Self::EmitSubscription(event_id, id, event) => f
                 .debug_tuple("EmitSubscription")
+                .field(event_id)
+                .field(id)
+                .field(event)
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::EmitMapSubscription(event_id, id, event) => f
+                .debug_tuple("EmitMapSubscription")
                 .field(event_id)
                 .field(id)
                 .field(event)
