@@ -537,8 +537,8 @@ pub enum Input {
     /// limit exceeded", without reconnecting.
     MessageTooLarge(TransportId),
     /// A message arrived while the transport's inbox was full, and the
-    /// owner closed the transport (Block 44, D7): a push transport that
-    /// cannot stop reading, such as a browser's WebSocket, holds what the
+    /// owner closed the transport (Block 44, D7): a transport that does
+    /// not stop reading, such as every browser transport, holds what the
     /// core does not read yet in an inbox bounded by the read-ahead's
     /// limits. The client reconnects at once with code
     /// [`codes::connecting::READ_AHEAD_OVERFLOW`], a client-side reason:

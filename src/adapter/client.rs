@@ -2386,7 +2386,7 @@ struct Driver {
     timeout: Duration,
     /// Largest message accepted from the server (`Config::max_message_bytes`).
     max_message: usize,
-    /// The bound of a push transport's inbox (Block 44, D7).
+    /// The bound of a browser transport's inbox (Block 44, D7).
     #[cfg(adapter_browser)]
     read_ahead: super::backend::websocket::Bound,
     /// The application's constructors, looked up with the page's at each

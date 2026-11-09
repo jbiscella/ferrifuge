@@ -1,4 +1,4 @@
-//! Block 44, D7: a push transport's inbox overflowing, on the core (@E).
+//! Block 44, D7: a browser transport's inbox overflowing, on the core (@E).
 
 use super::*;
 use crate::SubscriptionState;
