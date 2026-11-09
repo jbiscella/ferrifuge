@@ -106,16 +106,6 @@ enum Divergence {
     Dv4,
 }
 
-impl Divergence {
-    /// The value kind that must differ at the step (D5).
-    fn kind(self) -> Kind {
-        match self {
-            Self::Dv1 | Self::Dv2 | Self::Dv3 => Kind::Commands,
-            Self::Dv4 => Kind::Client,
-        }
-    }
-}
-
 /// What D4 compares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -215,6 +205,120 @@ impl Trace {
         self.hits().into_iter().min()
     }
 
+    /// The client-side subscriptions the core subscribes in the connect
+    /// frame when the websocket opens in `state` (DV1; Block 36, D5).
+    fn optimistic(&self, state: &Value) -> Vec<String> {
+        channels(state, "sub")
+            .into_iter()
+            .filter(|channel| {
+                let sub = &state["sub"][channel];
+                sub["st"] == "subscribing"
+                    && sub["tmr"] == false
+                    && sub["unw"] == 0
+                    && (!self.constant("SubToken") || sub["tok"].as_i64() > Some(0))
+                    && !self.constant("GetState")
+            })
+            .collect()
+    }
+
+    /// The model's state after a divergence step, with the difference the
+    /// divergence records applied: what the core must match exactly there
+    /// (D5).
+    fn as_recorded(
+        &self,
+        divergence: Divergence,
+        at: usize,
+        before: &Value,
+        after: &Value,
+    ) -> Value {
+        let mut after = after.clone();
+        match divergence {
+            // The connect frame also carries the subscribes, with the
+            // fields of the subscription's own state.
+            Divergence::Dv1 => {
+                let mut commands = list(&after, "toS");
+                for (index, channel) in self.optimistic(&self.states[at]).into_iter().enumerate() {
+                    let sub = &self.states[at]["sub"][&channel];
+                    commands.push(json!({
+                        "k": "sub",
+                        "ch": channel,
+                        "id": -1 - i64::try_from(index).unwrap_or(0),
+                        "tok": sub["tok"],
+                        "rec": sub["rec"],
+                        "ep": sub["ep"],
+                        "off": sub["pos"],
+                        "rej": self.constant("GetState"),
+                        "pos": {},
+                    }));
+                }
+                after["toS"] = json!(commands);
+            }
+            // The unsubscribe waits for the subscribe's reply, and a flow
+            // for the unsubscribe's.
+            Divergence::Dv2 => {
+                let channel = changed_channel(&self.states[at - 1], &self.states[at], "sub");
+                let new: BTreeSet<i64> = new_commands(before, &after)
+                    .iter()
+                    .filter(|command| {
+                        command["ch"].as_str() == channel.as_deref()
+                            && (command["k"] == "unsub" || command["k"] == "sub")
+                    })
+                    .filter_map(|command| command["id"].as_i64())
+                    .collect();
+                let kept: Vec<Value> = list(&after, "toS")
+                    .into_iter()
+                    .filter(|command| !command["id"].as_i64().is_some_and(|id| new.contains(&id)))
+                    .collect();
+                after["toS"] = json!(kept);
+            }
+            // The subscribe after a 2502 carries no position; with
+            // getState, the core loads the state first instead (Block 11).
+            Divergence::Dv3 => {
+                let known: BTreeSet<i64> = list(before, "toS")
+                    .iter()
+                    .filter_map(|command| command["id"].as_i64())
+                    .collect();
+                let mut commands = Vec::new();
+                let mut callbacks = list(&after, "cbs");
+                for mut command in list(&after, "toS") {
+                    if command["k"] == "sub"
+                        && command["rec"] == true
+                        && command["ep"] == 0
+                        && !command["id"].as_i64().is_some_and(|id| known.contains(&id))
+                    {
+                        if self.constant("GetState") {
+                            callbacks.push(json!({"k": "state", "ch": command["ch"], "att": -1}));
+                            continue;
+                        }
+                        command["rec"] = json!(false);
+                        command["ep"] = json!(-1);
+                        command["off"] = json!(0);
+                    }
+                    commands.push(command);
+                }
+                after["toS"] = json!(commands);
+                after["cbs"] = json!(callbacks);
+            }
+            // The failed request closes the transport: the client
+            // reconnects instead of resubscribing.
+            Divergence::Dv4 => {
+                after["cl"]["st"] = json!("connecting");
+                after["cl"]["ph"] = json!("wait");
+                for channel in channels(&after, "sub") {
+                    if self.states[at - 1]["sub"][&channel]["tmr"] == false {
+                        after["sub"][&channel]["tmr"] = json!(false);
+                    }
+                }
+                for channel in channels(&after, "ss") {
+                    if after["ss"][&channel]["st"] == "subscribed" {
+                        after["ss"][&channel]["st"] = json!("subscribing");
+                    }
+                }
+            }
+        }
+        after
+    }
+
     /// Every recorded divergence the trace reaches.
     fn divergences(&self) -> BTreeSet<Divergence> {
         self.hits()
@@ -235,15 +339,7 @@ impl Trace {
             let new = new_commands(before, after);
             match act {
                 "Env_Open" if self.ordered() => {
-                    let optimistic = channels(after, "sub").into_iter().any(|channel| {
-                        let sub = &after["sub"][&channel];
-                        sub["st"] == "subscribing"
-                            && sub["tmr"] == false
-                            && sub["unw"] == 0
-                            && (!self.constant("SubToken") || sub["tok"].as_i64() > Some(0))
-                            && !self.constant("GetState")
-                    });
-                    if optimistic {
+                    if !self.optimistic(after).is_empty() {
                         keep(step, Divergence::Dv1);
                     }
                 }
@@ -319,6 +415,18 @@ fn channels(state: &Value, variable: &str) -> Vec<String> {
         .as_object()
         .map(|map| map.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+/// The one channel whose `variable` entry changed, if exactly one did.
+fn changed_channel(before: &Value, after: &Value, variable: &str) -> Option<String> {
+    let changed: Vec<String> = channels(after, variable)
+        .into_iter()
+        .filter(|channel| before[variable][channel] != after[variable][channel])
+        .collect();
+    match changed.as_slice() {
+        [channel] => Some(channel.clone()),
+        _ => None,
+    }
 }
 
 fn changed(before: &Value, after: &Value, variable: &str) -> bool {
@@ -598,8 +706,17 @@ struct Replay<'a> {
     reconnect_armed: bool,
     resubscribe_armed: BTreeSet<SubscriptionId>,
     connection_fetch: Option<FetchId>,
-    token_fetches: BTreeMap<SubscriptionId, FetchId>,
-    state_fetches: BTreeMap<SubscriptionId, FetchId>,
+    /// The core's token and getState fetches of each kind and channel,
+    /// in the order they started, cancelled ones included: the model's
+    /// answer to a fetch the core cancelled is fed too, for the core to
+    /// drop it.
+    fetches: BTreeMap<(String, String), Vec<FetchId>>,
+    /// The fetches the step being replayed started.
+    started_fetches: Vec<(String, String, FetchId)>,
+    /// The fetches the core cancelled, and how many of the model's answers
+    /// to them were fed.
+    cancelled: Vec<FetchId>,
+    stale_answers: usize,
     calls: Vec<ferrifuge::machine::CallId>,
     /// The server-side subscriptions' states, from their events.
     server: BTreeMap<String, &'static str>,
@@ -612,6 +729,8 @@ struct Replay<'a> {
     sent: Vec<(u64, Sent)>,
     started: Vec<(String, String)>,
     counts: Counts,
+    /// Off while a divergence step is compared with the model as it is.
+    counting: bool,
 }
 
 impl<'a> Replay<'a> {
@@ -657,8 +776,10 @@ impl<'a> Replay<'a> {
             reconnect_armed: false,
             resubscribe_armed: BTreeSet::new(),
             connection_fetch: None,
-            token_fetches: BTreeMap::new(),
-            state_fetches: BTreeMap::new(),
+            fetches: BTreeMap::new(),
+            started_fetches: Vec::new(),
+            cancelled: Vec::new(),
+            stale_answers: 0,
             calls: Vec::new(),
             server: BTreeMap::new(),
             positions: BTreeMap::new(),
@@ -666,6 +787,7 @@ impl<'a> Replay<'a> {
             sent: Vec::new(),
             started: Vec::new(),
             counts: Counts::default(),
+            counting: true,
         })
     }
 
@@ -728,6 +850,7 @@ impl<'a> Replay<'a> {
             }
             self.sent.clear();
             self.started.clear();
+            self.started_fetches.clear();
             self.input(step)?;
             for index in step..=end {
                 *self
@@ -736,23 +859,39 @@ impl<'a> Replay<'a> {
                     .entry(self.trace.acts[index].clone())
                     .or_default() += 1;
             }
-            let compared = self.compare(step, end);
-            let diverges = divergence.filter(|(at, _)| (step..=end).contains(at));
-            match (compared, diverges) {
-                (Ok(()), None) => {}
-                (Err(mismatch), None) => return Err(mismatch),
-                (Err(mismatch), Some((_, divergence))) => {
-                    if mismatch.kind == Some(divergence.kind()) {
-                        return Ok(());
+            let before = self.trace.states[step - 1].clone();
+            let after = self.trace.states[end].clone();
+            match divergence.filter(|(at, _)| (step..=end).contains(at)) {
+                None => {
+                    self.compare(step, &before, &after)?;
+                    // The fetches started match the model's callbacks.
+                    for (kind, channel, fetch) in std::mem::take(&mut self.started_fetches) {
+                        self.fetches.entry((kind, channel)).or_default().push(fetch);
                     }
-                    return Err(mismatch);
                 }
-                (Ok(()), Some((at, divergence))) => {
-                    return Err(self.mismatch(
-                        at,
-                        None,
-                        &format!("{divergence:?} not found at that step"),
-                    ));
+                Some((at, divergence)) => {
+                    // The core matches the model with the recorded
+                    // difference applied, every value of the step...
+                    let recorded = self.trace.as_recorded(divergence, at, &before, &after);
+                    self.compare(step, &before, &recorded).map_err(|mismatch| {
+                        self.mismatch(
+                            at,
+                            mismatch.kind,
+                            &format!("{divergence:?} not as recorded: {}", mismatch.text),
+                        )
+                    })?;
+                    // ...and so differs from the model as it is.
+                    self.counting = false;
+                    let plain = self.compare(step, &before, &after);
+                    self.counting = true;
+                    if plain.is_ok() {
+                        return Err(self.mismatch(
+                            at,
+                            None,
+                            &format!("{divergence:?} not found at that step"),
+                        ));
+                    }
+                    return Ok(());
                 }
             }
             step = end + 1;
@@ -821,23 +960,26 @@ impl<'a> Replay<'a> {
                     channel,
                     fetch,
                 } => {
-                    self.token_fetches.insert(subscription, fetch);
+                    let _ = subscription;
+                    self.started_fetches
+                        .push(("stoken".to_owned(), channel.clone(), fetch));
                     self.started.push(("stoken".to_owned(), channel));
                 }
-                Action::CancelSubscriptionToken(fetch) => {
-                    self.token_fetches.retain(|_, pending| *pending != fetch);
+                // Kept: the model may still answer it (Codex, #178).
+                Action::CancelSubscriptionToken(fetch) | Action::CancelSubscriptionState(fetch) => {
+                    self.cancelled.push(fetch);
                 }
                 Action::FetchSubscriptionState {
                     subscription,
                     channel,
                     fetch,
                 } => {
-                    self.state_fetches.insert(subscription, fetch);
+                    let _ = subscription;
+                    self.started_fetches
+                        .push(("state".to_owned(), channel.clone(), fetch));
                     self.started.push(("state".to_owned(), channel));
                 }
-                Action::CancelSubscriptionState(fetch) => {
-                    self.state_fetches.retain(|_, pending| *pending != fetch);
-                }
+
                 Action::FetchSubscriptionData { channel, .. } => {
                     self.started.push(("data".to_owned(), channel));
                 }
@@ -1079,10 +1221,29 @@ impl<'a> Replay<'a> {
                 let id = self.id(step, &channel)?;
                 let sub_before = &before["sub"][&channel];
                 let sub_after = &after["sub"][&channel];
+                let kind = callback["k"].as_str().unwrap_or_default().to_owned();
+                // The settled callback's rank among the model's of its kind
+                // and channel is that of the core's fetch.
+                let rank = list(&before, "cbs")
+                    .iter()
+                    .filter(|other| other["k"] == callback["k"] && other["ch"] == callback["ch"])
+                    .position(|other| *other == callback)
+                    .unwrap_or(0);
+                let fetch = self
+                    .fetches
+                    .get_mut(&(kind.clone(), channel.clone()))
+                    .filter(|fetches| rank < fetches.len())
+                    .map(|fetches| fetches.remove(rank))
+                    .ok_or_else(|| {
+                        self.mismatch(
+                            step,
+                            None,
+                            &format!("no fetch of the core for {kind} of {channel}"),
+                        )
+                    })?;
+                let _ = id;
+                let stale = self.cancelled.contains(&fetch);
                 if act == "Cb_SubToken" {
-                    let Some(fetch) = self.token_fetches.remove(&id) else {
-                        return Ok(());
-                    };
                     let result = if sub_after["st"] == "unsubscribed"
                         && sub_before["st"] != "unsubscribed"
                     {
@@ -1090,13 +1251,18 @@ impl<'a> Replay<'a> {
                     } else if sub_after["tmr"] == true && sub_before["tmr"] == false {
                         Err(TokenError::Failed("model".to_owned()))
                     } else {
-                        Ok(token(sub_after["tok"].as_i64().unwrap_or(0)))
+                        // A stale answer carries the token the server
+                        // issues, for the core to drop.
+                        let version = sub_after["tok"]
+                            .as_i64()
+                            .filter(|version| *version > 0)
+                            .or_else(|| after["tk"]["stok"][&channel].as_i64())
+                            .unwrap_or(1);
+                        Ok(token(version))
                     };
                     self.feed(Input::SubscriptionTokenFetched { fetch, result });
+                    self.stale_answers += usize::from(stale);
                 } else {
-                    let Some(fetch) = self.state_fetches.remove(&id) else {
-                        return Ok(());
-                    };
                     let result = if sub_after["tmr"] == true && sub_before["tmr"] == false {
                         Err(StateError("model".to_owned()))
                     } else {
@@ -1110,6 +1276,7 @@ impl<'a> Replay<'a> {
                         Ok(position)
                     };
                     self.feed(Input::SubscriptionStateFetched { fetch, result });
+                    self.stale_answers += usize::from(stale);
                 }
             }
             other => return Err(self.unmapped(step, other)),
@@ -1230,14 +1397,12 @@ impl<'a> Replay<'a> {
         })
     }
 
-    /// Compares the model's state after step `end` with the core, for the
-    /// steps from `start`.
-    fn compare(&mut self, start: usize, end: usize) -> Result<(), Mismatch> {
-        let before = self.trace.states[start - 1].clone();
-        let after = self.trace.states[end].clone();
-        self.compare_commands(start, &before, &after)?;
-        self.compare_states(start, &after)?;
-        self.compare_others(start, &before, &after)
+    /// Compares the model's state `after`, from `before`, with the core,
+    /// for the steps from `start`.
+    fn compare(&mut self, start: usize, before: &Value, after: &Value) -> Result<(), Mismatch> {
+        self.compare_commands(start, before, after)?;
+        self.compare_states(start, after)?;
+        self.compare_others(start, before, after)
     }
 
     /// The commands sent, in order, field by field.
@@ -1433,7 +1598,9 @@ impl<'a> Replay<'a> {
     }
 
     fn count(&mut self, kind: Kind, values: usize) {
-        *self.counts.values.entry(kind).or_default() += values;
+        if self.counting {
+            *self.counts.values.entry(kind).or_default() += values;
+        }
     }
 }
 
@@ -1831,4 +1998,88 @@ fn offset_of(offset: Option<u64>) -> i64 {
 fn a_reconnect_timer_mismatch_is_reported() {
     let report = planted(Fault::ReconnectTimer);
     assert!(report.contains("reconnect model"), "{report}");
+}
+
+/// The trace on line `line` of `file`.
+fn trace_of(file: &str, line: usize) -> Trace {
+    traces()
+        .into_iter()
+        .find(|(name, _)| name == file)
+        .and_then(|(_, traces)| traces.into_iter().find(|trace| trace.line == line))
+        .expect("the trace")
+}
+
+/// A DV1 trace, its divergence step and the last step checked with it.
+fn a_dv1_trace() -> (Trace, usize, usize) {
+    let trace = traces()
+        .into_iter()
+        .flat_map(|(_, traces)| traces)
+        .find(|trace| matches!(trace.divergence(), Some((_, Divergence::Dv1))))
+        .expect("a DV1 trace");
+    let (at, _) = trace.divergence().expect("its divergence");
+    let mut end = at;
+    while trace
+        .acts
+        .get(end + 1)
+        .is_some_and(|next| matches!(next.as_str(), "Sdk_StartFlow" | "Sdk_SSSubscribed"))
+    {
+        end += 1;
+    }
+    (trace, at, end)
+}
+
+// Codex, #178: at a recorded divergence, the core must show the recorded
+// difference itself, not any difference of the same kind.
+#[test]
+fn a_divergence_step_checks_the_recorded_difference_exactly() {
+    let (mut trace, at, _) = a_dv1_trace();
+    let channel = trace.optimistic(&trace.states[at])[0].clone();
+    // The subscribe the connect frame must carry now has another token.
+    let token = trace.states[at]["sub"][&channel]["tok"]
+        .as_i64()
+        .unwrap_or(0);
+    trace.states[at]["sub"][&channel]["tok"] = json!(token + 5);
+
+    let result = Replay::new(&trace).and_then(|mut replay| replay.run(trace.divergence()));
+
+    let mismatch = result.expect_err("a difference other than the recorded one");
+    assert!(
+        mismatch.text.contains("Dv1 not as recorded"),
+        "{}",
+        mismatch.text
+    );
+}
+
+// Codex, #178: the other values of a divergence step are compared too.
+#[test]
+fn a_divergence_step_checks_its_other_values() {
+    let (mut trace, _, end) = a_dv1_trace();
+    let channel = channels(&trace.states[end], "app")[0].clone();
+    let offset = trace.states[end]["app"][&channel]["off"]
+        .as_i64()
+        .unwrap_or(0);
+    trace.states[end]["app"][&channel]["off"] = json!(offset + 1);
+
+    let result = Replay::new(&trace).and_then(|mut replay| replay.run(trace.divergence()));
+
+    let mismatch = result.expect_err("a position the core does not hold");
+    assert_eq!(mismatch.kind, Some(Kind::Position), "{}", mismatch.text);
+}
+
+// Codex, #178: the model's answer to a callback the core cancelled is fed,
+// for the core to drop it.
+#[test]
+fn answers_to_cancelled_callbacks_are_fed() {
+    for (file, line) in [("MC_refresh.jsonl", 13), ("MC_get_state.jsonl", 22)] {
+        let trace = trace_of(file, line);
+        let mut replay = Replay::new(&trace).expect("a replay");
+
+        let result = replay.run(trace.divergence());
+
+        assert!(result.is_ok(), "{file} line {line}: {result:?}");
+        assert!(
+            replay.stale_answers >= 1,
+            "{file} line {line}: no stale answer fed"
+        );
+    }
 }
