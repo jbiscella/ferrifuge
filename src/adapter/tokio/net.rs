@@ -10,15 +10,15 @@ use hyper_util::client::proxy::matcher::Matcher;
 use reqwest::Url;
 use rustls::ClientConfig;
 
-use super::client::lock;
+use super::super::client::lock;
 use super::connector::Shared;
 use super::proxy::{self, Proxy, ProxyTarget};
 use super::tls::{BuildOnce, Tls, plain_tls_config};
 
 /// The network settings of one client.
 #[derive(Debug, Default)]
-pub(super) struct Network {
-    pub(super) tls: Tls,
+pub(in crate::adapter) struct Network {
+    pub(in crate::adapter) tls: Tls,
     /// The application's connector, which replaces every proxy setting
     /// (Block 37, D4).
     connector: Option<Shared>,
@@ -32,19 +32,19 @@ pub(super) struct Network {
 /// A cookie jar, shown without its cookies.
 #[cfg(feature = "cookies")]
 #[derive(Clone, Default)]
-pub(super) struct Jar(pub(super) Option<Arc<dyn super::CookieJar>>);
+pub(in crate::adapter) struct Jar(pub(in crate::adapter) Option<Arc<dyn super::cookies::CookieJar>>);
 
 /// No cookie jar without the `cookies` feature.
 #[cfg(not(feature = "cookies"))]
 #[derive(Clone, Debug, Default)]
-pub(super) struct Jar(());
+pub(in crate::adapter) struct Jar(());
 
 impl Jar {
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
     /// jar (Block 43, D2, D3).
     #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
-    pub(super) fn add(&self, url: &str, headers: &mut http::HeaderMap) {
+    pub(in crate::adapter) fn add(&self, url: &str, headers: &mut http::HeaderMap) {
         #[cfg(feature = "cookies")]
         if let Some(jar) = &self.0 {
             super::cookies::add_cookies(jar.as_ref(), url, headers);
@@ -56,7 +56,7 @@ impl Jar {
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
     /// a request to `url`; nothing without a jar (Block 43, D2, D5).
     #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
-    pub(super) fn store(&self, url: &str, status: u16, headers: &http::HeaderMap) {
+    pub(in crate::adapter) fn store(&self, url: &str, status: u16, headers: &http::HeaderMap) {
         #[cfg(feature = "cookies")]
         if let Some(jar) = &self.0 {
             super::cookies::store_cookies(jar.as_ref(), url, status, headers);
@@ -106,7 +106,7 @@ struct Clients {
 }
 
 impl Network {
-    pub(super) fn new(tls: Tls, proxy: Proxy) -> Self {
+    pub(in crate::adapter) fn new(tls: Tls, proxy: Proxy) -> Self {
         Self {
             tls,
             connector: None,
@@ -125,18 +125,18 @@ impl Network {
     }
 
     /// The network of a client given `connector`.
-    pub(super) fn with_connector(mut self, connector: Option<Shared>) -> Self {
+    pub(in crate::adapter) fn with_connector(mut self, connector: Option<Shared>) -> Self {
         self.connector = connector;
         self
     }
 
     /// The application's connector, if it gave one.
-    pub(super) fn connector(&self) -> Option<&Shared> {
+    pub(in crate::adapter) fn connector(&self) -> Option<&Shared> {
         self.connector.as_ref()
     }
 
     /// The network of a client given the cookie jar `jar` (Block 43).
-    pub(super) fn with_cookie_jar(mut self, jar: Jar) -> Self {
+    pub(in crate::adapter) fn with_cookie_jar(mut self, jar: Jar) -> Self {
         self.cookie_jar = jar;
         self
     }
@@ -144,25 +144,30 @@ impl Network {
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
     /// jar (Block 43, D2, D3).
-    pub(super) fn add_cookies(&self, url: &str, headers: &mut http::HeaderMap) {
+    pub(in crate::adapter) fn add_cookies(&self, url: &str, headers: &mut http::HeaderMap) {
         self.cookie_jar.add(url, headers);
     }
 
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
     /// a request to `url`; nothing without a jar (Block 43, D2, D5).
-    pub(super) fn store_cookies(&self, url: &str, status: u16, headers: &http::HeaderMap) {
+    pub(in crate::adapter) fn store_cookies(
+        &self,
+        url: &str,
+        status: u16,
+        headers: &http::HeaderMap,
+    ) {
         self.cookie_jar.store(url, status, headers);
     }
 
     /// The cookie jar, for the requests of an open HTTP transport (Block 43).
-    pub(super) fn jar(&self) -> Jar {
+    pub(in crate::adapter) fn jar(&self) -> Jar {
         self.cookie_jar.clone()
     }
 
     /// Replaces the proxy setting from the next connection attempt
     /// (Block 23, D1); with a connector, which is the route, nothing
     /// (Block 37, D4).
-    pub(super) fn set_proxy(&self, proxy: Proxy) {
+    pub(in crate::adapter) fn set_proxy(&self, proxy: Proxy) {
         if self.connector.is_none() {
             *lock(&self.pending) = Some(proxy);
         }
@@ -173,7 +178,7 @@ impl Network {
     /// clients are built again. Their pools are keyed by destination, not by
     /// proxy, so a connection through the last attempt's proxy would be
     /// reused when a proxy function now chooses another (Codex, #115).
-    pub(super) fn new_attempt(&self) {
+    pub(in crate::adapter) fn new_attempt(&self) {
         let pending = lock(&self.pending).take();
         let mut current = lock(&self.current);
         let proxy = pending.unwrap_or_else(|| lock(&current.decisions).proxy.clone());
@@ -190,7 +195,7 @@ impl Network {
 
     /// The proxy for `url` under the setting in use (Block 23, D2),
     /// decided once per endpoint per attempt.
-    pub(super) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
+    pub(in crate::adapter) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
         // A connector reads no proxy setting (Block 37, D4).
         if self.connector.is_some() {
             return Ok(None);
@@ -203,7 +208,7 @@ impl Network {
     /// process for a client with the default proxy setting and the
     /// platform's trust, per client and per proxy setting otherwise; not
     /// kept when its TLS settings are not (Block 6, C7).
-    pub(super) fn http_client(&self, secure: bool) -> Result<reqwest::Client, String> {
+    pub(in crate::adapter) fn http_client(&self, secure: bool) -> Result<reqwest::Client, String> {
         // Built again once the system's proxy settings are read again
         // (Block 25, D7).
         static SHARED: Mutex<Option<(u64, Arc<Clients>)>> = Mutex::new(None);

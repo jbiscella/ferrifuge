@@ -500,7 +500,7 @@ fn start(shared: &Arc<Shared>, handlers: &mut Handlers) -> Option<std::io::Error
     handlers.started = true;
     match handlers.delivery {
         EventDelivery::Task => {
-            shared.runtime.spawn(consume(Arc::clone(shared)));
+            super::platform::spawn(&shared.runtime, consume(Arc::clone(shared)));
         }
         // The driver polls `next` itself, woken by the installation.
         EventDelivery::Inline => {}
@@ -594,7 +594,7 @@ async fn consume(shared: Arc<Shared>) {
     while let Some(handed) = std::future::poll_fn(|cx| next(&shared, cx)).await {
         deliver(&shared, handed);
         // A task's turn: the driver and the other tasks run between events.
-        tokio::task::yield_now().await;
+        super::platform::yield_now().await;
     }
 }
 
@@ -900,14 +900,10 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
 /// `Thread` is no worker.
 fn run(call: impl FnOnce(), thread: bool) -> std::thread::Result<()> {
     let call = AssertUnwindSafe(call);
-    let multi_thread = !thread
-        && tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
-            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        });
-    if multi_thread {
-        tokio::task::block_in_place(|| std::panic::catch_unwind(call))
-    } else {
+    if thread {
         std::panic::catch_unwind(call)
+    } else {
+        super::platform::hand_over_worker(|| std::panic::catch_unwind(call))
     }
 }
 

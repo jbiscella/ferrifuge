@@ -168,7 +168,7 @@ fn lock_read_write<G>(result: Result<G, PoisonError<G>>) -> G {
 /// `http://` and `https://`, which `cookie_store` counts as HTTP and secure
 /// schemes, without the query, which carries the sse token, and the
 /// fragment (Block 43, D4).
-pub(super) fn jar_url(url: &str) -> Option<Url> {
+pub(in crate::adapter) fn jar_url(url: &str) -> Option<Url> {
     let mut url = Url::parse(url).ok()?;
     let scheme = match url.scheme() {
         "ws" => Some("http"),
@@ -189,7 +189,7 @@ pub(super) fn jar_url(url: &str) -> Option<Url> {
 /// from `app`, in their order, then the jar's, leaving out a jar cookie
 /// whose name is among the application's, in one header (RFC 6265 §5.4;
 /// Block 43, D3). `None` when neither has a cookie.
-pub(super) fn cookie_header(
+pub(in crate::adapter) fn cookie_header(
     jar: &dyn CookieJar,
     url: &str,
     app: Option<&HeaderValue>,
@@ -231,7 +231,7 @@ pub(super) fn cookie_header(
 
 /// Sets the request's `Cookie` header in `headers` for a request to `url`
 /// (Block 43, D2, D3).
-pub(super) fn add_cookies(jar: &dyn CookieJar, url: &str, headers: &mut HeaderMap) {
+pub(in crate::adapter) fn add_cookies(jar: &dyn CookieJar, url: &str, headers: &mut HeaderMap) {
     match cookie_header(jar, url, headers.get(COOKIE)) {
         Some(value) => {
             headers.insert(COOKIE, value);
@@ -245,7 +245,12 @@ pub(super) fn add_cookies(jar: &dyn CookieJar, url: &str, headers: &mut HeaderMa
 /// Gives the jar the `Set-Cookie` values of a response with `status` to a
 /// request to `url`; a 407 is a proxy's own answer, whose cookies are not
 /// the server's (Block 43, D2, D5).
-pub(super) fn store_cookies(jar: &dyn CookieJar, url: &str, status: u16, headers: &HeaderMap) {
+pub(in crate::adapter) fn store_cookies(
+    jar: &dyn CookieJar,
+    url: &str,
+    status: u16,
+    headers: &HeaderMap,
+) {
     if status == 407 {
         return;
     }

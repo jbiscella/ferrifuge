@@ -72,7 +72,7 @@ impl<C: Connector + ?Sized> Connector for Arc<C> {
 
 /// A connector shared between clients.
 #[derive(Clone)]
-pub(super) struct Shared(pub(super) Arc<dyn Connector>);
+pub(in crate::adapter) struct Shared(pub(in crate::adapter) Arc<dyn Connector>);
 
 impl fmt::Debug for Shared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -81,10 +81,10 @@ impl fmt::Debug for Shared {
 }
 
 /// A byte stream a [`Connector`] opened.
-pub struct ConnectedStream(pub(super) Box<dyn Io>);
+pub struct ConnectedStream(pub(in crate::adapter) Box<dyn Io>);
 
 /// What the websocket needs of a stream.
-pub(super) trait Io: AsyncRead + AsyncWrite + Send + Unpin {}
+pub(in crate::adapter) trait Io: AsyncRead + AsyncWrite + Send + Unpin {}
 
 impl<S: AsyncRead + AsyncWrite + Send + Unpin> Io for S {}
 
@@ -104,7 +104,7 @@ impl fmt::Debug for ConnectedStream {
 /// The endpoint given to a connector: `url` with its port always written,
 /// path and query kept (Block 37, D3; as Block 23 D1 gives
 /// `Proxy::custom`).
-pub(super) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, String> {
+pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, String> {
     let host = url.host_str().ok_or("an endpoint without a host")?;
     let port = url
         .port_or_known_default()
@@ -120,7 +120,7 @@ pub(super) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, String> {
 
 /// Opens the stream through `connector`, failing as a refused connection
 /// does on its error or its panic (Block 37, D4).
-pub(super) async fn connect(
+pub(in crate::adapter) async fn connect(
     connector: &Shared,
     url: &reqwest::Url,
 ) -> Result<ConnectedStream, String> {

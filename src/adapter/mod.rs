@@ -1,28 +1,26 @@
 //! Tokio adapter: performs the actions of the sans-IO core.
+//!
+//! The shared layer (client, subscriptions, handlers, delivery, the driver
+//! loop) names no runtime; it reaches the runtime through `platform` and
+//! the transports through `tokio` (Block 44, D2).
 
-#[cfg(target_os = "android")]
-pub mod android;
 mod client;
-mod connector;
-#[cfg(feature = "cookies")]
-mod cookies;
 mod handler;
-mod http;
 mod log;
-mod net;
 mod outbox;
-mod proxy;
+mod platform;
 mod ready;
 mod subscription;
-mod tls;
-mod transport;
+mod tokio;
 
-pub use client::{Batch, Client, ClientBuilder, WeakClient};
-pub use connector::{BoxError, ConnectedStream, Connecting, Connector};
+#[cfg(target_os = "android")]
+pub use self::tokio::android;
+pub use self::tokio::connector::{BoxError, ConnectedStream, Connecting, Connector};
 #[cfg(feature = "cookies")]
-pub use cookies::{CookieJar, MemoryJar};
-pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
-pub use proxy::{Proxy, ProxyTarget};
-pub use subscription::{Subscription, SubscriptionBuilder};
+pub use self::tokio::cookies::{CookieJar, MemoryJar};
+pub use self::tokio::proxy::{Proxy, ProxyTarget};
 #[cfg(feature = "__test-hooks")]
-pub use transport::stalled_websocket_writes;
+pub use self::tokio::transport::stalled_websocket_writes;
+pub use client::{Batch, Client, ClientBuilder, WeakClient};
+pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
+pub use subscription::{Subscription, SubscriptionBuilder};

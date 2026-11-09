@@ -18,17 +18,17 @@ compile_error!(
 /// The crypto provider chosen by the build's features (Block 6). Features
 /// are additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
 #[cfg(feature = "fips")]
-pub(super) fn crypto_provider() -> CryptoProvider {
+pub(in crate::adapter) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::default_fips_provider()
 }
 
 #[cfg(all(feature = "aws-lc-rs", not(feature = "fips")))]
-pub(super) fn crypto_provider() -> CryptoProvider {
+pub(in crate::adapter) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
 #[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
-pub(super) fn crypto_provider() -> CryptoProvider {
+pub(in crate::adapter) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
 
@@ -59,7 +59,7 @@ impl std::fmt::Debug for Trust {
 /// The TLS settings of one client: the process-wide ones when it trusts the
 /// platform alone, its own otherwise.
 #[derive(Debug, Default)]
-pub(super) struct Tls {
+pub(in crate::adapter) struct Tls {
     trust: Trust,
     /// Its own TLS settings, built at its first secure attempt.
     config: BuildOnce<Arc<ClientConfig>>,
@@ -68,11 +68,11 @@ pub(super) struct Tls {
 impl Tls {
     /// Whether the client trusts the platform alone, sharing the
     /// process-wide settings.
-    pub(super) fn is_platform(&self) -> bool {
+    pub(in crate::adapter) fn is_platform(&self) -> bool {
         matches!(self.trust, Trust::Platform)
     }
 
-    pub(super) fn new(trust: Trust) -> Self {
+    pub(in crate::adapter) fn new(trust: Trust) -> Self {
         Self {
             trust,
             ..Self::default()
@@ -80,14 +80,14 @@ impl Tls {
     }
 
     /// The settings of `wss://` connections.
-    pub(super) fn config(&self) -> Result<Arc<ClientConfig>, String> {
+    pub(in crate::adapter) fn config(&self) -> Result<Arc<ClientConfig>, String> {
         self.setup().map(|(config, _)| config)
     }
 
     /// [`Tls::config`], and whether it is kept: a read of the platform's
     /// root certificates that reported errors serves the attempt but is
     /// read again by the next one (Block 6, review item C7).
-    pub(super) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
+    pub(in crate::adapter) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
         match &self.trust {
             Trust::Platform => platform_setup(),
             Trust::ExtraRoots(roots) => self
@@ -101,7 +101,7 @@ impl Tls {
 /// TLS settings of an HTTP client that only ever speaks plain `http://`:
 /// no root certificates, so it works on hosts without platform ones, and
 /// still the build's provider, as the HTTP client takes no default one.
-pub(super) fn plain_tls_config() -> ClientConfig {
+pub(in crate::adapter) fn plain_tls_config() -> ClientConfig {
     ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
         .expect("the provider supports the default protocol versions")
@@ -131,7 +131,7 @@ fn platform_setup() -> Result<(Arc<ClientConfig>, bool), String> {
 /// How servers are verified in this build and on this platform (Block 22,
 /// D1), for tests.
 #[cfg(test)]
-pub(super) const VERIFIER: &str = if cfg!(all(
+pub(in crate::adapter) const VERIFIER: &str = if cfg!(all(
     not(feature = "fips"),
     any(
         target_os = "macos",
@@ -353,7 +353,7 @@ fn roots_config(
 
 /// The index of the first certificate of `roots` webpki cannot take as a
 /// root (Block 22, D2).
-pub(super) fn unparsable_root(roots: &[CertificateDer<'static>]) -> Option<usize> {
+pub(in crate::adapter) fn unparsable_root(roots: &[CertificateDer<'static>]) -> Option<usize> {
     roots
         .iter()
         .position(|root| RootCertStore::empty().add(root.clone()).is_err())
@@ -363,7 +363,7 @@ pub(super) fn unparsable_root(roots: &[CertificateDer<'static>]) -> Option<usize
 /// builder says not to keep, is not kept, so the next use builds again
 /// (Block 6, review item C7).
 #[derive(Debug)]
-pub(super) struct BuildOnce<T>(OnceLock<T>);
+pub(in crate::adapter) struct BuildOnce<T>(OnceLock<T>);
 
 impl<T> Default for BuildOnce<T> {
     fn default() -> Self {
@@ -372,14 +372,14 @@ impl<T> Default for BuildOnce<T> {
 }
 
 impl<T: Clone> BuildOnce<T> {
-    pub(super) const fn new() -> Self {
+    pub(in crate::adapter) const fn new() -> Self {
         Self(OnceLock::new())
     }
 
     /// The value, and whether it is kept: built by `build`, which also says
     /// whether to keep it, unless an earlier build was kept. Two first uses
     /// racing may both build; one value is kept.
-    pub(super) fn get(
+    pub(in crate::adapter) fn get(
         &self,
         build: impl FnOnce() -> Result<(T, bool), String>,
     ) -> Result<(T, bool), String> {

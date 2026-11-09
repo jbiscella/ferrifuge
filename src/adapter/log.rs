@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{Span, debug, debug_span, trace, warn};
 
 use super::client::lock;
-use super::proxy::ProxyTarget;
+use super::tokio::proxy::ProxyTarget;
 use crate::machine::{
     Action, Anomaly, CallId, FetchId, Input, SubscriptionId, SubscriptionTimer, Timer,
     TransportKind,
