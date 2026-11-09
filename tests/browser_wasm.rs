@@ -859,7 +859,28 @@ async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
     yields_nothing(&mut events, 1000).await;
     assert_eq!(client.read_ahead().0, 16);
     for n in 1..=COUNT {
-        assert_eq!(publication(&mut subscription_events).await.data, data(n));
+        // Names the publication a stall stops at (Safari: the job's log).
+        let event = match select(
+            subscription_events.next(),
+            std::pin::pin!(TimeoutFuture::new(WAIT)),
+        )
+        .await
+        {
+            Either::Left((event, _)) => event,
+            Either::Right(_) => {
+                let read_ahead = client.read_ahead();
+                wasm_bindgen_test::console_log!(
+                    "stalled before publication {n} of {COUNT}, read-ahead {read_ahead:?}"
+                );
+                panic!("publication {n} of {COUNT} not within {WAIT} ms");
+            }
+        };
+        match event {
+            Some(SubscriptionEvent::Publication(publication)) => {
+                assert_eq!(publication.data, data(n));
+            }
+            other => panic!("publication {n} of {COUNT}: {other:?}"),
+        }
     }
     match select(subscription_events.next(), sleep(500)).await {
         Either::Left((event, _)) => panic!("yielded {event:?} after the publications"),
