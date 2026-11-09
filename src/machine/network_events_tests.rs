@@ -90,7 +90,7 @@ fn offline_while_connected_adds_the_jitter_window() {
 
         let delay = reconnect_delay(&machine.handle(Input::Offline)).expect("a delay");
 
-        assert!(delay <= Duration::from_millis(101_000), "{delay:?}");
+        assert!(delay <= Duration::from_secs(101), "{delay:?}");
     }
 }
 
