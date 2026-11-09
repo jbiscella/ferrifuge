@@ -1132,6 +1132,9 @@ const MESSAGE_TOO_BIG: u32 = 1009;
 /// before the connect reply (Block 29, D3).
 const MESSAGE_TOO_LARGE: &str = "message larger than the size limit";
 
+/// The reason of [`codes::connecting::READ_AHEAD_OVERFLOW`] (Block 44, D7).
+const READ_AHEAD_OVERFLOW_REASON: &str = "read-ahead overflow";
+
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
@@ -1449,6 +1452,7 @@ impl Machine {
                     self.message_too_large();
                 }
             }
+            Input::InboxOverflow(transport) => self.inbox_overflowed(transport),
             Input::Frame { transport, data } if self.is_current(transport) => {
                 self.counters.bytes_in += data.len() as u64;
                 self.frame(transport, &data);
@@ -1504,7 +1508,6 @@ impl Machine {
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::MessageTooLarge(_)
-            | Input::InboxOverflow(_)
             | Input::Frame { .. }
             | Input::SendRejected { .. }
             | Input::FrameWritten { .. } => {}
@@ -1837,6 +1840,22 @@ impl Machine {
                 false,
             );
         }
+    }
+
+    /// The transport's inbox overflowed (Block 44, D7): a client-side
+    /// reason, as `reconnect()`, so events not taken are withdrawn. Handled
+    /// at once, not after the messages held: the application is not taking
+    /// their events, which is why the inbox filled.
+    fn inbox_overflowed(&mut self, transport: TransportId) {
+        // About a transport already abandoned.
+        if !self.is_current(transport) {
+            return;
+        }
+        self.disconnect(
+            codes::connecting::READ_AHEAD_OVERFLOW,
+            READ_AHEAD_OVERFLOW_REASON,
+            true,
+        );
     }
 
     fn reconnect_after_transport_closed(&mut self) {
@@ -2258,14 +2277,16 @@ impl Machine {
         self.transport_open = false;
         self.emulation = None;
         // A connection that ends before it proved usable keeps the backoff
-        // growing, and so does one the server found too slow before any
-        // ping (Block 15, "Backoff after 3008"): each reconnect would ask
-        // for the same backlog.
+        // growing, and so does one the server found too slow, or whose
+        // inbox overflowed (Block 44, D7), before any ping (Block 15,
+        // "Backoff after 3008"): each reconnect would ask for the same
+        // backlog.
         self.backoff_reset_pending = false;
         let pinged = std::mem::take(&mut self.pinged);
         // A server-side subscription's broken delta keeps it growing too
         // (Block 19, D8).
-        if (code == SLOW && !pinged) || code == codes::connecting::DELTA_ERROR {
+        let slow = code == SLOW || code == codes::connecting::READ_AHEAD_OVERFLOW;
+        if (slow && !pinged) || code == codes::connecting::DELTA_ERROR {
             self.backoff.undo_reset();
         } else {
             self.backoff.keep_reset();
