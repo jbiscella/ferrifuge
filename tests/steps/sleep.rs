@@ -506,6 +506,8 @@ async fn a_slow_reconnecting_client(world: &mut ClientWorld, min: u64) {
 
 #[when("reconnect is called")]
 #[when("reconnect is called on each")]
+// Coming online is a reconnect (Block 44, D10).
+#[when("the device comes online on each")]
 fn reconnect_is_called(world: &mut ClientWorld) {
     let sleep = sleep(world);
     if !sleep.fleet.is_empty() {
@@ -521,6 +523,14 @@ fn reconnect_is_called(world: &mut ClientWorld) {
         return;
     }
     world.client().reconnect();
+}
+
+#[when("the device goes offline on each")]
+fn offline_on_each(world: &mut ClientWorld) {
+    for (run, mark) in &mut sleep(world).fleet {
+        *mark = run.actions.len();
+        run.handle(Input::Offline);
+    }
 }
 
 #[then(

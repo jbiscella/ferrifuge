@@ -1150,6 +1150,8 @@ const MESSAGE_TOO_LARGE: &str = "message larger than the size limit";
 
 /// The reason of [`codes::connecting::READ_AHEAD_OVERFLOW`] (Block 44, D7).
 const READ_AHEAD_OVERFLOW_REASON: &str = "read-ahead overflow";
+/// The reason of `Input::PageCached` (Block 44, D11).
+const PAGE_CACHED_REASON: &str = "page entered back/forward cache";
 
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
@@ -1237,6 +1239,10 @@ pub struct Machine {
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
     backoff_reset_pending: bool,
+    /// The client lost its connection and its first attempt since has not
+    /// started: a reconnect then waits the jitter window (Block 44, D10,
+    /// amending Block 25 D5).
+    reconnecting_after_loss: bool,
     /// A server ping was read on the current connection: a 3008 close then
     /// keeps the backoff reset (Block 15, "Backoff after 3008").
     pinged: bool,
@@ -1390,6 +1396,7 @@ impl Machine {
             server_subscriptions: ServerSubscriptions::default(),
             calls: calls::Calls::default(),
             backoff_reset_pending: false,
+            reconnecting_after_loss: false,
             pinged: false,
             pings: None,
             connect_data: ConnectData::default(),
@@ -1471,8 +1478,8 @@ impl Machine {
                 }
             }
             Input::InboxOverflow(transport) => self.inbox_overflowed(transport),
-            // Block 44, D10 and D11: not yet handled.
-            Input::Offline | Input::PageCached => {}
+            Input::Offline => self.offline("transport closed"),
+            Input::PageCached => self.offline(PAGE_CACHED_REASON),
             Input::Frame { transport, data } if self.is_current(transport) => {
                 self.counters.bytes_in += data.len() as u64;
                 self.frame(transport, &data);
@@ -1558,6 +1565,7 @@ impl Machine {
     }
 
     fn start_attempt(&mut self) {
+        self.reconnecting_after_loss = false;
         match self.tokens.before_connect() {
             BeforeConnect::Ready => self.token_ready(),
             BeforeConnect::Fetch => self.fetch_token(FetchPurpose::Connect),
@@ -2178,14 +2186,60 @@ impl Machine {
             };
             if was_connected {
                 delay += self.reconnect_jitter();
+                self.reconnecting_after_loss = true;
             }
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+        } else {
+            self.reconnecting_after_loss = false;
         }
     }
 
+    /// The device went offline, or the page entered the back/forward cache
+    /// (Block 44, D10, D11; centrifuge-js 63ed73e `_setNetworkEvents`,
+    /// `_setPageEvents`).
+    fn offline(&mut self, reason: &str) {
+        match self.state {
+            State::Disconnected => {}
+            State::Connected => {
+                self.disconnect(codes::connecting::TRANSPORT_CLOSED, reason, true);
+            }
+            State::Connecting => {
+                if !self.attempt_in_flight() {
+                    // Already waiting the reconnect delay.
+                    return;
+                }
+                // Neither a failed attempt (Block 31, D1) nor a failed one
+                // of its transport's round (Block 8).
+                self.counters.cancelling = true;
+                let after_loss = self.reconnecting_after_loss;
+                if self
+                    .tear_down(codes::connecting::TRANSPORT_CLOSED, reason, true)
+                    .is_some()
+                {
+                    let delay = self.backoff.next_delay(&mut self.rng);
+                    self.reconnecting_after_loss = after_loss;
+                    self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                }
+            }
+        }
+    }
+
+    /// Whether an attempt is under way: its token, its connect data, its
+    /// transport opening or open.
+    fn attempt_in_flight(&self) -> bool {
+        self.transport.is_some()
+            || self.connect_data.fetch.is_some()
+            || matches!(
+                self.tokens.pending_fetch(),
+                Some((_, FetchPurpose::Connect))
+            )
+    }
+
     /// `reconnect()` (Block 25, D5, D6): a connected client reconnects
-    /// after the jitter window only, a connecting one at once; a
-    /// disconnected one is left alone, as one stopped on purpose.
+    /// after the jitter window only, a connecting one at once, unless its
+    /// first attempt since it lost its connection has not started (Block
+    /// 44, D10); a disconnected one is left alone, as one stopped on
+    /// purpose.
     /// `disconnect()`: the attempt in flight is not a failed one (Block
     /// 31, D1).
     fn disconnect_called(&mut self) {
@@ -2246,10 +2300,16 @@ impl Machine {
         ) else {
             return;
         };
+        let after_loss = std::mem::take(&mut self.reconnecting_after_loss);
         self.transports.restart();
         // As after `connect()` (Block 2).
         self.backoff.restart();
-        if was_connected {
+        // A connected client, or one whose first attempt since it lost its
+        // connection has not started, waits the jitter window (Block 25 D5,
+        // amended by Block 44 D10), so that a fleet whose network comes
+        // back does not reconnect at once.
+        if was_connected || (after_loss && !self.config.reconnect_jitter_window.is_zero()) {
+            self.reconnecting_after_loss = true;
             let delay = self.reconnect_jitter();
             self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
         } else {
@@ -2290,7 +2350,9 @@ impl Machine {
                 self.counters.failed_attempts += 1;
             }
             self.actions.push(Action::CloseTransport(transport));
-            if reconnect {
+            // A cancelled attempt keeps its transport's place in the round
+            // (Block 44, D10).
+            if reconnect && !cancelled {
                 self.transports.attempt_failed();
             }
         }
