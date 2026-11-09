@@ -201,11 +201,19 @@ impl From<&Command> for pb::Command {
                     method: method.clone(),
                 });
             }
-            Method::Publish(PublishRequest { channel, data }) => {
+            Method::Publish(PublishRequest {
+                channel,
+                data,
+                kind,
+                key,
+                removed,
+            }) => {
                 pb.publish = Some(pb::PublishRequest {
                     channel: channel.clone(),
                     data: data.clone(),
-                    ..pb::PublishRequest::default()
+                    r#type: *kind,
+                    key: key.clone(),
+                    removed: *removed,
                 });
             }
             Method::History(HistoryRequest {
@@ -497,6 +505,7 @@ mod tests {
                 method: Method::Publish(PublishRequest {
                     channel: "news".into(),
                     data: vec![0xff, 0x00, 0xfe],
+                    ..PublishRequest::default()
                 }),
             },
             Command {
@@ -603,6 +612,82 @@ mod tests {
                 num_clients: 2,
                 num_users: 1
             })
+        );
+    }
+
+    // Block 45, D3: a map publication's fields, absent from a regular one.
+    #[test]
+    fn encodes_map_publications_and_leaves_a_regular_one_unchanged() {
+        let frame = encode(&[
+            Command {
+                id: 1,
+                method: Method::Publish(PublishRequest {
+                    channel: "map:a".into(),
+                    data: vec![0xff],
+                    kind: 1,
+                    key: "k1".into(),
+                    removed: false,
+                }),
+            },
+            Command {
+                id: 2,
+                method: Method::Publish(PublishRequest {
+                    channel: "map:a".into(),
+                    kind: 1,
+                    key: "k1".into(),
+                    removed: true,
+                    ..PublishRequest::default()
+                }),
+            },
+        ]);
+        let regular = encode(&[Command {
+            id: 3,
+            method: Method::Publish(PublishRequest {
+                channel: "news".into(),
+                data: vec![0xff],
+                ..PublishRequest::default()
+            }),
+        }]);
+
+        let mut rest = frame.as_slice();
+        let commands: Vec<pb::Command> = (0..2)
+            .map(|_| pb::Command::decode_length_delimited(&mut rest).unwrap())
+            .collect();
+        assert_eq!(
+            commands[0].publish,
+            Some(pb::PublishRequest {
+                channel: "map:a".into(),
+                data: vec![0xff],
+                r#type: 1,
+                key: "k1".into(),
+                removed: false,
+            })
+        );
+        assert_eq!(
+            commands[1].publish,
+            Some(pb::PublishRequest {
+                channel: "map:a".into(),
+                data: Vec::new(),
+                r#type: 1,
+                key: "k1".into(),
+                removed: true,
+            })
+        );
+        // Zero fields are not encoded: the regular publication's bytes are
+        // those of its two fields only.
+        let expected = pb::Command {
+            id: 3,
+            publish: Some(pb::PublishRequest {
+                channel: "news".into(),
+                data: vec![0xff],
+                ..pb::PublishRequest::default()
+            }),
+            ..pb::Command::default()
+        };
+        assert_eq!(regular, expected.encode_length_delimited_to_vec());
+        assert_eq!(
+            expected.publish.unwrap().encoded_len(),
+            "news".len() + 2 + 1 + 2
         );
     }
 
