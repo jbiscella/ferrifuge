@@ -694,10 +694,11 @@ failure) with 17 `PUBLISH_DROPPED`, safe to publish again once subscribed. A
 trailing send already handed to the connection, its publishes following it,
 keeps Block 13's rules for that connection. For data that must arrive, use
 `Client::publish`, which is never debounced (the documentation's own caveat).
-Debouncing needs only the advised interval: this client has been tested
-against the protocol's field but not against a real PRO server, which only
-Centrifugo PRO can send. In a hidden browser tab, timer throttling (see
-[Browser](#browser)) lets windows and trailing sends lag by as much.
+Debouncing is untested against a real Centrifugo PRO server: only the
+interval the protocol carries has been tested, as the open-source server,
+which never sends it, publishes every value. In a hidden browser tab, timer
+throttling (see [Browser](#browser)) makes windows and trailing sends lag by
+as much, the latest value still kept.
 
 ### Batching
 
