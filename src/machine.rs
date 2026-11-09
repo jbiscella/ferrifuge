@@ -724,7 +724,7 @@ pub enum Input {
 /// connect and refresh frames carry the connection token.
 ///
 /// Non-exhaustive since 0.21.0 (Block 45, D3): a variant added under a
-/// feature, as [`Action::EmitMapSubscription`] under `unstable`, would
+/// feature, as `Action::EmitMapSubscription` under `unstable`, would
 /// otherwise break the exhaustive `match` of any crate in a graph where
 /// another crate enables that feature.
 #[derive(Clone, PartialEq, Eq)]
