@@ -120,31 +120,65 @@ impl Load {
     }
 }
 
-/// The state `items` make, by key: the last value wins, a removal deletes
+/// The state a load builds, by key: the last value wins, a removal deletes
 /// the key, a key keeps the place of its first appearance, and a key set
-/// again after a removal goes last (D4).
-fn state_of(items: Vec<Publication>) -> Vec<MapEntry> {
-    let mut entries: Vec<Option<Publication>> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
-    for publication in items {
+/// again after a removal goes last (D4). A superseded value is freed at
+/// once, so `bytes` is what the state holds now.
+#[derive(Default)]
+struct LoadState {
+    entries: Vec<Option<Publication>>,
+    index: HashMap<String, usize>,
+    bytes: usize,
+}
+
+impl LoadState {
+    fn push(&mut self, publication: Publication) {
         let (key, removed) = publication
             .map
             .as_ref()
             .map_or(("", false), |map| (map.key.as_str(), map.removed));
-        let place = index.get(key).copied();
+        let place = self.index.get(key).copied();
+        if let Some(old) = place.and_then(|place| self.entries[place].as_ref()) {
+            self.bytes -= old.data.len();
+        }
         if removed {
             if let Some(place) = place {
-                entries[place] = None;
-                index.remove(key);
+                self.entries[place] = None;
+                self.index.remove(key);
             }
-        } else if let Some(place) = place {
-            entries[place] = Some(publication);
+            return;
+        }
+        self.bytes += publication.data.len();
+        if let Some(place) = place {
+            self.entries[place] = Some(publication);
         } else {
-            index.insert(key.to_owned(), entries.len());
-            entries.push(Some(publication));
+            self.index.insert(key.to_owned(), self.entries.len());
+            self.entries.push(Some(publication));
         }
     }
-    entries.into_iter().flatten().map(MapEntry::from).collect()
+
+    fn into_entries(self) -> Vec<MapEntry> {
+        self.entries
+            .into_iter()
+            .flatten()
+            .map(MapEntry::from)
+            .collect()
+    }
+}
+
+/// What a finished load gives the application.
+enum Finished {
+    /// The whole state, for a `Sync`.
+    State(Vec<MapEntry>),
+    /// A completed recovery's catch-up, for its `Update`s.
+    Updates(Vec<Publication>),
+}
+
+/// Why a load could not be finished.
+enum LoadFailure {
+    Delta(DeltaError),
+    /// What it decoded passed `max_state_bytes` (D5).
+    TooLarge,
 }
 
 /// How payloads are rebuilt while delta is on.
@@ -226,8 +260,12 @@ enum Next {
     Fault(&'static str),
     /// The stream's epoch changed during the load (D4).
     EpochChanged,
-    /// The pages passed `max_state_bytes` (D5).
-    TooLarge,
+    /// The pages, or what they decoded to, passed `max_state_bytes` (D5).
+    TooLarge {
+        /// A kept position would replay the same catch-up: the next load
+        /// starts from scratch, and folded per key it may fit.
+        decoded: bool,
+    },
     /// A page: the next request of the load follows.
     Request,
     /// The live reply, with the state built from every page.
@@ -275,7 +313,7 @@ impl MapFlow {
         load.bytes = load.bytes.saturating_add(size);
         if load.bytes > max_state_bytes {
             self.load = None;
-            return Next::TooLarge;
+            return Next::TooLarge { decoded: false };
         }
         if load.epoch.is_none() {
             load.epoch = Some(result.epoch.clone());
@@ -307,50 +345,82 @@ impl MapFlow {
                 for publication in std::mem::take(&mut result.publications) {
                     load.catch_up(publication);
                 }
-                if let Err(error) = self.rebuild_load(&mut load, result.delta, rebuild, statistics)
-                {
-                    return Next::DeltaFailed(error);
+                let completed = load.recovering && result.recovered;
+                match self.finish_load(load, result.delta, completed, rebuild, statistics) {
+                    Ok(Finished::State(entries)) => Next::Live(entries),
+                    Ok(Finished::Updates(publications)) => Next::Recovered(publications),
+                    Err(LoadFailure::Delta(error)) => Next::DeltaFailed(error),
+                    Err(LoadFailure::TooLarge) => {
+                        self.bases = None;
+                        Next::TooLarge { decoded: true }
+                    }
                 }
-                if load.recovering && result.recovered {
-                    return Next::Recovered(load.catch_up);
-                }
-                // A recovery the server did not complete: the catch-up is all
-                // the state there is, so the application gets it whole.
-                load.items.append(&mut load.catch_up);
-                Next::Live(state_of(load.items))
             }
         }
     }
 
-    /// Rebuilds what `load` read, now that the live reply says whether
-    /// `delta` is on (D9): with delta on, each key's chain starts from the
-    /// bases this load kept, none for a load from scratch; with it off the
-    /// data stays as received and no base is kept.
-    fn rebuild_load(
+    /// Finishes `load`, now that the live reply says whether `delta` is on
+    /// (D9): with delta on, each key's chain starts from the bases this
+    /// load kept, none for a load from scratch; with it off the data stays
+    /// as received and no base is kept. What it decodes stays within
+    /// `max_state_bytes` (D5): many small deltas can rebuild far more than
+    /// the replies that carried them. A recovery the server did not
+    /// complete has no updates to give: its catch-up joins the state.
+    fn finish_load(
         &mut self,
-        load: &mut Load,
+        load: Load,
         delta: bool,
+        completed: bool,
         rebuild: Rebuild,
         statistics: &mut Option<Box<crate::DeltaStatistics>>,
-    ) -> Result<(), DeltaError> {
-        if !delta {
+    ) -> Result<Finished, LoadFailure> {
+        let Load {
+            items, catch_up, ..
+        } = load;
+        if delta {
+            self.bases.get_or_insert_default();
+        } else {
             self.bases = None;
-            return if load
-                .items
-                .iter()
-                .chain(&load.catch_up)
-                .any(|publication| publication.delta)
-            {
-                Err(DeltaError::NotOn)
-            } else {
-                Ok(())
-            };
+            if items.iter().chain(&catch_up).any(|item| item.delta) {
+                return Err(LoadFailure::Delta(DeltaError::NotOn));
+            }
         }
-        let bases = self.bases.get_or_insert_default();
-        for publication in load.items.iter_mut().chain(&mut load.catch_up) {
-            rebuild.apply(bases, publication, statistics)?;
+        let max_state_bytes = self.max_state_bytes;
+        let mut decode = |publication: &mut Publication| match &mut self.bases {
+            Some(bases) => rebuild
+                .apply(bases, publication, statistics)
+                .map_err(LoadFailure::Delta),
+            None => Ok(()),
+        };
+        let mut state = LoadState::default();
+        for mut publication in items {
+            decode(&mut publication)?;
+            state.push(publication);
+            if state.bytes > max_state_bytes {
+                return Err(LoadFailure::TooLarge);
+            }
         }
-        Ok(())
+        if completed {
+            let mut updates = Vec::with_capacity(catch_up.len());
+            let mut bytes = 0_usize;
+            for mut publication in catch_up {
+                decode(&mut publication)?;
+                bytes = bytes.saturating_add(publication.data.len());
+                if bytes > max_state_bytes {
+                    return Err(LoadFailure::TooLarge);
+                }
+                updates.push(publication);
+            }
+            return Ok(Finished::Updates(updates));
+        }
+        for mut publication in catch_up {
+            decode(&mut publication)?;
+            state.push(publication);
+            if state.bytes > max_state_bytes {
+                return Err(LoadFailure::TooLarge);
+            }
+        }
+        Ok(Finished::State(state.into_entries()))
     }
 
     /// Rebuilds a publication pushed live: against its key's base while
@@ -597,7 +667,10 @@ impl Machine {
                     self.start_subscribe(id);
                 }
             }
-            Next::TooLarge => {
+            Next::TooLarge { decoded } => {
+                if decoded && let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                    sub.forget_position();
+                }
                 self.send_unsubscribe(id, channel);
                 self.set_unsubscribed(
                     id,
