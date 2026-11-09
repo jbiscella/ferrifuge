@@ -418,7 +418,7 @@ jobs:
       # The unstable APIs work in the browser too (Block 45, D14).
       - name: The browser adapter with unstable
         run: |
-          cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features browser,unstable -- -D warnings
+          cargo clippy --lib --test browser_wasm --target wasm32-unknown-unknown --no-default-features --features browser,unstable -- -D warnings
           cargo build --lib --target wasm32-unknown-unknown --no-default-features --features browser,unstable
 
       # The default features build there too (Block 44, D1).

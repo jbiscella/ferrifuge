@@ -53,7 +53,7 @@ const SERVER: &[(&str, &str)] = &[
     ),
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"history","history_size":300,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true,"allow_publish_for_client":true,"allow_publish_for_anonymous":true}]"#,
+        r#"[{"name":"history","history_size":300,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true,"allow_publish_for_client":true,"allow_publish_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
     ),
 ];
 
@@ -171,7 +171,7 @@ fn run_in(browser: &Browser, server: &str, relay: &str) -> bool {
             "wasm32-unknown-unknown",
             "--no-default-features",
             "--features",
-            "browser",
+            "browser,unstable",
             "--lib",
             "--test",
             "browser_wasm",
