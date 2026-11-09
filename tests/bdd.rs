@@ -717,6 +717,11 @@ const COOKIES: &[&str] = &[];
 /// `unstable` (Block 45, D16).
 #[cfg(feature = "unstable")]
 const MAPS: &[&str] = &[
+    // Block 46b: map keys.
+    "Each map key has its own window",
+    "A remove cancels the key's pending publish and settles the publishes it replaced",
+    "Client-level map writes are not debounced",
+    "A map subscribe reply's interval is honoured",
     // 45a: map_publish and map_remove on the client.
     "A refused map publish fails with the server's code",
     // 45b: map subscriptions load their state, then follow its changes.
