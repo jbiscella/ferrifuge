@@ -353,6 +353,25 @@ struct Sent {
     positions: BTreeMap<String, (i64, i64)>,
 }
 
+/// Whether a connect among `commands`, if any, comes first.
+fn connect_first<'a>(commands: impl Iterator<Item = &'a Sent>) -> bool {
+    commands
+        .enumerate()
+        .all(|(at, sent)| sent.kind != "connect" || at == 0)
+}
+
+/// Commands with their ids, by channel, each channel's in its order.
+fn by_channel<Id: Copy>(commands: &[(Id, Sent)]) -> BTreeMap<String, Vec<(Id, Sent)>> {
+    let mut by_channel: BTreeMap<String, Vec<(Id, Sent)>> = BTreeMap::new();
+    for (id, sent) in commands {
+        by_channel
+            .entry(sent.channel.clone())
+            .or_default()
+            .push((*id, sent.clone()));
+    }
+    by_channel
+}
+
 impl Sent {
     fn of_model(command: &Value) -> Self {
         let mut positions = BTreeMap::new();
@@ -1228,14 +1247,28 @@ impl<'a> Replay<'a> {
         before: &Value,
         after: &Value,
     ) -> Result<(), Mismatch> {
-        // Commands, in order.
-        let expected: Vec<Sent> = new_commands(before, after)
+        // A connect first, then each channel's commands in its own order:
+        // the model's order of independent flows is a schedule choice
+        // (D4).
+        let model: Vec<(i64, Sent)> = new_commands(before, after)
             .iter()
-            .map(Sent::of_model)
+            .map(|command| (command["id"].as_i64().unwrap_or(0), Sent::of_model(command)))
             .collect();
-        let sent: Vec<Sent> = self.sent.iter().map(|(_, sent)| sent.clone()).collect();
-        self.count(Kind::Commands, expected.len().max(1));
-        if expected != sent {
+        self.count(Kind::Commands, model.len().max(1));
+        let expected = by_channel(&model);
+        let sent = by_channel(&self.sent);
+        let same = expected.keys().eq(sent.keys())
+            && expected.iter().all(|(channel, commands)| {
+                sent[channel]
+                    .iter()
+                    .map(|(_, sent)| sent)
+                    .eq(commands.iter().map(|(_, sent)| sent))
+            })
+            && connect_first(model.iter().map(|(_, sent)| sent))
+            && connect_first(self.sent.iter().map(|(_, sent)| sent));
+        if !same {
+            let expected: Vec<&Sent> = model.iter().map(|(_, sent)| sent).collect();
+            let sent: Vec<&Sent> = self.sent.iter().map(|(_, sent)| sent).collect();
             return Err(self.mismatch(
                 start,
                 Some(Kind::Commands),
@@ -1245,12 +1278,11 @@ impl<'a> Replay<'a> {
                 ),
             ));
         }
-        let model_ids: Vec<i64> = new_commands(before, after)
-            .iter()
-            .filter_map(|command| command["id"].as_i64())
-            .collect();
-        for (model, (core, _)) in model_ids.iter().zip(&self.sent) {
-            self.command_ids.insert(*model, *core);
+        // The replies use the match of the same channel and rank.
+        for (channel, commands) in &expected {
+            for ((model, _), (core, _)) in commands.iter().zip(&sent[channel]) {
+                self.command_ids.insert(*model, *core);
+            }
         }
         Ok(())
     }
