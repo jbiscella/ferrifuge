@@ -70,6 +70,7 @@ mod event;
 mod fossil;
 mod json;
 pub mod machine;
+mod maybe_send;
 mod protobuf;
 pub(crate) mod protocol;
 mod statistics;
@@ -116,6 +117,7 @@ pub use fossil::write as write_fossil_delta;
 #[cfg(feature = "tokio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
+pub use maybe_send::{MaybeSend, MaybeSync};
 /// rustls, whose types [`ClientBuilder::root_certificates`] and
 /// [`ClientBuilder::tls_config`] take (Block 22). Moving to another rustls
 /// 0.x line is a breaking release of Ferrifuge.

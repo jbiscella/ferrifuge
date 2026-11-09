@@ -14,8 +14,8 @@ use super::client::{
 use crate::machine::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
     CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, JsonCallError,
-    PresenceResult, PresenceStatsResult, Publication, StateError, StreamPosition,
-    SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
+    MaybeSend, MaybeSync, PresenceResult, PresenceStatsResult, Publication, StateError,
+    StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
@@ -132,7 +132,7 @@ impl Subscription {
     /// client is closed (dropped, or its runtime shut down), and when the
     /// client enters `disconnected` while it waits, as its calls waiting for
     /// it do.
-    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
+    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
         super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
     }
 
@@ -180,7 +180,7 @@ impl Subscription {
     /// }
     /// # }
     /// ```
-    pub fn publications(&self) -> impl Stream<Item = Publication> + Send + Unpin + use<> {
+    pub fn publications(&self) -> impl Stream<Item = Publication> + MaybeSend + Unpin + use<> {
         use futures_util::StreamExt as _;
         self.events().filter_map(|event| {
             std::future::ready(match event {
@@ -206,7 +206,7 @@ impl Subscription {
     /// events it had not yielded are the new one's (Block 15). The stream
     /// borrows nothing from the subscription, so it can be kept beside it,
     /// and it ends once the subscription is removed or its client dropped.
-    pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + Send + Unpin + use<> {
+    pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + MaybeSend + Unpin + use<> {
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then closes the outbox, so a removed
         // subscription's stream ends at once.
@@ -258,7 +258,7 @@ impl Subscription {
     pub fn publish(
         &self,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
         let call = self.call(CallRequest::Publish {
             channel: self.channel.to_string(),
             data: data.into(),
@@ -287,7 +287,7 @@ impl Subscription {
     pub fn publish_json<T: serde::Serialize + ?Sized>(
         &self,
         data: &T,
-    ) -> impl Future<Output = Result<(), JsonCallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), JsonCallError>> + MaybeSend + 'static {
         let call = serde_json::to_vec(data).map(|data| self.publish(data));
         async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
@@ -301,7 +301,7 @@ impl Subscription {
     pub fn history(
         &self,
         options: HistoryOptions,
-    ) -> impl Future<Output = Result<HistoryResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<HistoryResult, CallError>> + MaybeSend + 'static {
         let call = self.call(CallRequest::History {
             channel: self.channel.to_string(),
             options,
@@ -317,7 +317,7 @@ impl Subscription {
     /// As [`Subscription::publish`].
     pub fn presence(
         &self,
-    ) -> impl Future<Output = Result<PresenceResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<PresenceResult, CallError>> + MaybeSend + 'static {
         let call = self.call(CallRequest::Presence {
             channel: self.channel.to_string(),
         });
@@ -332,7 +332,7 @@ impl Subscription {
     /// As [`Subscription::publish`].
     pub fn presence_stats(
         &self,
-    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + MaybeSend + 'static {
         let call = self.call(CallRequest::PresenceStats {
             channel: self.channel.to_string(),
         });
@@ -342,7 +342,7 @@ impl Subscription {
     fn call(
         &self,
         request: CallRequest,
-    ) -> impl Future<Output = Result<CallReply, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<CallReply, CallError>> + MaybeSend + 'static {
         self.shared.call(Some(self.id), request)
     }
 }
@@ -392,8 +392,8 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_data<F, Fut>(mut self, get_data: F) -> Self
     where
-        F: Fn(String) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
+        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<Vec<u8>, DataError>> + MaybeSend + 'static,
     {
         self.options = self.options.data_source();
         self.get_data = Some(Arc::new(move |channel| Box::pin(get_data(channel))));
@@ -498,8 +498,8 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn(String) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
+        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
         self.options = self.options.token_source();
         self.get_token = Some(Arc::new(move |channel| Box::pin(get_token(channel))));
@@ -519,8 +519,8 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_state<F, Fut>(mut self, get_state: F) -> Self
     where
-        F: Fn(String) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<StreamPosition, StateError>> + Send + 'static,
+        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<StreamPosition, StateError>> + MaybeSend + 'static,
     {
         self.options = self.options.state_source();
         self.get_state = Some(Arc::new(move |channel| Box::pin(get_state(channel))));

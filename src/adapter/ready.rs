@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 
 use super::client::{Core, Shared, client_closed, lock};
 use crate::machine::SubscriptionId;
-use crate::{CallError, State, SubscriptionState, codes};
+use crate::{CallError, MaybeSend, State, SubscriptionState, codes};
 
 type Waiter = oneshot::Sender<Result<(), CallError>>;
 
@@ -157,7 +157,7 @@ impl Drop for Registered {
 pub(super) fn ready(
     shared: &Arc<Shared>,
     of: Of,
-) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
+) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
     let start = {
         let core = lock(&shared.core);
         if shared.closed.load(Ordering::Acquire) {

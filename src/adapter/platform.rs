@@ -5,6 +5,8 @@
 //! natively; the browser target adds its own (Block 44b).
 
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) use ::tokio::runtime::Handle;
@@ -60,3 +62,15 @@ pub(super) fn hand_over_worker<R>(call: impl FnOnce() -> R) -> R {
         call()
     }
 }
+
+/// A boxed future the driver awaits: `Send` natively, as futures'
+/// `BoxFuture` (Block 44, D3).
+pub(super) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// An application callback the client keeps, with no argument: `Send` and
+/// `Sync` natively (Block 44, D3).
+pub(super) type Callback<R> = Arc<dyn Fn() -> R + Send + Sync>;
+
+/// An application callback the client keeps, given a subscription's
+/// channel: `Send` and `Sync` natively (Block 44, D3).
+pub(super) type ChannelCallback<R> = Arc<dyn Fn(String) -> R + Send + Sync>;

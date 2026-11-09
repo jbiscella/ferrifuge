@@ -34,8 +34,8 @@ use crate::machine::{
 };
 use crate::{
     CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
-    HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult, State,
-    StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
+    HistoryOptions, HistoryResult, JsonCallError, MaybeSend, MaybeSync, PresenceResult,
+    PresenceStatsResult, State, StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 use tracing::{debug, trace, warn};
 
@@ -379,26 +379,17 @@ impl Refreshes {
 
 /// Async callback returning the data of a subscription's next subscribe
 /// command, given its channel.
-pub(super) type GetData = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DataError>> + Send>>
-        + Send
-        + Sync,
->;
+pub(super) type GetData =
+    platform::ChannelCallback<platform::BoxFuture<'static, Result<Vec<u8>, DataError>>>;
 
 /// Async callback returning a new subscription token, given the channel.
-pub(super) type GetSubscriptionToken = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>
-        + Send
-        + Sync,
->;
+pub(super) type GetSubscriptionToken =
+    platform::ChannelCallback<platform::BoxFuture<'static, Result<String, TokenError>>>;
 
 /// Async callback loading the application's state for a channel, giving
 /// the stream position it was loaded at.
-pub(super) type GetState = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<StreamPosition, StateError>> + Send>>
-        + Send
-        + Sync,
->;
+pub(super) type GetState =
+    platform::ChannelCallback<platform::BoxFuture<'static, Result<StreamPosition, StateError>>>;
 
 /// The callbacks of a subscription.
 #[derive(Clone, Default)]
@@ -683,7 +674,7 @@ impl Shared {
         self: &Arc<Self>,
         subscription: Option<SubscriptionId>,
         request: CallRequest,
-    ) -> impl Future<Output = Result<CallReply, CallError>> + Send + use<> {
+    ) -> impl Future<Output = Result<CallReply, CallError>> + MaybeSend + use<> {
         let (sender, receiver) = oneshot::channel();
         let pending = {
             let mut core = lock(&self.core);
@@ -874,12 +865,10 @@ impl<E> Drop for EventStream<E> {
 }
 
 /// Async callback returning a fresh connection token.
-type GetToken =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>> + Send + Sync>;
+type GetToken = platform::Callback<platform::BoxFuture<'static, Result<String, TokenError>>>;
 
 /// Async callback returning the data of the next connect command.
-type GetConnectData =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DataError>> + Send>> + Send + Sync>;
+type GetConnectData = platform::Callback<platform::BoxFuture<'static, Result<Vec<u8>, DataError>>>;
 
 /// Builds a [`Client`] with options beyond [`Config`].
 pub struct ClientBuilder {
@@ -983,8 +972,8 @@ impl ClientBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String, TokenError>> + Send + 'static,
+        F: Fn() -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
         self.get_token = Some(Arc::new(move || Box::pin(get_token())));
         self
@@ -998,8 +987,8 @@ impl ClientBuilder {
     #[must_use]
     pub fn get_data<F, Fut>(mut self, get_data: F) -> Self
     where
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Vec<u8>, DataError>> + Send + 'static,
+        F: Fn() -> Fut + MaybeSend + MaybeSync + 'static,
+        Fut: Future<Output = Result<Vec<u8>, DataError>> + MaybeSend + 'static,
     {
         self.get_data = Some(Arc::new(move || Box::pin(get_data())));
         self
@@ -1418,7 +1407,7 @@ impl Client {
     /// assert!(client.is_closed());
     /// # }
     /// ```
-    pub fn close(&self) -> impl Future<Output = ()> + Send + use<> {
+    pub fn close(&self) -> impl Future<Output = ()> + MaybeSend + use<> {
         self.shared.shut_down();
         let shared = Arc::clone(&self.shared);
         async move {
@@ -1498,7 +1487,7 @@ impl Client {
     /// terminal code, a denied token. Code 4 "client closed"
     /// (`codes::error::CLIENT_CLOSED`) when the client is closed, its last
     /// clone dropped or its runtime shut down included (Block 33).
-    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + Send + use<> {
+    pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
         ready::ready(&self.shared, Of::Client)
     }
 
@@ -1518,7 +1507,7 @@ impl Client {
     /// it had not yielded are the new one's (Block 15). The stream borrows
     /// nothing from the client, so it can be kept beside it, and it ends
     /// once the client is dropped or its runtime shuts down (Block 28).
-    pub fn events(&self) -> impl Stream<Item = ClientEvent> + Send + Unpin + use<> {
+    pub fn events(&self) -> impl Stream<Item = ClientEvent> + MaybeSend + Unpin + use<> {
         let mut core = lock(&self.shared.core);
         let number = lock(&self.shared.outboxes).client.open_stream();
         self.shared.handle(&mut core, Input::StreamOpened(None));
@@ -1716,7 +1705,7 @@ impl Client {
         &self,
         method: impl Into<String>,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<Vec<u8>, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<Vec<u8>, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::Rpc {
@@ -1766,7 +1755,7 @@ impl Client {
         &self,
         method: impl Into<String>,
         data: &Req,
-    ) -> impl Future<Output = Result<Resp, JsonCallError>> + Send + 'static
+    ) -> impl Future<Output = Result<Resp, JsonCallError>> + MaybeSend + 'static
     where
         Req: serde::Serialize + ?Sized,
         Resp: serde::de::DeserializeOwned,
@@ -1791,7 +1780,7 @@ impl Client {
         &self,
         channel: impl Into<String>,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::Publish {
@@ -1829,7 +1818,7 @@ impl Client {
         &self,
         channel: impl Into<String>,
         data: &T,
-    ) -> impl Future<Output = Result<(), JsonCallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), JsonCallError>> + MaybeSend + 'static {
         let call = serde_json::to_vec(data).map(|data| self.publish(channel, data));
         async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
@@ -1845,7 +1834,7 @@ impl Client {
         &self,
         channel: impl Into<String>,
         options: HistoryOptions,
-    ) -> impl Future<Output = Result<HistoryResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<HistoryResult, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::History {
@@ -1865,7 +1854,7 @@ impl Client {
     pub fn presence(
         &self,
         channel: impl Into<String>,
-    ) -> impl Future<Output = Result<PresenceResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<PresenceResult, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::Presence {
@@ -1895,7 +1884,7 @@ impl Client {
     pub fn send(
         &self,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<(), CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
         let call = self
             .shared
             .call(None, CallRequest::Send { data: data.into() });
@@ -1911,7 +1900,7 @@ impl Client {
     pub fn presence_stats(
         &self,
         channel: impl Into<String>,
-    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + Send + 'static {
+    ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::PresenceStats {
@@ -1956,7 +1945,7 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 use super::tokio::{Opening, Transport};
-type Fetching = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>;
+type Fetching = platform::BoxFuture<'static, Result<String, TokenError>>;
 
 /// Performs the machine's actions, and turns transport activity and timers
 /// into inputs for it.
@@ -2009,7 +1998,7 @@ struct Driver {
     callback_aborts: HashMap<FetchId, AbortHandle>,
 }
 
-type CallbackFetching = Pin<Box<dyn Future<Output = Option<(FetchId, Input)>> + Send>>;
+type CallbackFetching = platform::BoxFuture<'static, Option<(FetchId, Input)>>;
 
 /// The machine's subscription timers, by subscription and kind, or its
 /// call timers, by call.
@@ -2563,7 +2552,7 @@ impl Driver {
     fn start_fetch(
         &mut self,
         fetch: FetchId,
-        answer: impl Future<Output = Input> + Send + 'static,
+        answer: impl Future<Output = Input> + MaybeSend + 'static,
     ) {
         let (fetching, abort) = future::abortable(answer);
         self.callback_aborts.insert(fetch, abort);
@@ -2576,10 +2565,10 @@ impl Driver {
 /// The future of a callback, which fails with `panicked()` rather than
 /// panicking the driver: whether the callback panics creating its future
 /// or polling it.
-fn guarded<T: Send + 'static, E: Send + 'static>(
-    callback: impl FnOnce() -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
+fn guarded<T: MaybeSend + 'static, E: MaybeSend + 'static>(
+    callback: impl FnOnce() -> platform::BoxFuture<'static, Result<T, E>>,
     panicked: fn() -> E,
-) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>> {
+) -> platform::BoxFuture<'static, Result<T, E>> {
     let Ok(future) = std::panic::catch_unwind(AssertUnwindSafe(callback)) else {
         debug!("callback panicked");
         return Box::pin(std::future::ready(Err(panicked())));
