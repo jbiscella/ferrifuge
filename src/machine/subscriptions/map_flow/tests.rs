@@ -1876,3 +1876,26 @@ fn an_entry_without_a_value_stays_empty_with_delta_on() {
     assert_eq!(sync_keys(&live), ["u1"]);
     assert!(delta_error(&live).is_none(), "{live:?}");
 }
+
+#[test]
+fn a_live_reply_with_delta_off_ends_the_chains_and_data_stays_as_received() {
+    let (mut machine, transport, id) = delta_synced();
+    let (transport, recovering) = reconnect(&mut machine, transport);
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering.expect("a subscribe"),
+            r#""type":1,"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":2"#,
+        ),
+    ));
+    take_all(&mut machine, &live);
+
+    assert_eq!(bases(&machine, id), None);
+    let pushed = machine.handle(frame(
+        transport,
+        &push(r#"{"key":"a","data":{"v":2},"offset":3}"#),
+    ));
+    assert!(delta_error(&pushed).is_none(), "{pushed:?}");
+    assert_eq!(updates(&pushed)[0].data, br#"{"v":2}"#);
+}
