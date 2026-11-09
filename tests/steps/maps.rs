@@ -366,17 +366,7 @@ async fn a_client_with_a_map_subscription(world: &mut ClientWorld, channel: Stri
             });
         }
         r#" with fossil delta, synced with key "a" whose delta is on"# => {
-            a_scripted_map_subscription(world, &channel, |builder| {
-                builder.delta(DeltaFormat::Fossil)
-            });
-            world.map().subscribe();
-            answer_next(
-                world,
-                json!({"type": 1, "recoverable": true, "delta": true, "epoch": "e1", "offset": 1,
-                    "state": [entry("a", json!(r#"{"v":1}"#), 1)]}),
-            )
-            .await;
-            world.map_events_until("sync").await;
+            synced_with_delta_on_the_fake(world, &channel).await;
         }
         r#" with a token callback, synced at epoch "e1" and offset 7"# => {
             let times = Arc::clone(&world.maps.token_times);
@@ -2222,6 +2212,20 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
 }
 
 // --- Per-key delta and tag filters (45d) ----------------------------------
+
+/// A map subscription to `channel` with delta, whose sync of key "a" the
+/// fake server answered with delta on.
+async fn synced_with_delta_on_the_fake(world: &mut ClientWorld, channel: &str) {
+    a_scripted_map_subscription(world, channel, |builder| builder.delta(DeltaFormat::Fossil));
+    world.map().subscribe();
+    answer_next(
+        world,
+        json!({"type": 1, "recoverable": true, "delta": true, "epoch": "e1", "offset": 1,
+            "state": [entry("a", json!(r#"{"v":1}"#), 1)]}),
+    )
+    .await;
+    world.map_events_until("sync").await;
+}
 
 /// A JSON value of 300 bytes for `key`, differing from the other versions
 /// of the key by one byte.
