@@ -37,6 +37,13 @@ const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 const TIMEOUT: Duration = Duration::from_secs(1);
 /// I6: a call waits at most once per phase, plus a margin for real time.
 const CALL_BOUND: Duration = Duration::from_secs(4);
+/// I6: a publish that may have waited in a debounce window waits once more
+/// (Block 46, D6); the adapter cannot tell which did, so the bound is that
+/// of every publish of a burst.
+const WINDOW_CALL_BOUND: Duration = Duration::from_secs(5);
+/// A tick of real time, of which a debounce interval is 1 to 3 (Block 46,
+/// D16): longer than the pause between two operations.
+const TICK: u32 = 50;
 /// How long a seed may take to reach quiescence once faults stop (I4).
 const QUIESCENCE: Duration = Duration::from_secs(10);
 /// No event for this long: the streams are quiet.
@@ -143,6 +150,9 @@ enum Op {
     DropBatch,
     /// The server sends its next delta broken (Block 19).
     CorruptDelta,
+    /// The application publishes this many times on the subscription to
+    /// `CHANNELS[n]`, each publish awaited in its own task (Block 46, D16).
+    Burst(usize, u32),
 }
 
 impl Op {
@@ -206,7 +216,10 @@ struct Run {
     /// The server advises a debounce interval on some subscribes, and the
     /// application makes publish bursts (Block 46, D16).
     debounce: bool,
-    calls: Vec<JoinHandle<Duration>>,
+    /// Tasks awaiting calls, each with the bound of its settling (I6).
+    calls: Vec<(JoinHandle<Duration>, Duration)>,
+    /// The publishes of each burst made, by burst number (Block 46).
+    bursts: Vec<u32>,
     /// Batches the application holds open.
     batches: Vec<ferrifuge::Batch>,
     ops: Vec<String>,
@@ -270,6 +283,7 @@ impl Run {
             delta,
             debounce,
             calls: Vec::new(),
+            bursts: Vec::new(),
             batches: Vec::new(),
             ops: Vec::new(),
             counts: BTreeMap::new(),
@@ -291,10 +305,12 @@ impl Run {
 
     async fn run(&mut self, ops: usize) -> Step {
         for n in 0..ops {
-            // Drawn only with delta, so the other runs' seeds keep their
-            // operations.
+            // Drawn only with delta, or with debouncing, so the other runs'
+            // seeds keep their operations.
             let op = if self.delta && self.rng.u32(0..100) < 8 {
                 Op::CorruptDelta
+            } else if self.debounce && self.rng.u32(0..100) < 20 {
+                Op::Burst(self.rng.usize(..CHANNELS.len()), self.rng.u32(2..=5))
             } else {
                 Op::pick(&mut self.rng)
             };
@@ -315,7 +331,10 @@ impl Run {
             Op::Connect => self.client.connect(),
             Op::Disconnect => self.client.disconnect(),
             Op::Reconnect => self.client.reconnect(),
-            Op::Subscribe(n) => self.subs[n].subscription.subscribe(),
+            Op::Subscribe(n) => {
+                self.advise_interval();
+                self.subs[n].subscription.subscribe();
+            }
             Op::Unsubscribe(n) => self.subs[n].subscription.unsubscribe(),
             Op::Call(kind) => self.call(kind),
             Op::Take(target, events) => {
@@ -374,8 +393,40 @@ impl Run {
                 }
             }
             Op::CorruptDelta => self.server.corrupt_next_delta(),
+            Op::Burst(n, count) => self.burst(n, count),
         }
         Ok(())
+    }
+
+    /// With debouncing, the next subscribe replies advise an interval of 1
+    /// to 3 ticks, or none (Block 46, D16).
+    fn advise_interval(&mut self) {
+        if self.debounce {
+            let interval = (self.rng.u32(0..100) < 75).then(|| self.rng.u32(1..=3) * TICK);
+            self.server.advise_publish_debounce(interval);
+        }
+    }
+
+    /// `count` publishes on the subscription to `CHANNELS[n]`, numbered so
+    /// that those merged can be counted, each awaited in its own task, on
+    /// a subscription that wants to be subscribed so that bursts reach the
+    /// windows (Block 46, D16).
+    fn burst(&mut self, n: usize, count: u32) {
+        self.advise_interval();
+        self.count("publish burst");
+        self.subs[n].subscription.subscribe();
+        let burst = self.bursts.len();
+        self.bursts.push(count);
+        for publish in 0..count {
+            let made = Instant::now();
+            let data = serde_json::json!({"burst": burst, "publish": publish}).to_string();
+            let call = self.subs[n].subscription.publish(data.into_bytes());
+            let handle = tokio::spawn(async move {
+                let _ = call.await;
+                made.elapsed()
+            });
+            self.calls.push((handle, WINDOW_CALL_BOUND));
+        }
     }
 
     /// Makes a call in a task that reports how long it took to settle.
@@ -399,10 +450,11 @@ impl Run {
                 async move { call.await.is_ok() }
             }),
         };
-        self.calls.push(tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             call.await;
             made.elapsed()
-        }));
+        });
+        self.calls.push((handle, CALL_BOUND));
     }
 
     /// Reads the next event of `target` within `wait`; whether one came.
@@ -551,7 +603,7 @@ impl Run {
                         "no quiescence {QUIESCENCE:?} after healing: client {:?}, subscriptions {:?}, {} calls unsettled",
                         self.last_state,
                         self.subs.iter().map(|sub| sub.last_state).collect::<Vec<_>>(),
-                        self.calls.iter().filter(|call| !call.is_finished()).count()
+                        self.calls.iter().filter(|(call, _)| !call.is_finished()).count()
                     ),
                 ));
             }
@@ -571,11 +623,11 @@ impl Run {
                 ));
             }
         }
-        for call in std::mem::take(&mut self.calls) {
+        for (call, bound) in std::mem::take(&mut self.calls) {
             let took = call
                 .await
                 .map_err(|error| self.violation("I2", error.to_string()))?;
-            if took > CALL_BOUND {
+            if took > bound {
                 return Err(self.violation("I6", format!("a call settled after {took:?}")));
             }
         }
@@ -595,7 +647,7 @@ impl Run {
                     SubscriptionState::Unsubscribed | SubscriptionState::Subscribed
                 ) && sub.subscription.state() == sub.last_state
             })
-            && self.calls.iter().all(JoinHandle::is_finished)
+            && self.calls.iter().all(|(call, _)| call.is_finished())
     }
 
     /// I5: after `disconnect()`, no connection stays open and no new one
@@ -654,11 +706,38 @@ async fn run_seeds(
         run.run(OPS).await?;
         *counts.entry("corrupted delta").or_default() += run.server.corrupted_deltas();
         frames_of(&run, &mut counts);
+        merged_of(&run, &mut counts);
         for (name, count) in run.counts {
             *counts.entry(name).or_default() += count;
         }
     }
     Ok(counts)
+}
+
+/// Counts the publishes of `run`'s bursts merged in a window: the fake
+/// server never read them but read a later one of their burst (Block 46,
+/// D3).
+fn merged_of(run: &Run, counts: &mut BTreeMap<&'static str, usize>) {
+    let read: std::collections::BTreeSet<(u64, u64)> = run
+        .server
+        .received_with_frames()
+        .iter()
+        .filter_map(|(command, _)| {
+            let data = &command["publish"]["data"];
+            Some((data["burst"].as_u64()?, data["publish"].as_u64()?))
+        })
+        .collect();
+    for (burst, count) in run.bursts.iter().enumerate() {
+        let burst = burst as u64;
+        for publish in 0..u64::from(*count) {
+            let later = publish + 1..u64::from(*count);
+            if !read.contains(&(burst, publish))
+                && later.into_iter().any(|at| read.contains(&(burst, at)))
+            {
+                *counts.entry("publish merged").or_default() += 1;
+            }
+        }
+    }
 }
 
 /// Counts the frames of `run` the fake server read: those of several

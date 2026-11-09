@@ -24,8 +24,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
 
 use ferrifuge::machine::{
-    Action, CallId, CallTimer, EventId, FetchId, FrameId, Input, Machine, SubscriptionId,
-    SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
+    Action, CallId, CallTimer, DebounceTimer, EventId, FetchId, FrameId, Input, Machine,
+    SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
 };
 use ferrifuge::{
     CallRequest, ClientEvent, Config, DeltaFormat, HistoryOptions, ServerSubscriptionEvent, State,
@@ -43,7 +43,8 @@ const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 /// Operations of each seed of the long run.
 const OPS_VARIABLE: &str = "FERRIFUGE_CHAOS_OPS";
 /// The long run's mode: `0` the connection alone, `1` with subscriptions,
-/// `2` (the default) with subscriptions and batches.
+/// `2` (the default) with subscriptions and batches, `3` with delta, `4`
+/// with automatic batching, `5` with debounced publishes.
 const SUBSCRIPTIONS_VARIABLE: &str = "FERRIFUGE_CHAOS_SUBSCRIPTIONS";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -51,6 +52,12 @@ const TIMEOUT: Duration = Duration::from_secs(1);
 const LIVENESS: Duration = Duration::from_secs(3);
 /// I6: a call waits at most once per phase (connection, room, reply).
 const CALL_BOUND: Duration = Duration::from_secs(3);
+/// I6: a publish that waited in a debounce window waits once more (Block
+/// 46, D6).
+const WINDOW_CALL_BOUND: Duration = Duration::from_secs(4);
+/// A tick of the simulated clock, of which a debounce interval is 1 to 3
+/// (Block 46, D16): the longest pause between two operations.
+const TICK: u64 = 50;
 /// Lines of the trace a violation shows before it.
 const TAIL: usize = 40;
 /// Interval of the simulated server's pings, in seconds.
@@ -121,6 +128,11 @@ impl Mode {
             Self::AutoBatching => 4,
             Self::Debounce => 5,
         }
+    }
+
+    /// Whether the machine batches automatically for this seed.
+    fn automatic(self, seed: u64) -> bool {
+        matches!(self, Self::AutoBatching | Self::Debounce) && seed.is_multiple_of(2)
     }
 
     /// Whether the application starts and stops batches.
@@ -265,6 +277,9 @@ enum Op {
     ServerSubscribe(usize),
     /// The server unsubscribes the client from `SERVER_CHANNELS[n]`.
     ServerUnsubscribe(usize),
+    /// The application publishes this many times on the subscription to
+    /// `CHANNELS[n]`, some spread over the debounce intervals (Block 46, D16).
+    Burst(usize, u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -381,6 +396,7 @@ impl Op {
             Self::ServerUnsubscribe(_) => "server unsubscribe".to_owned(),
             Self::StartBatching => "start batching".to_owned(),
             Self::StopBatching => "stop batching".to_owned(),
+            Self::Burst(..) => "publish burst".to_owned(),
             other => format!("{other:?}"),
         }
     }
@@ -440,6 +456,7 @@ enum Key {
     Client(Timer),
     Call(CallId, CallTimer),
     Subscription(SubscriptionId, SubscriptionTimer),
+    Debounce(DebounceTimer),
 }
 
 #[derive(Debug)]
@@ -558,6 +575,17 @@ struct Checker {
     held: BTreeMap<CallId, u64>,
     /// Transports that sent something: the first was a connect (I10).
     started: BTreeSet<u64>,
+    /// The subscription of each publish a burst made, unsettled (I6, I12).
+    publishes: BTreeMap<CallId, SubscriptionId>,
+    /// Those that waited in a debounce window, seen as a publish unsettled
+    /// without a timer of its own (D6, I6).
+    windowed: BTreeSet<CallId>,
+    /// The subscription of each debounce timer running (D5 gives the timer
+    /// no subscription; only looked up, never iterated).
+    debounce_owners: std::collections::HashMap<DebounceTimer, SubscriptionId>,
+    /// When each subscription last handed a debounced publish to Block 13's
+    /// path while subscribed (I12).
+    last_handoff: BTreeMap<SubscriptionId, Duration>,
 }
 
 /// The simulated owner's flushes, with automatic batching (Block 36, D9).
@@ -597,6 +625,9 @@ struct Run {
     batch_frames: usize,
     /// How the simulated owner flushes (Block 36, D9).
     owner: Owner,
+    /// The subscriptions of the `SetDebounceTimer` actions of the input being
+    /// performed, in order.
+    handoffs: VecDeque<Option<SubscriptionId>>,
     rng: fastrand::Rng,
     machine: Machine,
     now: Duration,
@@ -642,15 +673,21 @@ impl Run {
             last_batch_frame: None,
             batch_frames: 0,
             owner: Owner {
-                automatic: mode == Mode::AutoBatching && seed.is_multiple_of(2),
+                automatic: mode.automatic(seed),
                 every: usize::try_from(seed % 4).expect("small") + 1,
                 ..Owner::default()
             },
+            handoffs: VecDeque::new(),
             rng: fastrand::Rng::with_seed(seed ^ 0x5eed_c4a0_5000_0016),
             machine: {
                 let machine = Machine::with_token_source(chaos_config()).with_seed(seed);
-                if mode == Mode::AutoBatching && seed.is_multiple_of(2) {
+                let machine = if mode.automatic(seed) {
                     machine.with_automatic_batching()
+                } else {
+                    machine
+                };
+                if mode == Mode::Debounce {
+                    machine.with_publish_debounce()
                 } else {
                     machine
                 }
@@ -694,9 +731,11 @@ impl Run {
             if std::mem::take(&mut self.late_stop) {
                 self.checker.stops += 1;
             }
-            // Drawn only with batching, so the other modes' seeds keep their
-            // operations.
-            let next = if self.mode.batching() && self.rng.u32(0..100) < 12 {
+            // Drawn only with batching, or with debouncing, so the other
+            // modes' seeds keep their operations.
+            let next = if self.mode == Mode::Debounce && self.rng.u32(0..100) < 20 {
+                Op::Burst(self.rng.usize(..CHANNELS.len()), self.rng.u32(2..=5))
+            } else if self.mode.batching() && self.rng.u32(0..100) < 12 {
                 if self.rng.bool() {
                     Op::StartBatching
                 } else {
@@ -861,6 +900,51 @@ impl Run {
         self.feed(Input::Call(id))
     }
 
+    /// The application publishes `count` times on the subscription to
+    /// `CHANNELS[n]`; about half of the publishes are followed by a pause
+    /// of up to 3 ticks, the longest interval, so that windows end between
+    /// them (Block 46, D16).
+    fn burst(&mut self, n: usize, count: u32) -> Step {
+        // On a subscription that exists and wants to be subscribed, so that
+        // bursts reach the windows; made while subscribing, they meet the
+        // gate once subscribed (Block 46, D3).
+        self.apply_subscription(Op::Add(n))?;
+        let Some(subscription) = self.subs[n] else {
+            return Ok(());
+        };
+        if self.machine.subscription_state(subscription) == Some(SubscriptionState::Unsubscribed) {
+            self.feed(Input::Subscribe(subscription))?;
+        }
+        for _ in 0..count {
+            self.publish_on(subscription)?;
+            if self.rng.bool() {
+                let pause = Duration::from_millis(self.rng.u64(0..=3 * TICK));
+                self.advance(pause)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A publish of the subscription, which `Machine::with_publish_debounce`
+    /// sends through the window of its channel.
+    fn publish_on(&mut self, subscription: SubscriptionId) -> Step {
+        let data = format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes();
+        let id = self.machine.add_subscription_call(
+            subscription,
+            CallRequest::Publish {
+                channel: String::new(),
+                data,
+            },
+        );
+        self.checker.calls.insert(id, self.now);
+        self.checker.publishes.insert(id, subscription);
+        if self.checker.batches_open > 0 {
+            // Held: sent only after a batch stops (I10).
+            self.checker.held.insert(id, self.checker.stops);
+        }
+        self.feed(Input::Call(id))
+    }
+
     fn of(&self, target: Target) -> Option<Of> {
         match target {
             Target::Client => Some(None),
@@ -958,6 +1042,7 @@ impl Run {
                 self.feed(Input::StartBatching)
             }
             Op::StopBatching => self.stop_batch(),
+            Op::Burst(n, count) => self.burst(n, count),
             subscription => self.apply_subscription(subscription),
         }
     }
@@ -1152,7 +1237,12 @@ impl Run {
         if let Some(what) = self.not_live() {
             return Err(self.violation("I4", format!("{what} {LIVENESS:?} after healing")));
         }
-        self.advance(CALL_BOUND)
+        // A publish still in its window settles last (I6).
+        self.advance(if self.mode == Mode::Debounce {
+            WINDOW_CALL_BOUND
+        } else {
+            CALL_BOUND
+        })
     }
 
     /// What keeps the client from being live, if anything.
@@ -1234,6 +1324,7 @@ impl Run {
             Due::Timer(Key::Subscription(id, timer)) => {
                 self.feed(Input::SubscriptionTimerFired(id, timer))
             }
+            Due::Timer(Key::Debounce(timer)) => self.feed(Input::DebounceTimerFired(timer)),
             Due::Arrive(transport, inbound) => {
                 self.inbox.push_back((transport, inbound));
                 self.pump()
@@ -1405,9 +1496,14 @@ impl Run {
 
     fn feed_one(&mut self, input: Input, flush: bool) -> Step {
         self.trace.push(format!("in {input:?}"));
+        let fired = match &input {
+            Input::DebounceTimerFired(timer) => Some(*timer),
+            _ => None,
+        };
         let machine = &mut self.machine;
         let actions = catch_unwind(AssertUnwindSafe(|| machine.handle(input)))
             .map_err(|panic| self.violation("I2", panic_message(&panic)))?;
+        self.handoffs = self.handoff_owners(fired, &actions);
         // The planted fault tells the checker the input before this one.
         let reported = if self.fault == Some(Fault::LateFlushReport) {
             self.owner.last_was_flush
@@ -1424,6 +1520,7 @@ impl Run {
             }
         }
         self.owner.flushing = outer;
+        self.note_windowed();
         for event in std::mem::take(&mut self.taken_at_once) {
             self.delivered(event)?;
             self.feed(Input::EventTaken(event))?;
@@ -1434,6 +1531,93 @@ impl Run {
         self.forget_removed_streams();
         self.check()?;
         self.pump()
+    }
+
+    /// The subscription of each `SetDebounceTimer` in `actions` (D5 gives
+    /// the timer none): the one of the timer that fired, for a trailing send,
+    /// else that of the call the gate let through, which the next action
+    /// naming a call of a burst names (D16).
+    fn handoff_owners(
+        &mut self,
+        fired: Option<DebounceTimer>,
+        actions: &[Action],
+    ) -> VecDeque<Option<SubscriptionId>> {
+        let fired_owner = fired.and_then(|timer| self.checker.debounce_owners.remove(&timer));
+        let mut owners = VecDeque::new();
+        for (at, action) in actions.iter().enumerate() {
+            if !matches!(action, Action::SetDebounceTimer(..)) {
+                continue;
+            }
+            owners.push_back(if fired.is_some() {
+                self.count("trailing send");
+                fired_owner
+            } else {
+                actions[at + 1..].iter().find_map(|next| match next {
+                    Action::SetCallTimer(call, ..)
+                    | Action::CancelCallTimer(call, _)
+                    | Action::CallSettled { call, .. } => self.checker.publishes.get(call).copied(),
+                    _ => None,
+                })
+            });
+        }
+        if fired.is_some() && owners.is_empty() && fired_owner.is_some() {
+            self.count("window closed empty");
+        }
+        owners
+    }
+
+    /// A publish unsettled with no timer waits in a window or follows a
+    /// trailing send: only those have none (D6).
+    fn note_windowed(&mut self) {
+        let waiting: Vec<CallId> = self
+            .checker
+            .publishes
+            .keys()
+            .filter(|call| {
+                self.checker.calls.contains_key(call)
+                    && !self.checker.windowed.contains(call)
+                    && !self
+                        .agenda
+                        .values()
+                        .any(|due| matches!(due, Due::Timer(Key::Call(of, _)) if of == *call))
+            })
+            .copied()
+            .collect();
+        for call in waiting {
+            self.checker.windowed.insert(call);
+            self.count("publish waited in a window");
+        }
+    }
+
+    /// A debounced publish was handed off: I5 and I12 (Block 46, D16).
+    fn debounce_timer_set(&mut self, timer: DebounceTimer, delay: Duration) -> Step {
+        if self.checker.disconnected {
+            return Err(self.violation("I5", format!("{timer:?} set after disconnect()")));
+        }
+        let Some(subscription) = self.handoffs.pop_front().flatten() else {
+            return Err(self.violation("I12", format!("{timer:?} of no known subscription")));
+        };
+        if let Some(last) = self.checker.last_handoff.insert(subscription, self.now)
+            && self.now.saturating_sub(last) < delay
+        {
+            return Err(self.violation(
+                "I12",
+                format!(
+                    "{subscription:?} handed off at {:?}, {:?} after the last, interval {delay:?}",
+                    self.now,
+                    self.now.saturating_sub(last)
+                ),
+            ));
+        }
+        self.count("debounce hand-off");
+        self.checker.debounce_owners.insert(timer, subscription);
+        let after = if self.fault == Some(Fault::EarlyDebounceTimer) {
+            delay / 2
+        } else {
+            delay
+        };
+        self.schedule(after, Due::Timer(Key::Debounce(timer)));
+        Ok(())
     }
 
     /// A removed subscription's stream ends once it is read.
@@ -1526,15 +1710,28 @@ impl Run {
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.cancel(Key::Subscription(id, timer));
             }
+            Action::SetDebounceTimer(timer, delay) => self.debounce_timer_set(timer, delay)?,
+            Action::CancelDebounceTimer(timer) => {
+                self.checker.debounce_owners.remove(&timer);
+                self.cancel(Key::Debounce(timer));
+            }
             Action::CallSettled { call, result } => {
-                if self.fault != Some(Fault::DropCallOutcome)
+                let dropped = self.fault == Some(Fault::DropCallOutcome)
+                    || (self.fault == Some(Fault::DropWindowedOutcome)
+                        && self.checker.windowed.contains(&call));
+                let bound = self.call_bound(call);
+                if !dropped
                     && let Some(made) = self.checker.calls.remove(&call)
-                    && self.now.saturating_sub(made) > CALL_BOUND
+                    && self.now.saturating_sub(made) > bound
                 {
                     return Err(self.violation(
                         "I6",
                         format!("{call:?} made at {made:?} settled at {:?}", self.now),
                     ));
+                }
+                if !dropped {
+                    self.checker.publishes.remove(&call);
+                    self.checker.windowed.remove(&call);
                 }
                 let held = self.checker.held.remove(&call).is_some();
                 if matches!(&result, Err(error) if error.code == codes::error::TIMEOUT) {
@@ -1542,6 +1739,9 @@ impl Run {
                     if held {
                         self.count("held call timed out");
                     }
+                }
+                if matches!(&result, Err(error) if error.code == codes::error::PUBLISH_DROPPED) {
+                    self.count("publish dropped");
                 }
             }
             other => self.act_application(other)?,
@@ -1847,6 +2047,13 @@ impl Run {
     /// I1 for a subscription: each state event differs from the last, and
     /// a client-side one never goes from unsubscribed to subscribed.
     fn sub_state(&mut self, sub: Sub, state: SubscriptionState, client_side: bool) -> Step {
+        // Leaving `subscribed` closes the window: the next publish leads
+        // again (Block 46, D16).
+        if let Sub::Client(id) = sub
+            && state != SubscriptionState::Subscribed
+        {
+            self.checker.last_handoff.remove(&id);
+        }
         if self.fault == Some(Fault::DropSubscriptionStateEvent)
             && client_side
             && state == SubscriptionState::Subscribed
@@ -1938,7 +2145,8 @@ impl Run {
             let timers: Vec<&Due> = self
                 .agenda
                 .values()
-                .filter(|due| matches!(due, Due::Timer(Key::Client(_))))
+                // Debounce timers end with their windows (Block 46, D16).
+                .filter(|due| matches!(due, Due::Timer(Key::Client(_) | Key::Debounce(_))))
                 .collect();
             if !timers.is_empty() {
                 return Err(self.violation("I5", format!("{timers:?} run after disconnect()")));
@@ -1989,13 +2197,23 @@ impl Run {
         Ok(())
     }
 
-    /// I6: every call settles within [`CALL_BOUND`].
+    /// I6: what `call` may take: 4 × for a publish that waited in a
+    /// window, 3 × otherwise (Block 46, D6).
+    fn call_bound(&self, call: CallId) -> Duration {
+        if self.checker.windowed.contains(&call) {
+            WINDOW_CALL_BOUND
+        } else {
+            CALL_BOUND
+        }
+    }
+
+    /// I6: every call settles within its bound.
     fn check_calls(&self) -> Step {
         match self
             .checker
             .calls
             .iter()
-            .find(|(_, made)| self.now.saturating_sub(**made) > CALL_BOUND)
+            .find(|(call, made)| self.now.saturating_sub(**made) > self.call_bound(**call))
         {
             Some((call, made)) => Err(self.violation(
                 "I6",
@@ -2142,6 +2360,12 @@ impl Run {
             let mut result = self.recovery(channel, subscribe, skip);
             if delta {
                 result["delta"] = json!(true);
+            }
+            // Drawn only with debouncing, so the other modes' seeds keep
+            // their operations (Block 46, D16).
+            if self.mode == Mode::Debounce && self.rng.u32(0..100) < 75 {
+                self.count("interval advised");
+                result["publish_debounce"] = json!(self.rng.u64(1..=3) * TICK);
             }
             return json!({"id": id, "subscribe": result});
         }

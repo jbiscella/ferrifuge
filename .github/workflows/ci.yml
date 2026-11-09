@@ -188,9 +188,9 @@ jobs:
 
   # Seeded chaos on the sans-IO core (Block 16): 10 000 seeds of 200
   # operations in release, from a start seed drawn per run and printed,
-  # then the same with delta subscriptions (Block 19), and with automatic
-  # batching on even seeds (Block 36); a
-  # failure prints the command that reruns its seed alone. Pull requests
+  # then the same with delta subscriptions (Block 19), with automatic
+  # batching on even seeds (Block 36), and with debounced publishes (Block
+  # 46); a failure prints the command that reruns its seed alone. Pull requests
   # run seeds 0-299 in the test and portability jobs.
   chaos:
     # Heavy: on main (merges and nightly) and on demand, not on pull requests.
@@ -212,6 +212,8 @@ jobs:
           FERRIFUGE_CHAOS_SUBSCRIPTIONS=3 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
           # And with automatic batching on even seeds (Block 36, D9).
           FERRIFUGE_CHAOS_SUBSCRIPTIONS=4 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
+          # And with debounced publishes, windows meeting reconnects and batches (Block 46, D16).
+          FERRIFUGE_CHAOS_SUBSCRIPTIONS=5 cargo test --release --test chaos seeded_chaos_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
 
       # The drawn start seed, and the failing seed, also when the run fails.
       - name: Chaos summary
@@ -225,8 +227,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Seeded chaos on the tokio client against the fake server (Block 16), in
-  # real time: 500 seeds, then 100 with delta subscriptions (Block 19), from
-  # a start seed drawn per run on Linux, and the
+  # real time: 500 seeds, then 100 with delta subscriptions (Block 19) and
+  # 100 with debounced publishes (Block 46), from a start seed drawn per run
+  # on Linux, and the
   # pull-request seeds 0-19 on Windows and macOS, where real-time limits
   # would make pull requests flaky. Pull requests run seeds 0-19 on Linux in
   # the test job.
@@ -253,6 +256,7 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored --nocapture 2>&1 | tee chaos.txt
             FERRIFUGE_CHAOS_DELTA=1 FERRIFUGE_CHAOS_SEEDS=100 cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
+            FERRIFUGE_CHAOS_DEBOUNCE=1 FERRIFUGE_CHAOS_SEEDS=100 cargo test --test chaos_adapter seeded_chaos_adapter_long_run -- --ignored --nocapture 2>&1 | tee -a chaos.txt
           else
             cargo test --test chaos_adapter 2>&1 | tee chaos.txt
           fi
