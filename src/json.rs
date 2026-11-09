@@ -223,6 +223,14 @@ struct JsonSubscribeRequest<'a> {
     delta: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     tf: Option<JsonFilter<'a>>,
+    #[serde(rename = "type", skip_serializing_if = "is_zero_i32")]
+    kind: i32,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    phase: i32,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    cursor: &'a str,
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    limit: i32,
 }
 
 /// A tag filter as `client.proto` `FilterNode` in JSON (Block 35a).
@@ -386,8 +394,16 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                 join_leave,
                 delta,
                 tag_filter,
+                kind,
+                phase,
+                cursor,
+                limit,
             }) => {
                 json.subscribe = Some(JsonSubscribeRequest {
+                    kind: *kind,
+                    phase: *phase,
+                    cursor,
+                    limit: *limit,
                     delta: if *delta { FOSSIL } else { "" },
                     channel,
                     token: &token.0,
@@ -672,6 +688,11 @@ struct JsonSubscribeResult {
     recovered: bool,
     delta: bool,
     id: i64,
+    #[serde(rename = "type")]
+    kind: i32,
+    phase: i32,
+    cursor: String,
+    state: Vec<JsonPublication>,
 }
 
 impl From<JsonSubscribeResult> for SubscribeResult {
@@ -693,6 +714,10 @@ impl From<JsonSubscribeResult> for SubscribeResult {
             recovered: subscribe.recovered,
             delta: subscribe.delta,
             id: subscribe.id,
+            kind: subscribe.kind,
+            phase: subscribe.phase,
+            cursor: subscribe.cursor,
+            state: subscribe.state.into_iter().map(Publication::from).collect(),
         }
     }
 }
@@ -824,6 +849,10 @@ struct JsonPublication {
     delta: bool,
     #[serde(default)]
     channel: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    removed: bool,
 }
 
 impl From<JsonPublication> for Publication {
@@ -840,6 +869,8 @@ impl From<JsonPublication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
+            key: publication.key,
+            removed: publication.removed,
         }
     }
 }
@@ -1039,6 +1070,79 @@ mod tests {
                 r#"{"id":3,"publish":{"channel":"news","data":""}}"#,
             ]
         );
+    }
+
+    // Block 45, D3: a map subscription's request carries its type, phase,
+    // cursor and limit; a stream subscription's is unchanged.
+    #[test]
+    fn encodes_map_subscribe_requests_and_leaves_a_stream_one_unchanged() {
+        let commands = [
+            Method::Subscribe(SubscribeRequest {
+                channel: "scores".into(),
+                kind: 1,
+                phase: 2,
+                limit: 2,
+                ..SubscribeRequest::default()
+            }),
+            Method::Subscribe(SubscribeRequest {
+                channel: "scores".into(),
+                epoch: "e1".into(),
+                offset: 5,
+                kind: 2,
+                phase: 2,
+                cursor: "c1".into(),
+                ..SubscribeRequest::default()
+            }),
+            Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                ..SubscribeRequest::default()
+            }),
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(method, id)| Command { id, method })
+        .collect::<Vec<_>>();
+
+        let frame = String::from_utf8(encode(&commands)).unwrap();
+
+        assert_eq!(
+            frame.lines().collect::<Vec<_>>(),
+            [
+                r#"{"id":1,"subscribe":{"channel":"scores","type":1,"phase":2,"limit":2}}"#,
+                r#"{"id":2,"subscribe":{"channel":"scores","epoch":"e1","offset":5,"type":2,"phase":2,"cursor":"c1"}}"#,
+                r#"{"id":3,"subscribe":{"channel":"news"}}"#,
+            ]
+        );
+    }
+
+    // Block 45, D3: a map subscription's reply decodes its type, phase,
+    // cursor and state, and a publication its key and removal; a reply
+    // without phase is live.
+    #[test]
+    fn decodes_map_subscribe_results_and_publications() {
+        let replies = decode(
+            concat!(
+                r#"{"id":1,"subscribe":{"type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5,"state":[{"key":"a","data":{"v":1},"offset":1}]}}"#,
+                "\n",
+                r#"{"id":2,"subscribe":{"type":1,"publications":[{"key":"b","removed":true,"offset":6}]}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let ReplyResult::Subscribe(page) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!((page.kind, page.phase, page.cursor.as_str()), (1, 2, "c1"));
+        assert_eq!(page.state.len(), 1);
+        assert_eq!(page.state[0].key, "a");
+        assert_eq!(page.state[0].data, br#"{"v":1}"#);
+        let ReplyResult::Subscribe(live) = &replies[1].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!((live.kind, live.phase), (1, 0));
+        assert_eq!(live.publications[0].key, "b");
+        assert!(live.publications[0].removed);
     }
 
     #[test]

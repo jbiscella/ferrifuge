@@ -70,6 +70,8 @@ mod event;
 mod fossil;
 mod json;
 pub mod machine;
+#[cfg(feature = "unstable")]
+mod map;
 mod maybe_send;
 mod protobuf;
 pub(crate) mod protocol;
@@ -121,6 +123,9 @@ pub use fossil::write as write_fossil_delta;
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+pub use map::{MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, UnrecoverableStrategy};
 pub use maybe_send::{MaybeSend, MaybeSync};
 /// rustls, whose types [`ClientBuilder::root_certificates`] and
 /// [`ClientBuilder::tls_config`] take (Block 22). Moving to another rustls

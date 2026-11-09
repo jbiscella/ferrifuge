@@ -770,7 +770,7 @@ that carries it: 1 is "transport closed" in `Connecting` and "timeout" in
 an error. The same fields also carry server codes, in their own ranges
 (the last table). The client's logs show the state, code and reason
 (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
-adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 and 4, and
+adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6, and
 errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
 Block 47. Blocks are those of the repository's `CLAUDE.md`.
 
@@ -822,6 +822,8 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | 2 | `codes::unsubscribed::CLIENT_CLOSED` | `"client closed"` | the client was closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | never: the client is closed |
 | 3 | `codes::unsubscribed::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server refused a subscribe or `sub_refresh` with HTTP 413 (Block 8) | never, until `subscribe()` |
 | 4 | `codes::unsubscribed::NOT_GRANTED_ON_RECONNECT` | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
+| 5 | `codes::unsubscribed::MAP_STATE_TOO_LARGE` | `"map state too large"` | a map subscription's load passed its `max_state_bytes` (Block 45, D5; `unstable`) | never, until `subscribe()` |
+| 6 | `codes::unsubscribed::MAP_NOT_SUPPORTED` | `"map subscriptions not supported"` | the server answered a map subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 45, D15; `unstable`) | never, until `subscribe()` |
 
 #### `error`
 

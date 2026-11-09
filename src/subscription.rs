@@ -175,6 +175,10 @@ pub struct Publication {
     /// previous publication. Cleared once the delta is applied, so a
     /// publication the application takes never has it (Block 19, D4).
     pub(crate) delta: bool,
+    /// A map publication's key, and whether it removes the key (Block 45,
+    /// D3); empty and false otherwise.
+    pub(crate) key: String,
+    pub(crate) removed: bool,
 }
 
 /// A client connection, as the server describes it (`client.proto`,

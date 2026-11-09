@@ -2767,6 +2767,8 @@ impl Driver {
             Action::Emit(..) | Action::EmitSubscription(..) | Action::Withdraw(_) => {
                 unreachable!("events never reach the driver")
             }
+            #[cfg(feature = "unstable")]
+            Action::EmitMapSubscription(..) => unreachable!("events never reach the driver"),
             // In order with the other actions: a send settles once its
             // frame went to the transport, which writes it even when closed
             // right after.

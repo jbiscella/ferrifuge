@@ -152,6 +152,34 @@ impl Machine {
         }
     }
 
+    /// Records the event `id` of `owner`, a map subscription's sync, which
+    /// sets the owner's position to `position` once taken, and counts as no
+    /// publication delivered (Block 45, D5, D11); withdrawn as a
+    /// publication is.
+    #[cfg(feature = "unstable")]
+    pub(super) fn deliver_position(
+        &mut self,
+        id: EventId,
+        owner: Owner,
+        position: Option<StreamPosition>,
+    ) {
+        let (offset, epoch) = position.map_or((None, None), |position| {
+            (Some(position.offset), Some(position.epoch))
+        });
+        let commit = Commit {
+            owner,
+            offset,
+            epoch,
+            replaces: true,
+            publication: false,
+        };
+        if self.deliveries.streams.contains(&commit.owner.stream()) {
+            self.deliveries.pending.insert(id, commit);
+        } else {
+            self.commit(commit);
+        }
+    }
+
     /// Id of an event for the stream of `stream`, or `None` to drop it: an
     /// `error` event once that stream holds 256 untaken events.
     pub(super) fn admit_event(

@@ -162,8 +162,16 @@ impl From<&Command> for pb::Command {
                 join_leave,
                 delta,
                 tag_filter,
+                kind,
+                phase,
+                cursor,
+                limit,
             }) => {
                 pb.subscribe = Some(pb::SubscribeRequest {
+                    r#type: *kind,
+                    phase: *phase,
+                    cursor: cursor.clone(),
+                    limit: *limit,
                     tf: tag_filter.as_ref().map(|filter| filter_node(&filter.0)),
                     delta: if *delta {
                         crate::wire::FOSSIL.to_owned()
@@ -271,6 +279,10 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             recovered: subscribe.recovered,
             delta: subscribe.delta,
             id: subscribe.id,
+            kind: subscribe.r#type,
+            phase: subscribe.phase,
+            cursor: subscribe.cursor,
+            state: subscribe.state.into_iter().map(Publication::from).collect(),
         }
     }
 }
@@ -429,6 +441,8 @@ impl From<pb::Publication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
+            key: publication.key,
+            removed: publication.removed,
         }
     }
 }
@@ -616,6 +630,92 @@ mod tests {
     }
 
     // Block 45, D3: a map publication's fields, absent from a regular one.
+    // Block 45, D3: a map subscription's fields round-trip; a stream
+    // subscription's request leaves them out.
+    #[test]
+    fn map_subscribe_fields_round_trip() {
+        let frame = encode(&[Command {
+            id: 1,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "scores".into(),
+                epoch: "e1".into(),
+                offset: 5,
+                kind: 3,
+                phase: 2,
+                cursor: "c1".into(),
+                limit: 2,
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let stream = encode(&[Command {
+            id: 2,
+            method: Method::Subscribe(SubscribeRequest {
+                channel: "news".into(),
+                ..SubscribeRequest::default()
+            }),
+        }]);
+        let reply = pb::Reply {
+            id: 1,
+            subscribe: Some(pb::SubscribeResult {
+                r#type: 1,
+                phase: 2,
+                cursor: "c2".into(),
+                state: vec![pb::Publication {
+                    key: "a".into(),
+                    data: vec![0xff],
+                    ..pb::Publication::default()
+                }],
+                publications: vec![pb::Publication {
+                    key: "b".into(),
+                    removed: true,
+                    ..pb::Publication::default()
+                }],
+                ..pb::SubscribeResult::default()
+            }),
+            ..pb::Reply::default()
+        };
+
+        let command = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+        let replies = decode(&reply.encode_length_delimited_to_vec()).unwrap();
+
+        let subscribe = command.subscribe.unwrap();
+        assert_eq!(
+            (
+                subscribe.r#type,
+                subscribe.phase,
+                subscribe.cursor.as_str(),
+                subscribe.limit
+            ),
+            (3, 2, "c1", 2)
+        );
+        assert_eq!(
+            pb::Command::decode_length_delimited(stream.as_slice()).unwrap(),
+            pb::Command {
+                id: 2,
+                subscribe: Some(pb::SubscribeRequest {
+                    channel: "news".into(),
+                    ..pb::SubscribeRequest::default()
+                }),
+                ..pb::Command::default()
+            }
+        );
+        let ReplyResult::Subscribe(result) = &replies[0].result else {
+            panic!("{replies:?}");
+        };
+        assert_eq!(
+            (result.kind, result.phase, result.cursor.as_str()),
+            (1, 2, "c2")
+        );
+        assert_eq!(
+            (
+                result.state[0].key.as_str(),
+                result.state[0].data.as_slice()
+            ),
+            ("a", &[0xff][..])
+        );
+        assert!(result.publications[0].removed);
+    }
+
     #[test]
     fn encodes_map_publications_and_leaves_a_regular_one_unchanged() {
         let frame = encode(&[

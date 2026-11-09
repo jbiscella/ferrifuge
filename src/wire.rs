@@ -83,6 +83,16 @@ pub(crate) struct SubscribeRequest {
     /// Asks the server to send only the publications it matches
     /// (`SubscribeRequest.tf`, Block 35a).
     pub(crate) tag_filter: Option<crate::TagFilter>,
+    /// `type`: 0 for a stream subscription, 1, 2 or 3 for a map one (Block
+    /// 45, D2); with `phase`, `cursor` and `limit`, which a stream
+    /// subscription leaves at zero, so its frames are unchanged (D3).
+    pub(crate) kind: i32,
+    /// The phase of a map subscription's load asked for: 2 state, 1 stream.
+    pub(crate) phase: i32,
+    /// The cursor of the state page asked for; empty for the first.
+    pub(crate) cursor: String,
+    /// The page size asked for; 0 leaves it to the server.
+    pub(crate) limit: i32,
 }
 
 /// The only delta format of `client.proto` (`SubscribeRequest.delta`).
@@ -267,6 +277,13 @@ pub(crate) struct SubscribeResult {
     /// The numeric channel id later pushes may use instead of the channel;
     /// 0 for none (`SubscribeResult.id`, Block 35b).
     pub(crate) id: i64,
+    /// Map subscriptions (Block 45, D3): `type` 1 for every map kind, the
+    /// phase of the reply (0 live, 1 stream, 2 state), the cursor of the
+    /// next state page and the state entries.
+    pub(crate) kind: i32,
+    pub(crate) phase: i32,
+    pub(crate) cursor: String,
+    pub(crate) state: Vec<Publication>,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.
