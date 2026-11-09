@@ -697,7 +697,8 @@ impl Machine {
     }
 
     /// The owner gave up on call `id`, e.g. its future was dropped: it is
-    /// forgotten, and never sent if it was queued.
+    /// forgotten, and never sent if it was queued. A remove that publishes
+    /// follow loses only its owner and goes on for them (Block 46, D11).
     pub(super) fn call_abandoned(&mut self, id: CallId) {
         // A remove's owner dropped it: the publishes it replaced still wait
         // for its result, so it goes on without an owner (Block 46, D11, D12).
