@@ -930,8 +930,10 @@ impl Connection {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            // Recorded before it is answered: a step that sees its reply, or
+            // a client that gets it, finds the command in `received`.
+            self.record(message.clone(), line, frame);
             if connect_failed {
-                self.record(message, line, frame);
                 continue;
             }
             let failing = message["connect"].is_object().then(|| {
@@ -968,7 +970,6 @@ impl Connection {
                     }
                 }
             }
-            self.record(message, line, frame);
         }
         if let Some((delay, held)) = deferred {
             let out = self.out.clone();
