@@ -188,3 +188,46 @@ fn a_skipped_emulated_transport_counts_no_opening_request() {
     assert_eq!(machine.statistics().bytes_out, 0);
     assert_eq!(machine.statistics().messages_out, 0);
 }
+
+// Codex, #192: the skipped transport's connect command no longer awaits a
+// reply, so a token fetched for the websocket's connect is sent.
+#[test]
+fn a_websocket_after_a_skip_sends_its_connect_once_a_token_is_fetched() {
+    let mut machine = Machine::with_rng(
+        Config {
+            token: "t0".to_owned(),
+            ..Config::default()
+        },
+        true,
+        fastrand::Rng::with_seed(7),
+    )
+    .with_transports(vec![TransportKind::Sse, TransportKind::WebSocket])
+    .expect("valid transports");
+    let (sse, _) = opened(&machine.handle(Input::Connect)).expect("an attempt");
+    let (websocket, _) =
+        opened(&machine.handle(Input::TransportUnsupported(sse))).expect("the next transport");
+    machine.handle(Input::TimerFired(Timer::Refresh));
+    let fetch = machine
+        .handle(Input::TransportOpened(websocket))
+        .iter()
+        .find_map(|action| match action {
+            Action::FetchToken(id) => Some(*id),
+            _ => None,
+        })
+        .expect("a token fetched for the connect");
+
+    let actions = machine.handle(Input::TokenFetched {
+        fetch,
+        result: Ok("t1".into()),
+    });
+
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Send { transport, frame, .. }
+                if *transport == websocket
+                    && String::from_utf8_lossy(frame).contains(r#""token":"t1""#)
+        )),
+        "{actions:?}"
+    );
+}
