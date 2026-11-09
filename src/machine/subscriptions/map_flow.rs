@@ -30,6 +30,12 @@ const STATE_TOO_LARGE_REASON: &str = "map state too large";
 /// Reason of [`codes::unsubscribed::MAP_NOT_SUPPORTED`].
 const NOT_SUPPORTED_REASON: &str = "map subscriptions not supported";
 
+/// Error code by which the server refuses a position it cannot recover
+/// from (`client.proto`; centrifuge `ErrorUnrecoverablePosition`), and its
+/// reason, for an epoch change the client sees itself.
+const UNRECOVERABLE_POSITION: u32 = 112;
+const UNRECOVERABLE_POSITION_REASON: &str = "unrecoverable position";
+
 /// What makes a map subscription one: its kind and options, and the load
 /// in progress. Boxed in the subscription, so a stream subscription pays a
 /// pointer (Block 14, "Marginal cost of a subscription").
@@ -38,7 +44,6 @@ pub(in crate::machine) struct MapFlow {
     pub(super) kind: MapKind,
     page_size: u32,
     max_state_bytes: usize,
-    #[allow(dead_code)] // Read by recovery (Block 45c).
     strategy: UnrecoverableStrategy,
     load: Option<Load>,
 }
@@ -66,6 +71,10 @@ struct Load {
     /// A reply of this load was a page: the server holds a reservation, so
     /// an error ending the load is followed by an unsubscribe (D6).
     paged: bool,
+    /// The load recovers from a position: it starts in the stream phase,
+    /// and its catch-up publications become updates, in order (D6).
+    recovering: bool,
+    catch_up: Vec<Publication>,
 }
 
 impl Default for Load {
@@ -79,11 +88,34 @@ impl Default for Load {
             index: HashMap::new(),
             bytes: 0,
             paged: false,
+            recovering: false,
+            catch_up: Vec::new(),
         }
     }
 }
 
 impl Load {
+    /// A load recovering from `position`: the stream from there (D6).
+    fn recovering(position: StreamPosition) -> Self {
+        Self {
+            asked_phase: STREAM,
+            epoch: Some(position.epoch),
+            offset: position.offset,
+            recovering: true,
+            ..Self::default()
+        }
+    }
+
+    /// Takes a catch-up publication: kept in order when recovering, applied
+    /// to the state otherwise.
+    fn catch_up(&mut self, publication: Publication) {
+        if self.recovering {
+            self.catch_up.push(publication);
+        } else {
+            self.apply(publication);
+        }
+    }
+
     /// Applies a state entry or a catch-up publication by key: the last
     /// value wins, a removal deletes the key.
     fn apply(&mut self, publication: Publication) {
@@ -130,6 +162,9 @@ enum Next {
     Request,
     /// The live reply, with the state built from every page.
     Live(Vec<MapEntry>),
+    /// The live reply of a load that recovered, with its catch-up
+    /// publications in order (D4, D6).
+    Recovered(Vec<Publication>),
 }
 
 impl MapFlow {
@@ -183,7 +218,7 @@ impl MapFlow {
             }
             STREAM => {
                 for publication in std::mem::take(&mut result.publications) {
-                    load.apply(publication);
+                    load.catch_up(publication);
                 }
                 load.offset = result.offset;
                 Next::Request
@@ -194,6 +229,14 @@ impl MapFlow {
                     load.apply(entry);
                 }
                 for publication in std::mem::take(&mut result.publications) {
+                    load.catch_up(publication);
+                }
+                if load.recovering && result.recovered {
+                    return Next::Recovered(load.catch_up);
+                }
+                // A recovery the server did not complete: the catch-up is all
+                // the state there is, so the application gets it whole.
+                for publication in std::mem::take(&mut load.catch_up) {
                     load.apply(publication);
                 }
                 Next::Live(load.into_entries())
@@ -324,10 +367,15 @@ impl Machine {
         } else {
             0
         };
+        // A new load recovers from the position a taken event set, when
+        // the server made the map recoverable (D6).
+        let recover_from = sub.position.clone().filter(|_| sub.recover);
         let map = sub.map.as_mut()?;
         let kind = map.kind.wire();
         let limit = i32::try_from(map.page_size).unwrap_or(i32::MAX);
-        let load = map.load.get_or_insert_with(Load::default);
+        let load = map
+            .load
+            .get_or_insert_with(|| recover_from.map_or_else(Load::default, Load::recovering));
         Some(Command {
             id: command_id,
             method: Method::Subscribe(SubscribeRequest {
@@ -336,6 +384,9 @@ impl Machine {
                 data,
                 epoch: load.epoch.clone().unwrap_or_default(),
                 offset: if load.epoch.is_some() { load.offset } else { 0 },
+                // On every stream request of a recovering load, as
+                // centrifuge-js sends it (`src/subscription.ts:2816-2828`).
+                recover: load.recovering && load.asked_phase == STREAM,
                 flag,
                 delta,
                 tag_filter,
@@ -363,6 +414,9 @@ impl Machine {
                 if paged {
                     self.send_unsubscribe(id, channel);
                 }
+                if error.code == UNRECOVERABLE_POSITION {
+                    return self.map_unrecoverable(id, &error.message);
+                }
                 return self.subscribe_error(id, &error);
             }
             (None, ReplyResult::Subscribe(result)) => result,
@@ -372,6 +426,7 @@ impl Machine {
             return;
         };
         let next = map.next(&mut result, size);
+        let fatal = map.strategy == UnrecoverableStrategy::Fatal;
         match next {
             Next::NotSupported => {
                 // A server without map subscriptions subscribed a stream
@@ -395,10 +450,19 @@ impl Machine {
                 self.reconnect_after_transport_closed();
             }
             // Undone, then loaded again from scratch once the unsubscribe is
-            // settled (D4).
+            // settled (D4), unless the strategy is fatal (D6).
             Next::EpochChanged => {
                 self.send_unsubscribe(id, channel);
-                self.start_subscribe(id);
+                if fatal {
+                    self.set_unsubscribed(
+                        id,
+                        UNRECOVERABLE_POSITION,
+                        UNRECOVERABLE_POSITION_REASON,
+                        false,
+                    );
+                } else {
+                    self.start_subscribe(id);
+                }
             }
             Next::TooLarge => {
                 self.send_unsubscribe(id, channel);
@@ -411,7 +475,28 @@ impl Machine {
             }
             Next::Request => self.send_subscribe(id, None),
             Next::Live(entries) => self.map_live(id, result, entries),
+            Next::Recovered(publications) => self.map_recovered(id, result, publications),
         }
+    }
+
+    /// Error 112 to a request of map subscription `id`'s load: its
+    /// position cannot be recovered (D6). From scratch, the position is
+    /// dropped and the state loaded again after the resubscribe backoff,
+    /// with no `error` event; fatal, the subscription ends with 112.
+    fn map_unrecoverable(&mut self, id: SubscriptionId, reason: &str) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        let fatal = sub
+            .map
+            .as_ref()
+            .is_some_and(|map| map.strategy == UnrecoverableStrategy::Fatal);
+        if fatal {
+            return self.set_unsubscribed(id, UNRECOVERABLE_POSITION, reason, false);
+        }
+        sub.forget_position();
+        self.withdraw(&Owner::Client(id));
+        self.schedule_resubscribe(id);
     }
 
     /// The live reply of map subscription `id` (D4): subscribed, then the
@@ -433,6 +518,11 @@ impl Machine {
             offset: result.offset,
             epoch: result.epoch.clone(),
         });
+        // Until the sync is taken the application lacks the state: the
+        // next subscribe loads it again (D5; centrifuge-js
+        // `src/subscription.ts:2657-2661`).
+        sub.forget_position();
+        sub.recover = result.recoverable;
         self.subscriptions.map_compact_id(id, result.id);
         self.withdraw(&Owner::Client(id));
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
@@ -466,6 +556,85 @@ impl Machine {
         self.subscription_calls_subscribed(id);
     }
 
+    /// The live reply of map subscription `id`'s recovering load (D4, D6):
+    /// subscribed, then one update per catch-up publication, in order, with
+    /// no sync. Each update moves the position to its offset once taken,
+    /// the last to the reply's, the top of the stream, which a tag filter
+    /// may have put past it (D5).
+    fn map_recovered(
+        &mut self,
+        id: SubscriptionId,
+        result: crate::wire::SubscribeResult,
+        publications: Vec<Publication>,
+    ) {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        sub.state = SubscriptionState::Subscribed;
+        sub.backoff.keep_reset();
+        sub.backoff.reset();
+        sub.tokens.connected();
+        sub.recover = result.recoverable;
+        let reply = StreamPosition {
+            offset: result.offset,
+            epoch: result.epoch.clone(),
+        };
+        // Before the catch-up, so that updates not taken come back with the
+        // next recovery (centrifuge-js `src/subscription.ts:2662-2666`).
+        sub.position = result.recoverable.then(|| StreamPosition {
+            offset: publications
+                .first()
+                .and_then(|first| first.offset)
+                .map_or(reply.offset, |first| first.saturating_sub(1)),
+            epoch: reply.epoch.clone(),
+        });
+        let recoverable = result.recoverable;
+        self.subscriptions.map_compact_id(id, result.id);
+        self.withdraw(&Owner::Client(id));
+        self.rearm_subscription_refresh(id, result.expires, result.ttl);
+        self.emit_subscription(
+            id,
+            SubscriptionEvent::Subscribed(Subscribed {
+                data: result.data,
+                positioned: result.positioned,
+                recoverable: result.recoverable,
+                was_recovering: result.was_recovering,
+                recovered: result.recovered,
+                stream_position: (result.positioned || result.recoverable).then(|| reply.clone()),
+                delta: result.delta,
+                has_recovered_publications: !publications.is_empty(),
+            }),
+        );
+        let last = publications.len().checked_sub(1);
+        for (index, publication) in publications.into_iter().enumerate() {
+            let Some(event_id) = self.admit_event(Some(id), false) else {
+                continue;
+            };
+            let (offset, epoch) = if !recoverable {
+                (None, None)
+            } else if Some(index) == last {
+                (Some(reply.offset), Some(reply.epoch.clone()))
+            } else {
+                (
+                    publication.offset,
+                    Some(
+                        publication
+                            .epoch
+                            .clone()
+                            .unwrap_or_else(|| reply.epoch.clone()),
+                    ),
+                )
+            };
+            self.deliver_map_update(event_id, Owner::Client(id), offset, epoch);
+            self.actions.push(Action::EmitMapSubscription(
+                event_id,
+                id,
+                MapSubscriptionEvent::Update(MapUpdate::from(publication)),
+            ));
+        }
+        self.subscription_calls_subscribed(id);
+    }
+
     /// A publication pushed to map subscription `id`: an update of its key,
     /// which moves the position once taken (D5).
     pub(super) fn map_publication(&mut self, id: SubscriptionId, publication: Publication) {
@@ -483,10 +652,22 @@ impl Machine {
             }
             return self.reconnect_after_transport_closed();
         }
+        // No position is kept for a map the server does not recover
+        // (ephemeral mode, D5).
+        let recover = self
+            .subscriptions
+            .by_id
+            .get(&id)
+            .is_some_and(|sub| sub.recover);
         let Some(event_id) = self.admit_event(Some(id), false) else {
             return;
         };
-        self.deliver_publication(event_id, Owner::Client(id), &publication, None);
+        let (offset, epoch) = if recover {
+            (publication.offset, publication.epoch.clone())
+        } else {
+            (None, None)
+        };
+        self.deliver_map_update(event_id, Owner::Client(id), offset, epoch);
         self.actions.push(Action::EmitMapSubscription(
             event_id,
             id,

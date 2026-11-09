@@ -180,6 +180,32 @@ impl Machine {
         }
     }
 
+    /// Records the event `id` of `owner`, a map subscription's update,
+    /// which moves the owner's position to `offset` and `epoch`, those
+    /// given, once taken, and counts as a publication delivered (Block 45,
+    /// D5, D11); withdrawn as a publication is.
+    #[cfg(feature = "unstable")]
+    pub(super) fn deliver_map_update(
+        &mut self,
+        id: EventId,
+        owner: Owner,
+        offset: Option<u64>,
+        epoch: Option<String>,
+    ) {
+        let commit = Commit {
+            owner,
+            offset,
+            epoch,
+            replaces: false,
+            publication: true,
+        };
+        if self.deliveries.streams.contains(&commit.owner.stream()) {
+            self.deliveries.pending.insert(id, commit);
+        } else {
+            self.commit(commit);
+        }
+    }
+
     /// Id of an event for the stream of `stream`, or `None` to drop it: an
     /// `error` event once that stream holds 256 untaken events.
     pub(super) fn admit_event(
