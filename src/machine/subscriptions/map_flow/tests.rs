@@ -1076,6 +1076,37 @@ fn error_112_with_the_fatal_strategy_unsubscribes_with_its_code() {
     );
 }
 
+// Codex, #200: without this the load would recover from the old epoch again.
+#[test]
+fn an_epoch_change_during_a_recovering_load_loads_the_state_from_scratch() {
+    let (mut machine, transport, _) = synced();
+    let (transport, recovering) = reconnect(&mut machine, transport);
+    let recovering = recovering.expect("a subscribe");
+    assert_eq!(recovering["subscribe"]["phase"], 1, "{recovering}");
+
+    let changed = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering,
+            r#""type":1,"phase":1,"epoch":"other","offset":1"#,
+        ),
+    ));
+    let unsubscribe = sent(&changed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe");
+    let again = subscribe_sent(&machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
+    )));
+
+    let again = &again["subscribe"];
+    assert_eq!(again["phase"], 2, "{again}");
+    for absent in ["recover", "epoch", "offset"] {
+        assert!(again.get(absent).is_none(), "{again}");
+    }
+}
+
 #[test]
 fn an_epoch_change_with_the_fatal_strategy_unsubscribes_with_112() {
     let (mut machine, transport) = connected();

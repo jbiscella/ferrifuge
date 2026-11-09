@@ -461,6 +461,13 @@ impl Machine {
                         false,
                     );
                 } else {
+                    // As for 112: the new epoch makes the position useless,
+                    // so the next load starts from the first state page
+                    // (D6; Codex, #200).
+                    if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
+                        sub.forget_position();
+                    }
+                    self.withdraw(&Owner::Client(id));
                     self.start_subscribe(id);
                 }
             }
