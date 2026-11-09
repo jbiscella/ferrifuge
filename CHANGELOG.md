@@ -11,6 +11,18 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- Unstable (`unstable` feature): map subscriptions recover and resync
+  (Block 45c). A subscribe after a taken event recovers from that
+  position in the stream phase, and the missed changes come as
+  `MapSubscriptionEvent::Update`s with no `Sync`; error 112 loads the
+  state again after the resubscribe backoff with
+  `UnrecoverableStrategy::FromScratch`, the default, and ends the
+  subscription with `unsubscribed` 112 with `UnrecoverableStrategy::Fatal`.
+  2502, 3014 and `set_tag_filter` drop a map subscription's position, and
+  2502 and 3014 its token.
+
 ## [0.21.0] - 2026-11-09
 
 ### Added

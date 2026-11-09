@@ -157,6 +157,18 @@ impl Subscription {
         }
     }
 
+    /// What disconnect code 3014 does to the position: a map subscription
+    /// drops it, so that the next subscribe loads the state (Block 45, D6;
+    /// centrifuge-js `src/subscription.ts:519-527`); a stream subscription
+    /// keeps one the server cannot match.
+    fn invalidate_position_or_forget(&mut self) {
+        #[cfg(feature = "unstable")]
+        if self.map.is_some() {
+            return self.forget_position();
+        }
+        self.invalidate_position();
+    }
+
     /// Whether it has subscription token timers or fetches to clean up.
     fn uses_token(&self) -> bool {
         self.tokens.has_source() || self.tokens.has_token()
@@ -345,6 +357,12 @@ impl Machine {
     ) {
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.options.tag_filter = filter;
+            // A map's state is loaded again through the new filter (Block
+            // 45, D6; centrifuge-js `src/subscription.ts:367-379`).
+            #[cfg(feature = "unstable")]
+            if sub.map.is_some() {
+                sub.forget_position();
+            }
         }
     }
 
@@ -1194,7 +1212,7 @@ impl Machine {
         for id in ids {
             self.end_token_refresh(id);
             if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-                sub.invalidate_position();
+                sub.invalidate_position_or_forget();
                 sub.tokens.invalidate();
             }
             self.withdraw(&Owner::Client(id));

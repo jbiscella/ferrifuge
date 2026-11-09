@@ -418,6 +418,28 @@ large". A server older than 6.8.0 answers a map subscription as a stream
 one, and the subscription ends with `unsubscribed` 6. The application
 holds the `Sync` it gets, and its own copy of the map.
 
+After a lost connection, an `unsubscribe()` or a server's 2500, a map
+subscription whose namespace keeps a stream (`map.mode` `recoverable` or
+`persistent`) catches up from where the application's last taken event
+left it: `subscribed` reports `was_recovering` and `recovered`, and the
+missed changes follow as `Update`s, with no `Sync`, since the
+application's copy is still right. Each update taken moves that position,
+so changes not taken before a disconnect come back. When the server cannot
+recover the position (code 112: the stream was trimmed past it, the map
+was cleared with `map_clear`, or its epoch changed), the default
+`UnrecoverableStrategy::FromScratch` loads the state again after the
+resubscribe backoff, with no `error` event, and a new `Sync` replaces the
+application's copy; `UnrecoverableStrategy::Fatal` ends the subscription
+with `unsubscribed` 112 instead. An ephemeral namespace keeps no stream, so
+every resubscribe loads the state again. A `Sync` not taken before the
+subscription stops is withdrawn, and the next subscribe loads the state
+again. The server's "state invalidated" (unsubscribe 2502, disconnect
+3014) and `set_tag_filter` drop the position, so the next subscribe loads
+the state; 2502 and 3014 also drop the subscription token, which a token
+callback replaces. A load that fails with a temporary error (113
+"concurrent pagination", say) is unsubscribed on the server first, then
+starts again after the backoff.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it
@@ -901,17 +923,18 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 |---|---|---|
 | disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` (Block 3) |
 | disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff (Block 3) |
-| disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15) |
-| disconnect 3014 | `Connecting` | drops the tokens, makes every stream position unmatchable, then reconnects (Block 11) |
+| disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15); during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again (Block 45) |
+| disconnect 3014 | `Connecting` | drops the tokens, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
 | websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()` (Block 3); other close codes below 3000 give `Connecting` 1 |
 | unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed (Block 10) |
-| unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); any code ends a server-side subscription (Block 12) |
+| unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112 (Block 45); any code ends a server-side subscription (Block 12) |
 | connect error, temporary or below 100, or 109 | `Error`, then `Connecting` | reconnects after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12, then `Disconnected` 1 (Blocks 1, 5, 17) |
 | connect error, any other | `Disconnected` | with the error's code, until `connect()` (Block 1) |
 | refresh error, temporary or below 100 | `Error` | retried after 5 to 10 s (Block 5) |
 | refresh error, any other | `Disconnected` | with the error's code (Block 5) |
 | subscribe error 109 | `Error` or `Unsubscribed` 1 | a new token, then resubscribes; without a token callback, error 12, then `Unsubscribed` 1 (Block 10) |
-| subscribe error 112 with getState | none | the state is reloaded and the subscription resubscribes after the backoff (Block 11) |
+| subscribe error 112 with getState | none | the state is reloaded and the subscription resubscribes after the backoff (Block 11); on a map subscription, with `FromScratch` no `Error` and the state is loaded again after the backoff, with `Fatal` `Unsubscribed` 112 (Block 45) |
+| subscribe error 113 | `Error` | temporary: the map subscription's load starts again after the backoff (Block 45) |
 | subscribe error, temporary or below 100 | `Error` | resubscribes after the resubscribe backoff (Block 9) |
 | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |

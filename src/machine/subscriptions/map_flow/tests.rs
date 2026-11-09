@@ -858,3 +858,383 @@ fn a_lost_connection_ends_the_load_and_the_next_one_starts_from_scratch() {
     assert_eq!(again["subscribe"]["phase"], 2);
     assert!(again["subscribe"].get("cursor").is_none());
 }
+
+// Recovery and resync (Block 45c, D6).
+
+/// Closes `transport` and opens the next, answering its connect: the
+/// transport, and the subscribe command sent on it, if any.
+fn reconnect(machine: &mut Machine, transport: TransportId) -> (TransportId, Option<Value>) {
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let transport =
+        opened(&machine.handle(Input::TimerFired(crate::machine::Timer::Reconnect))).unwrap();
+    let mut actions = machine.handle(Input::TransportOpened(transport));
+    let connect = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("connect").is_some())
+        .expect("a connect command");
+    actions.extend(machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"connect":{{"client":"c"}}}}"#, id_of(&connect)),
+    )));
+    let subscribe = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some());
+    (transport, subscribe)
+}
+
+fn subscribe_reply(command: &Value, fields: &str) -> String {
+    format!(r#"{{"id":{},"subscribe":{{{fields}}}}}"#, id_of(command))
+}
+
+fn error_reply(command: &Value, code: u32, temporary: bool) -> String {
+    format!(
+        r#"{{"id":{},"error":{{"code":{code},"message":"m","temporary":{temporary}}}}}"#,
+        id_of(command)
+    )
+}
+
+#[test]
+fn a_subscribe_after_a_taken_sync_recovers_in_the_stream_phase() {
+    let (mut machine, transport, _) = synced();
+
+    let (_, subscribe) = reconnect(&mut machine, transport);
+
+    let request = &subscribe.expect("a subscribe")["subscribe"];
+    assert_eq!(
+        (
+            &request["phase"],
+            &request["recover"],
+            &request["epoch"],
+            &request["offset"]
+        ),
+        (
+            &Value::from(1),
+            &Value::from(true),
+            &Value::from("e1"),
+            &Value::from(7)
+        ),
+        "{request}"
+    );
+}
+
+#[test]
+fn a_recovered_load_emits_its_catch_up_as_updates_moving_the_position_once_taken() {
+    let (mut machine, transport, id) = synced();
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+    let subscribe = subscribe.unwrap();
+    // A stream page first, then the live reply with the rest; the reply's
+    // offset lies past the last update (a tag filter skipped one).
+    let page = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &subscribe,
+            &format!(
+                r#""type":1,"phase":1,"epoch":"e1","offset":8,"publications":[{}]"#,
+                entry("b", 1, 8)
+            ),
+        ),
+    ));
+    let next = subscribe_sent(&page);
+    assert_eq!(next["subscribe"]["recover"], true);
+    assert_eq!(next["subscribe"]["offset"], 8);
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &next,
+            &format!(
+                r#""type":1,"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":10,"publications":[{}]"#,
+                removal("a", 9)
+            ),
+        ),
+    ));
+
+    let emitted = events(&live);
+    let names: Vec<_> = emitted.iter().map(|(_, event)| event.name()).collect();
+    assert_eq!(names, ["subscribed", "update", "update"]);
+    let MapSubscriptionEvent::Subscribed(subscribed) = &emitted[0].1 else {
+        unreachable!();
+    };
+    assert!(subscribed.has_recovered_publications);
+    // Before the catch-up until its updates are taken.
+    assert_eq!(machine.subscription_position(id).unwrap().offset, 7);
+    machine.handle(Input::EventTaken(emitted[1].0));
+    assert_eq!(machine.subscription_position(id).unwrap().offset, 8);
+    machine.handle(Input::EventTaken(emitted[2].0));
+    assert_eq!(machine.subscription_position(id).unwrap().offset, 10);
+}
+
+#[test]
+fn a_recovery_answered_live_without_catch_up_sets_the_reply_position() {
+    let (mut machine, transport, id) = synced();
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &subscribe.unwrap(),
+            r#""type":1,"recoverable":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":9"#,
+        ),
+    ));
+
+    assert_eq!(names(&live), ["subscribed"]);
+    assert_eq!(machine.subscription_position(id).unwrap().offset, 9);
+}
+
+#[test]
+fn a_recovery_not_completed_syncs_and_keeps_no_position_until_taken() {
+    let (mut machine, transport, id) = synced();
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &subscribe.unwrap(),
+            &format!(
+                r#""type":1,"recoverable":true,"was_recovering":true,"epoch":"e1","offset":9,"publications":[{}]"#,
+                entry("b", 1, 8)
+            ),
+        ),
+    ));
+
+    assert_eq!(names(&live), ["subscribed", "sync"]);
+    assert_eq!(sync_keys(&live), ["b"]);
+    assert_eq!(machine.subscription_position(id), None);
+}
+
+#[test]
+fn error_112_from_scratch_drops_the_position_and_loads_after_the_backoff() {
+    let (mut machine, transport, id) = synced();
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+
+    let failed = machine.handle(frame(
+        transport,
+        &error_reply(&subscribe.unwrap(), 112, false),
+    ));
+
+    assert!(events(&failed).is_empty(), "{failed:?}");
+    assert_eq!(machine.subscription_position(id), None);
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Subscribing)
+    );
+    assert!(
+        failed.iter().any(|action| matches!(
+            action,
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, _) if *of == id
+        )),
+        "{failed:?}"
+    );
+    let again = machine.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    let request = &subscribe_sent(&again)["subscribe"];
+    assert_eq!(request["phase"], 2);
+    assert!(request.get("epoch").is_none(), "{request}");
+}
+
+#[test]
+fn error_112_with_the_fatal_strategy_unsubscribes_with_its_code() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.unrecoverable_strategy = UnrecoverableStrategy::Fatal;
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"recoverable":true,"epoch":"e1","offset":7"#,
+        ),
+    ));
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+
+    let failed = machine.handle(frame(
+        transport,
+        &error_reply(&subscribe.unwrap(), 112, false),
+    ));
+
+    assert_eq!(
+        events(&failed).pop().map(|(_, event)| event),
+        Some(MapSubscriptionEvent::Unsubscribed {
+            code: 112,
+            reason: "m".into()
+        })
+    );
+    assert!(
+        !failed.iter().any(|action| matches!(
+            action,
+            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+        )),
+        "{failed:?}"
+    );
+}
+
+#[test]
+fn an_epoch_change_with_the_fatal_strategy_unsubscribes_with_112() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.unrecoverable_strategy = UnrecoverableStrategy::Fatal;
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let page = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5"#,
+        ),
+    ));
+
+    let changed = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &subscribe_sent(&page),
+            r#""type":1,"phase":2,"cursor":"c2","epoch":"e2","offset":6"#,
+        ),
+    ));
+
+    assert_eq!(unsubscribes(&changed), 1);
+    assert_eq!(
+        events(&changed).pop().map(|(_, event)| event),
+        Some(MapSubscriptionEvent::Unsubscribed {
+            code: 112,
+            reason: "unrecoverable position".into()
+        })
+    );
+    assert!(
+        sent(&changed)
+            .iter()
+            .all(|command| command.get("subscribe").is_none())
+    );
+}
+
+#[test]
+fn unsubscribe_2502_drops_the_position_and_the_token() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.common = SubscriptionOptions::default().token("t0".into());
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    assert_eq!(first["subscribe"]["token"], "t0");
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"recoverable":true,"epoch":"e1","offset":7"#,
+        ),
+    ));
+
+    let invalidated = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"scores","unsubscribe":{"code":2502,"reason":"state invalidated"}}}"#,
+    ));
+
+    let request = &subscribe_sent(&invalidated)["subscribe"];
+    assert_eq!(request["phase"], 2);
+    for absent in ["epoch", "recover", "token"] {
+        assert!(request.get(absent).is_none(), "{request}");
+    }
+}
+
+#[test]
+fn disconnect_3014_drops_a_maps_position_rather_than_making_it_unmatchable() {
+    let (mut machine, transport, id) = synced();
+
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: Some(3014),
+        reason: "state invalidated".into(),
+    });
+
+    assert_eq!(machine.subscription_position(id), None);
+}
+
+#[test]
+fn setting_a_tag_filter_drops_the_position() {
+    let (mut machine, transport, id) = synced();
+
+    machine.handle(Input::SetSubscriptionTagFilter(
+        id,
+        Some(crate::TagFilter::eq("t", "red")),
+    ));
+    let (_, subscribe) = reconnect(&mut machine, transport);
+
+    assert_eq!(machine.subscription_position(id), None);
+    assert_eq!(subscribe.unwrap()["subscribe"]["phase"], 2);
+}
+
+#[test]
+fn a_temporary_error_after_a_page_unsubscribes_then_recovers_after_the_backoff() {
+    let (mut machine, transport, id) = synced();
+    let (transport, subscribe) = reconnect(&mut machine, transport);
+    let page = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &subscribe.unwrap(),
+            &format!(
+                r#""type":1,"phase":1,"epoch":"e1","offset":8,"publications":[{}]"#,
+                entry("b", 1, 8)
+            ),
+        ),
+    ));
+
+    let failed = machine.handle(frame(
+        transport,
+        &error_reply(&subscribe_sent(&page), 113, true),
+    ));
+    let unsubscribe = sent(&failed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe");
+    assert_eq!(names(&failed), ["error"]);
+    // Taken, so that the unsubscribe reply is handled (Block 15).
+    for (event, _) in events(&failed) {
+        machine.handle(Input::EventTaken(event));
+    }
+    let waiting = machine.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    assert!(sent(&waiting).is_empty(), "{waiting:?}");
+    let answered = machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
+    ));
+
+    let request = &subscribe_sent(&answered)["subscribe"];
+    assert_eq!(
+        (&request["phase"], &request["offset"]),
+        (&Value::from(1), &Value::from(7))
+    );
+}
+
+#[test]
+fn an_ephemeral_map_keeps_no_position() {
+    let (mut machine, transport, id, first) = subscribing(2);
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(&first, r#""type":1,"epoch":"e1","offset":7"#),
+    ));
+    machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"push":{{"channel":"scores","pub":{}}}}}"#,
+            entry("b", 1, 8)
+        ),
+    ));
+
+    let (_, subscribe) = reconnect(&mut machine, transport);
+
+    assert_eq!(machine.subscription_position(id), None);
+    assert_eq!(subscribe.unwrap()["subscribe"]["phase"], 2);
+}
