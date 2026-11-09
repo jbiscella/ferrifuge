@@ -278,6 +278,11 @@ pub struct MapSubscriptionOptions {
     pub common: SubscriptionOptions,
 }
 
+/// Block 45, D5: 64 MiB, Block 19 D6's inbound limit.
+#[cfg(feature = "unstable")]
+const DEFAULT_MAX_STATE_BYTES: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(64 * 1024 * 1024).expect("not zero");
+
 #[cfg(feature = "unstable")]
 impl MapSubscriptionOptions {
     /// Options of a map subscription of `kind`, every other option at its
@@ -287,7 +292,7 @@ impl MapSubscriptionOptions {
         Self {
             kind,
             page_size: 0,
-            max_state_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024).expect("not zero"),
+            max_state_bytes: DEFAULT_MAX_STATE_BYTES,
             unrecoverable_strategy: crate::UnrecoverableStrategy::default(),
             common: SubscriptionOptions::default(),
         }

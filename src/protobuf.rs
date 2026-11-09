@@ -441,8 +441,7 @@ impl From<pb::Publication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
-            key: publication.key,
-            removed: publication.removed,
+            map: crate::subscription::MapPart::of(publication.key, publication.removed),
         }
     }
 }
@@ -708,12 +707,12 @@ mod tests {
         );
         assert_eq!(
             (
-                result.state[0].key.as_str(),
+                result.state[0].map.as_ref().unwrap().key.as_str(),
                 result.state[0].data.as_slice()
             ),
             ("a", &[0xff][..])
         );
-        assert!(result.publications[0].removed);
+        assert!(result.publications[0].map.as_ref().unwrap().removed);
     }
 
     #[test]

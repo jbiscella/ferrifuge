@@ -95,7 +95,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.20"
+ferrifuge = "0.21"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -366,9 +366,57 @@ Each waits for the connection, as any call. The namespace must allow a
 client's writes (`map.allow_publish_for_client`, `map.allow_remove_for_client`,
 or their `_for_anonymous` and `_for_subscriber` forms), or the call fails
 with code 103; the server may replace the key (`map.client_key`), and
-refuses an empty one, or a publication without data, with 107. Map
-subscriptions, which load the state and follow its changes, come in later
-releases.
+refuses an empty one, or a publication without data, with 107.
+
+A map subscription loads such a channel's whole state, then follows its
+changes per key:
+
+```rust
+use futures_util::StreamExt;
+use ferrifuge::{MapKind, MapSubscriptionEvent};
+
+let scores = client
+    .map_subscription_builder("scores:game-1", MapKind::Map)
+    .page_size(500)
+    .build()?;
+let mut events = scores.events();
+scores.subscribe();
+while let Some(event) = events.next().await {
+    match event {
+        MapSubscriptionEvent::Sync(entries) => { /* the whole state: replace your copy */ }
+        MapSubscriptionEvent::Update(update) if update.removed => { /* forget update.key */ }
+        MapSubscriptionEvent::Update(update) => { /* set update.key to update.data */ }
+        _ => {}
+    }
+}
+```
+
+Its stream yields `subscribing`, then `subscribed` once the state is
+loaded, then one `Sync` with every entry, keys in the order the server
+gave them and the changes made while it loaded already applied, then an
+`Update` per change, the publisher's own included. `scores.publish(key,
+data)` and `scores.remove(key)` write keys once it is subscribed.
+`MapKind::Clients` and `MapKind::Users` follow a channel's presence, keyed
+by client id with its info and by user id, on the channel the stream
+namespace's `map_clients_presence_channel_prefix` and
+`map_users_presence_channel_prefix` name. A map subscription shares the
+registry with stream subscriptions, one per channel, but
+`get_subscription` and `subscriptions()` list stream subscriptions only,
+`get_map_subscription` and `map_subscriptions()` map ones.
+
+The server sends the state in pages of `page_size` entries, clamped to
+the namespace's `map.min_page_size` and `map.max_page_size` (100 and 1000
+by default; 0 leaves the size to the server), and times the whole load:
+past `map.subscribe_catch_up_timeout` (5 s by default) it closes the
+connection with 3008 "slow". The client therefore handles a page as soon
+as it reads it, even while the application has not taken earlier events;
+but a full read-ahead still stops the reading (Block 15), so an
+application that leaves its streams unread can make loads time out. The
+pages of one load may add up to `max_state_bytes`, 64 MiB by default;
+past it the subscription ends with `unsubscribed` 5 "map state too
+large". A server older than 6.8.0 answers a map subscription as a stream
+one, and the subscription ends with `unsubscribed` 6. The application
+holds the `Sync` it gets, and its own copy of the map.
 
 ### Join and leave
 
@@ -919,7 +967,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.20", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.21", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -981,7 +1029,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.20", features = ["test-util"] }
+ferrifuge = { version = "0.21", features = ["test-util"] }
 ```
 
 ```rust

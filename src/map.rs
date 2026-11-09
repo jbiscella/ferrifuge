@@ -171,7 +171,7 @@ impl MapSubscriptionEvent {
 impl From<crate::Publication> for MapEntry {
     fn from(publication: crate::Publication) -> Self {
         Self {
-            key: publication.key,
+            key: publication.map.map(|map| map.key).unwrap_or_default(),
             data: publication.data,
             offset: publication.offset,
             tags: publication.tags,
@@ -182,9 +182,12 @@ impl From<crate::Publication> for MapEntry {
 
 impl From<crate::Publication> for MapUpdate {
     fn from(publication: crate::Publication) -> Self {
-        let removed = publication.removed;
+        let (key, removed) = publication
+            .map
+            .map(|map| (map.key, map.removed))
+            .unwrap_or_default();
         Self {
-            key: publication.key,
+            key,
             // A removal carries no value (centrifuge-js `MapUpdateContext`).
             data: if removed {
                 Vec::new()

@@ -11,6 +11,8 @@ mod browser;
 mod client;
 mod handler;
 mod log;
+#[cfg(feature = "unstable")]
+mod map_subscription;
 mod outbox;
 mod platform;
 mod ready;
@@ -36,4 +38,6 @@ pub use self::tokio::proxy::{Proxy, ProxyTarget};
 pub use self::tokio::transport::stalled_websocket_writes;
 pub use client::{Batch, Client, ClientBuilder, WeakClient};
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
+#[cfg(feature = "unstable")]
+pub use map_subscription::{MapSubscription, MapSubscriptionBuilder};
 pub use subscription::{Subscription, SubscriptionBuilder};
