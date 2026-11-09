@@ -1811,7 +1811,7 @@ async fn no_state_request(world: &mut ClientWorld, channel: String) {
     assert!(later.is_empty(), "{later:?}");
 }
 
-#[given(regex = r#"^the fake server has pushed updates at offsets (\d+) and (\d+)$"#)]
+#[given(regex = r"^the fake server has pushed updates at offsets (\d+) and (\d+)$")]
 async fn pushed_updates(world: &mut ClientWorld, first: u64, second: u64) {
     for offset in [first, second] {
         let push = json!({"push": {"channel": "scores",
