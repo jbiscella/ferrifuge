@@ -23,6 +23,8 @@ mod compaction_tests;
 mod delivery;
 mod inbound;
 #[cfg(test)]
+mod inbox_overflow_tests;
+#[cfg(test)]
 mod optimistic_tests;
 #[cfg(test)]
 mod publication_channel_tests;
@@ -468,6 +470,16 @@ pub enum Input {
     /// fails; after it the client disconnects with code 3 "message size
     /// limit exceeded", without reconnecting.
     MessageTooLarge(TransportId),
+    /// A message arrived while the transport's inbox was full, and the
+    /// owner closed the transport (Block 44, D7): a push transport that
+    /// cannot stop reading, such as a browser's WebSocket, holds what the
+    /// core does not read yet in an inbox bounded by the read-ahead's
+    /// limits. The client reconnects at once with code
+    /// [`codes::connecting::READ_AHEAD_OVERFLOW`], a client-side reason:
+    /// events not taken are withdrawn, and recovery brings them back. Before
+    /// a server ping is read on the connection, the backoff keeps growing,
+    /// as after a 3008 close (Block 15).
+    InboxOverflow(TransportId),
     /// The transport closed after opening.
     TransportClosed {
         /// The transport that closed.
@@ -850,6 +862,7 @@ impl std::fmt::Debug for Input {
                 .field("message", message)
                 .finish(),
             Self::MessageTooLarge(id) => f.debug_tuple("MessageTooLarge").field(id).finish(),
+            Self::InboxOverflow(id) => f.debug_tuple("InboxOverflow").field(id).finish(),
             Self::TransportClosed {
                 transport,
                 code,
@@ -1491,6 +1504,7 @@ impl Machine {
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::MessageTooLarge(_)
+            | Input::InboxOverflow(_)
             | Input::Frame { .. }
             | Input::SendRejected { .. }
             | Input::FrameWritten { .. } => {}
