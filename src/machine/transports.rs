@@ -55,6 +55,22 @@ impl Transports {
         }
     }
 
+    /// How many transports are configured.
+    pub(super) fn len(&self) -> usize {
+        self.kinds.len()
+    }
+
+    /// The current transport cannot be opened (Block 44, D12): the next
+    /// one is tried, even after one was chosen, as centrifuge-js 63ed73e
+    /// `_initializeTransport` advances past a transport not supported.
+    pub(super) fn skip(&mut self) {
+        self.index += 1;
+        if self.index == self.kinds.len() {
+            self.index = 0;
+            self.tried_all = true;
+        }
+    }
+
     /// The round starts again from the first transport, as on the first
     /// connection: a new network may allow it again (Block 25, D6).
     pub(super) fn restart(&mut self) {

@@ -171,6 +171,7 @@ web-sys = { version = "0.3.107", optional = true, features = [
     "Headers",
     "Performance",
     "ReadableStream",
+    "ReadableStreamDefaultReader",
     "Response",
     "ResponseType",
     "Url",
