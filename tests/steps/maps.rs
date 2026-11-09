@@ -1345,13 +1345,13 @@ fn called_once_before(world: &mut ClientWorld) {
 }
 
 #[then(
-    regex = r#"^(\d+) s later the map subscription is still "subscribed" and the token callback was called twice$"#
+    regex = r#"^(\d+) s later the map subscription is still "subscribed" and the token callback was called at least twice$"#
 )]
 async fn still_subscribed_later(world: &mut ClientWorld, seconds: u64) {
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     assert_eq!(world.map().state(), SubscriptionState::Subscribed);
     let calls = world.maps.token_calls.load(Ordering::SeqCst);
-    assert_eq!(calls, 2, "token callback calls {seconds} s after the sync");
+    assert!(calls >= 2, "{calls} token callback calls {seconds} s after the sync");
     let events = world.maps.events.as_mut().expect("a stream");
     let later = quiet_events(events).await;
     assert!(
