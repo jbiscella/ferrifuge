@@ -522,8 +522,10 @@ jobs:
       - name: Enable safaridriver
         run: sudo safaridriver --enable
 
+      # macOS has no GNU timeout: the job's timeout-minutes and the
+      # harness's own run limit bound the run instead.
       - name: The @W tests in Safari
-        run: timeout -k 10 2400 cargo test --test browser
+        run: cargo test --test browser
         env:
           FERRIFUGE_BROWSERS: safari
           SAFARIDRIVER: /usr/bin/safaridriver
