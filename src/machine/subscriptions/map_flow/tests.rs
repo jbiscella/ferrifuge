@@ -589,6 +589,72 @@ fn a_page_is_handled_while_another_subscriptions_publication_is_held() {
     assert!(events(&live).is_empty(), "{live:?}");
 }
 
+// Codex, #198: the last state page has no cursor, like the first request.
+#[test]
+fn a_single_cursorless_state_page_is_handled_while_another_subscriptions_publication_is_held() {
+    let (mut machine, transport) = connected();
+    let news = machine
+        .add_subscription("news".into(), SubscriptionOptions::default())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(news)));
+    let subscribe = subscribe_sent(&machine.handle(Input::Subscribe(news)));
+    for action in machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"subscribe":{{}}}}"#, id_of(&subscribe)),
+    )) {
+        if let Action::EmitSubscription(event, ..) = action {
+            machine.handle(Input::EventTaken(event));
+        }
+    }
+    machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"news","pub":{"data":{}}}}"#,
+    ));
+    let id = machine
+        .add_map_subscription("scores".into(), options(2))
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let paged = machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"id":{},"subscribe":{{"type":1,"phase":2,"epoch":"e1","offset":5,"state":[{}]}}}}"#,
+            id_of(&first),
+            entry("a", 1, 4)
+        ),
+    ));
+
+    let stream = subscribe_sent(&paged);
+    assert_eq!(stream["subscribe"]["phase"], 1, "{paged:?}");
+}
+
+// Codex, #198: an error reply to an abandoned page request still leaves the
+// server's reservation, which an unsubscribe undoes.
+#[test]
+fn an_error_to_a_page_request_abandoned_by_unsubscribe_is_followed_by_an_unsubscribe() {
+    let (mut machine, transport, id, first) = subscribing(2);
+    let second = subscribe_sent(&machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"id":{},"subscribe":{{"type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5}}}}"#,
+            id_of(&first)
+        ),
+    )));
+    let unsubscribed = machine.handle(Input::Unsubscribe(id));
+    assert_eq!(unsubscribes(&unsubscribed), 0, "{unsubscribed:?}");
+
+    let answered = machine.handle(frame(
+        transport,
+        &format!(
+            r#"{{"id":{},"error":{{"code":113,"message":"concurrent pagination","temporary":true}}}}"#,
+            id_of(&second)
+        ),
+    ));
+
+    assert_eq!(unsubscribes(&answered), 1, "{answered:?}");
+}
+
 #[test]
 fn a_page_read_before_the_connect_reply_is_handled_right_after_it() {
     let mut machine = Machine::new(Config::default());

@@ -50,6 +50,11 @@ pub(super) struct Subscriptions {
     /// read yet: their deadline starts when the connect reply is read
     /// (Block 36, D6).
     optimistic: Vec<(u32, SubscriptionId)>,
+    /// Abandoned subscribe commands of map loads that had read a page: the
+    /// server holds a reservation, so any reply to them, an error
+    /// included, is followed by an unsubscribe (Block 45, D6).
+    #[cfg(feature = "unstable")]
+    reserved: std::collections::HashSet<u32>,
 }
 
 /// Who started a subscribe (Block 18, D2).
@@ -825,20 +830,25 @@ impl Machine {
             .by_id
             .get_mut(&id)
             .filter(|sub| sub.subscribe_command == Some(command));
-        match current {
-            // Never subscribed on the server: nothing to unsubscribe.
-            Some(sub) => {
-                sub.subscribe_command = None;
-                self.set_unsubscribed(
-                    id,
-                    codes::unsubscribed::MESSAGE_SIZE_LIMIT,
-                    MESSAGE_SIZE_LIMIT_REASON,
-                    false,
-                );
-            }
-            // Unsubscribed or removed while in flight: the channel is free.
-            None => self.wake_waiting(&channel),
+        // Never subscribed on the server: nothing to unsubscribe.
+        if let Some(sub) = current {
+            sub.subscribe_command = None;
+            self.set_unsubscribed(
+                id,
+                codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                MESSAGE_SIZE_LIMIT_REASON,
+                false,
+            );
+            return true;
         }
+        // Unsubscribed or removed while in flight: the channel is free,
+        // unless a map load's reservation is to be undone (Block 45, D6).
+        #[cfg(feature = "unstable")]
+        if self.subscriptions.reserved.remove(&command) {
+            self.send_unsubscribe(id, channel);
+            return true;
+        }
+        self.wake_waiting(&channel);
         true
     }
 
@@ -873,11 +883,16 @@ impl Machine {
             .by_id
             .get(&id)
             .is_some_and(|sub| sub.subscribe_command == Some(reply.id));
+        #[cfg(feature = "unstable")]
+        let reserved = self.subscriptions.reserved.remove(&reply.id);
+        #[cfg(not(feature = "unstable"))]
+        let reserved = false;
         if !current {
             // Unsubscribed or removed while in flight: undo a subscription
-            // the server made, so none outlives the handle; subscriptions
-            // to the channel wait for that too.
-            if reply.error.is_none() {
+            // the server made, or a map load's reservation, so none
+            // outlives the handle; subscriptions to the channel wait for
+            // that too.
+            if reply.error.is_none() || reserved {
                 self.send_unsubscribe(id, channel);
             } else {
                 self.wake_waiting(&channel);
@@ -1056,7 +1071,8 @@ impl Machine {
             || matches!(sub.tokens.pending_fetch(), Some((_, FetchPurpose::Connect)));
         // A subscribe in flight stays in `subscribes`, with its reply
         // deadline: its reply undoes it, its timeout starts over.
-        sub.subscribe_command = None;
+        #[cfg_attr(not(feature = "unstable"), allow(unused_variables))]
+        let abandoned = sub.subscribe_command.take();
         if let Some(fetch) = sub.fetch.take() {
             self.actions.push(Action::CancelSubscriptionData(fetch));
         }
@@ -1065,10 +1081,21 @@ impl Machine {
         }
         sub.waiting = false;
         sub.state = SubscriptionState::Unsubscribed;
+        // A map load that read a page leaves a reservation on the server
+        // (Block 45, D6): the reply to its request in flight undoes it,
+        // whatever that reply is; with none in flight, an unsubscribe now.
         #[cfg(feature = "unstable")]
-        if let Some(map) = sub.map.as_mut() {
-            map.end_load();
+        let mut reserved_now = false;
+        #[cfg(feature = "unstable")]
+        if sub.map.as_mut().and_then(|map| map.end_load()) == Some(true) {
+            if let Some(command) = abandoned {
+                self.subscriptions.reserved.insert(command);
+            } else {
+                reserved_now = true;
+            }
         }
+        #[cfg(not(feature = "unstable"))]
+        let reserved_now = false;
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
         sub.backoff.reset();
@@ -1081,7 +1108,8 @@ impl Machine {
         // A token being fetched, a refresh scheduled or in flight end too
         // (centrifuge-js `_setUnsubscribed`).
         self.end_token_refresh(id);
-        if send && (was_subscribed || in_callback) {
+        // A reservation is undone whoever ends the load (Block 45, D6).
+        if (send && (was_subscribed || in_callback)) || reserved_now {
             self.send_unsubscribe(id, channel);
         }
         self.emit_subscription(
@@ -1416,6 +1444,9 @@ impl Machine {
     /// unless `invalidated` (disconnect code 3014): what was asked before
     /// the invalidation is not used (Block 11).
     pub(super) fn subscriptions_disconnected(&mut self, reconnect: bool, invalidated: bool) {
+        // A lost connection takes the server's reservations with it.
+        #[cfg(feature = "unstable")]
+        self.subscriptions.reserved.clear();
         for (id, _) in self
             .subscriptions
             .subscribes
