@@ -11,7 +11,13 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-09
+
 ### Added
+
+- `MaybeSend` and `MaybeSync` (Block 44a): `Send` and `Sync` on native
+  targets, nothing on the browser target the browser adapter adds, so that
+  one bound of the client's API serves both.
 
 - An opt-in cookie jar (`cookies` feature): `CookieJar`, `MemoryJar`,
   `ClientBuilder::cookie_jar` (Block 43a). The websocket upgrade sends the
@@ -95,6 +101,15 @@ repository held while it carried that version, from the blocks of
   in the `codes` documentation and the README's "Codes" section.
 
 ### Changed
+
+- The `Send` and `Sync` bounds of the client's API read `MaybeSend` and
+  `MaybeSync` (Block 44a): the builders' token, data and getState callbacks
+  and their futures, `ClientHandler`, `SubscriptionHandler` and their closure
+  implementations, and the futures and streams the client and its
+  subscriptions return. Natively each bound is the same as before; the
+  handler traits' supertrait changes, hence 0.20.0. The adapter is split
+  into a shared layer, its tokio transports and a compile-time seam, with no
+  behaviour change.
 
 - A subscription's data, token or getState callback running when the
   connection is torn down keeps running, and its answer is used: a token
