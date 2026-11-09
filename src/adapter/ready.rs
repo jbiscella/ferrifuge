@@ -81,7 +81,7 @@ impl Waiters {
     }
 
     /// Waiters left, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, adapter_tokio))]
     pub(super) fn len(&self) -> usize {
         self.client.len() + self.subscriptions.values().map(HashMap::len).sum::<usize>()
     }
@@ -245,7 +245,8 @@ pub(super) fn ready(
     }
 }
 
-#[cfg(test)]
+// On tokio; the browser client is tested in a browser (Block 44, D18).
+#[cfg(all(test, adapter_tokio))]
 mod tests {
     use std::future::Future;
     use std::sync::Arc;

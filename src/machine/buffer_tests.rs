@@ -304,6 +304,8 @@ fn the_debug_output_of_a_flush_names_it() {
 /// encoded, for both encodings, over websocket and emulated (Block 36,
 /// D1).
 #[test]
+// bolero is a native dev-dependency (Block 44, D18).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn a_computed_frame_size_is_the_encoded_length() {
     bolero::check!()
         .with_type::<(bool, bool, Vec<(String, Vec<u8>)>)>()

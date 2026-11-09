@@ -170,7 +170,7 @@ impl Log {
     }
 
     /// How many callbacks the log tracks, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, adapter_tokio))]
     pub(super) fn tracked_fetches(&self) -> usize {
         lock(&self.state).fetches.len()
     }

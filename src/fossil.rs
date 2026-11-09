@@ -447,6 +447,8 @@ mod tests {
     /// Coverage-guided with `cargo bolero test fossil::tests::fuzz_apply
     /// --engine libfuzzer`.
     #[test]
+    // bolero is a native dev-dependency (Block 44, D18).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn fuzz_apply() {
         bolero::check!()
             .with_type::<(Vec<u8>, Vec<u8>)>()
@@ -460,6 +462,8 @@ mod tests {
     /// Fuzz target (Block 19, D1): a delta the tests' writer makes from any
     /// base to any target rebuilds that target.
     #[test]
+    // bolero is a native dev-dependency (Block 44, D18).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn fuzz_written_delta_round_trip() {
         bolero::check!()
             .with_type::<(Vec<u8>, Vec<u8>)>()

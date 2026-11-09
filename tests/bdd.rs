@@ -796,12 +796,14 @@ async fn run_scenarios() {
         })
         .fail_on_skipped()
         .filter_run_and_exit(FEATURES, move |feature, rule, scenario| {
-            // @P runs outside cucumber (Block 0, "Test layers"); a scenario
-            // also tagged with a cucumber layer runs in that layer.
-            let p_only = !scenario.tags.is_empty() && scenario.tags.iter().all(|tag| tag == "P");
+            // @P and @W run outside cucumber (Block 0, "Test layers"; Block
+            // 44, D18); a scenario also tagged with a cucumber layer runs in
+            // that layer.
+            let outside = !scenario.tags.is_empty()
+                && scenario.tags.iter().all(|tag| tag == "P" || tag == "W");
             (IMPLEMENTED.contains(&scenario.name.as_str())
                 || COOKIES.contains(&scenario.name.as_str()))
-                && !p_only
+                && !outside
                 && !scenario
                     .tags
                     .iter()

@@ -479,13 +479,13 @@ impl Shared {
     }
 
     /// The next action queued for the driver, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, adapter_tokio))]
     pub(super) fn next_action_for_tests(&self) -> Option<Action> {
         self.next_action()
     }
 
     /// Whether the driver was woken since this was last asked, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, adapter_tokio))]
     pub(super) fn woken(&self) -> bool {
         use futures_util::FutureExt as _;
         self.actions_queued.notified().now_or_never().is_some()
@@ -3121,7 +3121,8 @@ pub(super) fn presence_stats_of(reply: CallReply) -> Option<PresenceStatsResult>
     }
 }
 
-#[cfg(test)]
+// On tokio; the browser client is tested in a browser (Block 44, D18).
+#[cfg(all(test, adapter_tokio))]
 mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -3983,11 +3984,16 @@ mod tests {
                 let text = std::fs::read_to_string(&path)
                     .expect("a source file")
                     .replace("\r\n", "\n");
-                // Code before the test module only.
-                let code = text
-                    .split("#[cfg(test)]\nmod tests")
-                    .next()
-                    .unwrap_or(&text);
+                // Code before the test module only, the tokio adapter's
+                // tests included (Block 44, D18).
+                let code = [
+                    "#[cfg(test)]\nmod tests",
+                    "#[cfg(all(test, adapter_tokio))]\nmod tests",
+                ]
+                .iter()
+                .filter_map(|marker| text.find(marker))
+                .min()
+                .map_or(text.as_str(), |end| &text[..end]);
                 let relative = path
                     .strip_prefix(root)
                     .expect("under src/adapter")
