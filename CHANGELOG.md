@@ -34,6 +34,12 @@ repository held while it carried that version, from the blocks of
   read only while the read-ahead has room, so a slow page holds the server
   back; closing or dropping the transport aborts its requests.
 
+- sse in the browser (Block 44e): the browser client falls back to sse
+  over the page's `EventSource`, its commands in emulation requests over
+  `fetch`, its messages in the inbox; when the stream ends the client
+  closes the `EventSource` and reconnects by its own backoff, not the
+  browser's.
+
 ### Changed
 
 - `reconnect()` while connecting, before the first attempt since the
