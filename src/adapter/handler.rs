@@ -14,8 +14,8 @@ use super::client::{Core, Outboxes, Shared, lock};
 use super::outbox::{Head, Outbox};
 use crate::machine::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
-    ClientError, ClientEvent, ClientInfo, Publication, ServerSubscriptionEvent, Subscribed,
-    SubscriptionEvent,
+    ClientError, ClientEvent, ClientInfo, MaybeSend, Publication, ServerSubscriptionEvent,
+    Subscribed, SubscriptionEvent,
 };
 
 /// Receives a client's events, one at a time, in order (Block 41, D1): the
@@ -50,7 +50,7 @@ use crate::{
 /// # }
 /// ```
 #[allow(unused_variables)] // The defaults ignore their event.
-pub trait ClientHandler: Send + 'static {
+pub trait ClientHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: ClientEvent) {
         match event {
@@ -89,7 +89,7 @@ pub trait ClientHandler: Send + 'static {
     fn on_message(&mut self, data: Vec<u8>) {}
 }
 
-impl<F: FnMut(ClientEvent) + Send + 'static> ClientHandler for F {
+impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
     fn on_event(&mut self, event: ClientEvent) {
         self(event);
     }
@@ -112,7 +112,7 @@ impl<F: FnMut(ClientEvent) + Send + 'static> ClientHandler for F {
 /// # }
 /// ```
 #[allow(unused_variables)] // The defaults ignore their event.
-pub trait SubscriptionHandler: Send + 'static {
+pub trait SubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: SubscriptionEvent) {
         match event {
@@ -150,7 +150,7 @@ pub trait SubscriptionHandler: Send + 'static {
     fn on_leave(&mut self, info: ClientInfo) {}
 }
 
-impl<F: FnMut(SubscriptionEvent) + Send + 'static> SubscriptionHandler for F {
+impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for F {
     fn on_event(&mut self, event: SubscriptionEvent) {
         self(event);
     }
