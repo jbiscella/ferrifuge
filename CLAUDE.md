@@ -6278,7 +6278,7 @@ Feature: Event handlers
 - **D4 What is checked after each step or group of steps.** The model's state, built up from `Init`, is compared whole, not only the variables the step wrote:
   - the client's state;
   - each subscription's state, client-side and server-side;
-  - the commands sent, in order and field by field: kind, channel, token version, recover flag, epoch and offset, the reject-unrecovered flag, server-side positions in the connect;
+  - the commands sent, field by field: kind, channel, token version, recover flag, epoch and offset, the reject-unrecovered flag, server-side positions in the connect. A connect command comes first. Within one group of steps, the commands of one channel keep their order; those of different channels may come in any order, since the order in which the model starts independent flows is a schedule choice (Ferrifuge's registry order is Block 36 D5's, checked by its tests). Each command of the model is matched to the core's command of the same channel and rank, and the replies use that match;
   - the callbacks started (token, data, getState);
   - the reconnect and resubscribe timers, armed or not (other timers are not compared);
   - the application's stream position (`app`: epoch, offset).
