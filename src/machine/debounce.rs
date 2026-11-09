@@ -19,3 +19,19 @@ impl Machine {
         let _ = (timer, self.debouncing.enabled);
     }
 }
+
+#[cfg(test)]
+impl Machine {
+    /// How many windows are open.
+    pub(super) fn debounce_window_count(&self) -> usize {
+        0
+    }
+
+    /// How many windows `subscription` has open.
+    pub(super) fn subscription_debounce_windows(
+        &self,
+        _subscription: super::SubscriptionId,
+    ) -> usize {
+        0
+    }
+}

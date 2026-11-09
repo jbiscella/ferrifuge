@@ -21,6 +21,8 @@ mod close_tests;
 #[cfg(test)]
 mod compaction_tests;
 mod debounce;
+#[cfg(test)]
+mod debounce_tests;
 mod delivery;
 mod inbound;
 #[cfg(test)]

@@ -171,6 +171,17 @@ struct State {
     /// Per channel with delta on for the latest connection, the payload the
     /// next delta applies to; cleared at each subscribe and connection.
     delta_chains: std::collections::HashMap<String, Option<String>>,
+    /// `publish_debounce`, JSON and Protobuf, of the subscribe replies from
+    /// now on; the field is left out of the JSON reply when `None`
+    /// (Block 46).
+    publish_debounce: Option<u32>,
+    /// Replies to publish commands are held until the test answers them
+    /// (Block 46).
+    hold_publishes: bool,
+    /// The ids of the publish commands whose replies are held, oldest first.
+    held_publishes: VecDeque<Value>,
+    /// Publish commands of this data are refused with this error (Block 46).
+    refused_publishes: Vec<(Value, Value)>,
     /// The next delta sent goes without the end of its trailer.
     corrupt_next_delta: bool,
     /// Deltas sent broken so far.
@@ -468,6 +479,44 @@ impl FakeServer {
     /// When each JSON connect reply went out, in order.
     pub(crate) fn connects_answered_at(&self) -> Vec<std::time::Instant> {
         self.state.lock().unwrap().connects_answered_at.clone()
+    }
+
+    /// The subscribe replies from now on advise `interval`, in
+    /// milliseconds, as `publish_debounce`; none when `None`, the field
+    /// left out, unlike `Some(0)` (Block 46).
+    pub(crate) fn advise_publish_debounce(&self, interval: Option<u32>) {
+        self.state.lock().unwrap().publish_debounce = interval;
+    }
+
+    /// Holds the replies to publish commands from now on, until
+    /// [`FakeServer::answer_held_publish`].
+    pub(crate) fn hold_publish_replies(&self) {
+        self.state.lock().unwrap().hold_publishes = true;
+    }
+
+    /// Answers the oldest held publish command with success, and stops
+    /// holding once none is left; whether there was one.
+    pub(crate) fn answer_held_publish(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some(id) = state.held_publishes.pop_front() else {
+            return false;
+        };
+        if let Some(out) = &state.out {
+            let _ = out.send(Outgoing::Message(Message::text(
+                json!({"id": id, "publish": {}}).to_string(),
+            )));
+        }
+        true
+    }
+
+    /// Refuses publish commands of `data`, as JSON, with `code` and
+    /// `message` from now on.
+    pub(crate) fn refuse_publishes_of(&self, data: Value, code: u32, message: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_publishes
+            .push((data, json!({"code": code, "message": message})));
     }
 
     /// Answers the next connect command with error `code` and `message`.
@@ -1020,9 +1069,21 @@ impl Connection {
                 json!({"id": message["id"], "unsubscribe": {}}).to_string(),
             ));
         } else if message["publish"].is_object() {
-            replies.push(Message::text(
-                json!({"id": message["id"], "publish": {}}).to_string(),
-            ));
+            let mut state = self.state.lock().unwrap();
+            if let Some((_, error)) = state
+                .refused_publishes
+                .iter()
+                .find(|(data, _)| *data == message["publish"]["data"])
+            {
+                let reply = json!({"id": message["id"], "error": error});
+                replies.push(Message::text(reply.to_string()));
+            } else if state.hold_publishes {
+                state.held_publishes.push_back(message["id"].clone());
+            } else {
+                replies.push(Message::text(
+                    json!({"id": message["id"], "publish": {}}).to_string(),
+                ));
+            }
         } else if message["refresh"].is_object() {
             // The connection lives another ttl, so the client refreshes again.
             replies.push(Message::text(
@@ -1097,6 +1158,9 @@ impl Connection {
         } else {
             state.delta_chains.remove(&channel);
         }
+        if let Some(interval) = state.publish_debounce {
+            result["publish_debounce"] = json!(interval);
+        }
         state.subscribe_replies.push((channel, result.clone()));
         let reply = Message::text(json!({"id": message["id"], "subscribe": result}).to_string());
         if from_history {
@@ -1135,7 +1199,8 @@ impl Connection {
                     ..Default::default()
                 })
             } else {
-                protobuf_result(&command)
+                let publish_debounce = self.state.lock().unwrap().publish_debounce.unwrap_or(0);
+                protobuf_result(&command, publish_debounce)
             };
             if let Some(reply) = reply {
                 replies.push(Message::binary(reply.encode_length_delimited_to_vec()));
@@ -1206,7 +1271,7 @@ pub(crate) mod protobuf_results {
 
 /// The answer to a Protobuf call command, if it is one the fake server
 /// answers: RPC, history, presence or presence stats.
-fn protobuf_result(command: &protobuf::Command) -> Option<protobuf::Reply> {
+fn protobuf_result(command: &protobuf::Command, publish_debounce: u32) -> Option<protobuf::Reply> {
     let mut reply = protobuf::Reply {
         id: command.id,
         ..Default::default()
@@ -1222,8 +1287,12 @@ fn protobuf_result(command: &protobuf::Command) -> Option<protobuf::Reply> {
     } else if command.presence_stats.is_some() {
         reply.presence_stats = Some(protobuf_results::presence_stats());
     } else if command.subscribe.is_some() {
-        // Granted, without position or publications (Block 29).
-        reply.subscribe = Some(protobuf::SubscribeResult::default());
+        // Granted, without position or publications (Block 29); the
+        // interval, 0 for none, is the only field Block 46 needs.
+        reply.subscribe = Some(protobuf::SubscribeResult {
+            publish_debounce,
+            ..protobuf::SubscribeResult::default()
+        });
     } else {
         return None;
     }
