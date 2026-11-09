@@ -1201,6 +1201,7 @@ const SLOW: u32 = 3008;
 
 /// The client connection state machine.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent facts of the connection.
 pub struct Machine {
     config: Config,
     state: State,
@@ -1433,6 +1434,7 @@ impl Machine {
     }
 
     /// Reacts to `input`; the owner performs the returned actions in order.
+    #[allow(clippy::too_many_lines)] // One arm per variant.
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
         self.batching.application_unsubscribe =
             matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));

@@ -1183,6 +1183,36 @@ has received it whole. The browser hides the upgrade's response, so a
 failed attempt says "websocket closed before open (code N)" and names no
 captive portal.
 
+**Network and page events.** While it is not disconnected, the client
+listens to the page's `offline` and `online` events and to `pagehide` and
+`pageshow`, as centrifuge-js does, on `globalThis` (the window, or a
+worker's global). Going offline closes the connection: a connected client
+emits `connecting` with code 1 "transport closed", a connecting one closes
+its attempt without an event, and the next attempt waits the reconnect
+delay. Coming online while connecting reconnects at once, from the first
+transport, with the backoff restarted; a client that lost its connection
+waits a draw from `reconnect_jitter_window` first, so that a building whose
+network comes back does not reconnect all its devices at once. A
+`pagehide` whose `persisted` is true, the page entering the back/forward
+cache, closes the connection the same way, with the reason "page entered
+back/forward cache", so the server does not keep a frozen page's
+connection; the `pageshow` that restores the page reconnects as `online`
+does. A `pagehide` or `pageshow` whose `persisted` is false changes
+nothing. Without these events the reconnect delay still runs as usual.
+`network_event_target` and `page_event_target` name other targets;
+`web_sys::EventTarget::new()`, which never fires, turns either off. The
+listeners do not keep the client alive, and are removed when it
+disconnects, is closed or is dropped.
+
+```rust,ignore
+// Only page events, through a target the app forwards them to.
+let page = web_sys::EventTarget::new()?;
+let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
+    .network_event_target(web_sys::EventTarget::new()?)
+    .page_event_target(page.clone())
+    .build()?;
+```
+
 **Handlers and panics.** `EventDelivery::Task` runs handlers as a task of
 the page, `Inline` on the client's driver; both block the page while a
 handler runs, and a call of the client from its own handler fails at once
