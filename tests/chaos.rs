@@ -14,6 +14,8 @@
 // @P scenario: The core runner reports a planted payload fault
 // @P scenario: Seeded chaos with automatic batching and optimistic subscriptions on the core keeps every invariant
 // @P scenario: The core runner reports a planted automatic-batching fault
+// @P scenario: Seeded chaos with debounced publishes on the core keeps every invariant
+// @P scenario: The core runner reports a planted debounce fault
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -102,6 +104,10 @@ enum Mode {
     /// Subscriptions and batches, with automatic batching on even seeds
     /// (Block 36, D9).
     AutoBatching,
+    /// Debounced publishes, with subscriptions and batches and automatic
+    /// batching on even seeds, so that windows meet reconnects and batches
+    /// (Block 46, D16).
+    Debounce,
 }
 
 impl Mode {
@@ -113,12 +119,13 @@ impl Mode {
             Self::Batching => 2,
             Self::Delta => 3,
             Self::AutoBatching => 4,
+            Self::Debounce => 5,
         }
     }
 
     /// Whether the application starts and stops batches.
     fn batching(self) -> bool {
-        matches!(self, Self::Batching | Self::AutoBatching)
+        matches!(self, Self::Batching | Self::AutoBatching | Self::Debounce)
     }
 }
 
@@ -163,6 +170,12 @@ enum Fault {
     /// The first subscribe command of a connect frame reported to the
     /// checker before the connect command (I10, Block 36).
     SubscribeBeforeConnect,
+    /// A debounce timer the simulated clock fires before its delay (I12,
+    /// Block 46).
+    EarlyDebounceTimer,
+    /// The settle action of a publish that waited in a window dropped
+    /// before the checker (I6, Block 46).
+    DropWindowedOutcome,
 }
 
 /// An invariant a seed broke.
@@ -2539,6 +2552,43 @@ fn the_core_runner_reports_a_planted_automatic_batching_fault() {
     }
 }
 
+#[test]
+fn seeded_chaos_with_debounced_publishes_on_the_core_keeps_every_invariant() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Debounce)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let mut expected = subscription_counts();
+    expected.extend(
+        [
+            "start batching",
+            "stop batching",
+            "batch stopped",
+            "publish burst",
+            "interval advised",
+            "debounce hand-off",
+            "trailing send",
+            "window closed empty",
+            "publish waited in a window",
+            "publish dropped",
+        ]
+        .map(str::to_owned),
+    );
+    assert_counted(&counts, &expected);
+}
+
+#[test]
+fn the_core_runner_reports_a_planted_debounce_fault() {
+    for (fault, invariant) in [
+        (Fault::EarlyDebounceTimer, "I12"),
+        (Fault::DropWindowedOutcome, "I6"),
+    ] {
+        assert_reported(fault, invariant, Mode::Debounce);
+    }
+}
+
 /// Prints the whole trace of `FERRIFUGE_CHAOS_SEED` (seed 0 without it),
 /// of `FERRIFUGE_CHAOS_OPS` operations (60 without it), with
 /// subscriptions: `cargo test --test chaos trace -- --ignored --nocapture`.
@@ -2578,6 +2628,7 @@ fn seeded_chaos_long_run() {
         1 => Mode::Subscriptions,
         3 => Mode::Delta,
         4 => Mode::AutoBatching,
+        5 => Mode::Debounce,
         _ => Mode::Batching,
     };
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);

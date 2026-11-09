@@ -26,9 +26,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
-    "Seeded chaos with debounced publishes on the core keeps every invariant",
-    "Seeded chaos with debounced publishes on the tokio client keeps the invariants",
-    "The core runner reports a planted debounce fault",
     "What arrived during a process suspension beats a deadline that fired meanwhile",
     "Seeded chaos on the core applies no stale answer",
     "The core runner reports a planted continuity fault",
