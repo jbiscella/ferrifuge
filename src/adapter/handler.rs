@@ -942,7 +942,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-#[cfg(test)]
+// On tokio; the browser client is tested in a browser (Block 44, D18).
+#[cfg(all(test, adapter_tokio))]
 mod tests {
     use std::future::Future;
     use std::pin::Pin;

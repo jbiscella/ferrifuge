@@ -869,6 +869,8 @@ mod tests {
     /// Random inputs under `cargo test`; coverage-guided with
     /// `cargo bolero test json::tests::fuzz_decode --engine libfuzzer`.
     #[test]
+    // bolero is a native dev-dependency (Block 44, D18).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn fuzz_decode() {
         bolero::check!().for_each(|frame: &[u8]| {
             let _ = decode(frame);

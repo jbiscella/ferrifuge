@@ -242,6 +242,17 @@ name = "bdd"
 harness = false
 required-features = ["tokio"]
 
+# Runs tests/browser_wasm.rs in browsers against Centrifugo (Block 44, D18).
+[[test]]
+name = "browser"
+harness = false
+required-features = ["tokio"]
+
+# The @W tests, built for wasm32-unknown-unknown only (Block 44, D18).
+[[test]]
+name = "browser_wasm"
+required-features = ["browser"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

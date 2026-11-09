@@ -113,7 +113,7 @@ impl EventId {
     pub(crate) const NONE: Self = Self(u64::MAX);
 
     /// An id for the adapter's unit tests.
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }

@@ -6,7 +6,9 @@
 //!
 //! `@P` scenarios run outside cucumber (Block 0, "Test layers"): each must be
 //! claimed by a benchmark or simulation unless it is listed in
-//! [`P_NOT_YET_MEASURED`], and every claim must name a `@P` scenario.
+//! [`P_NOT_YET_MEASURED`], and every claim must name a `@P` scenario. So do
+//! `@W` scenarios, claimed by the wasm tests run in a browser (Block 44,
+//! D18), unless listed in [`W_NOT_YET_WRITTEN`].
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -26,6 +28,33 @@ const P_CLAIM: &str = "// @P scenario: ";
 
 /// Directories searched for `@P` claims.
 const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
+
+/// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet: those of
+/// the sub-increments after 44b (Block 44). A scenario leaves the list
+/// when a test claims it.
+const W_NOT_YET_WRITTEN: &[&str] = &[
+    "A browser client falls back to http_stream when websocket is unreachable",
+    "Commands work over http_stream from a browser client",
+    "A stream not read stops a browser client reading its http_stream response",
+    "A browser client falls back to sse when websocket and http_stream are unreachable",
+    "An sse stream that ends makes a browser client reconnect, not the browser's EventSource",
+    "Going offline closes a browser client's connection, and coming online reconnects it at once",
+    "Coming online while connected changes nothing",
+    "A page entering the back/forward cache closes the connection, and its restore reconnects at once",
+    "A page hidden without entering the back/forward cache keeps the connection",
+    "A disconnected browser client stops listening to network and page events",
+    "A constructor given to a browser client replaces the global",
+    "A browser client skips a transport the page has no constructor for",
+    "Building a browser client with no usable transport fails",
+    "With credentials included, a browser client's HTTP requests carry the page's cookies to the server's origin",
+];
+
+/// How a wasm test claims a `@W` scenario: a line of its own reading
+/// `// @W scenario: <scenario name>`.
+const W_CLAIM: &str = "// @W scenario: ";
+
+/// Directories searched for `@W` claims.
+const W_TEST_DIRS: &[&str] = &["tests"];
 
 /// A text file, with Windows line endings (a checkout with
 /// `core.autocrlf`) read as Unix ones.
@@ -77,25 +106,31 @@ fn spec_features(claude_md: &str) -> HashMap<String, String> {
     features
 }
 
-/// Names of the scenarios tagged `@P` in the gherkin blocks of `claude_md`.
-fn p_scenarios(claude_md: &str) -> BTreeSet<String> {
+/// Names of the scenarios tagged `tag` in the gherkin blocks of
+/// `claude_md`.
+fn tagged_scenarios(claude_md: &str, tag: &str) -> BTreeSet<String> {
     gherkin_blocks(claude_md)
         .into_iter()
-        .flat_map(p_scenarios_of)
+        .flat_map(|gherkin| tagged_scenarios_of(gherkin, tag))
         .collect()
 }
 
-/// Names of the scenarios tagged `@P` in one gherkin text, by Gherkin's
+/// Names of the scenarios tagged `@P` in one gherkin text.
+fn p_scenarios_of(gherkin: &str) -> BTreeSet<String> {
+    tagged_scenarios_of(gherkin, "@P")
+}
+
+/// Names of the scenarios tagged `tag` in one gherkin text, by Gherkin's
 /// rules: a scenario's tags may span several lines; a feature's or a rule's
 /// tags apply to every scenario under it; an `Examples` table's tags apply
 /// to the rows of its outline, so tag the outline.
-fn p_scenarios_of(gherkin: &str) -> BTreeSet<String> {
+fn tagged_scenarios_of(gherkin: &str, tag: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let (mut feature, mut rule, mut pending) = (false, false, false);
     let mut outline: Option<&str> = None;
     for line in gherkin.lines().map(str::trim) {
         if line.starts_with('@') {
-            pending |= line.split_whitespace().any(|tag| tag == "@P");
+            pending |= line.split_whitespace().any(|found| found == tag);
         } else if line.starts_with("Feature:") {
             (feature, rule, outline) = (pending, false, None);
             pending = false;
@@ -143,10 +178,10 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// `@P` scenario names claimed under [`P_HARNESS_DIRS`], with where.
-fn p_claims(root: &Path) -> Vec<(String, PathBuf)> {
+/// Scenario names claimed with `marker` under `dirs`, with where.
+fn claims(root: &Path, dirs: &[&str], marker: &str) -> Vec<(String, PathBuf)> {
     let mut files = Vec::new();
-    for dir in P_HARNESS_DIRS {
+    for dir in dirs {
         rust_files(&root.join(dir), &mut files);
     }
     let mut claims = Vec::new();
@@ -156,7 +191,7 @@ fn p_claims(root: &Path) -> Vec<(String, PathBuf)> {
             continue;
         }
         for line in read(&path).lines() {
-            if let Some(name) = line.trim().strip_prefix(P_CLAIM) {
+            if let Some(name) = line.trim().strip_prefix(marker) {
                 claims.push((name.trim().to_owned(), path.clone()));
             }
         }
@@ -218,10 +253,10 @@ fn feature_files_match_claude_md() {
 #[test]
 fn p_scenarios_match_their_harnesses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let spec = p_scenarios(&read(&root.join("CLAUDE.md")));
+    let spec = tagged_scenarios(&read(&root.join("CLAUDE.md")), "@P");
 
     let mut claimed = HashSet::new();
-    for (name, path) in p_claims(root) {
+    for (name, path) in claims(root, P_HARNESS_DIRS, P_CLAIM) {
         assert!(
             spec.contains(&name),
             "{} claims {name:?}, not a @P scenario of CLAUDE.md",
@@ -246,6 +281,40 @@ fn p_scenarios_match_their_harnesses() {
     assert!(
         unclaimed.is_empty(),
         "@P scenarios with no benchmark or simulation: {unclaimed:?}"
+    );
+}
+
+#[test]
+fn w_scenarios_match_their_wasm_tests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let spec = tagged_scenarios(&read(&root.join("CLAUDE.md")), "@W");
+
+    let mut claimed = HashSet::new();
+    for (name, path) in claims(root, W_TEST_DIRS, W_CLAIM) {
+        assert!(
+            spec.contains(&name),
+            "{} claims {name:?}, not a @W scenario of CLAUDE.md",
+            path.display()
+        );
+        claimed.insert(name);
+    }
+    for name in W_NOT_YET_WRITTEN {
+        assert!(
+            spec.contains(*name),
+            "{name:?} is listed as not yet written but is not a @W scenario of CLAUDE.md"
+        );
+        assert!(
+            !claimed.contains(*name),
+            "{name:?} is claimed: remove it from W_NOT_YET_WRITTEN"
+        );
+    }
+    let unclaimed: Vec<_> = spec
+        .iter()
+        .filter(|name| !claimed.contains(*name) && !W_NOT_YET_WRITTEN.contains(&name.as_str()))
+        .collect();
+    assert!(
+        unclaimed.is_empty(),
+        "@W scenarios with no wasm test: {unclaimed:?}"
     );
 }
 
