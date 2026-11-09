@@ -82,12 +82,19 @@ Feature: Browser adapter
     And the subscription's stream yields the publication "hello"
 
   @W
-  Scenario: A stream not read stops a browser client reading its http_stream response
-    Given a browser client with a read-ahead of 16 messages, connected over transport "http_stream", subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
+  Scenario: A stream not read does not stop a browser client reading its http_stream response
+    Given a browser client with a read-ahead of 600 messages, connected over transport "http_stream", subscribed to channel "news", whose subscription's stream has been read up to "subscribed" and is not read after
     When 1000 publications of 100 bytes are published to "news"
-    Then the client stops reading with 16 messages in its read-ahead
-    And 1 s later its read-ahead still holds 16 messages and the client has not emitted "connecting"
+    Then its read-ahead holds 600 messages
+    And 1 s later its read-ahead still holds 600 messages and the client has not emitted "connecting"
     And when the application reads the subscription's stream, it yields the 1000 publications in order, each once
+
+  @W
+  Scenario: A browser client whose stream is not read reconnects once its inbox overflows over http_stream, losing no publication
+    Given a browser client with a read-ahead of 16 messages, connected over transport "http_stream", subscribed to recoverable channel "history:news", whose subscription's stream has been read up to "subscribed" and is not read after, and whose client stream is read
+    When 100 publications are published to "history:news"
+    Then the client emits "connecting" with code 7 and reason "read-ahead overflow"
+    And when the application reads the subscription's stream, it yields "subscribing", "subscribed" with recovered true, then the publications at offsets 1 to 100 in order, each once
 
   @W
   Scenario: A browser client falls back to sse when websocket and http_stream are unreachable
