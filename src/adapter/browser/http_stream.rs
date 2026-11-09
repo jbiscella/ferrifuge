@@ -499,6 +499,7 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::future::{Either, select};
+    use futures_util::{Stream, StreamExt};
     use js_sys::{Function, Object, Reflect};
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -507,7 +508,8 @@ mod tests {
     use crate::adapter::body::CAPTIVE_PORTAL;
     use crate::adapter::browser::websocket::Inbound;
     use crate::adapter::platform;
-    use crate::machine::FrameId;
+    use crate::machine::{FrameId, TransportKind};
+    use crate::{Client, ClientEvent, Config, SubscriptionEvent};
 
     const URL: &str = "http://127.0.0.1:8000/connection/http_stream";
     const LIMIT: usize = 1 << 20;
@@ -898,6 +900,184 @@ mod tests {
 
         let reason = opened.err().expect("not opened");
         assert!(reason.contains("no streams here"), "{reason}");
+    }
+
+    /// A `fetch` standing in for a server over `http_stream`, each body chunk
+    /// served only when a read asks for it, one per read, as a transport
+    /// that only reads when polled: `state.push(text)` queues a chunk, and
+    /// `state.served` counts those read. Commands of the stream request and
+    /// of emulation requests are answered on the stream.
+    fn paced_fetch() -> (Function, Object) {
+        let state = Object::new();
+        let make = Function::new_with_args(
+            "state",
+            "state.served = 0;
+             const queue = [];
+             let wake = null;
+             state.push = (text) => {
+               queue.push(new TextEncoder().encode(text));
+               if (wake) { const waking = wake; wake = null; waking(); }
+             };
+             state.pushLater = (text, millis) => setTimeout(() => state.push(text), millis);
+             const answer = (frame) => {
+               for (const line of frame.split('\\n')) {
+                 if (line === '') continue;
+                 const command = JSON.parse(line);
+                 if (command.connect) {
+                   state.push(JSON.stringify({ id: command.id, connect: { client: 'c', session: 's', node: 'n' } }) + '\\n');
+                 } else if (command.subscribe) {
+                   state.push(JSON.stringify({ id: command.id, subscribe: {} }) + '\\n');
+                 }
+               }
+             };
+             return (url, init) => {
+               const text = new TextDecoder().decode(init.body);
+               if (url.endsWith('/emulation')) {
+                 answer(JSON.parse(text).data);
+                 return Promise.resolve({ type: 'basic', status: 200, headers: new Headers() });
+               }
+               answer(text);
+               const body = new ReadableStream({
+                 async pull(controller) {
+                   while (queue.length === 0) {
+                     await new Promise((resolve) => { wake = resolve; });
+                   }
+                   state.served += 1;
+                   controller.enqueue(queue.shift());
+                 },
+               }, { highWaterMark: 0 });
+               const headers = new Headers({ 'content-type': 'application/json' });
+               return Promise.resolve({ type: 'basic', status: 200, headers, body });
+             };",
+        );
+        let fetch = make
+            .call1(&JsValue::NULL, &state)
+            .expect("a paced fetch")
+            .unchecked_into();
+        (fetch, state)
+    }
+
+    fn push(state: &Object, text: &str) {
+        let push: Function = get(state, &["push"]).unchecked_into();
+        push.call1(&JsValue::NULL, &JsValue::from_str(text))
+            .expect("a chunk queued");
+    }
+
+    fn push_later(state: &Object, text: &str, millis: u32) {
+        let later: Function = get(state, &["pushLater"]).unchecked_into();
+        later
+            .call2(
+                &JsValue::NULL,
+                &JsValue::from_str(text),
+                &JsValue::from(millis),
+            )
+            .expect("a chunk scheduled");
+    }
+
+    fn served(state: &Object) -> f64 {
+        get(state, &["served"]).as_f64().expect("a count")
+    }
+
+    fn line(n: u32) -> String {
+        format!("{{\"n\":{n}}}\n")
+    }
+
+    fn frame(n: u32) -> Inbound {
+        Inbound::Frame(format!("{{\"n\":{n}}}").into_bytes())
+    }
+
+    // Block 15; Block 44, D7: stopping the reading with a read pending keeps
+    // that read, and whatever it brings, for when reading resumes; the next
+    // read after the pause then wakes the transport as any other.
+    #[wasm_bindgen_test]
+    async fn a_read_pending_when_reading_stops_keeps_its_chunk_and_later_reads_go_on() {
+        let (fetch, state) = paced_fetch();
+        let mut http = open(fetch).await;
+        // The stream request's frame is `{}`, which the fetch does not answer.
+        push(&state, &line(1));
+        assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(1)));
+
+        // Reading stops while this read is pending, with no chunk to give.
+        assert_eq!(recv_within(&mut http, true, 50).await, None);
+        // Chunks come during the pause; only the pending read is served.
+        push(&state, &line(2));
+        push(&state, &line(3));
+        assert_eq!(recv_within(&mut http, false, 100).await, None);
+        assert_eq!(served(&state), 2.0, "only the pending read was served");
+
+        // Resuming, the chunk of the pending read, then the next in order.
+        assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(2)));
+        assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(3)));
+
+        // A read after the pause is woken by a chunk arriving later.
+        push_later(&state, &line(4), 20);
+        assert_eq!(recv_within(&mut http, true, 1000).await, Some(frame(4)));
+    }
+
+    // Block 15; Block 44, D7: the whole client over a body read only when
+    // polled, one publication per chunk, as the @W test of the read-ahead
+    // reads it: a stream not read fills the read-ahead and stops the reading,
+    // and taking the events resumes it up to the last publication.
+    #[wasm_bindgen_test]
+    async fn a_client_whose_reading_stopped_and_resumed_delivers_every_publication() {
+        const COUNT: u32 = 1000;
+        const WAIT: Duration = Duration::from_secs(5);
+        let publication =
+            |n: u32| format!("{{\"push\":{{\"channel\":\"news\",\"pub\":{{\"data\":{n}}}}}}}\n");
+        let (fetch, state) = paced_fetch();
+        let client = Client::builder_with_transports([(TransportKind::HttpStream, URL.to_owned())])
+            .config(Config::default().read_ahead_messages(16))
+            .fetch(fetch)
+            .build()
+            .expect("a client");
+        let subscription = client.new_subscription("news").expect("a subscription");
+        let mut events = client.events();
+        let mut subscription_events = subscription.events();
+        client.connect();
+        subscription.subscribe();
+        loop {
+            match next_within(&mut events, WAIT).await {
+                ClientEvent::Connected { .. } => break,
+                ClientEvent::Connecting { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        loop {
+            match next_within(&mut subscription_events, WAIT).await {
+                SubscriptionEvent::Subscribed(_) => break,
+                SubscriptionEvent::Subscribing { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+
+        for n in 1..=COUNT {
+            push(&state, &publication(n));
+        }
+        platform::sleep(Duration::from_millis(200)).await;
+        let stopped_at = served(&state);
+        // The two replies, 17 publications (16 held and 1 handled, its event
+        // not taken), and at most the read left pending.
+        assert!(stopped_at <= 20.0, "{stopped_at} chunks read");
+        platform::sleep(Duration::from_millis(200)).await;
+        assert_eq!(served(&state), stopped_at, "reading did not stop");
+
+        for n in 1..=COUNT {
+            match next_within(&mut subscription_events, WAIT).await {
+                SubscriptionEvent::Publication(publication) => {
+                    assert_eq!(publication.data, n.to_string().into_bytes());
+                }
+                other => panic!("publication {n}: {other:?}"),
+            }
+        }
+    }
+
+    async fn next_within<E>(events: &mut (impl Stream<Item = E> + Unpin), wait: Duration) -> E {
+        let timer = platform::sleep(wait);
+        match select(events.next(), std::pin::pin!(timer)).await {
+            Either::Left((Some(event), _)) => event,
+            Either::Left((None, _)) => panic!("the stream ended"),
+            Either::Right(_) => panic!("no event within {wait:?}"),
+        }
     }
 
     #[wasm_bindgen_test]
