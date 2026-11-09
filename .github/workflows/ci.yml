@@ -615,15 +615,30 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # cargo-semver-checks cannot build the rustdoc itself for this target:
+      # cargo asks rustc about every crate type of its scratch crate, and
+      # wasm32-unknown-unknown has no dylib. Each revision's rustdoc JSON is
+      # built with cargo rustdoc instead, as cargo-semver-checks builds it,
+      # and the two are compared.
       - name: cargo semver-checks (browser target)
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
         run: |
-          if git show "$BASE:Cargo.toml" | grep -q '^browser = '; then
-            cargo semver-checks --default-features --features test-util,cookies --target wasm32-unknown-unknown --baseline-rev "$BASE"
-          else
+          if ! git show "$BASE:Cargo.toml" | grep -q '^browser = '; then
             echo "the base has no browser adapter: nothing to compare on the browser target"
+            exit 0
           fi
+          rustdoc_json() {
+            RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --target wasm32-unknown-unknown \
+              --features test-util,cookies --target-dir "$1" \
+              -- -Zunstable-options --output-format json
+          }
+          rustdoc_json "$RUNNER_TEMP/current"
+          git worktree add "$RUNNER_TEMP/base" "$BASE"
+          (cd "$RUNNER_TEMP/base" && rustdoc_json "$RUNNER_TEMP/baseline")
+          cargo semver-checks \
+            --current-rustdoc "$RUNNER_TEMP/current/wasm32-unknown-unknown/doc/ferrifuge.json" \
+            --baseline-rustdoc "$RUNNER_TEMP/baseline/wasm32-unknown-unknown/doc/ferrifuge.json"
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.
