@@ -136,6 +136,10 @@ pub(super) struct Shared {
     driver_ended: Notify,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
+    /// The debounce timers the driver holds unarmed for a test, oldest
+    /// first; `None` while it arms them (Block 46).
+    #[cfg(feature = "__test-hooks")]
+    held_debounce_timers: Mutex<Option<Vec<DebounceTimer>>>,
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
@@ -1603,6 +1607,8 @@ impl Client {
                 driver_gone: AtomicBool::new(false),
                 driver_ended: Notify::new(),
                 actions_queued: Notify::new(),
+                #[cfg(feature = "__test-hooks")]
+                held_debounce_timers: Mutex::new(None),
                 closed: AtomicBool::new(false),
                 log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
                 #[cfg(adapter_tokio)]
@@ -1852,6 +1858,41 @@ impl Client {
     #[must_use]
     pub fn held_events(&self) -> usize {
         lock(&self.shared.outboxes).client.held()
+    }
+
+    /// Leaves the debounce timers set from now on unarmed, until
+    /// [`Client::fire_held_debounce_timers`], so that a test decides when a
+    /// window ends (Block 46). Only with the `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    pub fn hold_debounce_timers(&self) {
+        *lock(&self.shared.held_debounce_timers) = Some(Vec::new());
+    }
+
+    /// How many debounce timers are held unarmed. Only with the
+    /// `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_debounce_timers(&self) -> usize {
+        lock(&self.shared.held_debounce_timers)
+            .as_ref()
+            .map_or(0, Vec::len)
+    }
+
+    /// Fires the debounce timers held so far, oldest first, as if each had
+    /// run its interval; timers set later stay held. Only with the
+    /// `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    pub fn fire_held_debounce_timers(&self) {
+        let held = lock(&self.shared.held_debounce_timers)
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        for timer in held {
+            self.shared.apply(Input::DebounceTimerFired(timer));
+        }
     }
 
     /// Starts connecting; reconnects until connected or disconnected. The
@@ -2856,6 +2897,11 @@ impl Driver {
             // core ignores one it no longer knows (Block 46, D5). Numbering
             // it here would skew the settings the core's `Armed` counts.
             Action::SetDebounceTimer(timer, delay) => {
+                #[cfg(feature = "__test-hooks")]
+                if let Some(held) = lock(&self.shared.held_debounce_timers).as_mut() {
+                    held.push(timer);
+                    return;
+                }
                 self.debounce_timers.set(timer, delay, 0);
             }
             Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),

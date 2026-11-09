@@ -31,7 +31,7 @@ const CHANNEL: &str = "cursors:a";
 /// How long a step waits for what it expects.
 const WAIT: Duration = Duration::from_secs(5);
 
-type Published = Result<(), CallError>;
+pub(super) type Published = Result<(), CallError>;
 
 /// What a Block 46a scenario holds.
 #[derive(Default)]
@@ -40,7 +40,7 @@ pub(crate) struct Debouncing {
     fired: Vec<DebounceTimer>,
     /// The publishes of a @D scenario, each awaited in a task of its own,
     /// with its data, in the order they were made.
-    publishes: Vec<(Value, JoinHandle<Published>)>,
+    pub(super) publishes: Vec<(Value, JoinHandle<Published>)>,
     /// What the handler of the Thread scenario did.
     handler: Arc<HandlerRecord>,
     /// The second client of the @A scenario, and the publications it took.
@@ -649,7 +649,7 @@ fn the_firing_sends(world: &mut ClientWorld, sent: String) {
 // @D: a tokio client against the fake server.
 
 /// Waits until `condition` holds, for at most [`WAIT`].
-async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+pub(super) async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(WAIT, async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -719,7 +719,7 @@ fn start_publish(world: &mut ClientWorld, data: Value) {
 }
 
 /// The commands the fake server received with data `data`.
-fn received_of(world: &ClientWorld, data: &Value) -> Vec<(Value, Instant)> {
+pub(super) fn received_of(world: &ClientWorld, data: &Value) -> Vec<(Value, Instant)> {
     world
         .fake()
         .commands_with_times("publish")
@@ -729,7 +729,7 @@ fn received_of(world: &ClientWorld, data: &Value) -> Vec<(Value, Instant)> {
 }
 
 /// When the fake server received a publish of `data`, waiting for it.
-async fn received_at(world: &ClientWorld, data: &Value) -> Instant {
+pub(super) async fn received_at(world: &ClientWorld, data: &Value) -> Instant {
     let at = std::sync::Mutex::new(None);
     wait_until("the publish to reach the fake server", || {
         let received = received_of(world, data);
@@ -741,7 +741,7 @@ async fn received_at(world: &ClientWorld, data: &Value) -> Instant {
 }
 
 /// The result of the publish made with `data`, waiting for it.
-async fn outcome_of(world: &mut ClientWorld, data: &Value) -> Published {
+pub(super) async fn outcome_of(world: &mut ClientWorld, data: &Value) -> Published {
     let index = world
         .debouncing
         .publishes
@@ -755,7 +755,7 @@ async fn outcome_of(world: &mut ClientWorld, data: &Value) -> Published {
         .expect("the task of the publish")
 }
 
-fn is_finished(world: &ClientWorld, data: &Value) -> bool {
+pub(super) fn is_finished(world: &ClientWorld, data: &Value) -> bool {
     world
         .debouncing
         .publishes
