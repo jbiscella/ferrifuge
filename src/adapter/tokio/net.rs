@@ -32,7 +32,9 @@ pub(in crate::adapter) struct Network {
 /// A cookie jar, shown without its cookies.
 #[cfg(feature = "cookies")]
 #[derive(Clone, Default)]
-pub(in crate::adapter) struct Jar(pub(in crate::adapter) Option<Arc<dyn super::cookies::CookieJar>>);
+pub(in crate::adapter) struct Jar(
+    pub(in crate::adapter) Option<Arc<dyn super::cookies::CookieJar>>,
+);
 
 /// No cookie jar without the `cookies` feature.
 #[cfg(not(feature = "cookies"))]
