@@ -5,6 +5,9 @@
 //! the transports through `backend`: `tokio` natively, `browser` on
 //! wasm32-unknown-unknown (Block 44, D2).
 
+// Read in the browser from Block 44d's http_stream on.
+#[cfg_attr(adapter_browser, allow(dead_code))]
+mod body;
 #[cfg(adapter_browser)]
 mod browser;
 mod client;

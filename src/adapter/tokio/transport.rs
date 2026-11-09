@@ -78,11 +78,11 @@ fn handshake_error(
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            super::http::captive_portal(response.status().as_u16(), content_type)
+            super::super::body::captive_portal(response.status().as_u16(), content_type)
         }
         _ => false,
     };
-    super::http::with_portal(error.to_string(), portal)
+    super::super::body::with_portal(error.to_string(), portal)
 }
 
 impl WebSocket {
@@ -342,10 +342,6 @@ fn websocket_config(max_message: usize) -> WebSocketConfig {
         .max_message_size(Some(max_message))
         .max_frame_size(Some(max_message))
 }
-
-/// The error of an HTTP transport's decoder when the server sent a message
-/// larger than the size limit, reported as [`Inbound::TooLarge`].
-pub(in crate::adapter) const TOO_LARGE: &str = "message larger than the size limit";
 
 fn closed(frame: Option<CloseFrame>) -> Inbound {
     match frame {
@@ -746,7 +742,7 @@ mod tests {
                 panic!("upgraded on {}", String::from_utf8_lossy(answer));
             };
             assert_eq!(
-                message.ends_with(super::super::http::CAPTIVE_PORTAL),
+                message.ends_with(crate::adapter::body::CAPTIVE_PORTAL),
                 portal,
                 "{message}"
             );

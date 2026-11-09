@@ -69,9 +69,9 @@ fips = ["aws-lc-rs", "rustls?/fips"]
 # MemoryJar and ClientBuilder::cookie_jar. Not a default.
 cookies = ["tokio", "dep:cookie_store", "dep:url"]
 # The browser adapter (Block 44): the same Client on
-# wasm32-unknown-unknown, over the browser's WebSocket. It builds nothing
-# on other targets, so it is a default; `tokio`, the providers and
-# `cookies` build as nothing on the browser target.
+# wasm32-unknown-unknown, over the browser's WebSocket and fetch. It
+# builds nothing on other targets, so it is a default; `tokio`, the
+# providers and `cookies` build as nothing on the browser target.
 browser = [
     "dep:tokio",
     "dep:futures-util",
@@ -82,6 +82,11 @@ browser = [
     "dep:js-sys",
     "dep:web-sys",
     "dep:gloo-timers",
+    "dep:wasm-streams",
+    # http_stream's decoders (Block 27), shared with the tokio adapter.
+    "dep:tokio-util",
+    "dep:bytes",
+    "dep:mediatype",
     # The core's random source seeded by the browser (Block 44, D5).
     "fastrand/js",
 ]
@@ -154,16 +159,24 @@ wasm-bindgen = { version = "0.2.130", optional = true }
 wasm-bindgen-futures = { version = "0.4.80", optional = true }
 js-sys = { version = "0.3.107", optional = true }
 web-sys = { version = "0.3.107", optional = true, features = [
+    "AbortController",
+    "AbortSignal",
     "BinaryType",
     "CloseEvent",
     "Event",
     "EventTarget",
     "MessageEvent",
+    "Headers",
     "Performance",
+    "ReadableStream",
+    "Response",
+    "ResponseType",
     "Url",
     "WebSocket",
 ] }
 gloo-timers = { version = "0.4.0", features = ["futures"], optional = true }
+# Reads a fetch response's body only when polled (Block 44, D7, D8).
+wasm-streams = { version = "0.7.1", optional = true }
 
 # Android only (Block 24): the JNI types of ferrifuge::android, at the
 # version rustls-platform-verifier uses there.
