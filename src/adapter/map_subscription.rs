@@ -349,18 +349,9 @@ impl MapSubscriptionBuilder {
         self
     }
 
-    /// Asks the server to send changes as deltas in `format` against each
-    /// key's previous value, on namespaces that allow it.
-    #[must_use]
-    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
-        self.options.common = self.options.common.delta(format);
-        self
-    }
-
     /// Asks the server to send only the entries and changes `filter`
     /// matches, on namespaces with `allow_tags_filter`; building fails when
-    /// the filter is one the server would refuse, or goes with
-    /// [`Self::delta`].
+    /// the filter is one the server would refuse.
     #[must_use]
     pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
         self.options.common = self.options.common.tag_filter(filter);
