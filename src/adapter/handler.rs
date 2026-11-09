@@ -162,6 +162,57 @@ impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for 
     }
 }
 
+/// Receives a map subscription's events, one at a time, in order, as
+/// [`SubscriptionHandler`] does a subscription's (Block 45, D13). Set with
+/// [`MapSubscriptionBuilder::handler`](crate::MapSubscriptionBuilder::handler)
+/// or [`MapSubscription::set_handler`](crate::MapSubscription::set_handler);
+/// it takes over the map subscription's stream.
+///
+/// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
+/// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
+/// may change in any minor release.
+#[cfg(feature = "unstable")]
+#[allow(unused_variables)] // The defaults ignore their event.
+pub trait MapSubscriptionHandler: MaybeSend + 'static {
+    /// Called for each event, in order; by default, the method of its kind.
+    fn on_event(&mut self, event: crate::MapSubscriptionEvent) {
+        use crate::MapSubscriptionEvent as Event;
+        match event {
+            Event::Subscribing { code, reason } => self.on_subscribing(code, reason),
+            Event::Subscribed(subscribed) => self.on_subscribed(subscribed),
+            Event::Unsubscribed { code, reason } => self.on_unsubscribed(code, reason),
+            Event::Sync(entries) => self.on_sync(entries),
+            Event::Update(update) => self.on_update(update),
+            Event::Error(error) => self.on_error(error),
+        }
+    }
+
+    /// [`MapSubscriptionEvent::Subscribing`](crate::MapSubscriptionEvent::Subscribing).
+    fn on_subscribing(&mut self, code: u32, reason: String) {}
+
+    /// [`MapSubscriptionEvent::Subscribed`](crate::MapSubscriptionEvent::Subscribed).
+    fn on_subscribed(&mut self, subscribed: Subscribed) {}
+
+    /// [`MapSubscriptionEvent::Unsubscribed`](crate::MapSubscriptionEvent::Unsubscribed).
+    fn on_unsubscribed(&mut self, code: u32, reason: String) {}
+
+    /// [`MapSubscriptionEvent::Sync`](crate::MapSubscriptionEvent::Sync).
+    fn on_sync(&mut self, entries: Vec<crate::MapEntry>) {}
+
+    /// [`MapSubscriptionEvent::Update`](crate::MapSubscriptionEvent::Update).
+    fn on_update(&mut self, update: crate::MapUpdate) {}
+
+    /// [`MapSubscriptionEvent::Error`](crate::MapSubscriptionEvent::Error).
+    fn on_error(&mut self, error: ClientError) {}
+}
+
+#[cfg(feature = "unstable")]
+impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptionHandler for F {
+    fn on_event(&mut self, event: crate::MapSubscriptionEvent) {
+        self(event);
+    }
+}
+
 /// Where a client's handlers run (Block 41, D2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]

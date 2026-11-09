@@ -401,6 +401,32 @@ impl DeltaStatistics {
     );
 }
 
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
+impl crate::MapEntry {
+    /// An entry of `key` holding `data`, with no offset, tags or info.
+    #[must_use]
+    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
+impl crate::MapUpdate {
+    /// A change setting `key` to `data`, with no offset, tags or info.
+    #[must_use]
+    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
+        Self::default()
+    }
+
+    /// The removal of `key`, with no offset, tags or info.
+    #[must_use]
+    pub fn removal(_key: impl Into<String>) -> Self {
+        Self::default()
+    }
+}
+
 #[cfg(test)]
 // Each setter is compared with assigning its field (Block 37, D2).
 #[allow(clippy::field_reassign_with_default)]

@@ -168,6 +168,33 @@ impl MapSubscriptionEvent {
     }
 }
 
+impl MapEntry {
+    /// The entry's value decoded as JSON into `T`, as
+    /// [`crate::Publication::json`] does (Block 38).
+    ///
+    /// # Errors
+    ///
+    /// The data is not JSON, or not JSON that `T` accepts; empty data is not
+    /// JSON. `serde_json`'s message may quote fragments of the data.
+    pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.data)
+    }
+}
+
+impl MapUpdate {
+    /// The new value decoded as JSON into `T`, as
+    /// [`crate::Publication::json`] does (Block 38).
+    ///
+    /// # Errors
+    ///
+    /// The data is not JSON, or not JSON that `T` accepts; empty data, as a
+    /// removal's, is not JSON. `serde_json`'s message may quote fragments of
+    /// the data.
+    pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.data)
+    }
+}
+
 impl From<crate::Publication> for MapEntry {
     fn from(publication: crate::Publication) -> Self {
         Self {

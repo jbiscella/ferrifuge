@@ -99,7 +99,7 @@ impl std::fmt::Debug for Handlers {
     }
 }
 
-fn delivery(mode: &str) -> EventDelivery {
+pub(super) fn delivery(mode: &str) -> EventDelivery {
     match mode {
         "Task" => EventDelivery::Task,
         "Inline" => EventDelivery::Inline,
