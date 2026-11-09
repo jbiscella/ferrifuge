@@ -357,9 +357,9 @@ Feature: Map subscriptions (unstable)
     Then the map subscription emits a sync whose entry "a" has data <data>
 
     Examples:
-      | delta | data            |
-      | true  | {"x":1}         |
-      | false | "{\"x\":1}"     |
+      | delta | data                       |
+      | true  | {"x":1}                    |
+      | false | the JSON string of {"x":1} |
 
   @A
   Scenario: A tag filter limits the state and the updates
