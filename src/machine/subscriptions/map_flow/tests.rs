@@ -146,22 +146,6 @@ fn the_first_request_asks_for_the_first_state_page() {
     }
 }
 
-// Codex, #198: no patch may reach the application as a value before
-// per-key delta bases exist (45d).
-#[test]
-fn a_map_subscription_does_not_negotiate_delta_yet() {
-    let (mut machine, _) = connected();
-    let mut options = options(2);
-    options.common.delta = Some(crate::DeltaFormat::Fossil);
-    let id = machine
-        .add_map_subscription("scores".into(), options)
-        .unwrap();
-
-    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
-
-    assert!(first["subscribe"].get("delta").is_none(), "{first}");
-}
-
 #[test]
 fn a_page_size_of_0_sends_no_limit() {
     let (_, _, _, first) = subscribing(0);
@@ -1268,4 +1252,627 @@ fn an_ephemeral_map_keeps_no_position() {
 
     assert_eq!(machine.subscription_position(id), None);
     assert_eq!(subscribe.unwrap()["subscribe"]["phase"], 2);
+}
+
+// --- Per-key delta (Block 45, D9) ------------------------------------------
+
+fn value(key: &str, version: u32) -> Vec<u8> {
+    format!("{}{version}", key.repeat(40)).into_bytes()
+}
+
+/// A JSON string holding `bytes`, as data travels with delta on.
+fn wrapped(bytes: &[u8]) -> String {
+    serde_json::to_string(std::str::from_utf8(bytes).unwrap()).unwrap()
+}
+
+fn whole(key: &str, version: u32, offset: u64) -> String {
+    format!(
+        r#"{{"key":"{key}","data":{},"offset":{offset}}}"#,
+        wrapped(&value(key, version))
+    )
+}
+
+/// The delta from `key`'s value at version `from` to version `to`.
+fn delta(key: &str, from: u32, to: u32, offset: u64) -> String {
+    format!(
+        r#"{{"key":"{key}","delta":true,"data":{},"offset":{offset}}}"#,
+        wrapped(&crate::fossil::write(&value(key, from), &value(key, to)))
+    )
+}
+
+fn push(publication: &str) -> String {
+    format!(r#"{{"push":{{"channel":"scores","pub":{publication}}}}}"#)
+}
+
+fn delta_options() -> MapSubscriptionOptions {
+    let mut options = options(2);
+    options.common = SubscriptionOptions::default().delta(crate::DeltaFormat::Fossil);
+    options
+}
+
+/// The keys with a base, sorted; `None` while delta is off.
+fn bases(machine: &Machine, id: SubscriptionId) -> Option<Vec<String>> {
+    let map = machine.subscriptions.by_id[&id].map.as_ref().unwrap();
+    map.bases.as_ref().map(|bases| {
+        let mut keys: Vec<String> = bases.keys().cloned().collect();
+        keys.sort();
+        keys
+    })
+}
+
+fn updates(actions: &[Action]) -> Vec<MapUpdate> {
+    events(actions)
+        .into_iter()
+        .filter_map(|(_, event)| match event {
+            MapSubscriptionEvent::Update(update) => Some(update),
+            _ => None,
+        })
+        .collect()
+}
+
+fn take_all(machine: &mut Machine, actions: &[Action]) {
+    for (event, _) in events(actions) {
+        machine.handle(Input::EventTaken(event));
+    }
+}
+
+fn delta_error(actions: &[Action]) -> Option<crate::ClientError> {
+    events(actions)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            MapSubscriptionEvent::Error(error) if error.kind == crate::ErrorKind::Delta => {
+                Some(error)
+            }
+            _ => None,
+        })
+}
+
+/// A map subscription with delta on, whose stream is open and whose sync
+/// of "a" and "b", both at version 1, was taken at epoch "e1" and offset 2.
+fn delta_synced() -> (Machine, TransportId, SubscriptionId) {
+    let (machine, transport) = connected();
+    delta_synced_on(machine, transport)
+}
+
+fn delta_synced_on(
+    mut machine: Machine,
+    transport: TransportId,
+) -> (Machine, TransportId, SubscriptionId) {
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":2,"state":[{},{}]"#,
+                whole("a", 1, 1),
+                whole("b", 1, 2)
+            ),
+        ),
+    ));
+    take_all(&mut machine, &live);
+    (machine, transport, id)
+}
+
+#[test]
+fn every_request_of_a_load_asks_for_delta() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let second = subscribe_sent(&machine.handle(frame(
+        transport,
+        &subscribe_reply(&first, r#""type":1,"phase":2,"epoch":"e1","offset":2"#),
+    )));
+
+    assert_eq!(first["subscribe"]["delta"], "fossil", "{first}");
+    assert_eq!(second["subscribe"]["delta"], "fossil", "{second}");
+}
+
+#[test]
+fn delta_and_a_tag_filter_are_refused_together() {
+    let (mut machine, _) = connected();
+    let mut options = delta_options();
+    options.common = options.common.tag_filter(crate::TagFilter::eq("t", "red"));
+
+    assert_eq!(
+        machine.add_map_subscription("scores".into(), options),
+        Err(SubscriptionError::TagFilterWithDelta)
+    );
+}
+
+fn page_then_live(delta: bool) -> Vec<u8> {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let stream = subscribe_sent(&machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"phase":2,"epoch":"e1","offset":1,"state":[{"key":"a","data":"{\"x\":1}","offset":1}]"#,
+        ),
+    )));
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &stream,
+            &format!(r#""type":1,"recoverable":true,"delta":{delta},"epoch":"e1","offset":1"#),
+        ),
+    ));
+    events(&live)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            MapSubscriptionEvent::Sync(entries) => Some(entries[0].data.clone()),
+            _ => None,
+        })
+        .expect("a sync")
+}
+
+#[test]
+fn page_data_is_unwrapped_only_when_the_live_reply_says_delta_is_on() {
+    assert_eq!(page_then_live(true), br#"{"x":1}"#);
+    assert_eq!(page_then_live(false), br#""{\"x\":1}""#);
+}
+
+#[test]
+fn a_catch_up_delta_applies_to_its_keys_state_entry_in_the_sync() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let stream = subscribe_sent(&machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"phase":2,"epoch":"e1","offset":1,"state":[{}]"#,
+                whole("a", 1, 1)
+            ),
+        ),
+    )));
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &stream,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":2,"publications":[{}]"#,
+                delta("a", 1, 2, 2)
+            ),
+        ),
+    ));
+
+    let entries = events(&live)
+        .into_iter()
+        .find_map(|(_, event)| match event {
+            MapSubscriptionEvent::Sync(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("a sync");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].data, value("a", 2));
+    assert_eq!(bases(&machine, id), Some(vec!["a".to_owned()]));
+}
+
+#[test]
+fn each_key_has_its_own_chain_and_the_statistics_count_full_and_delta_payloads() {
+    let (mut machine, transport, id) = delta_synced();
+
+    let first = machine.handle(frame(transport, &push(&delta("a", 1, 2, 3))));
+    take_all(&mut machine, &first);
+    let second = machine.handle(frame(transport, &push(&delta("b", 1, 2, 4))));
+    take_all(&mut machine, &second);
+    let third = machine.handle(frame(transport, &push(&delta("a", 2, 3, 5))));
+
+    assert_eq!(updates(&first)[0].data, value("a", 2));
+    assert_eq!(updates(&second)[0].data, value("b", 2));
+    assert_eq!(updates(&third)[0].data, value("a", 3));
+    let statistics = machine.delta_statistics(id).unwrap();
+    assert_eq!(statistics.full_payloads, 2);
+    assert_eq!(statistics.delta_payloads, 3);
+}
+
+#[test]
+fn a_removal_deletes_its_keys_base_and_the_next_value_comes_whole() {
+    let (mut machine, transport, id) = delta_synced();
+
+    let removed = machine.handle(frame(
+        transport,
+        &push(r#"{"key":"a","removed":true,"data":"","offset":3}"#),
+    ));
+    assert!(updates(&removed)[0].removed);
+    assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
+    take_all(&mut machine, &removed);
+
+    let set = machine.handle(frame(transport, &push(&whole("a", 5, 4))));
+
+    assert_eq!(updates(&set)[0].data, value("a", 5));
+    assert_eq!(
+        bases(&machine, id),
+        Some(vec!["a".to_owned(), "b".to_owned()])
+    );
+}
+
+#[test]
+fn a_delta_after_a_removal_fails_and_keeps_the_other_keys_bases() {
+    let (mut machine, transport, id) = delta_synced();
+    let removed = machine.handle(frame(
+        transport,
+        &push(r#"{"key":"a","removed":true,"data":"","offset":3}"#),
+    ));
+    take_all(&mut machine, &removed);
+
+    let failed = machine.handle(frame(transport, &push(&delta("a", 1, 2, 4))));
+
+    let error = delta_error(&failed).expect("a delta error");
+    assert_eq!(error.code, codes::error::DELTA);
+    assert!(updates(&failed).is_empty(), "{failed:?}");
+    assert!(
+        events(&failed).iter().any(|(_, event)| matches!(
+            event,
+            MapSubscriptionEvent::Subscribing { code, .. }
+                if *code == codes::subscribing::DELTA_ERROR
+        )),
+        "{failed:?}"
+    );
+    assert_eq!(unsubscribes(&failed), 1, "{failed:?}");
+    assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
+}
+
+#[test]
+fn a_corrupt_delta_drops_only_its_keys_base_and_resubscribes_recovering() {
+    let (mut machine, transport, id) = delta_synced();
+
+    let failed = machine.handle(frame(
+        transport,
+        &push(r#"{"key":"a","delta":true,"data":"not a delta","offset":3}"#),
+    ));
+
+    assert!(delta_error(&failed).is_some(), "{failed:?}");
+    assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
+    take_all(&mut machine, &failed);
+    let unsubscribe = sent(&failed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe");
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
+    ));
+    let again = machine.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    let request = &subscribe_sent(&again)["subscribe"];
+    assert_eq!(request["phase"], 1, "{request}");
+    assert_eq!(request["recover"], true, "{request}");
+    assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
+}
+
+#[test]
+fn a_recovering_resubscribe_keeps_the_bases_of_every_key() {
+    let (mut machine, transport, id) = delta_synced();
+    let (transport, recovering) = reconnect(&mut machine, transport);
+    let recovering = recovering.expect("a subscribe");
+    assert_eq!(recovering["subscribe"]["phase"], 1, "{recovering}");
+    assert_eq!(
+        bases(&machine, id),
+        Some(vec!["a".to_owned(), "b".to_owned()])
+    );
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"was_recovering":true,"recovered":true,"epoch":"e1","offset":4,"publications":[{},{}]"#,
+                whole("b", 2, 3),
+                delta("b", 2, 3, 4)
+            ),
+        ),
+    ));
+    let caught_up = updates(&live);
+    assert_eq!(caught_up[0].data, value("b", 2));
+    assert_eq!(caught_up[1].data, value("b", 3));
+    take_all(&mut machine, &live);
+
+    // "a" was not in the catch-up: its next delta is against the value held
+    // before the reconnect.
+    let pushed = machine.handle(frame(transport, &push(&delta("a", 1, 2, 5))));
+
+    assert_eq!(updates(&pushed)[0].data, value("a", 2));
+}
+
+/// Answers `request`, the first of a load from scratch, live with delta on
+/// and no entry, then pushes a delta of "a": it must fail for want of a
+/// base.
+fn assert_no_base_after_a_load_from_scratch(
+    machine: &mut Machine,
+    transport: TransportId,
+    id: SubscriptionId,
+    request: &Value,
+) {
+    assert_eq!(request["subscribe"]["phase"], 2, "{request}");
+    assert_eq!(bases(machine, id), None);
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            request,
+            r#""type":1,"recoverable":true,"delta":true,"epoch":"e2","offset":9"#,
+        ),
+    ));
+    take_all(machine, &live);
+    assert_eq!(bases(machine, id), Some(vec![]));
+
+    let failed = machine.handle(frame(transport, &push(&delta("a", 1, 2, 10))));
+
+    assert!(delta_error(&failed).is_some(), "{failed:?}");
+}
+
+#[test]
+fn error_112_drops_the_bases_and_the_next_load_starts_none() {
+    let (mut machine, transport, id) = delta_synced();
+    let (transport, recovering) = reconnect(&mut machine, transport);
+
+    machine.handle(frame(
+        transport,
+        &error_reply(&recovering.expect("a subscribe"), 112, false),
+    ));
+
+    assert_eq!(bases(&machine, id), None);
+    let again = machine.handle(Input::SubscriptionTimerFired(
+        id,
+        SubscriptionTimer::Resubscribe,
+    ));
+    assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &subscribe_sent(&again));
+}
+
+#[test]
+fn error_112_with_the_fatal_strategy_drops_the_bases_too() {
+    let (mut machine, transport) = connected();
+    let mut options = delta_options();
+    options.unrecoverable_strategy = UnrecoverableStrategy::Fatal;
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"state":[{}]"#,
+                whole("a", 1, 1)
+            ),
+        ),
+    ));
+    take_all(&mut machine, &live);
+    let (transport, recovering) = reconnect(&mut machine, transport);
+
+    machine.handle(frame(
+        transport,
+        &error_reply(&recovering.expect("a subscribe"), 112, false),
+    ));
+
+    assert_eq!(bases(&machine, id), None);
+}
+
+#[test]
+fn an_epoch_change_during_a_recovering_load_drops_the_bases() {
+    let (mut machine, transport, id) = delta_synced();
+    let (transport, recovering) = reconnect(&mut machine, transport);
+
+    let changed = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &recovering.expect("a subscribe"),
+            r#""type":1,"phase":1,"epoch":"other","offset":1"#,
+        ),
+    ));
+
+    assert_eq!(bases(&machine, id), None);
+    let unsubscribe = sent(&changed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe");
+    let again = subscribe_sent(&machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
+    )));
+    assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &again);
+}
+
+#[test]
+fn unsubscribe_2502_makes_the_next_load_start_with_no_base() {
+    let (mut machine, transport, id) = delta_synced();
+
+    let invalidated = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"scores","unsubscribe":{"code":2502,"reason":"state invalidated"}}}"#,
+    ));
+
+    take_all(&mut machine, &invalidated);
+    let request = subscribe_sent(&invalidated);
+    assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &request);
+}
+
+#[test]
+fn disconnect_3014_makes_the_next_load_start_with_no_base() {
+    let (mut machine, transport, id) = delta_synced();
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: Some(3014),
+        reason: "state invalidated".into(),
+    });
+    let transport =
+        opened(&machine.handle(Input::TimerFired(crate::machine::Timer::Reconnect))).unwrap();
+    let mut actions = machine.handle(Input::TransportOpened(transport));
+    let connect = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("connect").is_some())
+        .expect("a connect command");
+    actions.extend(machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"connect":{{"client":"c"}}}}"#, id_of(&connect)),
+    )));
+
+    let request = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some())
+        .expect("a subscribe");
+
+    assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &request);
+}
+
+#[test]
+fn a_sync_withdrawn_before_it_was_taken_makes_the_next_load_start_with_no_base() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let subscribed = machine.handle(Input::Subscribe(id));
+    let first = subscribe_sent(&subscribed);
+    take_all(&mut machine, &subscribed);
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"state":[{}]"#,
+                whole("a", 1, 1)
+            ),
+        ),
+    ));
+    for (event, what) in events(&live) {
+        if !matches!(what, MapSubscriptionEvent::Sync(_)) {
+            machine.handle(Input::EventTaken(event));
+        }
+    }
+    assert_eq!(bases(&machine, id), Some(vec!["a".to_owned()]));
+
+    // The application never took the sync: no position to recover from.
+    let unsubscribed = machine.handle(Input::Unsubscribe(id));
+    let unsubscribe = sent(&unsubscribed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe");
+    take_all(&mut machine, &unsubscribed);
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
+    ));
+    let subscribing = machine.handle(Input::Subscribe(id));
+    let request = subscribe_sent(&subscribing);
+    take_all(&mut machine, &subscribing);
+
+    assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &request);
+}
+
+#[test]
+fn a_delta_failing_in_the_live_reply_gives_no_sync_and_unsubscribes() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let failed = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            &format!(
+                r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"publications":[{}]"#,
+                delta("a", 1, 2, 1)
+            ),
+        ),
+    ));
+
+    assert!(delta_error(&failed).is_some(), "{failed:?}");
+    assert!(
+        !events(&failed)
+            .iter()
+            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Sync(_))),
+        "{failed:?}"
+    );
+    assert_eq!(unsubscribes(&failed), 1, "{failed:?}");
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Subscribing)
+    );
+}
+
+#[test]
+fn a_delta_rebuilding_past_the_inbound_limit_fails_and_keeps_no_base() {
+    let limit = 60;
+    let mut machine = Machine::new(Config::default().max_message_bytes(limit));
+    let transport = opened(&machine.handle(Input::Connect)).unwrap();
+    let connecting = machine.handle(Input::TransportOpened(transport));
+    let connect = sent(&connecting)
+        .into_iter()
+        .find(|command| command.get("connect").is_some())
+        .expect("a connect command");
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"connect":{{"client":"c"}}}}"#, id_of(&connect)),
+    ));
+    let (mut machine, transport, id) = delta_synced_on(machine, transport);
+    let big = "a".repeat(limit + 1).into_bytes();
+    let patch = wrapped(&crate::fossil::write(&value("a", 1), &big));
+
+    let failed = machine.handle(frame(
+        transport,
+        &push(&format!(
+            r#"{{"key":"a","delta":true,"data":{patch},"offset":3}}"#
+        )),
+    ));
+
+    let error = delta_error(&failed).expect("a delta error");
+    assert!(error.message.contains("inbound message limit"), "{error:?}");
+    assert_eq!(bases(&machine, id), Some(vec!["b".to_owned()]));
+}
+
+#[test]
+fn a_delta_while_delta_is_off_fails() {
+    let (mut machine, transport, id) = synced();
+    assert_eq!(bases(&machine, id), None);
+
+    let failed = machine.handle(frame(transport, &push(&delta("a", 1, 2, 8))));
+
+    assert!(delta_error(&failed).is_some(), "{failed:?}");
+    assert!(updates(&failed).is_empty(), "{failed:?}");
+}
+
+#[test]
+fn an_entry_without_a_value_stays_empty_with_delta_on() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_map_subscription("scores".into(), delta_options())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let live = machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"recoverable":true,"delta":true,"epoch":"e1","offset":1,"state":[{"key":"u1","offset":1}]"#,
+        ),
+    ));
+
+    assert_eq!(sync_keys(&live), ["u1"]);
+    assert!(delta_error(&live).is_none(), "{live:?}");
 }

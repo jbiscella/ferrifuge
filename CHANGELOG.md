@@ -22,6 +22,12 @@ repository held while it carried that version, from the blocks of
   subscription with `unsubscribed` 112 with `UnrecoverableStrategy::Fatal`.
   2502, 3014 and `set_tag_filter` drop a map subscription's position, and
   2502 and 3014 its token.
+- Unstable (`unstable` feature): per-key delta and tag filters on map
+  subscriptions (Block 45d). `MapSubscriptionBuilder::delta` asks for
+  per-key Fossil deltas: the client keeps a base per key, across a
+  recovering resubscribe and not across a load from scratch, and delivers
+  whole values; `MapSubscription::delta_statistics`,
+  `MapSubscription::set_tag_filter`.
 
 ## [0.21.0] - 2026-11-09
 

@@ -2323,7 +2323,11 @@ async fn sets_a_big_key_while_away(world: &mut ClientWorld, key: String) {
     regex = r#"^the server API sets key "(\w+)", changing one byte, once the map subscription is subscribed again$"#
 )]
 async fn sets_a_big_key_once_subscribed(world: &mut ClientWorld, key: String) {
-    world.map_ready().await;
+    // Past the recovery: the catch-up's own change has come, so this one
+    // goes out live, and not as the first of its key in the catch-up.
+    let events = world.map_events_until("subscribed").await;
+    world.maps.seen.extend(events);
+    next_kept_update(world).await;
     world.set_big_value(&key, 2).await;
 }
 
@@ -2331,13 +2335,23 @@ async fn sets_a_big_key_once_subscribed(world: &mut ClientWorld, key: String) {
     regex = r#"^the map subscription emits "subscribed" with recovered true and delta true, an update of "(\w+)", then an update of "(\w+)"$"#
 )]
 async fn recovered_with_delta(world: &mut ClientWorld, first: String, second: String) {
-    let events = world.map_events_until("subscribed").await;
-    let Some(MapSubscriptionEvent::Subscribed(subscribed)) = events.last() else {
-        unreachable!();
-    };
+    let subscribed = world.maps.seen.iter().find_map(|event| match event {
+        MapSubscriptionEvent::Subscribed(subscribed) => Some(subscribed.clone()),
+        _ => None,
+    });
+    let subscribed = subscribed.expect("a subscribed event");
     assert!(subscribed.recovered && subscribed.delta, "{subscribed:?}");
-    assert_eq!(next_kept_update(world).await.key, first);
-    assert_eq!(next_kept_update(world).await.key, second);
+    next_kept_update(world).await;
+    let keys: Vec<&str> = world
+        .maps
+        .seen
+        .iter()
+        .filter_map(|event| match event {
+            MapSubscriptionEvent::Update(update) => Some(update.key.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys, [first.as_str(), second.as_str()]);
 }
 
 #[then("each update's data equals, byte for byte, what was set")]
