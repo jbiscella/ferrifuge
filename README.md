@@ -882,6 +882,7 @@ let config = Config::default()
 | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider; builds with a C compiler |
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
+| `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -910,6 +911,36 @@ refresh jitter) start from a constant, because fastrand has no entropy
 source there without its `js` feature. Every machine of a page, and the n-th
 machine of every page, draws the same delays until the browser adapter
 enables that feature.
+
+### Cookies
+
+With the `cookies` feature, a client keeps the cookies a load balancer or
+gateway sets (session affinity, an auth session) and sends them back, as a
+browser does for centrifuge-js:
+
+```rust
+use std::sync::Arc;
+use ferrifuge::{Client, MemoryJar};
+
+let jar = Arc::new(MemoryJar::new());
+let client = Client::builder("wss://example.com/connection/websocket")
+    .cookie_jar(jar.clone())
+    .build()?;
+```
+
+- The websocket upgrade sends the jar's cookies, and the cookies of its
+  response, a refused upgrade's included, go into the jar. A proxy's 407
+  response sets none, and no proxy is sent them.
+- A `Cookie` header given in `http_headers` and the jar's cookies go in one
+  header, the application's pairs first; a jar cookie of the same name is
+  left out.
+- The jar sees `ws://` and `wss://` URLs as `http://` and `https://`, so
+  `HttpOnly` and `Secure` cookies work, and never sees the URL's query.
+- `MemoryJar` keeps cookies for the life of the process, takes at most 3000
+  cookies of at most 4096 bytes each, and does no public-suffix check. An
+  application that needs one, or cookies that outlive the process,
+  implements `CookieJar` over its own store; its method set is reqwest's
+  `CookieStore`'s, so one jar can serve both clients.
 
 ### Testing your application
 
@@ -1184,8 +1215,11 @@ entries and exits show at TRACE under the target `tracing::span::active`.
 
 Keep Ferrifuge's dependencies at INFO or above in production: they log on
 their own, through `log`. At TRACE, tungstenite 0.30 logs the whole
-websocket upgrade request, its query and header values included, and every
-frame sent and received, the connect frame with its token.
+websocket upgrade request, its query and header values included (the
+`Cookie` header of a client with a cookie jar among them), and every frame
+sent and received, the connect frame with its token. reqwest's own `Jar`,
+if an application uses one, logs cookie values at DEBUG; `MemoryJar` logs
+none.
 rustls-platform-verifier logs each failed verification at ERROR, with no
 secret. A `tracing` application sees those dependency records only through
 `tracing-log`.

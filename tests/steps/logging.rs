@@ -202,7 +202,7 @@ fn json_string(text: &str) -> Vec<u8> {
 }
 
 /// Registers the scenario's client for the capture.
-fn captured(world: &mut ClientWorld) -> u64 {
+pub(super) fn captured(world: &mut ClientWorld) -> u64 {
     let number = world.client().log_number();
     logs::register(number);
     world.logging.clients.push(number);

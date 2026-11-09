@@ -660,6 +660,19 @@ const TEST_CA_MARKER: &str = "FERRIFUGE_TEST_CA";
 /// not committed, until used.
 const RUNNER_STACK: usize = 32 << 20;
 
+/// Block 43a: the cookie jar on the websocket upgrade, run only when the
+/// BDD binary is built with `cookies` (Block 43, D8).
+#[cfg(feature = "cookies")]
+const COOKIES: &[&str] = &[
+    "A cookie set on the websocket upgrade is sent on the next connection",
+    "A cookie set on a refused upgrade is sent on the next attempt",
+    "The app's Cookie header and the jar's cookies are sent in one header",
+    "Without a cookie jar no cookie is kept",
+    "No cookie value reaches a log record",
+];
+#[cfg(not(feature = "cookies"))]
+const COOKIES: &[&str] = &[];
+
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
 /// (Block 41, D8): none since 41d ran `@thread`.
 const EXAMPLES_NOT_YET: &[&str] = &[];
@@ -783,7 +796,8 @@ async fn run_scenarios() {
             // @P runs outside cucumber (Block 0, "Test layers"); a scenario
             // also tagged with a cucumber layer runs in that layer.
             let p_only = !scenario.tags.is_empty() && scenario.tags.iter().all(|tag| tag == "P");
-            IMPLEMENTED.contains(&scenario.name.as_str())
+            (IMPLEMENTED.contains(&scenario.name.as_str())
+                || COOKIES.contains(&scenario.name.as_str()))
                 && !p_only
                 && !scenario
                     .tags

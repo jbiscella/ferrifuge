@@ -65,6 +65,13 @@ const PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Default)]
 struct State {
+    /// The Cookie header values of each upgrade request, in order (Block
+    /// 43).
+    upgrade_cookies: Vec<Vec<String>>,
+    /// The Set-Cookie values every accepted upgrade's response carries.
+    upgrade_set_cookies: Vec<String>,
+    /// The status and Set-Cookie value the next upgrade is refused with.
+    refuse_next_upgrade: Option<(u16, String)>,
     /// Instructions to the latest connection, if one is open.
     current: Option<mpsc::UnboundedSender<Control>>,
     /// What the latest connection writes, in order. Frames the server sends
@@ -234,11 +241,36 @@ impl FakeServer {
                     continue;
                 }
                 let mut protobuf = false;
+                let cookies = Arc::clone(&shared);
                 // The callback's error type is tungstenite's, not ours.
                 #[allow(clippy::result_large_err)]
                 let accepted = tokio_tungstenite::accept_hdr_async(
                     tcp,
                     |request: &Request, mut response: Response| {
+                        let mut state = cookies.lock().unwrap();
+                        state.upgrade_cookies.push(
+                            request
+                                .headers()
+                                .get_all("cookie")
+                                .iter()
+                                .filter_map(|value| value.to_str().ok().map(str::to_owned))
+                                .collect(),
+                        );
+                        if let Some((status, cookie)) = state.refuse_next_upgrade.take() {
+                            let refused = tokio_tungstenite::tungstenite::http::Response::builder()
+                                .status(status)
+                                .header("set-cookie", cookie)
+                                .body(None)
+                                .expect("a refusal");
+                            return Err(refused);
+                        }
+                        for cookie in &state.upgrade_set_cookies {
+                            response.headers_mut().append(
+                                "set-cookie",
+                                HeaderValue::from_str(cookie).expect("a cookie"),
+                            );
+                        }
+                        drop(state);
                         protobuf = asks_for_protobuf(request);
                         if protobuf {
                             response.headers_mut().insert(
@@ -414,6 +446,23 @@ impl FakeServer {
     /// (Block 37b).
     pub(crate) fn protobuf_upgrades(&self) -> Vec<bool> {
         self.state.lock().unwrap().protobuf_upgrades.clone()
+    }
+
+    /// Makes every accepted upgrade's response set `cookies` (Block 43).
+    pub(crate) fn set_cookies_on_upgrades(&self, cookies: &[&str]) {
+        self.state.lock().unwrap().upgrade_set_cookies =
+            cookies.iter().map(|cookie| (*cookie).to_owned()).collect();
+    }
+
+    /// Refuses the next upgrade with `status`, its response setting
+    /// `cookie` (Block 43).
+    pub(crate) fn refuse_next_upgrade(&self, status: u16, cookie: &str) {
+        self.state.lock().unwrap().refuse_next_upgrade = Some((status, cookie.to_owned()));
+    }
+
+    /// The Cookie header values of each upgrade request so far, in order.
+    pub(crate) fn upgrade_cookies(&self) -> Vec<Vec<String>> {
+        self.state.lock().unwrap().upgrade_cookies.clone()
     }
 
     /// When each JSON connect reply went out, in order.
