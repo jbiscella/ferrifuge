@@ -25,11 +25,12 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features and test-util on one target: never
-# fips, whose build needs Go and CMake (Block 20, D7; Block 37, D7).
+# docs.rs builds the default features, test-util and cookies on one
+# target: never fips, whose build needs Go and CMake (Block 20, D7; Block
+# 37, D7; Block 43, D8).
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
-features = ["test-util"]
+features = ["test-util", "cookies"]
 
 [features]
 default = ["tokio", "ring"]
@@ -63,6 +64,9 @@ ring = ["rustls?/ring"]
 aws-lc-rs = ["rustls?/aws-lc-rs"]
 # aws-lc-rs in FIPS mode; building it needs CMake and Go.
 fips = ["aws-lc-rs", "rustls?/fips"]
+# An opt-in cookie jar of the tokio adapter (Block 43): CookieJar,
+# MemoryJar and ClientBuilder::cookie_jar. Not a default.
+cookies = ["tokio", "dep:cookie_store", "dep:url"]
 # Constructors of the events and results the client yields, for an
 # application's tests (Block 37). Not a default.
 test-util = ["tokio?/io-util"]
@@ -99,6 +103,11 @@ sse-core = { version = "0.2.3", default-features = false, features = ["std"], op
 tokio-util = { version = "0.7.20", default-features = false, features = ["codec"], optional = true }
 bytes = { version = "1.12.1", optional = true }
 mediatype = { version = "0.23.0", optional = true }
+# The cookie jar (Block 43, D1): no default feature, so no public-suffix
+# list and no serde; url at reqwest's version, the type cookie_store and
+# CookieJar take.
+cookie_store = { version = "0.22.1", default-features = false, optional = true }
+url = { version = "2.5.8", optional = true }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }

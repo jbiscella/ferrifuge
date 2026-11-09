@@ -61,8 +61,16 @@ pub(crate) enum Inbound {
 }
 
 /// The message of a failed upgrade, naming a captive portal when its page
-/// answered instead of the server (Block 25, D8).
-fn handshake_error(error: &tokio_tungstenite::tungstenite::Error) -> String {
+/// answered instead of the server (Block 25, D8). The cookies a refused
+/// upgrade's response sets are kept (Block 43, D2).
+fn handshake_error(
+    error: &tokio_tungstenite::tungstenite::Error,
+    url: &str,
+    network: &Network,
+) -> String {
+    if let tokio_tungstenite::tungstenite::Error::Http(response) = error {
+        network.store_cookies(url, response.status().as_u16(), response.headers());
+    }
     let portal = match error {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             let content_type = response
@@ -119,16 +127,19 @@ impl WebSocket {
             let value = HeaderValue::from_str(subprotocol).map_err(|e| e.to_string())?;
             request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
         }
+        // With the application's Cookie, in one header (Block 43, D3).
+        network.add_cookies(url, request.headers_mut());
         // tungstenite fails the handshake unless the server accepts the
         // subprotocol asked for.
-        let (stream, _) = tokio_tungstenite::client_async_tls_with_config(
+        let (stream, response) = tokio_tungstenite::client_async_tls_with_config(
             request,
             stream,
             Some(websocket_config(max_message)),
             Some(connector),
         )
         .await
-        .map_err(|error| handshake_error(&error))?;
+        .map_err(|error| handshake_error(&error, url, network))?;
+        network.store_cookies(url, response.status().as_u16(), response.headers());
         Ok(Self {
             stream,
             queue: VecDeque::new(),
