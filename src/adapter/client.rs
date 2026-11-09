@@ -3929,6 +3929,62 @@ mod tests {
         );
     }
 
+    // Block 45, D8: the map calls carry their channel and key to the wire,
+    // and the empty publish result resolves them.
+    #[cfg(feature = "unstable")]
+    #[tokio::test]
+    async fn map_calls_send_their_channel_and_key() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (publishes, mut received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(Message::Text(frame))) = ws.next().await {
+                for line in frame.as_str().lines() {
+                    let command: serde_json::Value = serde_json::from_str(line).unwrap();
+                    let id = &command["id"];
+                    if command.get("connect").is_some() {
+                        let reply = format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#);
+                        ws.send(Message::text(reply)).await.unwrap();
+                    } else if let Some(publish) = command.get("publish") {
+                        publishes.send(publish.clone()).unwrap();
+                        let reply = format!(r#"{{"id":{id},"publish":{{}}}}"#);
+                        ws.send(Message::text(reply)).await.unwrap();
+                    }
+                }
+            }
+        });
+        let client = Client::new(endpoint, Config::default()).unwrap();
+        client.connect();
+
+        client
+            .map_publish("map:a", "k1", br#"{"x":1}"#.to_vec())
+            .await
+            .unwrap();
+        client.map_remove("map:a", "k2").await.unwrap();
+        client
+            .map_publish_json("map:b", "k3", &serde_json::json!({"y": 2}))
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(received.recv().await.unwrap());
+        }
+        assert_eq!(
+            seen,
+            [
+                serde_json::json!({"channel": "map:a", "data": {"x": 1}, "type": 1, "key": "k1"}),
+                serde_json::json!({"channel": "map:a", "type": 1, "key": "k2", "removed": true}),
+                serde_json::json!({"channel": "map:b", "data": {"y": 2}, "type": 1, "key": "k3"}),
+            ]
+        );
+    }
+
     // Block 32, D2: the next attempt's upgrade request carries the new set.
     #[tokio::test]
     async fn the_next_upgrade_request_carries_the_new_set() {
