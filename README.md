@@ -440,6 +440,27 @@ callback replaces. A load that fails with a temporary error (113
 "concurrent pagination", say) is unsubscribed on the server first, then
 starts again after the backoff.
 
+`.tag_filter(filter)` limits the state and the changes to the keys a filter
+matches, on namespaces with `allow_tags_filter`; offsets then skip what the
+filter left out, which is no gap. `set_tag_filter` applies from the next
+subscribe, which loads the state through the new filter.
+
+`.delta(DeltaFormat::Fossil)` asks for per-key deltas, on namespaces with
+`allowed_delta_types` (`delta_publish` sends every change as a delta): each
+key's chain is separate, and the application gets whole values, byte for
+byte, in `Sync` and `Update`. `Subscribed::delta` says whether the server
+agreed, and `delta_statistics()` what it saved. The client holds a base per
+key, one copy of every key's value, each within `max_message_bytes`, as long
+as delta is on: account for it next to the `Sync`. A recovering subscribe
+keeps the bases, since the next delta of a key the catch-up did not touch
+applies to the value held before the reconnect; a load from scratch drops
+them. A removal deletes its key's base, and the key's next value comes
+whole. A delta that cannot be applied emits an `error` event
+(`ErrorKind::Delta`, code 15) and `subscribing` code 2, then the subscription
+recovers after the resubscribe backoff, the other keys' bases kept. Delta
+and a tag filter cannot go together: `build()` and `set_tag_filter` refuse
+it.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it

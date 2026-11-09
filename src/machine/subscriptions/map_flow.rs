@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use super::super::delivery::Owner;
 use super::super::{Action, Anomaly, Machine, MapSubscriptionOptions, SubscriptionId};
+use crate::codec::Codec;
+use crate::fossil::{self, DeltaError};
 use crate::token::Secret;
 use crate::wire::{CHANNEL_COMPACTION, Command, Method, Reply, ReplyResult, SubscribeRequest};
 use crate::{
@@ -46,6 +48,9 @@ pub(in crate::machine) struct MapFlow {
     max_state_bytes: usize,
     strategy: UnrecoverableStrategy,
     load: Option<Load>,
+    /// What each key's next delta applies to, while the last live reply
+    /// has delta on; `None` while it is off (D9).
+    bases: Option<HashMap<String, Vec<u8>>>,
 }
 
 /// A load of the state: the request in flight and what the pages read so
@@ -61,11 +66,10 @@ struct Load {
     /// for the whole load; stream pages move the offset (D4).
     epoch: Option<String>,
     offset: u64,
-    /// The entries so far, by key: a key keeps the place of its first
-    /// appearance, a removal empties its place, and a key set again after a
-    /// removal goes last (D4).
-    entries: Vec<Option<Publication>>,
-    index: HashMap<String, usize>,
+    /// The state entries and catch-up publications so far, in order and
+    /// as received: only the live reply says whether delta is on, and so
+    /// how to read them (D9).
+    items: Vec<Publication>,
     /// Bytes of the page replies read (D5).
     bytes: usize,
     /// A reply of this load was a page: the server holds a reservation, so
@@ -84,8 +88,7 @@ impl Default for Load {
             asked_cursor: String::new(),
             epoch: None,
             offset: 0,
-            entries: Vec::new(),
-            index: HashMap::new(),
+            items: Vec::new(),
             bytes: 0,
             paged: false,
             recovering: false,
@@ -106,45 +109,112 @@ impl Load {
         }
     }
 
-    /// Takes a catch-up publication: kept in order when recovering, applied
-    /// to the state otherwise.
+    /// Takes a catch-up publication: kept apart when recovering, with the
+    /// state otherwise.
     fn catch_up(&mut self, publication: Publication) {
         if self.recovering {
             self.catch_up.push(publication);
         } else {
-            self.apply(publication);
+            self.items.push(publication);
         }
     }
+}
 
-    /// Applies a state entry or a catch-up publication by key: the last
-    /// value wins, a removal deletes the key.
-    fn apply(&mut self, publication: Publication) {
+/// The state `items` make, by key: the last value wins, a removal deletes
+/// the key, a key keeps the place of its first appearance, and a key set
+/// again after a removal goes last (D4).
+fn state_of(items: Vec<Publication>) -> Vec<MapEntry> {
+    let mut entries: Vec<Option<Publication>> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for publication in items {
         let (key, removed) = publication
             .map
             .as_ref()
             .map_or(("", false), |map| (map.key.as_str(), map.removed));
-        let place = self.index.get(key).copied();
+        let place = index.get(key).copied();
         if removed {
             if let Some(place) = place {
-                self.entries[place] = None;
-                self.index.remove(key);
+                entries[place] = None;
+                index.remove(key);
             }
-            return;
-        }
-        if let Some(place) = place {
-            self.entries[place] = Some(publication);
+        } else if let Some(place) = place {
+            entries[place] = Some(publication);
         } else {
-            self.index.insert(key.to_owned(), self.entries.len());
-            self.entries.push(Some(publication));
+            index.insert(key.to_owned(), entries.len());
+            entries.push(Some(publication));
+        }
+    }
+    entries.into_iter().flatten().map(MapEntry::from).collect()
+}
+
+/// How payloads are rebuilt while delta is on.
+#[derive(Clone, Copy)]
+struct Rebuild {
+    codec: Codec,
+    /// What one rebuilt value may reach (Block 19, D6).
+    limit: usize,
+}
+
+impl Rebuild {
+    /// Makes `publication`'s data its key's whole value and that value the
+    /// key's base; a removal deletes the base (D9). On failure the key's
+    /// base is gone too: its next value comes whole in the catch-up.
+    fn apply(
+        self,
+        bases: &mut HashMap<String, Vec<u8>>,
+        publication: &mut Publication,
+        statistics: &mut Option<Box<crate::DeltaStatistics>>,
+    ) -> Result<(), DeltaError> {
+        let Some(map) = publication.map.as_ref() else {
+            return Ok(());
+        };
+        if map.removed {
+            bases.remove(&map.key);
+            return Ok(());
+        }
+        let key = map.key.clone();
+        let rebuilt = self.rebuild(bases, &key, publication, statistics);
+        match rebuilt {
+            Ok(data) => {
+                bases.insert(key, data.clone());
+                publication.data = data;
+                publication.delta = false;
+                Ok(())
+            }
+            Err(error) => {
+                bases.remove(&key);
+                Err(error)
+            }
         }
     }
 
-    fn into_entries(self) -> Vec<MapEntry> {
-        self.entries
-            .into_iter()
-            .flatten()
-            .map(MapEntry::from)
-            .collect()
+    fn rebuild(
+        self,
+        bases: &HashMap<String, Vec<u8>>,
+        key: &str,
+        publication: &mut Publication,
+        statistics: &mut Option<Box<crate::DeltaStatistics>>,
+    ) -> Result<Vec<u8>, DeltaError> {
+        // An entry with no value (a `map_users` entry) has nothing to
+        // unwrap.
+        if publication.data.is_empty() && !publication.delta {
+            return Ok(Vec::new());
+        }
+        let payload = self
+            .codec
+            .delta_payload(std::mem::take(&mut publication.data))
+            .ok_or(DeltaError::NotAString)?;
+        let received = payload.len();
+        let data = if publication.delta {
+            let base = bases.get(key).ok_or(DeltaError::NoBase)?;
+            fossil::apply(base, &payload, self.limit)?
+        } else {
+            payload
+        };
+        statistics
+            .get_or_insert_default()
+            .count(publication.delta, received, data.len());
+        Ok(data)
     }
 }
 
@@ -165,11 +235,19 @@ enum Next {
     /// The live reply of a load that recovered, with its catch-up
     /// publications in order (D4, D6).
     Recovered(Vec<Publication>),
+    /// The live reply's payloads could not be rebuilt (D9).
+    DeltaFailed(DeltaError),
 }
 
 impl MapFlow {
     /// Applies `result`, `size` bytes as read, to the load in progress.
-    fn next(&mut self, result: &mut crate::wire::SubscribeResult, size: usize) -> Next {
+    fn next(
+        &mut self,
+        result: &mut crate::wire::SubscribeResult,
+        size: usize,
+        rebuild: Rebuild,
+        statistics: &mut Option<Box<crate::DeltaStatistics>>,
+    ) -> Next {
         let max_state_bytes = self.max_state_bytes;
         let load = self.load.get_or_insert_with(Load::default);
         if result.kind != MAP_TYPE {
@@ -185,6 +263,8 @@ impl MapFlow {
             .is_some_and(|kept| *kept != result.epoch)
         {
             self.load = None;
+            // The values of another stream's epoch (D6, D9).
+            self.bases = None;
             return Next::EpochChanged;
         }
         // The live reply's state and catch-up go into the same `Sync`, so
@@ -203,9 +283,7 @@ impl MapFlow {
         }
         match result.phase {
             STATE => {
-                for entry in std::mem::take(&mut result.state) {
-                    load.apply(entry);
-                }
+                load.items.append(&mut result.state);
                 // The next state page, or the stream from the first page's
                 // offset once the state is read.
                 if result.cursor.is_empty() {
@@ -225,22 +303,68 @@ impl MapFlow {
             }
             _ => {
                 let mut load = self.load.take().unwrap_or_default();
-                for entry in std::mem::take(&mut result.state) {
-                    load.apply(entry);
-                }
+                load.items.append(&mut result.state);
                 for publication in std::mem::take(&mut result.publications) {
                     load.catch_up(publication);
+                }
+                if let Err(error) = self.rebuild_load(&mut load, result.delta, rebuild, statistics)
+                {
+                    return Next::DeltaFailed(error);
                 }
                 if load.recovering && result.recovered {
                     return Next::Recovered(load.catch_up);
                 }
                 // A recovery the server did not complete: the catch-up is all
                 // the state there is, so the application gets it whole.
-                for publication in std::mem::take(&mut load.catch_up) {
-                    load.apply(publication);
-                }
-                Next::Live(load.into_entries())
+                load.items.append(&mut load.catch_up);
+                Next::Live(state_of(load.items))
             }
+        }
+    }
+
+    /// Rebuilds what `load` read, now that the live reply says whether
+    /// `delta` is on (D9): with delta on, each key's chain starts from the
+    /// bases this load kept, none for a load from scratch; with it off the
+    /// data stays as received and no base is kept.
+    fn rebuild_load(
+        &mut self,
+        load: &mut Load,
+        delta: bool,
+        rebuild: Rebuild,
+        statistics: &mut Option<Box<crate::DeltaStatistics>>,
+    ) -> Result<(), DeltaError> {
+        if !delta {
+            self.bases = None;
+            return if load
+                .items
+                .iter()
+                .chain(&load.catch_up)
+                .any(|publication| publication.delta)
+            {
+                Err(DeltaError::NotOn)
+            } else {
+                Ok(())
+            };
+        }
+        let bases = self.bases.get_or_insert_default();
+        for publication in load.items.iter_mut().chain(&mut load.catch_up) {
+            rebuild.apply(bases, publication, statistics)?;
+        }
+        Ok(())
+    }
+
+    /// Rebuilds a publication pushed live: against its key's base while
+    /// delta is on (D9).
+    fn rebuild_live(
+        &mut self,
+        publication: &mut Publication,
+        rebuild: Rebuild,
+        statistics: &mut Option<Box<crate::DeltaStatistics>>,
+    ) -> Result<(), DeltaError> {
+        match &mut self.bases {
+            Some(bases) => rebuild.apply(bases, publication, statistics),
+            None if publication.delta => Err(DeltaError::NotOn),
+            None => Ok(()),
         }
     }
 
@@ -289,8 +413,8 @@ impl Machine {
     /// # Errors
     ///
     /// When the registry holds a subscription to `channel` already, of
-    /// either kind; for a tag filter the server would refuse (Block 35,
-    /// D1).
+    /// either kind; for a tag filter the server would refuse, or one with
+    /// delta (Block 35, D1).
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn add_map_subscription(
         &mut self,
@@ -311,10 +435,6 @@ impl Machine {
         common.positioned = false;
         common.recoverable = false;
         common.join_leave = false;
-        // Not negotiated until per-key delta bases decode the payloads
-        // (Block 45 D9, 45d): a patch must never reach the application as
-        // a value (Codex, #198).
-        common.delta = None;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.map = Some(Box::new(MapFlow {
@@ -323,6 +443,7 @@ impl Machine {
                 max_state_bytes: max_state_bytes.get(),
                 strategy: unrecoverable_strategy,
                 load: None,
+                bases: None,
             }));
         }
         Ok(id)
@@ -373,6 +494,10 @@ impl Machine {
         let map = sub.map.as_mut()?;
         let kind = map.kind.wire();
         let limit = i32::try_from(map.page_size).unwrap_or(i32::MAX);
+        // A load from scratch starts no chain from what came before (D9).
+        if map.load.is_none() && recover_from.is_none() {
+            map.bases = None;
+        }
         let load = map
             .load
             .get_or_insert_with(|| recover_from.map_or_else(Load::default, Load::recovering));
@@ -402,6 +527,7 @@ impl Machine {
     /// The reply to the current subscribe command of map subscription
     /// `id`, its error or its result, `size` bytes as read (D4, D5, D15).
     pub(super) fn map_subscribe_reply(&mut self, id: SubscriptionId, reply: Reply, size: usize) {
+        let rebuild = self.rebuild();
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
@@ -425,7 +551,7 @@ impl Machine {
         let Some(map) = sub.map.as_mut() else {
             return;
         };
-        let next = map.next(&mut result, size);
+        let next = map.next(&mut result, size, rebuild, &mut sub.delta_statistics);
         let fatal = map.strategy == UnrecoverableStrategy::Fatal;
         match next {
             Next::NotSupported => {
@@ -483,6 +609,7 @@ impl Machine {
             Next::Request => self.send_subscribe(id, None),
             Next::Live(entries) => self.map_live(id, result, entries),
             Next::Recovered(publications) => self.map_recovered(id, result, publications),
+            Next::DeltaFailed(error) => self.delta_failed(id, error),
         }
     }
 
@@ -494,16 +621,24 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        let fatal = sub
-            .map
-            .as_ref()
-            .is_some_and(|map| map.strategy == UnrecoverableStrategy::Fatal);
+        let fatal = sub.map.as_mut().is_some_and(|map| {
+            // Whatever comes next, these values have no stream (D9).
+            map.bases = None;
+            map.strategy == UnrecoverableStrategy::Fatal
+        });
         if fatal {
             return self.set_unsubscribed(id, UNRECOVERABLE_POSITION, reason, false);
         }
         sub.forget_position();
         self.withdraw(&Owner::Client(id));
         self.schedule_resubscribe(id);
+    }
+
+    fn rebuild(&self) -> Rebuild {
+        Rebuild {
+            codec: self.codec,
+            limit: self.config.max_message_bytes,
+        }
     }
 
     /// The live reply of map subscription `id` (D4): subscribed, then the
@@ -644,7 +779,7 @@ impl Machine {
 
     /// A publication pushed to map subscription `id`: an update of its key,
     /// which moves the position once taken (D5).
-    pub(super) fn map_publication(&mut self, id: SubscriptionId, publication: Publication) {
+    pub(super) fn map_publication(&mut self, id: SubscriptionId, mut publication: Publication) {
         if publication
             .map
             .as_ref()
@@ -658,6 +793,14 @@ impl Machine {
                     }));
             }
             return self.reconnect_after_transport_closed();
+        }
+        let rebuild = self.rebuild();
+        if let Some(sub) = self.subscriptions.by_id.get_mut(&id)
+            && let Some(map) = sub.map.as_mut()
+            && let Err(error) =
+                map.rebuild_live(&mut publication, rebuild, &mut sub.delta_statistics)
+        {
+            return self.delta_failed(id, error);
         }
         // No position is kept for a map the server does not recover
         // (ephemeral mode, D5).
