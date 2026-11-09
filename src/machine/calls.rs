@@ -50,9 +50,13 @@ struct Call {
     /// The subscription of a subscription-level call.
     subscription: Option<SubscriptionId>,
     phase: Phase,
-    /// For the internal call of a trailing send (Block 46, D4): the calls it
-    /// settles, in the order they were made; empty for any other call.
+    /// The calls that follow its result, in the order they were made (Block
+    /// 46, D4, D12): those of a trailing send, or of a remove that closed
+    /// their window; empty for any other call.
     followers: Vec<CallId>,
+    /// No owner awaits it (Block 46, D4): a trailing send, or a remove whose
+    /// owner dropped it while publishes still follow it (D11).
+    internal: bool,
 }
 
 /// The calls not yet settled, in the order they were added.
@@ -171,6 +175,7 @@ impl Machine {
                 subscription,
                 phase: Phase::Added,
                 followers: Vec::new(),
+                internal: false,
             },
         );
         id
@@ -185,6 +190,16 @@ impl Machine {
         waiters: Vec<CallId>,
     ) {
         let id = self.insert_call(request, Some(subscription));
+        if let Some(call) = self.calls.by_id.get_mut(&id) {
+            call.internal = true;
+        }
+        self.follow_call(id, waiters);
+        self.hand_off(id);
+    }
+
+    /// `waiters` settle with the result of call `id` from now on (Block 46,
+    /// D4, D12).
+    pub(super) fn follow_call(&mut self, id: CallId, waiters: Vec<CallId>) {
         for waiter in &waiters {
             if let Some(call) = self.calls.by_id.get_mut(waiter) {
                 call.phase = Phase::Following(id);
@@ -193,16 +208,36 @@ impl Machine {
         if let Some(call) = self.calls.by_id.get_mut(&id) {
             call.followers = waiters;
         }
-        self.hand_off(id);
     }
 
-    /// The subscription and key call `id` is debounced by, if its publish
-    /// meets the gate (Block 46, D3): the key `""` of a stream subscription
-    /// (46b adds the map keys).
-    pub(super) fn debounce_key(&self, id: CallId) -> Option<(SubscriptionId, String)> {
-        let call = self.calls.by_id.get(&id)?;
-        let subscription = call.subscription?;
-        matches!(call.request, CallRequest::Publish { .. }).then(|| (subscription, String::new()))
+    /// The subscription of call `id` when it has a debounce interval (Block
+    /// 46, D3): nothing else is looked at for the others.
+    pub(super) fn debounced_subscription(&self, id: CallId) -> Option<SubscriptionId> {
+        let subscription = self.calls.by_id.get(&id)?.subscription?;
+        self.has_debounce_interval(subscription)
+            .then_some(subscription)
+    }
+
+    /// The key of a publish that meets the gate (Block 46, D3, D12): the
+    /// map key, or `""` on a stream subscription; `None` for any other
+    /// request.
+    pub(super) fn debounce_key(&self, id: CallId) -> Option<String> {
+        match &self.calls.by_id.get(&id)?.request {
+            CallRequest::Publish { .. } => Some(String::new()),
+            #[cfg(feature = "unstable")]
+            CallRequest::MapPublish { key, .. } => Some(key.clone()),
+            _ => None,
+        }
+    }
+
+    /// The key of a remove that meets the gate (Block 46, D12), `None` for
+    /// any other request.
+    #[cfg(feature = "unstable")]
+    pub(super) fn map_remove_key(&self, id: CallId) -> Option<String> {
+        match &self.calls.by_id.get(&id)?.request {
+            CallRequest::MapRemove { key, .. } => Some(key.clone()),
+            _ => None,
+        }
     }
 
     /// Call `id` waits in the window of `timer` (Block 46, D3): its
@@ -224,16 +259,16 @@ impl Machine {
         ))
     }
 
-    /// Follower `id` of trailing send `trailing` was abandoned: with none
-    /// left, so is the send, never written when it was not yet (Block 46,
-    /// D11).
-    fn follower_abandoned(&mut self, trailing: CallId, id: CallId) {
-        let Some(call) = self.calls.by_id.get_mut(&trailing) else {
+    /// Follower `id` of `send`, a trailing send or a remove, was abandoned:
+    /// with none left and no owner, so is the send, never written when it
+    /// was not yet (Block 46, D11).
+    fn follower_abandoned(&mut self, send: CallId, id: CallId) {
+        let Some(call) = self.calls.by_id.get_mut(&send) else {
             return;
         };
         call.followers.retain(|follower| *follower != id);
-        if call.followers.is_empty() {
-            self.call_abandoned(trailing);
+        if call.internal && call.followers.is_empty() {
+            self.call_abandoned(send);
         }
     }
 
@@ -664,6 +699,14 @@ impl Machine {
     /// The owner gave up on call `id`, e.g. its future was dropped: it is
     /// forgotten, and never sent if it was queued.
     pub(super) fn call_abandoned(&mut self, id: CallId) {
+        // A remove's owner dropped it: the publishes it replaced still wait
+        // for its result, so it goes on without an owner (Block 46, D11, D12).
+        if let Some(call) = self.calls.by_id.get_mut(&id)
+            && !call.followers.is_empty()
+        {
+            call.internal = true;
+            return;
+        }
         if let Some(call) = self.calls.by_id.remove(&id) {
             match call.phase {
                 // Not a trailing send: its data stays for the others while
@@ -803,14 +846,13 @@ impl Machine {
         if let Some(timer) = call.phase.timer() {
             self.actions.push(Action::CancelCallTimer(id, timer));
         }
-        // A trailing send settles the calls that follow it, never itself
-        // (Block 46, D4).
-        if call.followers.is_empty() {
+        // Its followers first, in the order they were made; a call with no
+        // owner, as a trailing send, settles only them (Block 46, D4, D12).
+        for follower in call.followers {
+            self.settle_call(follower, result.clone());
+        }
+        if !call.internal {
             self.actions.push(Action::CallSettled { call: id, result });
-        } else {
-            for follower in call.followers {
-                self.settle_call(follower, result.clone());
-            }
         }
         self.unbuffer_call(id);
     }

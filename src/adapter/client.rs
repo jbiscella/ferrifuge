@@ -2199,7 +2199,9 @@ impl Client {
     /// JSON protocol, any bytes with Protobuf (Block 45, D8). Made, waiting
     /// and failing as [`Client::rpc`]: it waits for the connection only,
     /// not for a map subscription. Every subscriber of the channel, this
-    /// client's included, receives the change.
+    /// client's included, receives the change. Never debounced, unlike
+    /// [`MapSubscription::publish`](crate::MapSubscription::publish) on a
+    /// namespace where the server advises an interval (Block 46).
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -2262,7 +2264,7 @@ impl Client {
 
     /// Removes `key` from the map channel `channel` (Block 45, D8). Made,
     /// waiting and failing as [`Client::map_publish`]; removing a key the
-    /// map does not hold succeeds.
+    /// map does not hold succeeds. Never debounced (Block 46).
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -2896,14 +2898,7 @@ impl Driver {
             // Not numbered: a window's timer is never set twice and the
             // core ignores one it no longer knows (Block 46, D5). Numbering
             // it here would skew the settings the core's `Armed` counts.
-            Action::SetDebounceTimer(timer, delay) => {
-                #[cfg(feature = "__test-hooks")]
-                if let Some(held) = lock(&self.shared.held_debounce_timers).as_mut() {
-                    held.push(timer);
-                    return;
-                }
-                self.debounce_timers.set(timer, delay, 0);
-            }
+            Action::SetDebounceTimer(timer, delay) => self.set_debounce_timer(timer, delay),
             Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),
             Action::SetCallTimer(id, timer, delay) => {
                 let set = self.next_set();
@@ -2936,6 +2931,17 @@ impl Driver {
 }
 
 impl Driver {
+    /// Arms a debounce window's timer, unless a test holds them
+    /// (`__test-hooks`).
+    fn set_debounce_timer(&mut self, timer: DebounceTimer, delay: Duration) {
+        #[cfg(feature = "__test-hooks")]
+        if let Some(held) = lock(&self.shared.held_debounce_timers).as_mut() {
+            held.push(timer);
+            return;
+        }
+        self.debounce_timers.set(timer, delay, 0);
+    }
+
     /// How frames travel with the configured encoding.
     fn frame_type(&self) -> FrameType {
         if self.subprotocol.is_some() {

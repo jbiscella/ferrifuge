@@ -202,10 +202,21 @@ impl MapSubscription {
     /// subscribed, as [`Client::map_publish`] does (Block 45, D8). The
     /// subscription gets its own change as an update, as every subscriber.
     ///
+    /// On a namespace where the server advises a debounce interval
+    /// (Centrifugo PRO, `publish_debounce`, Block 46) the first value of a
+    /// key is sent at once and the latest one per interval, each key with
+    /// its own window, so that a chatty key cannot delay a quiet one, and
+    /// this future resolves with the result of the send that carried later
+    /// data for its key, as [`crate::Subscription::publish`] does. Use
+    /// [`Client::map_publish`] for data that must arrive: it is never
+    /// debounced.
+    ///
     /// # Errors
     ///
     /// As [`crate::Subscription::publish`]; the server's refusal keeps its
-    /// code (103 without permission, 107 for an empty key).
+    /// code (103 without permission, 107 for an empty key). A publish made
+    /// while a window of its key is open fails with the error of the send
+    /// or the [`MapSubscription::remove`] that replaced it.
     pub fn publish(
         &self,
         key: impl Into<String>,
@@ -240,6 +251,11 @@ impl MapSubscription {
 
     /// Removes `key` from the map, once the subscription is subscribed;
     /// removing a key the map does not hold succeeds.
+    ///
+    /// The remove is sent at once and opens no debounce window (Block 46):
+    /// if the key has one open, it closes and its pending value is never
+    /// sent, so a publish made after it is sent at once, and the publishes
+    /// waiting in the window settle with the result of this remove.
     ///
     /// # Errors
     ///
