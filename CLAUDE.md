@@ -7464,11 +7464,11 @@ Feature: Map subscriptions (unstable)
 
   @W
   Scenario: A browser client syncs a map and receives its updates
-    Given the server API has set keys "a" and "b" of "map:w1"
+    Given keys "a" and "b" of "map:w1" have been set
     And a browser client with a map subscription to "map:w1", whose stream was taken
     When connect is called
     And subscribe is called on the map subscription
-    And the server API sets key "c" of "map:w1" once the subscription is subscribed
+    And key "c" of "map:w1" is set once the subscription is subscribed
     Then the map subscription's stream yields "subscribing", "subscribed", a sync with keys "a" and "b", then an update of "c"
 ```
 
