@@ -25,6 +25,8 @@ mod inbound;
 #[cfg(test)]
 mod inbox_overflow_tests;
 #[cfg(test)]
+mod network_events_tests;
+#[cfg(test)]
 mod optimistic_tests;
 #[cfg(test)]
 mod publication_channel_tests;
@@ -480,6 +482,18 @@ pub enum Input {
     /// a server ping is read on the connection, the backoff keeps growing,
     /// as after a 3008 close (Block 15).
     InboxOverflow(TransportId),
+    /// The device went offline, as the browser's `offline` event tells
+    /// (Block 44, D10). Connected: the transport closes, and the client
+    /// emits `connecting` with code 1 "transport closed" and reconnects
+    /// after the reconnect delay, as after a lost connection. Connecting:
+    /// the attempt in flight, if any, closes, with no event and counting as
+    /// no failed attempt, and the next waits the reconnect delay.
+    /// Disconnected: nothing.
+    Offline,
+    /// The page entered the back/forward cache, as the browser's `pagehide`
+    /// with `persisted` tells (Block 44, D11): as [`Input::Offline`], with
+    /// the reason "page entered back/forward cache".
+    PageCached,
     /// The transport closed after opening.
     TransportClosed {
         /// The transport that closed.
@@ -863,6 +877,8 @@ impl std::fmt::Debug for Input {
                 .finish(),
             Self::MessageTooLarge(id) => f.debug_tuple("MessageTooLarge").field(id).finish(),
             Self::InboxOverflow(id) => f.debug_tuple("InboxOverflow").field(id).finish(),
+            Self::Offline => f.write_str("Offline"),
+            Self::PageCached => f.write_str("PageCached"),
             Self::TransportClosed {
                 transport,
                 code,
@@ -1455,6 +1471,8 @@ impl Machine {
                 }
             }
             Input::InboxOverflow(transport) => self.inbox_overflowed(transport),
+            // Block 44, D10 and D11: not yet handled.
+            Input::Offline | Input::PageCached => {}
             Input::Frame { transport, data } if self.is_current(transport) => {
                 self.counters.bytes_in += data.len() as u64;
                 self.frame(transport, &data);
