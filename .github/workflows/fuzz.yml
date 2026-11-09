@@ -26,9 +26,9 @@ jobs:
         target:
           - json::tests::fuzz_decode
           - protobuf::tests::fuzz_decode
-          - adapter::http::tests::fuzz_http_stream_decoder
-          - adapter::http::tests::fuzz_sse_decoder
-          - adapter::http::tests::fuzz_protobuf_stream_decoder
+          - adapter::tokio::http::tests::fuzz_http_stream_decoder
+          - adapter::tokio::http::tests::fuzz_sse_decoder
+          - adapter::tokio::http::tests::fuzz_protobuf_stream_decoder
           - fossil::tests::fuzz_apply
           - fossil::tests::fuzz_written_delta_round_trip
     steps:
