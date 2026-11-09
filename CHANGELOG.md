@@ -29,6 +29,11 @@ repository held while it carried that version, from the blocks of
   `ClientBuilder::page_event_target` name other targets than `globalThis`.
   The core has the new inputs `Input::Offline` and `Input::PageCached`.
 
+- http_stream in the browser (Block 44d): the browser client falls back
+  to http_stream over the page's `fetch`, JSON or Protobuf, its response
+  read only while the read-ahead has room, so a slow page holds the server
+  back; closing or dropping the transport aborts its requests.
+
 ### Changed
 
 - `reconnect()` while connecting, before the first attempt since the

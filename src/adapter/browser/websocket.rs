@@ -26,8 +26,12 @@ pub(in crate::adapter) enum Inbound {
     /// The server sent a message over the size limit; the connection is
     /// closed (Block 29, D3).
     TooLarge,
-    /// The frame was written: handed to the browser's `send`.
+    /// The frame was written: handed to the browser's `send`, or, over
+    /// `http_stream`, its emulation request answered.
     Written(FrameId),
+    /// The server refused the emulation request carrying this frame with
+    /// HTTP 413; its commands fail (Block 8). `http_stream` only.
+    Rejected(Vec<u8>),
     /// A message arrived while the inbox was full; the connection is closed
     /// (Block 44, D7).
     Overflow,
@@ -260,7 +264,7 @@ fn closed(state: &RefCell<State>, event: &CloseEvent) {
 }
 
 /// The message of a JavaScript exception.
-fn js_message(error: &JsValue) -> String {
+pub(super) fn js_message(error: &JsValue) -> String {
     error
         .dyn_ref::<js_sys::Error>()
         .map(|error| String::from(error.message()))
