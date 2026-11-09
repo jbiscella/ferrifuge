@@ -169,8 +169,29 @@ pub enum EventDelivery {
     Inline,
     /// On a thread of the client's own, named `ferrifuge-events` and
     /// started at the first handler, for handlers that block: the runtime
-    /// and the driver go on while one runs.
+    /// and the driver go on while one runs. Absent on the browser target,
+    /// which has no threads (Block 44, D15).
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     Thread,
+}
+
+impl EventDelivery {
+    /// Whether the handlers run on a thread of their own.
+    #[cfg(adapter_tokio)]
+    pub(super) fn is_thread(self) -> bool {
+        self == Self::Thread
+    }
+
+    /// Never: the browser target has no threads.
+    #[cfg(adapter_browser)]
+    #[allow(clippy::unused_self)] // As natively.
+    pub(super) fn is_thread(self) -> bool {
+        false
+    }
 }
 
 thread_local! {
@@ -504,6 +525,7 @@ fn start(shared: &Arc<Shared>, handlers: &mut Handlers) -> Option<std::io::Error
         }
         // The driver polls `next` itself, woken by the installation.
         EventDelivery::Inline => {}
+        #[cfg(adapter_tokio)]
         EventDelivery::Thread => {
             let consumer = Arc::clone(shared);
             let runtime = shared.runtime.clone();
@@ -522,6 +544,7 @@ fn start(shared: &Arc<Shared>, handlers: &mut Handlers) -> Option<std::io::Error
 }
 
 /// Starts the events thread of `Thread`.
+#[cfg(adapter_tokio)]
 fn spawn_thread(run: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
     #[cfg(test)]
     if tests::FAIL_SPAWN.get() {
@@ -538,7 +561,7 @@ fn spawn_thread(run: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
 /// failing again, the connection fails as for a panic (D2, D4).
 pub(super) fn start_again(shared: &Arc<Shared>, core: &mut Core) {
     let mut handlers = lock(&shared.handlers);
-    let unstarted = handlers.delivery == EventDelivery::Thread
+    let unstarted = handlers.delivery.is_thread()
         && !handlers.started
         && (handlers.client.is_some() || !handlers.subscriptions.is_empty());
     let failed = if unstarted {
@@ -600,6 +623,7 @@ async fn consume(shared: Arc<Shared>) {
 
 /// The consumer of a client's handlers on its own thread (D2: `Thread`),
 /// ending after close once its events are delivered.
+#[cfg(adapter_tokio)]
 fn consume_on_thread(shared: &Arc<Shared>) {
     /// Wakes the thread parked for the next event.
     struct Unpark(std::thread::Thread);
@@ -651,7 +675,7 @@ pub(super) fn release_unconsumed(shared: &Shared) {
     let unconsumed = {
         let handlers = lock(&shared.handlers);
         handlers.delivery == EventDelivery::Inline
-            || (handlers.delivery == EventDelivery::Thread && !handlers.started)
+            || (handlers.delivery.is_thread() && !handlers.started)
     };
     if unconsumed {
         drop_handlers(shared);
@@ -817,7 +841,7 @@ fn remove_finished(outboxes: &mut Outboxes, of: SubscriptionId) {
 
 /// Calls the handler with no lock held, then reports its outcome (D3, D4).
 pub(super) fn deliver(shared: &Shared, handed: Handed) {
-    let thread = lock(&shared.handlers).delivery == EventDelivery::Thread;
+    let thread = lock(&shared.handlers).delivery.is_thread();
     let (id, outcome) = match handed {
         Handed::Client {
             id,

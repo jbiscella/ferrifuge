@@ -1,4 +1,4 @@
-//! Logging of the tokio adapter (Block 21): a span per client and per
+//! Logging of the adapters (Block 21): a span per client and per
 //! subscription, and records of what the machine is given and does. Every
 //! value goes through a redacting `Debug`, or is a code, a name or a length.
 
@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{Span, debug, debug_span, trace, warn};
 
 use super::client::lock;
+#[cfg(adapter_tokio)]
 use super::tokio::proxy::ProxyTarget;
 use crate::machine::{
     Action, Anomaly, CallId, FetchId, Input, SubscriptionId, SubscriptionTimer, Timer,
@@ -183,6 +184,7 @@ impl Log {
     /// The record of a transport attempt (Block 21), made where it opens:
     /// its endpoint and its proxy, as scheme, host and port, `direct`, or
     /// `connector` for a client given one (Block 23, D7; Block 37, D4).
+    #[cfg(adapter_tokio)]
     pub(super) fn attempt(
         &self,
         kind: TransportKind,
@@ -200,6 +202,19 @@ impl Log {
         debug!(
             transport = kind.name(),
             endpoint, proxy, "opening transport"
+        );
+    }
+
+    /// The record of a transport attempt in the browser, whose own proxy
+    /// settings apply (Block 44, D14).
+    #[cfg(adapter_browser)]
+    pub(super) fn attempt(&self, kind: TransportKind, endpoint: usize) {
+        let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
+        debug!(
+            transport = kind.name(),
+            endpoint,
+            proxy = "browser",
+            "opening transport"
         );
     }
 
@@ -360,6 +375,7 @@ fn data_outcome<T>(result: &Result<T, DataError>) -> &'static str {
 
 /// An endpoint as it may be logged: scheme, host, port and path, without
 /// the userinfo, query and fragment, which may hold a credential (D5).
+#[cfg(adapter_tokio)]
 pub(super) fn endpoint(url: &str) -> String {
     match reqwest::Url::parse(url) {
         Ok(mut url) => {
@@ -375,7 +391,22 @@ pub(super) fn endpoint(url: &str) -> String {
     }
 }
 
-#[cfg(test)]
+/// An endpoint as it may be logged, parsed by the browser's `URL`.
+#[cfg(adapter_browser)]
+pub(super) fn endpoint(url: &str) -> String {
+    match web_sys::Url::new(url) {
+        Ok(url) => {
+            url.set_username("");
+            url.set_password("");
+            url.set_search("");
+            url.set_hash("");
+            url.href()
+        }
+        Err(_) => "<invalid>".to_owned(),
+    }
+}
+
+#[cfg(all(test, adapter_tokio))]
 mod tests {
     use super::{Log, endpoint};
     use crate::machine::{Input, Machine};

@@ -1,4 +1,8 @@
-//! Client driven by tokio.
+//! Client driven by the adapter of the target: tokio natively, the
+//! browser's event loop on the browser target (Block 44, D2).
+
+// Neither `Send` nor `Sync` on the browser target (Block 44, D3).
+#![cfg_attr(adapter_browser, allow(clippy::arc_with_non_send_sync))]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -14,20 +18,27 @@ use futures_core::Stream;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
+#[cfg(adapter_tokio)]
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+#[cfg(adapter_tokio)]
 use rustls::pki_types::CertificateDer;
 use tokio::sync::{Notify, oneshot};
 use tracing::Instrument;
 
+use super::backend::Inbound;
 use super::log::{self, Log};
 use super::platform::{self, Handle, Sleep};
 use super::ready::{self, Of, Waiters};
+#[cfg(adapter_tokio)]
 use super::tokio::connector::{self, Connector};
+#[cfg(adapter_tokio)]
 use super::tokio::http::HeaderSet;
+#[cfg(adapter_tokio)]
 use super::tokio::net::Network;
+#[cfg(adapter_tokio)]
 use super::tokio::proxy::Proxy;
+#[cfg(adapter_tokio)]
 use super::tokio::tls::{self, Tls, Trust, unparsable_root};
-use super::tokio::transport::Inbound;
 use crate::machine::{
     Action, CallId, CallTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
@@ -127,9 +138,11 @@ pub(super) struct Shared {
     /// Spans and records of this client (Block 21).
     pub(super) log: Log,
     /// Its TLS and proxy settings and HTTP clients (Blocks 22, 23).
+    #[cfg(adapter_tokio)]
     pub(super) network: Arc<Network>,
     /// The real HTTP headers of every transport request, which
     /// `set_http_headers` replaces (Blocks 17, 32).
+    #[cfg(adapter_tokio)]
     pub(super) http_headers: HeaderSet,
     /// The handlers of the client and its subscriptions (Block 41b).
     /// Locked after `outboxes`.
@@ -878,20 +891,27 @@ pub struct ClientBuilder {
     get_token: Option<GetToken>,
     get_data: Option<GetConnectData>,
     emulation_endpoint: Option<String>,
+    #[cfg(adapter_tokio)]
     /// Real HTTP headers, as given; checked by [`ClientBuilder::build`].
     http_headers: Vec<(String, String)>,
     /// Emulated headers, as given; checked by [`ClientBuilder::build`].
     emulated_headers: Vec<(String, String)>,
+    #[cfg(adapter_tokio)]
     /// Extra root certificates, as given; checked by [`ClientBuilder::build`].
     root_certificates: Vec<CertificateDer<'static>>,
+    #[cfg(adapter_tokio)]
     /// The application's TLS configuration, if any.
     tls_config: Option<Arc<rustls::ClientConfig>>,
+    #[cfg(adapter_tokio)]
     proxy: Proxy,
+    #[cfg(adapter_tokio)]
     /// Whether [`ClientBuilder::proxy`] was called: a connector replaces
     /// any proxy setting (Block 37, D4).
     proxy_set: bool,
+    #[cfg(adapter_tokio)]
     /// The application's connector for the websocket, if any.
     connector: Option<connector::Shared>,
+    #[cfg(adapter_tokio)]
     /// The runtime the client runs on; the current one otherwise.
     runtime: Option<Handle>,
     /// The client's handler, set once it is built (Block 41b); behind a
@@ -900,6 +920,7 @@ pub struct ClientBuilder {
     handler: Option<Mutex<Box<dyn super::ClientHandler>>>,
     /// Where its handlers run (Block 41, D2).
     event_delivery: super::EventDelivery,
+    #[cfg(adapter_tokio)]
     /// The application's cookie jar (Block 43).
     cookie_jar: super::tokio::net::Jar,
 }
@@ -941,19 +962,22 @@ impl std::fmt::Debug for ClientBuilder {
                 "emulation_endpoint",
                 &self.emulation_endpoint.as_deref().map(log::endpoint),
             )
-            .field("http_headers", &HeaderNames(&self.http_headers))
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
-            // Their number, and whether one is set: never their content.
-            .field("root_certificates", &self.root_certificates.len())
-            .field("tls_config", &self.tls_config.is_some())
-            .field("proxy", &self.proxy)
-            .field("proxy_set", &self.proxy_set)
-            .field("connector", &self.connector.is_some())
-            .field("runtime", &self.runtime.is_some())
             .field("handler", &self.handler.is_some())
             .field("event_delivery", &self.event_delivery);
-        // Whether one is set: never its cookies (Block 43, D6).
-        f.field("cookie_jar", &self.cookie_jar);
+        #[cfg(adapter_tokio)]
+        {
+            f.field("http_headers", &HeaderNames(&self.http_headers))
+                // Their number, and whether one is set: never their content.
+                .field("root_certificates", &self.root_certificates.len())
+                .field("tls_config", &self.tls_config.is_some())
+                .field("proxy", &self.proxy)
+                .field("proxy_set", &self.proxy_set)
+                .field("connector", &self.connector.is_some())
+                .field("runtime", &self.runtime.is_some());
+            // Whether one is set: never its cookies (Block 43, D6).
+            f.field("cookie_jar", &self.cookie_jar);
+        }
         f.finish()
     }
 }
@@ -994,6 +1018,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Trusts `roots`, certificate authorities, in addition to the
     /// platform's, for `wss://` and every `https://` request (Block 22);
     /// they add to the roots of earlier calls. A certificate that is not a
@@ -1026,6 +1055,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Uses `config` for `wss://` and every `https://` request, instead of
     /// the platform's trust (Block 22): its roots, verifier, provider and
     /// client certificates are the application's. Ferrifuge only replaces
@@ -1040,6 +1074,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Sets how the client reaches the server's hosts (Block 23): through
     /// the system's proxy by default ([`Proxy::system`]), the environment's,
     /// none, one proxy, or one chosen per endpoint. Every transport takes
@@ -1051,6 +1090,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Sets the connector that gives the websocket its stream, for
     /// networking the client does not have (Block 37): a VPN tunnel, a
     /// custom proxy, an in-process transport. Over its stream the client
@@ -1072,7 +1116,7 @@ impl ClientBuilder {
     /// into the jar or seed it. The cookies merge with a `Cookie` header of
     /// [`ClientBuilder::http_headers`] into one header, the application's
     /// first. No proxy is sent them. Without a jar, no cookie is kept.
-    #[cfg(feature = "cookies")]
+    #[cfg(all(adapter_tokio, feature = "cookies"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
     #[must_use]
     pub fn cookie_jar(mut self, jar: Arc<dyn super::CookieJar>) -> Self {
@@ -1080,6 +1124,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Adds real HTTP headers to the websocket upgrade request and to every
     /// request of `http_stream` and sse, so that a gateway checking one
     /// still admits a client that fell back (Block 17). Names are
@@ -1134,6 +1183,11 @@ impl ClientBuilder {
         self
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Runs the client on `runtime` (Block 28), e.g. when building it where
     /// no tokio runtime is current, as in a Tauri setup hook:
     ///
@@ -1233,20 +1287,29 @@ impl Client {
             get_token: None,
             get_data: None,
             emulation_endpoint: None,
+            #[cfg(adapter_tokio)]
             http_headers: Vec::new(),
             emulated_headers: Vec::new(),
+            #[cfg(adapter_tokio)]
             root_certificates: Vec::new(),
+            #[cfg(adapter_tokio)]
             tls_config: None,
+            #[cfg(adapter_tokio)]
             proxy: Proxy::default(),
+            #[cfg(adapter_tokio)]
             proxy_set: false,
+            #[cfg(adapter_tokio)]
             connector: None,
+            #[cfg(adapter_tokio)]
             runtime: None,
             handler: None,
             event_delivery: super::EventDelivery::default(),
+            #[cfg(adapter_tokio)]
             cookie_jar: super::tokio::net::Jar::default(),
         }
     }
 
+    #[allow(clippy::too_many_lines)] // The settings of both adapters.
     fn start(builder: ClientBuilder) -> Result<Self, ClientError> {
         let ClientBuilder {
             endpoints,
@@ -1254,21 +1317,37 @@ impl Client {
             get_token,
             get_data,
             emulation_endpoint,
+            #[cfg(adapter_tokio)]
             http_headers,
             emulated_headers,
+            #[cfg(adapter_tokio)]
             root_certificates,
+            #[cfg(adapter_tokio)]
             tls_config,
+            #[cfg(adapter_tokio)]
             proxy,
+            #[cfg(adapter_tokio)]
             proxy_set,
+            #[cfg(adapter_tokio)]
             connector,
+            #[cfg(adapter_tokio)]
             runtime,
             handler: _,
             event_delivery,
+            #[cfg(adapter_tokio)]
             cookie_jar,
         } = builder;
+        #[cfg(adapter_tokio)]
         check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
+        #[cfg(adapter_browser)]
+        for (kind, endpoint) in &endpoints {
+            check_endpoint(*kind, endpoint)?;
+        }
+        #[cfg(adapter_tokio)]
         let android = cfg!(target_os = "android");
+        #[cfg(adapter_tokio)]
         let trust = trust(root_certificates, tls_config, android)?;
+        #[cfg(adapter_tokio)]
         android_gate(
             android && !tls::android_ready(),
             &trust,
@@ -1276,12 +1355,18 @@ impl Client {
             emulation_endpoint.as_deref(),
             &proxy,
         )?;
+        #[cfg(adapter_tokio)]
         let http_headers = HeaderSet::new(http_header_map(&http_headers)?);
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
         let max_message = config.max_message_bytes;
+        #[cfg(adapter_browser)]
+        let read_ahead = super::backend::websocket::Bound {
+            messages: config.read_ahead_messages,
+            bytes: config.read_ahead_bytes,
+        };
         let machine = machine_for(
             config,
             get_token.is_some(),
@@ -1289,7 +1374,11 @@ impl Client {
             emulated_headers,
             endpoints.iter().map(|(kind, _)| *kind).collect(),
         )?;
+        #[cfg(adapter_tokio)]
         let runtime = runtime_or_current(runtime)?;
+        // The page's event loop needs no handle (Block 44, D4).
+        #[cfg(adapter_browser)]
+        let runtime = Handle;
         let shared = Arc::new(Shared {
             core: Mutex::new(Core::new(machine)),
             outboxes: Mutex::new(Outboxes::default()),
@@ -1301,11 +1390,13 @@ impl Client {
             actions_queued: Notify::new(),
             closed: AtomicBool::new(false),
             log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
+            #[cfg(adapter_tokio)]
             network: Arc::new(
                 Network::new(Tls::new(trust), proxy)
                     .with_connector(connector)
                     .with_cookie_jar(cookie_jar),
             ),
+            #[cfg(adapter_tokio)]
             http_headers,
             handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
             runtime: runtime.clone(),
@@ -1319,6 +1410,8 @@ impl Client {
             emulation_endpoint,
             timeout,
             max_message,
+            #[cfg(adapter_browser)]
+            read_ahead,
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
@@ -1568,6 +1661,7 @@ impl Client {
     /// Publications not yet taken are withdrawn and, on recoverable
     /// channels, recovered by the next connection.
     pub fn reconnect(&self) {
+        #[cfg(adapter_tokio)]
         super::tokio::proxy::read_settings_again();
         self.shared.apply(Input::Reconnect);
     }
@@ -1637,6 +1731,11 @@ impl Client {
         Ok(())
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Replaces the real HTTP headers (Block 32): every HTTP request started
     /// from now on carries the new set, the upgrade or stream request of
     /// the next attempt and each emulation request of an open `http_stream`
@@ -1673,6 +1772,11 @@ impl Client {
         Ok(())
     }
 
+    #[cfg(adapter_tokio)]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
+    )]
     /// Replaces the proxy setting from the next connection attempt
     /// (Block 23), as the other setters do; the current connection is
     /// kept. A client given a connector reads no proxy setting: this
@@ -1944,7 +2048,7 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-use super::tokio::{Opening, Transport};
+use super::backend::{Opening, Transport};
 type Fetching = platform::BoxFuture<'static, Result<String, TokenError>>;
 
 /// Performs the machine's actions, and turns transport activity and timers
@@ -1955,12 +2059,17 @@ struct Driver {
     /// Websocket subprotocol of the configured encoding, if it needs one.
     subprotocol: Option<&'static str>,
     /// Where commands over emulated transports go, when not the default.
+    // In the browser from Block 44d, with http_stream.
+    #[cfg_attr(adapter_browser, allow(dead_code))]
     emulation_endpoint: Option<String>,
     /// Time allowed for an emulation request, and for writing a websocket
     /// frame or closing a websocket (`Config::timeout`).
     timeout: Duration,
     /// Largest message accepted from the server (`Config::max_message_bytes`).
     max_message: usize,
+    /// The bound of a push transport's inbox (Block 44, D7).
+    #[cfg(adapter_browser)]
+    read_ahead: super::backend::websocket::Bound,
     shared: Arc<Shared>,
     /// The runtime the driver runs on, for every spawn (Block 28, D1).
     runtime: Handle,
@@ -2103,6 +2212,7 @@ impl Timers {
 /// D3).
 /// Checks the endpoints, and the connector's limits when one is given
 /// (Block 37, D4).
+#[cfg(adapter_tokio)]
 fn check_endpoints(
     endpoints: &[(TransportKind, String)],
     connector: bool,
@@ -2162,6 +2272,7 @@ impl Driver {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // One arm per source of input.
     async fn run(mut self) {
         loop {
             // Everything the core buffered since the last flush, from this
@@ -2175,7 +2286,7 @@ impl Driver {
                 return self.finish().await;
             }
             let reading = self.reading();
-            if self.delivery == super::EventDelivery::Thread {
+            if self.delivery.is_thread() {
                 super::handler::check_thread_waits(&self.shared);
             }
             // The number of the setting of a timer that fired.
@@ -2215,6 +2326,7 @@ impl Driver {
                         );
                         Input::Frame { transport: id, data }
                     }
+                    #[cfg(adapter_tokio)]
                     Inbound::Rejected(frame) => Input::SendRejected { transport: id, frame },
                     Inbound::Written(frame) => Input::FrameWritten { transport: id, frame },
                     Inbound::Closed { code, reason } => {
@@ -2230,6 +2342,16 @@ impl Driver {
                             "a message from the server is larger than the size limit"
                         );
                         Input::MessageTooLarge(id)
+                    }
+                    #[cfg(adapter_browser)]
+                    Inbound::Overflow => {
+                        self.transport = None;
+                        warn!(
+                            client = self.shared.log.number,
+                            transport = self.kind.name(),
+                            "the inbox overflowed while the read-ahead was full"
+                        );
+                        Input::InboxOverflow(id)
                     }
                 },
                 (timer, set) = self.timers.fired() => {
@@ -2422,6 +2544,8 @@ impl Driver {
 
     /// Starts opening transport `id`, of `kind`, at endpoint `endpoint`;
     /// an emulated one sends `initial_frame`, its connect command.
+    // `initial_frame` is read over http_stream, in the browser from Block 44d.
+    #[cfg_attr(adapter_browser, allow(clippy::needless_pass_by_value))]
     fn open_transport(
         &mut self,
         id: TransportId,
@@ -2430,21 +2554,34 @@ impl Driver {
         initial_frame: Option<Vec<u8>>,
     ) {
         self.kind = kind;
-        let opening = super::tokio::open(
-            super::tokio::Open {
+        #[cfg(adapter_tokio)]
+        let open = super::tokio::Open {
+            kind,
+            endpoint,
+            url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
+            subprotocol: self.subprotocol,
+            timeout: self.timeout,
+            max_message: self.max_message,
+            headers: self.shared.http_headers.clone(),
+            network: Arc::clone(&self.shared.network),
+            emulation: self.emulation_endpoint.clone(),
+            initial_frame,
+        };
+        // http_stream and sse in Blocks 44d and 44e.
+        #[cfg(adapter_browser)]
+        let open = {
+            let _ = initial_frame;
+            super::browser::Open {
                 kind,
                 endpoint,
                 url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
                 subprotocol: self.subprotocol,
                 timeout: self.timeout,
                 max_message: self.max_message,
-                headers: self.shared.http_headers.clone(),
-                network: Arc::clone(&self.shared.network),
-                emulation: self.emulation_endpoint.clone(),
-                initial_frame,
-            },
-            &self.shared.log,
-        );
+                read_ahead: self.read_ahead,
+            }
+        };
+        let opening = super::backend::open(open, &self.shared.log);
         self.opening = Some((id, opening));
     }
 
@@ -2614,6 +2751,7 @@ async fn opened(
     }
 }
 
+#[cfg(adapter_tokio)]
 /// Refuses an endpoint the transport cannot use: an empty one, or an
 /// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
 /// `http(s)://` is right for `http_stream` and sse (owner decision,
@@ -2693,6 +2831,7 @@ impl Drop for Ending {
     }
 }
 
+#[cfg(adapter_tokio)]
 /// A connector carries the websocket only, and replaces every proxy
 /// setting (Block 37, D4).
 fn check_connector(
@@ -2745,6 +2884,7 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
     })
 }
 
+#[cfg(adapter_tokio)]
 /// A read-ahead limit of 0 could never let a message in (Block 15).
 /// Headers a transport sets itself, which an application may not set:
 /// proxy credentials go through `ProxyTarget` only, never through a tunnel
@@ -2778,6 +2918,7 @@ fn header_error(name: &str, problem: &str) -> ClientError {
     }
 }
 
+#[cfg(adapter_tokio)]
 /// The checked HTTP headers (Block 17).
 fn http_header_map(headers: &[(String, String)]) -> Result<HeaderMap, ClientError> {
     let mut map = HeaderMap::new();
@@ -2800,15 +2941,44 @@ fn emulated_header_map(
 ) -> Result<std::collections::BTreeMap<String, String>, ClientError> {
     let mut map = std::collections::BTreeMap::new();
     for (name, value) in headers {
-        HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| header_error(name, "is not a valid header name"))?;
-        HeaderValue::from_str(value)
-            .map_err(|_| header_error(name, "has a value that is not valid HTTP"))?;
+        #[cfg(adapter_tokio)]
+        let valid = (
+            HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            HeaderValue::from_str(value).is_ok(),
+        );
+        #[cfg(adapter_browser)]
+        let valid = (header_name_valid(name), header_value_valid(value));
+        if !valid.0 {
+            return Err(header_error(name, "is not a valid header name"));
+        }
+        if !valid.1 {
+            return Err(header_error(name, "has a value that is not valid HTTP"));
+        }
         map.insert(name.clone(), value.clone());
     }
     Ok(map)
 }
 
+/// Whether `name` is an HTTP token (RFC 9110, 5.6.2), as the `http`
+/// crate's `HeaderName` takes natively.
+#[cfg(adapter_browser)]
+fn header_name_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// Whether `value` has no control character but tab, as the `http`
+/// crate's `HeaderValue::from_str` takes natively.
+#[cfg(adapter_browser)]
+fn header_value_valid(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| (b >= 0x20 && b != 0x7f) || b == b'\t')
+}
+
+#[cfg(adapter_tokio)]
 /// Whom the client trusts, from its extra roots and raw configuration,
 /// checked (Block 22, D2 and D3).
 fn trust(
@@ -2848,6 +3018,7 @@ fn trust(
     })
 }
 
+#[cfg(adapter_tokio)]
 /// On Android before the verifier's setup (`unready`), refuses a client
 /// whose connections known now need the platform verifier (Block 24, D5):
 /// a `wss://` or `https://` endpoint, an `https://` emulation endpoint with

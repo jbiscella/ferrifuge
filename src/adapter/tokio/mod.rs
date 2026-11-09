@@ -23,7 +23,8 @@ use ::tokio::task::JoinHandle;
 
 use self::http::{HeaderSet, HttpTransport};
 use self::net::Network;
-use self::transport::{Inbound, WebSocket};
+pub(in crate::adapter) use self::transport::Inbound;
+use self::transport::WebSocket;
 use super::log::Log;
 use crate::machine::{FrameId, FrameType, TransportKind};
 

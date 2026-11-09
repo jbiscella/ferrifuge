@@ -33,7 +33,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 features = ["test-util", "cookies"]
 
 [features]
-default = ["tokio", "ring"]
+default = ["tokio", "ring", "browser"]
 # Runtime adapter. The core must compile without it: `cargo check --no-default-features`.
 tokio = [
     "dep:tokio",
@@ -67,6 +67,23 @@ fips = ["aws-lc-rs", "rustls?/fips"]
 # An opt-in cookie jar of the tokio adapter (Block 43): CookieJar,
 # MemoryJar and ClientBuilder::cookie_jar. Not a default.
 cookies = ["tokio", "dep:cookie_store", "dep:url"]
+# The browser adapter (Block 44): the same Client on
+# wasm32-unknown-unknown, over the browser's WebSocket. It builds nothing
+# on other targets, so it is a default; `tokio`, the providers and
+# `cookies` build as nothing on the browser target.
+browser = [
+    "dep:tokio",
+    "dep:futures-util",
+    "dep:futures-core",
+    "dep:tracing",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+    "dep:gloo-timers",
+    # The core's random source seeded by the browser (Block 44, D5).
+    "fastrand/js",
+]
 # Constructors of the events and results the client yields, for an
 # application's tests (Block 37). Not a default.
 test-util = ["tokio?/io-util"]
@@ -80,6 +97,25 @@ fastrand = "2.5.0"
 futures-core = { version = "0.3.34", optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"], optional = true }
 prost = "0.14.4"
+# Maintained decoders of the streams the server sends (Block 27), for both
+# adapters: http_stream JSON lines and media types; sse-core is native.
+tokio-util = { version = "0.7.20", default-features = false, features = ["codec"], optional = true }
+bytes = { version = "1.12.1", optional = true }
+mediatype = { version = "0.23.0", optional = true }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+# Both adapters: `sync` and `macros` build for the browser target too
+# (Block 44, D1); the native table adds the runtime and the timers.
+tokio = { version = "1.54.0", features = ["sync", "macros"], optional = true }
+# Logging of the adapters (Block 21): the core logs nothing. `log`
+# makes the records reach a `log` logger while no tracing subscriber is set.
+tracing = { version = "0.1.44", default-features = false, features = ["std", "log"], optional = true }
+
+# The tokio adapter's own dependencies: native targets only, so that
+# `tokio`, the providers and `cookies` build as nothing on the browser
+# target (Block 44, D1).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 # http_stream and sse (Block 8). No provider of its own: it is given the
 # client's TLS configuration, so the build's provider applies (Block 6).
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "socks"], optional = true }
@@ -100,24 +136,33 @@ percent-encoding = { version = "2.3.2", optional = true }
 # Maintained decoders of the streams the server sends (Block 27): sse
 # events, http_stream JSON lines, and media types.
 sse-core = { version = "0.2.3", default-features = false, features = ["std"], optional = true }
-tokio-util = { version = "0.7.20", default-features = false, features = ["codec"], optional = true }
-bytes = { version = "1.12.1", optional = true }
-mediatype = { version = "0.23.0", optional = true }
 # The cookie jar (Block 43, D1): no default feature, so no public-suffix
 # list and no serde; url at reqwest's version, the type cookie_store and
 # CookieJar take.
 cookie_store = { version = "0.22.1", default-features = false, optional = true }
 url = { version = "2.5.8", optional = true }
-
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["raw_value"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
 # `rt-multi-thread` for `block_in_place` around a handler call (Block 41b):
 # a handler that blocks must not hold the tasks its worker woke.
-tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
-# Logging of the tokio adapter (Block 21): the core logs nothing. `log`
-# makes the records reach a `log` logger while no tracing subscriber is set.
-tracing = { version = "0.1.44", default-features = false, features = ["std", "log"], optional = true }
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
+tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "time"], optional = true }
+
+# The browser adapter's dependencies (Block 44, D1, D4, D6): the browser
+# target only.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { version = "0.2.130", optional = true }
+wasm-bindgen-futures = { version = "0.4.80", optional = true }
+js-sys = { version = "0.3.107", optional = true }
+web-sys = { version = "0.3.107", optional = true, features = [
+    "BinaryType",
+    "CloseEvent",
+    "Event",
+    "EventTarget",
+    "MessageEvent",
+    "Performance",
+    "Url",
+    "WebSocket",
+] }
+gloo-timers = { version = "0.4.0", features = ["futures"], optional = true }
 
 # Android only (Block 24): the JNI types of ferrifuge::android, at the
 # version rustls-platform-verifier uses there.
@@ -133,6 +178,10 @@ protoc-bin-vendored = "3.3.0"
 # No default features, so builds without them (the core alone, aws-lc
 # providers without ring) stay so.
 ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", "test-util"] }
+
+# Native tests only: mio, which they pull in, does not build for wasm32
+# (Block 40, D3; Block 44, D18).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 # Reports the linked AWS-LC module in the fips build's unit test. Its
 # backend comes from rustls (fips) or reqwest (other test builds).
 aws-lc-rs = { version = "1.18.2", default-features = false }
@@ -162,6 +211,10 @@ futures-executor = { version = "0.3.34", default-features = false, features = ["
 log = { version = "0.4.35", features = ["std"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
+
+# The @W tests in a browser (Block 44, D18).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3.80"
 
 [[test]]
 name = "centrifugo_smoke"
