@@ -40,7 +40,7 @@ use super::tokio::proxy::Proxy;
 #[cfg(adapter_tokio)]
 use super::tokio::tls::{self, Tls, Trust, unparsable_root};
 use crate::machine::{
-    Action, CallId, CallTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
+    Action, CallId, CallTimer, DebounceTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use crate::{
@@ -1654,6 +1654,7 @@ impl Client {
             timers: Timers::default(),
             subscription_timers: KeyedTimers::default(),
             call_timers: KeyedTimers::default(),
+            debounce_timers: KeyedTimers::default(),
             timer_sets: 0,
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
@@ -2424,6 +2425,8 @@ struct Driver {
     timers: Timers,
     subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer)>,
     call_timers: KeyedTimers<(CallId, CallTimer)>,
+    /// One timer per open debounce window (Block 46, D5).
+    debounce_timers: KeyedTimers<DebounceTimer>,
     /// How many timers were set, numbering each setting as the core's
     /// [`Armed`] does.
     timer_sets: u64,
@@ -2460,6 +2463,31 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
         if let Some((sleep, _)) = self.0.get_mut(&key) {
             shortened(sleep, by);
         }
+    }
+
+    /// Resolves with every timer ready at this poll, which are removed;
+    /// never while none is ready or none is set. Cancel-safe. A wakeup polls
+    /// every timer, as [`KeyedTimers::fired`]; several windows ending
+    /// together cost one poll and, the driver feeding them all before its
+    /// next flush, one flush (Block 46, D5).
+    async fn fired_all(&mut self) -> Vec<K> {
+        std::future::poll_fn(|cx| {
+            let mut fired = Vec::new();
+            self.0.retain(|key, (sleep, _)| {
+                if sleep.as_mut().poll(cx).is_ready() {
+                    fired.push(*key);
+                    false
+                } else {
+                    true
+                }
+            });
+            if fired.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(fired)
+            }
+        })
+        .await
     }
 
     /// Resolves with the first timer to fire, which is removed, and the
@@ -2574,6 +2602,7 @@ fn machine_for(
     machine
         .with_emulated_headers(emulated_headers)
         .with_automatic_batching()
+        .with_publish_debounce()
         .with_transports(kinds)
 }
 
@@ -2691,6 +2720,14 @@ impl Driver {
                 ((id, timer), set) = self.call_timers.fired() => {
                     fired = Some(set);
                     Input::CallTimerFired(id, timer)
+                }
+                // Every window due now, fed before the next flush: windows
+                // ending together share a frame (Block 46, D5, D9).
+                timers = self.debounce_timers.fired_all() => {
+                    for timer in timers {
+                        self.shared.apply(Input::DebounceTimerFired(timer));
+                    }
+                    continue;
                 }
                 Some(fetched) = self.callback_fetches.next(),
                     if !self.callback_fetches.is_empty() =>
@@ -2815,6 +2852,11 @@ impl Driver {
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.subscription_timers.cancel((id, timer));
             }
+            Action::SetDebounceTimer(timer, delay) => {
+                let set = self.next_set();
+                self.debounce_timers.set(timer, delay, set);
+            }
+            Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),
             Action::SetCallTimer(id, timer, delay) => {
                 let set = self.next_set();
                 self.call_timers.set((id, timer), delay, set);
@@ -5942,6 +5984,27 @@ mod tests {
             (first, second),
             ((Timer::Refresh, 2), (Timer::ServerPing, 1))
         );
+        assert!(none_left.is_err(), "{none_left:?}");
+    }
+
+    // Block 46, D5: every timer ready at the poll, none not due, whatever
+    // was cancelled, on a paused clock that only advances past timers.
+    #[tokio::test(start_paused = true)]
+    async fn fired_all_returns_every_timer_due_and_none_not_due() {
+        let mut timers = KeyedTimers::<u32>::default();
+        timers.set(1, Duration::from_millis(20), 1);
+        timers.set(2, Duration::from_millis(20), 2);
+        timers.set(3, Duration::from_millis(50), 3);
+        timers.set(4, Duration::from_millis(50), 4);
+        timers.cancel(4);
+
+        let mut due = timers.fired_all().await;
+        due.sort_unstable();
+        let later = timers.fired_all().await;
+        let none_left = tokio::time::timeout(Duration::from_secs(1), timers.fired_all()).await;
+
+        assert_eq!(due, [1, 2]);
+        assert_eq!(later, [3]);
         assert!(none_left.is_err(), "{none_left:?}");
     }
 

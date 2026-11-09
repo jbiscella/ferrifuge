@@ -284,6 +284,10 @@ pub(crate) struct SubscribeResult {
     pub(crate) phase: i32,
     pub(crate) cursor: String,
     pub(crate) state: Vec<Publication>,
+    /// The interval, in milliseconds, of the debounce the server advises
+    /// for the subscription's publishes; 0 or absent for none
+    /// (`SubscribeResult.publish_debounce`, Block 46, D2).
+    pub(crate) publish_debounce: u32,
 }
 
 /// `Push` of `client.proto`, for the push types implemented so far.

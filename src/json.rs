@@ -693,6 +693,7 @@ struct JsonSubscribeResult {
     phase: i32,
     cursor: String,
     state: Vec<JsonPublication>,
+    publish_debounce: u32,
 }
 
 impl From<JsonSubscribeResult> for SubscribeResult {
@@ -718,6 +719,7 @@ impl From<JsonSubscribeResult> for SubscribeResult {
             phase: subscribe.phase,
             cursor: subscribe.cursor,
             state: subscribe.state.into_iter().map(Publication::from).collect(),
+            publish_debounce: subscribe.publish_debounce,
         }
     }
 }
@@ -924,6 +926,34 @@ mod tests {
         });
     }
 
+    // Block 46, D2: 0, absent and present.
+    #[test]
+    fn publish_debounce_decodes_and_absent_or_zero_means_none() {
+        let interval = |json: &str| {
+            let replies = decode(json.as_bytes()).unwrap();
+            let [
+                Reply {
+                    result: ReplyResult::Subscribe(result),
+                    ..
+                },
+            ] = &replies[..]
+            else {
+                panic!("{replies:?}");
+            };
+            result.publish_debounce
+        };
+
+        assert_eq!(
+            interval(r#"{"id":2,"subscribe":{"publish_debounce":250}}"#),
+            250
+        );
+        assert_eq!(
+            interval(r#"{"id":2,"subscribe":{"publish_debounce":0}}"#),
+            0
+        );
+        assert_eq!(interval(r#"{"id":2,"subscribe":{}}"#), 0);
+    }
+
     // Block 45, D3: the fuzz target's committed seeds, which `cargo test`
     // replays and the CI fuzz runs start from, are a valid map subscribe
     // result and a valid map publication.
@@ -948,6 +978,7 @@ mod tests {
             panic!("{result:?}");
         };
         assert_eq!((result.kind, result.phase, result.state.len()), (1, 2, 1));
+        assert_eq!(result.publish_debounce, 50);
         let [
             Reply {
                 result: ReplyResult::Push(Push::Publication { publication, .. }),

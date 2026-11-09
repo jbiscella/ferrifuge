@@ -20,6 +20,7 @@ pub(crate) use calls::CallWait;
 mod close_tests;
 #[cfg(test)]
 mod compaction_tests;
+mod debounce;
 mod delivery;
 mod inbound;
 #[cfg(test)]
@@ -135,6 +136,13 @@ impl FrameId {
         Self(n)
     }
 }
+
+/// Identifies the timer of one debounce window (Block 46, D5): the owner
+/// runs it for the [`Action::SetDebounceTimer`] and reports it with
+/// [`Input::DebounceTimerFired`]. A machine never reuses a number, so a
+/// firing for a window already gone is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DebounceTimer(u64);
 
 /// Identifies a call the machine settles with [`Action::CallSettled`];
 /// [`Machine::add_call`] gives it.
@@ -596,6 +604,10 @@ pub enum Input {
     },
     /// A timer set by [`Action::SetTimer`] fired.
     TimerFired(Timer),
+    /// A timer set by [`Action::SetDebounceTimer`] fired (Block 46): the
+    /// window sends the latest value it holds, if any, and opens anew, or
+    /// closes. One whose window is gone is ignored.
+    DebounceTimerFired(DebounceTimer),
     /// The token callback answered a [`Action::FetchToken`].
     TokenFetched {
         /// The fetch answered.
@@ -844,6 +856,12 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionState`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionState(FetchId),
+    /// Start a debounce window's timer (Block 46, D5), which the machine
+    /// never sets twice; report its end with
+    /// [`Input::DebounceTimerFired`].
+    SetDebounceTimer(DebounceTimer, Duration),
+    /// Stop a debounce window's timer if it runs.
+    CancelDebounceTimer(DebounceTimer),
     /// Start a call's timer, replacing its running one.
     SetCallTimer(CallId, CallTimer, Duration),
     /// Stop a call's timer if it runs.
@@ -1003,6 +1021,9 @@ impl std::fmt::Debug for Input {
                 .field("frame", frame)
                 .finish(),
             Self::TimerFired(timer) => f.debug_tuple("TimerFired").field(timer).finish(),
+            Self::DebounceTimerFired(timer) => {
+                f.debug_tuple("DebounceTimerFired").field(timer).finish()
+            }
             Self::TokenFetched { fetch, result } => f
                 .debug_struct("TokenFetched")
                 .field("fetch", fetch)
@@ -1188,6 +1209,14 @@ impl std::fmt::Debug for Action {
                 .debug_tuple("CancelSubscriptionState")
                 .field(fetch)
                 .finish(),
+            Self::SetDebounceTimer(timer, delay) => f
+                .debug_tuple("SetDebounceTimer")
+                .field(timer)
+                .field(delay)
+                .finish(),
+            Self::CancelDebounceTimer(timer) => {
+                f.debug_tuple("CancelDebounceTimer").field(timer).finish()
+            }
             Self::SetCallTimer(id, timer, delay) => f
                 .debug_tuple("SetCallTimer")
                 .field(id)
@@ -1362,6 +1391,8 @@ pub struct Machine {
     emulated_headers: EmulatedHeaders,
     /// Open batches and what they hold (Block 18).
     batching: batching::Batching,
+    /// Debounce windows of the subscriptions' publishes (Block 46).
+    debouncing: debounce::Debouncing,
     actions: Vec<Action>,
 }
 
@@ -1458,6 +1489,18 @@ impl Machine {
         self
     }
 
+    /// Honours the `publish_debounce` the server advises in its subscribe
+    /// replies (Block 46, D5): the owner runs [`Action::SetDebounceTimer`]
+    /// timers and reports them with [`Input::DebounceTimerFired`]. Without
+    /// it, every publish is sent: an owner written before this block would
+    /// never end a window, and its callers would hang. The tokio and
+    /// browser clients always do this.
+    #[must_use]
+    pub fn with_publish_debounce(mut self) -> Self {
+        self.debouncing.enabled = true;
+        self
+    }
+
     /// Makes the owner answer [`Action::FetchConnectData`] from the
     /// application's connect data callback, asked before every connection
     /// attempt once a token is obtained; its data replaces
@@ -1511,6 +1554,7 @@ impl Machine {
             connect_data: ConnectData::default(),
             emulated_headers: EmulatedHeaders::default(),
             batching: batching::Batching::default(),
+            debouncing: debounce::Debouncing::default(),
             actions: Vec::new(),
         }
     }
@@ -1603,6 +1647,7 @@ impl Machine {
                 self.frame_written(frame);
             }
             Input::TimerFired(timer) => self.timer_fired(timer),
+            Input::DebounceTimerFired(timer) => self.debounce_timer_fired(timer),
             Input::TokenFetched { fetch, result } => {
                 if self.tokens.take_stale_fetch(fetch) {
                     self.stale_token_fetched(&result);
