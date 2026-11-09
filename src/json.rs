@@ -277,7 +277,15 @@ struct JsonRpcRequest<'a> {
 #[derive(Serialize)]
 struct JsonPublishRequest<'a> {
     channel: &'a str,
-    data: JsonData<'a>,
+    /// Absent only from a map removal, which carries none (Block 45, D8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<JsonData<'a>>,
+    #[serde(rename = "type", skip_serializing_if = "is_zero_i32")]
+    kind: i32,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    key: &'a str,
+    #[serde(skip_serializing_if = "is_false")]
+    removed: bool,
 }
 
 #[derive(Serialize)]
@@ -409,10 +417,19 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
                     data: JsonData::new(data),
                 });
             }
-            Method::Publish(PublishRequest { channel, data }) => {
+            Method::Publish(PublishRequest {
+                channel,
+                data,
+                kind,
+                key,
+                removed,
+            }) => {
                 json.publish = Some(JsonPublishRequest {
                     channel,
-                    data: JsonData::new(data),
+                    data: (!(*removed && data.is_empty())).then(|| JsonData::new(data)),
+                    kind: *kind,
+                    key,
+                    removed: *removed,
                 });
             }
             Method::History(HistoryRequest {
@@ -945,6 +962,7 @@ mod tests {
             Method::Publish(PublishRequest {
                 channel: "news".into(),
                 data: br#"{"text":"hi"}"#.to_vec(),
+                ..PublishRequest::default()
             }),
             Method::History(HistoryRequest {
                 channel: "news".into(),
@@ -978,6 +996,47 @@ mod tests {
                 r#"{"id":3,"history":{"channel":"news"}}"#,
                 r#"{"id":4,"presence":{"channel":"news"}}"#,
                 r#"{"id":5,"presence_stats":{"channel":"news"}}"#,
+            ]
+        );
+    }
+
+    // Block 45, D3, D8: a map publication carries its type and key, a
+    // removal no data; a regular publication's frame is unchanged.
+    #[test]
+    fn encodes_map_publications_and_leaves_a_regular_one_unchanged() {
+        let commands = [
+            Method::Publish(PublishRequest {
+                channel: "map:a".into(),
+                data: br#"{"x":1}"#.to_vec(),
+                kind: 1,
+                key: "k1".into(),
+                removed: false,
+            }),
+            Method::Publish(PublishRequest {
+                channel: "map:a".into(),
+                kind: 1,
+                key: "k1".into(),
+                removed: true,
+                ..PublishRequest::default()
+            }),
+            Method::Publish(PublishRequest {
+                channel: "news".into(),
+                ..PublishRequest::default()
+            }),
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(method, id)| Command { id, method })
+        .collect::<Vec<_>>();
+
+        let frame = String::from_utf8(encode(&commands)).unwrap();
+
+        assert_eq!(
+            frame.lines().collect::<Vec<_>>(),
+            [
+                r#"{"id":1,"publish":{"channel":"map:a","data":{"x":1},"type":1,"key":"k1"}}"#,
+                r#"{"id":2,"publish":{"channel":"map:a","type":1,"key":"k1","removed":true}}"#,
+                r#"{"id":3,"publish":{"channel":"news","data":""}}"#,
             ]
         );
     }

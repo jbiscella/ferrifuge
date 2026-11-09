@@ -615,10 +615,13 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // keep a history and are recoverable (Block 11). Those of the `delta`
     // namespace are recoverable too, and send every publication as a fossil
     // delta to subscriptions asking for one, which needs a positioned
-    // subscription (Block 19).
+    // subscription (Block 19). Channels of the `map` namespace are map
+    // channels anyone may subscribe to, set keys of and remove keys from;
+    // those of `map_private` need a token and refuse a client's writes
+    // (Block 45, D16).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
+        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}}]"#,
     ),
     ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
 ];

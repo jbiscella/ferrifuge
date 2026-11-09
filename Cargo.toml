@@ -25,13 +25,13 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features, test-util and cookies, natively
-# and for the browser target, where cookies builds nothing: never fips,
-# whose build needs Go and CMake (Block 20, D7; Block 37, D7; Block 43,
-# D8; Block 44, D19).
+# docs.rs builds the default features, test-util, cookies and unstable,
+# natively and for the browser target, where cookies builds nothing: never
+# fips, whose build needs Go and CMake (Block 20, D7; Block 37, D7; Block
+# 43, D8; Block 44, D19; Block 45, D17).
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
-features = ["test-util", "cookies"]
+features = ["test-util", "cookies", "unstable"]
 
 [features]
 default = ["tokio", "ring", "browser"]
@@ -93,6 +93,11 @@ browser = [
 # Constructors of the events and results the client yields, for an
 # application's tests (Block 37). Not a default.
 test-util = ["tokio?/io-util"]
+# Experimental APIs following centrifuge-js 63ed73e and Centrifugo's
+# experimental features (Block 45: map subscriptions). Not a default, and
+# outside the semver promise: what it enables may change in any minor
+# release.
+unstable = []
 # Hooks for the crate's own tests and benchmarks, e.g. Machine::with_seed.
 # Private (the leading underscores): not part of the public API, enabled
 # only by the dev-dependency on itself below, never by applications.

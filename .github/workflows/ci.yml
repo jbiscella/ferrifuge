@@ -52,8 +52,10 @@ jobs:
       - name: clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: clippy (cookies)
-        run: cargo clippy --all-targets --features cookies -- -D warnings
+      # With the opt-in cookie jar and the unstable APIs (Block 43, D8;
+      # Block 45, D16).
+      - name: clippy (cookies, unstable)
+        run: cargo clippy --all-targets --features cookies,unstable -- -D warnings
 
       # The core must not depend on an async runtime.
       - name: clippy (no default features)
@@ -143,9 +145,9 @@ jobs:
       # One instrumented run executes every test target, including the
       # cucumber runner, so tests are not run twice for coverage.
       - name: cargo test (with coverage)
-        # With the opt-in cookie jar, so that its code is tested too (Block
-        # 43, D8).
-        run: cargo llvm-cov --all-targets --features cookies --lcov --output-path lcov.info
+        # With the opt-in cookie jar and the unstable APIs, so that their code
+        # is tested too (Block 43, D8; Block 45, D16).
+        run: cargo llvm-cov --all-targets --features cookies,unstable --lcov --output-path lcov.info
 
       # --all-targets does not include doctests.
       - name: doctests
@@ -364,7 +366,7 @@ jobs:
         run: cargo test --lib
 
       - name: Scenarios without a server
-        run: cargo test --features cookies --test bdd -- --tags "not @A and not @B and not @P"
+        run: cargo test --features cookies,unstable --test bdd -- --tags "not @A and not @B and not @P"
 
       - name: Spec sync and simulations
         run: cargo test --test spec_sync --test perf_sim --test chaos
@@ -412,6 +414,12 @@ jobs:
         run: |
           cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features browser,test-util -- -D warnings
           cargo build --lib --target wasm32-unknown-unknown --no-default-features --features browser,test-util
+
+      # The unstable APIs work in the browser too (Block 45, D14).
+      - name: The browser adapter with unstable
+        run: |
+          cargo clippy --lib --target wasm32-unknown-unknown --no-default-features --features browser,unstable -- -D warnings
+          cargo build --lib --target wasm32-unknown-unknown --no-default-features --features browser,unstable
 
       # The default features build there too (Block 44, D1).
       - name: The default features
@@ -765,7 +773,7 @@ jobs:
 
       - name: rustdoc as on docs.rs
         run: |
-          cargo doc --no-deps --features test-util,cookies
-          cargo doc --no-deps --features test-util,cookies --target wasm32-unknown-unknown
+          cargo doc --no-deps --features test-util,cookies,unstable
+          cargo doc --no-deps --features test-util,cookies,unstable --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings

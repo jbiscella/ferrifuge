@@ -120,12 +120,20 @@ pub(crate) struct RpcRequest {
     pub(crate) data: Vec<u8>,
 }
 
-/// `PublishRequest` of `client.proto`, for regular publications.
+/// `PublishRequest` of `client.proto`: a regular publication, or a map
+/// publication setting or removing a key (Block 45, D3). Zero and empty
+/// fields are not encoded, so a regular publication's frame is unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PublishRequest {
     pub(crate) channel: String,
     /// Raw JSON with the JSON protocol, any bytes with Protobuf.
     pub(crate) data: Vec<u8>,
+    /// `type`: 0 for a regular publication, 1 for a map publication.
+    pub(crate) kind: i32,
+    /// A map publication's key.
+    pub(crate) key: String,
+    /// A map publication removing its key.
+    pub(crate) removed: bool,
 }
 
 /// `HistoryRequest` of `client.proto`.

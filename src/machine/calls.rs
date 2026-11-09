@@ -716,6 +716,7 @@ fn method_of(request: &CallRequest) -> Method {
         CallRequest::Publish { channel, data } => Method::Publish(PublishRequest {
             channel: channel.clone(),
             data: data.clone(),
+            ..PublishRequest::default()
         }),
         CallRequest::History { channel, options } => Method::History(HistoryRequest {
             channel: channel.clone(),
