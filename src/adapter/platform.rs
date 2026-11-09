@@ -266,12 +266,9 @@ mod browser {
                 if left.is_zero() {
                     return Poll::Ready(());
                 }
-                let timer = self.timer.get_or_insert_with(|| {
-                    let millis = left.min(LONGEST_TIMEOUT).as_millis().max(1);
-                    gloo_timers::future::TimeoutFuture::new(
-                        u32::try_from(millis).unwrap_or(u32::MAX),
-                    )
-                });
+                let timer = self
+                    .timer
+                    .get_or_insert_with(|| gloo_timers::future::TimeoutFuture::new(armed(left)));
                 match Pin::new(timer).poll(cx) {
                     Poll::Ready(()) => self.timer = None,
                     Poll::Pending => return Poll::Pending,
@@ -280,11 +277,76 @@ mod browser {
         }
     }
 
+    /// The milliseconds `setTimeout` is armed with for a timer due in
+    /// `left`: at least 1, at most [`LONGEST_TIMEOUT`].
+    fn armed(left: Duration) -> u32 {
+        let millis = left.min(LONGEST_TIMEOUT).as_millis().max(1);
+        u32::try_from(millis).unwrap_or(u32::MAX)
+    }
+
     /// A timer of `delay` from now.
     pub(in crate::adapter) fn sleep(delay: Duration) -> Sleep {
         Sleep {
             deadline: Instant::now() + delay,
             timer: None,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use futures_util::future::{Either, select};
+        use wasm_bindgen_test::wasm_bindgen_test;
+
+        use super::{Instant, armed, sleep};
+
+        // Block 44, D4: passed to `setTimeout` as is, a delay over
+        // `i32::MAX` ms would wrap and fire at once, and the timer would be
+        // armed again at once until its deadline.
+        #[wasm_bindgen_test]
+        fn a_timer_is_armed_for_at_most_the_longest_timeout() {
+            let longest = u32::try_from(i32::MAX).unwrap();
+
+            assert_eq!(
+                armed(Duration::from_millis(u64::from(longest) + 1)),
+                longest
+            );
+            assert_eq!(armed(Duration::from_secs(u64::MAX)), longest);
+            assert_eq!(armed(Duration::from_micros(10)), 1);
+            assert_eq!(armed(Duration::from_millis(1500)), 1500);
+        }
+
+        #[wasm_bindgen_test]
+        async fn a_delay_over_the_longest_timeout_does_not_fire_at_once() {
+            let far = std::pin::pin!(sleep(Duration::from_millis(i32::MAX as u64 + 1)));
+            let near = gloo_timers::future::TimeoutFuture::new(50);
+
+            let first = select(far, near).await;
+
+            assert!(matches!(first, Either::Right(_)));
+        }
+
+        #[wasm_bindgen_test]
+        async fn a_sleep_fires_at_its_deadline() {
+            let start = Instant::now();
+
+            sleep(Duration::from_millis(30)).await;
+
+            assert!(Instant::now().saturating_duration_since(start) >= Duration::from_millis(29));
+        }
+
+        #[wasm_bindgen_test]
+        async fn a_reset_sleep_fires_at_its_new_deadline() {
+            let start = Instant::now();
+            let mut timer = std::pin::pin!(sleep(Duration::from_secs(3600)));
+
+            timer
+                .as_mut()
+                .reset(Instant::now() + Duration::from_millis(20));
+            timer.await;
+
+            assert!(Instant::now().saturating_duration_since(start) < Duration::from_secs(5));
         }
     }
 }
