@@ -1,8 +1,8 @@
-//! The @W scenarios of the websocket transport and of the network and page
-//! events (Blocks 44b, 44c): the browser client against the Centrifugo that
-//! `tests/browser.rs` starts, run by `wasm-bindgen-test-runner` in a browser
-//! (Block 44, D18). The server's `host:port` comes at compile time in
-//! `FERRIFUGE_W_SERVER`.
+//! The @W scenarios of the websocket transport, of the network and page
+//! events and of `http_stream` (Blocks 44b, 44c, 44d): the browser client
+//! against the Centrifugo that `tests/browser.rs` starts, run by
+//! `wasm-bindgen-test-runner` in a browser (Block 44, D18). The server's
+//! `host:port` comes at compile time in `FERRIFUGE_W_SERVER`.
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
@@ -11,6 +11,7 @@ use std::future::Future;
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use ferrifuge::machine::TransportKind;
 use ferrifuge::{
     Client, ClientEvent, ClientHandler, Config, EventDelivery, Protocol, SubscriptionEvent,
 };
@@ -731,4 +732,130 @@ async fn with_no_target_an_offline_on_the_global_closes_the_connection() {
     dispatch(global.unchecked_ref(), "offline", None);
 
     connecting_with(&mut events, 1, "transport closed").await;
+}
+
+/// An endpoint nothing listens on.
+const UNREACHABLE: &str = "ws://127.0.0.1:1/connection/websocket";
+
+fn http_stream_endpoint() -> String {
+    format!("http://{SERVER}/connection/http_stream")
+}
+
+/// A client trying the unreachable websocket endpoint, then the server's
+/// `http_stream` endpoint, then its sse one unless `protobuf`: the Protobuf
+/// protocol is refused with sse at build (Block 27, D3).
+fn falling_back(config: Config, protobuf: bool) -> Client {
+    let mut endpoints = vec![
+        (TransportKind::WebSocket, UNREACHABLE.to_owned()),
+        (TransportKind::HttpStream, http_stream_endpoint()),
+    ];
+    if !protobuf {
+        endpoints.push((
+            TransportKind::Sse,
+            format!("http://{SERVER}/connection/sse"),
+        ));
+    }
+    Client::builder_with_transports(endpoints)
+        .config(config)
+        .build()
+        .expect("a valid client")
+}
+
+/// A client over the server's `http_stream` endpoint only.
+fn over_http_stream(config: Config) -> Client {
+    Client::builder_with_transports([(TransportKind::HttpStream, http_stream_endpoint())])
+        .config(config)
+        .build()
+        .expect("a valid client")
+}
+
+// @W scenario: A browser client falls back to http_stream when websocket is unreachable
+async fn falls_back_to_http_stream(protocol: Protocol) {
+    let protobuf = protocol == Protocol::Protobuf;
+    let client = falling_back(Config::default().protocol(protocol), protobuf);
+    let mut events = client.events();
+
+    client.connect();
+
+    assert!(matches!(
+        next_event(&mut events).await,
+        ClientEvent::Connecting { .. }
+    ));
+    assert_eq!(connected_over(&mut events).await, "http_stream");
+}
+
+#[wasm_bindgen_test]
+async fn a_json_client_falls_back_to_http_stream() {
+    falls_back_to_http_stream(Protocol::Json).await;
+}
+
+#[wasm_bindgen_test]
+async fn a_protobuf_client_falls_back_to_http_stream() {
+    falls_back_to_http_stream(Protocol::Protobuf).await;
+}
+
+// @W scenario: Commands work over http_stream from a browser client
+#[wasm_bindgen_test]
+async fn commands_work_over_http_stream() {
+    let channel = unique("news");
+    let client = over_http_stream(Config::default());
+    let subscription = client.new_subscription(&channel).unwrap();
+    let mut events = client.events();
+    let mut subscription_events = subscription.events();
+    client.connect();
+    subscription.subscribe();
+    assert_eq!(connected_over(&mut events).await, "http_stream");
+    subscribed(&mut subscription_events).await;
+
+    within(WAIT, client.publish(&channel, b"hello".to_vec()))
+        .await
+        .expect("the publish succeeds");
+
+    assert_eq!(publication(&mut subscription_events).await.data, b"hello");
+}
+
+// @W scenario: A stream not read stops a browser client reading its http_stream response
+#[wasm_bindgen_test]
+async fn a_stream_not_read_stops_the_client_reading_its_http_stream_response() {
+    const COUNT: usize = 1000;
+    let channel = unique("news");
+    let client = over_http_stream(Config::default().read_ahead_messages(16));
+    let subscription = client.new_subscription(&channel).unwrap();
+    let mut events = client.events();
+    let mut subscription_events = subscription.events();
+    client.connect();
+    subscription.subscribe();
+    assert_eq!(connected_over(&mut events).await, "http_stream");
+    subscribed(&mut subscription_events).await;
+    let publisher = publisher(Config::default()).await;
+
+    for n in 1..=COUNT {
+        within(
+            WAIT,
+            publisher.publish(&channel, format!("{n:0100}").into_bytes()),
+        )
+        .await
+        .expect("published");
+    }
+
+    within(WAIT, async {
+        while client.read_ahead().0 != 16 {
+            sleep(20).await;
+        }
+    })
+    .await;
+    sleep(500).await;
+    assert_eq!(client.read_ahead().0, 16);
+    yields_nothing(&mut events, 1000).await;
+    assert_eq!(client.read_ahead().0, 16);
+    for n in 1..=COUNT {
+        assert_eq!(
+            publication(&mut subscription_events).await.data,
+            format!("{n:0100}").into_bytes()
+        );
+    }
+    match select(subscription_events.next(), sleep(500)).await {
+        Either::Left((event, _)) => panic!("yielded {event:?} after the publications"),
+        Either::Right(_) => {}
+    }
 }
