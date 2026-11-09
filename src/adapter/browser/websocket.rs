@@ -81,6 +81,11 @@ impl Inbox {
         self.items.is_empty()
     }
 
+    /// The frames waiting to be read.
+    pub(super) fn frames(&self) -> usize {
+        self.frames
+    }
+
     pub(super) fn pop(&mut self) -> Option<Inbound> {
         let item = self.items.pop_front()?;
         if let Inbound::Frame(frame) = &item {
