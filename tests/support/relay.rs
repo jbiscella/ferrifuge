@@ -23,6 +23,9 @@ pub(crate) enum Mode {
     Silent,
     /// Closes them at once, like a server that is down.
     Down,
+    /// Keeps new ones waiting, then relays them once the mode changes, so
+    /// a step can act while a client reconnects, however slow the runner.
+    Hold,
 }
 
 pub(crate) struct CountingRelay {
@@ -130,7 +133,11 @@ impl CountingRelay {
                         gating.lock().unwrap().push(Arc::downgrade(&gate));
                         let target = target.clone();
                         let relayed = Arc::clone(&relayed);
+                        let waiting = Arc::clone(&current);
                         tokio::spawn(async move {
+                            while waiting.load(Ordering::SeqCst) == Mode::Hold as u8 {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
                             if let Ok(outbound) = TcpStream::connect(&target).await {
                                 forward(inbound, outbound, gate, relayed).await;
                             }
