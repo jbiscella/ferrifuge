@@ -95,7 +95,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.19"
+ferrifuge = "0.20"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -737,6 +737,12 @@ subscription.subscribe();
   read-ahead stopped the reading. Other waits complete, and `close()`
   returns once the driver stops. Calls of another client never fail.
 
+The bounds of the handler traits, of the token, data and getState
+callbacks and of the futures and streams the client returns read
+`MaybeSend` and `MaybeSync`. On native targets they are `Send` and `Sync`,
+so native code sees no difference; on the browser target they ask nothing,
+since JavaScript handles are neither.
+
 ### Codes
 
 How to read a code: a code means something only with the event or error
@@ -888,7 +894,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.19", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.20", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -949,7 +955,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.19", features = ["test-util"] }
+ferrifuge = { version = "0.20", features = ["test-util"] }
 ```
 
 ```rust
