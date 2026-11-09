@@ -88,7 +88,7 @@ impl Calls {
 /// What a call not yet settled waits for, for the adapter's deadlock
 /// detection (Block 41, D6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "tokio"), allow(dead_code))] // Read by the tokio adapter.
+#[cfg_attr(not(any(adapter_tokio, adapter_browser)), allow(dead_code))] // Read by the adapters.
 pub(crate) enum CallWait {
     /// A message from the server before it is sent: the connect reply, or
     /// the subscribe reply of its subscription.
@@ -101,7 +101,7 @@ pub(crate) enum CallWait {
 
 impl Machine {
     /// What the call `id` waits for; `None` once it is settled.
-    #[cfg_attr(not(feature = "tokio"), allow(dead_code))] // Read by the tokio adapter.
+    #[cfg_attr(not(any(adapter_tokio, adapter_browser)), allow(dead_code))] // Read by the adapters.
     pub(crate) fn call_wait(&self, id: CallId) -> Option<CallWait> {
         self.calls.by_id.get(&id).map(|call| match call.phase {
             Phase::Subscribing | Phase::Queued => CallWait::Message,

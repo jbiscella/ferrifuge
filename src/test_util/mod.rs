@@ -4,10 +4,10 @@
 //! real client runs against.
 
 mod constructors;
-#[cfg(feature = "tokio")]
+#[cfg(adapter_tokio)]
 mod server;
 
-#[cfg(feature = "tokio")]
+#[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use server::{Command, Server};
 
