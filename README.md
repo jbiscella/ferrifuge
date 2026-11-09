@@ -672,6 +672,33 @@ has not taken earlier events, so call results are not ordered with events.
 Dropping the future abandons the call: one still waiting for the connection
 is never sent.
 
+#### Publish debouncing (Centrifugo PRO)
+
+On a namespace where Centrifugo PRO advises a debounce interval
+(`client_publish_debounce_interval`, sent as `publish_debounce` in the
+subscribe reply), `Subscription::publish` and `publish_json` send the first
+value at once and the latest one per interval, per channel: a publish that
+comes while a window is open is merged, and the value is sent when the
+interval ends, the timer not reset by later publishes. Each publish reports
+the server's answer for the value that replaced it: it resolves with the
+result of the send that carried later data, and never succeeds before the
+server has answered that send (`client.proto` advises the interval, the
+result is the SDK's; centrifuge-js and Centrifugo's documentation resolve at
+once with an empty result).
+
+Data waiting in a window is never sent once its subscription leaves
+`subscribed`: the publishes waiting fail with code 7 if the subscription
+became `unsubscribed`, 3 if the client became `disconnected`, 4 if it was
+closed, and otherwise (a lost transport, a server resubscribe, a delta
+failure) with 17 `PUBLISH_DROPPED`, safe to publish again once subscribed. A
+trailing send already handed to the connection, its publishes following it,
+keeps Block 13's rules for that connection. For data that must arrive, use
+`Client::publish`, which is never debounced (the documentation's own caveat).
+Debouncing needs only the advised interval: this client has been tested
+against the protocol's field but not against a real PRO server, which only
+Centrifugo PRO can send. In a hidden browser tab, timer throttling (see
+[Browser](#browser)) lets windows and trailing sends lag by as much.
+
 ### Batching
 
 The client batches by itself: the commands made before its driver next runs,
@@ -870,7 +897,7 @@ an error. The same fields also carry server codes, in their own ranges
 (the last table). The client's logs show the state, code and reason
 (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
 adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6, and
-errors 15 and 16; error 14 is centrifuge-js's shared-poll code, unused until
+errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code, unused until
 Block 47. Blocks are those of the repository's `CLAUDE.md`.
 
 #### `connecting`
@@ -945,6 +972,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
 | 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
 | 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
+| 17 | `codes::error::PUBLISH_DROPPED` | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
 
 #### Server codes
 

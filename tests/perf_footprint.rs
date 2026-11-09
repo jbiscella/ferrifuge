@@ -12,13 +12,18 @@
 // @P scenario: Idle footprint with ten subscriptions
 // @P scenario: Marginal cost of a subscription
 // @P scenario: Memory stays flat across reconnects
+// @P scenario: A closed window frees its memory
 
 mod support;
 
 use std::env;
 use std::time::Duration;
 
-use ferrifuge::{Client, ClientEvent, Config, Subscription, SubscriptionState};
+use ferrifuge::machine::{
+    Action, DebounceTimer, FrameId, Input, Machine, SubscriptionId, SubscriptionOptions,
+    TransportId,
+};
+use ferrifuge::{CallRequest, Client, ClientEvent, Config, Subscription, SubscriptionState};
 use futures_util::{Stream, StreamExt};
 use support::perf_server::{self, ChildServer};
 
@@ -55,6 +60,7 @@ fn main() {
         marginal_cost_of_a_subscription().await;
         memory_stays_flat_across_reconnects().await;
     });
+    a_closed_window_frees_its_memory();
 }
 
 fn live_bytes() -> usize {
@@ -174,4 +180,133 @@ async fn memory_stays_flat_across_reconnects() {
     assert!(change * 100 <= after_first, "{change} bytes apart");
     drop((subscriptions, events));
     drop(client);
+}
+
+/// Windows of the Block 46 scenario.
+const WINDOWS: usize = 10_000;
+
+/// A machine connected over websocket with `WINDOWS` subscriptions, each
+/// advised an interval (Block 46), its transport and the subscriptions.
+fn subscribed_core() -> (Machine, TransportId, Vec<SubscriptionId>) {
+    let mut machine = Machine::new(Config::default()).with_publish_debounce();
+    let transport = machine
+        .handle(Input::Connect)
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a transport");
+    machine.handle(Input::TransportOpened(transport));
+    machine.handle(Input::Frame {
+        transport,
+        data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
+    });
+    let mut subscriptions = Vec::with_capacity(WINDOWS);
+    for number in 0..WINDOWS {
+        let subscription = machine
+            .add_subscription(format!("cursors:{number}"), SubscriptionOptions::default())
+            .expect("a new channel");
+        machine.handle(Input::Subscribe(subscription));
+        subscriptions.push(subscription);
+        let id = number + 2;
+        machine.handle(Input::Frame {
+            transport,
+            data: format!(r#"{{"id":{id},"subscribe":{{"publish_debounce":100}}}}"#).into_bytes(),
+        });
+    }
+    (machine, transport, subscriptions)
+}
+
+/// Answers the publish commands among `actions` and reports their frames
+/// written; the debounce timers set.
+fn answer_publishes(
+    machine: &mut Machine,
+    transport: TransportId,
+    actions: Vec<Action>,
+    timers: &mut Vec<DebounceTimer>,
+) {
+    let mut frames: Vec<(FrameId, Vec<u8>)> = Vec::new();
+    for action in actions {
+        match action {
+            Action::Send { id, frame, .. } => frames.push((id, frame)),
+            Action::SetDebounceTimer(timer, _) => timers.push(timer),
+            _ => {}
+        }
+    }
+    for (frame, bytes) in frames {
+        machine.handle(Input::FrameWritten { transport, frame });
+        let text = String::from_utf8(bytes).expect("a JSON frame");
+        for line in text.lines() {
+            let command: serde_json::Value = serde_json::from_str(line).expect("JSON");
+            if command["publish"].is_object() {
+                machine.handle(Input::Frame {
+                    transport,
+                    data: format!(r#"{{"id":{},"publish":{{}}}}"#, command["id"]).into_bytes(),
+                });
+            }
+        }
+    }
+}
+
+/// Every window opens, a 1 KiB value waiting in it, then closes: its
+/// trailing send answered, its timer fired once more with nothing to send.
+fn open_and_close_windows(
+    machine: &mut Machine,
+    transport: TransportId,
+    subscriptions: &[SubscriptionId],
+) {
+    let value = format!("\"{}\"", "x".repeat(KIB));
+    let mut timers = Vec::new();
+    for subscription in subscriptions {
+        for _ in 0..2 {
+            let call = machine.add_subscription_call(
+                *subscription,
+                CallRequest::Publish {
+                    channel: String::new(),
+                    data: value.as_bytes().to_vec(),
+                },
+            );
+            let actions = machine.handle(Input::Call(call));
+            answer_publishes(machine, transport, actions, &mut timers);
+        }
+    }
+    let fired = std::mem::take(&mut timers);
+    for timer in fired {
+        let actions = machine.handle(Input::DebounceTimerFired(timer));
+        answer_publishes(machine, transport, actions, &mut timers);
+    }
+    let fired = std::mem::take(&mut timers);
+    for timer in fired {
+        let actions = machine.handle(Input::DebounceTimerFired(timer));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::Send { .. })),
+            "a window sent a value it did not hold"
+        );
+    }
+}
+
+fn a_closed_window_frees_its_memory() {
+    let (mut machine, transport, subscriptions) = subscribed_core();
+    // A first round grows the maps of the calls' commands to their working
+    // size (Block 13): they keep their capacity, as for any burst of calls.
+    open_and_close_windows(&mut machine, transport, &subscriptions);
+    let before = live_bytes();
+
+    open_and_close_windows(&mut machine, transport, &subscriptions);
+    let after = live_bytes();
+
+    println!(
+        "@P report: live heap with {WINDOWS} debounce windows closed: \
+         {after} bytes, {before} bytes before they opened"
+    );
+    assert_eq!(
+        after,
+        before,
+        "the windows left {} bytes",
+        after.abs_diff(before)
+    );
+    drop(machine);
 }

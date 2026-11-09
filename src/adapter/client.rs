@@ -2852,9 +2852,11 @@ impl Driver {
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.subscription_timers.cancel((id, timer));
             }
+            // Not numbered: a window's timer is never set twice and the
+            // core ignores one it no longer knows (Block 46, D5). Numbering
+            // it here would skew the settings the core's `Armed` counts.
             Action::SetDebounceTimer(timer, delay) => {
-                let set = self.next_set();
-                self.debounce_timers.set(timer, delay, set);
+                self.debounce_timers.set(timer, delay, 0);
             }
             Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),
             Action::SetCallTimer(id, timer, delay) => {

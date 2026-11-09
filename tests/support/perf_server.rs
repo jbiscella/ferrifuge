@@ -4,8 +4,8 @@
 //! `publish <channel> <count>` sends that many JSON publications of 1 KiB,
 //! `paced <channel> <count> <per second>` sends them at that rate, each
 //! with its send time in microseconds since the Unix epoch (`sent`),
-//! `close <code>` closes the connection with that code. It exits when stdin
-//! closes.
+//! `close <code>` closes the connection with that code, `debounce <ms>`
+//! advises that interval in subscribe replies. It exits when stdin closes.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -75,6 +75,9 @@ pub(crate) fn serve_if_child() -> bool {
                     }
                 }
                 ["close", code] => server.close(code.parse().expect("a close code"), "perf"),
+                ["debounce", interval] => {
+                    server.advise_publish_debounce(Some(interval.parse().expect("an interval")));
+                }
                 _ => panic!("unknown command {line:?}"),
             }
         }
@@ -143,6 +146,12 @@ impl ChildServer {
     /// the Unix epoch).
     pub(crate) fn publish_paced(&mut self, channel: &str, count: usize, per_second: u32) {
         self.command(&format!("paced {channel} {count} {per_second}"));
+    }
+
+    /// Advises `interval` milliseconds of publish debouncing in the
+    /// subscribe replies from now on (Block 46).
+    pub(crate) fn advise_publish_debounce(&mut self, interval: u32) {
+        self.command(&format!("debounce {interval}"));
     }
 
     /// Closes the current connection with `code`.

@@ -249,12 +249,22 @@ impl Subscription {
     /// subscribing, it waits for at most `Config::timeout`; it then waits
     /// for the connection and the reply as a client's call does.
     ///
+    /// On a namespace where the server advises a debounce interval
+    /// (Centrifugo PRO, `publish_debounce`, Block 46) the first value is
+    /// sent at once and the latest one per interval: a publish merged in
+    /// an open window resolves with the result of the send that carried
+    /// later data, and is failed, never sent, if its subscription leaves
+    /// `subscribed` first. Use [`Client::publish`] for data that must
+    /// arrive: it is never debounced.
+    ///
     /// # Errors
     ///
     /// As [`Client::rpc`], and [`crate::codes::error::SUBSCRIPTION_UNSUBSCRIBED`]
     /// when the subscription is unsubscribed, or becomes so before the call
-    /// is sent. Entering `disconnected` fails a call waiting for the
-    /// subscription with [`crate::codes::error::DISCONNECTED`].
+    /// is sent; [`crate::codes::error::PUBLISH_DROPPED`] when it waited in a
+    /// debounce window that its subscription's re-subscribing dropped.
+    /// Entering `disconnected` fails a call waiting for the subscription
+    /// with [`crate::codes::error::DISCONNECTED`].
     pub fn publish(
         &self,
         data: impl Into<Vec<u8>>,

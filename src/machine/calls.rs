@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::{Action, CallId, CallTimer, FrameId, Machine, SubscriptionId};
+use super::{Action, CallId, CallTimer, DebounceTimer, FrameId, Machine, SubscriptionId};
 use crate::wire::{
     ChannelRequest, Command, Error, HistoryRequest, Method, PublishRequest, Reply, ReplyResult,
     RpcRequest,
@@ -35,6 +35,13 @@ enum Phase {
     Held,
     /// Sent as the command with this id, waiting for its reply.
     Sent(u32),
+    /// Waiting in a debounce window, by its timer (Block 46, D3, D6): bounded
+    /// by the window, so with no timer of its own; its data is the window's
+    /// latest, or was replaced by it.
+    Debounced(DebounceTimer),
+    /// Replaced in a window now ended: it settles with the result of the
+    /// trailing send with this id (Block 46, D4).
+    Following(CallId),
 }
 
 #[derive(Debug)]
@@ -43,6 +50,9 @@ struct Call {
     /// The subscription of a subscription-level call.
     subscription: Option<SubscriptionId>,
     phase: Phase,
+    /// For the internal call of a trailing send (Block 46, D4): the calls it
+    /// settles, in the order they were made; empty for any other call.
+    followers: Vec<CallId>,
 }
 
 /// The calls not yet settled, in the order they were added.
@@ -64,7 +74,7 @@ impl Phase {
     /// The timer of this phase.
     fn timer(&self) -> Option<CallTimer> {
         match self {
-            Self::Added => None,
+            Self::Added | Self::Debounced(_) | Self::Following(_) => None,
             Self::Subscribing => Some(CallTimer::Subscription),
             Self::Queued => Some(CallTimer::Connection),
             Self::Room | Self::Held => Some(CallTimer::Room),
@@ -106,7 +116,15 @@ impl Machine {
         self.calls.by_id.get(&id).map(|call| match call.phase {
             Phase::Subscribing | Phase::Queued => CallWait::Message,
             Phase::Sent(_) => CallWait::Reply,
-            Phase::Added | Phase::Room | Phase::Held => CallWait::Other,
+            Phase::Added | Phase::Room | Phase::Held | Phase::Debounced(_) => CallWait::Other,
+            // The phase of its trailing send (Block 46, D13).
+            Phase::Following(trailing) => {
+                match self.calls.by_id.get(&trailing).map(|call| &call.phase) {
+                    Some(Phase::Queued) => CallWait::Message,
+                    Some(Phase::Sent(_)) => CallWait::Reply,
+                    _ => CallWait::Other,
+                }
+            }
         })
     }
 
@@ -152,9 +170,71 @@ impl Machine {
                 request,
                 subscription,
                 phase: Phase::Added,
+                followers: Vec::new(),
             },
         );
         id
+    }
+
+    /// The internal call of a trailing send (Block 46, D3, D4), past the
+    /// gate: no owner awaits it, `waiters` settle with its result.
+    pub(super) fn start_trailing_send(
+        &mut self,
+        subscription: SubscriptionId,
+        request: CallRequest,
+        waiters: Vec<CallId>,
+    ) {
+        let id = self.insert_call(request, Some(subscription));
+        for waiter in &waiters {
+            if let Some(call) = self.calls.by_id.get_mut(waiter) {
+                call.phase = Phase::Following(id);
+            }
+        }
+        if let Some(call) = self.calls.by_id.get_mut(&id) {
+            call.followers = waiters;
+        }
+        self.hand_off(id);
+    }
+
+    /// The subscription and key call `id` is debounced by, if its publish
+    /// meets the gate (Block 46, D3): the key `""` of a stream subscription
+    /// (46b adds the map keys).
+    pub(super) fn debounce_key(&self, id: CallId) -> Option<(SubscriptionId, String)> {
+        let call = self.calls.by_id.get(&id)?;
+        let subscription = call.subscription?;
+        matches!(call.request, CallRequest::Publish { .. }).then(|| (subscription, String::new()))
+    }
+
+    /// Call `id` waits in the window of `timer` (Block 46, D3): its
+    /// subscription deadline ends, the window bounds it, and its request, as
+    /// the window's latest, is taken from it.
+    pub(super) fn park_call(&mut self, id: CallId, timer: DebounceTimer) -> Option<CallRequest> {
+        let call = self.calls.by_id.get_mut(&id)?;
+        if matches!(call.phase, Phase::Subscribing) {
+            self.actions
+                .push(Action::CancelCallTimer(id, CallTimer::Subscription));
+        }
+        call.phase = Phase::Debounced(timer);
+        Some(std::mem::replace(
+            &mut call.request,
+            CallRequest::Publish {
+                channel: String::new(),
+                data: Vec::new(),
+            },
+        ))
+    }
+
+    /// Follower `id` of trailing send `trailing` was abandoned: with none
+    /// left, so is the send, never written when it was not yet (Block 46,
+    /// D11).
+    fn follower_abandoned(&mut self, trailing: CallId, id: CallId) {
+        let Some(call) = self.calls.by_id.get_mut(&trailing) else {
+            return;
+        };
+        call.followers.retain(|follower| *follower != id);
+        if call.followers.is_empty() {
+            self.call_abandoned(trailing);
+        }
     }
 
     /// Starts call `id`. A subscription-level call waits for its
@@ -191,8 +271,17 @@ impl Machine {
     /// connected and it fits the write queue, otherwise waiting for the
     /// connection (centrifuge-js `_methodCall`) or for room. A transport
     /// whose close is read but not yet handled counts as gone: the call
-    /// waits for the next one.
+    /// waits for the next one. A debounced publish that meets its open
+    /// window waits there instead (Block 46, D3).
     fn start_call(&mut self, id: CallId) {
+        if self.debounce_gate(id) {
+            return;
+        }
+        self.hand_off(id);
+    }
+
+    /// Hands call `id`, past the debounce gate, to Block 13's path.
+    fn hand_off(&mut self, id: CallId) {
         let connected = self.can_send();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
@@ -576,6 +665,13 @@ impl Machine {
     /// forgotten, and never sent if it was queued.
     pub(super) fn call_abandoned(&mut self, id: CallId) {
         if let Some(call) = self.calls.by_id.remove(&id) {
+            match call.phase {
+                // Not a trailing send: its data stays for the others while
+                // any waits (Block 46, D11).
+                Phase::Debounced(timer) => return self.debounce_waiter_abandoned(timer, id),
+                Phase::Following(trailing) => return self.follower_abandoned(trailing, id),
+                _ => {}
+            }
             self.calls.room.remove(&id);
             self.unbuffer_call(id);
             if let Phase::Sent(command) = call.phase {
@@ -707,7 +803,15 @@ impl Machine {
         if let Some(timer) = call.phase.timer() {
             self.actions.push(Action::CancelCallTimer(id, timer));
         }
-        self.actions.push(Action::CallSettled { call: id, result });
+        // A trailing send settles the calls that follow it, never itself
+        // (Block 46, D4).
+        if call.followers.is_empty() {
+            self.actions.push(Action::CallSettled { call: id, result });
+        } else {
+            for follower in call.followers {
+                self.settle_call(follower, result.clone());
+            }
+        }
         self.unbuffer_call(id);
     }
 }
@@ -769,7 +873,7 @@ pub(super) fn connection_closed() -> CallError {
     CallError::new(codes::error::CONNECTION_CLOSED, "connection closed")
 }
 
-fn subscription_unsubscribed() -> CallError {
+pub(super) fn subscription_unsubscribed() -> CallError {
     CallError::new(
         codes::error::SUBSCRIPTION_UNSUBSCRIBED,
         "subscription unsubscribed",

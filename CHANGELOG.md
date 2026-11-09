@@ -13,6 +13,13 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Publish debouncing as advised by the server (Centrifugo PRO):
+  `Subscription::publish` and `publish_json` send the first value at once
+  and the latest per interval, and each publish resolves with the result
+  of the send that carried later data (Block 46).
+  `codes::error::PUBLISH_DROPPED`; `machine::DebounceTimer`,
+  `Input::DebounceTimerFired`, `Action::SetDebounceTimer` and
+  `CancelDebounceTimer`, `Machine::with_publish_debounce`.
 - Unstable (`unstable` feature): map subscriptions recover and resync
   (Block 45c). A subscribe after a taken event recovers from that
   position in the stream phase, and the missed changes come as

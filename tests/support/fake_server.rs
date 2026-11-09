@@ -175,11 +175,9 @@ struct State {
     /// now on; the field is left out of the JSON reply when `None`
     /// (Block 46).
     publish_debounce: Option<u32>,
-    /// Replies to publish commands are held until the test answers them
-    /// (Block 46).
-    hold_publishes: bool,
-    /// The ids of the publish commands whose replies are held, oldest first.
-    held_publishes: VecDeque<Value>,
+    /// The ids of the publish commands whose replies are held, oldest
+    /// first, while the test holds them (Block 46).
+    held_publishes: Option<VecDeque<Value>>,
     /// Publish commands of this data are refused with this error (Block 46).
     refused_publishes: Vec<(Value, Value)>,
     /// The next delta sent goes without the end of its trailer.
@@ -491,14 +489,14 @@ impl FakeServer {
     /// Holds the replies to publish commands from now on, until
     /// [`FakeServer::answer_held_publish`].
     pub(crate) fn hold_publish_replies(&self) {
-        self.state.lock().unwrap().hold_publishes = true;
+        self.state.lock().unwrap().held_publishes = Some(VecDeque::new());
     }
 
-    /// Answers the oldest held publish command with success, and stops
-    /// holding once none is left; whether there was one.
+    /// Answers the oldest held publish command with success; whether there
+    /// was one.
     pub(crate) fn answer_held_publish(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        let Some(id) = state.held_publishes.pop_front() else {
+        let Some(id) = state.held_publishes.as_mut().and_then(VecDeque::pop_front) else {
             return false;
         };
         if let Some(out) = &state.out {
@@ -1077,8 +1075,8 @@ impl Connection {
             {
                 let reply = json!({"id": message["id"], "error": error});
                 replies.push(Message::text(reply.to_string()));
-            } else if state.hold_publishes {
-                state.held_publishes.push_back(message["id"].clone());
+            } else if let Some(held) = state.held_publishes.as_mut() {
+                held.push_back(message["id"].clone());
             } else {
                 replies.push(Message::text(
                     json!({"id": message["id"], "publish": {}}).to_string(),
