@@ -11,6 +11,23 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+### Added
+
+- The browser adapter (Block 44b): on `wasm32-unknown-unknown` the same
+  `Client`, `Subscription`, streams, handlers and calls run in the browser
+  over its WebSocket, behind the new `browser` feature, in the default set,
+  which builds nothing on other targets. Its inbox holds at most the
+  read-ahead's limits while the application does not read; past them the
+  client reconnects with the new `connecting` code 7
+  `READ_AHEAD_OVERFLOW`, after the new input `Input::InboxOverflow`.
+
+### Changed
+
+- The `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` features build as
+  nothing on `wasm32-unknown-unknown` (Block 44b), where the native-only
+  options do not exist. With `browser`, the core's random delays are seeded
+  from the browser there.
+
 ## [0.20.0] - 2026-11-09
 
 ### Added

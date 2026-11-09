@@ -1239,11 +1239,12 @@ impl Machine {
     /// Creates a disconnected machine whose owner has no token callback: an
     /// expiring token cannot be refreshed and ends the connection.
     ///
-    /// On `wasm32-unknown-unknown` the random source of its delays (backoff,
-    /// refresh jitter) starts from a constant, as fastrand without its `js`
-    /// feature has no entropy there: every machine of a page, and the n-th
-    /// machine of every page, draws the same delays until the browser
-    /// adapter's feature enables it (Block 40, D4).
+    /// On `wasm32-unknown-unknown` without the `browser` feature, the random
+    /// source of its delays (backoff, refresh jitter) starts from a
+    /// constant, as fastrand without its `js` feature has no entropy there:
+    /// every machine of a page, and the n-th machine of every page, draws
+    /// the same delays (Block 40, D4). `browser` seeds it from the
+    /// browser's `crypto.getRandomValues` (Block 44, D5).
     #[must_use]
     pub fn new(config: Config) -> Self {
         Self::with_rng(config, false, fastrand::Rng::new())
@@ -1304,11 +1305,12 @@ impl Machine {
     /// Creates a disconnected machine whose owner answers
     /// [`Action::FetchToken`] from the application's token callback.
     ///
-    /// On `wasm32-unknown-unknown` the random source of its delays (backoff,
-    /// refresh jitter) starts from a constant, as fastrand without its `js`
-    /// feature has no entropy there: every machine of a page, and the n-th
-    /// machine of every page, draws the same delays until the browser
-    /// adapter's feature enables it (Block 40, D4).
+    /// On `wasm32-unknown-unknown` without the `browser` feature, the random
+    /// source of its delays (backoff, refresh jitter) starts from a
+    /// constant, as fastrand without its `js` feature has no entropy there:
+    /// every machine of a page, and the n-th machine of every page, draws
+    /// the same delays (Block 40, D4). `browser` seeds it from the
+    /// browser's `crypto.getRandomValues` (Block 44, D5).
     #[must_use]
     pub fn with_token_source(config: Config) -> Self {
         Self::with_rng(config, true, fastrand::Rng::new())

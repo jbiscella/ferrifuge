@@ -890,6 +890,7 @@ let config = Config::default()
 | `fips` | no | aws-lc-rs in FIPS mode; also needs CMake and Go to build |
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
+| `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket; nothing on other targets (see Browser) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -912,12 +913,13 @@ Without default features, ferrifuge has no runtime or network dependency.
 activity, timers) and returns the actions to perform.
 
 The core alone builds for `wasm32-unknown-unknown`, and CI checks it on every
-pull request. `tokio` does not build there: its dependencies need an
-operating system. On that target the machine's random delays (backoff,
-refresh jitter) start from a constant, because fastrand has no entropy
-source there without its `js` feature. Every machine of a page, and the n-th
-machine of every page, draws the same delays until the browser adapter
-enables that feature.
+pull request. There `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` build
+as nothing, so the default features give the browser adapter (see Browser).
+Without `browser`, as for a non-JavaScript wasm host, the machine's random
+delays (backoff, refresh jitter) start from a constant, because fastrand has
+no entropy source there without its `js` feature: every machine of a page,
+and the n-th machine of every page, draws the same delays. `browser` seeds
+them from the browser's `crypto.getRandomValues`.
 
 ### Cookies
 
@@ -1138,6 +1140,76 @@ Revocation is checked from API level 24. Extra roots go through a
 `root_certificates` works there. On both, only the environment's proxy
 applies (see Proxies), and the `fips` build is unsupported.
 
+### Browser
+
+A web front-end in Rust (Leptos, Yew, Dioxus) runs the same `Client`,
+built for `wasm32-unknown-unknown` with the default features: the `browser`
+feature gives it the browser's WebSocket, the page's event loop for its
+tasks, `setTimeout` for its timers, `performance.now()` and `Date.now()`
+for its clocks. With `--no-default-features`, add `features = ["browser"]`.
+
+```rust,ignore
+let client = ferrifuge::Client::new("wss://example.com/connection/websocket", Config::default())?;
+client.connect();
+```
+
+**What is not there.** The options the browser decides itself do not
+exist on that target, so code using them does not build for it: real HTTP
+headers (`http_headers`, `set_http_headers`; the emulated headers stay),
+TLS settings (`root_certificates`, `tls_config`, the `rustls` re-export),
+proxies (`proxy`, `set_proxy`, `Proxy`), the connector and the `http`
+re-export, `runtime`, the cookie jar (the browser keeps cookies),
+`EventDelivery::Thread` (no threads), `test_util::Server` and
+`ferrifuge::android`. There the client is neither `Send` nor `Sync`, and
+its callbacks need not be either: a token callback may hold an `Rc` and
+await a `fetch`.
+
+**The inbox.** A browser's WebSocket cannot stop reading: every message
+arrives as an event. While the client's read-ahead is full, because the
+application does not take its events, arriving messages wait in an inbox
+with the read-ahead's own limits (`read_ahead_messages`,
+`read_ahead_bytes`), so a client holds at most twice its read-ahead. A
+message that would overflow it closes the connection, and the client
+reconnects with `connecting` code 7 "read-ahead overflow": the events it
+had not taken are withdrawn, and recovery brings them back on recoverable
+channels within the server's recovery limit; elsewhere they can be lost.
+Before a server ping is read on the connection the backoff keeps growing,
+as after a 3008 close. The server is not held back, as natively.
+
+Over websocket a frame counts as written when the browser takes it, so
+there is no write timeout; a stalled connection still ends at the no-ping
+deadline. A message over `max_message_bytes` is refused once the browser
+has received it whole. The browser hides the upgrade's response, so a
+failed attempt says "websocket closed before open (code N)" and names no
+captive portal.
+
+**Handlers and panics.** `EventDelivery::Task` runs handlers as a task of
+the page, `Inline` on the client's driver; both block the page while a
+handler runs, and a call of the client from its own handler fails at once
+with `WOULD_DEADLOCK`. wasm32-unknown-unknown builds with `panic =
+"abort"`: a panicking handler or callback traps the module, whose later
+calls are undefined. Set a panic hook (`std::panic::set_hook`) that logs
+to the console to see why.
+
+**Clocks and hidden tabs.** The sleep detection compares `Date.now()` with
+`performance.now()`. Whether a browser's monotonic clock counts a system
+sleep is not specified: where it does, no gap is seen and timers fire at
+the wake as if they had counted it. Browsers throttle the timers of hidden
+tabs, Chrome's intensive throttling included, which an open WebSocket does
+not prevent: reconnect delays, token refreshes and the no-ping deadline may
+fire late, while pongs, answered from message events, are not delayed.
+
+**Logging** goes through `tracing` as natively; a browser subscriber such
+as [tracing-web](https://crates.io/crates/tracing-web) shows the records
+in the console.
+
+**Size.** A release module that builds a client and connects it is about
+1.1 MiB after `wasm-bindgen`, 313 KiB gzipped, before any `wasm-opt`
+(2026-11-09); CI reports it on every change.
+
+**Tested browsers:** headless Chrome and Firefox on every pull request,
+Safari on `main` and nightly.
+
 ### Sleep and network changes
 
 The client notices a system sleep at the first input after the wake: a
@@ -1190,7 +1262,7 @@ can tell its user to sign in to the network.
 
 ### Logging
 
-The tokio adapter logs through [`tracing`](https://docs.rs/tracing); the
+The adapters log through [`tracing`](https://docs.rs/tracing); the
 sans-IO core logs nothing and reports the protocol breaches only it sees as
 `Action::Anomaly`. Every record's target starts with `ferrifuge`:
 
@@ -1332,10 +1404,14 @@ providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
 build. It runs the unit tests, the scenarios that need no server and the
 chaos seeds on Windows and macOS, builds the library and its unit tests for
-Android and iOS, the core alone for `wasm32-unknown-unknown` (its clippy
-also refusing the std clock and thread calls that panic there), the interop
-test, each fuzz target for
-30 s (10 min nightly) and the semver check. The perf, wall-clock, fuzz and long chaos jobs
+Android and iOS, the core alone and the browser adapter for
+`wasm32-unknown-unknown` (their clippy also refusing the std clock and
+thread calls that panic there), with a check that a module linking them
+imports nothing but wasm-bindgen's glue, and runs the `@W` tests in headless
+Chrome and Firefox (`browser` job; Safari on `main` and nightly), the
+interop test, each fuzz target for
+30 s (10 min nightly) and the semver check, natively and for the browser
+target. The perf, wall-clock, fuzz and long chaos jobs
 run on merges to `main`, nightly and on demand (`workflow_dispatch`), not
 on pull requests. cargo-deny also runs daily.
 

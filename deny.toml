@@ -5,8 +5,8 @@
 [graph]
 # Dev-dependencies are checked too: they run in CI with network and Docker access.
 all-features = true
-# The platforms ferrifuge supports (CLAUDE.md, Block 8): crates used only
-# on others, e.g. wasm32 shims of the HTTP client, are not shipped.
+# The platforms ferrifuge supports (CLAUDE.md, Block 8), and the browser
+# target of its browser adapter (Block 44, D19).
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -14,6 +14,7 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
+    "wasm32-unknown-unknown",
 ]
 
 [advisories]
@@ -47,7 +48,14 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
-exceptions = []
+exceptions = [
+    # Built for no target: rustls-platform-verifier depends on it on wasm32
+    # only, and ferrifuge depends on rustls-platform-verifier on its native
+    # targets only (Block 44, D1); `cargo tree -i webpki-root-certs` finds
+    # it for none of the targets above. cargo-deny takes the union of the
+    # targets' edges, so wasm32-unknown-unknown in the list reaches it.
+    { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

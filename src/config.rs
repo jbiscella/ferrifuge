@@ -108,6 +108,10 @@ pub struct Config {
     /// reports a larger message with
     /// [`Input::MessageTooLarge`](crate::machine::Input::MessageTooLarge). At least
     /// 1. Default 64 MiB.
+    ///
+    /// In the browser a websocket message is refused only once the browser
+    /// has received it whole: the browser reads the connection, not the
+    /// client (Block 44, D6).
     pub max_message_bytes: usize,
 }
 
