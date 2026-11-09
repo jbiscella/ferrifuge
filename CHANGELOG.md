@@ -21,7 +21,21 @@ repository held while it carried that version, from the blocks of
   client reconnects with the new `connecting` code 7
   `READ_AHEAD_OVERFLOW`, after the new input `Input::InboxOverflow`.
 
+- The browser's network and page events (Block 44c): in the browser the
+  client closes its connection on `offline`, and on a `pagehide` that puts
+  the page in the back/forward cache, with the reason "page entered
+  back/forward cache", and reconnects on `online` and on the `pageshow`
+  that restores it; `ClientBuilder::network_event_target` and
+  `ClientBuilder::page_event_target` name other targets than `globalThis`.
+  The core has the new inputs `Input::Offline` and `Input::PageCached`.
+
 ### Changed
+
+- `reconnect()` while connecting, before the first attempt since the
+  client lost its connection has started, waits a draw from the reconnect
+  jitter window instead of starting that attempt at once (Block 44c), so
+  that a fleet whose network comes back does not reconnect at once. With
+  the default window 0 nothing changes.
 
 - The `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` features build as
   nothing on `wasm32-unknown-unknown` (Block 44b), where the native-only

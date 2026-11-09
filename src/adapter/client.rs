@@ -674,6 +674,8 @@ impl Shared {
         }
         // On the states, not the events taken (Block 30, D4).
         ready::settle(core, &mut lock(&self.ready));
+        #[cfg(adapter_browser)]
+        lock(&self.events).follow(core.machine.state());
         let connected = core.machine.state() == State::Connected;
         if connected != core.connected_since.is_some() {
             core.connected_since = connected.then(platform::wall_clock);
