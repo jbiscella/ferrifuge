@@ -345,7 +345,7 @@ fn websocket_config(max_message: usize) -> WebSocketConfig {
 
 /// The error of an HTTP transport's decoder when the server sent a message
 /// larger than the size limit, reported as [`Inbound::TooLarge`].
-pub(super) const TOO_LARGE: &str = "message larger than the size limit";
+pub(in crate::adapter) const TOO_LARGE: &str = "message larger than the size limit";
 
 fn closed(frame: Option<CloseFrame>) -> Inbound {
     match frame {

@@ -19,7 +19,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
-use super::client::lock;
+use super::super::client::lock;
 use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
@@ -334,20 +334,20 @@ impl HttpTransport {
 
 /// What an error message about an open ends with when a captive portal may
 /// have answered it (Block 25, D8).
-pub(super) const CAPTIVE_PORTAL: &str = "; a captive portal may be answering";
+pub(in crate::adapter) const CAPTIVE_PORTAL: &str = "; a captive portal may be answering";
 
 /// Whether an open answered with `status` and `content_type`, instead of
 /// the transport's, looks like a captive portal's web page (Block 25, D8):
 /// a redirect, 511 "Network Authentication Required", or a page served as
 /// a success.
-pub(super) fn captive_portal(status: u16, content_type: &str) -> bool {
+pub(in crate::adapter) fn captive_portal(status: u16, content_type: &str) -> bool {
     (300..400).contains(&status)
         || status == 511
         || ((200..300).contains(&status) && is_media_type(content_type, names::TEXT, names::HTML))
 }
 
 /// `message`, saying that a captive portal may be answering when `portal`.
-pub(super) fn with_portal(message: String, portal: bool) -> String {
+pub(in crate::adapter) fn with_portal(message: String, portal: bool) -> String {
     if portal {
         message + CAPTIVE_PORTAL
     } else {

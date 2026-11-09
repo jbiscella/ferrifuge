@@ -16,21 +16,20 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rustls::pki_types::CertificateDer;
-use tokio::runtime::Handle;
 use tokio::sync::{Notify, oneshot};
-use tokio::time::Sleep;
 use tracing::Instrument;
 
-use super::connector::{self, Connector};
-use super::http::{HeaderSet, HttpTransport};
 use super::log::{self, Log};
-use super::net::Network;
-use super::proxy::Proxy;
+use super::platform::{self, Handle, Sleep};
 use super::ready::{self, Of, Waiters};
-use super::tls::{self, Tls, Trust, unparsable_root};
-use super::transport::{Inbound, WebSocket};
+use super::tokio::connector::{self, Connector};
+use super::tokio::http::HeaderSet;
+use super::tokio::net::Network;
+use super::tokio::proxy::Proxy;
+use super::tokio::tls::{self, Tls, Trust, unparsable_root};
+use super::tokio::transport::Inbound;
 use crate::machine::{
-    Action, CallId, CallTimer, FetchId, FrameId, FrameType, Input, Machine, SubscriptionId,
+    Action, CallId, CallTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use crate::{
@@ -208,12 +207,12 @@ impl Core {
 
 /// The wall-clock and monotonic times of the last input given the machine.
 #[derive(Debug, Default)]
-pub(super) struct Clock(Option<(SystemTime, std::time::Instant)>);
+pub(super) struct Clock(Option<(SystemTime, platform::Monotonic)>);
 
 impl Clock {
     /// How long the system slept since the last input, if it did.
     fn tick(&mut self) -> Option<Duration> {
-        let now = (SystemTime::now(), std::time::Instant::now());
+        let now = platform::clocks();
         let gap = self.0.and_then(|last| sleep_gap(last, now));
         self.0 = Some(now);
         gap
@@ -224,8 +223,8 @@ impl Clock {
 /// moved than the monotonic one, whose time stops in a suspend, when at
 /// least 2 s (Block 25, D1). A wall clock set back gives none.
 fn sleep_gap(
-    last: (SystemTime, std::time::Instant),
-    now: (SystemTime, std::time::Instant),
+    last: (SystemTime, platform::Monotonic),
+    now: (SystemTime, platform::Monotonic),
 ) -> Option<Duration> {
     let wall = now.0.duration_since(last.0).ok()?;
     let monotonic = now.1.saturating_duration_since(last.1);
@@ -314,7 +313,7 @@ impl Armed {
 /// application task that reveals a sleep cannot reach the driver's
 /// timers (Block 25, D1, D3).
 #[derive(Debug, Default)]
-pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, tokio::time::Instant>);
+pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, platform::Instant>);
 
 impl Refreshes {
     /// Follows `action`, which the driver will perform.
@@ -335,7 +334,7 @@ impl Refreshes {
     }
 
     fn set(&mut self, key: Option<SubscriptionId>, delay: Duration) {
-        self.0.insert(key, tokio::time::Instant::now() + delay);
+        self.0.insert(key, platform::Instant::now() + delay);
     }
 
     /// Every refresh comes due `by` earlier, as the core's shortening of
@@ -344,7 +343,7 @@ impl Refreshes {
         for deadline in self.0.values_mut() {
             *deadline = deadline
                 .checked_sub(by)
-                .unwrap_or_else(tokio::time::Instant::now);
+                .unwrap_or_else(platform::Instant::now);
         }
     }
 
@@ -363,7 +362,7 @@ impl Refreshes {
 
     /// Removes the refresh timers due now, and names them.
     fn due(&mut self) -> Vec<Option<SubscriptionId>> {
-        let now = tokio::time::Instant::now();
+        let now = platform::Instant::now();
         let mut due: Vec<_> = self
             .0
             .iter()
@@ -650,7 +649,7 @@ impl Shared {
         ready::settle(core, &mut lock(&self.ready));
         let connected = core.machine.state() == State::Connected;
         if connected != core.connected_since.is_some() {
-            core.connected_since = connected.then(SystemTime::now);
+            core.connected_since = connected.then(platform::wall_clock);
         }
     }
 
@@ -913,7 +912,7 @@ pub struct ClientBuilder {
     /// Where its handlers run (Block 41, D2).
     event_delivery: super::EventDelivery,
     /// The application's cookie jar (Block 43).
-    cookie_jar: super::net::Jar,
+    cookie_jar: super::tokio::net::Jar,
 }
 
 /// Endpoints as they may be logged (Block 21, D5).
@@ -1088,7 +1087,7 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
     #[must_use]
     pub fn cookie_jar(mut self, jar: Arc<dyn super::CookieJar>) -> Self {
-        self.cookie_jar = super::net::Jar(Some(jar));
+        self.cookie_jar = super::tokio::net::Jar(Some(jar));
         self
     }
 
@@ -1255,7 +1254,7 @@ impl Client {
             runtime: None,
             handler: None,
             event_delivery: super::EventDelivery::default(),
-            cookie_jar: super::net::Jar::default(),
+            cookie_jar: super::tokio::net::Jar::default(),
         }
     }
 
@@ -1352,7 +1351,7 @@ impl Client {
             callback_aborts: HashMap::new(),
         };
         let span = shared.log.span.clone();
-        runtime.spawn(driver.run().instrument(span));
+        platform::spawn(&runtime, driver.run().instrument(span));
         // A runtime that has shut down drops the task at once, and its
         // guard closes the client (Block 28, D5).
         if shared.closed.load(Ordering::Acquire) {
@@ -1580,7 +1579,7 @@ impl Client {
     /// Publications not yet taken are withdrawn and, on recoverable
     /// channels, recovered by the next connection.
     pub fn reconnect(&self) {
-        super::proxy::read_settings_again();
+        super::tokio::proxy::read_settings_again();
         self.shared.apply(Input::Reconnect);
     }
 
@@ -1956,7 +1955,7 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-type Opening = Pin<Box<dyn Future<Output = Result<Transport, String>> + Send>>;
+use super::tokio::{Opening, Transport};
 type Fetching = Pin<Box<dyn Future<Output = Result<String, TokenError>> + Send>>;
 
 /// Performs the machine's actions, and turns transport activity and timers
@@ -1982,7 +1981,7 @@ struct Driver {
     delivery: super::EventDelivery,
     /// The closings of the transports closed that may still run, each
     /// awaited before the driver stops (Block 33, D1; Codex, #141).
-    closing: Vec<tokio::task::JoinHandle<()>>,
+    closing: Vec<platform::JoinHandle<()>>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     /// The kind of the transport opening or open, for the records.
@@ -2025,8 +2024,7 @@ impl<K> Default for KeyedTimers<K> {
 impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
     /// Sets `key`'s timer, of the setting numbered `set` (see [`Armed`]).
     fn set(&mut self, key: K, delay: Duration, set: u64) {
-        self.0
-            .insert(key, (Box::pin(tokio::time::sleep(delay)), set));
+        self.0.insert(key, (Box::pin(platform::sleep(delay)), set));
     }
 
     fn cancel(&mut self, key: K) {
@@ -2064,7 +2062,7 @@ fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
     let deadline = sleep
         .deadline()
         .checked_sub(by)
-        .unwrap_or_else(tokio::time::Instant::now);
+        .unwrap_or_else(platform::Instant::now);
     sleep.as_mut().reset(deadline);
 }
 
@@ -2077,7 +2075,7 @@ impl Timers {
     /// Sets `timer`, of the setting numbered `set` (see [`Armed`]).
     fn set(&mut self, timer: Timer, delay: Duration, set: u64) {
         // sleep() clamps delays too large for an Instant instead of panicking.
-        self.0[timer.index()] = Some((Box::pin(tokio::time::sleep(delay)), set));
+        self.0[timer.index()] = Some((Box::pin(platform::sleep(delay)), set));
     }
 
     fn cancel(&mut self, timer: Timer) {
@@ -2442,50 +2440,22 @@ impl Driver {
         endpoint: usize,
         initial_frame: Option<Vec<u8>>,
     ) {
-        let url = self.endpoints.get(endpoint).cloned().unwrap_or_default();
         self.kind = kind;
-        let subprotocol = self.subprotocol;
-        let timeout = self.timeout;
-        let max_message = self.max_message;
-        let headers = self.shared.http_headers.clone();
-        let network = Arc::clone(&self.shared.network);
-        // The attempt's proxy, decided once (Block 23, D1); the transport
-        // opening it gets the same decision.
-        network.new_attempt();
-        let decision = reqwest::Url::parse(&url)
-            .map_err(|e| e.to_string())
-            .and_then(|parsed| network.decide(&parsed));
-        self.shared
-            .log
-            .attempt(kind, endpoint, &decision, network.connector().is_some());
-        let opening: Opening = match kind {
-            TransportKind::WebSocket => Box::pin(async move {
-                let headers = headers.current();
-                WebSocket::open(&url, subprotocol, timeout, &headers, &network, max_message)
-                    .await
-                    .map(|websocket| Transport::WebSocket(Box::new(websocket)))
-            }),
-            TransportKind::HttpStream | TransportKind::Sse => {
-                let emulation = self.emulation_endpoint.clone();
-                let request_timeout = self.timeout;
-                let protobuf = self.subprotocol.is_some();
-                Box::pin(async move {
-                    HttpTransport::open(
-                        kind,
-                        &url,
-                        initial_frame.unwrap_or_default(),
-                        emulation.as_deref(),
-                        request_timeout,
-                        headers,
-                        &network,
-                        protobuf,
-                        max_message,
-                    )
-                    .await
-                    .map(|http| Transport::Http(Box::new(http)))
-                })
-            }
-        };
+        let opening = super::tokio::open(
+            super::tokio::Open {
+                kind,
+                endpoint,
+                url: self.endpoints.get(endpoint).cloned().unwrap_or_default(),
+                subprotocol: self.subprotocol,
+                timeout: self.timeout,
+                max_message: self.max_message,
+                headers: self.shared.http_headers.clone(),
+                network: Arc::clone(&self.shared.network),
+                emulation: self.emulation_endpoint.clone(),
+                initial_frame,
+            },
+            &self.shared.log,
+        );
         self.opening = Some((id, opening));
     }
 
@@ -2645,46 +2615,6 @@ fn callback_panicked() -> TokenError {
     TokenError::Failed("token callback panicked".to_owned())
 }
 
-/// An open transport of any kind.
-enum Transport {
-    // Boxed: the transports differ much in size, and one is held at a time.
-    WebSocket(Box<WebSocket>),
-    Http(Box<HttpTransport>),
-}
-
-impl Transport {
-    /// Queues `frame`; it is written while [`Transport::recv`] runs.
-    fn send(&mut self, id: FrameId, frame: Vec<u8>, frame_type: FrameType) -> Result<(), String> {
-        match self {
-            Self::WebSocket(websocket) => websocket.send(id, frame, frame_type),
-            // Failures end the transport through `recv`.
-            Self::Http(http) => {
-                http.send(id, frame);
-                Ok(())
-            }
-        }
-    }
-
-    /// Cancel-safe. Without `reading`, only writes, as Block 15's full
-    /// read-ahead requires.
-    async fn recv(&mut self, reading: bool) -> Inbound {
-        match self {
-            Self::WebSocket(websocket) => websocket.recv(reading).await,
-            Self::Http(http) => http.recv(reading).await,
-        }
-    }
-
-    /// Closes the transport on a task of its own, bounded by
-    /// `Config::timeout` (Block 8); the task, which the driver awaits when it
-    /// stops (Block 33, D1).
-    fn close(self, runtime: &Handle) -> tokio::task::JoinHandle<()> {
-        match self {
-            Self::WebSocket(websocket) => runtime.spawn(websocket.close()),
-            Self::Http(http) => runtime.spawn(http.close()),
-        }
-    }
-}
-
 /// Resolves when the transport being opened is ready; never without one.
 async fn opened(
     opening: &mut Option<(TransportId, Opening)>,
@@ -2704,7 +2634,7 @@ async fn opened(
 fn runtime_or_current(runtime: Option<Handle>) -> Result<Handle, ClientError> {
     match runtime {
         Some(runtime) => Ok(runtime),
-        None => Handle::try_current().map_err(|_| {
+        None => platform::current_runtime().ok_or_else(|| {
             runtime_error(
                 "no tokio runtime is current: build the client inside one, or give one \
                  with ClientBuilder::runtime",
@@ -3871,30 +3801,94 @@ mod tests {
         assert!(error.message.contains("shut down"), "{}", error.message);
     }
 
-    #[test]
-    fn the_adapter_spawns_only_through_its_runtime_handle() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
-        let mut found = Vec::new();
-        for entry in std::fs::read_dir(&root).expect("src/adapter") {
-            let path = entry.expect("an entry").path();
-            if path.extension().is_none_or(|extension| extension != "rs") {
-                continue;
-            }
-            // Line endings normalised: a Windows checkout has CRLF.
-            let text = std::fs::read_to_string(&path)
-                .expect("a source file")
-                .replace("\r\n", "\n");
-            // Code before the test module only.
-            let code = text
-                .split("#[cfg(test)]\nmod tests")
-                .next()
-                .unwrap_or(&text);
-            for (number, line) in code.lines().enumerate() {
-                if line.contains("tokio::spawn") || line.contains("tokio::task::spawn") {
-                    found.push(format!("{}:{}: {line}", path.display(), number + 1));
+    /// The code lines of every source file under `src/adapter`, before its
+    /// test module, comments left out, with the file's path relative to
+    /// `src/adapter` (`/`-separated) and the line's number.
+    fn adapter_code() -> Vec<(String, usize, String)> {
+        fn visit(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            out: &mut Vec<(String, usize, String)>,
+        ) {
+            for entry in std::fs::read_dir(dir).expect("a source directory") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    visit(&path, root, out);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                // Line endings normalised: a Windows checkout has CRLF.
+                let text = std::fs::read_to_string(&path)
+                    .expect("a source file")
+                    .replace("\r\n", "\n");
+                // Code before the test module only.
+                let code = text
+                    .split("#[cfg(test)]\nmod tests")
+                    .next()
+                    .unwrap_or(&text);
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("under src/adapter")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                for (number, line) in code.lines().enumerate() {
+                    if !line.trim_start().starts_with("//") {
+                        out.push((relative.clone(), number + 1, line.to_owned()));
+                    }
                 }
             }
         }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        let mut out = Vec::new();
+        visit(&root, &root, &mut out);
+        out
+    }
+
+    #[test]
+    fn the_adapter_spawns_only_through_its_runtime_handle() {
+        let found: Vec<String> = adapter_code()
+            .into_iter()
+            .filter(|(_, _, line)| {
+                line.contains("tokio::spawn") || line.contains("tokio::task::spawn")
+            })
+            .map(|(path, number, line)| format!("{path}:{number}: {line}"))
+            .collect();
+
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// Whether `line` names the tokio crate's `path`: `super::tokio::net`
+    /// is the adapter's own module, `::tokio::net` and `tokio::net` the
+    /// crate's.
+    fn names_the_crate(line: &str, path: &str) -> bool {
+        line.match_indices(path).any(|(at, _)| {
+            let before = &line[..at];
+            !before.ends_with("::")
+                || before.ends_with(" ::")
+                || before.ends_with("(::")
+                || before == "::"
+        })
+    }
+
+    // Block 44, D2: the shared layer names no runtime; tokio's runtime,
+    // timers and sockets appear only in the tokio module and the seam.
+    #[test]
+    fn only_the_tokio_module_and_the_seam_name_tokio_s_runtime_timers_and_sockets() {
+        let found: Vec<String> = adapter_code()
+            .into_iter()
+            .filter(|(path, _, line)| {
+                !path.starts_with("tokio/")
+                    && path != "platform.rs"
+                    && ["tokio::runtime", "tokio::time", "tokio::net"]
+                        .iter()
+                        .any(|name| names_the_crate(line, name))
+            })
+            .map(|(path, number, line)| format!("{path}:{number}: {line}"))
+            .collect();
 
         assert!(found.is_empty(), "{found:#?}");
     }
@@ -4856,11 +4850,11 @@ mod tests {
     async fn reconnect_asks_for_the_proxy_settings_to_be_read_again() {
         let client =
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
-        let before = super::super::proxy::settings_generation();
+        let before = super::super::tokio::proxy::settings_generation();
 
         client.reconnect();
 
-        assert!(super::super::proxy::settings_generation() > before);
+        assert!(super::super::tokio::proxy::settings_generation() > before);
     }
 
     // Single-threaded runtime: the driver task cannot run in between.
