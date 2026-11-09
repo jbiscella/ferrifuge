@@ -36,6 +36,8 @@ mod statistics_tests;
 mod subscriptions;
 mod tokens;
 mod transports;
+#[cfg(test)]
+mod unsupported_tests;
 
 use tokens::{
     BeforeConnect, FetchPurpose, REFRESH_RETRY_MAX, REFRESH_RETRY_MIN, TOKEN_EXPIRED, Tokens,
@@ -457,6 +459,14 @@ pub enum Input {
     },
     /// The transport opened.
     TransportOpened(TransportId),
+    /// The owner cannot open the transport the core asked for, as what it
+    /// needs is missing (Block 44, D12: a browser without its constructors,
+    /// as centrifuge-js 63ed73e `_initializeTransport` skips a transport
+    /// whose `supported()` is false): the core skips it in the round,
+    /// without an `error` event or a failed attempt, and asks for the next
+    /// one. When no transport of the round can be opened, the attempt
+    /// fails with "no supported transport found".
+    TransportUnsupported(TransportId),
     /// The transport could not be opened.
     TransportFailed {
         /// The transport that failed.
@@ -870,6 +880,9 @@ impl std::fmt::Debug for Input {
                 .field("panicked", panicked)
                 .finish(),
             Self::TransportOpened(id) => f.debug_tuple("TransportOpened").field(id).finish(),
+            Self::TransportUnsupported(id) => {
+                f.debug_tuple("TransportUnsupported").field(id).finish()
+            }
             Self::TransportFailed { transport, message } => f
                 .debug_struct("TransportFailed")
                 .field("transport", transport)
@@ -1228,6 +1241,9 @@ pub struct Machine {
     codec: Codec,
     /// Transports to try, in order, and the one chosen (Block 8).
     transports: Transports,
+    /// Transports of the current attempt its owner could not open (Block
+    /// 44, D12).
+    unsupported: usize,
     /// Session and node of the emulated connection, from its connect reply.
     emulation: Option<(String, String)>,
     /// Client-side subscriptions (Block 9).
@@ -1392,6 +1408,7 @@ impl Machine {
             tokens,
             codec,
             transports: Transports::new(vec![TransportKind::WebSocket]),
+            unsupported: 0,
             emulation: None,
             subscriptions: Subscriptions::default(),
             server_subscriptions: ServerSubscriptions::default(),
@@ -1452,6 +1469,7 @@ impl Machine {
             Input::Close => self.close(codes::disconnected::DISCONNECT_CALLED, "disconnect called"),
             Input::DriverDropped { panicked } => self.driver_dropped(panicked),
             Input::TransportOpened(id) if self.is_current(id) => self.transport_opened(),
+            Input::TransportUnsupported(id) if self.is_current(id) => self.transport_unsupported(),
             Input::TransportFailed { transport, message } if self.is_current(transport) => {
                 self.transport_failed(message);
             }
@@ -1534,6 +1552,7 @@ impl Machine {
             Input::Slept { gap } => self.slept(gap),
             // About a transport already abandoned.
             Input::TransportOpened(_)
+            | Input::TransportUnsupported(_)
             | Input::TransportFailed { .. }
             | Input::TransportClosed { .. }
             | Input::MessageTooLarge(_)
@@ -1568,6 +1587,7 @@ impl Machine {
 
     fn start_attempt(&mut self) {
         self.reconnecting_after_loss = false;
+        self.unsupported = 0;
         match self.tokens.before_connect() {
             BeforeConnect::Ready => self.token_ready(),
             BeforeConnect::Fetch => self.fetch_token(FetchPurpose::Connect),
@@ -1805,6 +1825,31 @@ impl Machine {
             transport: Some(self.transport_kind().name().to_owned()),
         }));
         self.reconnect_after_transport_closed();
+    }
+
+    /// The owner cannot open the current transport (Block 44, D12): the
+    /// next one of the round is asked for at once, the round wrapping as
+    /// after a failure; once every transport was skipped in this attempt,
+    /// it fails as centrifuge-js 63ed73e's does when it finds none
+    /// (`centrifuge.ts:1154-1170`): a failed attempt, then the `error`
+    /// event, naming no transport.
+    fn transport_unsupported(&mut self) {
+        self.unsupported += 1;
+        if self.unsupported < self.transports.len() {
+            self.transport = None;
+            self.transport_open = false;
+            self.transports.skip();
+            self.open_transport();
+            return;
+        }
+        self.unsupported = 0;
+        self.reconnect_after_transport_closed();
+        self.emit(ClientEvent::Error(ClientError {
+            kind: ErrorKind::Transport,
+            code: codes::error::TRANSPORT_CLOSED,
+            message: "no supported transport found".to_owned(),
+            transport: None,
+        }));
     }
 
     fn transport_closed(&mut self, code: Option<u16>, reason: &str) {

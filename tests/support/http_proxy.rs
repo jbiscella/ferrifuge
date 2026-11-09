@@ -30,8 +30,11 @@ use tokio::task::JoinHandle;
 const MAX_BODY: usize = 1 << 20;
 
 /// Where a browser test drives the proxy, answered by the proxy itself and
-/// not recorded: `end-streams` does [`HttpProxy::end_streams`], and
-/// `requests/<path>` gives how many requests to `/<path>` it received.
+/// not recorded: `end-streams` does [`HttpProxy::end_streams`],
+/// `requests/<path>` gives how many requests to `/<path>` it received, and
+/// `cookies/<path>` the Cookie header values of each of them but CORS
+/// preflights, which carry no credentials: one line per request, `>`
+/// then its values separated by tabs (Block 44, D13).
 const CONTROL: &str = "/_relay/";
 
 pub(crate) struct HttpProxy {
@@ -241,6 +244,23 @@ fn control(state: &ProxyState, command: &str) -> Response<Body> {
             .filter(|(received, _)| received == path)
             .count()
             .to_string()
+    } else if let Some(path) = command.strip_prefix("cookies") {
+        let requests = state.requests.lock().unwrap();
+        requests
+            .iter()
+            .filter(|(received, headers)| {
+                received == path && !headers.contains_key(ACCESS_CONTROL_REQUEST_METHOD)
+            })
+            .map(|(_, headers)| {
+                let values: Vec<&str> = headers
+                    .get_all(COOKIE)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .collect();
+                format!(">{}", values.join("\t"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         return StatusCode::NOT_FOUND.into_response();
     };
