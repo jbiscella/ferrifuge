@@ -350,6 +350,26 @@ stream position keeps it with the epoch `_`, so its next recovery fails and you
 are told: with `get_state` your state is reloaded; without it, the `subscribed`
 event reports `was_recovering` true and `recovered` false.
 
+### Map subscriptions (unstable)
+
+Centrifugo 6.8.0 and later can hold a channel's state as a map of keys,
+in namespaces declaring `subscription_type: map` (or `map_clients`,
+`map_users`). With the `unstable` feature, which may change in any minor
+release, the client sets and removes keys of such a channel:
+
+```rust
+client.map_publish("lobby:1", "seat-3", br#"{"name":"ada"}"#.to_vec()).await?;
+client.map_remove("lobby:1", "seat-3").await?;
+```
+
+Each waits for the connection, as any call. The namespace must allow a
+client's writes (`map.allow_publish_for_client`, `map.allow_remove_for_client`,
+or their `_for_anonymous` and `_for_subscriber` forms), or the call fails
+with code 103; the server may replace the key (`map.client_key`), and
+refuses an empty one, or a publication without data, with 107. Map
+subscriptions, which load the state and follow its changes, come in later
+releases.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it
@@ -891,6 +911,7 @@ let config = Config::default()
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
 | `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket, fetch (http_stream) and EventSource (sse); nothing on other targets (see Browser) |
+| `unstable` | no | experimental APIs following centrifuge-js 63ed73e and Centrifugo's experimental features, outside the semver promise: they may change in any minor release (see Map subscriptions) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:

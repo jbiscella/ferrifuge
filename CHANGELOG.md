@@ -50,6 +50,16 @@ repository held while it carried that version, from the blocks of
   has the new input `Input::TransportUnsupported`, which skips a transport
   its owner cannot open.
 
+- The `unstable` feature (Block 45a): experimental APIs following
+  centrifuge-js 63ed73e and Centrifugo's experimental features, not a
+  default and outside the semver promise.
+
+- Unstable (`unstable` feature): `Client::map_publish`,
+  `Client::map_publish_json` and `Client::map_remove` (Block 45a) set and
+  remove keys of a map channel (Centrifugo 6.8.0 and later), waiting for
+  the connection as any call; the server's refusal keeps its code. The
+  core has `CallRequest::MapPublish` and `CallRequest::MapRemove`.
+
 ### Changed
 
 - `reconnect()` while connecting, before the first attempt since the

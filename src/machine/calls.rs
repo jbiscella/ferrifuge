@@ -712,6 +712,10 @@ impl Machine {
     }
 }
 
+/// `PublishRequest.type` of a map publication (`client.proto`).
+#[cfg(feature = "unstable")]
+const MAP_PUBLICATION: i32 = 1;
+
 /// The command method of a call's request.
 fn method_of(request: &CallRequest) -> Method {
     match request {
@@ -740,16 +744,23 @@ fn method_of(request: &CallRequest) -> Method {
             channel: channel.clone(),
         }),
         CallRequest::Send { data } => Method::Send(data.clone()),
+        // A map publication: `type` 1 with its key, a removal with no data
+        // (Block 45, D8; centrifuge-js `mapPublish`, `mapRemove`).
         #[cfg(feature = "unstable")]
-        CallRequest::MapPublish { channel, data, .. } => Method::Publish(PublishRequest {
+        CallRequest::MapPublish { channel, key, data } => Method::Publish(PublishRequest {
             channel: channel.clone(),
             data: data.clone(),
-            ..PublishRequest::default()
+            kind: MAP_PUBLICATION,
+            key: key.clone(),
+            removed: false,
         }),
         #[cfg(feature = "unstable")]
-        CallRequest::MapRemove { channel, .. } => Method::Publish(PublishRequest {
+        CallRequest::MapRemove { channel, key } => Method::Publish(PublishRequest {
             channel: channel.clone(),
-            ..PublishRequest::default()
+            data: Vec::new(),
+            kind: MAP_PUBLICATION,
+            key: key.clone(),
+            removed: true,
         }),
     }
 }
@@ -1387,6 +1398,66 @@ mod tests {
 
         assert_eq!(error_code(&actions), Some(codes::error::CONNECTION_CLOSED));
         assert_eq!(machine.state(), State::Connecting);
+    }
+
+    // Block 45, D8: a map publication and a removal are publish commands
+    // of type 1 with their key, and the empty PublishResult settles them
+    // as Ok, as Block 13's publish; a refusal keeps the server's code.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn map_publish_and_remove_send_their_key_and_settle_on_the_empty_result() {
+        let (mut machine, transport) = connected();
+        let mut sent = Vec::new();
+        let calls: Vec<CallId> = [
+            CallRequest::MapPublish {
+                channel: "map:a".into(),
+                key: "k1".into(),
+                data: br#"{"x":1}"#.to_vec(),
+            },
+            CallRequest::MapRemove {
+                channel: "map:a".into(),
+                key: "k1".into(),
+            },
+            CallRequest::MapPublish {
+                channel: "news".into(),
+                key: "k1".into(),
+                data: b"{}".to_vec(),
+            },
+        ]
+        .into_iter()
+        .map(|request| {
+            let id = machine.add_call(request);
+            sent.extend(sent_text(&machine.handle(Input::Call(id))));
+            id
+        })
+        .collect();
+
+        let actions = machine.handle(frame(
+            transport,
+            concat!(
+                r#"{"id":2,"publish":{}}"#,
+                "\n",
+                r#"{"id":3}"#,
+                "\n",
+                r#"{"id":4,"error":{"code":103,"message":"permission denied"}}"#,
+            ),
+        ));
+
+        assert_eq!(
+            sent,
+            [
+                r#"{"id":2,"publish":{"channel":"map:a","data":{"x":1},"type":1,"key":"k1"}}"#,
+                r#"{"id":3,"publish":{"channel":"map:a","type":1,"key":"k1","removed":true}}"#,
+                r#"{"id":4,"publish":{"channel":"news","data":{},"type":1,"key":"k1"}}"#,
+            ]
+        );
+        let settled = settled(&actions);
+        assert_eq!(settled[0], (calls[0], Ok(CallReply::Publish)));
+        assert_eq!(settled[1], (calls[1], Ok(CallReply::Publish)));
+        let (id, Err(error)) = &settled[2] else {
+            panic!("{settled:?}");
+        };
+        assert_eq!((*id, error.code), (calls[2], 103));
     }
 
     #[test]
