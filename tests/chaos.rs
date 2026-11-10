@@ -52,9 +52,10 @@ const TIMEOUT: Duration = Duration::from_secs(1);
 const LIVENESS: Duration = Duration::from_secs(3);
 /// I6: a call waits at most once per phase (connection, room, reply).
 const CALL_BOUND: Duration = Duration::from_secs(3);
-/// I6: a publish that waited in a debounce window waits once more (Block
-/// 46, D6).
-const WINDOW_CALL_BOUND: Duration = Duration::from_secs(4);
+/// I6: the longest a call may take: `CALL_BOUND`, once more if it waited
+/// for its subscription and once more if it waited in a debounce window
+/// (Block 46, D6).
+const WINDOW_CALL_BOUND: Duration = Duration::from_secs(5);
 /// A tick of the simulated clock, of which a debounce interval is 1 to 3
 /// (Block 46, D16): the longest pause between two operations.
 const TICK: u64 = 50;
@@ -583,6 +584,8 @@ struct Checker {
     /// Those that waited in a debounce window, seen as a publish unsettled
     /// without a timer of its own (D6, I6).
     windowed: BTreeSet<CallId>,
+    /// Calls that waited for their subscription to be subscribed (I6).
+    waited_for_subscription: BTreeSet<CallId>,
     /// The subscription of each debounce timer running (D5 gives the timer
     /// no subscription; only looked up, never iterated).
     debounce_owners: std::collections::HashMap<DebounceTimer, SubscriptionId>,
@@ -1245,7 +1248,7 @@ impl Run {
         self.advance(if self.mode == Mode::Debounce {
             WINDOW_CALL_BOUND
         } else {
-            CALL_BOUND
+            CALL_BOUND + TIMEOUT
         })
     }
 
@@ -1704,6 +1707,9 @@ impl Run {
                 }
             }
             Action::SetCallTimer(call, timer, delay) => {
+                if matches!(timer, CallTimer::Subscription) {
+                    self.checker.waited_for_subscription.insert(call);
+                }
                 self.check_held_sent(call, timer)?;
                 self.cancel(Key::Call(call, timer));
                 self.schedule(delay, Due::Timer(Key::Call(call, timer)));
@@ -1752,6 +1758,7 @@ impl Run {
         if !dropped {
             self.checker.publishes.remove(&call);
             self.checker.windowed.remove(&call);
+            self.checker.waited_for_subscription.remove(&call);
         }
         let held = self.checker.held.remove(&call).is_some();
         if matches!(result, Err(error) if error.code == codes::error::TIMEOUT) {
@@ -2214,14 +2221,12 @@ impl Run {
         Ok(())
     }
 
-    /// I6: what `call` may take: 4 × for a publish that waited in a
-    /// window, 3 × otherwise (Block 46, D6).
+    /// I6: what `call` may take: 3 ×, 1 × more if it waited for its
+    /// subscription and 1 × more if it waited in a window (Block 46, D6).
     fn call_bound(&self, call: CallId) -> Duration {
-        if self.checker.windowed.contains(&call) {
-            WINDOW_CALL_BOUND
-        } else {
-            CALL_BOUND
-        }
+        let waits = u32::from(self.checker.waited_for_subscription.contains(&call))
+            + u32::from(self.checker.windowed.contains(&call));
+        CALL_BOUND + TIMEOUT * waits
     }
 
     /// I6: every call settles within its bound.
