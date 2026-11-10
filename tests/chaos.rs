@@ -28,9 +28,9 @@ use ferrifuge::machine::{
     SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
 };
 use ferrifuge::{
-    CallRequest, ClientEvent, Config, DeltaFormat, HistoryOptions, ServerSubscriptionEvent, State,
-    StateError, StreamPosition, SubscriptionEvent, SubscriptionState, TokenError, codes,
-    write_fossil_delta,
+    CallError, CallReply, CallRequest, ClientEvent, Config, DeltaFormat, HistoryOptions,
+    ServerSubscriptionEvent, State, StateError, StreamPosition, SubscriptionEvent,
+    SubscriptionState, TokenError, codes, write_fossil_delta,
 };
 use serde_json::{Value, json};
 
@@ -1728,36 +1728,40 @@ impl Run {
                 self.checker.debounce_owners.remove(&timer);
                 self.cancel(Key::Debounce(timer));
             }
-            Action::CallSettled { call, result } => {
-                let dropped = self.fault == Some(Fault::DropCallOutcome)
-                    || (self.fault == Some(Fault::DropWindowedOutcome)
-                        && self.checker.windowed.contains(&call));
-                let bound = self.call_bound(call);
-                if !dropped
-                    && let Some(made) = self.checker.calls.remove(&call)
-                    && self.now.saturating_sub(made) > bound
-                {
-                    return Err(self.violation(
-                        "I6",
-                        format!("{call:?} made at {made:?} settled at {:?}", self.now),
-                    ));
-                }
-                if !dropped {
-                    self.checker.publishes.remove(&call);
-                    self.checker.windowed.remove(&call);
-                }
-                let held = self.checker.held.remove(&call).is_some();
-                if matches!(&result, Err(error) if error.code == codes::error::TIMEOUT) {
-                    self.count("call timeout");
-                    if held {
-                        self.count("held call timed out");
-                    }
-                }
-                if matches!(&result, Err(error) if error.code == codes::error::PUBLISH_DROPPED) {
-                    self.count("publish dropped");
-                }
-            }
+            Action::CallSettled { call, result } => self.call_settled(call, &result)?,
             other => self.act_application(other)?,
+        }
+        Ok(())
+    }
+
+    /// I6: a call settled, within its bound.
+    fn call_settled(&mut self, call: CallId, result: &Result<CallReply, CallError>) -> Step {
+        let dropped = self.fault == Some(Fault::DropCallOutcome)
+            || (self.fault == Some(Fault::DropWindowedOutcome)
+                && self.checker.windowed.contains(&call));
+        let bound = self.call_bound(call);
+        if !dropped
+            && let Some(made) = self.checker.calls.remove(&call)
+            && self.now.saturating_sub(made) > bound
+        {
+            return Err(self.violation(
+                "I6",
+                format!("{call:?} made at {made:?} settled at {:?}", self.now),
+            ));
+        }
+        if !dropped {
+            self.checker.publishes.remove(&call);
+            self.checker.windowed.remove(&call);
+        }
+        let held = self.checker.held.remove(&call).is_some();
+        if matches!(result, Err(error) if error.code == codes::error::TIMEOUT) {
+            self.count("call timeout");
+            if held {
+                self.count("held call timed out");
+            }
+        }
+        if matches!(result, Err(error) if error.code == codes::error::PUBLISH_DROPPED) {
+            self.count("publish dropped");
         }
         Ok(())
     }
