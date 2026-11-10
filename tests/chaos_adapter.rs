@@ -37,10 +37,10 @@ const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 const TIMEOUT: Duration = Duration::from_secs(1);
 /// I6: a call waits at most once per phase, plus a margin for real time.
 const CALL_BOUND: Duration = Duration::from_secs(4);
-/// I6: a publish that may have waited in a debounce window waits once more
-/// (Block 46, D6); the adapter cannot tell which did, so the bound is that
-/// of every publish of a burst.
-const WINDOW_CALL_BOUND: Duration = Duration::from_secs(5);
+/// I6: a publish of a burst may have waited for its subscription and in a
+/// debounce window, 5 × in all, plus the margin (Block 46, D6); the adapter
+/// cannot tell which did, so the bound is that of every publish of a burst.
+const WINDOW_CALL_BOUND: Duration = Duration::from_secs(6);
 /// A tick of real time, of which a debounce interval is 1 to 3 (Block 46,
 /// D16): longer than the pause between two operations.
 const TICK: u32 = 50;
