@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–46 and 49–52 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–47 and 49–52 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -58,7 +58,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 ### Out of scope (v1)
 
 - sockjs, webtransport transports (webtransport planned: Block 48)
-- map subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 45, behind the `unstable` feature), shared poll subscriptions (experimental; planned: Block 47)
+- map subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 45, behind the `unstable` feature), shared poll subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 47, behind the `unstable` feature)
 - client publish debouncing (Centrifugo PRO; reversed by the owner decision of 2026-11-06, late: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
 - `closed` state
@@ -84,6 +84,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 0 and Block 8, out of scope | browser-only options and shims | owner, 2026-11-06, late (items 25, 39) | 44 |
 | Block 0, Block 9 and Block 11, out of scope | map subscriptions | owner, 2026-11-06, late (item 29) | 45 |
 | Block 0, Block 13 and Block 18, out of scope | client publish debouncing | owner, 2026-11-06, late (item 32) | 46 |
+| Block 0, Block 9, Block 11 and Block 19, out of scope | shared poll subscriptions | owner, 2026-11-06, late (item 30) | 47 |
 | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |
 
 ### Test layers
@@ -693,7 +694,7 @@ Feature: Transport fallback
 
 **Dependencies:** Blocks 1–5, 8 (publications over the emulated transports arrive as top-level pushes rather than websocket's reply envelope, so delivery is checked over every transport here).
 
-**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (Block 0); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
+**Out of scope:** subscription tokens, server unsubscribe codes, resubscribe backoff (Block 10); recovery and `getState` (Block 11); server-side subscriptions (Block 12); publish, history, presence (Block 13); join and leave pushes (Block 13); map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (reversed by the owner decision of 2026-11-06, late: Block 47); delta compression (`delta` in `SubscribeRequest`, `SubscribeResult` and `Publication`): not in v1, the client never requests it, so the server never sends patches (reversed by the owner decision of 2026-11-06: Block 19); tag filters (`SubscribeRequest.tf`): not among the spec's subscription options, not in v1, the client never sends one (reversed by the owner decision of 2026-11-06: Block 35).
 
 **Decisions:** a `Subscription` handle with its own `state()` and `events()` stream, like `Client` (one active stream per object, hand-off delivery: Block 15) (spec: subscriptions have their own states and events); creating a second subscription to a channel already in the registry fails (spec: "`newSubscription` can throw"; centrifuge-js: "already exists"); the registry offers lookup by channel, the list of subscriptions, and removal, which unsubscribes first (spec, "Subscription management"); the subscription `data` option is attached to every subscribe and resubscribe request (spec, "Subscription common options"), and a `get_data` callback, given the channel, is called before every subscribe and resubscribe instead when set (centrifuge-js `getData`); a `get_data` callback that signals "unauthorized" unsubscribes the subscription with code 1 "unauthorized" and schedules no retry, while any other failure emits an `error` event and retries after the resubscribe backoff (centrifuge-js `_handleGetDataError`); a permanent subscribe error unsubscribes with the error's code and its message as the reason (centrifuge-js `_subscribeError`); `subscribe()` before `connect()` is allowed (spec); a subscribe without a reply within `Config::timeout` makes the client reconnect with code 3 "subscribe timeout", since the server-side subscription state is unknown (centrifuge-js `connectingCodes.subscribeTimeout`), while a reply already read but waiting behind events the application has not taken does not time out (Block 15); subscribed handles go to `subscribing` on any disconnect, explicit or not, and resubscribe on the next connection (spec, "Subscription states"); an `unsubscribe()` made while the subscribe is in flight takes effect after it is settled, so no server subscription outlives the handle, and a new subscription to a channel waits until the unsubscribe of a removed subscription to that channel is settled (centrifuge-js `_removedSubscriptionUnsubscribed`), as does a `subscribe()` of the same handle until its own unsubscribe is settled (centrifuge-js `_setSubscribing`, `_unsubPromise`); an `unsubscribe()` or a removal while the flow waits for its data, token or getState callback sends an unsubscribe command (amended by Block 42 D10; centrifuge-js 63ed73e `_inflight`); the messages of a frame that follow one closing or replacing the transport (a disconnect push, a malformed message) are discarded, so no stale publication is delivered and no position moves (centrifuge-js `_dispatchSynchronized`); both matter on the emulated transports, whose commands travel as separate requests; publication data is bytes (Block 0), so with Protobuf any bytes round-trip, including non-UTF-8 (Block 7's value, testable once publications exist); the `subscribed` event carries the data the server attached to the subscribe result (`client.proto`, `SubscribeResult.data`), and publications included in a non-recovering subscribe result are delivered after it (`SubscribeResult.publications`); publication data is exposed as the exact bytes received, never re-serialized; the publication event carries `offset`, `tags` and `info` when the server sends them (spec, "Listen to channel publications"; `client.proto`, `Publication`).
 
@@ -1166,7 +1167,7 @@ The resubscribe steps apply the same checks as Block 2's: each delay is at least
 
 **Dependencies:** Blocks 9, 10.
 
-**Out of scope:** delta compression; map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (Block 0); server-side subscriptions (Block 12).
+**Out of scope:** delta compression; map subscriptions (Block 0; reversed by the owner decision of 2026-11-06, late: Block 45) and shared-poll subscriptions (reversed by the owner decision of 2026-11-06, late: Block 47); server-side subscriptions (Block 12).
 
 **Decisions:** the `subscribed` event carries `was_recovering` and `recovered` (spec); `unsubscribe()` keeps the stream position (spec); the `since` option starts recovery on the first subscribe (spec); the `positioned` and `recoverable` options ask the server for those capabilities on channels that do not force them, by setting the corresponding `SubscribeRequest` fields (spec, "Subscription common options"); the server decides, so the `subscribed` event reports the granted `positioned` and `recoverable` and the stream position (`epoch`, `offset`) from `SubscribeResult` (centrifuge-js); the stored position follows every publication delivered (taken from the application's stream, Block 15), live or recovered, including a changed `epoch` (`client.proto`, `Publication.epoch`); `getState` is called before the initial subscribe, whose stream position it provides, and again when recovery fails (spec); when `since` is also set, `since` provides the first position and getState is not called until a recovery fails (centrifuge-js calls getState only without a position); with getState the subscribe command sets the "reject unrecovered" flag, so a failed recovery is answered with error 112 instead of a `recovered = false` result, and the client drops the position and resubscribes after the resubscribe backoff, calling getState first: the subscription stays `subscribing`, with no `subscribed` event, no publication and no released subscription call, until that subscribe succeeds (`client.proto`, `SubscribeRequest.flag`; centrifuge-js `subscriptionFlags.rejectUnrecovered`); a failing `getState` emits an `error` event and is retried with the resubscribe backoff before subscribing (Centrifugo blog "App-owned state with stream subscriptions", 2026-07-27); disconnect code 3014 "state invalidated" (centrifuge-js; within the spec's reconnect range) reconnects; on 3014 a server-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_"), so its recovery at the next connect fails and its subscribed event reports was_recovering true and recovered false (owner decision, 2026-11-04; centrifuge-js 63ed73e centrifuge.ts _disconnect); on 3014 a client-side subscription with a stream position keeps a sentinel position (offset 0, epoch "_") instead of dropping it, so the next recovery fails and the app is told: with getState, error 112 leads to a reload; without getState, `subscribed` reports `was_recovering` true and `recovered` false (owner decision, 2026-11-04; centrifuge-js 63ed73e `_invalidateState`; `client.proto` does not define 3014); on 3014 the client clears the connection token and the token of every client-side subscription, unconditionally; before the next connect or resubscribe a new token is fetched only where a token callback exists, otherwise the command carries no token (owner decision, 2026-11-04; centrifuge-js 63ed73e clears them only when getToken is set, `centrifuge.ts` `_disconnect`, `subscription.ts` `_invalidateState`; `client.proto` does not define 3014); unsubscribe code 2502 "state invalidated" drops the subscription token and the stream position, then resubscribes: with a token callback a new token is fetched first, without one the resubscribe carries no token (`client.proto`, `Unsubscribe`: "client must drop its subscription token and any state accumulated"; it outranks centrifuge-js, which keeps the token when there is no callback).
 
@@ -2093,7 +2094,7 @@ Feature: Footprint, performance and fleet behaviour
 - **One active stream per object.** The client and each subscription have one active stream. A second `events()` call (or `publications()`, Block 39) ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
 - **No stream, no hold-up.** An object whose stream was never requested, or was dropped, takes its events at once: they count as delivered and positions move, events not yet taken included (centrifuge-rust §9.4: "a dropped stream acks like an unregistered handler"); so an application that needs every event, and exactly-once delivery on recoverable channels, takes the stream before calling connect() or subscribe(): events emitted before the first events() call count as delivered (documented, with the README examples in that order).
 - **Lifecycle events** go through the same stream as publications, in order, and count as delivered only when taken; none is dropped or merged, and each state change is one event. `state()` returns the current state, which may be ahead of the stream. An event caused by an application call or a timer joins its stream at once.
-- **Withdrawal.** A publication not yet taken when its subscription, client-side or server-side, leaves `subscribed` for a client-side reason (`disconnect()`, `unsubscribe()`, a client-side timeout) is withdrawn and never yielded; its position did not move, so recovery brings it back.
+- **Withdrawal.** A publication not yet taken when its subscription, client-side or server-side, leaves `subscribed` for a client-side reason (`disconnect()`, `unsubscribe()`, a client-side timeout) is withdrawn and never yielded; its position did not move, so recovery brings it back. A shared poll subscription's removal `Update` is not withdrawn (Block 47 D9).
 - **Errors past 256.** When a stream holds 256 events not taken, further `error` events for it are dropped, on the client's stream and on subscription streams alike: they change no state, and they are the only events a timer can add without bound (one per failed connection or subscribe attempt). Events caused by application calls are not bounded by the client: an application that cycles `connect()` and `disconnect()` without reading its stream grows it (documented).
 - **Channels without recovery.** There a slow consumer can lose publications, as with any disconnect; this is documented, with no further signal.
 - **Head-of-line.** The read-ahead belongs to the connection, so one stream not read pauses every subscription of that client (centrifuge-rust §9.2).
@@ -2907,7 +2908,7 @@ Feature: Batching
 - a tag filter together with delta: a subscription with both is rejected when built (Block 35, D1; `client.proto`, `SubscribeRequest.tf`: "disables delta compression"; centrifuge-js `subscription.ts:368-370`);
 - delta statistics (centrifuge-js `deltaStats()`): with `statistics()`, parity item 8;
 - a configurable inbound message limit (parity item 12);
-- shared-poll subscriptions and their per-key delta chains (Block 0); map subscriptions' per-key delta chains are Block 45 D9's.
+- shared-poll subscriptions and their per-key delta chains (reversed by the owner decision of 2026-11-06, late: Block 47, whose D10 holds the chain; D5's clearing at each subscribe holds for it, unlike map subscriptions, Block 45 D9); map subscriptions' per-key delta chains are Block 45 D9's.
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Component.** The decoder is written from scratch (owner decision, item 5). No crate meets Block 0's definition of a maintained component: fossil-delta 0.2.0 has had no release or commit since 2023-01-14; heroforge-core has no public repository; libfossil-rs is AGPL-3.0; delta-compression, xpatch and gdelta implement other formats; centrifuge-client-core 0.1.0 is excluded, as the sans-IO state machine behind centrifuge-client, which Block 0's first row does not reuse, and whose source the clean-room rule closes. The decoder is implemented from the Fossil documentation ("Fossil Delta Format", fossil-scm.org, read 2026-11-06) and cross-checked against centrifuge-js 63ed73e `src/fossil.ts`; no Rust crate's code is read or copied. As Block 0 requires of in-house components, it has a cargo-bolero target, run in ci.yml's `fuzz` loop and the fuzz.yml matrix (Block 14e), whose oracle round-trips the test-only writer's deltas (D9) and checks that any input either fails or builds a target within the limit; explicit bounds (D6); and no unsafe code. Only apply is implemented.
@@ -4304,7 +4305,7 @@ Feature: Waiting until ready
     - A request refused with HTTP 413 is written, so it counts once; each command then sent again alone counts again (Block 8).
   - `messages_in: u64`: replies and pushes decoded from those frames when read, pings included, and those later dropped included (messages after a disconnect push, messages of a transport that ended while they were held, Block 15).
   - `messages_out: u64`: commands in the frames counted in `bytes_out`, pongs included, each command of a batch frame counted (Block 18).
-  - `publications_delivered: u64`: publications of client-side and server-side subscriptions once they count as taken under Block 15, and a map subscription's `Update` events (its `Sync` counts as none, Block 45 D11). That means taken from a stream, emitted while no stream is open, or left in a stream the application dropped. A withdrawn publication never counts.
+  - `publications_delivered: u64`: publications of client-side and server-side subscriptions once they count as taken under Block 15, and a map subscription's `Update` events (its `Sync` counts as none, Block 45 D11). That means taken from a stream, emitted while no stream is open, or left in a stream the application dropped. A withdrawn publication never counts. A shared poll subscription's `Update` of a publication taken counts too, a synthetic removal counting as none, and `Statistics::subscriptions` counts shared poll subscriptions (Block 47 D13).
   - `subscriptions: usize`: the client-side registry's size. `server_subscriptions: usize`: the server-side registry's size (`Machine::server_subscriptions`, Block 12).
 - **D2 Where the counters live.**
   - Every counter but `connected_since` lives in the core: `Machine::statistics(&self) -> Statistics`, deterministic and @E-testable. It reports `connected_since: None`, as the core has no clock; its owner sets that public field.
@@ -4706,7 +4707,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 6 (5 and 6: Block 45 D12), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code, unused until Block 47.
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 8 (5 and 6: Block 45 D12; 7 and 8: Block 47 D14), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code (Block 47).
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
@@ -4734,6 +4735,7 @@ This block reverses no exclusion.
     - temporary or below 100: an `error` event, then resubscribes after the backoff;
     - any other: `unsubscribed` with its code (Block 9);
   - sub_refresh error that is temporary or below 100: an `error` event, retried after 10 to 20 s; any other: `unsubscribed` with its code (Block 10);
+  - shared poll sub_refresh of type 1: 109 refreshes the signature; a temporary error or one below 100 is retried after 1 s to 15 s; any other untracks the keys of the request; of type 2: an `error` event, the client does nothing more; a subscribe with `type` 4: as subscribe errors above (Block 47);
   - call error: a `CallError` with the server's code, message and `temporary`; the client never retries a call (Block 13).
 - **D2 README.** A "Codes" section after "States and events" mirrors every table row for row. The client-side code table in "Calls" is replaced by a pointer to it, as it lacks code 4. The "States and events" sentence on `ferrifuge::codes` points to it too.
 - **D3 Test.** Steps read `src/codes.rs` and `README.md` from the repository, as Block 20's do, with no new dependency:
@@ -7861,6 +7863,643 @@ Feature: Client publish debouncing
 - The interval is capped at `Config::timeout` (D2); `client.proto` and centrifuge-js set no cap. Block 13: a call never hangs.
 - A publish that waits in a window resolves with the result of the send that replaced it, and fails with its error or as D10 says (D4, D10); centrifuge-js and the documentation resolve it at once with `{}`. The owner's decision ("Planned after Block 19", item 32).
 - A publish whose future was dropped while later waiters depend on its value is still sent (D11), against Block 13's "never sent if it was queued": an earlier publish was replaced by that value.
+
+---
+
+## Block 47 — Shared poll subscriptions (unstable)
+
+**Goal:** an application that shows live values for many items (prices, vote counts, statuses) tells the client which keys it follows; Centrifugo polls the application's backend once per key on behalf of every client and fans the changes out; the client tracks keys under signatures the backend issued, delivers each new version once with Block 15's guarantees, keeps its keys across reconnects without calling the backend for each device, and refreshes each signature as it expires; behind the non-default `unstable` feature. Source: parity item 30, design A ("Planned after Block 19": "Experimental APIs (items 29, 30, 33) are behind a non-default `unstable` feature, documented unstable and pinned to 63ed73e"; `ANALYSIS-PARITY.md`, branch `analysis/parity`, "30. Shared poll subscriptions": "Recommendation. A, its API documented as unstable"; reverses Block 0's exclusion, recorded in Block 0's "Reversed exclusions"); centrifuge-js 63ed73e `newSharedPollSubscription` (`src/centrifuge.ts:350`), `SharedPollSubscription` (`src/subscription.ts:2915-3084`), README.md:895-908 ("experimental and require Centrifugo >= v6.8.0"); Centrifugo v6.10.1 with centrifuge `7ac037196c95`, which it pins (`go.mod:18`).
+
+The spec (`transports/client_api`, `transports/client_protocol`, read 2026-11-10) does not mention shared poll, `track` or `untrack`; the server documentation does (`docs/server/shared_poll`, read 2026-11-10: "the SDK resets all stored versions, triggering a one-time full resync" on a changed epoch). Its wire contract is `client.proto` (`SubscribeRequest.type` 4, `SubRefreshRequest.type` 1 and 2, `TrackBatch`, `KeyedItem`, `SubRefreshResult.items`, `Publication.key`, `removed`, `version`, lines 277-294, 557-564, 634-676); its behaviour is centrifuge-js 63ed73e, checked against the server.
+
+**The feature is open source.** Centrifugo v6.10.1 OSS (`/api/info` reports "6.10.1 OSS") serves shared poll subscriptions completely; Verified below. What PRO adds is outside this client's contract (`docs/pro/shared_poll`, read 2026-11-10): `keep_latest_data`, a notification fast path, backpressure and a relay. Consequences: the items a track reply can carry need `keep_latest_data` (centrifuge `shared_poll.go:888-898`), so they run on @D only; every other path runs on a real server, delta compression included, since the refresh response's `prev_data` works on OSS (Verified).
+
+**How @A tests it.** The config check requires a refresh endpoint on every shared poll namespace, and the only per-key write the server API offers is `shared_poll_publish` (versioned mode with `publish_enabled`). With the endpoint pointing at a port nothing listens on, the server tracks, reports refresh errors in its log and delivers what `shared_poll_publish` sends (Verified). So @A covers subscribing, tracking, versions, untracking, reconnects, limits and refused signatures; @B, with the test backend answering refreshes (`ProxyBackend` gains `/shared_poll_refresh`), covers the versionless default mode, backend removals, the epoch flip and `prev_data` deltas; @D covers what a server cannot be made to produce.
+
+**Dependencies:** Blocks 0 (references, precedence, Components rule, test layers), 2 (backoff formula), 3 (1009 ends the client), 7 (Protobuf, protocol faults), 8 (transports, emulation), 9 (subscription lifecycle, registry, unsubscribe while in flight), 10 (tokens, `sub_refresh`, unsubscribe codes, resubscribe backoff), 11 (2502, 3014), 13 (write queue, reply deadlines), 14 (marginal cost of a subscription), 15 (delivered means taken, in-order handling, read-ahead, withdrawal, errors past 256), 18 (the frame limits of the server), 19 (fossil delta, the inbound limit, failure outcomes), 20 (semver check, docs.rs, changelog), 21 (logging, redacting `Debug`), 26 (the emulation envelope), 29 (message size), 30 (`ready()`), 31 (statistics, delta statistics), 32 (`set_data`), 33 (`close()`), 34 (codes table), 36 (optimistic subscriptions, automatic batching), 37 (test constructors), 38 (JSON helpers), 39 (one active stream), 41 (handlers, delivery modes, deadlock detection), 44 (browser target, `MaybeSend`), 45 (the `unstable` feature, one registry, `MaybeSend` handles), 46 (opaque timers on the core), 49 (I13, I14, D10).
+
+**Out of scope:**
+- a client publishing to a shared poll channel: `publish` on such a channel gets 103 (Verified), and centrifuge-js's `SharedPollSubscription` has no publish (`src/centrifuge.ts:56-62`);
+- `get_state`, `get_data`, `since`, `positioned`, `recoverable`, `join_leave`, tag filters and channel compaction on shared poll subscriptions: centrifuge-js's `SharedPollSubscriptionOptions` has none of them (`src/types.ts:791-816`), and its subscribe command returns before setting any of them (`src/subscription.ts:968-972`). `data` and `set_data` stay;
+- `history()`: not on the type in centrifuge-js (`src/centrifuge.ts:39-44`, `:56-62`), and the server answers 108 (Verified);
+- server-side shared poll subscriptions: centrifuge reaches the shared poll flow only from a client's subscribe command with `type` 4 (`client_shared_poll.go:12`); a `ConnectResult.subs` entry or `Subscribe` push is handled as today;
+- a client-side mirror of the values (an `items()` accessor): the application keeps its own, as with centrifuge-js;
+- the server API's `shared_poll_publish` other than in tests (a backend's concern; `ServerApi` gains it);
+- the in-memory server double (Block 37), the chaos runners (Block 16), the trace replay (Block 42) and the real-server chaos and soak runs (Blocks 51, 52): none models shared poll subscriptions while they are unstable, which the double's rustdoc says (D19);
+- computing a signature: the backend does, the client only carries it (`ANALYSIS-PARITY.md`, "the client checks no signature ... so no cryptography is involved").
+
+This block reverses Block 0's exclusion of shared poll subscriptions and the exclusions of Blocks 9, 11 and 19 that name it (owner decision, 2026-11-06, late, item 30); Block 0's "Reversed exclusions" gains its row. It amends Block 15's "Withdrawal" (D9), Block 34 D1 and adds rows to Block 34's tables (D14), and Block 31's `publications_delivered` (D13), as listed after this block.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 47a | As an app developer showing live values for many items, I want a shared poll subscription on which I name keys with signatures my backend issued, so that each device gets every change of the items it follows without polling my backend itself | "A shared poll subscription cannot share a channel with another subscription", "A new shared poll subscription starts unsubscribed", "Removing a shared poll subscription unsubscribes it and frees its channel", "A shared poll subscription subscribes with type 4 and nothing else", "Tracking with a signature sends one track request", "Keys tracked before subscribing are sent once subscribed", "A key tracked twice is tracked once at the higher version", "An empty key set sends nothing", "Tracked keys receive their values and each new version", "Centrifugo polls the backend and fans the value out", "A shared poll subscription works over each transport and protocol", "An untracked key delivers nothing more", "A version not newer than the one held is dropped", "A publication of a key not tracked is dropped", "A backend removal ends the key and gives one update", "Items of a track reply are delivered before later pushes", "A signature the server refuses untracks its keys and reports the error", "A limit the server enforces untracks the keys over it", "A namespace that is not shared poll refuses a shared poll subscription", "A server without shared poll ends the subscription", "A private namespace gets its token and refreshes it" |
+| 47b | As an app developer on a backend that signs keys, I want the client to ask for signatures by itself and refresh them before they expire, so that I hand over keys and never write signature bookkeeping | "track asks get_signature for the keys and tracks what it returns", "A key the callback does not return is revoked", "A key untracked while get_signature runs is untracked in the same request", "Without get_signature a key set reports error 14", "A failing get_signature reports error 14 and retries", "An unauthorized get_signature unsubscribes with code 1", "A signature with an expiry is refreshed when it expires", "A track refused with 109 refreshes the signature", "A track refused with 109 again waits before the next refresh", "A signature accepted within the grace period is refreshed soon", "A key set larger than one frame is signed and tracked in chunks", "A signature batch over the frame budget is refused before it is sent" |
+| 47c | As an operator of a large fleet, I want reconnecting devices to keep their keys without a signature request per device, and to get each value again only when they missed it, so that a mass reconnect costs my backend nothing | "Tracked keys come back after a reconnect with the versions held", "A replay reuses the signatures it holds", "A key untracked while offline is untracked in the replay frame", "A replay signs only the keys without a signature", "A changed epoch sends every key from version 0", "A first epoch from the backend sends every key from version 0", "Versions given before the first subscribe are kept whatever its epoch", "An epoch flip resubscribes and tracks again", "A replay with held versions stays within the frame budget", "unsubscribe forgets the keys and the signatures", "A failing track is retried or untracked by its error", "Updates not taken before disconnect come back on the next connection", "A removal not taken before disconnect is still delivered" |
+| 47d | As an app developer with large values that change a little at a time, I want per-key delta compression, so that each change costs a fraction of its size within a memory bound | "Delta compression decodes each tracked key's changes", "Delta bases are dropped at each subscribe", "A delta in flight when its key was tracked again is dropped", "Delta bases past their bound end the subscription", "A delta that cannot be applied resubscribes and tracks again", "Statistics count shared poll subscriptions and their updates" |
+| 47e | As an app developer using handlers, typed JSON, test constructors or the browser target, I want shared poll subscriptions there too, so that they fit the rest of my code | "A shared poll subscription handler receives the events in order", "A test builds shared poll events without a server", "A browser client tracks a key and receives its updates" |
+
+**Decisions** (reviewer, 2026-11-10, delegated by the owner, after a three-amigos round table on the draft):
+
+- **D1 Design A, behind `unstable`.** A handle type of its own, as the analysis recommends and as Block 45 D1 decided for map subscriptions: centrifuge-js 63ed73e has its own class and registry accessors (`SharedPollSubscription`, `src/subscription.ts:2915`; `getSharedPollSubscription`, `removeSharedPollSubscription`, `sharedPollSubscriptions`, `src/centrifuge.ts:380`, `:410`, `:429`); `SubscriptionEvent` matches do not grow variants a stream subscription never emits; `track` exists only where a key means something. centrifugal/centrifuge-rust `docs/spec.md` (88d6edf, §9.11, as quoted in Block 45 D1) plans the same split. Everything public this block adds is `#[cfg(feature = "unstable")]` with `#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]`, except the code constants of D14, and its rustdoc opens with: "Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e and Centrifugo's experimental shared poll subscriptions (v6.8.0 and later), and may change in any minor release."
+
+- **D2 Public API** (adapter, both targets):
+  - `Client::shared_poll_subscription_builder(&self, channel: impl Into<String>) -> SharedPollSubscriptionBuilder`, `Client::new_shared_poll_subscription(&self, channel) -> Result<SharedPollSubscription, SubscriptionError>`; `get_shared_poll_subscription(&self, &str) -> Option<SharedPollSubscription>`, `shared_poll_subscriptions(&self) -> Vec<SharedPollSubscription>`, `remove_shared_poll_subscription(&self, &SharedPollSubscription)` (unsubscribes first, as Block 9's removal).
+  - One registry for all kinds (Block 45 D2, centrifuge-js `_subs`, `src/centrifuge.ts:353`): creating any subscription on a channel already taken by any kind fails with `SubscriptionError::AlreadyExists`; `get_subscription` and `subscriptions()` list stream subscriptions only, `get_map_subscription` and `map_subscriptions()` map subscriptions only, these only shared poll subscriptions.
+  - `SharedPollSubscriptionBuilder`: `token`, `get_token` (Block 10), `data` (Block 9), `min_resubscribe_delay`, `max_resubscribe_delay` (Block 10 defaults), `get_signature` (D6), `delta(DeltaFormat)` (D10), `max_delta_bases_bytes(NonZeroUsize)` (D11), `max_track_frame_bytes(NonZeroUsize)` (D7), `handler` (D15), `build() -> Result<SharedPollSubscription, SubscriptionError>`.
+  - `SharedPollSubscription` (`Clone`, `Debug`, `PartialEq`, `Eq` as `Subscription`): `channel()`, `state() -> SubscriptionState`, `events() -> impl Stream<Item = SharedPollSubscriptionEvent> + MaybeSend + Unpin + use<>` (one active stream, Block 15), `set_handler`, `held_events()`, `subscribe()`, `unsubscribe()`, `ready()` (Block 30), `track(keys: impl IntoIterator<Item = impl Into<String>>)`, `track_with_signature(items: impl IntoIterator<Item = SharedPollTrackItem>, signature: impl Into<String>)`, `untrack(keys: impl IntoIterator<Item = impl Into<String>>)`, `tracked_keys() -> Vec<String>`, `presence()`, `presence_stats()` (centrifuge-js `CommonSurface`, `src/centrifuge.ts:39-44`), `set_data` (Block 32), `delta_statistics()` (D13).
+  - `track`, `track_with_signature`, `untrack` are synchronous and return nothing: fire-and-forget, as centrifuge-js ("Fire-and-forget ... returns void and never throws", `src/subscription.ts:2914-2933`, `:3055-3057`); failures come as `Error` events and synthetic removals (D7). Being synchronous they cannot deadlock from a handler and need no `WouldDeadlock` path (Block 41 D6).
+  - `pub struct SharedPollTrackItem { pub key: String, pub version: u64 }` (`#[non_exhaustive]`, `new(key, version)`), and `pub struct SharedPollSignature { pub keys: Vec<String>, pub signature: String }` (`#[non_exhaustive]`, `new`), its `Debug` redacting the signature (D16).
+  - `pub enum SharedPollSubscriptionEvent`, `#[non_exhaustive]`: `Subscribing { code, reason }`, `Subscribed(Subscribed)`, `Unsubscribed { code, reason }`, `Update(SharedPollUpdate)`, `Error(ClientError)`, with `name()` as `SubscriptionEvent::name` ("update"). `Subscribed` is Block 11's struct, with no stream position (a shared poll subscription has none).
+  - `pub struct SharedPollUpdate { pub key: String, pub data: Vec<u8>, pub removed: bool, pub version: Option<u64> }`, `#[non_exhaustive]`, `Clone`, `PartialEq`, `Eq`, with Block 21's redacting `Debug` (data as its length; the key shown, as `MapEntry`). centrifuge-js `SharedPollUpdateContext` (`src/types.ts:749-760`). A removal's `data` is empty and its `version` `None` (`src/subscription.ts:2864-2869`; Verified: the server's removal push has neither). `version` is `None` for an absent or zero `version` (`client.proto`, `KeyedItem.version`: 0 means no version is known).
+  - `ErrorKind` (non-exhaustive) gains `Track`, `Untrack` and `SignatureRefresh`, carrying centrifuge-js's error context `type` (`src/subscription.ts:1905`, `:1951`, `:2083`).
+  - Not adopted: centrifuge-js's `publication` event alongside each `update` (`src/subscription.ts:1167-1173`), as Block 45 D2 decided for maps (Exceptions).
+
+- **D3 Core.** One registry (`SubscriptionId` shared): a subscription has a kind, stream, map or shared poll; a shared poll subscription has `SharedPollSubscriptionOptions` (new, `#[non_exhaustive]`, unstable) and its state of D5, both boxed beside `map` under `unstable` (`Option<Box<...>>`, as Block 45's `MapFlow`), so a stream subscription pays a pointer (Block 14, "Marginal cost of a subscription"). `Machine::add_shared_poll_subscription(channel, SharedPollSubscriptionOptions) -> Result<SubscriptionId, SubscriptionError>`; the existing inputs (`Subscribe`, `Unsubscribe`, `EventTaken`, token and data answers) serve it, and its subscribe uses `SubscriptionTimer::Resubscribe` and `SubscribeReply` as any kind does. New, unstable: `Input::TrackKeys`, `Input::TrackKeysWithSignature`, `Input::UntrackKeys`, `Input::SignatureFetched { subscription, request, result }`, `Input::SharedPollTimerFired(SharedPollTimer)`; `Action::EmitSharedPollSubscription(EventId, SubscriptionId, SharedPollSubscriptionEvent)`, `Action::FetchSignature { subscription, request, keys }`, `Action::SetSharedPollTimer(SharedPollTimer, Duration)`, `Action::CancelSharedPollTimer(SharedPollTimer)`. Every enum gaining a variant is `#[non_exhaustive]` (Block 45 D3, `src/machine.rs:502`, `:746`). `SharedPollTimer` is an opaque `Copy` number never reused by a machine, the driver holding them in `KeyedTimers<SharedPollTimer>`, as `DebounceTimer` (Block 46 D5): track and untrack reply deadlines, the signature refresh, the retries, per request or per retry kind, none of which fits the exhaustive `Timer` and `SubscriptionTimer` (`src/machine.rs:421`, `:453`), which stay unchanged. A machine without shared poll subscriptions sets no such timer, so no `with_...` switch is needed (Block 46 D5's reason does not apply: an owner adds these subscriptions only through the unstable call).
+  - The wire model (`src/wire.rs`, `src/json.rs`, `src/protobuf.rs`) gains `Publication.version` (16), `SubRefreshRequest.type` (3), `track` (4), `untrack` (5), `KeyedItem` (`key`, `version`), `TrackBatch` (`signature`, `items`), and `SubRefreshResult.items` (3); `SubscribeRequest.type` and `SubscribeResult.type` exist since Block 45. Zero and empty values are not encoded (a key at version 0 goes as `{"key":"k"}`, `src/subscription.ts:1691`, Verified), so existing commands are unchanged byte for byte (unit tests on both codecs).
+
+- **D4 The subscribe flow.** `subscribe { channel, type: 4, token, data, delta }` (`src/subscription.ts:968-972`), in the connect frame when it fits (Block 36, as any subscribe). No recovery fields ever. The reply is a `SubscribeResult` with `type` 4, an optional `epoch`, optional `expires` and `ttl`, optional `delta` (centrifuge `client_shared_poll.go:87-139`; Verified). On it the subscription becomes `subscribed`, emits `Subscribed`, and sends the replay of D8.
+  - A reply whose `type` is not 4 ends the subscription: the client sends an unsubscribe command and emits `Unsubscribed` with code 8 "shared poll subscriptions not supported", without subscribing again by itself. Block 45 D15's reason holds (a server before v6.8.0 ignores `type` and grants a stream subscription); centrifuge-js does not check it (Exceptions).
+  - Subscribe errors follow Block 9 and Block 10 unchanged: 109 drops the token and resubscribes; temporary or below 100 emits an `Error` and resubscribes after the backoff; any other unsubscribes with its code (a namespace of another type answers 108, a stream subscribe to a shared poll namespace 107, a missing token 103, Verified). `105` "already subscribed" is a plain permanent error.
+
+- **D5 State per subscription** (centrifuge-js `src/subscription.ts:119-153`), in the core:
+  - **`tracked`**: key to version (0 when none is known), in insertion order.
+  - **`signatures`**: the library of `(keys, signature)` the client holds, each entry the exact key list its signature covers.
+  - **`epoch`**: `None` until the first subscribe reply after `set_unsubscribed` (a subscription starts cold), then the last reply's epoch, an absent one as `""` (D8).
+  - **`untrack_pending`**: per key, the number of untrack requests not yet answered (D10); empty when not `subscribed`.
+  - **`tracked` and `signatures` persist** when the subscription leaves `subscribed` for `subscribing` (transport lost, server unsubscribe from 2500, delta failure, resubscribe backoff), as the JS comment says, "avoids hitting getSignature for every client during mass reconnect storms" (`src/subscription.ts:486-491`). They are cleared, with `epoch`, in `set_unsubscribed` (`:1088-1093`), so `unsubscribe()` and a removal start cold.
+  - **Version moves when taken** (Block 15): a key's version moves to a publication's `version` when its `Update` is taken, and a track or replay built while such an event is in flight uses the version it would set (Block 41 D3). Epoch resets (D8) apply to the versions held. A removal ends its key when it is handled, not when it is taken (D9).
+
+- **D6 Signatures** (`src/types.ts:777-789`, `:800-808`; `src/subscription.ts:2934-3047`):
+  - `get_signature`, on the builder, is an async callback built like `get_token` (Block 10): `Fn(Vec<String>) -> impl Future<Output = Result<SharedPollSignature, TokenError>>`, `MaybeSend` on both targets, polled beside the core, so a slow backend blocks no ping or call (Blocks 1, 10; Block 49 row S6 stands). `TokenError::Unauthorized` is the "user may no longer use the subscription" case (`src/types.ts:805-807`).
+  - **`track(keys)`** stores each key at `max(existing, 0)`; empty sets are no-ops (`:2935`). Subscribed, it requests a signature for those keys; not subscribed, it only stores them (the replay asks for what lacks one, `:2988-2993`). Each `Action::FetchSignature` carries a request number; an answer to an abandoned request (the subscription left `subscribed` meanwhile) changes nothing (I13's rule; `:2995-2997`).
+  - **`track_with_signature(items, signature)`** stores each key at the higher of its version and the one held (`:2953-2960`), adds `(keys, signature)` to the library (dropping entries it fully covers, `_addSharedPollSignature`, `:1896-1900`), and when subscribed sends the batch as given; not subscribed, the replay sends it.
+  - **`untrack(keys)`** removes the keys from `tracked` at once, drops library entries whose every key is untracked (`:3063-3065`), and sends an untrack command if subscribed. An empty key set sends nothing (Verified the server answers 107 to one; centrifuge-js would send it).
+  - **What the callback returns** may be a subset: keys in the request and not in the result are revoked, each giving a synthetic removal `Update` and an untrack command (`:3001-3026`); the result's keys are then tracked as a batch whose items include any key since untracked, sent in that request's `untrack` field too, since the signature covers the exact list (`_signedBatch`, `:1639-1652`; server: the signature is over the keys in order, `client_keyed.go:72`, `internal/client/track_signature.go`, Verified "key order swapped" is refused). A result with no key still tracked sends nothing. A result whose batch is over the budget by D7's worst-case cost (more keys than asked for) is refused as below and retried as a failed fetch.
+  - **An explicit batch over the budget.** `track_with_signature` sends its batch as given when it fits. One over `max_track_frame_bytes` by D7's worst-case cost is refused before it enters the library or the wire: an `Error` of kind `Track`, code 12 "track batch over max_track_frame_bytes", and its keys untracked with synthetic removal `Update`s (D7, D9), since a single batch cannot be split and sending it would end the client.
+  - **Refreshing without a callback.** With `track_with_signature` only, refreshing an expiring signature is the application's job: it calls `track_with_signature` again before `exp`. Otherwise the server drops the keys silently after `exp` plus `track_expired_extra_delay` (no removal is pushed, Verified) and `tracked_keys` still lists them; the rustdoc and the README say so.
+  - **A key set with no callback:** `track(keys)` without `get_signature` emits an `Error` of kind `Track`, code 14, "get_signature callback required for track(keys)" (`:2978-2984`), and the keys stay tracked (the next replay reports it again, `:2196-2201`).
+  - **Callback failure:** `Unauthorized` unsubscribes with code 1 "unauthorized" (`:3036-3039`); any other error emits an `Error` of kind `Track` (track path) or `SignatureRefresh` (refresh and replay paths), code 14 (`:3041-3046`, `:2085-2089`), and retries after the backoff of D7.
+  - **Chunks (divergence).** A key set whose single batch would exceed `max_track_frame_bytes` by D7's worst-case cost is asked for in chunks, each a separate `Action::FetchSignature`, one at a time in key order, each chunk sized by D7's worst-case cost (the signature's length counted as 128 until known) so that its batch can be replayed alone whatever versions it later holds. The chunks of one request are collected and handled as one result (revocations, tracking, and for a refresh the library swap of D7). A chunk whose fetch fails fails the whole request as above; what the other chunks returned is dropped. Reason: a single batch cannot be split (the signature covers its exact list), and a frame over the server's `websocket.message_size_limit` (65 536 by default, Block 18 D5) closes the connection with 1009, which Block 3 turns into `disconnected` code 3 for the whole client (Verified with 1800 keys of 44 bytes, about 99 KB). Nothing in centrifuge-js avoids it: a refresh of a large key set kills the client hours after start, the moment the first expiry fires.
+
+- **D7 Track requests, replies and errors** (`_sendTrackRequest`, `_handleTrackResponse`, `_handleTrackError`, `src/subscription.ts:1655-1735`, `:1789-1836`, `:1902-1937`):
+  - A track request is one `sub_refresh { channel, type: 1, track: [{ signature, items: [{ key, version }] }], untrack }`. Frames: a request's batches are split so that no frame exceeds `max_track_frame_bytes` (default 60 000, centrifuge-js's `maxBytes`, `:1663`; below `websocket.message_size_limit` and emulation's `max_request_body_size`, 65 536 each, Block 18 D5; rustdoc and README say an operator who lowers either lowers this). The cost of a frame is computed for the worst encoding, not by centrifuge-js's estimate (`:1666-1676`, 16 bytes per item, unsafe once versions are carried): JSON inside the JSON string of an emulation request (Block 26), each version at `u64::MAX`; per item the key's doubly JSON-escaped length and 48; per batch 40 and the signature's length; per frame 256 and the channel's doubly escaped length; per inline untrack key its doubly escaped length and 6. Protobuf is never larger. Verified: 2491 keys of 8 bytes at version 1 000 000, within centrifuge-js's estimate, are 92 KB and close the websocket with 1009, and a track of 62 882 bytes over emulation gets HTTP 413; two frames of 900 keys each are accepted. Inline `untrack` keys go in the first frame only, a key whose batch landed in a later frame being untracked by the `stale` rule below (`:1721-1724`); frames go one after the other, and a failing frame stops the rest (`:1721`, "Sequential dispatch"), a permanent error untracking the keys of every frame not accepted (`:1686`).
+  - An untrack request is `sub_refresh { channel, type: 2, untrack: [keys] }`.
+  - A single batch over `max_track_frame_bytes` never reaches the wire (D6).
+  - Both are the client's own commands: they bypass the write queue's admission as subscribe and unsubscribe do (Block 13), are bounded by `Config::timeout` each (Block 15's rule pauses the deadline while a reply waits to be handled), and join automatic batching (Block 36) like any command.
+  - **Replies are handled in order** (Block 15): a track reply can carry `items` and its pushes follow it on the connection (centrifuge `client_keyed.go:435-440`). `items` are handled as publications (D9). Keys of the request no longer tracked (`stale`) get an untrack command (`:1815-1821`). `expires` schedules the refresh (below). A track reply of an earlier subscription is dropped (`:1791-1793`; I13).
+  - **Errors** (`:1902-1937`), each emitting an `Error` of kind `Track` first:
+    - **109:** a consolidated refresh of the signatures (below) (`:1920-1923`); without a callback nothing more happens (the `Error` was reported). A 109 answering the track request of a refresh is a failure of that refresh and retries after 5 s to 30 s, so a backend signing expired signatures, or a clock behind the server's by more than the grace, cannot make a device loop on it; centrifuge-js refreshes again at once (Exceptions).
+    - **Temporary, below 100, or a reply deadline on websocket:** after a backoff of 1 s to 15 s, the replay of D8 runs (`:1926-1929`).
+    - **Any other:** the keys of the request are untracked, locally and by an untrack command, and each still-tracked key gives a synthetic removal `Update` (`:1940-1966`). 103 (invalid signature) and 106 (limit, Verified) land here.
+    - An untrack error emits an `Error` of kind `Untrack` only (`:3072-3075`).
+  - **Signature refresh** (`_sharedPollRefreshSignature`, `:1973-2100`): a reply with `expires` sets one timer to the earliest deadline it has seen (`now + ttl`, or `now + 1 s` when `ttl` is 0 or absent: a signature accepted within the server's 5 s grace, Verified; `:1830-1835`; replies with `expires` and no `ttl` in a row back off by Block 2's formula with bounds 1 s and 15 s, the attempt count reset by a reply with a positive `ttl`, so a backend that keeps issuing expired signatures is not polled every second, Exceptions). When it fires, with a callback and at least one key tracked: a fetch for every tracked key (chunked, D6); one at a time, and a tracked key not covered by the fetch in flight runs another once it ends (`:1978-1985`, `:2008-2011`). The result revokes as in D6, replaces the library with the new entries plus any entry still needed for keys outside it (`:2034-2046`), and is tracked. A failure retries after 5 s to 30 s (`:2091`). The refresh guard and target reset when the subscription leaves `subscribed` (`:477-485`).
+  - Backoff uses Block 2's formula with those bounds (`src/utils.ts:30-36`); each retry timer has its own attempt counter, reset on success and on leaving `subscribed` (`:128-134`, `:477-479`).
+  - Server: a key whose signature expired is dropped silently after `exp` plus `track_expired_extra_delay` (25 s by default: centrifuge `client.go:1467-1471`, `config.go:358`, the check `client_keyed.go:724`; centrifugo docs; Verified, no removal pushed), so refreshing at the expiry, within the grace period, loses no key, and the client never sees a removal for it.
+
+- **D8 Replay after subscribe** (`_sharedPollReplayTrack`, `:2117-2230`). On every `subscribed` (first subscribe and each resubscribe), in the step that makes it so:
+  - If `epoch` is `Some` and differs from the reply's, an absent reply `epoch` being `""`, every held version is set to 0 before anything is sent; `epoch` then takes the reply's value. Versions given before the first subscribe of a subscription are kept, whatever its epoch: `epoch` is `None` then. Reason (Verified): the server's versions restart lower after the channel's state is recreated or the backend's epoch changes (2500, D13), so a version held from before suppresses every value until a higher one comes, and a version sent as 0 gets the current value. centrifuge-js's rule resets only when its kept epoch is non-empty (`:579-587`), which leaves the first epoch a backend reports suppressed: Verified, a kept empty epoch with held version 3 gets nothing after the flip to version 1; the server's comment and its documentation ask for version 0 (centrifuge `shared_poll.go:944-946`) (Exceptions).
+  - Phase 1: every library entry is sent as a batch of one track request with its original key list and the current versions (0 for a key since untracked), with those untracked keys in the request's `untrack` (Verified inline untrack frees slots). All-or-nothing on the server (`Handler.OnTrack`, one bad batch refuses the whole request, Verified).
+  - Phase 2: tracked keys with no library entry go to one fetch (chunked, D6); no callback emits the error 14 of D6. A failure retries after 5 s to 30 s (`:2240-2245`).
+  - No `get_signature` runs for keys already in the library, so a mass reconnect does not touch the backend while its signatures stay valid.
+
+- **D9 Publications** (`_handlePublication`, `:1109-1200`), for a push or a track reply item, in this order:
+  - **Not tracked:** a key not in `tracked` is dropped silently, as centrifuge-js does for the race its comment describes (a replay carries untracked keys until the inline untrack is applied, `:1143-1153`), but before decoding, so an untracked key creates no delta base (Exceptions: centrifuge-js decodes first, `:1122-1138`).
+  - **Duplicate:** a publication with a `version`, not `removed`, not newer than the version held (when that is above 0) is dropped (`:1110-1118`; Verified the server repeats the same version after a re-track from 0). Dropped before decoding, which would otherwise move the base.
+  - **Decoding:** delta (D10).
+  - **Delivery:** one `Update { key, data, removed, version }`, in order (Block 15). Within one message (the items of one track reply) the version check compares against what the earlier items would set.
+  - **Removals.** A `removed` publication ends the key when it is handled: the key leaves `tracked`, its delta base goes (D10), and the `Update { removed: true }` is queued; a synthetic removal does the same (D6, D7). A removal `Update` is never withdrawn (amends Block 15, "Withdrawal"), as no later step would bring it back, and tracking the key again later is unaffected; centrifuge-js ends it when it is delivered (`:1194-1196`), which on a client-side reason would lose it here. A removal of a key no longer tracked is dropped by the first rule, and a publication with no key is the empty key, dropped by it too.
+  - **Delivered means taken:** an `Update` of a value not taken when the subscription leaves `subscribed` for a client-side reason is withdrawn (Block 15), and the key's version did not move, so the replay asks from the old version and the server sends it again (Verified: a held version equal to the latest gets no redelivery, version 0 does). A connection closed by the server holds its pending events as Block 15 says.
+
+- **D10 Delta compression** (Block 19, per key):
+  - `delta(DeltaFormat::Fossil)` sends `delta: "fossil"` on the subscribe; the reply's `delta` says whether it is on (Verified on an `allowed_delta_types: ["fossil"]` namespace; absent otherwise).
+  - With delta on, every publication's data is a JSON string on the JSON protocol (Verified: the first, whole, and later ones) unwrapped per Block 19 D7. Bases are per key: the data of the last publication handled for that key, deleted when the key stops being tracked (an untrack, a removal, a permanent error). On a new subscribe every base is dropped, so Block 19 D5's "cleared at each subscribe" holds, unlike map subscriptions (Block 45 D9): each track resets the server's per-key `deltaReady`, so the first publication after a track, a replay or a signature refresh is whole (`client_keyed.go:37-41`, `:319-324`, Verified). centrifuge-js keeps the map across a resubscribe, where it is simply overwritten by the whole first publication (`:1122-1138`), and after an untrack (`:3058-3066`); Ferrifuge frees it.
+  - **A delta for a key with no base while `untrack_pending` names that key** is dropped: neither delivered nor a failure. On one connection the server answers commands and pushes in order, so a delta it sent before handling the untrack can reach a client that has already tracked the key again and dropped its base; the track reply and the whole first publication follow it (D7). Any other delta with no base is Block 19's failure.
+  - Failures: Block 19 D3 and D8 unchanged (`Error` of kind `Delta`, code 15, then `Subscribing` code 2, an unsubscribe command and a resubscribe after the backoff); the resubscribe replays and each key comes back whole. On OSS a delta exists only when the backend's refresh returns `prev_data` (Verified); the rustdoc says so.
+
+- **D11 Memory bound** (what a server can grow):
+  - **Events and messages.** Block 15's read-ahead and Block 29's per-message limit bound what is read; track replies are ordinary messages. Block 15's "Errors past 256" bounds the retry `Error` events a stuck backend can add.
+  - **Delta bases.** A base exists only for a tracked key (D9, D10) and each within Block 19 D6's limit, so the server can grow only values, not keys. `max_delta_bases_bytes`, default 64 MiB (Block 19 D6's inbound limit), bounds their total; a key whose base would pass it ends the subscription: the client sends an unsubscribe command and emits `Unsubscribed` with code 7 "shared poll delta bases too large", and does not subscribe again by itself, since every resubscribe would end the same way (as `unsubscribed` 5, Block 45 D5); the publication that passes the bound is not delivered. centrifuge-js has no bound (Exceptions).
+  - **Tracked keys and the signature library** grow only by the application's calls and its backend's answers, not by the server: a publication of an unknown key is dropped (D9). Entries with no tracked key are dropped (D6, D7). They are not bounded (as Block 15's "Events caused by application calls"), and the rustdoc says so, with the server's `max_keys_per_connection` (5000 by default) as the usual limit. Tracked keys cost memory per key, not per subscription; `perf_footprint` reports it (Structural acceptance), and Block 14's 2 KiB per subscription holds for a subscription tracking no key.
+
+- **D12 Emulated transports** (`_sharedPollSerial`, `_sharedPollRequestFailed`, `src/subscription.ts:1741-1763`). Over `http_stream` and `sse` each request is a separate HTTP request the server may handle in any order, so a subscription's track and untrack requests go one at a time, in the order made, each waiting for its reply; a request of an earlier subscription is dropped when its turn comes. The next subscribe of the subscription waits for the queue to drain (`:640-642`). A track or untrack reply deadline passing over emulation makes the client reconnect with `connecting` code 3 "shared poll request timeout", since whether the keys are tracked is unknown (`:1758-1763`). Verified: `sub_refresh` track over `http_stream` and over `sse` with the emulation endpoint delivers the same reply and pushes as websocket.
+
+- **D13 Tokens, data, statistics** (Blocks 10, 31, 32): the subscription token goes on the subscribe; an expiring subscription (`expires`, `ttl` in the reply) is refreshed with `sub_refresh` type 0 as Block 10 (Verified), its timers kept apart from the signature refresh's. `data` and `set_data` go on the subscribe. 2502 and 3014 drop the token unconditionally (Block 11) and every delta base; `tracked`, `signatures` and versions stay, and the next reply's `epoch` decides (`_invalidateState`, `:514-530`, with no position to reset, so Block 11's sentinel epoch does not apply). `Statistics::subscriptions` counts shared poll subscriptions (one registry), and `publications_delivered` counts each `Update` of a publication taken; a synthetic removal counts as none. `delta_statistics()` counts whole and delta publications (Block 19, `:1128-1136`).
+
+- **D14 Codes** (Block 34): `codes::error::SHARED_POLL_GET_SIGNATURE` = 14 "get_signature callback required ..." or the callback's error text (centrifuge-js's value, `src/codes.ts:15`); `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE` = 7 "shared poll delta bases too large" (D11) and `SHARED_POLL_NOT_SUPPORTED` = 8 "shared poll subscriptions not supported" (D4). Not behind `unstable`, for Block 45 D12's reason (`cargo doc` with default features resolves every constant); their documentation says only shared poll subscriptions (`unstable`) use them. Code 12 (`BAD_CONFIGURATION`) also reports a batch refused for its size (D6): its row's Cause gains it. Block 34's tables gain them, and the "Server codes" table and D1 change as listed after this block.
+
+- **D15 Handlers, streams, helpers, test constructors.** Block 41: `pub trait SharedPollSubscriptionHandler: MaybeSend + 'static` with `on_event`, whose default dispatches to no-op `on_subscribing`, `on_subscribed`, `on_unsubscribed`, `on_update(SharedPollUpdate)`, `on_error(ClientError)`, and a blanket implementation for `FnMut(SharedPollSubscriptionEvent) + MaybeSend + 'static`; set with `SharedPollSubscriptionBuilder::handler` and `set_handler`, with Block 41's delivery rule, panics and deadlock detection for `ready`, `presence` and `presence_stats` (the rest are synchronous). Block 39: no `updates()` view. Block 38: `SharedPollUpdate::json<T>()`, an empty removal yielding an error as `Publication::json` does. Block 37: under `test-util` and `unstable`, `SharedPollUpdate::new(key, data)`, `SharedPollUpdate::removal(key)` and setters.
+
+- **D16 Secrets and logs** (Block 21): a signature is a credential: `SharedPollSignature`, `Input::SignatureFetched`, `Action::FetchSignature`'s result, `TrackBatch` and the `Send` frames redact it in `Debug`, shown as its length. A unit test (structural acceptance) covers it, since the runners do not model shared poll (D19; Block 49 row C2's class).
+
+- **D17 Browser target** (Block 44): the core and the shared adapter layer carry the subscription; `SharedPollSubscriptionHandler` and `get_signature` use `MaybeSend`; the wasm job builds `--features browser,unstable`. One @W scenario, on the browser harness's server with the @A namespace of D18 (the dead proxy endpoint and `shared_poll_publish`), so the relay needs no backend.
+
+- **D18 Tests.** The @A server's `CENTRIFUGO_CHANNEL_NAMESPACES` (`tests/bdd.rs`) gains, with `CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY` and `CENTRIFUGO_CHANNEL_PROXY_SHARED_POLL_REFRESH_ENDPOINT` set (Verified to load and serve on v6.10.1): `poll_v` (`subscription_type: shared_poll`, `shared_poll: { mode: "versioned", refresh_interval: "1s", publish_enabled: true }`, `allow_subscribe_for_client`, `allow_subscribe_for_anonymous`), `poll_l` (the same, `max_keys_per_connection: 2`), `poll_private` (the same without `allow_subscribe_*`). The refresh endpoint is `http://127.0.0.1:9/`, where nothing listens, as `poll_v` is written by `shared_poll_publish`. The @B variant points it at `ProxyBackend`'s `/shared_poll_refresh`, adding `poll` (versionless, `refresh_interval: "1s"`, `channel_shutdown_delay: "1s"`) and `poll_d` (versioned, `allowed_delta_types: ["fossil"]`). `ServerApi` gains `shared_poll_publish`; `tests/support/token.rs` gains `shared_poll_signature(channel, user, keys, expiry)` on the `hmac` and `sha2` dev-dependencies already there. The fake server answers `sub_refresh` commands of type 1 and 2 from a script. The shared poll scenarios are in `IMPLEMENTED` only with `unstable` (Block 43 D8's pattern).
+
+- **D19 Chaos runners and the bug-pattern catalogue.**
+  - Blocks 16 (runners), 42 (trace replay), 51 (real-server chaos) and 52 (soak) do not model shared poll while it is unstable, as Block 45 stated for map subscriptions; their budgets and invariants do not change. The two invariants that apply are covered instead by unit tests on the core: I13 (an answer to an abandoned signature request, track reply or retry timer changes nothing) and I14's rule (D16).
+  - Block 49 D10 (reviewed rows of `not applicable` and `not reconstructible` touching subscriptions): 20 stays `not reconstructible` (§12 defers it to map subscriptions); 44 stays `not applicable` (the core emits `Unsubscribed` and the unsubscribe command in one step, for every kind); S6 stays `not applicable` (`get_signature` is polled as a future beside the core, D6); S17 stays `not applicable` (a shared poll subscription recovers no stream; an empty epoch is an epoch to compare, never a recovery, D8); 54 stays `not applicable` (`get_signature` returns a typed result, D6); 76 stays `not applicable` (`ready()` resolves on the state, for this kind too); 22 stays `not applicable` (3014's token rule holds for this kind, D13). No new row: no bug was fixed here and centrifuge-js's own fixes are covered by the scenarios above. A probe is added only if a defect is later found twice (`C` rule).
+
+- **D20 Semver, version, docs.** Everything is additive: the new `Input` and `Action` variants are on `#[non_exhaustive]` enums and under `unstable`, `ErrorKind` is `#[non_exhaustive]` (Block 17), the constants are new, and `Timer`, `SubscriptionTimer` and `Machine`'s existing surface do not change, so no version bump; `cargo-semver-checks` runs on default features without `unstable` (Block 43 D8) and reports only the constants (additive). Changelog `Unreleased`, "Added" (each sub-increment, prefixed "Unstable (`unstable` feature):"): `SharedPollSubscription`, `SharedPollSubscriptionBuilder`, `SharedPollSubscriptionEvent`, `SharedPollUpdate`, `SharedPollTrackItem`, `SharedPollSignature`, the registry methods; `Machine::add_shared_poll_subscription`, `SharedPollSubscriptionOptions`, `SharedPollTimer` and the new `Input` and `Action` variants; per-key delta; `SharedPollSubscriptionHandler`, the JSON helper and constructors; and, not prefixed, `codes::error::SHARED_POLL_GET_SIGNATURE`, `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE`, `SHARED_POLL_NOT_SUPPORTED`. README: a "Shared poll subscriptions (unstable)" section after map subscriptions: the feature, Centrifugo ≥ 6.8.0, the namespace options (`subscription_type`, `shared_poll.mode`, `refresh_interval`, `max_keys_per_connection`), the signature (format, HMAC input, 5 s grace, key order), reconnect and refresh behaviour, memory, `websocket.message_size_limit`, delta's `prev_data`, the codes rows, `max_track_frame_bytes` against the server's limits, and refreshing an expiring signature without `get_signature` (D6).
+
+Verified (Centrifugo v6.10.1 OSS, a raw websocket and `http_stream` JSON client on Node 22 with a test backend for `shared_poll_refresh`, 2026-11-10, by the drafter; the reviewer re-ran the items marked (R) on v6.10.1, and those about signature errors, the 1009 close and the epoch flip also on v6.10.2 and v6.10.3, with throwaway scripts, not committed):
+- the server and config: `/api/info` reports "6.10.1 OSS"; a namespace with `subscription_type: "shared_poll"` loads with a required `shared_poll.hmac_secret_key` and a refresh proxy; `subscribe { type: 4 }` answers `{ "epoch": "...", "type": 4 }`, with `expires` and `ttl` on a token namespace, and `delta: true` with `delta: "fossil"` on a namespace allowing it;
+- (R) `presence` and `presence_stats` work on a shared poll namespace with `presence: true` and `allow_presence_for_client` or `_for_anonymous` (108 without), `history` always 108;
+- (R) `track` with a valid signature answers `{ "sub_refresh": {} }`, with `expires` and `ttl` for a signature with `exp`; `push.pub` carries `key`, `data` and `version`; a cold key is polled on tracking (`/refresh` with `{ "items": [{"key": "k1"}] }`); a changed value arrives with a higher version; versions are one counter per channel; a key the refresh reports `removed: true` arrives as `{ "key": "k", "removed": true }`, without `data` or `version` (the server stops tracking it, `keyedWriteRemoval`, read);
+- (R) errors: an invalid signature gets 103, a signature of another user 103, a signature whose keys are in another order 103, `exp` 10 s past 109, `exp` 2 s past (grace 5 s) succeeds with `expires` and no `ttl`, `track` with no batches or no items 107, `untrack` with no keys 107, tracking on an unsubscribed channel 103, a limit over `max_keys_per_connection` 106 (an inline `untrack` frees slots), one bad batch of two refuses the request with 103, a second subscribe 105, a non-shared-poll namespace `type: 4` 108, a stream subscribe to a shared poll namespace 107, a `sub_refresh` with `type: 1` on a stream subscription 107, a client `publish` 103; exp 5 s past is accepted, 6 s past refused (109);
+- an `untrack` stops the pushes; a key tracked twice with version 0 gets the same version pushed twice (the client's duplicate rule);
+- (R) reconnect: a held version equal to the server's gets no push; after the channel's state was recreated (no subscribers past `channel_shutdown_delay`) the reply's epoch differs and a held version from before gets nothing, so the versions must be sent as 0;
+- (R) versioned mode: `shared_poll_publish` delivers `version`, the same `version` is not repeated, version 0 is refused 107, a versionless namespace is refused 108; a backend reporting an epoch for the first time, and a later change of epoch, make the server send `unsubscribe` 2500 "insufficient state" to the subscribers; after an immediate resubscribe the reply's `epoch` is the backend's (and absent on a fresh channel), a held version 3 gets nothing after a flip to version 1, and version 0 gets the value at version 1;
+- (R) delta: the first publication and any without `prev_data` are whole and JSON-escaped; a change with the refresh's `prev_data` arrives with `delta: true`;
+- (R) a frame of 99 186 bytes closes the websocket with 1009; two frames of 900 keys each are accepted; 2491 keys of 8 bytes within centrifuge-js's estimate of 60 000 are accepted at 47 KB without versions and close the websocket with 1009 at 92 KB with version 1 000 000;
+- (R) over emulation a track of 60 682 bytes (a request body of 65 206) is accepted and one of 62 882 bytes (a body of 67 566) is refused with HTTP 413;
+- (R) a key whose signature expired is dropped after `exp` plus the delay and at the next presence tick (about 40 to 60 s after a 3 s `exp`), with no push of any kind;
+- (R) over Protobuf websocket: `SubscribeRequest.type` 15, `SubRefreshRequest` 1, 3, 4 and `KeyedItem` 1, 2, `Publication.version` 16, `key` 11, `data` 4, the same flow as JSON;
+- (R) `sse` with the emulation endpoint: the same reply and pushes as `http_stream`;
+- (R) `http_stream` with the emulation endpoint: the same reply and pushes, the `sub_refresh` reply arriving on the stream before the pushes.
+- (R) @A: `CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY` and `CENTRIFUGO_CHANNEL_PROXY_SHARED_POLL_REFRESH_ENDPOINT` are the right names, without the endpoint the server refuses to start ("endpoint not set"), a namespace with `publish_enabled` and a refresh endpoint nothing listens on tracks, delivers `shared_poll_publish`, and refuses empty-key publishes 107; the server's log shows refresh errors only.
+
+`VERIFY:` Protobuf over `http_stream`, by the transport outline (same codec and field numbers, not run); a track reply carrying `items` on a real server (needs `keep_latest_data`, PRO; @D covers it); a signature whose user is the JWT `sub` over emulation (same code path, run only anonymously); what a pre-v6.8.0 Centrifugo answers to `type: 4` (D4 assumes a stream subscribe reply, or an error, either of which ends the subscription).
+
+**Structural acceptance:**
+- with default features, `cargo doc` and rustdoc JSON list no shared poll item but the three code constants; with `--features unstable` each carries the `doc(cfg)` badge and the unstable sentence; `cargo tree` is unchanged by `unstable` (no new dependency);
+- D3: the state boxed beside `map`; `tests/perf_footprint.rs` measures, under `unstable`, 1000 shared poll subscriptions tracking no key against the same 2 KiB limit, and reports the bytes per tracked key;
+- D3: unit tests on both codecs: every existing frame unchanged byte for byte; each new field round-trips; the JSON and Protobuf decoder fuzz targets (Block 14) gain a committed seed of a track reply with `items` and of a push with `version`;
+- D5 to D9: @E unit tests of the core: track and untrack commands with their fields; the replay's two phases and inline untrack; a value's version moved only by `EventTaken`, a removal ending its key when handled and never withdrawn, a key tracked again after it staying tracked; the epoch rule with `None`, `""` and a value (mutation: comparing only non-empty kept epochs fails); a track built with the in-flight version; a stale reply and a stale `SignatureFetched` changing nothing; the epoch reset; the retry timers per kind with Block 2's bounds (mutation: a retry that does not back off, one that resets its counter on failure); a publication of an untracked key leaving no base;
+- D6, D7: the worst-case cost is an upper bound of the real bytes (a property test: random keys, including ones needing JSON escapes, versions up to `u64::MAX`, channels and signatures; encoded as JSON, as Protobuf and inside an emulation request; mutation: counting no version bytes fails); a single 60 KB command goes alone (Block 18 D5); a mutation sending a key set in one over-budget batch fails the budget test and the @D scenario; the 109 of a refresh's track request and repeated replies without `ttl` back off (@E; mutations: no backoff on each); a failing chunk failing the whole request;
+- D10, D11: per-key bases: deleted on removal, on untrack and on resubscribe; a no-base delta dropped only while `untrack_pending` names its key, else a failure (mutation: dropping every no-base delta fails "A delta that cannot be applied resubscribes and tracks again"); the bound counted; the mutation "no base bound" fails;
+- D12: emulation: track and untrack serialized, a queued request of an earlier subscription dropped, a reply deadline reconnecting with reason "shared poll request timeout": unit tests on the core, as the fake server speaks websocket only (Block 15);
+- D16: a test that no `Debug` of the signature-carrying types prints the signature;
+- D18's CI changes, Block 14's @P gates unchanged with default features;
+- the README section, rustdoc, changelog entries, Block 34's rows and its test with the new constants.
+
+Value clause: As an app developer showing live values for many items, I want to name the keys I follow and let the client track them under my backend's signatures, get each new version once, and keep following them across reconnects and signature expiry, so that my devices stay current without each of them polling my backend.
+
+```gherkin
+Feature: Shared poll subscriptions (unstable)
+
+  Scenario Outline: A shared poll subscription cannot share a channel with another subscription
+    Given a new client with a <existing> to channel "poll_v:a"
+    When a <created> to channel "poll_v:a" is created
+    Then creating it fails with "a subscription to channel poll_v:a already exists"
+
+    Examples:
+      | existing                 | created                  |
+      | subscription             | shared poll subscription |
+      | shared poll subscription | subscription             |
+      | map subscription         | shared poll subscription |
+
+  Scenario: A new shared poll subscription starts unsubscribed
+    Given a new client
+    When a shared poll subscription to channel "poll_v:a" is created
+    Then the shared poll subscription state is "unsubscribed"
+    And the client's shared poll subscriptions are "poll_v:a" and its subscriptions are none
+    And tracked_keys is empty
+
+  @D
+  Scenario: Removing a shared poll subscription unsubscribes it and frees its channel
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking key "a"
+    When the shared poll subscription is removed
+    Then the fake server receives an unsubscribe command for "items"
+    And the client's shared poll subscriptions are none
+    And a subscription to channel "items" can be created
+
+  @D
+  Scenario: A shared poll subscription subscribes with type 4 and nothing else
+    Given a client connected to the fake server
+    And a shared poll subscription to channel "items" with data {"a":1}, delta and a token
+    When subscribe is called on the shared poll subscription
+    Then the subscribe command for "items" has type 4, the data {"a":1}, delta "fossil" and the token
+    And it has no recover, epoch, offset, positioned, recoverable, join_leave, flag or tf field
+
+  @D
+  Scenario: Tracking with a signature sends one track request
+    Given a client connected to the fake server, with a shared poll subscription to "items" that has subscribed
+    When track_with_signature is called with keys "a" at version 3 and "b" at version 0 and signature "sig1"
+    Then the fake server receives a sub_refresh for "items" with type 1 and one batch with signature "sig1", item "a" at version 3 and item "b" with no version
+    And tracked_keys is "a" and "b"
+
+  @D
+  Scenario: Keys tracked before subscribing are sent once subscribed
+    Given a client connected to the fake server, with a shared poll subscription to "items" with get_signature that signs what it is given with "sig1"
+    When track is called with key "a" before subscribe
+    Then get_signature has not been called
+    And when subscribe is called and the subscribe is answered, get_signature is called with key "a"
+    And the fake server receives a sub_refresh for "items" with type 1, signature "sig1" and item "a"
+
+  @D
+  Scenario: A key tracked twice is tracked once at the higher version
+    Given a client connected to the fake server, with a shared poll subscription to "items" that has subscribed
+    When track_with_signature is called with key "a" at version 5 and signature "sig1"
+    And track_with_signature is called with key "a" at version 2 and signature "sig2"
+    And the transport closes and the client reconnects and subscribes again
+    Then the replay's track request carries key "a" at version 5
+
+  @D
+  Scenario: An empty key set sends nothing
+    Given a client connected to the fake server, with a shared poll subscription to "items" with a get_signature callback that has subscribed
+    When track is called with no keys and untrack is called with no keys
+    Then the fake server receives no sub_refresh and get_signature is not called within 1 s
+
+  @A
+  Scenario: Tracked keys receive their values and each new version
+    Given a connected client with a shared poll subscription to "poll_v:t1" whose stream was taken, subscribed
+    When track_with_signature is called with key "a" at version 0 and a valid signature for "a"
+    And the server API publishes key "a" of "poll_v:t1" at version 2 with data {"v":2}
+    And the server API publishes key "a" of "poll_v:t1" at version 4 with data {"v":4}
+    Then the shared poll subscription's stream yields "subscribing", "subscribed", an update of "a" with data {"v":2} and version 2, then an update of "a" with data {"v":4} and version 4
+
+  @B
+  Scenario: Centrifugo polls the backend and fans the value out
+    Given the backend's refresh answers key "a" of "poll:f1" with data {"v":1}
+    And a client and another client each with a shared poll subscription to "poll:f1" subscribed, each tracking "a" with a valid signature
+    Then each shared poll subscription's stream yields an update of "a" with data {"v":1} and a version greater than 0
+    And when the backend's refresh answers key "a" with data {"v":2}, each stream yields an update of "a" with data {"v":2}
+    And the backend's refresh requests for "poll:f1" never name "a" more than once per request
+
+  @A
+  Scenario Outline: A shared poll subscription works over each transport and protocol
+    Given a server with http_stream and sse enabled, and a client with the <protocol> protocol connected over transport "<transport>" with a shared poll subscription to "poll_v:tr1"
+    When subscribe is called on the shared poll subscription and key "a" is tracked with a valid signature
+    And the server API publishes key "a" of "poll_v:tr1" at version 3 with data {"v":3}
+    Then the shared poll subscription's stream yields an update of "a" with data {"v":3} and version 3
+
+    Examples:
+      | transport   | protocol |
+      | websocket   | JSON     |
+      | websocket   | Protobuf |
+      | http_stream | JSON     |
+      | http_stream | Protobuf |
+      | sse         | JSON     |
+
+  @A
+  Scenario: An untracked key delivers nothing more
+    Given a connected client with a shared poll subscription to "poll_v:u1" that has subscribed, tracking "a" and "b"
+    When untrack is called with key "a"
+    And the untrack reply is received
+    And the server API publishes key "a" at version 3 and key "b" at version 5
+    Then the stream yields an update of "b" and no update of "a" within 2 s
+    And tracked_keys is "b"
+
+  @D
+  Scenario: A version not newer than the one held is dropped
+    Given a client connected to the fake server, with a shared poll subscription to "items" tracking "a" at version 5, whose stream was taken
+    When the fake server pushes key "a" at version 5 and then key "a" at version 6
+    Then the stream yields exactly one update of "a" with version 6
+
+  @D
+  Scenario: A publication of a key not tracked is dropped
+    Given a client connected to the fake server, with a shared poll subscription to "items" tracking "a", whose stream was taken
+    When the fake server pushes key "z" at version 1 and then key "a" at version 1
+    Then the stream yields exactly one update, of "a" at version 1
+
+  @B
+  Scenario: A backend removal ends the key and gives one update
+    Given a client with a shared poll subscription to "poll:rm1" subscribed, tracking "a" with a valid signature, whose update of "a" was taken
+    When the backend's refresh answers key "a" with removed true
+    Then the stream yields an update of "a" with removed true, empty data and no version
+    And tracked_keys is empty
+
+  @D
+  Scenario: Items of a track reply are delivered before later pushes
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken
+    When track_with_signature is called with key "a" and "b" and the fake server answers with items "a" at version 2 and "b" at version 3
+    And the fake server pushes "a" at version 4
+    Then the stream yields updates of "a" version 2, "b" version 3 and "a" version 4, in that order
+
+  @A
+  Scenario: A signature the server refuses untracks its keys and reports the error
+    Given a connected client with a shared poll subscription to "poll_v:s1" subscribed, whose stream was taken
+    When track_with_signature is called with key "a" and signature "1:0:deadbeef"
+    Then the stream yields an error with code 103 of kind Track and an update of "a" with removed true
+    And tracked_keys is empty
+
+  @A
+  Scenario: A limit the server enforces untracks the keys over it
+    Given a connected client with a shared poll subscription to "poll_l:l1" subscribed, whose stream was taken
+    When track_with_signature is called with keys "a", "b" and "c" and a valid signature
+    Then the stream yields an error with code 106 and updates of "a", "b" and "c" with removed true
+    And tracked_keys is empty
+
+  @A
+  Scenario: A namespace that is not shared poll refuses a shared poll subscription
+    Given a connected client with a shared poll subscription to "news:x"
+    When subscribe is called on the shared poll subscription
+    Then the stream yields "unsubscribed" with code 108
+
+  @D
+  Scenario: A server without shared poll ends the subscription
+    Given a client connected to the fake server, with a shared poll subscription to "items" whose stream was taken
+    When subscribe is called and the fake server answers with a subscribe result of type 0
+    Then the fake server receives an unsubscribe command for "items"
+    And the stream yields "unsubscribed" with code 8 and reason "shared poll subscriptions not supported"
+
+  @A
+  Scenario: A private namespace gets its token and refreshes it
+    Given a connected client with a shared poll subscription to "poll_private:p1" with a get_token callback returning tokens with a 2 s lifetime
+    When subscribe is called on the shared poll subscription
+    Then the subscribe carries the token and the subscription becomes "subscribed"
+    And within 4 s get_token has been called at least twice and the subscription stays "subscribed"
+
+  @D
+  Scenario: track asks get_signature for the keys and tracks what it returns
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, with get_signature answering keys "a" and "b" with "sig1"
+    When track is called with keys "a" and "b"
+    Then get_signature is called with keys "a" and "b"
+    And the fake server receives a sub_refresh with type 1, signature "sig1" and items "a" and "b"
+
+  @D
+  Scenario: A key the callback does not return is revoked
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken, with get_signature answering only key "a" with "sig1"
+    When track is called with keys "a" and "b"
+    Then the stream yields an update of "b" with removed true
+    And the fake server receives a sub_refresh with type 2 and key "b", and one with type 1 and item "a"
+    And tracked_keys is "a"
+
+  @D
+  Scenario: A key untracked while get_signature runs is untracked in the same request
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, with a get_signature callback that waits for the test and then answers keys "a" and "b" with "sig1"
+    When track is called with keys "a" and "b"
+    And untrack is called with key "a"
+    And the callback answers
+    Then the fake server receives a track request with batch items "a" and "b" and an untrack field "a"
+
+  @D
+  Scenario: Without get_signature a key set reports error 14
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken, without a get_signature callback
+    When track is called with key "a"
+    Then the stream yields an error with code 14 of kind Track
+    And the fake server receives no sub_refresh
+
+  @D
+  Scenario: A failing get_signature reports error 14 and retries
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken, with a get_signature callback that fails once and then answers
+    When track is called with key "a"
+    Then the stream yields an error with code 14 of kind Track
+    And after the 5 s to 30 s backoff the fake server receives a sub_refresh with type 1 and item "a"
+
+  @D
+  Scenario: An unauthorized get_signature unsubscribes with code 1
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken, with a get_signature callback answering unauthorized
+    When track is called with key "a"
+    Then the stream yields "unsubscribed" with code 1 and reason "unauthorized"
+    And the fake server receives an unsubscribe command for "items"
+
+  @A
+  Scenario: A signature with an expiry is refreshed when it expires
+    Given a connected client with a shared poll subscription to "poll_v:e1" subscribed, whose stream was taken, with a get_signature callback signing every key for 3 s
+    When track is called with key "a"
+    Then get_signature is called for "a" a second time within 4 s
+    And once the second signature is accepted, the server API's publish at version 7 yields an update of "a" with version 7
+
+  @A
+  Scenario: A track refused with 109 refreshes the signature
+    Given a connected client with a shared poll subscription to "poll_v:e2" subscribed, whose stream was taken, with a get_signature callback signing valid signatures
+    When track_with_signature is called with key "a" and a signature that expired 10 s ago
+    Then the stream yields an error with code 109 of kind Track
+    And get_signature is called for "a" and the next track request is accepted
+
+  @D
+  Scenario: A track refused with 109 again waits before the next refresh
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, whose stream was taken, with a get_signature callback counting its calls
+    And the fake server answers every track request with error 109
+    When track is called with key "a"
+    Then get_signature is called twice within 1 s
+    And get_signature is not called a third time within 4 s
+
+  @D
+  Scenario: A signature accepted within the grace period is refreshed soon
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, with a get_signature callback
+    When track is called with key "a"
+    And the fake server answers with expires true and no ttl
+    Then get_signature is called again within 2 s
+
+  @D
+  Scenario: A key set larger than one frame is signed and tracked in chunks
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, with a get_signature callback
+    When track is called with 1800 keys of 44 bytes each
+    Then get_signature is called at least twice and no call covers a key set over the frame budget
+    And the fake server receives several sub_refresh frames with type 1, each at most 60000 bytes as sent, together covering all 1800 keys
+    And the client stays connected
+
+  @D
+  Scenario: A signature batch over the frame budget is refused before it is sent
+    Given a client connected to the fake server, with a shared poll subscription to "items" with max_track_frame_bytes 1000, subscribed, whose stream was taken
+    When track_with_signature is called with 100 keys of 20 bytes and signature "sig1"
+    Then the stream yields an error with code 12 of kind Track and 100 updates with removed true
+    And the fake server receives no sub_refresh
+    And tracked_keys is empty
+
+  @A
+  Scenario: Tracked keys come back after a reconnect with the versions held
+    Given a connected client with a shared poll subscription to "poll_v:r1" subscribed, tracking "a" and "b", whose updates of "a" at version 4 and "b" at version 6 were taken
+    When the server API disconnects the client with a reconnect-advised code
+    And the client reconnects and the shared poll subscription becomes "subscribed"
+    Then no update is yielded within 1 s without a new publish
+    And the server API's publish of "a" at version 5 yields an update of "a" with version 5
+
+  @D
+  Scenario: A replay reuses the signatures it holds
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking "a" with signature "sig1" from get_signature
+    When the transport closes and the client reconnects and the subscribe is answered
+    Then the replay's track request carries signature "sig1" and item "a"
+    And get_signature was called once
+
+  @D
+  Scenario: A key untracked while offline is untracked in the replay frame
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking "a" and "b" under signature "sig1"
+    When the transport closes and untrack is called with key "a"
+    And the client reconnects and the subscribe is answered
+    Then the replay's track request carries items "a" and "b" under signature "sig1" and the untrack field "a"
+
+  @D
+  Scenario: A replay signs only the keys without a signature
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking "a" under signature "sig1", with a get_signature callback
+    When the client is not subscribed and track is called with key "b"
+    And the client reconnects and the subscribe is answered
+    Then the replay's first track request carries item "a" under "sig1"
+    And get_signature is called with key "b" only
+    And a second track request carries item "b"
+
+  @D
+  Scenario: A changed epoch sends every key from version 0
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed at epoch "e1", tracking "a" at version 9
+    When the transport closes and the client reconnects and the subscribe is answered with epoch "e2"
+    Then the replay's track request carries item "a" with no version
+
+  @B
+  Scenario: An epoch flip resubscribes and tracks again
+    Given a client with a shared poll subscription to "poll_v:ef1" tracking "a" with a valid signature, whose backend has reported epoch "E1" and whose update of "a" at version 3 was taken
+    When the backend's refresh reports epoch "E2" and key "a" at version 1 with data {"v":2}
+    Then the stream yields "subscribing" with code 2500, then "subscribed"
+    And the next track request carries key "a" with no version
+    And the stream yields an update of "a" with data {"v":2}
+
+  @D
+  Scenario: A first epoch from the backend sends every key from version 0
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed with no epoch, tracking "a" at version 9
+    When the fake server unsubscribes it with code 2500 and answers the next subscribe with epoch "e1"
+    Then the replay's track request carries item "a" with no version
+
+  @D
+  Scenario: Versions given before the first subscribe are kept whatever its epoch
+    Given a client connected to the fake server, with a shared poll subscription to "items"
+    And track_with_signature was called with key "a" at version 5 and signature "sig1" before subscribe
+    When subscribe is called and the subscribe is answered with epoch "e1"
+    Then the replay's track request carries item "a" at version 5
+
+  @D
+  Scenario: A replay with held versions stays within the frame budget
+    Given a client connected to the fake server, with a shared poll subscription to "items" with get_signature that signs what it is given with "sig1", subscribed, whose stream was taken
+    And track is called with 2500 keys of 8 bytes each
+    And the fake server has pushed every key at version 9007199254740992 and each update was taken
+    When the transport closes and the client reconnects and the subscribe is answered
+    Then every sub_refresh frame the fake server receives is at most 60000 bytes as sent
+    And the replay's track requests together carry every key at version 9007199254740992
+    And the client stays connected
+
+  @D
+  Scenario: unsubscribe forgets the keys and the signatures
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking "a" under signature "sig1"
+    When unsubscribe is called and the fake server answers it
+    And subscribe is called and the subscribe is answered
+    Then tracked_keys is empty and the fake server receives no sub_refresh within 1 s
+
+  @D
+  Scenario Outline: A failing track is retried or untracked by its error
+    Given a client connected to the fake server, with a shared poll subscription to "items" with a get_signature callback, subscribed, tracking "a", whose stream was taken
+    When track_with_signature is called with key "b" and the fake server answers it with error <code> and temporary <temporary>
+    Then the stream yields an error with code <code>
+    And <outcome>
+
+    Examples:
+      | code | temporary | outcome                                                                                 |
+      | 109  | false     | get_signature is called for the tracked keys                                            |
+      | 1    | false     | after the 1 s to 15 s backoff the replay's track request carries key b                  |
+      | 106  | false     | the fake server receives an untrack of key b and tracked_keys is a                      |
+      | 500  | true      | after the 1 s to 15 s backoff the replay's track request carries key b                  |
+
+  @D
+  Scenario: Updates not taken before disconnect come back on the next connection
+    Given a client connected to the fake server, with a shared poll subscription to "items" tracking "a" at version 2, whose stream has been read up to "subscribed"
+    And the fake server has pushed "a" at version 3, not taken
+    When disconnect is called, then connect is called and the subscribe is answered
+    Then the replay's track request carries item "a" at version 2
+    And the stream yields "subscribing", "subscribed" and no update at version 3 before the fake server sends it again
+
+  @D
+  Scenario: A removal not taken before disconnect is still delivered
+    Given a client connected to the fake server, with a shared poll subscription to "items" tracking "a" at version 2, whose stream has been read up to "subscribed"
+    And the fake server has pushed "a" as removed, not taken
+    When disconnect is called
+    Then the stream yields an update of "a" with removed true before "subscribing"
+    And tracked_keys is empty
+
+  @B
+  Scenario: Delta compression decodes each tracked key's changes
+    Given a client with a shared poll subscription to "poll_d:d1" with delta, subscribed, tracking "a" with a valid signature, whose stream was taken
+    When the backend's refresh answers key "a" at version 1 with data {"v":"long value one"}
+    And the backend's refresh answers key "a" at version 2 with data {"v":"long value two"} and that previous data
+    Then the stream yields updates of "a" with data {"v":"long value one"} and {"v":"long value two"}
+    And the subscription's delta_statistics counts one delta
+
+  @D
+  Scenario: Delta bases are dropped at each subscribe
+    Given a client connected to the fake server, with a shared poll subscription to "items" with delta, subscribed, tracking "a", which has decoded one delta on key "a"
+    When the transport closes and the client reconnects and the subscribe is answered with delta true
+    And the fake server pushes a delta for "a" against the former base
+    Then the stream yields an error of kind Delta with code 15 and "subscribing" with code 2
+
+  @D
+  Scenario: A delta in flight when its key was tracked again is dropped
+    Given a client connected to the fake server, with a shared poll subscription to "items" with delta, subscribed, tracking "a" under signature "sig1", which has decoded one delta on key "a", whose stream was taken
+    When untrack is called with key "a" and track_with_signature is called with key "a" and signature "sig2"
+    And the fake server, before answering the untrack, pushes a delta for "a" against the former base
+    Then the stream yields no error and no update of "a" within 1 s
+    And the shared poll subscription stays "subscribed"
+    When the fake server answers the untrack and the track and pushes "a" whole at version 9
+    Then the stream yields an update of "a" with version 9
+
+  @D
+  Scenario: Delta bases past their bound end the subscription
+    Given a client connected to the fake server, with a shared poll subscription to "items" with delta and max_delta_bases_bytes 1024, subscribed, tracking "a", whose stream was taken
+    When the fake server pushes "a" with 2048 bytes of data
+    Then the fake server receives an unsubscribe command for "items"
+    And the stream yields "unsubscribed" with code 7 and reason "shared poll delta bases too large"
+
+  @D
+  Scenario: A delta that cannot be applied resubscribes and tracks again
+    Given a client connected to the fake server, with a shared poll subscription to "items" with delta, subscribed, tracking "a" under signature "sig1", whose stream was taken
+    When the fake server pushes a delta for key "a" with no base
+    Then the stream yields an error of kind Delta with code 15 and "subscribing" with code 2
+    And after the resubscribe backoff the fake server receives a subscribe and a track request with signature "sig1" and item "a"
+
+  @D
+  Scenario: Statistics count shared poll subscriptions and their updates
+    Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, tracking "a"
+    When the fake server pushes "a" at version 1 and it is taken
+    Then the client's statistics report 1 subscription and 1 publication delivered
+
+  @A
+  Scenario Outline: A shared poll subscription handler receives the events in order
+    Given a client with <mode> delivery whose shared poll subscription to "poll_v:h1" has a handler recording its events, subscribed, tracking "a"
+    When the server API publishes key "a" at version 3
+    Then the handler has received "subscribing", "subscribed" and an update of "a" with version 3, in this order
+
+    Examples:
+      | mode   |
+      | Task   |
+
+    @inline
+    Examples:
+      | mode   |
+      | Inline |
+
+    @thread
+    Examples:
+      | mode   |
+      | Thread |
+
+  Scenario: A test builds shared poll events without a server
+    Given the test-util and unstable features
+    When a test builds an update of "a" with data {"x":1} at version 2 and a removal of "b"
+    Then the events equal those the client would emit, and the update's json() gives {"x":1}
+
+  @W
+  Scenario: A browser client tracks a key and receives its updates
+    Given a browser client with a shared poll subscription to "poll_v:w1", whose stream was taken
+    When connect is called and the subscription becomes "subscribed"
+    And key "a" is tracked with a valid signature
+    And the server API publishes key "a" of "poll_v:w1" at version 2 with data {"v":2}
+    Then the stream yields "subscribing", "subscribed" and an update of "a" with version 2
+```
+
+**Exceptions introduced:**
+- Each change is one `Update` event; centrifuge-js 63ed73e also emits a `publication` event for it (`src/subscription.ts:1167-1173`), as Block 45 decided for maps.
+- A publication of an untracked key is dropped before decoding (D9), so it creates no delta base; centrifuge-js decodes and stores the base first (`:1122-1138`), a server-growable map with no bound.
+- Delta bases are bounded and end the subscription with `unsubscribed` 7 past the bound (D11); centrifuge-js has no bound. The bases are also dropped at each subscribe and at an untrack (D10), a no-base delta being dropped while its key's untrack is unanswered; centrifuge-js keeps them.
+- A key set over the frame budget is signed in chunks (D6), so that a refresh of many keys cannot close the connection with 1009; centrifuge-js sends one batch regardless.
+- A frame's cost is computed for the worst encoding (D7), so that a replay of versioned keys cannot pass the server's limit; centrifuge-js's estimate leaves out version digits and the emulation envelope. A single batch over the budget is refused before it is sent (D6, D7); centrifuge-js sends it.
+- The 109 of a refresh's own track request, and repeated replies with `expires` and no `ttl`, back off (D7); centrifuge-js retries the first at once and the second every second.
+- A first epoch reported after an empty one resets the versions held, as any change of epoch (D8); centrifuge-js resets only from a non-empty one.
+- A removal, server's or synthetic, ends its key when handled and is never withdrawn (D9); centrifuge-js, which has no withdrawal, ends it when delivered.
+- A reply without `type` 4 ends the subscription with `unsubscribed` 8 (D4); centrifuge-js does not check it.
+- An empty key set sends no untrack; centrifuge-js sends one, answered 107.
+
+**Amendments to earlier blocks** (the text of this file was amended with this block's spec; the code and the tables of `src/codes.rs` follow in 47a):
+
+- **Block 0, "Out of scope":** "shared poll subscriptions (experimental; planned: Block 47)" becomes "shared poll subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 47, behind the `unstable` feature)".
+- **Block 0, "Reversed exclusions"**, new row:
+
+  | Block 0, Block 9, Block 11 and Block 19, out of scope | shared poll subscriptions | owner, 2026-11-06, late (item 30) | 47 |
+
+- **Blocks 9, 11 (the "map and shared-poll subscriptions" lines) and 19 ("shared-poll subscriptions and their per-key delta chains"):** "(Block 0)" becomes "(reversed by the owner decision of 2026-11-06, late: Block 47)". Block 16's line stays (D19 keeps the runners out), and Block 35's line already names Block 47.
+- **Block 19, out of scope:** the shared poll per-key delta chain moves to D10 here; D5's clearing at each subscribe holds for it, unlike map subscriptions (Block 45 D9).
+- **Block 15, "Withdrawal":** append "A shared poll subscription's removal `Update` is not withdrawn (Block 47 D9)."
+- **Block 31:** `publications_delivered` counts each shared poll `Update` of a publication taken, a synthetic removal counting as none (D13); `Statistics::subscriptions` counts shared poll subscriptions (the registry).
+- **Block 34 D1:** "error 14 is centrifuge-js's shared-poll code, unused until Block 47" becomes "error 14 is centrifuge-js's shared-poll code (Block 47)"; "`unsubscribed` 3 to 6 (5 and 6: Block 45 D12)" becomes "`unsubscribed` 3 to 8 (5 and 6: Block 45 D12; 7 and 8: Block 47 D14)". The `error` 12 row's Cause gains "or a shared poll track batch over `max_track_frame_bytes` (Block 47)". New rows in the tables: `error` 14; `unsubscribed` 7, 8 (D14); `connecting` 3's reason cell adds "shared poll request timeout" (D12). "Server codes" gains: sub_refresh of type 1: 109 refreshes the signature; a temporary error or one below 100 is retried after 1 s to 15 s; any other untracks the keys of the request; sub_refresh of type 2: an `Error` event, the client does nothing more (Block 47); subscribe `type` 4: the rows of Block 9 and Block 10 apply.
+- **Block 49:** D10's review recorded in D19; no row changes.
 
 ---
 
