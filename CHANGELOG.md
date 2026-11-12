@@ -13,6 +13,24 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Unstable (`unstable` feature): shared poll subscriptions track keys
+  under signatures (Block 47a). `SharedPollSubscription`,
+  `SharedPollSubscriptionBuilder`, `SharedPollSubscriptionEvent`,
+  `SharedPollUpdate`, `SharedPollTrackItem`, `SharedPollSignature`;
+  `Client::shared_poll_subscription_builder`,
+  `new_shared_poll_subscription`, `get_shared_poll_subscription`,
+  `shared_poll_subscriptions` and `remove_shared_poll_subscription`;
+  `ErrorKind::Track` and `Untrack`; `Machine::add_shared_poll_subscription`,
+  `SharedPollSubscriptionOptions`, `Input::TrackKeys`,
+  `TrackKeysWithSignature`, `UntrackKeys` and `SignatureFetched`,
+  `Action::EmitSharedPollSubscription` and `FetchSignature`. Keys, their
+  versions and signatures are tracked again on each subscribe; an untrack
+  is split within `max_track_frame_bytes`; a refused track untracks its
+  keys with a removal update each.
+- `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` (8) and
+  `codes::error::SHARED_POLL_GET_SIGNATURE` (14), with their rows in the
+  table of codes.
+
 - Publish debouncing as advised by the server (Centrifugo PRO):
   `Subscription::publish` and `publish_json` send the first value at once
   and the latest per interval, and each publish resolves with the result
