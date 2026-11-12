@@ -568,3 +568,146 @@ fn only_an_unanswered_untrack_of_this_period_counts() {
         "an earlier period's"
     );
 }
+
+/// Disconnects while `untrack` is called, then connects again, answering
+/// the resubscribe with delta on: the new transport and the replay's
+/// actions.
+fn away_and_back(
+    machine: &mut Machine,
+    id: SubscriptionId,
+    untrack: &[&str],
+) -> (TransportId, Vec<Action>) {
+    let closed = machine.handle(Input::Disconnect);
+    take_all(machine, &closed);
+    machine.handle(Input::UntrackKeys(
+        id,
+        untrack.iter().map(|key| (*key).to_owned()).collect(),
+    ));
+    let opening = machine.handle(Input::Connect);
+    take_all(machine, &opening);
+    let transport = opened(&opening).expect("a new transport");
+    let mut actions = machine.handle(Input::TransportOpened(transport));
+    let connect = sent(&actions)
+        .into_iter()
+        .find(|command| command.get("connect").is_some())
+        .expect("a connect command");
+    actions.extend(machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": connect["id"], "connect": {"client": "c"}}).to_string(),
+    )));
+    take_all(machine, &actions);
+    let replay = answer_with_delta(machine, transport, &actions);
+    (transport, replay)
+}
+
+/// k1 and k2 tracked under one signature; k1 untracked while away, so the
+/// replay carries it inline (D7), its frame answered and a whole value of
+/// k1 dropped (D9); then k1 tracked again, that request unanswered: the
+/// machine, its transport, the subscription and that request.
+fn tracked_again_after_an_inline_untrack() -> (Machine, TransportId, SubscriptionId, Value) {
+    let (mut machine, _, id) = tracking(&["k1", "k2"]);
+    let (transport, replay) = away_and_back(&mut machine, id, &["k1"]);
+    let frames = requests(&replay, 1);
+    assert_eq!(frames.len(), 1, "{replay:?}");
+    assert_eq!(
+        frames[0]["sub_refresh"]["untrack"],
+        serde_json::json!(["k1"])
+    );
+    machine.handle(reply_to(transport, &frames[0]));
+    let dropped = push_all(&mut machine, transport, &[whole("k1", 1, &value(1))]);
+    assert_eq!(values(&dropped), []);
+    let again = track(&mut machine, id, &[("k1", 0)], "s2");
+    let request = requests(&again, 1)[0].clone();
+    (machine, transport, id, request)
+}
+
+// D7, D10: the server applies a frame's inline untrack after it tracked the
+// key, delivered its value and answered (centrifuge `handleTrack`), so a
+// delta of a key tracked again since may follow while that key has no
+// base: dropped, until a later track request carrying the key is answered.
+#[test]
+fn a_delta_after_an_inline_untrack_is_dropped_until_the_key_is_tracked_again() {
+    let (mut machine, transport, id, request) = tracked_again_after_an_inline_untrack();
+
+    let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
+
+    assert!(events(&dropped).is_empty(), "{dropped:?}");
+    assert_eq!(
+        machine.subscription_state(id),
+        Some(SubscriptionState::Subscribed)
+    );
+    machine.handle(reply_to(transport, &request));
+    let delivered = push_all(&mut machine, transport, &[whole("k1", 3, &value(3))]);
+    assert_eq!(
+        values(&delivered),
+        [("k1".to_owned(), value(3).into_bytes())]
+    );
+}
+
+// D10: once a later track request carrying the key is answered, a delta of
+// the key with no base is Block 19's failure again.
+#[test]
+fn an_answered_track_ends_the_inline_untrack() {
+    let (mut machine, transport, _, request) = tracked_again_after_an_inline_untrack();
+    machine.handle(reply_to(transport, &request));
+
+    let failed = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
+
+    assert_eq!(delta_errors(&failed), [codes::error::DELTA], "{failed:?}");
+}
+
+// D10: an inline untrack counts in its `subscribed` period only: one of an
+// earlier period does not hold a delta, and a track request of an earlier
+// period answered late does not end one of this period.
+#[test]
+fn an_inline_untrack_counts_in_its_period_only() {
+    // An earlier period's.
+    let (mut machine, _, id) = tracking(&["k1", "k2"]);
+    let (transport, replay) = away_and_back(&mut machine, id, &["k1"]);
+    machine.handle(reply_to(transport, &requests(&replay, 1)[0]));
+    // Only k1's signature is left once k2 goes; the next replay carries k1
+    // alone, not answered.
+    machine.handle(Input::UntrackKeys(id, vec!["k2".into()]));
+    let again = track(&mut machine, id, &[("k1", 0)], "s2");
+    assert_eq!(requests(&again, 1).len(), 1);
+    let resubscribe = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"items","unsubscribe":{"code":2500,"reason":"r"}}}"#,
+    ));
+    take_all(&mut machine, &resubscribe);
+    let replay = answer_with_delta(&mut machine, transport, &resubscribe);
+    assert!(
+        requests(&replay, 1)
+            .iter()
+            .all(|frame| frame["sub_refresh"].get("untrack").is_none()),
+        "{replay:?}"
+    );
+    let failed = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
+    assert_eq!(
+        delta_errors(&failed),
+        [codes::error::DELTA],
+        "an earlier period's"
+    );
+
+    // A track request of an earlier period, answered late.
+    let (mut machine, transport, id) = tracking(&["k1", "k2"]);
+    let late = requests(&track(&mut machine, id, &[("k1", 0)], "s2"), 1)[0].clone();
+    let untracked = machine.handle(Input::UntrackKeys(id, vec!["k1".into()]));
+    machine.handle(reply_to(transport, &requests(&untracked, 2)[0]));
+    let resubscribe = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"items","unsubscribe":{"code":2500,"reason":"r"}}}"#,
+    ));
+    take_all(&mut machine, &resubscribe);
+    let replay = answer_with_delta(&mut machine, transport, &resubscribe);
+    let frames = requests(&replay, 1);
+    assert_eq!(
+        frames[0]["sub_refresh"]["untrack"],
+        serde_json::json!(["k1"])
+    );
+    machine.handle(reply_to(transport, &frames[0]));
+    machine.handle(reply_to(transport, &late));
+    track(&mut machine, id, &[("k1", 0)], "s3");
+    let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
+    assert!(events(&dropped).is_empty(), "a late reply: {dropped:?}");
+}
