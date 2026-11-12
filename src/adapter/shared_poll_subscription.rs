@@ -39,7 +39,8 @@ use crate::{
 /// client keeps the keys, their versions and the signatures across
 /// reconnects, and tracks them again on each subscribe without calling the
 /// backend for keys it holds a signature for; [`Self::unsubscribe`] forgets
-/// them. Keys and signatures are not bounded by the client: the server's
+/// them. With the callback, the client also renews signatures as they
+/// expire. Keys and signatures are not bounded by the client: the server's
 /// `max_keys_per_connection` (5000 by default) is the usual limit.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
@@ -88,10 +89,15 @@ impl SharedPollSubscription {
 
     /// Tracks `keys`, keeping the version held for a key already tracked.
     /// Subscribed, the [`SharedPollSubscriptionBuilder::get_signature`]
-    /// callback signs them and they are tracked under its signature; not
-    /// subscribed, they are signed once the subscription is. An empty set
-    /// does nothing. Returns at once: failures come as
-    /// [`SharedPollSubscriptionEvent::Error`] events (Block 47, D6).
+    /// callback signs them, in chunks when one batch of them would pass
+    /// [`SharedPollSubscriptionBuilder::max_track_frame_bytes`], and they
+    /// are tracked under its signatures; not subscribed, they are signed
+    /// once the subscription is. A key the callback does not return is
+    /// revoked, with a removal [`SharedPollSubscriptionEvent::Update`]. An
+    /// empty set does nothing. Returns at once: failures come as
+    /// [`SharedPollSubscriptionEvent::Error`] events with code 14, the
+    /// callback being asked again after 5 to 30 s, also when there is no
+    /// callback, the keys staying tracked (Block 47, D6).
     pub fn track(&self, keys: impl IntoIterator<Item = impl Into<String>>) {
         let keys = keys.into_iter().map(Into::into).collect();
         self.shared.apply(Input::TrackKeys(self.id, keys));
@@ -105,9 +111,11 @@ impl SharedPollSubscription {
     /// with a removal [`SharedPollSubscriptionEvent::Update`] for each key
     /// (Block 47, D6, D7).
     ///
-    /// A signature with an expiry is the application's to renew: call this
-    /// again with a new signature before it expires, as the server stops
-    /// tracking its keys some time after it, with no event.
+    /// With a [`SharedPollSubscriptionBuilder::get_signature`] callback,
+    /// the client renews a signature with an expiry through it. Without
+    /// one, renewing is the application's: call this again with a new
+    /// signature before it expires, as the server stops tracking its keys
+    /// some time after it, with no event.
     pub fn track_with_signature(
         &self,
         items: impl IntoIterator<Item = SharedPollTrackItem>,
@@ -303,6 +311,16 @@ impl SharedPollSubscriptionBuilder {
     /// it returns a [`SharedPollSignature`] from the application's backend
     /// (Block 47, D6). It runs beside the client, so a slow backend holds
     /// back no ping or call.
+    ///
+    /// The client asks it for the keys in chunks when one batch of them
+    /// would pass `max_track_frame_bytes`, one at a time, each sized for a
+    /// signature of up to 128 bytes. A key asked for and not returned is
+    /// revoked. It is asked again for every key tracked when a signature
+    /// expires, at the earliest expiry the server reports, or when the
+    /// server refuses one with 109; the signatures it returns then replace
+    /// those they cover. A failure is reported as an `Error` event with
+    /// code 14 and retried after 5 to 30 s; [`TokenError::Unauthorized`]
+    /// ends the subscription with `unsubscribed` 1 (Block 47, D6, D7).
     #[must_use]
     pub fn get_signature<F, Fut>(mut self, get_signature: F) -> Self
     where
