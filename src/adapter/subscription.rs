@@ -562,6 +562,8 @@ impl SubscriptionBuilder {
                     data: self.get_data,
                     token: self.get_token,
                     state: self.get_state,
+                    #[cfg(feature = "unstable")]
+                    signature: None,
                 },
             );
         }
@@ -620,9 +622,9 @@ impl Client {
     pub fn get_subscription(&self, channel: &str) -> Option<Subscription> {
         let core = lock(&self.shared().core);
         let id = core.machine.find_subscription(channel)?;
-        // A map subscription is not one (Block 45, D2).
+        // A map or shared poll subscription is not one (Blocks 45, 47, D2).
         #[cfg(feature = "unstable")]
-        if core.machine.map_subscription_kind(id).is_some() {
+        if core.machine.map_subscription_kind(id).is_some() || core.machine.is_shared_poll(id) {
             return None;
         }
         drop(core);
@@ -638,11 +640,15 @@ impl Client {
     pub fn subscriptions(&self) -> Vec<Subscription> {
         let core = lock(&self.shared().core);
         let subscriptions = core.machine.subscriptions();
-        // Map subscriptions are listed apart (Block 45, D2).
+        // Map and shared poll subscriptions are listed apart (Blocks 45, 47,
+        // D2).
         #[cfg(feature = "unstable")]
         let subscriptions: Vec<_> = subscriptions
             .into_iter()
-            .filter(|(id, _)| core.machine.map_subscription_kind(*id).is_none())
+            .filter(|(id, _)| {
+                core.machine.map_subscription_kind(*id).is_none()
+                    && !core.machine.is_shared_poll(*id)
+            })
             .collect();
         drop(core);
         subscriptions

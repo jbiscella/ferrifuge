@@ -75,6 +75,8 @@ mod map;
 mod maybe_send;
 mod protobuf;
 pub(crate) mod protocol;
+#[cfg(feature = "unstable")]
+mod shared_poll;
 mod statistics;
 mod subscription;
 mod tag_filter;
@@ -103,7 +105,10 @@ pub use adapter::{
 };
 #[cfg(all(any(adapter_tokio, adapter_browser), feature = "unstable"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-pub use adapter::{MapSubscription, MapSubscriptionBuilder, MapSubscriptionHandler};
+pub use adapter::{
+    MapSubscription, MapSubscriptionBuilder, MapSubscriptionHandler, SharedPollSubscription,
+    SharedPollSubscriptionBuilder,
+};
 // Native only (Block 44, D14).
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
@@ -136,6 +141,11 @@ pub use maybe_send::{MaybeSend, MaybeSync};
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use rustls;
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+pub use shared_poll::{
+    SharedPollSignature, SharedPollSubscriptionEvent, SharedPollTrackItem, SharedPollUpdate,
+};
 pub use statistics::{DeltaStatistics, Statistics};
 pub use subscription::{
     ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,

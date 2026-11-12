@@ -309,6 +309,50 @@ impl MapSubscriptionOptions {
     }
 }
 
+/// Options of a shared poll subscription in the machine (Block 47, D3):
+/// whether a `get_signature` callback signs keys, the frame budget of its
+/// track and untrack requests, and the options it shares with a stream
+/// subscription.
+///
+/// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
+/// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
+/// later), and may change in any minor release.
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SharedPollSubscriptionOptions {
+    /// Ask the owner to sign keys with [`Action::FetchSignature`] (Block 47,
+    /// D6), for keys tracked without a signature.
+    pub signature_source: bool,
+    /// Bytes a track or untrack request may take on the wire, in the worst
+    /// encoding (Block 47, D7); 60 000 by default, below Centrifugo's
+    /// `websocket.message_size_limit` and the emulation endpoint's
+    /// `max_request_body_size` (65 536 each by default).
+    pub max_track_frame_bytes: std::num::NonZeroUsize,
+    /// The options a shared poll subscription shares with a stream
+    /// subscription: `data`, the token and its callback, the resubscribe
+    /// delays and `delta`. The others do not apply to shared poll
+    /// subscriptions and are ignored (Block 47, out of scope).
+    pub common: SubscriptionOptions,
+}
+
+/// Block 47, D7: centrifuge-js's `maxBytes`.
+#[cfg(feature = "unstable")]
+const DEFAULT_MAX_TRACK_FRAME_BYTES: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(60_000).expect("not zero");
+
+#[cfg(feature = "unstable")]
+impl Default for SharedPollSubscriptionOptions {
+    fn default() -> Self {
+        Self {
+            signature_source: false,
+            max_track_frame_bytes: DEFAULT_MAX_TRACK_FRAME_BYTES,
+            common: SubscriptionOptions::default(),
+        }
+    }
+}
+
 impl SubscriptionOptions {
     /// Sends `data` with every subscribe command, instead of asking the
     /// owner: the last of this and [`Self::data_source`] decides.
@@ -731,6 +775,53 @@ pub enum Input {
         /// How long the system slept.
         gap: Duration,
     },
+    /// The application tracks `keys` on a shared poll subscription without
+    /// a signature (Block 47, D6): kept at the version held, signed through
+    /// [`Action::FetchSignature`] once the subscription is subscribed.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    TrackKeys(SubscriptionId, Vec<String>),
+    /// The application tracks `items` on a shared poll subscription under
+    /// `signature`, which covers exactly their keys in that order (Block
+    /// 47, D6).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    TrackKeysWithSignature(SubscriptionId, Vec<crate::SharedPollTrackItem>, String),
+    /// The application stops tracking `keys` on a shared poll subscription
+    /// (Block 47, D6).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    UntrackKeys(SubscriptionId, Vec<String>),
+    /// The `get_signature` callback answered [`Action::FetchSignature`]
+    /// `request` of shared poll subscription `subscription` (Block 47, D6).
+    /// An answer to a request the subscription abandoned, by leaving
+    /// `subscribed`, changes nothing.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SignatureFetched {
+        /// The subscription that asked.
+        subscription: SubscriptionId,
+        /// The request answered.
+        request: FetchId,
+        /// The signature, or why there is none.
+        result: Result<crate::SharedPollSignature, TokenError>,
+    },
 }
 
 /// Something the owner of the machine must do.
@@ -811,6 +902,34 @@ pub enum Action {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitMapSubscription(EventId, SubscriptionId, crate::MapSubscriptionEvent),
+    /// Deliver an event to a shared poll subscription's listeners (Block
+    /// 47, D3); report it with [`Input::EventTaken`] once the application
+    /// has taken it.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    EmitSharedPollSubscription(EventId, SubscriptionId, crate::SharedPollSubscriptionEvent),
+    /// Ask the shared poll subscription's `get_signature` callback to sign
+    /// `keys` (Block 47, D6); report the answer with
+    /// [`Input::SignatureFetched`]. Only issued for subscriptions with
+    /// [`SharedPollSubscriptionOptions::signature_source`].
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    FetchSignature {
+        /// The subscription asking.
+        subscription: SubscriptionId,
+        /// Identifies the request in its answer.
+        request: FetchId,
+        /// The keys to sign, in order.
+        keys: Vec<String>,
+    },
     /// Never deliver these events, emitted and not yet taken: publications
     /// of a subscription that left `subscribed`, or whose position was set
     /// otherwise, which recovery brings back (Block 15).
@@ -1099,6 +1218,31 @@ impl std::fmt::Debug for Input {
                 .finish(),
             Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
             Self::Slept { gap } => f.debug_struct("Slept").field("gap", gap).finish(),
+            #[cfg(feature = "unstable")]
+            Self::TrackKeys(id, keys) => f.debug_tuple("TrackKeys").field(id).field(keys).finish(),
+            // The signature redacted: a credential (Block 47, D16).
+            #[cfg(feature = "unstable")]
+            Self::TrackKeysWithSignature(id, items, signature) => f
+                .debug_tuple("TrackKeysWithSignature")
+                .field(id)
+                .field(items)
+                .field(&Secret(signature.clone()))
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::UntrackKeys(id, keys) => {
+                f.debug_tuple("UntrackKeys").field(id).field(keys).finish()
+            }
+            #[cfg(feature = "unstable")]
+            Self::SignatureFetched {
+                subscription,
+                request,
+                result,
+            } => f
+                .debug_struct("SignatureFetched")
+                .field("subscription", subscription)
+                .field("request", request)
+                .field("result", result)
+                .finish(),
         }
     }
 }
@@ -1168,6 +1312,24 @@ impl std::fmt::Debug for Action {
                 .field(event_id)
                 .field(id)
                 .field(event)
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::EmitSharedPollSubscription(event_id, id, event) => f
+                .debug_tuple("EmitSharedPollSubscription")
+                .field(event_id)
+                .field(id)
+                .field(event)
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::FetchSignature {
+                subscription,
+                request,
+                keys,
+            } => f
+                .debug_struct("FetchSignature")
+                .field("subscription", subscription)
+                .field("request", request)
+                .field("keys", keys)
                 .finish(),
             Self::Withdraw(ids) => f.debug_tuple("Withdraw").field(ids).finish(),
             Self::FetchSubscriptionData {
@@ -1689,6 +1851,11 @@ impl Machine {
             Input::CallTimerFired(id, timer) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),
             Input::Slept { gap } => self.slept(gap),
+            #[cfg(feature = "unstable")]
+            input @ (Input::TrackKeys(..)
+            | Input::TrackKeysWithSignature(..)
+            | Input::UntrackKeys(..)
+            | Input::SignatureFetched { .. }) => self.shared_poll_input(input),
             // About a transport already abandoned.
             Input::TransportOpened(_)
             | Input::TransportUnsupported(_)

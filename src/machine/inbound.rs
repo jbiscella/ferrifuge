@@ -187,6 +187,7 @@ impl Machine {
                     }
                     #[cfg(feature = "unstable")]
                     Action::EmitMapSubscription(id, subscription, _)
+                    | Action::EmitSharedPollSubscription(id, subscription, _)
                         if self.has_stream(Some(*subscription)) =>
                     {
                         Some(*id)

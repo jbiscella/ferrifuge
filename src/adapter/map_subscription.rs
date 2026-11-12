@@ -471,6 +471,8 @@ impl MapSubscriptionBuilder {
                     data: None,
                     token: self.get_token,
                     state: None,
+                    #[cfg(feature = "unstable")]
+                    signature: None,
                 },
             );
         }

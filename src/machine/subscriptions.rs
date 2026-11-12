@@ -4,6 +4,8 @@
 
 #[cfg(feature = "unstable")]
 mod map_flow;
+#[cfg(feature = "unstable")]
+mod shared_poll_flow;
 mod state_flow;
 mod token_flow;
 
@@ -56,6 +58,10 @@ pub(super) struct Subscriptions {
     /// included, is followed by an unsubscribe (Block 45, D6).
     #[cfg(feature = "unstable")]
     reserved: std::collections::HashSet<u32>,
+    /// Track and untrack requests of shared poll subscriptions awaiting
+    /// their reply (Block 47, D7).
+    #[cfg(feature = "unstable")]
+    track_commands: HashMap<u32, shared_poll_flow::TrackCommand>,
 }
 
 /// Who started a subscribe (Block 18, D2).
@@ -117,6 +123,10 @@ struct Subscription {
     /// subscription.
     #[cfg(feature = "unstable")]
     map: Option<Box<map_flow::MapFlow>>,
+    /// What makes a shared poll subscription one (Block 47, D3); `None` for
+    /// the other kinds.
+    #[cfg(feature = "unstable")]
+    shared_poll: Option<Box<shared_poll_flow::SharedPollFlow>>,
 }
 
 /// Whether a subscribe reply turned delta on (Block 19, D4), and what the
@@ -206,6 +216,10 @@ impl Subscriptions {
     }
 
     pub(super) fn owns_command(&self, id: u32) -> bool {
+        #[cfg(feature = "unstable")]
+        if self.track_commands.contains_key(&id) {
+            return true;
+        }
         self.subscribes.contains_key(&id)
             || self.unsubscribes.contains_key(&id)
             || self.sub_refreshes.contains_key(&id)
@@ -289,6 +303,8 @@ impl Machine {
                 debounce: None,
                 #[cfg(feature = "unstable")]
                 map: None,
+                #[cfg(feature = "unstable")]
+                shared_poll: None,
             },
         );
         Ok(id)
@@ -539,6 +555,10 @@ impl Machine {
         #[cfg(feature = "unstable")]
         if self.is_map(id) {
             return self.map_subscribe_request(id, command_id, data);
+        }
+        #[cfg(feature = "unstable")]
+        if self.is_shared_poll(id) {
+            return self.shared_poll_subscribe_request(id, command_id, data);
         }
         let sub = self.subscriptions.by_id.get_mut(&id)?;
         let channel = sub.channel.clone();
@@ -894,6 +914,10 @@ impl Machine {
     }
 
     pub(super) fn subscription_command_reply(&mut self, reply: Reply) {
+        #[cfg(feature = "unstable")]
+        if self.owns_track_command(reply.id) {
+            return self.track_command_reply(reply);
+        }
         if let Some(id) = self.subscriptions.sub_refreshes.remove(&reply.id) {
             self.sub_refresh_reply(id, reply);
             return;
@@ -950,6 +974,10 @@ impl Machine {
         if sub.map.is_some() {
             let size = self.inbound.handled;
             return self.map_subscribe_reply(id, reply, size);
+        }
+        #[cfg(feature = "unstable")]
+        if sub.shared_poll.is_some() {
+            return self.shared_poll_subscribe_reply(id, reply);
         }
         match (reply.error, reply.result) {
             (Some(error), _) => self.subscribe_error(id, &error),
@@ -1140,6 +1168,20 @@ impl Machine {
         }
         #[cfg(not(feature = "unstable"))]
         let reserved_now = false;
+        // Its keys and signatures go too, and its requests in flight are
+        // abandoned (Block 47, D5).
+        #[cfg(feature = "unstable")]
+        if let Some(flow) = sub.shared_poll.as_deref_mut() {
+            flow.forget();
+            self.subscriptions
+                .track_commands
+                .retain(|_, command| !command.of(id));
+        }
+        let sub = self
+            .subscriptions
+            .by_id
+            .get_mut(&id)
+            .expect("checked above");
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
         sub.backoff.reset();
@@ -1289,6 +1331,10 @@ impl Machine {
         #[cfg(feature = "unstable")]
         if self.is_map(id) {
             return self.map_publication(id, publication);
+        }
+        #[cfg(feature = "unstable")]
+        if self.is_shared_poll(id) {
+            return self.shared_poll_publication(id, publication);
         }
         // Delta checks follow routing: a publication no subscribed
         // subscription takes is dropped as before (Block 19, D5).
@@ -1496,6 +1542,8 @@ impl Machine {
         // A lost connection takes the server's reservations with it.
         #[cfg(feature = "unstable")]
         self.subscriptions.reserved.clear();
+        #[cfg(feature = "unstable")]
+        self.subscriptions.track_commands.clear();
         for (id, _) in self
             .subscriptions
             .subscribes
@@ -1589,6 +1637,10 @@ impl Machine {
         #[cfg(feature = "unstable")]
         if self.is_map(id) {
             return self.emit_map_lifecycle(id, event);
+        }
+        #[cfg(feature = "unstable")]
+        if self.is_shared_poll(id) {
+            return self.emit_shared_poll_lifecycle(id, event);
         }
         let error = matches!(event, SubscriptionEvent::Error(_));
         if let Some(event_id) = self.admit_event(Some(id), error) {
