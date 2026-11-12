@@ -308,6 +308,7 @@ impl Machine {
                 self.track_keys_with_signature(id, items, signature);
             }
             Input::UntrackKeys(id, keys) => self.untrack_keys(id, keys),
+            Input::SharedPollTimerFired(timer) => self.shared_poll_timer_fired(timer),
             Input::SignatureFetched {
                 subscription,
                 request,
@@ -385,6 +386,10 @@ impl Machine {
             self.send_untrack(id, keys);
         }
     }
+
+    /// A track or untrack request's reply deadline passed (D12).
+    #[allow(clippy::unused_self)] // Until D12's green step.
+    fn shared_poll_timer_fired(&mut self, _timer: super::super::SharedPollTimer) {}
 
     /// Asks the `get_signature` callback to sign `keys`, when there is one
     /// (D6).
