@@ -215,6 +215,8 @@ fn reconnect(machine: &mut Machine, _transport: TransportId) -> (TransportId, Ve
     (transport, replay)
 }
 
+// D4; delta waits for 47d's per-key bases (D10), as map subscriptions
+// did before 45d: asked for or not, the subscribe carries none.
 #[test]
 fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
     let (mut machine, _) = connected();
@@ -233,7 +235,6 @@ fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
     let subscribe = &sent(&machine.handle(Input::Subscribe(id)))[0]["subscribe"];
 
     assert_eq!(subscribe["type"], 4);
-    assert_eq!(subscribe["delta"], "fossil");
     assert_eq!(subscribe["data"], serde_json::json!({}));
     for absent in [
         "positioned",
@@ -243,6 +244,7 @@ fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
         "recover",
         "epoch",
         "offset",
+        "delta",
     ] {
         assert!(subscribe.get(absent).is_none(), "{absent} in {subscribe}");
     }
