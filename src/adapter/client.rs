@@ -1697,6 +1697,7 @@ impl Client {
             call_timers: KeyedTimers::default(),
             debounce_timers: KeyedTimers::default(),
             shared_poll_timers: SharedPollTimers::default(),
+            shared_poll_refreshes: SharedPollRefreshes::default(),
             timer_sets: 0,
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
@@ -2508,6 +2509,9 @@ struct Driver {
     debounce_timers: KeyedTimers<DebounceTimer>,
     /// The reply deadlines of shared poll requests (Block 47, D12).
     shared_poll_timers: SharedPollTimers,
+    /// The signature refresh of each shared poll subscription, at the
+    /// earliest deadline reported (Block 47, D7).
+    shared_poll_refreshes: SharedPollRefreshes,
     /// How many timers were set, numbering each setting as the core's
     /// [`Armed`] does.
     timer_sets: u64,
@@ -2544,6 +2548,27 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
         if let Some((sleep, _)) = self.0.get_mut(&key) {
             shortened(sleep, by);
         }
+    }
+
+    /// Arms `key`'s timer to fire `delay` from now, unless it runs and
+    /// fires sooner: one timer at the earliest deadline asked for.
+    #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
+    fn set_earliest(&mut self, key: K, delay: Duration) {
+        match self.0.get_mut(&key) {
+            Some((sleep, _)) => {
+                let deadline = platform::Instant::now() + delay;
+                if deadline < sleep.deadline() {
+                    sleep.as_mut().reset(deadline);
+                }
+            }
+            None => self.set(key, delay, 0),
+        }
+    }
+
+    /// The number of timers running.
+    #[cfg(all(test, feature = "unstable"))]
+    fn len(&self) -> usize {
+        self.0.len()
     }
 
     /// Resolves with every timer ready at this poll, which are removed;
@@ -2805,6 +2830,7 @@ impl Driver {
                 // Not numbered, as debounce timers: the core ignores one it
                 // no longer knows (Block 47, D3).
                 input = self.shared_poll_timers.next_input() => input,
+                input = self.shared_poll_refreshes.next_input() => input,
                 // Every window due now, fed before the next flush: windows
                 // ending together share a frame (Block 46, D5, D9).
                 timers = self.debounce_timers.fired_all() => {
@@ -2930,6 +2956,12 @@ impl Driver {
             #[cfg(feature = "unstable")]
             Action::CancelSharedPollTimer(timer) => self.shared_poll_timers.cancel(timer),
             #[cfg(feature = "unstable")]
+            Action::SetSharedPollRefresh(id, delay) => {
+                self.shared_poll_refreshes.set_earliest(id, delay);
+            }
+            #[cfg(feature = "unstable")]
+            Action::CancelSharedPollRefresh(id) => self.shared_poll_refreshes.cancel(id),
+            #[cfg(feature = "unstable")]
             Action::FetchSignature {
                 subscription,
                 request,
@@ -3005,6 +3037,32 @@ struct SharedPollTimers(());
 
 #[cfg(not(feature = "unstable"))]
 impl SharedPollTimers {
+    /// Never ready.
+    async fn next_input(&mut self) -> Input {
+        std::future::pending().await
+    }
+}
+
+/// The signature refresh timer of each shared poll subscription (Block
+/// 47, D7).
+#[cfg(feature = "unstable")]
+type SharedPollRefreshes = KeyedTimers<SubscriptionId>;
+
+#[cfg(feature = "unstable")]
+impl SharedPollRefreshes {
+    /// The input of the next refresh due.
+    async fn next_input(&mut self) -> Input {
+        Input::SharedPollRefreshFired(self.fired().await.0)
+    }
+}
+
+/// No shared poll refresh without `unstable`.
+#[cfg(not(feature = "unstable"))]
+#[derive(Debug, Default)]
+struct SharedPollRefreshes(());
+
+#[cfg(not(feature = "unstable"))]
+impl SharedPollRefreshes {
     /// Never ready.
     async fn next_input(&mut self) -> Input {
         std::future::pending().await
@@ -6129,6 +6187,32 @@ mod tests {
 
         assert!(format!("{without:?}").contains("connector: false"));
         assert!(format!("{with:?}").contains("connector: true"));
+    }
+
+    // Block 47, D7: replies with ever shorter deadlines keep one timer per
+    // subscription, at the earliest of them, and a later deadline moves
+    // nothing.
+    #[cfg(feature = "unstable")]
+    #[tokio::test(start_paused = true)]
+    async fn one_refresh_timer_per_subscription_at_the_earliest_deadline() {
+        let mut refreshes = SharedPollRefreshes::default();
+        let id = SubscriptionId::for_tests(1);
+        let start = tokio::time::Instant::now();
+        for ttl in (50..=60).rev() {
+            refreshes.set_earliest(id, Duration::from_secs(ttl));
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        refreshes.set_earliest(id, Duration::from_secs(120));
+        assert_eq!(refreshes.len(), 1);
+
+        let Input::SharedPollRefreshFired(fired) = refreshes.next_input().await else {
+            unreachable!("only refreshes");
+        };
+
+        assert_eq!(fired, id);
+        // The 50 s deadline, set after ten advances of 100 ms.
+        assert_eq!(start.elapsed(), Duration::from_secs(51));
+        assert_eq!(refreshes.len(), 0);
     }
 
     #[tokio::test]
