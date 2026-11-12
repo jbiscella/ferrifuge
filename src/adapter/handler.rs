@@ -1994,6 +1994,43 @@ mod tests {
         });
     }
 
+    // Codex, #169: the outbox goes when the handler is handed the removed
+    // subscription's last event, not only at the consumer's next turn.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_removed_shared_poll_subscription_s_outbox_goes_with_its_last_event() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+        poll.set_handler(|_: crate::SharedPollSubscriptionEvent| {});
+        poll.subscribe();
+        client.remove_shared_poll_subscription(&poll);
+        let shared = client.shared();
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut names = Vec::new();
+        while let Poll::Ready(Some(handed)) = next(shared, &mut cx) {
+            let Handed::SharedPoll { event, .. } = &handed else {
+                panic!("not a shared poll event");
+            };
+            names.push(event.name());
+            let last = event.name() == "unsubscribed";
+            if last {
+                assert!(lock(&shared.outboxes).shared_polls.is_empty());
+            }
+            deliver(shared, handed);
+            if last {
+                break;
+            }
+        }
+
+        assert_eq!(names, ["subscribing", "unsubscribed"]);
+    }
+
     #[cfg(feature = "unstable")]
     #[test]
     fn a_shared_poll_handler_set_after_close_is_dropped() {
