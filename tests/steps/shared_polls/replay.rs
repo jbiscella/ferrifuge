@@ -653,7 +653,7 @@ async fn publish_yields(world: &mut ClientWorld, key: String, at: u64, of: Strin
 // --- The epoch flip (@B) ------------------------------------------------
 
 #[given(
-    regex = r#"^a client with a shared poll subscription to "([^"]+)" tracking "a" with a valid signature, whose backend has reported epoch "(\w+)" and whose update of "a" at version (\d+) was taken$"#
+    regex = r#"^a client over http_stream with a shared poll subscription to "([^"]+)" tracking "a" with a valid signature, whose backend has reported epoch "(\w+)" and whose update of "a" at version (\d+) was taken$"#
 )]
 async fn tracking_at_an_epoch(
     world: &mut ClientWorld,

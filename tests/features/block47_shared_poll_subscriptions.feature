@@ -298,7 +298,7 @@ Feature: Shared poll subscriptions (unstable)
 
   @B
   Scenario: An epoch flip resubscribes and tracks again
-    Given a client with a shared poll subscription to "poll_v:ef1" tracking "a" with a valid signature, whose backend has reported epoch "E1" and whose update of "a" at version 3 was taken
+    Given a client over http_stream with a shared poll subscription to "poll_v:ef1" tracking "a" with a valid signature, whose backend has reported epoch "E1" and whose update of "a" at version 3 was taken
     When the backend's refresh reports epoch "E2" and key "a" at version 1 with data {"v":2}
     Then the stream yields "subscribing" with code 2500, then "subscribed"
     And the next track request carries key "a" with no version
