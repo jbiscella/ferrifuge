@@ -1033,3 +1033,36 @@ fn the_track_cost_bounds_every_encoding() {
         }
     }
 }
+
+// D12 with Block 15: a reply read but held behind an event not taken stops
+// its request's deadline, so the deadline passing then reconnects nothing.
+#[test]
+fn a_reply_read_behind_an_event_not_taken_stops_the_deadline() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    let actions = track(&mut machine, id, &[("a", 0)], "sig1");
+    let request = emulated_requests(&actions, 1)[0].clone();
+    let timer = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetSharedPollTimer(timer, _) => Some(*timer),
+            _ => None,
+        })
+        .unwrap();
+    // An update not taken holds the messages read after it.
+    let pushed = updates(&machine.handle(push(transport, "a", 1)));
+    assert_eq!(pushed.len(), 1);
+
+    let read = machine.handle(reply_to(transport, &request));
+    let fired = machine.handle(Input::SharedPollTimerFired(timer));
+
+    assert!(
+        read.contains(&Action::CancelSharedPollTimer(timer)),
+        "{read:?}"
+    );
+    assert!(
+        !fired
+            .iter()
+            .any(|action| matches!(action, Action::CloseTransport(_))),
+        "{fired:?}"
+    );
+}
