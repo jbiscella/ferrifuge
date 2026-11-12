@@ -58,6 +58,11 @@ fn main() {
     runtime.block_on(async {
         idle_footprint_with_ten_subscriptions().await;
         marginal_cost_of_a_subscription().await;
+        #[cfg(feature = "unstable")]
+        {
+            marginal_cost_of_a_shared_poll_subscription().await;
+            bytes_per_tracked_key().await;
+        }
         memory_stays_flat_across_reconnects().await;
     });
     a_closed_window_frees_its_memory();
@@ -145,6 +150,69 @@ async fn marginal_cost_of_a_subscription() {
     );
     assert!(per_subscription <= MARGINAL_LIMIT);
     drop((subscriptions, client));
+}
+
+/// Block 47, D3: a shared poll subscription tracking no key costs what a
+/// subscription does, its state boxed.
+#[cfg(feature = "unstable")]
+async fn marginal_cost_of_a_shared_poll_subscription() {
+    let server = ChildServer::start();
+    let client = connected(&server, Config::default()).await;
+    tokio::time::sleep(IDLE).await;
+    let before = live_bytes();
+
+    let subscriptions: Vec<ferrifuge::SharedPollSubscription> = (0..MORE_CHANNELS)
+        .map(|index| {
+            let subscription = client
+                .new_shared_poll_subscription(format!("poll{index}"))
+                .expect("a new channel");
+            subscription.subscribe();
+            subscription
+        })
+        .collect();
+    while subscriptions
+        .iter()
+        .any(|subscription| subscription.state() != SubscriptionState::Subscribed)
+    {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    tokio::time::sleep(IDLE).await;
+    let per_subscription = (live_bytes() - before) / MORE_CHANNELS;
+
+    println!(
+        "@P report: marginal cost of a shared poll subscription tracking no key: \
+         {per_subscription} bytes (limit {MARGINAL_LIMIT})"
+    );
+    assert!(per_subscription <= MARGINAL_LIMIT);
+    drop((subscriptions, client));
+}
+
+/// Block 47, D11: tracked keys cost memory per key, reported: 16-byte keys
+/// under signatures of 80 bytes covering 100 keys each.
+#[cfg(feature = "unstable")]
+async fn bytes_per_tracked_key() {
+    const KEYS: usize = 10_000;
+    let server = ChildServer::start();
+    let client = connected(&server, Config::default()).await;
+    let subscription = client
+        .new_shared_poll_subscription("poll")
+        .expect("a new channel");
+    tokio::time::sleep(IDLE).await;
+    let before = live_bytes();
+
+    // Not subscribed: kept for the next subscribe, nothing sent.
+    for batch in 0..KEYS / 100 {
+        subscription.track_with_signature(
+            (0..100).map(|key| {
+                ferrifuge::SharedPollTrackItem::new(format!("{:016}", batch * 100 + key), 0)
+            }),
+            "s".repeat(80),
+        );
+    }
+    let per_key = (live_bytes() - before) / KEYS;
+
+    println!("@P report: bytes per tracked shared poll key: {per_key}");
+    drop((subscription, client));
 }
 
 async fn memory_stays_flat_across_reconnects() {
