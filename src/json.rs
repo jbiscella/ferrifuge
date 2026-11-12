@@ -1018,6 +1018,35 @@ mod tests {
         assert_eq!(interval(r#"{"id":2,"subscribe":{}}"#), 0);
     }
 
+    // Block 47, D3: the fuzz target's committed seeds include a track
+    // reply with items and a push with a version.
+    #[test]
+    fn the_fuzz_seeds_decode_as_shared_poll_replies() {
+        let reply = decode(include_bytes!(
+            "__fuzz__/json__tests__decode/corpus/seed-shared-poll-track-reply"
+        ))
+        .unwrap();
+        let pushed = decode(include_bytes!(
+            "__fuzz__/json__tests__decode/corpus/seed-shared-poll-publication"
+        ))
+        .unwrap();
+
+        let ReplyResult::SubRefresh(result) = &reply[0].result else {
+            panic!("{reply:?}");
+        };
+        let versions: Vec<u64> = result
+            .items
+            .iter()
+            .map(|item| item.map.as_deref().unwrap().version)
+            .collect();
+        assert_eq!(versions, [2, 3]);
+        let ReplyResult::Push(Push::Publication { publication, .. }) = &pushed[0].result else {
+            panic!("{pushed:?}");
+        };
+        let part = publication.map.as_deref().unwrap();
+        assert_eq!((part.key.as_str(), part.version), ("a", 4));
+    }
+
     // Block 45, D3: the fuzz target's committed seeds, which `cargo test`
     // replays and the CI fuzz runs start from, are a valid map subscribe
     // result and a valid map publication.
