@@ -859,6 +859,11 @@ impl Machine {
     /// (Block 18, D6).
     pub(in crate::machine) fn awaits_subscription_reply(&self, command: u32) -> bool {
         let subscriptions = &self.subscriptions;
+        // A shared poll track or untrack request (Block 47, D7).
+        #[cfg(feature = "unstable")]
+        if subscriptions.track_commands.contains_key(&command) {
+            return true;
+        }
         subscriptions.unsubscribes.contains_key(&command)
             || subscriptions.sub_refreshes.contains_key(&command)
             || subscriptions
@@ -873,6 +878,10 @@ impl Machine {
     }
 
     pub(in crate::machine) fn subscription_command_too_large(&mut self, command: u32) -> bool {
+        #[cfg(feature = "unstable")]
+        if self.track_command_too_large(command) {
+            return true;
+        }
         if let Some(id) = self.subscriptions.sub_refreshes.remove(&command) {
             self.actions.push(Action::CancelSubscriptionTimer(
                 id,
@@ -1113,6 +1122,18 @@ impl Machine {
 
     /// `unsubscribe()` was called.
     pub(super) fn unsubscribe(&mut self, id: SubscriptionId) {
+        // A shared poll subscription forgets its keys and signatures even
+        // when it was not subscribing, as before its first subscribe
+        // (Block 47, D5).
+        #[cfg(feature = "unstable")]
+        if let Some(flow) = self
+            .subscriptions
+            .by_id
+            .get_mut(&id)
+            .and_then(|sub| sub.shared_poll.as_deref_mut())
+        {
+            flow.forget();
+        }
         self.set_unsubscribed(
             id,
             codes::unsubscribed::UNSUBSCRIBE_CALLED,

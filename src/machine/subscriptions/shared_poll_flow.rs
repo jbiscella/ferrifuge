@@ -110,6 +110,9 @@ struct Signed {
 #[derive(Debug)]
 pub(in crate::machine) struct TrackCommand {
     subscription: SubscriptionId,
+    /// Its channel: a subscription recreated there after a removal waits
+    /// for it too (D12).
+    channel: String,
     generation: u64,
     track: bool,
     keys: Vec<String>,
@@ -724,6 +727,7 @@ impl Machine {
             command_id,
             TrackCommand {
                 subscription: id,
+                channel: request.channel.clone(),
                 generation,
                 track,
                 keys,
@@ -776,10 +780,22 @@ impl Machine {
         }
     }
 
-    /// Whether the next subscribe of `id` waits for its requests in flight:
-    /// over an emulated transport they could be handled after it (D12).
+    /// Whether the next subscribe of `id` waits for the requests in flight
+    /// on its channel, of `id` or of a subscription removed from it: over
+    /// an emulated transport they could be handled after it (D12).
     pub(in crate::machine) fn shared_poll_requests_pending(&self, id: SubscriptionId) -> bool {
-        self.transport_kind().is_emulated() && self.requests_in_flight(id).0
+        let Some(channel) = self.subscription_channel(id) else {
+            return false;
+        };
+        self.transport_kind().is_emulated() && self.requests_on(channel)
+    }
+
+    /// Whether a track or untrack request on `channel` awaits its reply.
+    fn requests_on(&self, channel: &str) -> bool {
+        self.subscriptions
+            .track_commands
+            .values()
+            .any(|command| command.channel == channel)
     }
 
     /// The subscribe command `command_id` of shared poll subscription `id`,
@@ -901,10 +917,11 @@ impl Machine {
                 .get(&id)
                 .and_then(|sub| sub.shared_poll.as_ref())
                 .is_some_and(|flow| flow.generation == command.generation);
+        let channel = command.channel.clone();
         if current {
             self.track_command_answered(command, reply);
         }
-        self.requests_settled(id);
+        self.requests_settled(id, &channel);
     }
 
     /// The reply to a current track or untrack request (D7).
@@ -948,15 +965,46 @@ impl Machine {
         }
     }
 
-    /// A request of `id` was answered: the queue goes on, and a subscribe
-    /// waiting for the requests in flight follows once none is left (D12).
-    fn requests_settled(&mut self, id: SubscriptionId) {
+    /// A request of `id` on `channel` was settled: the queue goes on, and a
+    /// subscribe waiting for the requests in flight on the channel follows
+    /// once none is left (D12).
+    fn requests_settled(&mut self, id: SubscriptionId, channel: &str) {
         self.pump_requests(id);
-        if !self.requests_in_flight(id).0
-            && let Some(channel) = self.subscription_channel(id).cloned()
-        {
-            self.wake_waiting(&channel);
+        if !self.requests_on(channel) {
+            self.wake_waiting(channel);
         }
+    }
+
+    /// The server refused track or untrack request `command` as too large
+    /// (an emulation request answered with HTTP 413); whether it was one.
+    /// As any `sub_refresh` (Block 8): the subscription ends with
+    /// `unsubscribed` 3, after an unsubscribe command, since the same
+    /// request would be refused again.
+    pub(in crate::machine) fn track_command_too_large(&mut self, command: u32) -> bool {
+        let Some(command) = self.subscriptions.track_commands.remove(&command) else {
+            return false;
+        };
+        if let Some(timer) = command.timer {
+            self.actions.push(Action::CancelSharedPollTimer(timer));
+        }
+        let id = command.subscription;
+        let current = self.subscribed_now(id)
+            && self
+                .subscriptions
+                .by_id
+                .get(&id)
+                .and_then(|sub| sub.shared_poll.as_ref())
+                .is_some_and(|flow| flow.generation == command.generation);
+        if current {
+            self.set_unsubscribed(
+                id,
+                codes::unsubscribed::MESSAGE_SIZE_LIMIT,
+                super::MESSAGE_SIZE_LIMIT_REASON,
+                true,
+            );
+        }
+        self.requests_settled(id, &command.channel);
+        true
     }
 
     /// The server refused a track request for good (D7): its keys are
@@ -981,6 +1029,21 @@ impl Machine {
     /// order (D9): a version is compared with what the earlier ones would
     /// set once taken.
     fn shared_poll_publications(&mut self, id: SubscriptionId, publications: Vec<Publication>) {
+        // A delta for a tracked key fails the subscription before any item
+        // is emitted: an update emitted then withdrawn in the same message
+        // would hold the next messages (Block 15).
+        let delta = self.shared_poll_flow(id).is_some_and(|flow| {
+            publications.iter().any(|publication| {
+                publication.delta
+                    && publication
+                        .map
+                        .as_deref()
+                        .is_some_and(|part| !part.removed && flow.tracked.contains_key(&part.key))
+            })
+        });
+        if delta {
+            return self.delta_failed(id, DeltaError::NotOn);
+        }
         let mut handled = HashMap::new();
         for publication in publications {
             if !self.subscribed_now(id) {
