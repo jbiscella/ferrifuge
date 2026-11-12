@@ -1,6 +1,6 @@
 //! Block 47: shared poll subscriptions on the core (@E).
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::*;
 use crate::Config;
@@ -124,7 +124,7 @@ fn answer_subscribe(
         .expect("a subscribe command");
     machine.handle(frame(
         transport,
-        &json!({"id": command["id"], "subscribe": {"type": 4}}).to_string(),
+        &serde_json::json!({"id": command["id"], "subscribe": {"type": 4}}).to_string(),
     ))
 }
 
@@ -178,7 +178,7 @@ fn track(
 fn push(transport: TransportId, key: &str, version: u64) -> Input {
     frame(
         transport,
-        &json!({"push": {"channel": "items", "pub": {"key": key, "data": {"v": version}, "version": version}}})
+        &serde_json::json!({"push": {"channel": "items", "pub": {"key": key, "data": {"v": version}, "version": version}}})
             .to_string(),
     )
 }
@@ -200,7 +200,7 @@ fn reconnect(machine: &mut Machine, _transport: TransportId) -> (TransportId, Ve
         .expect("a connect command");
     actions.extend(machine.handle(frame(
         transport,
-        &json!({"id": connect["id"], "connect": {"client": "c"}}).to_string(),
+        &serde_json::json!({"id": connect["id"], "connect": {"client": "c"}}).to_string(),
     )));
     take_all(machine, &actions);
     let subscribe = sent(&actions)
@@ -209,7 +209,7 @@ fn reconnect(machine: &mut Machine, _transport: TransportId) -> (TransportId, Ve
         .expect("a resubscribe");
     let replay = machine.handle(frame(
         transport,
-        &json!({"id": subscribe["id"], "subscribe": {"type": 4}}).to_string(),
+        &serde_json::json!({"id": subscribe["id"], "subscribe": {"type": 4}}).to_string(),
     ));
     take_all(machine, &replay);
     (transport, replay)
@@ -234,7 +234,7 @@ fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
 
     assert_eq!(subscribe["type"], 4);
     assert_eq!(subscribe["delta"], "fossil");
-    assert_eq!(subscribe["data"], json!({}));
+    assert_eq!(subscribe["data"], serde_json::json!({}));
     for absent in [
         "positioned",
         "recoverable",
@@ -259,7 +259,7 @@ fn a_reply_without_type_4_unsubscribes_with_code_8() {
 
     let actions = machine.handle(frame(
         transport,
-        &json!({"id": command["id"], "subscribe": {}}).to_string(),
+        &serde_json::json!({"id": command["id"], "subscribe": {}}).to_string(),
     ));
 
     assert!(
@@ -290,7 +290,10 @@ fn track_and_untrack_send_their_requests_and_empty_sets_send_nothing() {
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0]["sub_refresh"]["track"][0]["signature"], "sig1");
     assert_eq!(items(&tracked[0]), [("a".into(), 3), ("b".into(), 0)]);
-    assert_eq!(untracked[0]["sub_refresh"]["untrack"], json!(["a"]));
+    assert_eq!(
+        untracked[0]["sub_refresh"]["untrack"],
+        serde_json::json!(["a"])
+    );
     for actions in [empty_track, empty_untrack, empty_signed] {
         assert!(
             sent(&actions).is_empty() && fetches(&actions).is_empty(),
@@ -379,7 +382,7 @@ fn a_stale_signature_answer_and_a_stale_track_reply_change_nothing() {
     });
     let replied = machine.handle(frame(
         transport,
-        &json!({"id": track_command, "sub_refresh": {"items": [{"key": "a", "data": {}, "version": 7}]}})
+        &serde_json::json!({"id": track_command, "sub_refresh": {"items": [{"key": "a", "data": {}, "version": 7}]}})
             .to_string(),
     ));
 
@@ -460,7 +463,7 @@ fn untracked_keys_and_old_versions_are_dropped() {
 
     let reply = machine.handle(frame(
         transport,
-        &json!({"id": command, "sub_refresh": {"items": [
+        &serde_json::json!({"id": command, "sub_refresh": {"items": [
             {"key": "a", "data": {}, "version": 6},
             {"key": "a", "data": {}, "version": 6},
             {"key": "z", "data": {}, "version": 1},
@@ -486,14 +489,23 @@ fn untracked_keys_and_old_versions_are_dropped() {
 #[test]
 fn a_refused_track_untracks_its_keys_and_others_only_report() {
     for (error, refused) in [
-        (json!({"code": 103, "message": "permission denied"}), true),
-        (json!({"code": 106, "message": "limit exceeded"}), true),
-        (json!({"code": 109, "message": "token expired"}), false),
         (
-            json!({"code": 500, "message": "busy", "temporary": true}),
+            serde_json::json!({"code": 103, "message": "permission denied"}),
+            true,
+        ),
+        (
+            serde_json::json!({"code": 106, "message": "limit exceeded"}),
+            true,
+        ),
+        (
+            serde_json::json!({"code": 109, "message": "token expired"}),
             false,
         ),
-        (json!({"code": 1, "message": "timeout"}), false),
+        (
+            serde_json::json!({"code": 500, "message": "busy", "temporary": true}),
+            false,
+        ),
+        (serde_json::json!({"code": 1, "message": "timeout"}), false),
     ] {
         let (mut machine, transport, id) = subscribed(false, false);
         let command =
@@ -501,7 +513,7 @@ fn a_refused_track_untracks_its_keys_and_others_only_report() {
 
         let actions = machine.handle(frame(
             transport,
-            &json!({"id": command, "error": error}).to_string(),
+            &serde_json::json!({"id": command, "error": error}).to_string(),
         ));
 
         let got = events(&actions);
@@ -513,7 +525,10 @@ fn a_refused_track_untracks_its_keys_and_others_only_report() {
         let untracked = requests(&actions, 2);
         if refused {
             assert_eq!(removed, ["a", "b"]);
-            assert_eq!(untracked[0]["sub_refresh"]["untrack"], json!(["a", "b"]));
+            assert_eq!(
+                untracked[0]["sub_refresh"]["untrack"],
+                serde_json::json!(["a", "b"])
+            );
             assert_eq!(
                 machine.shared_poll_tracked_keys(id).unwrap(),
                 [] as [std::string::String; 0]
@@ -537,7 +552,8 @@ fn an_untrack_error_is_reported_as_such() {
 
     let actions = machine.handle(frame(
         transport,
-        &json!({"id": command, "error": {"code": 107, "message": "bad request"}}).to_string(),
+        &serde_json::json!({"id": command, "error": {"code": 107, "message": "bad request"}})
+            .to_string(),
     ));
 
     assert!(matches!(
@@ -555,7 +571,7 @@ fn unsubscribe_forgets_the_keys_and_the_signatures() {
     let unsubscribe = sent(&unsubscribed)[0]["id"].clone();
     machine.handle(frame(
         transport,
-        &json!({"id": unsubscribe, "unsubscribe": {}}).to_string(),
+        &serde_json::json!({"id": unsubscribe, "unsubscribe": {}}).to_string(),
     ));
     let actions = machine.handle(Input::Subscribe(id));
     let replay = answer_subscribe(&mut machine, transport, &actions);
