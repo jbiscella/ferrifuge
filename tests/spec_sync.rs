@@ -21,7 +21,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
     "Byte-split matrix",
     "Real-server chaos",
     "Soak run",
-    "Shared poll subscriptions (unstable)",
 ];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims

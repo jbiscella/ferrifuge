@@ -27,7 +27,7 @@ use support::fake_server::{Announce, FakeServer};
 use support::proxy::ProxyBackend;
 use support::relay::CountingRelay;
 use support::tls;
-use support::token::HMAC_SECRET;
+use support::token::{HMAC_SECRET, SHARED_POLL_SECRET};
 
 const FEATURES: &str = "tests/features";
 
@@ -647,12 +647,23 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     // for them, and `map_tag` filters by tags (Block 45d).
     // Subscribing to a channel of `game` adds its client to the
     // `clients:` map and its user to the `users:` map of that channel
-    // (Block 45, D16).
+    // (Block 45, D16). Channels of `poll_v` are shared poll channels in
+    // versioned mode written by the server API's `shared_poll_publish`;
+    // `poll_l` tracks at most 2 keys per connection, `poll_private` needs a
+    // subscription token (Block 47, D18).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}},{"name":"map_rec","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s","stream_size":5,"min_page_size":1},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_eph","subscription_type":"map","map":{"mode":"ephemeral","key_ttl":"300s","min_page_size":1,"max_page_size":5},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_delta","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_tag","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allow_tags_filter":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"game","map_clients_presence_channel_prefix":"clients:","map_users_presence_channel_prefix":"users:","allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"clients","subscription_type":"map_clients","map":{"mode":"recoverable","key_ttl":"60s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"users","subscription_type":"map_users","map":{"mode":"recoverable","key_ttl":"2s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
+        r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}},{"name":"map_rec","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s","stream_size":5,"min_page_size":1},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_eph","subscription_type":"map","map":{"mode":"ephemeral","key_ttl":"300s","min_page_size":1,"max_page_size":5},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_delta","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_tag","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allow_tags_filter":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"game","map_clients_presence_channel_prefix":"clients:","map_users_presence_channel_prefix":"users:","allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"clients","subscription_type":"map_clients","map":{"mode":"recoverable","key_ttl":"60s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"users","subscription_type":"map_users","map":{"mode":"recoverable","key_ttl":"2s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_v","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_l","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true,"max_keys_per_connection":2},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_private","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true}}]"#,
     ),
     ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
+    // Shared poll namespaces need a signature key and a refresh endpoint:
+    // nothing listens on this one, as `poll_v` is written by the server API
+    // (Block 47, D18).
+    ("CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY", SHARED_POLL_SECRET),
+    (
+        "CENTRIFUGO_CHANNEL_PROXY_SHARED_POLL_REFRESH_ENDPOINT",
+        "http://127.0.0.1:9/",
+    ),
 ];
 
 /// Server configuration added for @B scenarios, besides the proxy's.
@@ -671,11 +682,14 @@ pub(crate) const SERVER_B: &[(&str, &str)] = &[
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_SIZE", "10"),
     ("CENTRIFUGO_CHANNEL_WITHOUT_NAMESPACE_HISTORY_TTL", "300s"),
     // Channels of the `rec` namespace keep a history and are recoverable
-    // (Block 11); the subscribe proxy sees them too.
+    // (Block 11); the subscribe proxy sees them too. Channels of `poll` are
+    // shared poll channels in versionless mode, refreshed by the proxy
+    // backend (Block 47, D18).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"subscribe_proxy_enabled":true}]"#,
+        r#"[{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"subscribe_proxy_enabled":true},{"name":"poll","subscription_type":"shared_poll","shared_poll":{"refresh_interval":"1s","channel_shutdown_delay":"1s"},"allow_subscribe_for_client":true}]"#,
     ),
+    ("CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY", SHARED_POLL_SECRET),
 ];
 
 /// A scenario still running after this long is reported as hung and fails

@@ -50,6 +50,11 @@ struct Answers {
     accept_delay: Duration,
     /// The `data` of an accepted connection's result, if any (Block 17).
     connect_data: Option<Value>,
+    /// The items a shared poll refresh answers, by channel and key, as the
+    /// backend holds them now (Block 47, D18).
+    shared_poll_items: HashMap<(String, String), Value>,
+    /// Bodies of the shared poll refresh requests received.
+    shared_poll_requests: Vec<Value>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -80,6 +85,7 @@ impl ProxyBackend {
             .route("/connect", post(connect))
             .route("/subscribe", post(subscribe))
             .route("/rpc", post(rpc))
+            .route("/shared_poll_refresh", post(shared_poll_refresh))
             .with_state(Arc::clone(&state));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("proxy server");
@@ -137,10 +143,32 @@ impl ProxyBackend {
                 "CENTRIFUGO_RPC_PROXY_ENDPOINT",
                 format!("http://{HOST_GATEWAY}:{}/rpc", self.port),
             ),
+            // The backend of shared poll namespaces (Block 47, D18).
+            (
+                "CENTRIFUGO_CHANNEL_PROXY_SHARED_POLL_REFRESH_ENDPOINT",
+                format!("http://{HOST_GATEWAY}:{}/shared_poll_refresh", self.port),
+            ),
         ]
     }
 
     /// Answers subscribe requests for `channel` with this error.
+    /// Makes the shared poll refresh of `channel` answer `key` with `item`
+    /// (its `data`, `version`, `removed`), the key added, from now on
+    /// (Block 47).
+    pub(crate) fn shared_poll_item(&self, channel: &str, key: &str, mut item: Value) {
+        item["key"] = json!(key);
+        self.state
+            .lock()
+            .unwrap()
+            .shared_poll_items
+            .insert((channel.to_owned(), key.to_owned()), item);
+    }
+
+    /// Bodies of the shared poll refresh requests received.
+    pub(crate) fn shared_poll_requests(&self) -> Vec<Value> {
+        self.state.lock().unwrap().shared_poll_requests.clone()
+    }
+
     pub(crate) fn subscribe_error(&self, channel: &str, code: u32, message: &str) {
         self.program_subscribe(channel, |answer| {
             answer.body = Some(json!({"error": {"code": code, "message": message}}));
@@ -336,6 +364,32 @@ async fn subscribe(
     };
     tokio::time::sleep(answer.delay).await;
     Json(answer.body.unwrap_or_else(|| json!({"result": {}})))
+}
+
+/// Answers a shared poll refresh with the items programmed for the keys it
+/// names (Centrifugo's shared poll documentation: the request lists
+/// `items` by `key`, the result answers changed ones; an omitted item is
+/// unchanged).
+async fn shared_poll_refresh(
+    State(state): State<Arc<Mutex<Answers>>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let mut answers = state.lock().unwrap();
+    let channel = request["channel"].as_str().unwrap_or_default().to_owned();
+    let items: Vec<Value> = request["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let key = item["key"].as_str()?.to_owned();
+            answers
+                .shared_poll_items
+                .get(&(channel.clone(), key))
+                .cloned()
+        })
+        .collect();
+    answers.shared_poll_requests.push(request);
+    Json(json!({"result": {"items": items}}))
 }
 
 /// Answers RPCs: "echo" returns its input, "sum" returns `{"sum":3}`,

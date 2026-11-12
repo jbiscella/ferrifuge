@@ -99,6 +99,15 @@ struct State {
     received_protobuf_frames: Vec<usize>,
     /// Frames received so far.
     frames: usize,
+    /// The bytes of each JSON frame received, by number (Block 47).
+    frame_sizes: std::collections::HashMap<usize, usize>,
+    /// What answers the next shared poll track and untrack requests
+    /// (`sub_refresh` of type 1 or 2), in order: a reply's fields besides
+    /// its id, `{"sub_refresh": {}}` once none is left, or none for `null`
+    /// (Block 47, D18).
+    sub_refresh_answers: VecDeque<Value>,
+    /// Every shared poll track and untrack request is answered so.
+    sub_refresh_answer: Option<Value>,
     /// Every Protobuf command received from clients, in order.
     received_protobuf: Vec<protobuf::Command>,
     /// Subscribe commands still to leave unanswered.
@@ -613,6 +622,28 @@ impl FakeServer {
             .collect()
     }
 
+    /// Answers the next shared poll track or untrack request not given an
+    /// answer yet with `answer`, a reply's fields besides its id; `null`
+    /// leaves it unanswered (Block 47).
+    pub(crate) fn answer_a_sub_refresh_with(&self, answer: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .sub_refresh_answers
+            .push_back(answer);
+    }
+
+    /// Answers every shared poll track and untrack request with `answer`
+    /// once the queued answers are used (Block 47).
+    pub(crate) fn answer_sub_refreshes_with(&self, answer: Value) {
+        self.state.lock().unwrap().sub_refresh_answer = Some(answer);
+    }
+
+    /// The bytes of JSON frame `frame`, as received (Block 47).
+    pub(crate) fn frame_size(&self, frame: usize) -> usize {
+        self.state.lock().unwrap().frame_sizes[&frame]
+    }
+
     /// Leaves the next subscribe command unanswered.
     pub(crate) fn ignore_next_subscribe(&self) {
         self.state.lock().unwrap().ignored_subscribes += 1;
@@ -971,7 +1002,9 @@ impl Connection {
         let frame = {
             let mut state = self.state.lock().unwrap();
             state.frames += 1;
-            state.frames - 1
+            let frame = state.frames - 1;
+            state.frame_sizes.insert(frame, text.len());
+            frame
         };
         for line in text.lines() {
             let Ok(message) = serde_json::from_str::<Value>(line) else {
@@ -1082,6 +1115,17 @@ impl Connection {
                     json!({"id": message["id"], "publish": {}}).to_string(),
                 ));
             }
+        } else if matches!(message["sub_refresh"]["type"].as_i64(), Some(1 | 2)) {
+            let mut state = self.state.lock().unwrap();
+            let answer = state
+                .sub_refresh_answers
+                .pop_front()
+                .or_else(|| state.sub_refresh_answer.clone())
+                .unwrap_or_else(|| json!({"sub_refresh": {}}));
+            if let Value::Object(mut reply) = answer {
+                reply.insert("id".to_owned(), message["id"].clone());
+                replies.push(Message::text(Value::Object(reply).to_string()));
+            }
         } else if message["refresh"].is_object() {
             // The connection lives another ttl, so the client refreshes again.
             replies.push(Message::text(
@@ -1140,6 +1184,8 @@ impl Connection {
             None if state.recovering.contains(&channel) => {
                 (from_history(&state, &channel, &message["subscribe"]), true)
             }
+            // A shared poll subscribe (Block 47) on a shared poll namespace.
+            None if message["subscribe"]["type"] == 4 => (json!({"type": 4}), false),
             None => (json!({}), false),
         };
         // Each subscribe starts a new delta chain (Block 19, D5).
