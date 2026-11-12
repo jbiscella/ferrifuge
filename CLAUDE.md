@@ -5426,7 +5426,7 @@ Feature: Automatic command batching, optimistic subscriptions
     - The connector is guarded as the token and data callbacks are, so a panic never ends the driver (invariant I2).
   - **Timeout.** `Config::handshake_timeout` bounds the connector's future with the rest of the open (Block 29 D1). At the timeout the future is dropped and the error says "handshake timeout"; the documentation tells connectors to be cancel-safe. tonic: "The `connect_timeout` will still be applied".
   - **Proxies.** A client with a connector reads no proxy setting: not the environment's, not the system's (Block 23 D1, D2). The connector is the route, as a proxy is itself a connector wrapping another (hyper-util `Tunnel` and `SocksV5`; Block 23 D3).
-    - `build()` fails with a configuration error (code 12) naming the connector and the other option in two cases: `ClientBuilder::proxy` was called with any setting, or an endpoint is not websocket (http_stream, sse).
+    - `build()` fails with a configuration error (code 12) naming the connector and the other option in two cases: `ClientBuilder::proxy` was called with any setting, or an endpoint is not websocket (http_stream, sse, webtransport: Block 48).
     - `Client::set_proxy` on such a client changes nothing, and its documentation says so.
   - **Logging.** The DEBUG record of each attempt (Block 23 D7) gives `proxy` as `connector`. The connector sees the endpoint unredacted: it is the application's own.
 - **D5 Server double (37c; Q4).** `ferrifuge::test_util::Server` is `Clone` and shares one state.
@@ -9124,7 +9124,7 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 43 | R | `close()` from a handler waits for itself | §4.3 | covered | "close awaited inside a handler returns" |
 | 44 | R | An unsubscribe is emitted before its command is written, so a handler's re-subscribe overtakes it | §7.3 | not applicable | the core emits the `Unsubscribed` event and the unsubscribe command in one step and the adapter performs the actions in order (Block 0, sans-IO), so the command cannot be overtaken |
 | 47 | R | Pending calls fail before the close that caused them is handled | §6.5, §9.3 | covered | `src/machine/calls.rs::a_terminal_disconnect_fails_queued_calls`; one core step produces the state change and the call failures together |
-| 53 | R | The client closes or reconfigures a resource the app gave it | §5.1 | not applicable | app-provided resources are held by `Arc` and dropped, never closed (Blocks 22, 37); a dropped `Arc` releases only our reference |
+| 53 | R | The client closes or reconfigures a resource the app gave it | §5.1 | not applicable | app-provided resources are held by `Arc` and dropped, never closed (Blocks 22, 37, and WebTransport: Block 48 D4); a dropped `Arc` releases only our reference |
 | 54 | R | An app callback's own timeout error is mistaken for an SDK timeout | §4.2 | not applicable | callbacks return a typed result; there is no shared error type to confuse |
 | 56 | R | A resubscribe started from a handler recovers the publication that handler is processing | §7.4 | covered | Block 41 D3; `src/machine/subscriptions.rs::a_handed_publication_moves_the_position_and_is_not_withdrawn`; "A publication a handler had not returned from before disconnect is taken once" |
 | 57 | R | After 3014, a saved position still asks to recover | §7.1 | covered | "Connection state invalidation clears the token and invalidates every position" |
