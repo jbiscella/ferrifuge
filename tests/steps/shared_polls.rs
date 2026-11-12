@@ -22,6 +22,8 @@ use super::delivery::wait_until;
 use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, recorded};
 use crate::support::token::{shared_poll_signature, subscription_token};
 
+mod replay;
+
 type Events = Pin<Box<dyn Stream<Item = SharedPollSubscriptionEvent> + Send>>;
 
 /// The keys and signatures a `get_signature` callback was called with.
@@ -226,7 +228,7 @@ fn the_registry_lists(world: &mut ClientWorld, channel: String) {
     );
 }
 
-#[then(regex = r"^tracked_keys is (empty|.+)$")]
+#[then(regex = r#"^tracked_keys is (empty|"\w+"(?: and "\w+")*)$"#)]
 fn tracked_keys_are(world: &mut ClientWorld, keys: String) {
     let expected = if keys == "empty" {
         Vec::new()
@@ -400,7 +402,8 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
         }
         other => {
             assert!(
-                a_signing_subscription(world, &channel, other).await,
+                a_signing_subscription(world, &channel, other).await
+                    || replay::a_replaying_subscription(world, &channel, other).await,
                 "no such shared poll subscription: {other}"
             );
         }

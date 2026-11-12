@@ -60,7 +60,7 @@ fn proxy_answers_next_connect_with_terminal_code(world: &mut ClientWorld) {
 }
 
 #[when("the server disconnects the client with a reconnect-advised code")]
-async fn server_disconnects_with_reconnect_code(world: &mut ClientWorld) {
+pub(super) async fn server_disconnects_with_reconnect_code(world: &mut ClientWorld) {
     let reason = "reconnect advised by the test";
     // Connections accepted by the proxy belong to its user, others are anonymous.
     let user = if world.proxy.is_some() {
