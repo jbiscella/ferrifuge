@@ -109,7 +109,7 @@ pub(in crate::machine) struct SharedPollFlow {
     bases: Bases,
     /// Keys a track frame of this `subscribed` period carried in its
     /// `untrack` field, until a later track frame carrying the key is
-    /// answered (D7, D10): the server applies an inline untrack after it
+    /// accepted (D7, D10): the server applies an inline untrack after it
     /// tracked the key, answered and sent its value (centrifuge
     /// `handleTrack`), so a delta of the key may follow while the client,
     /// which tracked it again, holds no base. Once a key is in no held
@@ -1152,9 +1152,11 @@ impl Machine {
                 .is_some_and(|flow| flow.generation == command.generation);
         let channel = command.channel.clone();
         if current {
-            // A track frame answered ends the inline untracks of the keys
-            // it tracks: the server has reset their state (D10).
+            // A track frame accepted ends the inline untracks of the keys
+            // it tracks: the server has reset their state (D10). A failed
+            // one shows nothing of it (Codex on #221).
             if command.purpose != Purpose::Untrack
+                && reply.error.is_none()
                 && let Some(flow) = self.shared_poll_flow(id)
             {
                 for key in &command.keys {
