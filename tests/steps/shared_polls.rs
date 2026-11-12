@@ -1429,7 +1429,9 @@ async fn an_error_of_kind_track(world: &mut ClientWorld, code: u32) {
     let SharedPollSubscriptionEvent::Error(error) = world.next_shared_poll_event().await else {
         panic!("expected an error");
     };
-    world.shared_polls.at = Some(std::time::Instant::now());
+    // The backoff is measured from `track` (the When step), before the
+    // fetch failed, not from when the error is taken, which a slow runner
+    // delays: a correct delay never looks short.
     assert_eq!(
         (error.code, error.kind),
         (code, ErrorKind::Track),
@@ -1441,7 +1443,7 @@ async fn an_error_of_kind_track(world: &mut ClientWorld, code: u32) {
     regex = r#"^after the 5 s to 30 s backoff the fake server receives a sub_refresh with type 1 and item "(\w+)"$"#
 )]
 async fn retried_after_the_backoff(world: &mut ClientWorld, key: String) {
-    let since = world.shared_polls.at.expect("an error seen");
+    let since = world.shared_polls.at.expect("track called");
     let channel = world.shared_poll().channel().to_owned();
     // The first retry comes after 5 s to 10 s (Block 2's formula).
     let waited = tokio::time::timeout(Duration::from_secs(12), async {
