@@ -304,7 +304,8 @@ fn each_replay_frame_untracks_the_keys_of_its_own_batches() {
 // under three signatures, one key of each kept) cannot put its untracks in
 // the frames of their batches: each frame stays within the budget, and
 // what does not fit is untracked by untrack requests once its frame is
-// answered. Inline, it would be a frame of about 120 KB, closed with 1009.
+// answered, before the next frame. Inline, it would be a frame of about
+// 120 KB, closed with 1009.
 #[test]
 fn a_replay_of_mostly_untracked_keys_stays_within_the_budget() {
     let (mut machine, transport, id, replay, groups) = mostly_untracked(60_000, 3, 600, 44);
@@ -344,15 +345,18 @@ fn a_replay_of_mostly_untracked_keys_stays_within_the_budget() {
             other => panic!("{other:?}"),
         }
     }
-    // After the frame that tracked the key, and no later frame tracks it
-    // again.
+    // After the frame that tracked the key and before the request's next
+    // frame: the server counts it against `max_keys_per_connection` until
+    // then.
     for (key, frames) in &after {
         let carrying: Vec<usize> = (0..tracked_by.len())
             .filter(|frame| tracked_by[*frame].contains(key))
             .collect();
-        assert!(
-            carrying.iter().all(|frame| frame < frames),
-            "{key} untracked before a frame tracking it"
+        let last = *carrying.last().expect("a frame tracking it");
+        assert_eq!(
+            *frames,
+            last + 1,
+            "{key}, tracked by frame {last}, untracked after {frames} frames"
         );
     }
     assert_eq!(tracked_by.len(), 3, "one frame per signature");
