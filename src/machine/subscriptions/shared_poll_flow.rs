@@ -358,8 +358,9 @@ impl SharedPollFlow {
     /// its `untrack` field (D7, D8): a batch goes with its untracks to the
     /// frame being filled when both fit, else it starts the next frame,
     /// taking as many of its untracks as the budget lets; the others are
-    /// untracked once that frame is answered (the stale rule of
-    /// [`Machine::track_command_answered`]). A batch too large for any
+    /// untracked once that frame is answered, before the next frame (the
+    /// stale rule of [`Machine::track_command_answered`]). A batch too
+    /// large for any
     /// frame goes alone.
     fn track_frames(
         channel: &str,
