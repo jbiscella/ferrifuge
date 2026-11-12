@@ -974,33 +974,29 @@ fn a_failed_track_keeps_the_inline_untrack() {
     for failure in ["temporary", "timeout"] {
         let (mut machine, transport, id, again) = tracked_again_after_an_inline_untrack();
         let request = requests(&again, 1)[0].clone();
-        match failure {
-            "temporary" => {
-                let failed = machine.handle(frame(
-                    transport,
-                    &serde_json::json!({"id": request["id"], "error": {
-                        "code": 500, "message": "busy", "temporary": true,
-                    }})
-                    .to_string(),
-                ));
-                take_all(&mut machine, &failed);
-            }
-            _ => {
-                let deadline = again
-                    .iter()
-                    .find_map(|action| match action {
-                        Action::SetSharedPollTimer(timer, delay)
-                            if *delay == Config::default().timeout =>
-                        {
-                            Some(*timer)
-                        }
-                        _ => None,
-                    })
-                    .expect("a reply deadline");
-                let failed = machine.handle(Input::SharedPollTimerFired(deadline));
-                take_all(&mut machine, &failed);
-            }
-        }
+        let failed = if failure == "temporary" {
+            machine.handle(frame(
+                transport,
+                &serde_json::json!({"id": request["id"], "error": {
+                    "code": 500, "message": "busy", "temporary": true,
+                }})
+                .to_string(),
+            ))
+        } else {
+            let deadline = again
+                .iter()
+                .find_map(|action| match action {
+                    Action::SetSharedPollTimer(timer, delay)
+                        if *delay == Config::default().timeout =>
+                    {
+                        Some(*timer)
+                    }
+                    _ => None,
+                })
+                .expect("a reply deadline");
+            machine.handle(Input::SharedPollTimerFired(deadline))
+        };
+        take_all(&mut machine, &failed);
 
         let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
 
@@ -1032,6 +1028,8 @@ fn a_refused_track_leaves_no_inline_untrack() {
         &serde_json::json!({"id": request["id"], "error": {"code": 103, "message": "permission denied"}})
             .to_string(),
     ));
+    // Its error and removal taken, as the stream would.
+    take_all(&mut machine, &refused);
     let answered = answer_all(&mut machine, transport, &refused);
     answer_all(&mut machine, transport, &answered);
     let untracked = machine.handle(Input::UntrackKeys(id, vec!["k2".into()]));
