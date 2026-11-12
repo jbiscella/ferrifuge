@@ -179,6 +179,15 @@ impl SharedPollSubscription {
         super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
     }
 
+    /// Sets the shared poll subscription's handler (Block 47, D15), as
+    /// [`crate::Subscription::set_handler`] does a subscription's: from now
+    /// on it takes the events, one at a time, in order with those of the
+    /// client's other handlers; its events count as delivered when its
+    /// method returns.
+    pub fn set_handler(&self, handler: impl super::SharedPollSubscriptionHandler) {
+        drop(Box::new(handler));
+    }
+
     /// Events of the subscription queued for its streams and not yet
     /// taken, so that tests can wait for them. Only with the `__test-hooks`
     /// feature.
@@ -278,6 +287,7 @@ pub struct SharedPollSubscriptionBuilder {
     options: SharedPollSubscriptionOptions,
     get_token: Option<GetSubscriptionToken>,
     get_signature: Option<GetSignature>,
+    handler: Option<std::sync::Mutex<Box<dyn super::SharedPollSubscriptionHandler>>>,
 }
 
 /// The options' `Debug` output redacts the token.
@@ -288,6 +298,7 @@ impl std::fmt::Debug for SharedPollSubscriptionBuilder {
             .field("options", &self.options)
             .field("get_token", &self.get_token.is_some())
             .field("get_signature", &self.get_signature.is_some())
+            .field("handler", &self.handler.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -400,6 +411,15 @@ impl SharedPollSubscriptionBuilder {
         self
     }
 
+    /// The shared poll subscription's handler, which takes its events from
+    /// the start instead of a stream (Block 47, D15); see
+    /// [`SharedPollSubscription::set_handler`].
+    #[must_use]
+    pub fn handler(mut self, handler: impl super::SharedPollSubscriptionHandler) -> Self {
+        self.handler = Some(std::sync::Mutex::new(Box::new(handler)));
+        self
+    }
+
     /// Adds the shared poll subscription, unsubscribed, to the client's
     /// registry.
     ///
@@ -452,6 +472,7 @@ impl Client {
             options: SharedPollSubscriptionOptions::default(),
             get_token: None,
             get_signature: None,
+            handler: None,
         }
     }
 

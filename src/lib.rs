@@ -107,7 +107,7 @@ pub use adapter::{
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 pub use adapter::{
     MapSubscription, MapSubscriptionBuilder, MapSubscriptionHandler, SharedPollSubscription,
-    SharedPollSubscriptionBuilder,
+    SharedPollSubscriptionBuilder, SharedPollSubscriptionHandler,
 };
 // Native only (Block 44, D14).
 #[cfg(adapter_tokio)]

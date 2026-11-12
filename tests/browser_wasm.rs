@@ -977,6 +977,49 @@ async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publ
     }
 }
 
+// The relay signs the key and calls the server API, out of a page's reach
+// (no CORS; Block 47, D17).
+// @W scenario: A browser client tracks a key and receives its updates
+#[cfg(feature = "unstable")]
+#[wasm_bindgen_test]
+async fn a_browser_client_tracks_a_key_and_receives_its_updates() {
+    use ferrifuge::{SharedPollSubscriptionEvent, SharedPollTrackItem};
+
+    let channel = unique("poll_v:w1");
+    let client = client(Config::default());
+    let subscription = client.new_shared_poll_subscription(&channel).unwrap();
+    let mut events = subscription.events();
+
+    client.connect();
+    subscription.subscribe();
+    assert_eq!(next(&mut events).await.name(), "subscribing");
+    assert_eq!(next(&mut events).await.name(), "subscribed");
+
+    let signature = relay(&format!("shared-poll-signature/{channel}/a")).await;
+    let read = client.statistics().messages_in;
+    subscription.track_with_signature([SharedPollTrackItem::new("a", 0)], signature);
+    // The track reply is read before the key is written.
+    within(WAIT, async {
+        while client.statistics().messages_in == read {
+            sleep(20).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        relay(&format!("shared-poll-publish/{channel}/a/2")).await,
+        "ok"
+    );
+
+    match next(&mut events).await {
+        SharedPollSubscriptionEvent::Update(update) => {
+            assert_eq!(update.key, "a");
+            assert_eq!(update.version, Some(2));
+            assert_eq!(update.data, br#"{"v":2}"#);
+        }
+        event => panic!("not an update: {event:?}"),
+    }
+}
+
 fn sse_endpoint(server: &str) -> String {
     format!("http://{server}/connection/sse")
 }

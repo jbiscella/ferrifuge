@@ -113,13 +113,27 @@ impl std::fmt::Debug for SharedPollUpdate {
 
 impl SharedPollUpdate {
     /// The removal of `key`: no data, no version.
-    pub(crate) fn removal(key: String) -> Self {
+    pub(crate) fn removal_of(key: String) -> Self {
         Self {
             key,
             data: Vec::new(),
             removed: true,
             version: None,
         }
+    }
+}
+
+impl SharedPollUpdate {
+    /// The value decoded as JSON into `T`, as [`crate::Publication::json`]
+    /// does (Block 38, Block 47 D15).
+    ///
+    /// # Errors
+    ///
+    /// The data is not JSON, or not JSON that `T` accepts; empty data, as a
+    /// removal's, is not JSON. `serde_json`'s message may quote fragments of
+    /// the data.
+    pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.data)
     }
 }
 
@@ -130,7 +144,7 @@ impl From<crate::Publication> for SharedPollUpdate {
             .map(|part| (part.key, part.removed, part.version))
             .unwrap_or_default();
         if removed {
-            return Self::removal(key);
+            return Self::removal_of(key);
         }
         Self {
             key,
@@ -224,7 +238,7 @@ mod tests {
         };
         assert_eq!(
             SharedPollUpdate::from(publication),
-            SharedPollUpdate::removal("a".into())
+            SharedPollUpdate::removal_of("a".into())
         );
     }
 

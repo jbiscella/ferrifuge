@@ -371,7 +371,12 @@ impl Machine {
             flow.refresh_attempts = 0;
         }
         for key in &revoked {
-            self.emit_shared_poll_update(id, SharedPollUpdate::removal(key.clone()), None, false);
+            self.emit_shared_poll_update(
+                id,
+                SharedPollUpdate::removal_of(key.clone()),
+                None,
+                false,
+            );
         }
         if !revoked.is_empty() {
             self.send_untrack(id, revoked);

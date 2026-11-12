@@ -2092,7 +2092,7 @@ impl MapCore {
     }
 }
 
-fn opened_transport(actions: &[Action]) -> TransportId {
+pub(super) fn opened_transport(actions: &[Action]) -> TransportId {
     actions
         .iter()
         .find_map(|action| match action {
@@ -2103,7 +2103,7 @@ fn opened_transport(actions: &[Action]) -> TransportId {
 }
 
 /// The commands sent among `actions`, decoded.
-fn sent_commands(actions: &[Action]) -> Vec<Value> {
+pub(super) fn sent_commands(actions: &[Action]) -> Vec<Value> {
     actions
         .iter()
         .filter_map(|action| match action {

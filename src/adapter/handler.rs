@@ -213,6 +213,75 @@ impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptio
     }
 }
 
+/// Receives a shared poll subscription's events, one at a time, in order,
+/// as [`SubscriptionHandler`] does a subscription's (Block 47, D15). Set
+/// with
+/// [`SharedPollSubscriptionBuilder::handler`](crate::SharedPollSubscriptionBuilder::handler)
+/// or
+/// [`SharedPollSubscription::set_handler`](crate::SharedPollSubscription::set_handler);
+/// it takes over the shared poll subscription's stream. An
+/// [`on_update`](Self::on_update) that returns counts its update as
+/// delivered, and the key's version moves; one that panics leaves the
+/// version as it was, so the next subscribe asks for the value again.
+///
+/// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
+/// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
+/// later), and may change in any minor release.
+///
+/// ```no_run
+/// # fn run(votes: ferrifuge::SharedPollSubscription) {
+/// struct Votes;
+///
+/// impl ferrifuge::SharedPollSubscriptionHandler for Votes {
+///     fn on_update(&mut self, update: ferrifuge::SharedPollUpdate) {
+///         println!("{}: {:?}", update.key, update.version);
+///     }
+/// }
+///
+/// votes.set_handler(Votes);
+/// votes.subscribe();
+/// # }
+/// ```
+#[cfg(feature = "unstable")]
+#[allow(unused_variables)] // The defaults ignore their event.
+pub trait SharedPollSubscriptionHandler: MaybeSend + 'static {
+    /// Called for each event, in order; by default, the method of its kind.
+    fn on_event(&mut self, event: crate::SharedPollSubscriptionEvent) {
+        use crate::SharedPollSubscriptionEvent as Event;
+        match event {
+            Event::Subscribing { code, reason } => self.on_subscribing(code, reason),
+            Event::Subscribed(subscribed) => self.on_subscribed(subscribed),
+            Event::Unsubscribed { code, reason } => self.on_unsubscribed(code, reason),
+            Event::Update(update) => self.on_update(update),
+            Event::Error(error) => self.on_error(error),
+        }
+    }
+
+    /// [`SharedPollSubscriptionEvent::Subscribing`](crate::SharedPollSubscriptionEvent::Subscribing).
+    fn on_subscribing(&mut self, code: u32, reason: String) {}
+
+    /// [`SharedPollSubscriptionEvent::Subscribed`](crate::SharedPollSubscriptionEvent::Subscribed).
+    fn on_subscribed(&mut self, subscribed: Subscribed) {}
+
+    /// [`SharedPollSubscriptionEvent::Unsubscribed`](crate::SharedPollSubscriptionEvent::Unsubscribed).
+    fn on_unsubscribed(&mut self, code: u32, reason: String) {}
+
+    /// [`SharedPollSubscriptionEvent::Update`](crate::SharedPollSubscriptionEvent::Update).
+    fn on_update(&mut self, update: crate::SharedPollUpdate) {}
+
+    /// [`SharedPollSubscriptionEvent::Error`](crate::SharedPollSubscriptionEvent::Error).
+    fn on_error(&mut self, error: ClientError) {}
+}
+
+#[cfg(feature = "unstable")]
+impl<F: FnMut(crate::SharedPollSubscriptionEvent) + MaybeSend + 'static>
+    SharedPollSubscriptionHandler for F
+{
+    fn on_event(&mut self, event: crate::SharedPollSubscriptionEvent) {
+        self(event);
+    }
+}
+
 /// Where a client's handlers run (Block 41, D2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]

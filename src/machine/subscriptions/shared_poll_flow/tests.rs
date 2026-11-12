@@ -428,6 +428,45 @@ fn a_replay_uses_the_version_of_an_update_handed_to_a_handler() {
     assert_eq!(items(&requests(&replay, 1)[0]), [("a".into(), 3)]);
 }
 
+// Block 41 D3, D4 (Block 47 D15): a panic voids the version its handed
+// update moved, so the next subscribe asks for the value again.
+#[test]
+fn a_panicking_handler_leaves_the_version_as_it_was() {
+    let (mut machine, transport, id) = subscribed(false, true);
+    track(&mut machine, id, &[("a", 1)], "sig1");
+    let pushed = updates(&machine.handle(push(transport, "a", 3)));
+    machine.handle(Input::EventHanded(pushed[0].0));
+
+    let panicked = machine.handle(Input::HandlerPanicked {
+        event: pushed[0].0,
+        message: "boom".into(),
+    });
+    take_all(&mut machine, &panicked);
+    let (_, replay) = reconnect(&mut machine, transport);
+
+    assert_eq!(items(&requests(&replay, 1)[0]), [("a".into(), 1)]);
+}
+
+// A version the key took since, by another track, is not undone.
+#[test]
+fn a_panic_leaves_a_version_set_since_by_a_track() {
+    let (mut machine, transport, id) = subscribed(false, true);
+    track(&mut machine, id, &[("a", 1)], "sig1");
+    let pushed = updates(&machine.handle(push(transport, "a", 3)));
+    machine.handle(Input::EventHanded(pushed[0].0));
+    track(&mut machine, id, &[("a", 7)], "sig2");
+
+    let panicked = machine.handle(Input::HandlerPanicked {
+        event: pushed[0].0,
+        message: "boom".into(),
+    });
+    take_all(&mut machine, &panicked);
+    let (_, replay) = reconnect(&mut machine, transport);
+
+    let replayed: Vec<(String, u64)> = requests(&replay, 1).iter().flat_map(items).collect();
+    assert!(replayed.contains(&("a".into(), 7)), "{replayed:?}");
+}
+
 // D9: a removal ends its key when handled and is never withdrawn; a key
 // tracked again after it stays tracked.
 #[test]
