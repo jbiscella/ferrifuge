@@ -1163,18 +1163,15 @@ impl Machine {
                     }
                 }
             }
-            let track = command.purpose != Purpose::Untrack;
             self.track_command_answered(command, reply);
-            if track {
-                self.untrack_inline_untracked(id);
-            }
+            self.untrack_inline_untracked(id);
         }
         self.requests_settled(id, &channel);
     }
 
-    /// The inline untracks of keys no held signature covers, whose frames
-    /// are answered, go in an untrack request (D10), which bounds them
-    /// (Codex on #221). Safe: such a key is not tracked, so a publication of
+    /// At each current reply, the inline untracks of keys no held signature
+    /// covers, whose frames are answered, go in an untrack request (D10),
+    /// which bounds them (Codex on #221). Safe: such a key is not tracked, so a publication of
     /// it is dropped (D9) until it is tracked again, and while the request
     /// awaits its reply a delta of the key is dropped as for any untrack
     /// request. Its reply comes after the server applied the inline untrack
@@ -1190,20 +1187,11 @@ impl Machine {
         if !self.subscribed_now(id) {
             return;
         }
-        let Some(generation) = self
-            .subscriptions
-            .by_id
-            .get(&id)
-            .and_then(|sub| sub.shared_poll.as_ref())
-            .map(|flow| flow.generation)
-        else {
-            return;
-        };
         let in_flight: HashSet<&String> = self
             .subscriptions
             .track_commands
             .values()
-            .filter(|command| command.subscription == id && command.generation == generation)
+            .filter(|command| command.subscription == id)
             .flat_map(|command| &command.untracked)
             .collect();
         let Some(flow) = self

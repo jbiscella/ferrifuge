@@ -811,7 +811,8 @@ fn inline_untracks_of_keys_gone_stay_bounded() {
 }
 
 // Codex on #221 (D10): once no held signature covers a key untracked
-// inline and its frame is answered, the key goes in an untrack request,
+// inline and its frame is answered, the next reply sends the key in an
+// untrack request,
 // whose reply comes after the server applied the inline untrack (centrifuge
 // `handleUntrack` waits for the track requests in progress, and that
 // frame's reply was read before it was sent). Until then a delta of the
@@ -827,10 +828,9 @@ fn an_inline_untrack_of_a_key_gone_becomes_an_untrack_request() {
     );
     answer_all(&mut machine, transport, &answered);
     let untracked = machine.handle(Input::UntrackKeys(id, vec!["b".into()]));
-    answer_all(&mut machine, transport, &untracked);
 
-    let other = track(&mut machine, id, &[("c", 0)], "s3");
-    let answered = machine.handle(reply_to(transport, &requests(&other, 1)[0]));
+    // Once b's untrack is answered, a is in no held signature.
+    let answered = answer_all(&mut machine, transport, &untracked);
 
     let untrack: Vec<Value> = requests(&answered, 2)
         .into_iter()
@@ -881,6 +881,7 @@ fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
     let again = track(&mut machine, id, &[("a", 0)], "s2");
     answer_all(&mut machine, transport, &again);
 
+    let counted = machine.delta_statistics(id).unwrap();
     let duplicates = push_all(
         &mut machine,
         transport,
@@ -890,6 +891,11 @@ fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
         ],
     );
     assert!(events(&duplicates).is_empty(), "{duplicates:?}");
+    assert_eq!(
+        machine.delta_statistics(id).unwrap(),
+        counted,
+        "no duplicate counts"
+    );
     let next = push_all(
         &mut machine,
         transport,
