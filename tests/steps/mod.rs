@@ -58,6 +58,8 @@ mod release;
 mod runtime;
 mod runtime_headers;
 mod server_subs;
+#[cfg(feature = "unstable")]
+mod shared_polls;
 mod sleep;
 mod slow;
 mod statistics;
@@ -243,6 +245,9 @@ pub(crate) struct ClientWorld {
     /// What a Block 45 scenario holds.
     #[cfg(feature = "unstable")]
     pub(crate) maps: maps::Maps,
+    /// What a Block 47 scenario holds.
+    #[cfg(feature = "unstable")]
+    pub(crate) shared_polls: shared_polls::SharedPolls,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;
