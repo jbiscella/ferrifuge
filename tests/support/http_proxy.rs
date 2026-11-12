@@ -35,6 +35,11 @@ const MAX_BODY: usize = 1 << 20;
 /// `cookies/<path>` the Cookie header values of each of them but CORS
 /// preflights, which carry no credentials: one line per request, `>`
 /// then its values separated by tabs (Block 44, D13).
+/// `shared-poll-signature/<channel>/<key>` gives an anonymous client's
+/// signature for `key` of `channel`, and
+/// `shared-poll-publish/<channel>/<key>/<version>` sets the key to
+/// `{"v":<version>}` at that version with the server API, which a page
+/// cannot call (no CORS), answering `ok` or the error (Block 47, D17).
 const CONTROL: &str = "/_relay/";
 
 pub(crate) struct HttpProxy {
@@ -242,7 +247,7 @@ impl Drop for HttpProxy {
 }
 
 /// A request under [`CONTROL`], answered to any origin.
-fn control(state: &ProxyState, command: &str) -> Response<Body> {
+async fn control(state: &ProxyState, command: &str) -> Response<Body> {
     let answer = if command == "end-streams" {
         state.end_streams.send_modify(|ended| *ended += 1);
         String::new()
@@ -270,6 +275,20 @@ fn control(state: &ProxyState, command: &str) -> Response<Body> {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    } else if let Some(args) = command.strip_prefix("shared-poll-signature/") {
+        let Some((channel, key)) = args.split_once('/') else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        super::token::shared_poll_signature(channel, "", &[key], None)
+    } else if let Some(args) = command.strip_prefix("shared-poll-publish/") {
+        let parts: Vec<&str> = args.split('/').collect();
+        let [channel, key, version] = parts[..] else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Ok(version) = version.parse::<u64>() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        shared_poll_publish(state, channel, key, version).await
     } else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -279,10 +298,37 @@ fn control(state: &ProxyState, command: &str) -> Response<Body> {
         .expect("valid control response")
 }
 
+/// Sets `key` of `channel` to `{"v":version}` with the server API's
+/// `shared_poll_publish`: `ok`, or what went wrong.
+async fn shared_poll_publish(state: &ProxyState, channel: &str, key: &str, version: u64) -> String {
+    let body = serde_json::json!({
+        "channel": channel,
+        "key": key,
+        "version": version,
+        "data": {"v": version},
+    });
+    let sent = state
+        .http
+        .post(format!("http://{}/api/shared_poll_publish", state.target))
+        .header("X-API-Key", super::centrifugo::API_KEY)
+        .json(&body)
+        .send()
+        .await;
+    let answer = match sent {
+        Ok(response) => response.json::<serde_json::Value>().await,
+        Err(error) => return format!("not sent: {error}"),
+    };
+    match answer {
+        Ok(answer) if answer.get("error").is_none() => "ok".to_owned(),
+        Ok(answer) => answer["error"].to_string(),
+        Err(error) => format!("no answer: {error}"),
+    }
+}
+
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response<Body> {
     let (parts, body) = request.into_parts();
     if let Some(command) = parts.uri.path().strip_prefix(CONTROL) {
-        return control(&state, command);
+        return control(&state, command).await;
     }
     state
         .requests
