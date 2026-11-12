@@ -29,9 +29,9 @@ Feature: Shared poll subscriptions (unstable)
   @D
   Scenario: A shared poll subscription subscribes with type 4 and nothing else
     Given a client connected to the fake server
-    And a shared poll subscription to channel "items" with data {"a":1}, delta and a token
+    And a shared poll subscription to channel "items" with data {"a":1} and a token
     When subscribe is called on the shared poll subscription
-    Then the subscribe command for "items" has type 4, the data {"a":1}, delta "fossil" and the token
+    Then the subscribe command for "items" has type 4, the data {"a":1} and the token
     And it has no recover, epoch, offset, positioned, recoverable, join_leave, flag or tf field
 
   @D
