@@ -25,6 +25,58 @@ fn timers_cancelled(actions: &[Action]) -> Vec<SharedPollTimer> {
         .collect()
 }
 
+/// The refresh timer settings among `actions`, as the owner runs them
+/// (D7): the delays asked for, and whether one was cancelled.
+fn refreshes_set(actions: &[Action], id: SubscriptionId) -> Vec<Duration> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::SetSharedPollRefresh(of, delay) if *of == id => Some(*delay),
+            _ => None,
+        })
+        .collect()
+}
+
+fn refresh_cancelled(actions: &[Action], id: SubscriptionId) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, Action::CancelSharedPollRefresh(of) if *of == id))
+}
+
+/// The one refresh delay set among `actions`.
+fn the_refresh(actions: &[Action], id: SubscriptionId) -> Duration {
+    let set = refreshes_set(actions, id);
+    assert_eq!(set.len(), 1, "{actions:?}");
+    assert!(
+        timers_set(actions).is_empty(),
+        "no other timer: {actions:?}"
+    );
+    set[0]
+}
+
+/// A refresh timer as the owner runs it: one per subscription, firing at
+/// the earliest deadline asked for, on a clock the test moves.
+#[derive(Default)]
+struct RefreshTimer {
+    now: Duration,
+    deadline: Option<Duration>,
+}
+
+impl RefreshTimer {
+    fn run(&mut self, actions: &[Action], id: SubscriptionId) {
+        for action in actions {
+            match action {
+                Action::SetSharedPollRefresh(of, delay) if *of == id => {
+                    let at = self.now + *delay;
+                    self.deadline = Some(self.deadline.map_or(at, |set| set.min(at)));
+                }
+                Action::CancelSharedPollRefresh(of) if *of == id => self.deadline = None,
+                _ => {}
+            }
+        }
+    }
+}
+
 fn errors(actions: &[Action]) -> Vec<ClientError> {
     events(actions)
         .into_iter()
@@ -246,38 +298,52 @@ fn an_unauthorized_callback_unsubscribes_with_code_1() {
     );
 }
 
-// D7: replies with `expires` keep one refresh at the earliest deadline
-// seen; when it comes, every tracked key is signed again, and the new
-// signature replaces every one held whose tracked keys it covers.
+// D7: replies with `expires` make the refresh run at the earliest
+// deadline seen, one timer per subscription, however many replies with
+// ever shorter ttls come; when it comes, every tracked key is signed again,
+// and the new signature replaces every one held whose tracked keys it
+// covers.
 #[test]
 fn an_expiring_signature_is_refreshed_at_the_earliest_deadline() {
     let (mut machine, transport, id) = subscribed(true, false);
-    let mut deadline = |key: &str, ttl: u32| {
-        let command = the_track(&track(&mut machine, id, &[(key, 0)], &format!("sig-{key}")));
-        timers_set(&machine.handle(answered(
+    let mut owner = RefreshTimer::default();
+    // Signatures under one exp: each reply a second later says 1 s less.
+    for (second, key) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+        owner.now = Duration::from_secs(second as u64);
+        let command = the_track(&track(
+            &mut machine,
+            id,
+            &[(*key, 0)],
+            &format!("sig-{key}"),
+        ));
+        let ttl = 60 - second as u64;
+        let actions = machine.handle(answered(
             transport,
             &command,
             &serde_json::json!({"expires": true, "ttl": ttl}),
-        )))
-    };
-    let first = deadline("a", 60);
-    let later = deadline("b", 120);
-    let sooner = deadline("c", 30);
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].1, Duration::from_secs(60));
-    assert!(later.is_empty(), "a later deadline: {later:?}");
-    assert_eq!(sooner.len(), 1);
-    assert_eq!(sooner[0].1, Duration::from_secs(30));
+        ));
+        assert_eq!(the_refresh(&actions, id), Duration::from_secs(ttl));
+        owner.run(&actions, id);
+    }
+    // A later deadline moves nothing.
+    let command = the_track(&track(&mut machine, id, &[("g", 0)], "sig-g"));
+    let later = machine.handle(answered(
+        transport,
+        &command,
+        &serde_json::json!({"expires": true, "ttl": 600}),
+    ));
+    owner.run(&later, id);
+    assert_eq!(owner.deadline, Some(Duration::from_secs(60)));
     // A signature held for "a" with a key since untracked: the refresh
     // replaces it, though it does not cover "x".
     the_track(&track(&mut machine, id, &[("a", 0), ("x", 0)], "sig-ax"));
     machine.handle(Input::UntrackKeys(id, names(&["x"])));
 
-    let fired = machine.handle(Input::SharedPollTimerFired(sooner[0].0));
-    assert!(timers_cancelled(&fired).contains(&first[0].0), "{fired:?}");
+    let fired = machine.handle(Input::SharedPollRefreshFired(id));
     let (request, keys) = the_fetch(&fired);
-    assert_eq!(keys, ["a", "b", "c"]);
-    let actions = signed(&mut machine, id, request, &["a", "b", "c"], "sig-all");
+    let all = ["a", "b", "c", "d", "e", "f", "g"];
+    assert_eq!(keys, all);
+    let actions = signed(&mut machine, id, request, &all, "sig-all");
     let track = the_track(&actions);
     assert_eq!(track["sub_refresh"]["track"][0]["signature"], "sig-all");
 
@@ -285,6 +351,31 @@ fn an_expiring_signature_is_refreshed_at_the_earliest_deadline() {
     let replayed = &requests(&replay, 1)[0]["sub_refresh"]["track"];
     assert_eq!(replayed.as_array().unwrap().len(), 1, "{replayed}");
     assert_eq!(replayed[0]["signature"], "sig-all");
+}
+
+// D7: a refresh run for a 109 ends the timer armed for an expiry; a
+// firing with none armed does nothing.
+#[test]
+fn a_refresh_ends_the_armed_timer_and_a_stray_firing_does_nothing() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig-a"));
+    the_refresh(
+        &machine.handle(answered(
+            transport,
+            &command,
+            &serde_json::json!({"expires": true, "ttl": 60}),
+        )),
+        id,
+    );
+    let command = the_track(&track(&mut machine, id, &[("b", 0)], "sig-b"));
+
+    let refreshed = machine.handle(refused(transport, &command, 109));
+
+    assert!(refresh_cancelled(&refreshed, id), "{refreshed:?}");
+    let (request, _) = the_fetch(&refreshed);
+    the_track(&signed(&mut machine, id, request, &["a", "b"], "sig-ab"));
+    let stray = machine.handle(Input::SharedPollRefreshFired(id));
+    assert!(fetches(&stray).is_empty(), "{stray:?}");
 }
 
 // D6: without a callback, refreshing is the application's job.
@@ -299,7 +390,10 @@ fn without_a_callback_no_refresh_is_scheduled() {
         &serde_json::json!({"expires": true, "ttl": 5}),
     ));
 
-    assert!(timers_set(&actions).is_empty(), "{actions:?}");
+    assert!(
+        timers_set(&actions).is_empty() && refreshes_set(&actions, id).is_empty(),
+        "{actions:?}"
+    );
 }
 
 // D7: a signature accepted within the grace period is refreshed after
@@ -311,13 +405,16 @@ fn replies_without_ttl_in_a_row_back_off_from_1_s() {
     let mut command = the_track(&track(&mut machine, id, &[("a", 0)], "sig0"));
     let mut delays = Vec::new();
     for _ in 0..8 {
-        let (timer, delay) = the_timer(&machine.handle(answered(
-            transport,
-            &command,
-            &serde_json::json!({"expires": true}),
-        )));
+        let delay = the_refresh(
+            &machine.handle(answered(
+                transport,
+                &command,
+                &serde_json::json!({"expires": true}),
+            )),
+            id,
+        );
         delays.push(delay);
-        let (request, _) = the_fetch(&machine.handle(Input::SharedPollTimerFired(timer)));
+        let (request, _) = the_fetch(&machine.handle(Input::SharedPollRefreshFired(id)));
         command = the_track(&signed(&mut machine, id, request, &["a"], "sig"));
     }
     assert_eq!(delays[0], Duration::from_secs(1), "{delays:?}");
@@ -332,19 +429,25 @@ fn replies_without_ttl_in_a_row_back_off_from_1_s() {
         "no backoff: {delays:?}"
     );
 
-    let (timer, delay) = the_timer(&machine.handle(answered(
-        transport,
-        &command,
-        &serde_json::json!({"expires": true, "ttl": 10}),
-    )));
+    let delay = the_refresh(
+        &machine.handle(answered(
+            transport,
+            &command,
+            &serde_json::json!({"expires": true, "ttl": 10}),
+        )),
+        id,
+    );
     assert_eq!(delay, Duration::from_secs(10));
-    let (request, _) = the_fetch(&machine.handle(Input::SharedPollTimerFired(timer)));
+    let (request, _) = the_fetch(&machine.handle(Input::SharedPollRefreshFired(id)));
     let command = the_track(&signed(&mut machine, id, request, &["a"], "sig"));
-    let (_, delay) = the_timer(&machine.handle(answered(
-        transport,
-        &command,
-        &serde_json::json!({"expires": true}),
-    )));
+    let delay = the_refresh(
+        &machine.handle(answered(
+            transport,
+            &command,
+            &serde_json::json!({"expires": true}),
+        )),
+        id,
+    );
     assert_eq!(delay, Duration::from_secs(1), "started over");
 }
 
@@ -571,26 +674,27 @@ fn what_was_asked_before_leaving_subscribed_changes_nothing() {
     // A refresh timer and a retry timer, then a resubscribe.
     let (mut machine, transport, id) = subscribed(true, false);
     let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig"));
-    let (refresh, _) = the_timer(&machine.handle(answered(
-        transport,
-        &command,
-        &serde_json::json!({"expires": true, "ttl": 60}),
-    )));
+    the_refresh(
+        &machine.handle(answered(
+            transport,
+            &command,
+            &serde_json::json!({"expires": true, "ttl": 60}),
+        )),
+        id,
+    );
     let (request, _) = the_fetch(&machine.handle(Input::TrackKeys(id, names(&["b"]))));
     let (retry, _) = the_timer(&failed(&mut machine, id, request));
     let lost = machine.handle(Input::Disconnect);
     take_all(&mut machine, &lost);
+    // Leaving `subscribed` stops them.
+    assert!(refresh_cancelled(&lost, id), "{lost:?}");
+    assert!(timers_cancelled(&lost).contains(&retry), "{lost:?}");
     let (_, replay) = reconnect(&mut machine, transport);
-    let cancelled = timers_cancelled(&replay)
-        .into_iter()
-        .chain(timers_cancelled(&lost))
-        .collect::<Vec<_>>();
-    assert!(
-        cancelled.contains(&refresh) && cancelled.contains(&retry),
-        "{replay:?}"
-    );
-    for timer in [refresh, retry] {
-        let fired = machine.handle(Input::SharedPollTimerFired(timer));
+    assert!(refreshes_set(&replay, id).is_empty(), "{replay:?}");
+    for fired in [
+        machine.handle(Input::SharedPollRefreshFired(id)),
+        machine.handle(Input::SharedPollTimerFired(retry)),
+    ] {
         assert!(fetches(&fired).is_empty(), "{fired:?}");
     }
 
@@ -612,17 +716,23 @@ fn what_was_asked_before_leaving_subscribed_changes_nothing() {
     for remove in [false, true] {
         let (mut machine, transport, id) = subscribed(true, false);
         let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig"));
-        let (timer, _) = the_timer(&machine.handle(answered(
-            transport,
-            &command,
-            &serde_json::json!({"expires": true, "ttl": 60}),
-        )));
+        the_refresh(
+            &machine.handle(answered(
+                transport,
+                &command,
+                &serde_json::json!({"expires": true, "ttl": 60}),
+            )),
+            id,
+        );
+        let (request, _) = the_fetch(&machine.handle(Input::TrackKeys(id, names(&["b"]))));
+        let (retry, _) = the_timer(&failed(&mut machine, id, request));
         let actions = machine.handle(if remove {
             Input::RemoveSubscription(id)
         } else {
             Input::Unsubscribe(id)
         });
-        assert!(timers_cancelled(&actions).contains(&timer), "{actions:?}");
+        assert!(refresh_cancelled(&actions, id), "{actions:?}");
+        assert!(timers_cancelled(&actions).contains(&retry), "{actions:?}");
     }
 }
 
@@ -642,4 +752,52 @@ fn an_answer_while_not_subscribed_changes_nothing() {
     assert_eq!(tracked_keys(&machine, id), ["a", "b"]);
     let (_, replay) = reconnect(&mut machine, transport);
     assert_eq!(the_fetch(&replay).1, ["a", "b"]);
+}
+
+// D6: a chunk is sized for the longest signature received, at least 128
+// bytes: a backend signing with 300 bytes gets one refusal for the first
+// chunk, sized before any was known, then chunks its signatures fit.
+#[test]
+fn chunks_are_sized_for_the_longest_signature_received() {
+    let (mut machine, transport, id, fetched) = tracking_many();
+    let long = "s".repeat(300);
+    let (request, keys) = the_fetch(&fetched);
+    let names: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let refused = signed(&mut machine, id, request, &names, &long);
+    assert_eq!(errors(&refused)[0].code, 12, "the first chunk: {refused:?}");
+    let (timer, _) = the_timer(&refused);
+
+    let mut fetched = machine.handle(Input::SharedPollTimerFired(timer));
+    let mut actions = Vec::new();
+    let mut chunks = 0;
+    while let [(request, keys)] = fetches(&fetched).as_slice() {
+        chunks += 1;
+        let names: Vec<&str> = keys.iter().map(String::as_str).collect();
+        fetched = signed(&mut machine, id, *request, &names, &long);
+        assert!(errors(&fetched).is_empty(), "chunk {chunks}: {fetched:?}");
+        actions.clone_from(&fetched);
+    }
+    assert!(chunks > 1);
+    let mut frames = vec![the_track(&actions)];
+    loop {
+        let next = requests(
+            &machine.handle(answered(
+                transport,
+                frames.last().unwrap(),
+                &serde_json::json!({}),
+            )),
+            1,
+        );
+        match next.as_slice() {
+            [] => break,
+            [frame] => frames.push(frame.clone()),
+            more => panic!("{} frames at once", more.len()),
+        }
+    }
+    let mut tracked = Vec::new();
+    for frame in &frames {
+        assert!(frame.to_string().len() <= 1000, "{frame}");
+        tracked.extend(items(frame).into_iter().map(|(key, _)| key));
+    }
+    assert_eq!(tracked, tracked_keys(&machine, id));
 }
