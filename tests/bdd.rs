@@ -194,6 +194,8 @@ const IMPLEMENTED: &[&str] = &[
     // the token and invalidates every position" is with Block 12c, which
     // brings its server-side positions (owner decision).
     "State invalidation fetches a new subscription token",
+    "Connection state invalidation keeps a fixed connection token",
+    "Connection state invalidation keeps a fixed subscription token",
     "State invalidation drops a fixed subscription token",
     // Block 12a: server-side subscriptions granted at connect.
     "Publications of a server-side subscription are delivered",

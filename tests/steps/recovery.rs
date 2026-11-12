@@ -36,6 +36,10 @@ pub(super) const FAKE_EPOCH: &str = "fake-epoch";
 pub(super) const FAKE_OFFSET: u64 = 3;
 /// Epoch of a stream that started again.
 const NEW_EPOCH: &str = "new-epoch";
+
+/// The token of a client or subscription without a token callback.
+const FIXED_CONNECTION_TOKEN: &str = "fixed-connection-token";
+const FIXED_SUBSCRIPTION_TOKEN: &str = "fixed-subscription-token";
 /// How long a step waits for a publication that must not arrive.
 const NO_PUBLICATION_PERIOD: Duration = Duration::from_millis(500);
 
@@ -811,7 +815,7 @@ async fn subscribed_with_a_fixed_token(world: &mut ClientWorld) {
     let builder = world
         .client()
         .subscription_builder(CHANNEL)
-        .token("fixed-subscription-token");
+        .token(FIXED_SUBSCRIPTION_TOKEN);
     subscribed_on_the_fake_server_with(world, builder).await;
 }
 
@@ -849,7 +853,7 @@ async fn resubscribes_without_token_or_position(world: &mut ClientWorld) {
 async fn a_client_with_a_fixed_connection_token(world: &mut ClientWorld) {
     let endpoint = world.server_endpoint();
     let mut config = world.client_config();
-    "fixed-connection-token".clone_into(&mut config.token);
+    FIXED_CONNECTION_TOKEN.clone_into(&mut config.token);
     world.build_client(ferrifuge::Client::builder(endpoint).config(config));
     world.client().connect();
     super::expect_event(world, "connecting").await;
@@ -869,22 +873,24 @@ pub(super) fn connects(world: &ClientWorld) -> Vec<Value> {
         .collect()
 }
 
-#[then("the next connect command carries no token")]
-async fn the_next_connect_carries_no_token(world: &mut ClientWorld) {
-    let connects = tokio::time::timeout(EVENT_TIMEOUT, async {
-        loop {
-            let connects = connects(world);
-            if connects.len() >= 2 {
-                return connects;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a second connect command within the timeout");
-    assert_eq!(
-        connects[0]["token"], "fixed-connection-token",
-        "{connects:?}"
-    );
-    assert!(connects[1]["token"].is_null(), "{connects:?}");
+#[then("the next connect command carries that token")]
+async fn the_next_connect_carries_that_token(world: &mut ClientWorld) {
+    let before = world.recovery.connects_before;
+    let next = connect_request(world, before).await;
+    // The token went with the first connect, so a client sending none at
+    // all fails here too.
+    let first = connect_request(world, 0).await;
+    assert_eq!(first["token"], FIXED_CONNECTION_TOKEN, "{first}");
+    assert_eq!(next["token"], FIXED_CONNECTION_TOKEN, "{next}");
+}
+
+#[then(r#"the next subscribe command for "news" carries that token"#)]
+async fn the_next_subscribe_carries_that_token(world: &mut ClientWorld) {
+    let before = world.recovery.subscribes_before;
+    let next = subscribe_request(world, before).await;
+    // The token went with the first subscribe, so a subscription sending
+    // none at all fails here too.
+    let first = subscribe_request(world, 0).await;
+    assert_eq!(first["token"], FIXED_SUBSCRIPTION_TOKEN, "{first}");
+    assert_eq!(next["token"], FIXED_SUBSCRIPTION_TOKEN, "{next}");
 }

@@ -848,9 +848,18 @@ fn a_lost_connection_ends_the_load_and_the_next_one_starts_from_scratch() {
 /// Closes `transport` and opens the next, answering its connect: the
 /// transport, and the subscribe command sent on it, if any.
 fn reconnect(machine: &mut Machine, transport: TransportId) -> (TransportId, Option<Value>) {
+    reconnect_after(machine, transport, None)
+}
+
+/// As [`reconnect`], the transport closed with `code`.
+fn reconnect_after(
+    machine: &mut Machine,
+    transport: TransportId,
+    code: Option<u16>,
+) -> (TransportId, Option<Value>) {
     machine.handle(Input::TransportClosed {
         transport,
-        code: None,
+        code,
         reason: String::new(),
     });
     let transport =
@@ -1230,6 +1239,34 @@ fn disconnect_3014_drops_a_maps_position_rather_than_making_it_unmatchable() {
     });
 
     assert_eq!(machine.subscription_position(id), None);
+}
+
+#[test]
+fn disconnect_3014_keeps_a_maps_fixed_token() {
+    let (mut machine, transport) = connected();
+    let mut options = options(2);
+    options.common = SubscriptionOptions::default().token("t0".into());
+    let id = machine
+        .add_map_subscription("scores".into(), options)
+        .unwrap();
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+    machine.handle(frame(
+        transport,
+        &subscribe_reply(
+            &first,
+            r#""type":1,"recoverable":true,"epoch":"e1","offset":7"#,
+        ),
+    ));
+
+    let (_, subscribe) = reconnect_after(&mut machine, transport, Some(3014));
+
+    // The position is dropped (Block 45, D6), the fixed token kept: no
+    // callback could replace it (Block 11, owner decision, 2026-11-12).
+    let request = &subscribe.expect("a subscribe")["subscribe"];
+    assert_eq!(request["token"], "t0", "{request}");
+    for absent in ["epoch", "recover"] {
+        assert!(request.get(absent).is_none(), "{request}");
+    }
 }
 
 #[test]
