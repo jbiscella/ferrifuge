@@ -262,13 +262,13 @@ fn untrack_of(request: &Value) -> Vec<String> {
 
 // D7, D8 (47c): a key since untracked goes in the `untrack` field of the
 // frame that carries its batch, whichever frame that is; a frame takes a
-// batch with its untracks when both fit. At 1250 bytes three batches fit
-// a frame by themselves (1249 by the worst-case cost), but two with their
-// untracks (1033) and not three (1417): packing by the batches alone would
+// batch with its untracks when both fit. At 1300 bytes three batches fit
+// a frame by themselves (1287 by the worst-case cost), but two with their
+// untracks (1075) and not three (1479): packing by the batches alone would
 // leave no room for the untracks.
 #[test]
 fn each_replay_frame_untracks_the_keys_of_its_own_batches() {
-    let (mut machine, transport, _, replay, groups) = mostly_untracked(1250, 6, 5, 4);
+    let (mut machine, transport, _, replay, groups) = mostly_untracked(1300, 6, 5, 4);
 
     let commands = answer_all(&mut machine, transport, &replay);
 
@@ -292,7 +292,7 @@ fn each_replay_frame_untracks_the_keys_of_its_own_batches() {
     assert!(
         commands
             .iter()
-            .all(|(command, size)| command["sub_refresh"]["type"] == 1 && *size <= 1250),
+            .all(|(command, size)| command["sub_refresh"]["type"] == 1 && *size <= 1300),
         "{commands:?}"
     );
 }
