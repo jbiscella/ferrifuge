@@ -26,8 +26,7 @@ repository held while it carried that version, from the blocks of
   `Action::EmitSharedPollSubscription` and `FetchSignature`. Keys, their
   versions and signatures are tracked again on each subscribe; an untrack
   is split within `max_track_frame_bytes`; a refused track untracks its
-  keys with a removal update each. No delta compression yet: the
-  subscribe never asks for it until per-key bases come (Block 47d).
+  keys with a removal update each.
   A `track_with_signature` batch over `max_track_frame_bytes` is refused
   with error 12, the tracking after a reconnect goes in frames within it,
   one after the other, and over `http_stream` and `sse` a subscription's
@@ -68,6 +67,19 @@ repository held while it carried that version, from the blocks of
   `ErrorKind::SignatureRefresh`.
   The rows of `unsubscribed` 1, errors 12 and 14 and the track errors in
   the table of codes say so.
+- Unstable (`unstable` feature): per-key delta compression of shared poll
+  subscriptions (Block 47d). `SharedPollSubscriptionBuilder::delta` asks
+  for Fossil deltas; the client keeps a base per tracked key, deleted with
+  the key and at each subscribe, and delivers whole values; a delta in
+  flight across an unanswered untrack of its key is dropped. The bases
+  together are bounded by `SharedPollSubscriptionBuilder::max_delta_bases_bytes`
+  (`SharedPollSubscriptionOptions::max_delta_bases_bytes`, 64 MiB by
+  default), past which the subscription ends with `unsubscribed` 7.
+  `SharedPollSubscription::delta_statistics`. The values of one track
+  reply are handled before any is emitted, so a failing one emits none
+  that its failure would withdraw.
+- `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE` (7), with its
+  row in the table of codes.
 
 - Publish debouncing as advised by the server (Centrifugo PRO):
   `Subscription::publish` and `publish_json` send the first value at once

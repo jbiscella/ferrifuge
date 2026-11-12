@@ -66,6 +66,8 @@ fn main() {
         memory_stays_flat_across_reconnects().await;
     });
     a_closed_window_frees_its_memory();
+    #[cfg(feature = "unstable")]
+    bytes_per_tracked_key_with_a_base();
 }
 
 fn live_bytes() -> usize {
@@ -213,6 +215,68 @@ async fn bytes_per_tracked_key() {
 
     println!("@P report: bytes per tracked shared poll key: {per_key}");
     drop((subscription, client));
+}
+
+/// Block 47, D11: with delta on, each tracked key also holds its last
+/// value as its delta base; reported on the core, 16-byte keys whose values
+/// are 64 bytes.
+#[cfg(feature = "unstable")]
+fn bytes_per_tracked_key_with_a_base() {
+    const KEYS: usize = 10_000;
+    const VALUE: usize = 64;
+    let mut machine = Machine::new(Config::default());
+    let transport = machine
+        .handle(Input::Connect)
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a transport");
+    machine.handle(Input::TransportOpened(transport));
+    machine.handle(Input::Frame {
+        transport,
+        data: br#"{"id":1,"connect":{"client":"c"}}"#.to_vec(),
+    });
+    let mut options = ferrifuge::machine::SharedPollSubscriptionOptions::default();
+    options.common = SubscriptionOptions::default().delta(ferrifuge::DeltaFormat::Fossil);
+    let subscription = machine
+        .add_shared_poll_subscription("poll".into(), options)
+        .expect("a new channel");
+    machine.handle(Input::Subscribe(subscription));
+    machine.handle(Input::Frame {
+        transport,
+        data: br#"{"id":2,"subscribe":{"type":4,"delta":true}}"#.to_vec(),
+    });
+    let key = |number: usize| format!("{number:016}");
+    for batch in 0..KEYS / 100 {
+        machine.handle(Input::TrackKeysWithSignature(
+            subscription,
+            (0..100)
+                .map(|number| ferrifuge::SharedPollTrackItem::new(key(batch * 100 + number), 0))
+                .collect(),
+            "s".repeat(80),
+        ));
+    }
+    let value = format!("\"{}\"", "x".repeat(VALUE - 2));
+    let before = live_bytes();
+
+    for number in 0..KEYS {
+        let push = serde_json::json!({"push": {"channel": "poll", "pub": {
+            "key": key(number), "data": value, "version": 1,
+        }}});
+        machine.handle(Input::Frame {
+            transport,
+            data: push.to_string().into_bytes(),
+        });
+    }
+    let per_key = (live_bytes() - before) / KEYS;
+
+    println!(
+        "@P report: bytes per tracked shared poll key for its delta base, with \
+         {VALUE}-byte values: {per_key}"
+    );
+    drop(machine);
 }
 
 async fn memory_stays_flat_across_reconnects() {

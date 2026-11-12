@@ -48,9 +48,13 @@ pub struct Statistics {
     pub messages_out: u64,
     /// Publications of client-side and server-side subscriptions delivered:
     /// taken from a stream, or counted as taken where no stream holds them
-    /// (Block 15). A withdrawn publication never counts.
+    /// (Block 15). A withdrawn publication never counts. With the
+    /// `unstable` feature, a map subscription's `Update` counts, its `Sync`
+    /// not (Block 45, D11), and a shared poll subscription's `Update` of a
+    /// publication counts, a removal the client made itself not (Block 47,
+    /// D13).
     pub publications_delivered: u64,
-    /// Client-side subscriptions in the registry.
+    /// Client-side subscriptions in the registry, of every kind.
     pub subscriptions: usize,
     /// Server-side subscriptions the client tracks.
     pub server_subscriptions: usize,

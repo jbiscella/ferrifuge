@@ -583,7 +583,29 @@ in any order, a subscription's requests go one at a time, each after the
 reply to the one before, and the next subscribe waits for them; a request
 unanswered within `Config::timeout` there makes the client reconnect with
 `connecting` 3 "shared poll request timeout".
-Delta compression is not offered yet for shared poll subscriptions. A server older than 6.8.0 answers
+`.delta(DeltaFormat::Fossil)` on the builder asks for per-key deltas, on
+namespaces with `allowed_delta_types: ["fossil"]`: each key's chain is
+separate, the application gets whole values, byte for byte, and
+`Subscribed::delta` says whether the server agreed. On Centrifugo OSS a
+change goes as a delta only when the backend's refresh response gives the
+key's previous value as `prev_data`, beside its `data`; without it, it goes
+whole. The client holds a base per tracked key, one copy of its last
+value, each within `max_message_bytes` and together within
+`max_delta_bases_bytes` (64 MiB by default): a value that would pass it is
+not delivered, and the subscription sends an unsubscribe command and ends
+with `unsubscribed` 7 "shared poll delta bases too large", without
+subscribing again by itself, as every subscribe would end the same way. An
+untrack, a removal or a refused track deletes its key's base, and every
+base goes when the subscription leaves `subscribed`: the server sends each
+key whole after a track, so the first value after each subscribe is whole.
+A delta that reaches a key tracked again while its untrack is unanswered,
+which the server sent before handling the untrack, is dropped; any other
+delta that cannot be applied reports an `error` event (`ErrorKind::Delta`,
+code 15), and the subscription subscribes again after its backoff
+(`subscribing` 2) and tracks its keys again, each value coming back whole.
+`delta_statistics()` counts the values received with delta on.
+
+A server older than 6.8.0 answers
 a shared poll subscription as a stream one, and the subscription ends with
 `unsubscribed` 8; a namespace of another type refuses it with 108. A
 shared poll subscription shares the registry with the other kinds, one per
