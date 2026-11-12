@@ -292,15 +292,11 @@ async fn unsubscribed_by_the_server(world: &mut ClientWorld, code: u32, epoch: S
         &json!({"push": {"channel": channel, "unsubscribe": {"code": code, "reason": "insufficient state"}}})
             .to_string(),
     );
-    loop {
-        match world.next_shared_poll_event().await {
-            SharedPollSubscriptionEvent::Subscribing { code: got, .. } => {
-                assert_eq!(got, code);
-                break;
-            }
-            other => panic!("expected subscribing, got {other:?}"),
-        }
-    }
+    let event = world.next_shared_poll_event().await;
+    assert!(
+        matches!(event, SharedPollSubscriptionEvent::Subscribing { code: got, .. } if got == code),
+        "expected subscribing with {code}, got {event:?}"
+    );
     subscribed_again(world).await;
 }
 
@@ -429,12 +425,8 @@ async fn replay_carries_every_key(world: &mut ClientWorld, version: u64) {
 #[when("unsubscribe is called and the fake server answers it")]
 async fn unsubscribed(world: &mut ClientWorld) {
     world.shared_poll().unsubscribe();
-    loop {
-        match world.next_shared_poll_event().await {
-            SharedPollSubscriptionEvent::Unsubscribed { .. } => break,
-            other => panic!("expected unsubscribed, got {other:?}"),
-        }
-    }
+    let event = world.next_shared_poll_event().await;
+    assert_eq!(event.name(), "unsubscribed", "{event:?}");
     let channel = world.shared_poll().channel().to_owned();
     let fake = world.fake();
     wait_until("the unsubscribe command", || {
@@ -509,7 +501,7 @@ async fn signed_again(world: &mut ClientWorld) {
     assert_eq!(signature_calls(world)[1], ["a", "b"]);
 }
 
-#[then(regex = r#"^after the 1 s to 15 s backoff the replay's track request carries key (\w+)$"#)]
+#[then(regex = r"^after the 1 s to 15 s backoff the replay's track request carries key (\w+)$")]
 async fn replayed_after_the_backoff(world: &mut ClientWorld, key: String) {
     let since = world.shared_polls.at.expect("an error seen");
     let request = tokio::time::timeout(Duration::from_secs(4), replayed(world, 2))
@@ -525,7 +517,7 @@ async fn replayed_after_the_backoff(world: &mut ClientWorld, key: String) {
     assert!(keys.contains(&"a".to_owned()), "{request}");
 }
 
-#[then(regex = r#"^the fake server receives an untrack of key (\w+) and tracked_keys is (\w+)$"#)]
+#[then(regex = r"^the fake server receives an untrack of key (\w+) and tracked_keys is (\w+)$")]
 async fn untracked_and_kept(world: &mut ClientWorld, key: String, kept: String) {
     let channel = world.shared_poll().channel().to_owned();
     wait_until("an untrack request", || {

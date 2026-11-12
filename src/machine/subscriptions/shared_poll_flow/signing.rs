@@ -72,28 +72,19 @@ pub(in crate::machine) struct Signing {
     signed: Vec<Signed>,
 }
 
-/// What runs again after a failure (D7).
-#[derive(Debug, Clone, Copy)]
-enum Retry {
-    /// The refresh of every signature.
-    Refresh,
-    /// Signing the keys tracked without a signature.
-    Sign,
-    /// The replay of the signatures held, after a failing track request.
-    Replay,
-}
-
-/// A retry timer of a subscription's `subscribed` period (D7); the
-/// refresh at an expiry is the owner's timer of the subscription
+/// What runs again after a failure (D7): a retry timer of a
+/// subscription's `subscribed` period, one of each at most; the refresh at
+/// an expiry is the owner's timer of the subscription
 /// ([`Action::SetSharedPollRefresh`]).
-#[derive(Debug, Clone, Copy)]
-pub(in crate::machine) enum FlowTimer {
-    /// The refresh failed and runs again.
-    RefreshRetry,
-    /// Signing the keys without a signature failed and runs again.
-    SignRetry,
-    /// A track request failed for a while: the replay runs again.
-    ReplayRetry,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::machine) enum Retry {
+    /// The refresh of every signature failed.
+    Refresh,
+    /// Signing the keys tracked without a signature failed.
+    Sign,
+    /// A track request failed for a while: the replay of the signatures
+    /// held runs again.
+    Replay,
 }
 
 impl SharedPollFlow {
@@ -138,7 +129,7 @@ impl SharedPollFlow {
     }
 
     /// Removes the timers of `kinds`, giving them to cancel.
-    fn take_timers(&mut self, kinds: impl Fn(FlowTimer) -> bool) -> Vec<SharedPollTimer> {
+    fn take_timers(&mut self, kinds: impl Fn(Retry) -> bool) -> Vec<SharedPollTimer> {
         let mut taken = Vec::new();
         self.timers.retain(|(timer, kind)| {
             let take = kinds(*kind);
@@ -422,7 +413,7 @@ impl Machine {
             return;
         };
         let mut ended: Vec<Action> = flow
-            .take_timers(|kind| matches!(kind, FlowTimer::RefreshRetry))
+            .take_timers(|kind| kind == Retry::Refresh)
             .into_iter()
             .map(Action::CancelSharedPollTimer)
             .collect();
@@ -519,31 +510,17 @@ impl Machine {
         else {
             return;
         };
-        let (attempts, kind, (min, max)) = match retry {
-            Retry::Refresh => (
-                &mut flow.refresh_attempts,
-                FlowTimer::RefreshRetry,
-                (RETRY_MIN, RETRY_MAX),
-            ),
-            Retry::Sign => (
-                &mut flow.sign_attempts,
-                FlowTimer::SignRetry,
-                (RETRY_MIN, RETRY_MAX),
-            ),
-            Retry::Replay => (
-                &mut flow.replay_attempts,
-                FlowTimer::ReplayRetry,
-                (REPLAY_MIN, REPLAY_MAX),
-            ),
+        let (attempts, (min, max)) = match retry {
+            Retry::Refresh => (&mut flow.refresh_attempts, (RETRY_MIN, RETRY_MAX)),
+            Retry::Sign => (&mut flow.sign_attempts, (RETRY_MIN, RETRY_MAX)),
+            Retry::Replay => (&mut flow.replay_attempts, (REPLAY_MIN, REPLAY_MAX)),
         };
         let delay = backoff::delay(*attempts, min, max, &mut self.rng);
         *attempts = attempts.saturating_add(1);
-        let replaced = flow.take_timers(|scheduled| {
-            std::mem::discriminant(&scheduled) == std::mem::discriminant(&kind)
-        });
+        let replaced = flow.take_timers(|scheduled| scheduled == retry);
         let timer = self.new_shared_poll_timer();
         if let Some(flow) = self.shared_poll_flow(id) {
-            flow.timers.push((timer, kind));
+            flow.timers.push((timer, retry));
         }
         for old in replaced {
             self.actions.push(Action::CancelSharedPollTimer(old));
@@ -566,9 +543,9 @@ impl Machine {
             return;
         }
         match kind {
-            FlowTimer::RefreshRetry => self.start_refresh(id),
-            FlowTimer::SignRetry => self.sign_unsigned(id),
-            FlowTimer::ReplayRetry => self.shared_poll_replay(id),
+            Retry::Refresh => self.start_refresh(id),
+            Retry::Sign => self.sign_unsigned(id),
+            Retry::Replay => self.shared_poll_replay(id),
         }
     }
 }
