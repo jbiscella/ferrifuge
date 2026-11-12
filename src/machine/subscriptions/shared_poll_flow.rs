@@ -6,10 +6,12 @@
 //! (`src/subscription.ts:1109-2245`, `:2915-3084`), except where Block 47
 //! decides otherwise.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::super::delivery::Owner;
-use super::super::{Action, FetchId, Machine, SharedPollSubscriptionOptions, SubscriptionId};
+use super::super::{
+    Action, FetchId, Machine, SharedPollSubscriptionOptions, SharedPollTimer, SubscriptionId,
+};
 use crate::fossil::DeltaError;
 use crate::shared_poll::SharedPollUpdate;
 use crate::token::Secret;
@@ -39,6 +41,18 @@ const FRAME_COST: usize = 256;
 /// The worst-case cost of a key in an untrack list, beyond its doubly
 /// escaped length: its quotes and separator (Block 47, D7).
 const UNTRACK_KEY_COST: usize = 6;
+/// The worst-case cost of a batch, beyond its signature and items (D7).
+const BATCH_COST: usize = 40;
+/// The worst-case cost of an item, beyond its key's doubly escaped length:
+/// its fields and a version at `u64::MAX` (D7).
+const ITEM_COST: usize = 48;
+
+/// Reason of `connecting` 3 when a shared poll request's reply deadline
+/// passes over an emulated transport (D12).
+const REQUEST_TIMEOUT_REASON: &str = "shared poll request timeout";
+
+/// The message of error 12 for a batch over `max_track_frame_bytes` (D6).
+const BATCH_TOO_LARGE: &str = "track batch over max_track_frame_bytes";
 
 /// What makes a shared poll subscription one: the keys it tracks, the
 /// signatures it holds for them, and the requests in flight (Block 47, D5).
@@ -60,6 +74,23 @@ pub(in crate::machine) struct SharedPollFlow {
     /// Signature requests awaiting their answer, with the generation that
     /// made them.
     fetches: HashMap<FetchId, u64>,
+    /// Requests not sent yet: over an emulated transport each waits for
+    /// the reply of the one before (D12), and a replay's frames each wait
+    /// for the reply of the frame before (D7).
+    queue: VecDeque<Queued>,
+}
+
+/// A track or untrack request waiting to be sent.
+#[derive(Debug)]
+struct Queued {
+    generation: u64,
+    request: SubRefreshRequest,
+    track: bool,
+    keys: Vec<String>,
+    /// A frame of a replay (D7).
+    replay: bool,
+    /// Waits for the reply of the replay frame before it (D7).
+    after_reply: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,12 +113,16 @@ pub(in crate::machine) struct TrackCommand {
     generation: u64,
     track: bool,
     keys: Vec<String>,
+    /// A frame of a replay (D7).
+    replay: bool,
+    /// Its reply deadline, over an emulated transport (D12).
+    timer: Option<SharedPollTimer>,
 }
 
 impl TrackCommand {
-    /// Whether it is a request of subscription `id`.
-    pub(in crate::machine) fn of(&self, id: SubscriptionId) -> bool {
-        self.subscription == id
+    /// Its reply deadline, if it has one.
+    pub(in crate::machine) fn timer(&self) -> Option<SharedPollTimer> {
+        self.timer
     }
 }
 
@@ -101,6 +136,7 @@ impl SharedPollFlow {
             library: Vec::new(),
             generation: 0,
             fetches: HashMap::new(),
+            queue: VecDeque::new(),
         }
     }
 
@@ -182,6 +218,57 @@ impl SharedPollFlow {
         self.tracked.clear();
         self.library.clear();
         self.fetches.clear();
+        self.queue.clear();
+    }
+
+    /// The connection is gone: nothing queued for it is sent.
+    pub(in crate::machine) fn connection_lost(&mut self) {
+        self.queue.clear();
+    }
+
+    /// The worst-case cost of a track request of `batches` on `channel`
+    /// (D7): JSON inside an emulation request, each version at `u64::MAX`.
+    fn track_cost<'a>(channel: &str, batches: impl IntoIterator<Item = &'a TrackBatch>) -> usize {
+        FRAME_COST
+            + escaped_twice(channel)
+            + batches.into_iter().map(Self::batch_cost).sum::<usize>()
+    }
+
+    /// The worst-case cost of `batch` in a track request (D7).
+    fn batch_cost(batch: &TrackBatch) -> usize {
+        BATCH_COST
+            + escaped_twice(&batch.signature.0)
+            + batch
+                .items
+                .iter()
+                .map(|item| escaped_twice(&item.key) + ITEM_COST)
+                .sum::<usize>()
+    }
+
+    /// `batches` grouped in frames, in order, each within `budget` by the
+    /// worst-case cost; a batch too large for any goes alone (D7).
+    fn track_frames(
+        channel: &str,
+        batches: Vec<TrackBatch>,
+        budget: usize,
+    ) -> Vec<Vec<TrackBatch>> {
+        let base = Self::track_cost(channel, []);
+        let mut frames = Vec::new();
+        let mut frame = Vec::new();
+        let mut cost = base;
+        for batch in batches {
+            let batch_cost = Self::batch_cost(&batch);
+            if !frame.is_empty() && cost + batch_cost > budget {
+                frames.push(std::mem::take(&mut frame));
+                cost = base;
+            }
+            cost += batch_cost;
+            frame.push(batch);
+        }
+        if !frame.is_empty() {
+            frames.push(frame);
+        }
+        frames
     }
 
     /// The untrack requests of `keys` on `channel`, each within `budget`
@@ -346,29 +433,65 @@ impl Machine {
         items: Vec<SharedPollTrackItem>,
         signature: String,
     ) {
-        let Some(flow) = self.shared_poll_flow(id) else {
-            return;
-        };
         if items.is_empty() {
             return;
         }
-        for item in &items {
+        let batch = TrackBatch {
+            signature: Secret(signature),
+            items: items
+                .into_iter()
+                .map(|item| KeyedItem {
+                    key: item.key,
+                    version: item.version,
+                })
+                .collect(),
+        };
+        let keys: Vec<String> = batch.items.iter().map(|item| item.key.clone()).collect();
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return;
+        };
+        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+            return;
+        };
+        // A single batch cannot be split, and a frame over the server's
+        // limit would end the client: refused before the library or the
+        // wire (D6).
+        if SharedPollFlow::track_cost(&sub.channel, [&batch]) > flow.max_track_frame_bytes {
+            return self.batch_refused(id, keys);
+        }
+        for item in &batch.items {
             flow.track(&item.key, item.version);
         }
-        let keys: Vec<String> = items.iter().map(|item| item.key.clone()).collect();
-        flow.add_signature(keys, signature.clone());
+        flow.add_signature(keys, batch.signature.0.clone());
         if self.subscribed_now(id) {
-            let batch = TrackBatch {
-                signature: Secret(signature),
-                items: items
-                    .into_iter()
-                    .map(|item| KeyedItem {
-                        key: item.key,
-                        version: item.version,
-                    })
-                    .collect(),
-            };
-            self.send_track(id, vec![batch]);
+            self.send_track(id, vec![batch], false);
+        }
+    }
+
+    /// A batch over the frame budget (D6): error 12 of kind `Track`, its
+    /// keys untracked, on the server too when they were tracked, each with
+    /// a removal.
+    fn batch_refused(&mut self, id: SubscriptionId, keys: Vec<String>) {
+        self.emit_shared_poll_error(
+            id,
+            ErrorKind::Track,
+            codes::error::BAD_CONFIGURATION,
+            BATCH_TOO_LARGE.to_owned(),
+        );
+        let keys = distinct(keys);
+        let Some(flow) = self.shared_poll_flow(id) else {
+            return;
+        };
+        let held: Vec<String> = keys
+            .iter()
+            .filter(|key| flow.untrack(key))
+            .cloned()
+            .collect();
+        if self.subscribed_now(id) {
+            self.send_untrack(id, held);
+        }
+        for key in keys {
+            self.emit_shared_poll_update(id, SharedPollUpdate::removal(key), None, false);
         }
     }
 
@@ -386,10 +509,6 @@ impl Machine {
             self.send_untrack(id, keys);
         }
     }
-
-    /// A track or untrack request's reply deadline passed (D12).
-    #[allow(clippy::unused_self)] // Until D12's green step.
-    fn shared_poll_timer_fired(&mut self, _timer: super::super::SharedPollTimer) {}
 
     /// Asks the `get_signature` callback to sign `keys`, when there is one
     /// (D6).
@@ -440,7 +559,7 @@ impl Machine {
                 };
                 let batch = flow.batch(&signed);
                 flow.add_signature(signed.keys, signed.signature.0);
-                self.send_track(id, vec![batch]);
+                self.send_track(id, vec![batch], false);
             }
             Err(error) => self.emit_shared_poll_error(
                 id,
@@ -451,25 +570,42 @@ impl Machine {
         }
     }
 
-    /// Sends a track request of `batches` (D7).
-    fn send_track(&mut self, id: SubscriptionId, batches: Vec<TrackBatch>) {
-        let keys = batches
-            .iter()
-            .flat_map(|batch| batch.items.iter().map(|item| item.key.clone()))
-            .collect();
-        self.send_track_command(
-            id,
-            SubRefreshRequest {
-                kind: TRACK,
-                track: batches,
-                ..SubRefreshRequest::default()
-            },
-            true,
-            keys,
-        );
+    /// Queues a track request of `batches` (D7), or the frames of a
+    /// `replay` within the frame budget, each after the reply to the one
+    /// before.
+    fn send_track(&mut self, id: SubscriptionId, batches: Vec<TrackBatch>, replay: bool) {
+        let Some(sub) = self.subscriptions.by_id.get(&id) else {
+            return;
+        };
+        let Some(flow) = sub.shared_poll.as_ref() else {
+            return;
+        };
+        let frames = if replay {
+            SharedPollFlow::track_frames(&sub.channel, batches, flow.max_track_frame_bytes)
+        } else {
+            vec![batches]
+        };
+        for (number, batches) in frames.into_iter().enumerate() {
+            let keys = batches
+                .iter()
+                .flat_map(|batch| batch.items.iter().map(|item| item.key.clone()))
+                .collect();
+            self.queue_request(
+                id,
+                SubRefreshRequest {
+                    kind: TRACK,
+                    track: batches,
+                    ..SubRefreshRequest::default()
+                },
+                true,
+                keys,
+                (replay, number > 0),
+            );
+        }
+        self.pump_requests(id);
     }
 
-    /// Sends untrack requests of `keys`, as many as the frame budget needs
+    /// Queues untrack requests of `keys`, as many as the frame budget needs
     /// (D7).
     fn send_untrack(&mut self, id: SubscriptionId, keys: Vec<String>) {
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
@@ -481,7 +617,7 @@ impl Machine {
         let requests =
             SharedPollFlow::untrack_requests(&sub.channel, keys, flow.max_track_frame_bytes);
         for keys in requests {
-            self.send_track_command(
+            self.queue_request(
                 id,
                 SubRefreshRequest {
                     kind: UNTRACK,
@@ -490,31 +626,103 @@ impl Machine {
                 },
                 false,
                 keys,
+                (false, false),
             );
+        }
+        self.pump_requests(id);
+    }
+
+    /// Queues `request` of subscription `id`; `(replay, after_reply)` says
+    /// whether it is a replay frame, and one waiting for the frame before.
+    fn queue_request(
+        &mut self,
+        id: SubscriptionId,
+        request: SubRefreshRequest,
+        track: bool,
+        keys: Vec<String>,
+        (replay, after_reply): (bool, bool),
+    ) {
+        if let Some(flow) = self.shared_poll_flow(id) {
+            let generation = flow.generation;
+            flow.queue.push_back(Queued {
+                generation,
+                request,
+                track,
+                keys,
+                replay,
+                after_reply,
+            });
         }
     }
 
-    /// Sends `request` for subscription `id`, one of the client's own
-    /// commands (D7).
-    fn send_track_command(
-        &mut self,
-        id: SubscriptionId,
-        mut request: SubRefreshRequest,
-        track: bool,
-        keys: Vec<String>,
-    ) {
+    /// The requests of `id` in flight: whether any is, and whether a replay
+    /// frame is.
+    fn requests_in_flight(&self, id: SubscriptionId) -> (bool, bool) {
+        let mine = || {
+            self.subscriptions
+                .track_commands
+                .values()
+                .filter(move |command| command.subscription == id)
+        };
+        (
+            mine().next().is_some(),
+            mine().any(|command| command.replay),
+        )
+    }
+
+    /// Sends what the queue of `id` lets go: over an emulated transport one
+    /// request at a time (D12); a replay frame after the reply to the one
+    /// before (D7); a request of an earlier subscription is dropped.
+    fn pump_requests(&mut self, id: SubscriptionId) {
+        loop {
+            if !self.subscribed_now(id) {
+                return;
+            }
+            let emulated = self.transport_kind().is_emulated();
+            let (busy, replaying) = self.requests_in_flight(id);
+            let Some(flow) = self.shared_poll_flow(id) else {
+                return;
+            };
+            let Some(front) = flow.queue.front() else {
+                return;
+            };
+            if front.generation != flow.generation {
+                flow.queue.pop_front();
+                continue;
+            }
+            if (emulated && busy) || (front.after_reply && replaying) {
+                return;
+            }
+            let queued = flow.queue.pop_front().expect("checked above");
+            self.send_track_command(id, queued, emulated);
+        }
+    }
+
+    /// Sends `queued` for subscription `id`, one of the client's own
+    /// commands (D7), with a reply deadline over an emulated transport
+    /// (D12).
+    fn send_track_command(&mut self, id: SubscriptionId, queued: Queued, emulated: bool) {
         let Some(transport) = self.transport.filter(|_| self.state == State::Connected) else {
             return;
         };
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_ref() else {
-            return;
-        };
+        let Queued {
+            generation,
+            mut request,
+            track,
+            keys,
+            replay,
+            ..
+        } = queued;
         request.channel.clone_from(&sub.channel);
-        let generation = flow.generation;
         let command_id = self.command_id();
+        let timer = emulated.then(|| {
+            let timer = SharedPollTimer(self.subscriptions.next_track_timer);
+            self.subscriptions.next_track_timer += 1;
+            timer
+        });
         self.subscriptions.track_commands.insert(
             command_id,
             TrackCommand {
@@ -522,6 +730,8 @@ impl Machine {
                 generation,
                 track,
                 keys,
+                replay,
+                timer,
             },
         );
         self.send(
@@ -531,6 +741,43 @@ impl Machine {
                 method: Method::SubRefresh(request),
             },
         );
+        if let Some(timer) = timer {
+            self.actions
+                .push(Action::SetSharedPollTimer(timer, self.config.timeout));
+        }
+    }
+
+    /// A track or untrack request's reply deadline passed (D12): over an
+    /// emulated transport whether the keys are tracked is unknown, so the
+    /// client reconnects with `connecting` 3.
+    fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
+        let pending = self
+            .subscriptions
+            .track_commands
+            .values()
+            .any(|command| command.timer == Some(timer));
+        if pending {
+            self.disconnect(
+                codes::connecting::SUBSCRIBE_TIMEOUT,
+                REQUEST_TIMEOUT_REASON,
+                true,
+            );
+        }
+    }
+
+    /// The reply deadline of track or untrack request `command`, if it has
+    /// one: its reply was read (Block 15).
+    pub(in crate::machine) fn track_command_timer(&self, command: u32) -> Option<SharedPollTimer> {
+        self.subscriptions
+            .track_commands
+            .get(&command)
+            .and_then(|command| command.timer)
+    }
+
+    /// Whether the next subscribe of `id` waits for its requests in flight:
+    /// over an emulated transport they could be handled after it (D12).
+    pub(in crate::machine) fn shared_poll_requests_pending(&self, id: SubscriptionId) -> bool {
+        self.transport_kind().is_emulated() && self.requests_in_flight(id).0
     }
 
     /// The subscribe command `command_id` of shared poll subscription `id`,
@@ -622,7 +869,7 @@ impl Machine {
             .filter(|key| !flow.library.iter().any(|signed| signed.keys.contains(key)))
             .collect();
         if !batches.is_empty() {
-            self.send_track(id, batches);
+            self.send_track(id, batches, true);
         }
         if !unsigned.is_empty() {
             self.fetch_signature(id, unsigned);
@@ -641,6 +888,9 @@ impl Machine {
         let Some(command) = self.subscriptions.track_commands.remove(&reply.id) else {
             return;
         };
+        if let Some(timer) = command.timer {
+            self.actions.push(Action::CancelSharedPollTimer(timer));
+        }
         let id = command.subscription;
         let current = self.subscribed_now(id)
             && self
@@ -649,9 +899,15 @@ impl Machine {
                 .get(&id)
                 .and_then(|sub| sub.shared_poll.as_ref())
                 .is_some_and(|flow| flow.generation == command.generation);
-        if !current {
-            return;
+        if current {
+            self.track_command_answered(command, reply);
         }
+        self.requests_settled(id);
+    }
+
+    /// The reply to a current track or untrack request (D7).
+    fn track_command_answered(&mut self, command: TrackCommand, reply: Reply) {
+        let id = command.subscription;
         if let Some(error) = reply.error {
             if !command.track {
                 return self.emit_shared_poll_error(
@@ -663,8 +919,22 @@ impl Machine {
             }
             let refused = !(error.code == SIGNATURE_EXPIRED || error.code < 100 || error.temporary);
             self.emit_shared_poll_error(id, ErrorKind::Track, error.code, error.message);
+            let mut keys = command.keys;
+            // A failing replay frame stops the rest (D7).
+            if command.replay
+                && let Some(flow) = self.shared_poll_flow(id)
+            {
+                let generation = flow.generation;
+                flow.queue.retain_mut(|queued| {
+                    let rest = queued.replay && queued.generation == generation;
+                    if rest {
+                        keys.append(&mut queued.keys);
+                    }
+                    !rest
+                });
+            }
             if refused {
-                self.track_refused(id, command.keys);
+                self.track_refused(id, keys);
             }
             return;
         }
@@ -673,6 +943,17 @@ impl Machine {
         };
         if command.track {
             self.shared_poll_publications(id, result.items);
+        }
+    }
+
+    /// A request of `id` was answered: the queue goes on, and a subscribe
+    /// waiting for the requests in flight follows once none is left (D12).
+    fn requests_settled(&mut self, id: SubscriptionId) {
+        self.pump_requests(id);
+        if !self.requests_in_flight(id).0
+            && let Some(channel) = self.subscription_channel(id).cloned()
+        {
+            self.wake_waiting(&channel);
         }
     }
 

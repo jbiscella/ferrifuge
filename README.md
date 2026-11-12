@@ -538,12 +538,22 @@ only by the application's calls and its backend's answers, not by the
 server, and are not bounded by the client: `max_keys_per_connection` is
 the usual limit.
 
-Track and untrack requests are `sub_refresh` commands. An untrack of many
-keys is split so that no request passes `max_track_frame_bytes` (60 000
-by default) by its worst-case size; keep it below the server's
+Track and untrack requests are `sub_refresh` commands, none larger than
+`max_track_frame_bytes` (60 000 by default) by its worst-case size: an
+untrack of many keys is split, the tracking after a reconnect goes in
+frames, each sent once the one before is answered, and a
+`track_with_signature` batch larger than that, which a signature over
+exactly its keys makes impossible to split, is refused before it is sent:
+an `Error` event of kind `Track` with code 12, and a removal `Update` for
+each of its keys. Keep `max_track_frame_bytes` below the server's
 `websocket.message_size_limit` and the emulation endpoint's
 `max_request_body_size`, 65 536 bytes each by default, as a larger
 websocket message closes the connection with 1009, which ends the client.
+Over `http_stream` and `sse`, where the server may handle separate requests
+in any order, a subscription's requests go one at a time, each after the
+reply to the one before, and the next subscribe waits for them; a request
+unanswered within `Config::timeout` there makes the client reconnect with
+`connecting` 3 "shared poll request timeout".
 Delta compression is not offered yet for shared poll subscriptions. A server older than 6.8.0 answers
 a shared poll subscription as a stream one, and the subscription ends with
 `unsubscribed` 8; a namespace of another type refuses it with 108. A
@@ -1000,7 +1010,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | 0 | `codes::connecting::CONNECT_CALLED` | `"connect called"` | `connect()` was called (Block 1) | at once |
 | 1 | `codes::connecting::TRANSPORT_CLOSED` | `"transport closed"` | the transport failed or closed, an undecodable frame included (Blocks 1, 8) | the next transport of a first fallback sequence at once, else after the reconnect backoff (and the jitter window when it was connected) |
 | 2 | `codes::connecting::NO_PING` | `"no ping"` | no data from the server within its ping interval plus `max_server_ping_delay`, or a system sleep longer than that (Blocks 4, 25) | after the reconnect backoff |
-| 3 | `codes::connecting::SUBSCRIBE_TIMEOUT` | `"subscribe timeout"` | a subscribe got no reply within `Config::timeout`, so the server's state is unknown (Block 9) | after the reconnect backoff |
+| 3 | `codes::connecting::SUBSCRIBE_TIMEOUT` | `"subscribe timeout"`; `"shared poll request timeout"` for a shared poll request | a subscribe got no reply within `Config::timeout`, so the server's state is unknown (Block 9); over an emulated transport, a shared poll track or untrack request got none, so whether its keys are tracked is unknown (Block 47, D12; `unstable`) | after the reconnect backoff |
 | 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
 | 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
 | 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
@@ -1060,7 +1070,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | 9 | `codes::error::SUBSCRIPTION_REFRESH_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to refresh with (Block 10) | an `Error` event; the refresh is retried after 10 to 20 s |
 | 10 | `codes::error::TRANSPORT_WRITE` | `"transport write error"` | an emulation request carrying the call was answered with HTTP 413 (Block 8) | the call fails; a retry with the same data never succeeds |
 | 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
-| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
+| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17), or a shared poll track batch over `max_track_frame_bytes` (Block 47; `unstable`) | building fails; for a data callback, an `Error` event and a retry after the backoff; for a track batch, an `Error` event of kind `Track`, and its keys end with a removal `Update` each |
 | 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
 | 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message | a shared poll subscription's `get_signature` callback failed (Block 47, D6; `unstable`) | an `Error` event of kind `Track`; the keys stay tracked and are asked for again on the next subscribe |
 | 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
@@ -1089,7 +1099,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
 | `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
-| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | except for 109, a temporary error or one below 100, the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit) (Block 47, D7) |
+| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109, a temporary error or one below 100: nothing more until the next subscribe tracks the keys again (D7's retries: 47b, 47c); any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and a replay's frames not yet sent with them (Block 47, D7) |
 | shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
 | shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
 | call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |

@@ -62,6 +62,10 @@ pub(super) struct Subscriptions {
     /// their reply (Block 47, D7).
     #[cfg(feature = "unstable")]
     track_commands: HashMap<u32, shared_poll_flow::TrackCommand>,
+    /// The number of the next reply deadline of such a request (Block 47,
+    /// D12): never reused.
+    #[cfg(feature = "unstable")]
+    next_track_timer: u64,
 }
 
 /// Who started a subscribe (Block 18, D2).
@@ -459,7 +463,15 @@ impl Machine {
         {
             return;
         }
-        if subscriptions.channel_busy(&sub.channel) {
+        // Over an emulated transport a shared poll subscription's track
+        // and untrack requests in flight could be handled after the
+        // subscribe (Block 47, D12).
+        #[cfg(feature = "unstable")]
+        let busy =
+            subscriptions.channel_busy(&sub.channel) || self.shared_poll_requests_pending(id);
+        #[cfg(not(feature = "unstable"))]
+        let busy = subscriptions.channel_busy(&sub.channel);
+        if busy {
             self.subscriptions
                 .by_id
                 .get_mut(&id)
@@ -1168,20 +1180,12 @@ impl Machine {
         }
         #[cfg(not(feature = "unstable"))]
         let reserved_now = false;
-        // Its keys and signatures go too, and its requests in flight are
-        // abandoned (Block 47, D5).
+        // Its keys and signatures go too, and what it queued; the replies
+        // to its requests in flight change nothing (Block 47, D5, D12).
         #[cfg(feature = "unstable")]
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
             flow.forget();
-            self.subscriptions
-                .track_commands
-                .retain(|_, command| !command.of(id));
         }
-        let sub = self
-            .subscriptions
-            .by_id
-            .get_mut(&id)
-            .expect("checked above");
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
         sub.backoff.reset();
@@ -1543,7 +1547,11 @@ impl Machine {
         #[cfg(feature = "unstable")]
         self.subscriptions.reserved.clear();
         #[cfg(feature = "unstable")]
-        self.subscriptions.track_commands.clear();
+        for (_, command) in self.subscriptions.track_commands.drain() {
+            if let Some(timer) = command.timer() {
+                self.actions.push(Action::CancelSharedPollTimer(timer));
+            }
+        }
         for (id, _) in self
             .subscriptions
             .subscribes
@@ -1578,6 +1586,10 @@ impl Machine {
             #[cfg(feature = "unstable")]
             if let Some(map) = sub.map.as_mut() {
                 map.end_load();
+            }
+            #[cfg(feature = "unstable")]
+            if let Some(flow) = sub.shared_poll.as_deref_mut() {
+                flow.connection_lost();
             }
             if invalidated {
                 if let Some(fetch) = sub.fetch.take() {

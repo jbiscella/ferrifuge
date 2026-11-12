@@ -974,3 +974,62 @@ fn a_batch_over_the_budget_is_refused_before_it_is_sent() {
         [] as [std::string::String; 0]
     );
 }
+
+// D7: the worst-case cost of a track request bounds its bytes in every
+// encoding, versions up to u64::MAX included (a property test), and each
+// frame of a replay keeps within the budget.
+#[test]
+fn the_track_cost_bounds_every_encoding() {
+    let mut rng = fastrand::Rng::with_seed(4747);
+    let alphabet: Vec<char> = "ab\"\\\n\t\u{1}é€😀/<>".chars().collect();
+    let text = |rng: &mut fastrand::Rng, max: usize| -> String {
+        (0..rng.usize(0..max))
+            .map(|_| alphabet[rng.usize(..alphabet.len())])
+            .collect()
+    };
+    for _ in 0..200 {
+        let channel = text(&mut rng, 40);
+        let batches: Vec<TrackBatch> = (0..rng.usize(1..8))
+            .map(|_| TrackBatch {
+                signature: Secret(text(&mut rng, 120)),
+                items: (0..rng.usize(1..12))
+                    .map(|_| KeyedItem {
+                        key: text(&mut rng, 40),
+                        version: if rng.bool() { u64::MAX } else { rng.u64(..) },
+                    })
+                    .collect(),
+            })
+            .collect();
+        let budget = rng.usize(400..6000);
+        let frames = SharedPollFlow::track_frames(&channel, batches.clone(), budget);
+        assert_eq!(frames.concat(), batches);
+        for frame in frames {
+            let cost = SharedPollFlow::track_cost(&channel, &frame);
+            assert!(frame.len() == 1 || cost <= budget, "{cost} over {budget}");
+            let command = Command {
+                id: u32::MAX,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: channel.clone(),
+                    kind: TRACK,
+                    track: frame,
+                    ..SubRefreshRequest::default()
+                }),
+            };
+            let session = "0".repeat(36);
+            for codec in [Codec::Json, Codec::Protobuf] {
+                let encoded = codec.encode(std::slice::from_ref(&command));
+                let emulated = codec.emulation_request(&session, &session, &encoded);
+                assert!(
+                    encoded.len() <= cost,
+                    "{codec:?}: {} over {cost}",
+                    encoded.len()
+                );
+                assert!(
+                    emulated.len() <= cost,
+                    "{codec:?}: {} over {cost}",
+                    emulated.len()
+                );
+            }
+        }
+    }
+}
