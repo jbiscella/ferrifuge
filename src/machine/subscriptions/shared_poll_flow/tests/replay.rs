@@ -262,39 +262,42 @@ fn untrack_of(request: &Value) -> Vec<String> {
 
 // D7, D8 (47c): a key since untracked goes in the `untrack` field of the
 // frame that carries its batch, whichever frame that is; a frame takes a
-// batch with its untracks when both fit. At 1300 bytes three batches fit
-// a frame by themselves (1287 by the worst-case cost), but two with their
-// untracks (1075) and not three (1479): packing by the batches alone would
-// leave no room for the untracks.
+// batch with its untracks when both fit, else the batch starts the next
+// frame. By the worst-case costs, a frame is 267 bytes, a batch of five
+// keys 340 and its four untracks 64. At 1050 bytes a second batch fits a
+// frame by itself (1011) but not with its untracks (1075): one per frame.
+// At 1300 three batches fit by themselves (1287), two with their untracks
+// and not three (1479): two per frame.
 #[test]
 fn each_replay_frame_untracks_the_keys_of_its_own_batches() {
-    let (mut machine, transport, _, replay, groups) = mostly_untracked(1300, 6, 5, 4);
+    for (budget, per_frame) in [(1050, 1), (1300, 2)] {
+        let (mut machine, transport, _, replay, groups) = mostly_untracked(budget, 6, 5, 4);
 
-    let commands = answer_all(&mut machine, transport, &replay);
+        let commands = answer_all(&mut machine, transport, &replay);
 
-    let tracks: Vec<&Value> = commands
-        .iter()
-        .map(|(command, _)| command)
-        .filter(|command| command["sub_refresh"]["type"] == 1)
-        .collect();
-    assert_eq!(tracks.len(), 3, "{tracks:?}");
-    for (number, request) in tracks.iter().enumerate() {
-        let mut expected: Vec<String> = groups[number * 2][1..]
+        let tracks: Vec<&Value> = commands
             .iter()
-            .chain(&groups[number * 2 + 1][1..])
-            .cloned()
+            .map(|(command, _)| command)
+            .filter(|command| command["sub_refresh"]["type"] == 1)
             .collect();
-        let mut untracked = untrack_of(request);
-        expected.sort();
-        untracked.sort();
-        assert_eq!(untracked, expected, "frame {number}: {request}");
+        assert_eq!(tracks.len(), 6 / per_frame, "{budget}: {tracks:?}");
+        for (number, request) in tracks.iter().enumerate() {
+            let mut expected: Vec<String> = groups[number * per_frame..(number + 1) * per_frame]
+                .iter()
+                .flat_map(|keys| keys[1..].to_vec())
+                .collect();
+            let mut untracked = untrack_of(request);
+            expected.sort();
+            untracked.sort();
+            assert_eq!(untracked, expected, "{budget}, frame {number}: {request}");
+        }
+        assert!(
+            commands
+                .iter()
+                .all(|(command, size)| command["sub_refresh"]["type"] == 1 && *size <= budget),
+            "{budget}: {commands:?}"
+        );
     }
-    assert!(
-        commands
-            .iter()
-            .all(|(command, size)| command["sub_refresh"]["type"] == 1 && *size <= 1300),
-        "{commands:?}"
-    );
 }
 
 // D7, D8 (47c): a mostly untracked large key set (1800 keys of 44 bytes
