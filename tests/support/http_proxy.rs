@@ -64,6 +64,9 @@ struct ProxyState {
     refuse_over: Mutex<Option<usize>>,
     /// The bodies of the requests refused that way.
     refused: Mutex<Vec<Vec<u8>>>,
+    /// The bodies of the emulation requests received, in order (Block 47:
+    /// the commands a client sent a real server).
+    emulation_bodies: Mutex<Vec<Vec<u8>>>,
     /// A `Set-Cookie` value added to the stream response (Block 43b).
     stream_cookie: Mutex<Option<String>>,
     /// A `Set-Cookie` value added to every emulation response (Block 43b).
@@ -91,6 +94,7 @@ impl HttpProxy {
             requests: Mutex::new(Vec::new()),
             refuse_over: Mutex::new(None),
             refused: Mutex::new(Vec::new()),
+            emulation_bodies: Mutex::new(Vec::new()),
             stream_cookie: Mutex::new(None),
             emulation_cookie: Mutex::new(None),
             emulation_answered: AtomicUsize::new(0),
@@ -204,6 +208,11 @@ impl HttpProxy {
         self.state.refused.lock().unwrap().clone()
     }
 
+    /// The bodies of the emulation requests received, in order.
+    pub(crate) fn emulation_bodies(&self) -> Vec<Vec<u8>> {
+        self.state.emulation_bodies.lock().unwrap().clone()
+    }
+
     /// Whether a rejection is programmed and not yet answered.
     pub(crate) fn rejection_programmed(&self) -> bool {
         self.state.reject_next_emulation.load(Ordering::SeqCst)
@@ -289,6 +298,7 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
         return StatusCode::BAD_REQUEST.into_response();
     };
     if parts.uri.path() == "/emulation" {
+        state.emulation_bodies.lock().unwrap().push(body.to_vec());
         let mut carrying = state.reject_carrying.lock().unwrap();
         if carrying.is_some_and(|bytes| body.windows(bytes.len()).any(|window| window == bytes)) {
             *carrying = None;

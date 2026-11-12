@@ -55,6 +55,8 @@ struct Answers {
     shared_poll_items: HashMap<(String, String), Value>,
     /// Bodies of the shared poll refresh requests received.
     shared_poll_requests: Vec<Value>,
+    /// The epoch a shared poll refresh of a channel reports, if any.
+    shared_poll_epochs: HashMap<String, String>,
 }
 
 /// A programmed answer to the subscribe requests for a channel.
@@ -162,6 +164,17 @@ impl ProxyBackend {
             .unwrap()
             .shared_poll_items
             .insert((channel.to_owned(), key.to_owned()), item);
+    }
+
+    /// Makes the shared poll refresh of `channel` report `epoch` from now
+    /// on (Block 47, D8): a new or changed one makes the server unsubscribe
+    /// the channel's subscribers with 2500.
+    pub(crate) fn shared_poll_epoch(&self, channel: &str, epoch: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .shared_poll_epochs
+            .insert(channel.to_owned(), epoch.to_owned());
     }
 
     /// Bodies of the shared poll refresh requests received.
@@ -367,9 +380,10 @@ async fn subscribe(
 }
 
 /// Answers a shared poll refresh with the items programmed for the keys it
-/// names (Centrifugo's shared poll documentation: the request lists
-/// `items` by `key`, the result answers changed ones; an omitted item is
-/// unchanged).
+/// names, and the channel's epoch when one is programmed (Centrifugo's
+/// shared poll documentation: the request lists `items` by `key`, the
+/// result answers changed ones, an omitted item being unchanged; `epoch`
+/// sits beside `items`, one per response).
 async fn shared_poll_refresh(
     State(state): State<Arc<Mutex<Answers>>>,
     Json(request): Json<Value>,
@@ -388,8 +402,12 @@ async fn shared_poll_refresh(
                 .cloned()
         })
         .collect();
+    let mut result = json!({"items": items});
+    if let Some(epoch) = answers.shared_poll_epochs.get(&channel) {
+        result["epoch"] = json!(epoch);
+    }
     answers.shared_poll_requests.push(request);
-    Json(json!({"result": {"items": items}}))
+    Json(json!({"result": result}))
 }
 
 /// Answers RPCs: "echo" returns its input, "sum" returns `{"sum":3}`,
