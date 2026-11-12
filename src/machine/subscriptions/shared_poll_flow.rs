@@ -107,6 +107,14 @@ pub(in crate::machine) struct SharedPollFlow {
     epoch: Option<String>,
     /// Delta compression of the tracked keys' values (D10, D11).
     bases: Bases,
+    /// Keys a track frame of this `subscribed` period carried in its
+    /// `untrack` field, until a later track frame carrying the key is
+    /// answered (D7, D10): the server applies an inline untrack after it
+    /// tracked the key, answered and sent its value (centrifuge
+    /// `handleTrack`), so a delta of the key may follow while the client,
+    /// which tracked it again, holds no base. Library keys only, so at most
+    /// the subscription's keys.
+    inline_untracked: HashSet<String>,
     /// Track requests failed in a row with a temporary error, one below
     /// 100 or no reply in time: the step of the replay's backoff (D7).
     replay_attempts: u32,
@@ -236,6 +244,7 @@ impl SharedPollFlow {
                 max: options.max_delta_bases_bytes.get(),
             },
             replay_attempts: 0,
+            inline_untracked: HashSet::new(),
         }
     }
 
@@ -371,6 +380,7 @@ impl SharedPollFlow {
             tracked.base = None;
         }
         self.bases.bytes = 0;
+        self.inline_untracked.clear();
         self.refresh_again = false;
         self.refresh_attempts = 0;
         self.sign_attempts = 0;
@@ -897,6 +907,12 @@ impl Machine {
             ..
         } = queued;
         request.channel.clone_from(&sub.channel);
+        if purpose != Purpose::Untrack
+            && let Some(flow) = self.shared_poll_flow(id)
+        {
+            flow.inline_untracked
+                .extend(request.untrack.iter().cloned());
+        }
         let command_id = self.command_id();
         let timer = self.new_shared_poll_timer();
         self.subscriptions.track_commands.insert(
@@ -1134,6 +1150,17 @@ impl Machine {
                 .is_some_and(|flow| flow.generation == command.generation);
         let channel = command.channel.clone();
         if current {
+            // A track frame answered ends the inline untracks of the keys
+            // it tracks: the server has reset their state (D10).
+            if command.purpose != Purpose::Untrack
+                && let Some(flow) = self.shared_poll_flow(id)
+            {
+                for key in &command.keys {
+                    if !command.untracked.contains(key) {
+                        flow.inline_untracked.remove(key);
+                    }
+                }
+            }
             self.track_command_answered(command, reply);
         }
         self.requests_settled(id, &channel);
@@ -1416,9 +1443,10 @@ impl Machine {
     }
 
     /// A delta for `key` of `id`, which has no base (D10): dropped while an
-    /// untrack request of the key awaits its reply, queued or sent, since
-    /// the server may have sent it before handling the untrack, the key
-    /// tracked again since; any other is Block 19's failure.
+    /// untrack request of the key awaits its reply, queued or sent, or an
+    /// inline untrack of the key stands, since the server may have sent it
+    /// before applying the untrack, the key tracked again since; any other
+    /// is Block 19's failure.
     fn delta_without_base(&self, id: SubscriptionId, key: &str) -> Item {
         let Some(flow) = self
             .subscriptions
@@ -1440,7 +1468,7 @@ impl Machine {
         let sent = self.subscriptions.track_commands.values().any(|command| {
             command.subscription == id && names(command.purpose, command.generation, &command.keys)
         });
-        if queued || sent {
+        if queued || sent || flow.inline_untracked.contains(key) {
             Item::Dropped
         } else {
             Item::Failed(Failure::Delta(DeltaError::NoBase))
