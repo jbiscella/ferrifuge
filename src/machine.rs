@@ -314,7 +314,7 @@ pub struct MapSubscriptionOptions {
     pub common: SubscriptionOptions,
 }
 
-/// Block 45, D5: 64 MiB, Block 19 D6's inbound limit.
+/// Block 45, D5, and Block 47, D11: 64 MiB, Block 19 D6's inbound limit.
 #[cfg(feature = "unstable")]
 const DEFAULT_MAX_STATE_BYTES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::new(64 * 1024 * 1024).expect("not zero");
@@ -337,8 +337,8 @@ impl MapSubscriptionOptions {
 
 /// Options of a shared poll subscription in the machine (Block 47, D3):
 /// whether a `get_signature` callback signs keys, the frame budget of its
-/// track and untrack requests, and the options it shares with a stream
-/// subscription.
+/// track and untrack requests, the bound of its delta bases, and the
+/// options it shares with a stream subscription.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
@@ -357,11 +357,15 @@ pub struct SharedPollSubscriptionOptions {
     /// `websocket.message_size_limit` and the emulation endpoint's
     /// `max_request_body_size` (65 536 each by default).
     pub max_track_frame_bytes: std::num::NonZeroUsize,
+    /// Bytes the delta bases of the tracked keys may hold together, with
+    /// delta on (Block 47, D11): a key whose base would pass it ends the
+    /// subscription with `unsubscribed` 7 "shared poll delta bases too
+    /// large"; 64 MiB by default.
+    pub max_delta_bases_bytes: std::num::NonZeroUsize,
     /// The options a shared poll subscription shares with a stream
-    /// subscription: `data`, the token and its callback and the resubscribe
-    /// delays. The others do not apply to shared poll subscriptions and are
-    /// ignored (Block 47, out of scope); `delta` waits for per-key delta
-    /// bases (Block 47, D10).
+    /// subscription: `data`, the token and its callback, the resubscribe
+    /// delays and `delta`. The others do not apply to shared poll
+    /// subscriptions and are ignored (Block 47, out of scope).
     pub common: SubscriptionOptions,
 }
 
@@ -376,6 +380,7 @@ impl Default for SharedPollSubscriptionOptions {
         Self {
             signature_source: false,
             max_track_frame_bytes: DEFAULT_MAX_TRACK_FRAME_BYTES,
+            max_delta_bases_bytes: DEFAULT_MAX_STATE_BYTES,
             common: SubscriptionOptions::default(),
         }
     }

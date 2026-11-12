@@ -5,8 +5,8 @@
 //! an error. The same fields also carry server codes, in their own ranges
 //! (the last table). The client's logs show the state, code and reason
 //! (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
-//! adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6 and 8
-//! (8: Block 47), and errors 15, 16 and 17; error 14 is centrifuge-js's
+//! adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 8
+//! (7 and 8: Block 47), and errors 15, 16 and 17; error 14 is centrifuge-js's
 //! shared-poll code (Block 47). Blocks are those of the repository's
 //! `CLAUDE.md`.
 //!
@@ -60,6 +60,7 @@
 //! | 4 | [`unsubscribed::NOT_GRANTED_ON_RECONNECT`] | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
 //! | 5 | [`unsubscribed::MAP_STATE_TOO_LARGE`] | `"map state too large"` | a map subscription's load passed its `max_state_bytes` (Block 45, D5; `unstable`) | never, until `subscribe()` |
 //! | 6 | [`unsubscribed::MAP_NOT_SUPPORTED`] | `"map subscriptions not supported"` | the server answered a map subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 45, D15; `unstable`) | never, until `subscribe()` |
+//! | 7 | [`unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE`] | `"shared poll delta bases too large"` | a shared poll subscription's delta bases would pass its `max_delta_bases_bytes` (Block 47, D11; `unstable`) | never, until `subscribe()` |
 //! | 8 | [`unsubscribed::SHARED_POLL_NOT_SUPPORTED`] | `"shared poll subscriptions not supported"` | the server answered a shared poll subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 47, D4; `unstable`) | never, until `subscribe()` |
 //!
 //! ## `error`
@@ -197,6 +198,11 @@ pub mod unsubscribed {
     /// a Centrifugo before v6.8.0 does (Block 45, D15). Only map
     /// subscriptions, which need the `unstable` feature, use it.
     pub const MAP_NOT_SUPPORTED: u32 = 6;
+    /// A shared poll subscription's delta bases would pass its
+    /// `max_delta_bases_bytes`: every subscribe would end the same way
+    /// (Block 47, D11). Only shared poll subscriptions, which need the
+    /// `unstable` feature, use it.
+    pub const SHARED_POLL_DELTA_BASES_TOO_LARGE: u32 = 7;
     /// The server answered a shared poll subscription as a stream
     /// subscription, as a Centrifugo before v6.8.0 does (Block 47, D4). Only
     /// shared poll subscriptions, which need the `unstable` feature, use it.
