@@ -14,7 +14,7 @@ use super::super::delivery::Owner;
 use super::super::{
     Action, Machine, SharedPollSubscriptionOptions, SharedPollTimer, SubscriptionId,
 };
-use crate::fossil::DeltaError;
+use crate::fossil::{self, DeltaError};
 use crate::shared_poll::SharedPollUpdate;
 use crate::token::Secret;
 use crate::wire::{
@@ -34,7 +34,6 @@ const SHARED_POLL_TYPE: i32 = 4;
 const NOT_SUPPORTED_REASON: &str = "shared poll subscriptions not supported";
 
 /// Reason of [`codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE`].
-#[allow(dead_code)] // Sent once per-key delta bases are bounded (47d, D11).
 const DELTA_BASES_TOO_LARGE_REASON: &str = "shared poll delta bases too large";
 
 /// Error code by which the server refuses an expired signature
@@ -106,6 +105,8 @@ pub(in crate::machine) struct SharedPollFlow {
     /// The epoch of the last subscribe reply, an absent one as `""`; `None`
     /// until the first reply after `unsubscribed` (D5, D8).
     epoch: Option<String>,
+    /// Delta compression of the tracked keys' values (D10, D11).
+    bases: Bases,
     /// Track requests failed in a row with a temporary error, one below
     /// 100 or no reply in time: the step of the replay's backoff (D7).
     replay_attempts: u32,
@@ -123,6 +124,18 @@ pub(in crate::machine) enum Purpose {
     Untrack,
 }
 
+/// Whether delta is on, and what the delta bases of the tracked keys hold
+/// (D10, D11); each base is its key's (`Tracked::base`).
+#[derive(Debug)]
+struct Bases {
+    /// The last subscribe reply turned delta on.
+    on: bool,
+    /// Bytes the bases hold together.
+    bytes: usize,
+    /// `max_delta_bases_bytes`.
+    max: usize,
+}
+
 /// A track or untrack request waiting to be sent.
 #[derive(Debug)]
 struct Queued {
@@ -136,10 +149,14 @@ struct Queued {
     after_reply: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Tracked {
     version: u64,
     place: u64,
+    /// The value of the last publication handled for the key while delta
+    /// is on, which its next delta applies to (D10): it goes with the key,
+    /// so no base outlives its key.
+    base: Option<Box<[u8]>>,
 }
 
 /// A signature the client holds, and the keys it covers.
@@ -174,6 +191,25 @@ impl TrackCommand {
     }
 }
 
+/// What a publication of a shared poll subscription gives (D9).
+enum Item {
+    /// Nothing: dropped.
+    Dropped,
+    /// An update, or a removal, to emit; taking it moves its key's version
+    /// to the one given.
+    Update(SharedPollUpdate, Option<(String, u64)>),
+    /// The subscription cannot go on as it is.
+    Failed(Failure),
+}
+
+/// Why a publication ends `subscribed`.
+enum Failure {
+    /// A delta that cannot be applied (Block 19, D3, D8).
+    Delta(DeltaError),
+    /// The delta bases would pass `max_delta_bases_bytes` (D11).
+    BasesTooLarge,
+}
+
 impl SharedPollFlow {
     fn new(options: &SharedPollSubscriptionOptions) -> Self {
         Self {
@@ -194,6 +230,11 @@ impl SharedPollFlow {
             refresh_armed: false,
             signature_cost: signing::unknown_signature_cost(),
             epoch: None,
+            bases: Bases {
+                on: false,
+                bytes: 0,
+                max: options.max_delta_bases_bytes.get(),
+            },
             replay_attempts: 0,
         }
     }
@@ -207,21 +248,29 @@ impl SharedPollFlow {
         }
         let place = self.next_place;
         self.next_place += 1;
-        self.tracked
-            .insert(key.to_owned(), Tracked { version, place });
+        self.tracked.insert(
+            key.to_owned(),
+            Tracked {
+                version,
+                place,
+                base: None,
+            },
+        );
         true
     }
 
-    /// Stops tracking `key`; true when it was tracked. A signature none of
-    /// whose keys is tracked is dropped (D6).
+    /// Stops tracking `key`, its delta base going with it (D10); true when
+    /// it was tracked. A signature none of whose keys is tracked is dropped
+    /// (D6).
     fn untrack(&mut self, key: &str) -> bool {
-        let tracked = self.tracked.remove(key).is_some();
-        if tracked {
-            let held = &self.tracked;
-            self.library
-                .retain(|signed| signed.keys.iter().any(|key| held.contains_key(key)));
-        }
-        tracked
+        let Some(tracked) = self.tracked.remove(key) else {
+            return false;
+        };
+        self.bases.bytes -= tracked.base.map_or(0, |base| base.len());
+        let held = &self.tracked;
+        self.library
+            .retain(|signed| signed.keys.iter().any(|key| held.contains_key(key)));
+        true
     }
 
     /// Adds a signature over `keys`, dropping those it covers entirely
@@ -311,12 +360,17 @@ impl SharedPollFlow {
     }
 
     /// Subscription `id` left `subscribed`: its refresh and retry timers
-    /// stop, and the retries and the refresh guard start over (D7). A
-    /// request to the callback in flight stays until the next subscribe,
-    /// its answer then changing nothing (I13). The actions cancelling the
-    /// timers.
+    /// stop, and the retries and the refresh guard start over (D7); every
+    /// delta base goes, as the server sends each key whole after the next
+    /// subscribe (D10). A request to the callback in flight stays until the
+    /// next subscribe, its answer then changing nothing (I13). The actions
+    /// cancelling the timers.
     #[must_use]
     pub(in crate::machine) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
+        for tracked in self.tracked.values_mut() {
+            tracked.base = None;
+        }
+        self.bases.bytes = 0;
         self.refresh_again = false;
         self.refresh_attempts = 0;
         self.sign_attempts = 0;
@@ -950,8 +1004,8 @@ impl Machine {
     }
 
     /// The subscribe command `command_id` of shared poll subscription `id`,
-    /// carrying `data` (D4): `type` 4, the token and the data, and nothing
-    /// else; no delta before 47d's per-key bases (D10).
+    /// carrying `data` (D4): `type` 4, the token, the data and, when asked
+    /// for, delta (D10), and nothing else.
     pub(super) fn shared_poll_subscribe_request(
         &mut self,
         id: SubscriptionId,
@@ -966,6 +1020,7 @@ impl Machine {
                 token: Secret(sub.tokens.for_connect()),
                 data,
                 kind: SHARED_POLL_TYPE,
+                delta: sub.options.delta.is_some(),
                 ..SubscribeRequest::default()
             }),
         })
@@ -1007,6 +1062,7 @@ impl Machine {
         self.withdraw(&Owner::Client(id));
         if let Some(flow) = self.shared_poll_flow(id) {
             flow.new_epoch(result.epoch);
+            flow.bases.on = result.delta;
         }
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
         self.emit_subscription(
@@ -1240,77 +1296,155 @@ impl Machine {
 
     /// Publications of shared poll subscription `id` in one message, in
     /// order (D9): a version is compared with what the earlier ones would
-    /// set once taken.
+    /// set once taken. All are handled before any is emitted: a delta that
+    /// fails, the bases passing their bound or the values together passing
+    /// the inbound limit (Block 19, D6) end `subscribed`, which would
+    /// withdraw an update of this message that the next message would wait
+    /// for (Block 15); only the removals before it are emitted, as no
+    /// removal is withdrawn.
     fn shared_poll_publications(&mut self, id: SubscriptionId, publications: Vec<Publication>) {
-        // A delta for a tracked key fails the subscription before any item
-        // is emitted: an update emitted then withdrawn in the same message
-        // would hold the next messages (Block 15).
-        let delta = self.shared_poll_flow(id).is_some_and(|flow| {
-            publications.iter().any(|publication| {
-                publication.delta
-                    && publication
-                        .map
-                        .as_deref()
-                        .is_some_and(|part| !part.removed && flow.tracked.contains_key(&part.key))
-            })
-        });
-        if delta {
-            return self.delta_failed(id, DeltaError::NotOn);
-        }
+        let limit = self.config.max_message_bytes;
         let mut handled = HashMap::new();
+        let mut built = 0usize;
+        let mut ready = Vec::new();
         for publication in publications {
-            if !self.subscribed_now(id) {
-                return;
+            let failure = match self.shared_poll_item(id, publication, &mut handled) {
+                Item::Dropped => continue,
+                Item::Update(update, taken) => {
+                    built = built.saturating_add(update.data.len());
+                    if built <= limit {
+                        ready.push((update, taken));
+                        continue;
+                    }
+                    Failure::Delta(DeltaError::MessageTooLarge)
+                }
+                Item::Failed(failure) => failure,
+            };
+            for (update, _) in ready.into_iter().filter(|(update, _)| update.removed) {
+                self.emit_shared_poll_update(id, update, None, true);
             }
-            self.shared_poll_item(id, publication, &mut handled);
+            return match failure {
+                Failure::Delta(error) => self.delta_failed(id, error),
+                Failure::BasesTooLarge => self.set_unsubscribed(
+                    id,
+                    codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE,
+                    DELTA_BASES_TOO_LARGE_REASON,
+                    true,
+                ),
+            };
+        }
+        for (update, taken) in ready {
+            self.emit_shared_poll_update(id, update, taken, true);
         }
     }
 
     /// A publication pushed to shared poll subscription `id` (D9).
     pub(super) fn shared_poll_publication(&mut self, id: SubscriptionId, publication: Publication) {
-        self.shared_poll_item(id, publication, &mut HashMap::new());
+        self.shared_poll_publications(id, vec![publication]);
     }
 
-    /// A value of a tracked key, a removal, or something dropped (D9):
-    /// the key not tracked, or a version not newer than the one held or
-    /// handled in the same message.
+    /// Handles a publication of a tracked key (D9, D10), or drops it: the
+    /// key not tracked, a version not newer than the one held or handled in
+    /// the same message, or a delta with no base while an untrack of its
+    /// key is unanswered. A removal ends its key here.
     fn shared_poll_item(
         &mut self,
         id: SubscriptionId,
-        publication: Publication,
+        mut publication: Publication,
         handled: &mut HashMap<String, u64>,
-    ) {
+    ) -> Item {
         let (key, removed, version) = publication
             .map
             .as_deref()
             .map(|part| (part.key.clone(), part.removed, part.version))
             .unwrap_or_default();
-        let Some(flow) = self.shared_poll_flow(id) else {
-            return;
+        let (codec, limit) = (self.codec, self.config.max_message_bytes);
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
+            return Item::Dropped;
         };
-        // A key not tracked: before decoding, so it leaves no trace.
-        let Some(tracked) = flow.tracked.get(&key) else {
-            return;
+        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+            return Item::Dropped;
+        };
+        // A key not tracked: before decoding, so it leaves no base.
+        let Some(tracked) = flow.tracked.get_mut(&key) else {
+            return Item::Dropped;
         };
         let held = tracked.version.max(handled.get(&key).copied().unwrap_or(0));
         if !removed && version > 0 && held > 0 && version <= held {
-            return;
+            return Item::Dropped;
         }
         if removed {
             flow.untrack(&key);
-            return self.emit_shared_poll_update(id, SharedPollUpdate::removal(key), None, true);
+            return Item::Update(SharedPollUpdate::removal(key), None);
         }
-        // Delta is never asked for before Block 47 D10's per-key bases
-        // (47d): one is a delta on a subscription without delta (Block 19).
-        if publication.delta {
-            return self.delta_failed(id, DeltaError::NotOn);
+        if flow.bases.on {
+            let Some(payload) = codec.delta_payload(std::mem::take(&mut publication.data)) else {
+                return Item::Failed(Failure::Delta(DeltaError::NotAString));
+            };
+            let received = payload.len();
+            let data = match (publication.delta, tracked.base.as_deref()) {
+                (false, _) => payload,
+                (true, Some(base)) => match fossil::apply(base, &payload, limit) {
+                    Ok(data) => data,
+                    Err(error) => return Item::Failed(Failure::Delta(error)),
+                },
+                (true, None) => return self.delta_without_base(id, &key),
+            };
+            // As carried and as rebuilt (Block 31, D3).
+            sub.delta_statistics.get_or_insert_default().count(
+                publication.delta,
+                received,
+                data.len(),
+            );
+            let bases =
+                flow.bases.bytes - tracked.base.as_ref().map_or(0, |base| base.len()) + data.len();
+            if bases > flow.bases.max {
+                return Item::Failed(Failure::BasesTooLarge);
+            }
+            flow.bases.bytes = bases;
+            tracked.base = Some(data.clone().into_boxed_slice());
+            publication.data = data;
+            publication.delta = false;
+        } else if publication.delta {
+            return Item::Failed(Failure::Delta(DeltaError::NotOn));
         }
         if version > 0 {
             handled.insert(key.clone(), version);
         }
-        let update = SharedPollUpdate::from(publication);
         let taken = (version > 0).then_some((key, version));
-        self.emit_shared_poll_update(id, update, taken, true);
+        Item::Update(SharedPollUpdate::from(publication), taken)
+    }
+
+    /// A delta for `key` of `id`, which has no base (D10): dropped while an
+    /// untrack request of the key awaits its reply, queued or sent, since
+    /// the server may have sent it before handling the untrack, the key
+    /// tracked again since; any other is Block 19's failure.
+    fn delta_without_base(&self, id: SubscriptionId, key: &str) -> Item {
+        let Some(flow) = self
+            .subscriptions
+            .by_id
+            .get(&id)
+            .and_then(|sub| sub.shared_poll.as_deref())
+        else {
+            return Item::Dropped;
+        };
+        let names = |purpose: Purpose, generation: u64, keys: &[String]| {
+            purpose == Purpose::Untrack
+                && generation == flow.generation
+                && keys.iter().any(|untracked| untracked == key)
+        };
+        let queued = flow
+            .queue
+            .iter()
+            .any(|queued| names(queued.purpose, queued.generation, &queued.keys));
+        let sent = self.subscriptions.track_commands.values().any(|command| {
+            command.subscription == id && names(command.purpose, command.generation, &command.keys)
+        });
+        if queued || sent {
+            Item::Dropped
+        } else {
+            Item::Failed(Failure::Delta(DeltaError::NoBase))
+        }
     }
 
     /// Emits `update` of `id`. Taking it moves its key's version to `taken`
