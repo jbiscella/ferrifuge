@@ -905,3 +905,32 @@ fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
     assert_eq!(delta_errors(&next), Vec::<u32>::new(), "{next:?}");
     assert_eq!(values(&next), [("a".to_owned(), value(6).into_bytes())]);
 }
+
+// Codex on #221 (D10): only this subscription's frames in flight hold an
+// inline untrack back; another subscription's frame naming the same key
+// inline does not.
+#[test]
+fn another_subscriptions_frame_holds_no_inline_untrack_back() {
+    let (mut machine, transport, id) = signing_with_delta();
+    let other = machine
+        .add_shared_poll_subscription("other".into(), options(true))
+        .unwrap();
+    let subscribing = machine.handle(Input::Subscribe(other));
+    take_all(&mut machine, &subscribing);
+    answer_subscribe(&mut machine, transport, &subscribing);
+    signed_with_one_untracked(&mut machine, transport, other, "a", "b");
+    let frame = signed_with_one_untracked(&mut machine, transport, id, "a", "b");
+    let answered = machine.handle(reply_to(transport, &frame));
+    answer_all(&mut machine, transport, &answered);
+
+    let untracked = machine.handle(Input::UntrackKeys(id, vec!["b".into()]));
+    let answered = answer_all(&mut machine, transport, &untracked);
+
+    assert!(
+        requests(&answered, 2).iter().any(|request| {
+            request["sub_refresh"]["channel"] == "items"
+                && request["sub_refresh"]["untrack"] == serde_json::json!(["a"])
+        }),
+        "{answered:?}"
+    );
+}
