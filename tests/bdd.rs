@@ -685,10 +685,12 @@ pub(crate) const SERVER_B: &[(&str, &str)] = &[
     // (Block 11); the subscribe proxy sees them too. Channels of `poll` are
     // shared poll channels in versionless mode, refreshed by the proxy
     // backend (Block 47, D18); those of `poll_v` in versioned mode, the
-    // backend giving the versions and the epoch (47c's epoch flip).
+    // backend giving the versions and the epoch (47c's epoch flip); those
+    // of `poll_d` versioned with fossil delta, a change going as a delta
+    // when the backend gives its previous value as `prev_data` (47d).
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"subscribe_proxy_enabled":true},{"name":"poll","subscription_type":"shared_poll","shared_poll":{"refresh_interval":"1s","channel_shutdown_delay":"1s"},"allow_subscribe_for_client":true},{"name":"poll_v","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s"},"allow_subscribe_for_client":true}]"#,
+        r#"[{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"subscribe_proxy_enabled":true},{"name":"poll","subscription_type":"shared_poll","shared_poll":{"refresh_interval":"1s","channel_shutdown_delay":"1s"},"allow_subscribe_for_client":true},{"name":"poll_v","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s"},"allow_subscribe_for_client":true},{"name":"poll_d","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s"},"allowed_delta_types":["fossil"],"allow_subscribe_for_client":true}]"#,
     ),
     ("CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY", SHARED_POLL_SECRET),
 ];

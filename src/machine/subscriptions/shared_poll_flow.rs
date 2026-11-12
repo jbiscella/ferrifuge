@@ -33,6 +33,10 @@ const SHARED_POLL_TYPE: i32 = 4;
 /// Reason of [`codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED`].
 const NOT_SUPPORTED_REASON: &str = "shared poll subscriptions not supported";
 
+/// Reason of [`codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE`].
+#[allow(dead_code)] // Sent once per-key delta bases are bounded (47d, D11).
+const DELTA_BASES_TOO_LARGE_REASON: &str = "shared poll delta bases too large";
+
 /// Error code by which the server refuses an expired signature
 /// (`client.proto`; centrifuge `ErrorTokenExpired`).
 const SIGNATURE_EXPIRED: u32 = 109;

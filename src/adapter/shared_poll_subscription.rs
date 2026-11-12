@@ -74,6 +74,17 @@ impl PartialEq for SharedPollSubscription {
 impl Eq for SharedPollSubscription {}
 
 impl SharedPollSubscription {
+    /// What delta compression did on the shared poll subscription since it
+    /// was created: each value received with delta on counts, whole or as
+    /// a delta (Block 47, D13). Zeros without negotiated delta.
+    #[must_use]
+    pub fn delta_statistics(&self) -> crate::DeltaStatistics {
+        lock(&self.shared.core)
+            .machine
+            .delta_statistics(self.id)
+            .unwrap_or_default()
+    }
+
     /// The channel subscribed to.
     #[must_use]
     pub fn channel(&self) -> &str {
@@ -356,6 +367,32 @@ impl SharedPollSubscriptionBuilder {
     #[must_use]
     pub fn max_track_frame_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.options.max_track_frame_bytes = bytes;
+        self
+    }
+
+    /// Asks the server to send each key's changes as deltas in `format`
+    /// against that key's previous value, on namespaces that allow it
+    /// (`allowed_delta_types`; Block 47, D10). The client then holds one
+    /// copy of every tracked key's last value, each within
+    /// [`crate::Config::max_message_bytes`] and together within
+    /// [`Self::max_delta_bases_bytes`], from each subscribe until the key
+    /// is untracked or the subscription leaves `subscribed`. On Centrifugo
+    /// OSS a change goes as a delta only when the backend's refresh
+    /// response gives the previous value as `prev_data`.
+    #[must_use]
+    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
+        self.options.common = self.options.common.delta(format);
+        self
+    }
+
+    /// Bytes the delta bases of the tracked keys may hold together, 64 MiB
+    /// by default: a key whose base would pass it is not delivered, and the
+    /// subscription sends an unsubscribe command and ends with
+    /// `unsubscribed` 7 "shared poll delta bases too large", without
+    /// subscribing again by itself (Block 47, D11).
+    #[must_use]
+    pub fn max_delta_bases_bytes(mut self, bytes: NonZeroUsize) -> Self {
+        self.options.max_delta_bases_bytes = bytes;
         self
     }
 
