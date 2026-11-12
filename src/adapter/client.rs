@@ -1696,6 +1696,7 @@ impl Client {
             subscription_timers: KeyedTimers::default(),
             call_timers: KeyedTimers::default(),
             debounce_timers: KeyedTimers::default(),
+            shared_poll_timers: SharedPollTimers::default(),
             timer_sets: 0,
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
@@ -2505,6 +2506,8 @@ struct Driver {
     call_timers: KeyedTimers<(CallId, CallTimer)>,
     /// One timer per open debounce window (Block 46, D5).
     debounce_timers: KeyedTimers<DebounceTimer>,
+    /// The reply deadlines of shared poll requests (Block 47, D12).
+    shared_poll_timers: SharedPollTimers,
     /// How many timers were set, numbering each setting as the core's
     /// [`Armed`] does.
     timer_sets: u64,
@@ -2799,6 +2802,9 @@ impl Driver {
                     fired = Some(set);
                     Input::CallTimerFired(id, timer)
                 }
+                // Not numbered, as debounce timers: the core ignores one it
+                // no longer knows (Block 47, D3).
+                input = self.shared_poll_timers.next_input() => input,
                 // Every window due now, fed before the next flush: windows
                 // ending together share a frame (Block 46, D5, D9).
                 timers = self.debounce_timers.fired_all() => {
@@ -2918,6 +2924,12 @@ impl Driver {
                 unreachable!("events never reach the driver")
             }
             #[cfg(feature = "unstable")]
+            Action::SetSharedPollTimer(timer, delay) => {
+                self.shared_poll_timers.set(timer, delay, 0);
+            }
+            #[cfg(feature = "unstable")]
+            Action::CancelSharedPollTimer(timer) => self.shared_poll_timers.cancel(timer),
+            #[cfg(feature = "unstable")]
             Action::FetchSignature {
                 subscription,
                 request,
@@ -2971,6 +2983,31 @@ impl Driver {
                 }
             }
         }
+    }
+}
+
+/// The reply deadlines of shared poll requests (Block 47, D12).
+#[cfg(feature = "unstable")]
+type SharedPollTimers = KeyedTimers<crate::machine::SharedPollTimer>;
+
+#[cfg(feature = "unstable")]
+impl SharedPollTimers {
+    /// The input of the next timer due.
+    async fn next_input(&mut self) -> Input {
+        Input::SharedPollTimerFired(self.fired().await.0)
+    }
+}
+
+/// No shared poll timer without `unstable`.
+#[cfg(not(feature = "unstable"))]
+#[derive(Debug, Default)]
+struct SharedPollTimers(());
+
+#[cfg(not(feature = "unstable"))]
+impl SharedPollTimers {
+    /// Never ready.
+    async fn next_input(&mut self) -> Input {
+        std::future::pending().await
     }
 }
 

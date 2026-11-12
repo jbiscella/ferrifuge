@@ -146,6 +146,20 @@ impl FrameId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DebounceTimer(u64);
 
+/// Identifies a timer of a shared poll subscription (Block 47, D3): the
+/// reply deadline of a track or untrack request. The owner runs it for the
+/// [`Action::SetSharedPollTimer`] and reports it with
+/// [`Input::SharedPollTimerFired`]; a machine never reuses a number, so a
+/// firing for a request already answered is ignored.
+///
+/// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
+/// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
+/// later), and may change in any minor release.
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SharedPollTimer(pub(crate) u64);
+
 /// Identifies a call the machine settles with [`Action::CallSettled`];
 /// [`Machine::add_call`] gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -805,6 +819,14 @@ pub enum Input {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     UntrackKeys(SubscriptionId, Vec<String>),
+    /// A timer set by [`Action::SetSharedPollTimer`] fired (Block 47, D12).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SharedPollTimerFired(SharedPollTimer),
     /// The `get_signature` callback answered [`Action::FetchSignature`]
     /// `request` of shared poll subscription `subscription` (Block 47, D6).
     /// An answer to a request the subscription abandoned, by leaving
@@ -913,6 +935,23 @@ pub enum Action {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitSharedPollSubscription(EventId, SubscriptionId, crate::SharedPollSubscriptionEvent),
+    /// Start a shared poll subscription's timer (Block 47, D12); report it
+    /// with [`Input::SharedPollTimerFired`].
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SetSharedPollTimer(SharedPollTimer, Duration),
+    /// Stop a shared poll subscription's timer if it runs.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    CancelSharedPollTimer(SharedPollTimer),
     /// Ask the shared poll subscription's `get_signature` callback to sign
     /// `keys` (Block 47, D6); report the answer with
     /// [`Input::SignatureFetched`]. Only issued for subscriptions with
@@ -1234,6 +1273,10 @@ impl std::fmt::Debug for Input {
                 f.debug_tuple("UntrackKeys").field(id).field(keys).finish()
             }
             #[cfg(feature = "unstable")]
+            Self::SharedPollTimerFired(timer) => {
+                f.debug_tuple("SharedPollTimerFired").field(timer).finish()
+            }
+            #[cfg(feature = "unstable")]
             Self::SignatureFetched {
                 subscription,
                 request,
@@ -1321,6 +1364,16 @@ impl std::fmt::Debug for Action {
                 .field(id)
                 .field(event)
                 .finish(),
+            #[cfg(feature = "unstable")]
+            Self::SetSharedPollTimer(timer, delay) => f
+                .debug_tuple("SetSharedPollTimer")
+                .field(timer)
+                .field(delay)
+                .finish(),
+            #[cfg(feature = "unstable")]
+            Self::CancelSharedPollTimer(timer) => {
+                f.debug_tuple("CancelSharedPollTimer").field(timer).finish()
+            }
             #[cfg(feature = "unstable")]
             Self::FetchSignature {
                 subscription,
@@ -1856,6 +1909,7 @@ impl Machine {
             input @ (Input::TrackKeys(..)
             | Input::TrackKeysWithSignature(..)
             | Input::UntrackKeys(..)
+            | Input::SharedPollTimerFired(_)
             | Input::SignatureFetched { .. }) => self.shared_poll_input(input),
             // About a transport already abandoned.
             Input::TransportOpened(_)
