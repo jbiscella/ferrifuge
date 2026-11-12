@@ -21,12 +21,17 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use support::centrifugo::Centrifugo;
+use support::centrifugo::{API_KEY, Centrifugo};
 use support::http_proxy::HttpProxy;
+use support::token::SHARED_POLL_SECRET;
 
 /// The server's configuration (Block 44, D18): the emulated transports,
 /// any origin, the `history` namespace with history and recovery, and
-/// client publish, for anonymous clients.
+/// client publish, for anonymous clients; the `map` namespace (Block 45,
+/// D16); the `poll_v` namespace of shared poll channels in versioned mode,
+/// written by the server API's `shared_poll_publish` through the relay,
+/// its refresh endpoint one nothing listens on (Block 47, D17, D18); the
+/// API key, for a Centrifugo binary run here.
 const SERVER: &[(&str, &str)] = &[
     (
         "CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN",
@@ -53,8 +58,14 @@ const SERVER: &[(&str, &str)] = &[
     ),
     (
         "CENTRIFUGO_CHANNEL_NAMESPACES",
-        r#"[{"name":"history","history_size":300,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true,"allow_publish_for_client":true,"allow_publish_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
+        r#"[{"name":"history","history_size":300,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true,"allow_publish_for_client":true,"allow_publish_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_v","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true}]"#,
     ),
+    ("CENTRIFUGO_SHARED_POLL_HMAC_SECRET_KEY", SHARED_POLL_SECRET),
+    (
+        "CENTRIFUGO_CHANNEL_PROXY_SHARED_POLL_REFRESH_ENDPOINT",
+        "http://127.0.0.1:9/",
+    ),
+    ("CENTRIFUGO_HTTP_API_KEY", API_KEY),
 ];
 
 /// The longest one browser's run may take, its build included.
