@@ -174,6 +174,10 @@ pub(super) struct Outboxes {
     /// 45).
     #[cfg(feature = "unstable")]
     pub(super) maps: HashMap<SubscriptionId, Outbox<crate::MapSubscriptionEvent>>,
+    /// Those of the shared poll subscriptions whose `events()` was called
+    /// (Block 47).
+    #[cfg(feature = "unstable")]
+    pub(super) shared_polls: HashMap<SubscriptionId, Outbox<crate::SharedPollSubscriptionEvent>>,
 }
 
 impl Outboxes {
@@ -184,6 +188,10 @@ impl Outboxes {
         }
         #[cfg(feature = "unstable")]
         for outbox in self.maps.values_mut() {
+            outbox.withdraw(ids);
+        }
+        #[cfg(feature = "unstable")]
+        for outbox in self.shared_polls.values_mut() {
             outbox.withdraw(ids);
         }
     }
@@ -424,12 +432,21 @@ pub(super) type GetSubscriptionToken =
 pub(super) type GetState =
     platform::ChannelCallback<platform::BoxFuture<'static, Result<StreamPosition, StateError>>>;
 
+/// Async callback signing keys of a shared poll subscription (Block 47,
+/// D6).
+#[cfg(feature = "unstable")]
+pub(super) type GetSignature = platform::KeysCallback<
+    platform::BoxFuture<'static, Result<crate::SharedPollSignature, TokenError>>,
+>;
+
 /// The callbacks of a subscription.
 #[derive(Clone, Default)]
 pub(super) struct Callbacks {
     pub(super) data: Option<GetData>,
     pub(super) token: Option<GetSubscriptionToken>,
     pub(super) state: Option<GetState>,
+    #[cfg(feature = "unstable")]
+    pub(super) signature: Option<GetSignature>,
 }
 
 /// Callbacks by subscription; opaque in `Debug` output.
@@ -679,6 +696,13 @@ impl Shared {
                             None => Some(id),
                         }
                     }
+                    #[cfg(feature = "unstable")]
+                    Action::EmitSharedPollSubscription(id, subscription, event) => {
+                        match outboxes.shared_polls.get_mut(&subscription) {
+                            Some(outbox) => outbox.offer(id, event),
+                            None => Some(id),
+                        }
+                    }
                     Action::Withdraw(ids) => {
                         outboxes.withdraw(&ids);
                         None
@@ -867,6 +891,17 @@ impl Routed for crate::MapSubscriptionEvent {
 
     fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
         outboxes.maps.remove(&of);
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl Routed for crate::SharedPollSubscriptionEvent {
+    fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
+        outboxes.shared_polls.get_mut(&of?)
+    }
+
+    fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
+        outboxes.shared_polls.remove(&of);
     }
 }
 
@@ -2817,6 +2852,7 @@ impl Driver {
         self.timer_sets
     }
 
+    #[allow(clippy::too_many_lines)] // One arm per action.
     fn perform(&mut self, action: Action) {
         match action {
             Action::OpenTransport {
@@ -2878,7 +2914,15 @@ impl Driver {
                 unreachable!("events never reach the driver")
             }
             #[cfg(feature = "unstable")]
-            Action::EmitMapSubscription(..) => unreachable!("events never reach the driver"),
+            Action::EmitMapSubscription(..) | Action::EmitSharedPollSubscription(..) => {
+                unreachable!("events never reach the driver")
+            }
+            #[cfg(feature = "unstable")]
+            Action::FetchSignature {
+                subscription,
+                request,
+                keys,
+            } => self.fetch_signature(subscription, request, keys),
             // In order with the other actions: a send settles once its
             // frame went to the transport, which writes it even when closed
             // right after.
@@ -3116,6 +3160,28 @@ impl Driver {
         });
     }
 
+    /// Runs a shared poll subscription's `get_signature` callback (Block 47,
+    /// D6); its answer to an abandoned request changes nothing in the core.
+    #[cfg(feature = "unstable")]
+    fn fetch_signature(&mut self, id: SubscriptionId, request: FetchId, keys: Vec<String>) {
+        let callback = lock(&self.shared.callbacks)
+            .0
+            .get(&id)
+            .and_then(|callbacks| callbacks.signature.clone());
+        // The machine asks only for subscriptions with a callback.
+        let Some(get_signature) = callback else {
+            return;
+        };
+        let fetching = guarded(|| get_signature(keys), signature_callback_panicked);
+        self.start_fetch(request, async move {
+            Input::SignatureFetched {
+                subscription: id,
+                request,
+                result: fetching.await,
+            }
+        });
+    }
+
     /// Runs a subscription or connect data callback, abortable by its
     /// fetch.
     fn start_fetch(
@@ -3151,6 +3217,11 @@ fn guarded<T: MaybeSend + 'static, E: MaybeSend + 'static>(
                 Err(panicked())
             })
     })
+}
+
+#[cfg(feature = "unstable")]
+fn signature_callback_panicked() -> TokenError {
+    TokenError::Failed("get_signature callback panicked".to_owned())
 }
 
 fn token_callback_panicked() -> TokenError {
@@ -3251,6 +3322,8 @@ impl Drop for Ending {
         outboxes.subscriptions.values_mut().for_each(Outbox::close);
         #[cfg(feature = "unstable")]
         outboxes.maps.values_mut().for_each(Outbox::close);
+        #[cfg(feature = "unstable")]
+        outboxes.shared_polls.values_mut().for_each(Outbox::close);
         drop(outboxes);
         lock(&shared.callbacks).0.clear();
         super::handler::wake_consumer(shared);

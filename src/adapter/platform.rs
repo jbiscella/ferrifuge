@@ -91,6 +91,11 @@ mod types {
     /// An application callback the client keeps, given a subscription's
     /// channel: `Send` and `Sync` natively (Block 44, D3).
     pub(in crate::adapter) type ChannelCallback<R> = Arc<dyn Fn(String) -> R + Send + Sync>;
+
+    /// An application callback the client keeps, given keys: `Send` and
+    /// `Sync` natively (Block 47, D6).
+    #[cfg(feature = "unstable")]
+    pub(in crate::adapter) type KeysCallback<R> = Arc<dyn Fn(Vec<String>) -> R + Send + Sync>;
 }
 
 #[cfg(adapter_browser)]
@@ -110,6 +115,11 @@ mod types {
     /// An application callback the client keeps, given a subscription's
     /// channel.
     pub(in crate::adapter) type ChannelCallback<R> = Arc<dyn Fn(String) -> R>;
+
+    /// An application callback the client keeps, given keys (Block 47,
+    /// D6).
+    #[cfg(feature = "unstable")]
+    pub(in crate::adapter) type KeysCallback<R> = Arc<dyn Fn(Vec<String>) -> R>;
 }
 
 #[cfg(adapter_browser)]

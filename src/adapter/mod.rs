@@ -16,6 +16,8 @@ mod map_subscription;
 mod outbox;
 mod platform;
 mod ready;
+#[cfg(feature = "unstable")]
+mod shared_poll_subscription;
 mod subscription;
 #[cfg(adapter_tokio)]
 mod tokio;
@@ -42,4 +44,6 @@ pub use handler::MapSubscriptionHandler;
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 #[cfg(feature = "unstable")]
 pub use map_subscription::{MapSubscription, MapSubscriptionBuilder};
+#[cfg(feature = "unstable")]
+pub use shared_poll_subscription::{SharedPollSubscription, SharedPollSubscriptionBuilder};
 pub use subscription::{Subscription, SubscriptionBuilder};

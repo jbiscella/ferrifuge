@@ -29,6 +29,14 @@ pub(super) struct Commit {
     /// A publication, counted delivered once taken (Block 31); not a join
     /// or a leave.
     publication: bool,
+    /// Never withdrawn: a shared poll removal, which no later step would
+    /// bring back (Block 47, D9).
+    #[cfg(feature = "unstable")]
+    keep: bool,
+    /// A shared poll update's key and the version its taking moves it to
+    /// (Block 47, D5), instead of a stream position.
+    #[cfg(feature = "unstable")]
+    key_version: Option<Box<(String, u64)>>,
 }
 
 /// Publications emitted and not yet taken, and the streams taking them.
@@ -73,6 +81,15 @@ impl Owner {
 }
 
 impl Commit {
+    /// Never withdrawn (Block 47, D9).
+    #[cfg_attr(not(feature = "unstable"), allow(clippy::unused_self))]
+    fn kept(&self) -> bool {
+        #[cfg(feature = "unstable")]
+        return self.keep;
+        #[cfg(not(feature = "unstable"))]
+        false
+    }
+
     /// Moves `position` as a publication at this offset and epoch does
     /// (centrifuge-js `_handlePublication`).
     pub(super) fn apply(self, position: &mut Option<StreamPosition>) {
@@ -128,6 +145,10 @@ impl Machine {
             epoch,
             replaces,
             publication: true,
+            #[cfg(feature = "unstable")]
+            keep: false,
+            #[cfg(feature = "unstable")]
+            key_version: None,
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -146,6 +167,10 @@ impl Machine {
             epoch: None,
             replaces: false,
             publication: false,
+            #[cfg(feature = "unstable")]
+            keep: false,
+            #[cfg(feature = "unstable")]
+            key_version: None,
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -172,6 +197,10 @@ impl Machine {
             epoch,
             replaces: true,
             publication: false,
+            #[cfg(feature = "unstable")]
+            keep: false,
+            #[cfg(feature = "unstable")]
+            key_version: None,
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -198,6 +227,40 @@ impl Machine {
             epoch,
             replaces: false,
             publication: true,
+            #[cfg(feature = "unstable")]
+            keep: false,
+            #[cfg(feature = "unstable")]
+            key_version: None,
+        };
+        if self.deliveries.streams.contains(&commit.owner.stream()) {
+            self.deliveries.pending.insert(id, commit);
+        } else {
+            self.commit(commit);
+        }
+    }
+
+    /// Records the event `id` of `owner`, a shared poll update (Block 47):
+    /// taking it moves its key's version to `taken`, and counts it as a
+    /// publication delivered when `publication`; withdrawn as a publication
+    /// is, unless `keep`.
+    #[cfg(feature = "unstable")]
+    #[allow(dead_code)] // Called from 47a's green step.
+    pub(super) fn deliver_shared_poll_update(
+        &mut self,
+        id: EventId,
+        owner: Owner,
+        taken: Option<(String, u64)>,
+        keep: bool,
+        publication: bool,
+    ) {
+        let commit = Commit {
+            owner,
+            offset: None,
+            epoch: None,
+            replaces: false,
+            publication,
+            keep,
+            key_version: taken.map(Box::new),
         };
         if self.deliveries.streams.contains(&commit.owner.stream()) {
             self.deliveries.pending.insert(id, commit);
@@ -361,7 +424,12 @@ impl Machine {
         }
     }
 
-    fn move_position(&mut self, commit: Commit) {
+    fn move_position(&mut self, #[allow(unused_mut)] mut commit: Commit) {
+        #[cfg(feature = "unstable")]
+        if let (Owner::Client(of), Some(taken)) = (&commit.owner, commit.key_version.take()) {
+            let of = *of;
+            return self.shared_poll_version_taken(of, &taken.0, taken.1);
+        }
         match commit.owner.clone() {
             Owner::Client(of) => self.commit_subscription_position(of, commit),
             Owner::Server(channel) => self.commit_server_subscription_position(&channel, commit),
@@ -377,7 +445,7 @@ impl Machine {
             .deliveries
             .pending
             .iter()
-            .filter(|(_, commit)| commit.owner == *owner)
+            .filter(|(_, commit)| commit.owner == *owner && !commit.kept())
             .map(|(id, _)| *id)
             .collect();
         if ids.is_empty() {
