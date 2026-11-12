@@ -818,6 +818,7 @@ const SHARED_POLLS: &[&str] = &[
     "A namespace that is not shared poll refuses a shared poll subscription",
     "A server without shared poll ends the subscription",
     "A private namespace gets its token and refreshes it",
+    "A signature batch over the frame budget is refused before it is sent",
 ];
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];
