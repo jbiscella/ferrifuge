@@ -87,7 +87,7 @@ pub(in crate::machine) struct SharedPollFlow {
     refresh_again: bool,
     /// The refresh deadlines and the retries scheduled in this `subscribed`
     /// period (D7).
-    timers: Vec<(SharedPollTimer, signing::FlowTimer)>,
+    timers: Vec<(SharedPollTimer, signing::Retry)>,
     /// Failures in a row of the refresh, of signing the keys without a
     /// signature, and replies with `expires` and no `ttl` in a row: the
     /// steps of their backoffs (D7).
