@@ -472,6 +472,10 @@ async fn track_answered_with_an_error(
         "code": code, "message": "refused by the test", "temporary": temporary == "true",
     }}));
     mark(world);
+    // The backoff runs from the reply, which comes after this request:
+    // measuring from here, not from when the error is taken, never makes
+    // a correct delay look short on a slow runner.
+    world.shared_polls.at = Some(Instant::now());
     world
         .shared_poll()
         .track_with_signature([SharedPollTrackItem::new(key, 0)], "sigb");
@@ -483,7 +487,6 @@ async fn an_error(world: &mut ClientWorld, code: u32) {
     let SharedPollSubscriptionEvent::Error(error) = world.next_shared_poll_event().await else {
         panic!("expected an error");
     };
-    world.shared_polls.at = Some(Instant::now());
     assert_eq!(
         (error.code, error.kind),
         (code, ErrorKind::Track),
@@ -503,7 +506,7 @@ async fn signed_again(world: &mut ClientWorld) {
 
 #[then(regex = r"^after the 1 s to 15 s backoff the replay's track request carries key (\w+)$")]
 async fn replayed_after_the_backoff(world: &mut ClientWorld, key: String) {
-    let since = world.shared_polls.at.expect("an error seen");
+    let since = world.shared_polls.at.expect("the failing track sent");
     let request = tokio::time::timeout(Duration::from_secs(4), replayed(world, 2))
         .await
         .expect("a replay within 4 s");
