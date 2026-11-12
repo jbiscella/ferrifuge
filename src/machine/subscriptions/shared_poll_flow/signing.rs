@@ -62,6 +62,15 @@ pub(in crate::machine) struct Signing {
     signed: Vec<Signed>,
 }
 
+/// What runs again after a failure (D7).
+#[derive(Debug, Clone, Copy)]
+enum Retry {
+    /// The refresh of every signature.
+    Refresh,
+    /// Signing the keys tracked without a signature.
+    Sign,
+}
+
 /// A timer of a subscription's `subscribed` period (D7).
 #[derive(Debug, Clone, Copy)]
 pub(in crate::machine) enum FlowTimer {
@@ -291,7 +300,7 @@ impl Machine {
             }
             self.refresh_failed(id);
         } else {
-            self.schedule_retry(id, FlowTimer::SignRetry);
+            self.schedule_retry(id, Retry::Sign);
         }
     }
 
@@ -425,7 +434,7 @@ impl Machine {
 
     /// The refresh failed: it runs again after the backoff (D7).
     pub(super) fn refresh_failed(&mut self, id: SubscriptionId) {
-        self.schedule_retry(id, FlowTimer::RefreshRetry);
+        self.schedule_retry(id, Retry::Refresh);
     }
 
     /// A track reply with `expires`: the refresh runs at the earliest
@@ -472,9 +481,9 @@ impl Machine {
         self.actions.push(Action::SetSharedPollTimer(timer, delay));
     }
 
-    /// Schedules the retry of `kind` after Block 2's backoff between 5 s
-    /// and 30 s, its step counting the failures in a row (D7).
-    fn schedule_retry(&mut self, id: SubscriptionId, kind: FlowTimer) {
+    /// Schedules `retry` after Block 2's backoff between 5 s and 30 s, its
+    /// step counting the failures in a row (D7), replacing one scheduled.
+    fn schedule_retry(&mut self, id: SubscriptionId, retry: Retry) {
         let Some(flow) = self
             .subscriptions
             .by_id
@@ -483,9 +492,9 @@ impl Machine {
         else {
             return;
         };
-        let attempts = match kind {
-            FlowTimer::RefreshRetry => &mut flow.refresh_attempts,
-            FlowTimer::SignRetry | FlowTimer::Refresh(_) => &mut flow.sign_attempts,
+        let (attempts, kind) = match retry {
+            Retry::Refresh => (&mut flow.refresh_attempts, FlowTimer::RefreshRetry),
+            Retry::Sign => (&mut flow.sign_attempts, FlowTimer::SignRetry),
         };
         let delay = backoff::delay(*attempts, RETRY_MIN, RETRY_MAX, &mut self.rng);
         *attempts = attempts.saturating_add(1);
