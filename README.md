@@ -600,7 +600,7 @@ base goes when the subscription leaves `subscribed`: the server sends each
 key whole after a track, so the first value after each subscribe is whole.
 A delta that reaches a key tracked again while its untrack is unanswered,
 or after a track request carried its untrack inline (the server applies
-that one after its reply) and before the key's new track is answered,
+that one after its reply) and before the server accepts the key's new track,
 which the server sent before applying the untrack, is dropped (once no
 held signature covers such a key, the client sends its untrack again in
 an untrack request, whose reply ends it, so what it remembers stays

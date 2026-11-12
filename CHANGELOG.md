@@ -72,7 +72,7 @@ repository held while it carried that version, from the blocks of
   for Fossil deltas; the client keeps a base per tracked key, deleted with
   the key and at each subscribe, and delivers whole values; a delta in
   flight across an unanswered untrack of its key, or across an inline
-  untrack until the key's next track is answered, is dropped; an inline
+  untrack until the key's next track is accepted, is dropped; an inline
   untrack of a key no held signature covers goes in an untrack request
   once its frame is answered, so those remembered stay bounded. A value
   at or below the version held, whole or as a delta, is no update but
