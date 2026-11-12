@@ -328,14 +328,6 @@ impl SharedPollSubscriptionBuilder {
         self
     }
 
-    /// Asks the server to send values as deltas in `format`, on namespaces
-    /// that allow it and when the backend's refresh gives the previous data.
-    #[must_use]
-    pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
-        self.options.common = self.options.common.delta(format);
-        self
-    }
-
     /// Bytes a track or untrack request may take, 60 000 by default: a
     /// request over it is split (Block 47, D7). Keep it below the server's
     /// `websocket.message_size_limit` and the emulation endpoint's

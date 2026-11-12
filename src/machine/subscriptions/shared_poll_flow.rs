@@ -60,9 +60,6 @@ pub(in crate::machine) struct SharedPollFlow {
     /// Signature requests awaiting their answer, with the generation that
     /// made them.
     fetches: HashMap<FetchId, u64>,
-    /// The last subscribe reply turned delta on: values come as JSON
-    /// strings with the JSON protocol (Block 19, D7).
-    delta: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,7 +101,6 @@ impl SharedPollFlow {
             library: Vec::new(),
             generation: 0,
             fetches: HashMap::new(),
-            delta: false,
         }
     }
 
@@ -256,6 +252,9 @@ impl Machine {
         common.join_leave = false;
         common.tag_filter = None;
         common.channel_compaction = false;
+        // Not negotiated until per-key delta bases decode the values (D10,
+        // 47d): a value must never reach the application as a patch.
+        common.delta = None;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.shared_poll = Some(Box::new(flow));
@@ -530,8 +529,8 @@ impl Machine {
     }
 
     /// The subscribe command `command_id` of shared poll subscription `id`,
-    /// carrying `data` (D4): `type` 4, the token, the data and delta, and
-    /// nothing else.
+    /// carrying `data` (D4): `type` 4, the token and the data, and nothing
+    /// else; no delta before 47d's per-key bases (D10).
     pub(super) fn shared_poll_subscribe_request(
         &mut self,
         id: SubscriptionId,
@@ -545,7 +544,6 @@ impl Machine {
                 channel: sub.channel.clone(),
                 token: Secret(sub.tokens.for_connect()),
                 data,
-                delta: sub.options.delta.is_some(),
                 kind: SHARED_POLL_TYPE,
                 ..SubscribeRequest::default()
             }),
@@ -581,7 +579,6 @@ impl Machine {
         sub.tokens.connected();
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
             flow.generation += 1;
-            flow.delta = result.delta;
         }
         self.withdraw(&Owner::Client(id));
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
@@ -716,10 +713,9 @@ impl Machine {
     fn shared_poll_item(
         &mut self,
         id: SubscriptionId,
-        mut publication: Publication,
+        publication: Publication,
         handled: &mut HashMap<String, u64>,
     ) {
-        let codec = self.codec;
         let (key, removed, version) = publication
             .map
             .as_deref()
@@ -740,22 +736,10 @@ impl Machine {
             flow.untrack(&key);
             return self.emit_shared_poll_update(id, SharedPollUpdate::removal(key), None, true);
         }
-        // Per-key delta bases come with Block 47 D10; until then a delta
-        // cannot be applied and the subscription subscribes again (Block
-        // 19, D8), each key then coming whole.
+        // Delta is never asked for before Block 47 D10's per-key bases
+        // (47d): one is a delta on a subscription without delta (Block 19).
         if publication.delta {
-            let error = if flow.delta {
-                DeltaError::NoBase
-            } else {
-                DeltaError::NotOn
-            };
-            return self.delta_failed(id, error);
-        }
-        if flow.delta {
-            match codec.delta_payload(std::mem::take(&mut publication.data)) {
-                Some(data) => publication.data = data,
-                None => return self.delta_failed(id, DeltaError::NotAString),
-            }
+            return self.delta_failed(id, DeltaError::NotOn);
         }
         if version > 0 {
             handled.insert(key.clone(), version);

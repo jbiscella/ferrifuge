@@ -26,7 +26,8 @@ repository held while it carried that version, from the blocks of
   `Action::EmitSharedPollSubscription` and `FetchSignature`. Keys, their
   versions and signatures are tracked again on each subscribe; an untrack
   is split within `max_track_frame_bytes`; a refused track untracks its
-  keys with a removal update each.
+  keys with a removal update each. No delta compression yet: the
+  subscribe never asks for it until per-key bases come (Block 47d).
 - `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` (8) and
   `codes::error::SHARED_POLL_GET_SIGNATURE` (14), with their rows in the
   table of codes.
