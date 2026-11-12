@@ -398,15 +398,29 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
             }
             world.shared_polls.keys = keys;
         }
+        other => {
+            assert!(
+                a_signing_subscription(world, &channel, other).await,
+                "no such shared poll subscription: {other}"
+            );
+        }
+    }
+}
+
+/// The subscriptions of the 47b scenarios, with a `get_signature` callback
+/// or none, subscribed; false for a description it does not know.
+async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &str) -> bool {
+    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    match how {
         r#" subscribed, with get_signature answering keys "a" and "b" with "sig1""# => {
-            a_shared_poll_subscription(world, &channel, |builder| {
+            a_shared_poll_subscription(world, channel, |builder| {
                 builder.get_signature(answering(&calls, &["a", "b"], "sig1"))
             });
             subscribed(world).await;
         }
         r#" subscribed, whose stream was taken, with get_signature answering only key "a" with "sig1""# =>
         {
-            a_shared_poll_subscription(world, &channel, |builder| {
+            a_shared_poll_subscription(world, channel, |builder| {
                 builder.get_signature(answering(&calls, &["a"], "sig1"))
             });
             subscribed(world).await;
@@ -414,7 +428,7 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
         r#" subscribed, with a get_signature callback that waits for the test and then answers keys "a" and "b" with "sig1""# =>
         {
             let gate = Arc::clone(&world.shared_polls.gate);
-            a_shared_poll_subscription(world, &channel, move |builder| {
+            a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys| {
                     calls.lock().unwrap().push(keys);
                     let gate = Arc::clone(&gate);
@@ -430,12 +444,12 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
             subscribed(world).await;
         }
         " subscribed, whose stream was taken, without a get_signature callback" => {
-            a_shared_poll_subscription(world, &channel, |b| b);
+            a_shared_poll_subscription(world, channel, |b| b);
             subscribed(world).await;
         }
         " subscribed, whose stream was taken, with a get_signature callback that fails once and then answers" =>
         {
-            a_shared_poll_subscription(world, &channel, move |builder| {
+            a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys: Vec<String>| {
                     let mut calls = calls.lock().unwrap();
                     calls.push(keys.clone());
@@ -450,7 +464,7 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
         }
         " subscribed, whose stream was taken, with a get_signature callback answering unauthorized" =>
         {
-            a_shared_poll_subscription(world, &channel, move |builder| {
+            a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys| {
                     calls.lock().unwrap().push(keys);
                     std::future::ready(Err(TokenError::Unauthorized))
@@ -460,13 +474,14 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
         }
         " subscribed, whose stream was taken, with a get_signature callback counting its calls"
         | " subscribed, with a get_signature callback" => {
-            a_shared_poll_subscription(world, &channel, |builder| {
+            a_shared_poll_subscription(world, channel, |builder| {
                 builder.get_signature(signing_with(&calls, "sig1"))
             });
             subscribed(world).await;
         }
-        other => panic!("no such shared poll subscription: {other}"),
+        _ => return false,
     }
+    true
 }
 
 #[given(
@@ -1311,7 +1326,7 @@ async fn get_signature_called_with(world: &mut ClientWorld, keys: String) {
     assert_eq!(signature_calls(world), [keys_of(&keys)]);
 }
 
-/// Waits for a sub_refresh of `kind` on `channel` that `matches`.
+/// Waits for a `sub_refresh` of the scenario's channel that `matches`.
 async fn a_sub_refresh(world: &ClientWorld, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
     let channel = world.shared_poll().channel().to_owned();
     let found = tokio::time::timeout(EVENT_TIMEOUT, async {

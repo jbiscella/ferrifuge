@@ -170,7 +170,7 @@ fn a_key_untracked_while_signing_goes_in_the_batch_and_its_untrack() {
         requests(&replay, 1)[0]["sub_refresh"]["track"][0]["signature"],
         "sig1"
     );
-    assert!(fetches(&replay).is_empty());
+    assert!(fetches(&replay).is_empty(), "{replay:?}");
 }
 
 // D6, D7: a failing callback reports error 14 (of kind Track on the track
@@ -191,7 +191,7 @@ fn a_failing_callback_retries_with_a_growing_backoff() {
             ErrorKind::SignatureRefresh
         };
         assert_eq!((error.kind, error.code), (kind, 14), "{error:?}");
-        assert!(requests(&actions, 1).is_empty());
+        assert!(requests(&actions, 1).is_empty(), "{actions:?}");
         let (timer, delay) = the_timer(&actions);
         assert!(
             (Duration::from_secs(5)..=Duration::from_secs(30)).contains(&delay),
@@ -248,7 +248,7 @@ fn an_unauthorized_callback_unsubscribes_with_code_1() {
 
 // D7: replies with `expires` keep one refresh at the earliest deadline
 // seen; when it comes, every tracked key is signed again, and the new
-// signature replaces those it covers.
+// signature replaces every one held whose tracked keys it covers.
 #[test]
 fn an_expiring_signature_is_refreshed_at_the_earliest_deadline() {
     let (mut machine, transport, id) = subscribed(true, false);
@@ -268,6 +268,10 @@ fn an_expiring_signature_is_refreshed_at_the_earliest_deadline() {
     assert!(later.is_empty(), "a later deadline: {later:?}");
     assert_eq!(sooner.len(), 1);
     assert_eq!(sooner[0].1, Duration::from_secs(30));
+    // A signature held for "a" with a key since untracked: the refresh
+    // replaces it, though it does not cover "x".
+    the_track(&track(&mut machine, id, &[("a", 0), ("x", 0)], "sig-ax"));
+    machine.handle(Input::UntrackKeys(id, names(&["x"])));
 
     let fired = machine.handle(Input::SharedPollTimerFired(sooner[0].0));
     assert!(timers_cancelled(&fired).contains(&first[0].0), "{fired:?}");

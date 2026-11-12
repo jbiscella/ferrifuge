@@ -593,6 +593,7 @@ impl Machine {
         let group = flow.next_group;
         flow.next_group += 1;
         let frames = SharedPollFlow::track_frames(&sub.channel, batches, budget);
+        let untracked = distinct(untracked);
         let mut requests = Vec::with_capacity(frames.len());
         for (number, batches) in frames.into_iter().enumerate() {
             let keys: Vec<String> = batches
@@ -602,11 +603,11 @@ impl Machine {
             let mut untrack = Vec::new();
             if number == 0 {
                 let mut cost = SharedPollFlow::track_cost(&sub.channel, &batches);
-                for key in distinct(untracked.clone()) {
-                    let key_cost = escaped_twice(&key) + UNTRACK_KEY_COST;
-                    if keys.contains(&key) && cost + key_cost <= budget {
+                for key in &untracked {
+                    let key_cost = escaped_twice(key) + UNTRACK_KEY_COST;
+                    if keys.contains(key) && cost + key_cost <= budget {
                         cost += key_cost;
-                        untrack.push(key);
+                        untrack.push(key.clone());
                     }
                 }
             }
