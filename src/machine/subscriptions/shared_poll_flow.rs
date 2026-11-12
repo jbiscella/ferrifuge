@@ -373,15 +373,12 @@ impl Machine {
     }
 
     /// `untrack(keys)` (D6): untracked at once, and on the server when
-    /// subscribed; an empty key set sends nothing.
+    /// subscribed; an empty key set makes no request (`untrack_requests`).
     fn untrack_keys(&mut self, id: SubscriptionId, keys: Vec<String>) {
         let keys = distinct(keys);
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
         };
-        if keys.is_empty() {
-            return;
-        }
         for key in &keys {
             flow.untrack(key);
         }
