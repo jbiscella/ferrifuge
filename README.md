@@ -599,7 +599,9 @@ untrack, a removal or a refused track deletes its key's base, and every
 base goes when the subscription leaves `subscribed`: the server sends each
 key whole after a track, so the first value after each subscribe is whole.
 A delta that reaches a key tracked again while its untrack is unanswered,
-which the server sent before handling the untrack, is dropped; any other
+or after a track request carried its untrack inline (the server applies
+that one after its reply) and before the key's new track is answered,
+which the server sent before applying the untrack, is dropped; any other
 delta that cannot be applied reports an `error` event (`ErrorKind::Delta`,
 code 15), and the subscription subscribes again after its backoff
 (`subscribing` 2) and tracks its keys again, each value coming back whole.
