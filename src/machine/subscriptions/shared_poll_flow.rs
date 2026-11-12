@@ -765,13 +765,18 @@ impl Machine {
         }
     }
 
-    /// The reply deadline of track or untrack request `command`, if it has
-    /// one: its reply was read (Block 15).
-    pub(in crate::machine) fn track_command_timer(&self, command: u32) -> Option<SharedPollTimer> {
-        self.subscriptions
+    /// The reply to track or untrack request `command` was read: its
+    /// deadline stops, also when the reply waits behind events not taken
+    /// (Block 15), and a firing already on its way is ignored.
+    pub(in crate::machine) fn track_command_read(&mut self, command: u32) {
+        if let Some(timer) = self
+            .subscriptions
             .track_commands
-            .get(&command)
-            .and_then(|command| command.timer)
+            .get_mut(&command)
+            .and_then(|command| command.timer.take())
+        {
+            self.actions.push(Action::CancelSharedPollTimer(timer));
+        }
     }
 
     /// Whether the next subscribe of `id` waits for its requests in flight:
