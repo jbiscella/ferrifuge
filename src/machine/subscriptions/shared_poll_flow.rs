@@ -1595,6 +1595,17 @@ impl Machine {
             .map(|tracked| tracked.version)
     }
 
+    /// The version held for `key` of the shared poll subscription `id`, for
+    /// the adapter's tests.
+    #[cfg(test)]
+    pub(crate) fn shared_poll_version_for_tests(
+        &mut self,
+        id: SubscriptionId,
+        key: &str,
+    ) -> Option<u64> {
+        self.shared_poll_key_version(id, key)
+    }
+
     /// The handler of an update that moved `key` from `before` to `after`
     /// panicked (Block 41 D4, Block 47 D15): the version goes back unless
     /// another step moved it since.

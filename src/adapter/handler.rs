@@ -1877,6 +1877,391 @@ mod tests {
         );
     }
 
+    // Block 47, D15: a shared poll subscription's handler is one consumer
+    // among the others: the earliest event goes first, whatever its kind.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn shared_poll_handlers_get_their_events_in_order_with_the_others() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let of_poll = Arc::clone(&seen);
+            let poll = client
+                .shared_poll_subscription_builder("poll:a")
+                .handler(move |event: crate::SharedPollSubscriptionEvent| {
+                    of_poll
+                        .lock()
+                        .unwrap()
+                        .push(format!("poll {}", event.name()));
+                })
+                .build()
+                .unwrap();
+            let of_map = Arc::clone(&seen);
+            let map = client
+                .map_subscription_builder("map:a", crate::MapKind::Map)
+                .handler(move |event: crate::MapSubscriptionEvent| {
+                    of_map.lock().unwrap().push(format!("map {}", event.name()));
+                })
+                .build()
+                .unwrap();
+            let of_poll = Arc::clone(&seen);
+            let second = client.new_shared_poll_subscription("poll:b").unwrap();
+            second.set_handler(move |event: crate::SharedPollSubscriptionEvent| {
+                of_poll
+                    .lock()
+                    .unwrap()
+                    .push(format!("second {}", event.name()));
+            });
+            // All queued before the consumer, on this thread, runs.
+            map.subscribe();
+            poll.subscribe();
+            second.subscribe();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            ["map subscribing", "poll subscribing", "second subscribing"]
+        );
+    }
+
+    /// Sets its flag when dropped, as [`Flagged`].
+    #[cfg(feature = "unstable")]
+    struct FlaggedSharedPoll(Arc<AtomicBool>);
+
+    #[cfg(feature = "unstable")]
+    impl Drop for FlaggedSharedPoll {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    impl SharedPollSubscriptionHandler for FlaggedSharedPoll {}
+
+    // Block 47, D15: events() takes over, and the handler it replaced goes.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn events_takes_over_a_shared_poll_handler() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            poll.set_handler(FlaggedSharedPoll(Arc::clone(&dropped)));
+
+            let _stream = poll.events();
+            poll.subscribe();
+
+            assert!(set_within_a_second(&dropped).await);
+        });
+    }
+
+    // Block 47, D15: a removed shared poll subscription's handler gets its
+    // last events, then its outbox goes.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_removed_shared_poll_subscription_s_outbox_goes_after_its_handler_took_the_last_event() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let record = Arc::clone(&seen);
+            let poll = client
+                .shared_poll_subscription_builder("poll:a")
+                .handler(move |event: crate::SharedPollSubscriptionEvent| {
+                    record.lock().unwrap().push(event.name().to_owned());
+                })
+                .build()
+                .unwrap();
+            poll.subscribe();
+            client.remove_shared_poll_subscription(&poll);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            assert_eq!(*seen.lock().unwrap(), ["subscribing", "unsubscribed"]);
+            assert!(lock(&client.shared().outboxes).shared_polls.is_empty());
+        });
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_shared_poll_handler_set_after_close_is_dropped() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        runtime.block_on(async {
+            let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+            let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+            client.close().await;
+
+            poll.set_handler(FlaggedSharedPoll(Arc::clone(&dropped)));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        });
+
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(runtime.metrics().num_alive_tasks(), 0);
+    }
+
+    /// Records which method of its kind each event reached.
+    #[cfg(feature = "unstable")]
+    #[derive(Default)]
+    struct SharedPollByKind(Vec<&'static str>);
+
+    #[cfg(feature = "unstable")]
+    impl SharedPollSubscriptionHandler for SharedPollByKind {
+        fn on_subscribing(&mut self, _: u32, _: String) {
+            self.0.push("subscribing");
+        }
+        fn on_subscribed(&mut self, _: Subscribed) {
+            self.0.push("subscribed");
+        }
+        fn on_unsubscribed(&mut self, _: u32, _: String) {
+            self.0.push("unsubscribed");
+        }
+        fn on_update(&mut self, _: crate::SharedPollUpdate) {
+            self.0.push("update");
+        }
+        fn on_error(&mut self, _: ClientError) {
+            self.0.push("error");
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn the_default_on_event_calls_the_method_of_each_shared_poll_event_s_kind() {
+        use crate::SharedPollSubscriptionEvent as Event;
+        let error = ClientError {
+            kind: crate::ErrorKind::Track,
+            code: 103,
+            message: String::new(),
+            transport: None,
+        };
+        let mut handler = SharedPollByKind::default();
+
+        for event in [
+            Event::Subscribing {
+                code: 0,
+                reason: String::new(),
+            },
+            Event::Subscribed(Subscribed::default()),
+            Event::Unsubscribed {
+                code: 0,
+                reason: String::new(),
+            },
+            Event::Update(crate::SharedPollUpdate::default()),
+            Event::Error(error),
+        ] {
+            handler.on_event(event);
+        }
+
+        assert_eq!(
+            handler.0,
+            [
+                "subscribing",
+                "subscribed",
+                "unsubscribed",
+                "update",
+                "error"
+            ]
+        );
+    }
+
+    /// A client with a shared poll subscription to "poll:a" whose handler
+    /// was set, subscribed by hand and tracking "a" at version 1, its
+    /// runtime entered and not running.
+    #[cfg(feature = "unstable")]
+    fn tracking_by_hand(client: &Client) -> (crate::machine::TransportId, SubscriptionId) {
+        let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+        poll.set_handler(|_: crate::SharedPollSubscriptionEvent| {});
+        poll.subscribe();
+        let transport = opened_by_hand(client);
+        replied_by_hand(client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
+        replied_by_hand(client, transport, r#"{"id":2,"subscribe":{"type":4}}"#);
+        poll.track_with_signature([crate::SharedPollTrackItem::new("a", 1)], "sig");
+        let id = lock(&client.shared().core)
+            .machine
+            .find_subscription("poll:a")
+            .expect("in the registry");
+        (transport, id)
+    }
+
+    // Block 47, D15, Codex #171's rule: an event queued for a shared poll
+    // handler holds a Thread handler's wait as any queued event does.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_thread_wait_held_by_a_queued_shared_poll_handler_event_would_deadlock() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let (transport, _) = tracking_by_hand(&client);
+        replied_by_hand(
+            &client,
+            transport,
+            r#"{"push":{"channel":"poll:a","pub":{"key":"a","data":{},"version":2}}}"#,
+        );
+        let shared = client.shared();
+        assert!(
+            lock(&shared.core)
+                .machine
+                .events_holding_messages()
+                .next()
+                .is_some()
+        );
+        // A running event that holds nothing.
+        lock(&shared.handlers).running = Some(EventId::for_tests(u64::MAX - 1));
+        let _marked = Marked::new(shared, true);
+
+        assert!(would_deadlock(shared, Wait::Ready(true)));
+    }
+
+    // Block 47, D15: a client whose only handler is a shared poll
+    // subscription's starts the events thread again at the next connect().
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_shared_poll_handler_s_events_thread_starts_at_the_next_connect() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runtime.block_on(async {
+            let client = Client::builder(UNREACHABLE)
+                .event_delivery(EventDelivery::Thread)
+                .build()
+                .unwrap();
+            let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+            let record = Arc::clone(&seen);
+            FAIL_SPAWN.set(true);
+            poll.set_handler(move |event: crate::SharedPollSubscriptionEvent| {
+                record.lock().unwrap().push(event.name().to_owned());
+            });
+            FAIL_SPAWN.set(false);
+            client.connect();
+            poll.subscribe();
+            for _ in 0..100 {
+                if !seen.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            client.close().await;
+        });
+
+        assert_eq!(
+            seen.lock().unwrap().first().map(String::as_str),
+            Some("subscribing")
+        );
+    }
+
+    // Block 47 D5, Block 41 D3: the consumer reports an update as handed
+    // before its handler runs, so its key's version moves at once; a
+    // panic of the handler moves it back (D4).
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_shared_poll_update_given_to_its_handler_moves_its_version_until_a_panic() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let (transport, id) = tracking_by_hand(&client);
+        replied_by_hand(
+            &client,
+            transport,
+            r#"{"push":{"channel":"poll:a","pub":{"key":"a","data":{},"version":3}}}"#,
+        );
+        let shared = client.shared();
+        let mut cx = Context::from_waker(Waker::noop());
+        let version = || {
+            lock(&shared.core)
+                .machine
+                .shared_poll_version_for_tests(id, "a")
+        };
+
+        let handed = loop {
+            let Poll::Ready(Some(handed)) = next(shared, &mut cx) else {
+                panic!("no event for the handler");
+            };
+            if let Handed::SharedPoll {
+                event: crate::SharedPollSubscriptionEvent::Update(_),
+                ..
+            } = &handed
+            {
+                break handed;
+            }
+            deliver(shared, handed);
+        };
+        let moved = version();
+        let Handed::SharedPoll { id: event, .. } = handed else {
+            unreachable!("matched above");
+        };
+        shared.apply(Input::HandlerPanicked {
+            event,
+            message: "boom".into(),
+        });
+
+        assert_eq!(moved, Some(3));
+        assert_eq!(version(), Some(1));
+    }
+
+    // Block 47, D15: Block 41's deadlock detection covers a shared poll
+    // subscription's calls; track and untrack are synchronous.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn a_task_handler_s_shared_poll_calls_fail_at_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        let client = Client::new(UNREACHABLE, crate::Config::default()).unwrap();
+        let poll = client.new_shared_poll_subscription("poll:a").unwrap();
+        poll.subscribe();
+        let _marked = Marked::new(client.shared(), false);
+        let mut cx = Context::from_waker(Waker::noop());
+        let deadlocked = |code: Poll<Option<u32>>| {
+            assert_eq!(code, Poll::Ready(Some(crate::codes::error::WOULD_DEADLOCK)));
+        };
+
+        deadlocked(
+            Box::pin(poll.ready())
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        deadlocked(
+            Box::pin(poll.presence())
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        deadlocked(
+            Box::pin(poll.presence_stats())
+                .as_mut()
+                .poll(&mut cx)
+                .map(|result| result.err().map(|error| error.code)),
+        );
+        poll.track(["a"]);
+        poll.untrack(["a"]);
+    }
+
     // Codex, #169: a runtime that shuts down drops the consumer, and its
     // handlers with it.
     #[test]
@@ -2470,6 +2855,8 @@ mod tests {
         sync::<crate::SubscriptionBuilder>();
         #[cfg(feature = "unstable")]
         sync::<crate::MapSubscriptionBuilder>();
+        #[cfg(feature = "unstable")]
+        sync::<crate::SharedPollSubscriptionBuilder>();
     }
 
     // Codex, #169: a consumer left without a handler ends when the client

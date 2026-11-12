@@ -629,6 +629,45 @@ mod tests {
         assert!(MapUpdate::removal("a").json::<serde_json::Value>().is_err());
     }
 
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn shared_poll_constructors_set_their_fields_only() {
+        use crate::SharedPollUpdate;
+
+        let mut update = SharedPollUpdate::default();
+        update.key = "a".into();
+        update.data = b"d".to_vec();
+        assert_eq!(SharedPollUpdate::new("a", b"d".to_vec()), update);
+        let mut versioned = update.clone();
+        versioned.version = Some(4);
+        assert_eq!(
+            SharedPollUpdate::new("a", b"d".to_vec()).version(4),
+            versioned
+        );
+
+        let mut removal = SharedPollUpdate::default();
+        removal.key = "a".into();
+        removal.removed = true;
+        assert_eq!(SharedPollUpdate::removal("a"), removal);
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn shared_poll_values_decode_as_json() {
+        use crate::SharedPollUpdate;
+
+        let update = SharedPollUpdate::new("a", br#"{"x":1}"#.to_vec());
+        assert_eq!(
+            update.json::<serde_json::Value>().unwrap(),
+            serde_json::json!({"x": 1})
+        );
+        assert!(
+            SharedPollUpdate::removal("a")
+                .json::<serde_json::Value>()
+                .is_err()
+        );
+    }
+
     #[test]
     fn each_publication_setter_sets_its_field_only() {
         let info = ClientInfo::new("c1", "u1");
