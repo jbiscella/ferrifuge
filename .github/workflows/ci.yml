@@ -322,6 +322,13 @@ jobs:
           FERRIFUGE_PERF=1 cargo test --release --test perf_footprint | tee perf_footprint.txt
           { echo '### Memory footprint'; grep '^@P report' perf_footprint.txt; } >> "$GITHUB_STEP_SUMMARY"
 
+      # Shared poll subscriptions within the same limit (Block 47, D3).
+      - name: Memory footprint with unstable
+        run: |
+          set -o pipefail
+          FERRIFUGE_PERF=1 cargo test --release --features unstable --test perf_footprint | tee perf_footprint_unstable.txt
+          { echo '### Memory footprint (unstable)'; grep '^@P report' perf_footprint_unstable.txt; } >> "$GITHUB_STEP_SUMMARY"
+
   # Wall-clock figures of Block 14 (@P): measured and reported, never
   # gating, since they depend on the runner.
   wall-clock:
