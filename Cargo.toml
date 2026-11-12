@@ -94,7 +94,8 @@ browser = [
 # application's tests (Block 37). Not a default.
 test-util = ["tokio?/io-util"]
 # Experimental APIs following centrifuge-js 63ed73e and Centrifugo's
-# experimental features (Block 45: map subscriptions). Not a default, and
+# experimental features (Block 45: map subscriptions; Block 47: shared poll
+# subscriptions). Not a default, and
 # outside the semver promise: what it enables may change in any minor
 # release.
 unstable = []

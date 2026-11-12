@@ -472,6 +472,87 @@ handlers). `MapEntry::json` and `MapUpdate::json` decode a value,
 `MapUpdate::new` and `MapUpdate::removal` build events for an application's
 tests. Map subscriptions work in the browser too.
 
+### Shared poll subscriptions (unstable)
+
+Centrifugo 6.8.0 and later can poll an application's backend once per key
+for every subscriber of a channel and send each new version of a key's
+value, in namespaces declaring `subscription_type: shared_poll` (options
+under `shared_poll`: `mode`, `versionless` by default or `versioned`,
+`refresh_interval`, `max_keys_per_connection`, 5000 by default; the
+refresh endpoint is `channel.proxy.shared_poll_refresh`). With the
+`unstable` feature, which may change in any minor release, a shared poll
+subscription names the keys it follows, each under a signature the
+backend issued:
+
+```rust
+use futures_util::StreamExt;
+use ferrifuge::{SharedPollSubscriptionEvent, SharedPollTrackItem};
+
+let votes = client.new_shared_poll_subscription("votes:feed-1")?;
+let mut events = votes.events();
+votes.subscribe();
+// A signature from your backend over exactly these keys, in this order.
+votes.track_with_signature([SharedPollTrackItem::new("post-1", 0)], signature);
+while let Some(event) = events.next().await {
+    match event {
+        SharedPollSubscriptionEvent::Update(update) if update.removed => { /* forget update.key */ }
+        SharedPollSubscriptionEvent::Update(update) => { /* set update.key to update.data */ }
+        _ => {}
+    }
+}
+```
+
+A signature is `iat:exp:hmac`: the hex HMAC-SHA256, with the server's
+`shared_poll.hmac_secret_key`, of `iat`, `exp` (0 for none), the user id
+(empty for an anonymous client), the channel and the hex SHA-256 of the
+keys joined by NUL bytes, the five joined by NUL bytes. It covers the keys
+in their order: the server refuses it for the same keys in another order
+(103), one expired more than 5 s ago (109), and keys past
+`max_keys_per_connection` (106). The client checks no signature;
+it carries it. `SharedPollSubscriptionBuilder::get_signature` gives the
+client a callback signing keys itself: `track(keys)` then asks it for the
+keys, and the keys tracked without a signature are signed after each
+subscribe. A callback that fails reports an `Error` event of kind `Track`
+with code 14, and the keys stay tracked.
+
+The stream yields `subscribing`, `subscribed`, then an `Update` per new
+version of a tracked key's value, each version once: `update.version` is
+the value's version, `None` in versionless mode. A key the backend removes,
+or one the server refuses to track, comes as an `Update` with `removed`
+and no data, and is no longer tracked; a refused track also reports an
+`Error` event of kind `Track` with the server's code. An update not taken
+when the subscription leaves `subscribed` for a client-side reason is
+withdrawn, and the next subscribe asks for the value again; a removal is
+never withdrawn. `untrack(keys)` stops a key at once; an empty set sends
+nothing.
+
+The client keeps the keys, the versions taken and the signatures across
+reconnects: each subscribe tracks every key again, with the signatures it
+holds and the versions taken, so a mass reconnect asks the backend for
+nothing while its signatures stay valid, and a device gets a value again
+only when it missed it. `unsubscribe()` forgets them. A signature with an
+expiry is the application's to renew: call `track_with_signature` again
+before it expires, as the server drops its keys some time after, with no
+event, while `tracked_keys()` still lists them. Keys and signatures grow
+only by the application's calls and its backend's answers, not by the
+server, and are not bounded by the client: `max_keys_per_connection` is
+the usual limit.
+
+Track and untrack requests are `sub_refresh` commands. An untrack of many
+keys is split so that no request passes `max_track_frame_bytes` (60 000
+by default) by its worst-case size; keep it below the server's
+`websocket.message_size_limit` and the emulation endpoint's
+`max_request_body_size`, 65 536 bytes each by default, as a larger
+websocket message closes the connection with 1009, which ends the client.
+`.delta(DeltaFormat::Fossil)` asks for deltas on namespaces with
+`allowed_delta_types`; on Centrifugo OSS a delta exists only when the
+backend's refresh returns `prev_data`. A server older than 6.8.0 answers
+a shared poll subscription as a stream one, and the subscription ends with
+`unsubscribed` 8; a namespace of another type refuses it with 108. A
+shared poll subscription shares the registry with the other kinds, one per
+channel: `get_shared_poll_subscription` and `shared_poll_subscriptions()`
+list shared poll ones only.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it
@@ -1059,7 +1140,7 @@ let config = Config::default()
 | `test-util` | no | constructors of the events and results the client yields, and with `tokio` an in-memory server double, for an application's tests (see Testing your application) |
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
 | `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket, fetch (http_stream) and EventSource (sse); nothing on other targets (see Browser) |
-| `unstable` | no | experimental APIs following centrifuge-js 63ed73e and Centrifugo's experimental features, outside the semver promise: they may change in any minor release (see Map subscriptions) |
+| `unstable` | no | experimental APIs following centrifuge-js 63ed73e and Centrifugo's experimental features, outside the semver promise: they may change in any minor release (see Map subscriptions and Shared poll subscriptions) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
