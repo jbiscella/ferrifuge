@@ -244,7 +244,6 @@ impl Machine {
     /// publication delivered when `publication`; withdrawn as a publication
     /// is, unless `keep`.
     #[cfg(feature = "unstable")]
-    #[allow(dead_code)] // Called from 47a's green step.
     pub(super) fn deliver_shared_poll_update(
         &mut self,
         id: EventId,

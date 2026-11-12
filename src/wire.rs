@@ -148,10 +148,10 @@ pub(crate) struct KeyedItem {
 }
 
 /// `SubRefreshRequest.type` of a shared poll track request.
-#[allow(dead_code)] // Shared poll only, sent from 47a's core.
+#[cfg_attr(not(feature = "unstable"), allow(dead_code))] // Shared poll only.
 pub(crate) const TRACK: i32 = 1;
 /// `SubRefreshRequest.type` of a shared poll untrack request.
-#[allow(dead_code)] // Shared poll only, sent from 47a's core.
+#[cfg_attr(not(feature = "unstable"), allow(dead_code))] // Shared poll only.
 pub(crate) const UNTRACK: i32 = 2;
 
 /// `RPCRequest` of `client.proto`.
