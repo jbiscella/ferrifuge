@@ -861,8 +861,21 @@ fn an_emulated_resubscribe_waits_for_the_requests_in_flight() {
     );
     assert!(
         emulated_requests(&answered, 2).is_empty(),
-        "the earlier untrack is dropped"
+        "the earlier untrack waits"
     );
+    // Once subscribed again, the earlier subscription's untrack is dropped
+    // and the replay goes first.
+    take_all(&mut machine, &answered);
+    let subscribe = commands
+        .iter()
+        .find(|command| command.get("subscribe").is_some())
+        .unwrap();
+    let replay = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": subscribe["id"], "subscribe": {"type": 4}}).to_string(),
+    ));
+    assert!(emulated_requests(&replay, 2).is_empty(), "{replay:?}");
+    assert_eq!(emulated_requests(&replay, 1).len(), 1, "{replay:?}");
 }
 
 /// A shared poll subscription to "items" with a frame budget of `budget`,

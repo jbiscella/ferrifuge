@@ -339,9 +339,6 @@ impl Machine {
         common.join_leave = false;
         common.tag_filter = None;
         common.channel_compaction = false;
-        // Not negotiated until per-key delta bases decode the values (D10,
-        // 47d): a value must never reach the application as a patch.
-        common.delta = None;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.shared_poll = Some(Box::new(flow));
