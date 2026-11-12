@@ -791,6 +791,37 @@ const MAPS: &[&str] = &[
 #[cfg(not(feature = "unstable"))]
 const MAPS: &[&str] = &[];
 
+/// Block 47: shared poll subscriptions, run only when the BDD binary is
+/// built with `unstable` (Block 47, D18).
+#[cfg(feature = "unstable")]
+const SHARED_POLLS: &[&str] = &[
+    // 47a: tracking keys under signatures.
+    "A shared poll subscription cannot share a channel with another subscription",
+    "A new shared poll subscription starts unsubscribed",
+    "Removing a shared poll subscription unsubscribes it and frees its channel",
+    "A shared poll subscription subscribes with type 4 and nothing else",
+    "Tracking with a signature sends one track request",
+    "Keys tracked before subscribing are sent once subscribed",
+    "A key tracked twice is tracked once at the higher version",
+    "An empty key set sends nothing",
+    "An untrack of more keys than one frame fits is split",
+    "Tracked keys receive their values and each new version",
+    "Centrifugo polls the backend and fans the value out",
+    "A shared poll subscription works over each transport and protocol",
+    "An untracked key delivers nothing more",
+    "A version not newer than the one held is dropped",
+    "A publication of a key not tracked is dropped",
+    "A backend removal ends the key and gives one update",
+    "Items of a track reply are delivered before later pushes",
+    "A signature the server refuses untracks its keys and reports the error",
+    "A limit the server enforces untracks the keys over it",
+    "A namespace that is not shared poll refuses a shared poll subscription",
+    "A server without shared poll ends the subscription",
+    "A private namespace gets its token and refreshes it",
+];
+#[cfg(not(feature = "unstable"))]
+const SHARED_POLLS: &[&str] = &[];
+
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
 /// (Block 41, D8): none since 41d ran `@thread`.
 const EXAMPLES_NOT_YET: &[&str] = &[];
@@ -918,7 +949,8 @@ async fn run_scenarios() {
                 && scenario.tags.iter().all(|tag| tag == "P" || tag == "W");
             (IMPLEMENTED.contains(&scenario.name.as_str())
                 || COOKIES.contains(&scenario.name.as_str())
-                || MAPS.contains(&scenario.name.as_str()))
+                || MAPS.contains(&scenario.name.as_str())
+                || SHARED_POLLS.contains(&scenario.name.as_str()))
                 && !outside
                 && !scenario
                     .tags
@@ -1018,7 +1050,12 @@ fn assert_implemented_scenarios_exist() {
             names.extend(feature.scenarios.into_iter().map(|s| s.name));
         }
     }
-    for name in IMPLEMENTED.iter().chain(COOKIES).chain(MAPS) {
+    for name in IMPLEMENTED
+        .iter()
+        .chain(COOKIES)
+        .chain(MAPS)
+        .chain(SHARED_POLLS)
+    {
         assert!(
             names.contains(*name),
             "no scenario named {name:?} in {FEATURES}"

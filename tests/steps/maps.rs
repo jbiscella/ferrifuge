@@ -43,7 +43,7 @@ pub(crate) struct Maps {
     /// The second client of a presence scenario: its id, and its
     /// subscription to the stream channel.
     second: Option<(Client, String, Subscription)>,
-    created: Option<Result<(), SubscriptionError>>,
+    pub(crate) created: Option<Result<(), SubscriptionError>>,
     calls: Vec<JoinHandle<Result<(), CallError>>>,
     token_calls: Arc<AtomicUsize>,
     token_calls_at_sync: Option<usize>,
