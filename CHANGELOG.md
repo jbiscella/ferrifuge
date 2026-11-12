@@ -48,7 +48,10 @@ repository held while it carried that version, from the blocks of
   `unsubscribed` 1. Signatures are renewed at the earliest expiry the
   server reports, after 1 s for one accepted within the server's grace
   period (backing off to 15 s), and at once after a 109, a 109 to the
-  renewal itself waiting 5 s to 30 s. `ErrorKind::SignatureRefresh`.
+  renewal itself waiting 5 s to 30 s, one refresh timer per
+  subscription run by the owner: `Action::SetSharedPollRefresh` and
+  `CancelSharedPollRefresh`, `Input::SharedPollRefreshFired`.
+  `ErrorKind::SignatureRefresh`.
   The rows of `unsubscribed` 1, errors 12 and 14 and the track errors in
   the table of codes say so.
 

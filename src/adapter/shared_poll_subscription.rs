@@ -313,9 +313,9 @@ impl SharedPollSubscriptionBuilder {
     /// back no ping or call.
     ///
     /// The client asks it for the keys in chunks when one batch of them
-    /// would pass `max_track_frame_bytes`, one at a time, each sized for a
-    /// signature of up to 128 bytes. A key asked for and not returned is
-    /// revoked. It is asked again for every key tracked when a signature
+    /// would pass `max_track_frame_bytes`, one at a time, each sized for
+    /// the longest signature it has returned, at least 128 bytes. A key
+    /// asked for and not returned is revoked. It is asked again for every key tracked when a signature
     /// expires, at the earliest expiry the server reports, or when the
     /// server refuses one with 109; the signatures it returns then replace
     /// those they cover. A failure is reported as an `Error` event with
