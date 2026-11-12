@@ -6,7 +6,7 @@
 //! (`src/subscription.ts:1109-2245`, `:2915-3084`), except where Block 47
 //! decides otherwise.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod signing;
 
@@ -99,6 +99,12 @@ pub(in crate::machine) struct SharedPollFlow {
     /// The worst-case cost of the longest signature received, at least
     /// that of one of 128 bytes: chunks are sized for it (D6).
     signature_cost: usize,
+    /// The epoch of the last subscribe reply, an absent one as `""`; `None`
+    /// until the first reply after `unsubscribed` (D5, D8).
+    epoch: Option<String>,
+    /// Track requests failed in a row with a temporary error, one below
+    /// 100 or no reply in time: the step of the replay's backoff (D7).
+    replay_attempts: u32,
 }
 
 /// What a track or untrack request is for.
@@ -153,7 +159,7 @@ pub(in crate::machine) struct TrackCommand {
     untracked: Vec<String>,
     /// The request it is a frame of (D7).
     group: u64,
-    /// Its reply deadline, over an emulated transport (D12).
+    /// Its reply deadline, until its reply is read (D7, D12).
     timer: Option<SharedPollTimer>,
 }
 
@@ -183,6 +189,8 @@ impl SharedPollFlow {
             grace_attempts: 0,
             refresh_armed: false,
             signature_cost: signing::unknown_signature_cost(),
+            epoch: None,
+            replay_attempts: 0,
         }
     }
 
@@ -258,16 +266,30 @@ impl SharedPollFlow {
         }
     }
 
-    /// `unsubscribe()` of subscription `id`: the keys and signatures go
-    /// with it, so the next subscribe starts cold (D5, `set_unsubscribed`);
-    /// what it asked for and scheduled ends. The actions cancelling its
-    /// timers.
+    /// `unsubscribe()` of subscription `id`: the keys, signatures and
+    /// epoch go with it, so the next subscribe starts cold (D5,
+    /// `set_unsubscribed`); what it asked for and scheduled ends. The
+    /// actions cancelling its timers.
     #[must_use]
     pub(in crate::machine) fn forget(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.tracked.clear();
         self.library.clear();
         self.queue.clear();
+        self.epoch = None;
         self.end_period(id)
+    }
+
+    /// The epoch of a subscribe reply, an absent one `""` (D8): when it
+    /// differs from the one kept, every version held goes to 0, as the
+    /// server's versions restart lower; with none kept, the first subscribe
+    /// after `unsubscribed`, the versions given stay.
+    fn new_epoch(&mut self, epoch: String) {
+        if self.epoch.as_ref().is_some_and(|kept| *kept != epoch) {
+            for tracked in self.tracked.values_mut() {
+                tracked.version = 0;
+            }
+        }
+        self.epoch = Some(epoch);
     }
 
     /// Subscription `id` became `subscribed` again: what an earlier period
@@ -295,6 +317,7 @@ impl SharedPollFlow {
         self.refresh_attempts = 0;
         self.sign_attempts = 0;
         self.grace_attempts = 0;
+        self.replay_attempts = 0;
         let mut cancel: Vec<Action> = self
             .timers
             .drain(..)
@@ -331,26 +354,57 @@ impl SharedPollFlow {
     }
 
     /// `batches` grouped in frames, in order, each within `budget` by the
-    /// worst-case cost; a batch too large for any goes alone (D7).
+    /// worst-case cost, with the keys of `untracked` its batches carry in
+    /// its `untrack` field (D7, D8): a batch goes with its untracks to the
+    /// frame being filled when both fit, else it starts the next frame,
+    /// taking as many of its untracks as the budget lets; the others are
+    /// untracked once that frame is answered (the stale rule of
+    /// [`Machine::track_command_answered`]). A batch too large for any
+    /// frame goes alone.
     fn track_frames(
         channel: &str,
         batches: Vec<TrackBatch>,
+        untracked: &HashSet<String>,
         budget: usize,
-    ) -> Vec<Vec<TrackBatch>> {
+    ) -> Vec<(Vec<TrackBatch>, Vec<String>)> {
         let base = Self::track_cost(channel, []);
         let mut frames = Vec::new();
-        let mut frame = Vec::new();
+        let mut frame: (Vec<TrackBatch>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut inline: HashSet<String> = HashSet::new();
         let mut cost = base;
         for batch in batches {
             let batch_cost = Self::batch_cost(&batch);
-            if !frame.is_empty() && cost + batch_cost > budget {
+            let untracks: Vec<String> = distinct(
+                batch
+                    .items
+                    .iter()
+                    .filter(|item| untracked.contains(&item.key))
+                    .map(|item| item.key.clone())
+                    .collect(),
+            );
+            let with_untracks = batch_cost
+                + untracks
+                    .iter()
+                    .filter(|key| !inline.contains(*key))
+                    .map(|key| untrack_key_cost(key))
+                    .sum::<usize>();
+            if !frame.0.is_empty() && cost + with_untracks > budget {
                 frames.push(std::mem::take(&mut frame));
+                inline.clear();
                 cost = base;
             }
             cost += batch_cost;
-            frame.push(batch);
+            frame.0.push(batch);
+            for key in untracks {
+                let key_cost = untrack_key_cost(&key);
+                if !inline.contains(&key) && cost + key_cost <= budget {
+                    cost += key_cost;
+                    inline.insert(key.clone());
+                    frame.1.push(key);
+                }
+            }
         }
-        if !frame.is_empty() {
+        if !frame.0.is_empty() {
             frames.push(frame);
         }
         frames
@@ -364,7 +418,7 @@ impl SharedPollFlow {
         let mut request = Vec::new();
         let mut cost = base;
         for key in keys {
-            let key_cost = escaped_twice(&key) + UNTRACK_KEY_COST;
+            let key_cost = untrack_key_cost(&key);
             if !request.is_empty() && cost + key_cost > budget {
                 requests.push(std::mem::take(&mut request));
                 cost = base;
@@ -384,6 +438,11 @@ impl SharedPollFlow {
 fn escaped_twice(text: &str) -> usize {
     let once = serde_json::to_string(text).unwrap_or_default();
     serde_json::to_string(&once).map_or(0, |twice| twice.len())
+}
+
+/// The worst-case cost of `key` in an untrack list (D7).
+fn untrack_key_cost(key: &str) -> usize {
+    escaped_twice(key) + UNTRACK_KEY_COST
 }
 
 /// Keys without repeats, in the order given.
@@ -552,7 +611,7 @@ impl Machine {
         }
         flow.add_signature(keys, batch.signature.0.clone());
         if self.subscribed_now(id) {
-            self.send_track(id, vec![batch], Vec::new(), Purpose::Track);
+            self.send_track(id, vec![batch], &HashSet::new(), Purpose::Track);
         }
     }
 
@@ -599,15 +658,15 @@ impl Machine {
     }
 
     /// Queues a track request of `batches` (D7), in frames within the frame
-    /// budget, each after the reply to the one before. The keys of
-    /// `untracked` its first frame carries go in its `untrack` field, as
-    /// many as the budget lets; the others are untracked once a reply shows
-    /// them tracked (the stale rule of [`Self::track_command_answered`]).
+    /// budget, each after the reply to the one before. A key of `untracked`
+    /// goes in the `untrack` field of the frame carrying its batch, as the
+    /// budget lets; the others are untracked once a reply shows them
+    /// tracked (the stale rule of [`Self::track_command_answered`]).
     fn send_track(
         &mut self,
         id: SubscriptionId,
         batches: Vec<TrackBatch>,
-        untracked: Vec<String>,
+        untracked: &HashSet<String>,
         purpose: Purpose,
     ) {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
@@ -619,38 +678,19 @@ impl Machine {
         let budget = flow.max_track_frame_bytes;
         let group = flow.next_group;
         flow.next_group += 1;
-        let frames = SharedPollFlow::track_frames(&sub.channel, batches, budget);
-        let untracked = distinct(untracked);
-        let mut requests = Vec::with_capacity(frames.len());
-        for (number, batches) in frames.into_iter().enumerate() {
+        let frames = SharedPollFlow::track_frames(&sub.channel, batches, untracked, budget);
+        for (number, (batches, untrack)) in frames.into_iter().enumerate() {
             let keys: Vec<String> = batches
                 .iter()
                 .flat_map(|batch| batch.items.iter().map(|item| item.key.clone()))
                 .collect();
-            let mut untrack = Vec::new();
-            if number == 0 {
-                let mut cost = SharedPollFlow::track_cost(&sub.channel, &batches);
-                for key in &untracked {
-                    let key_cost = escaped_twice(key) + UNTRACK_KEY_COST;
-                    if keys.contains(key) && cost + key_cost <= budget {
-                        cost += key_cost;
-                        untrack.push(key.clone());
-                    }
-                }
-            }
-            requests.push((
-                SubRefreshRequest {
-                    kind: TRACK,
-                    track: batches,
-                    untrack,
-                    ..SubRefreshRequest::default()
-                },
-                keys,
-                number > 0,
-            ));
-        }
-        for (request, keys, after_reply) in requests {
-            self.queue_request(id, request, purpose, keys, (group, after_reply));
+            let request = SubRefreshRequest {
+                kind: TRACK,
+                track: batches,
+                untrack,
+                ..SubRefreshRequest::default()
+            };
+            self.queue_request(id, request, purpose, keys, (group, number > 0));
         }
         self.pump_requests(id);
     }
@@ -759,14 +799,13 @@ impl Machine {
                 return;
             }
             let queued = flow.queue.pop_front().expect("checked above");
-            self.send_track_command(id, queued, emulated);
+            self.send_track_command(id, queued);
         }
     }
 
     /// Sends `queued` for subscription `id`, one of the client's own
-    /// commands (D7), with a reply deadline over an emulated transport
-    /// (D12).
-    fn send_track_command(&mut self, id: SubscriptionId, queued: Queued, emulated: bool) {
+    /// commands, with a reply deadline of `Config::timeout` (D7, D12).
+    fn send_track_command(&mut self, id: SubscriptionId, queued: Queued) {
         let Some(transport) = self.transport.filter(|_| self.state == State::Connected) else {
             return;
         };
@@ -783,7 +822,7 @@ impl Machine {
         } = queued;
         request.channel.clone_from(&sub.channel);
         let command_id = self.command_id();
-        let timer = emulated.then(|| self.new_shared_poll_timer());
+        let timer = self.new_shared_poll_timer();
         self.subscriptions.track_commands.insert(
             command_id,
             TrackCommand {
@@ -798,7 +837,7 @@ impl Machine {
                 },
                 keys,
                 group,
-                timer,
+                timer: Some(timer),
             },
         );
         self.send(
@@ -808,10 +847,8 @@ impl Machine {
                 method: Method::SubRefresh(request),
             },
         );
-        if let Some(timer) = timer {
-            self.actions
-                .push(Action::SetSharedPollTimer(timer, self.config.timeout));
-        }
+        self.actions
+            .push(Action::SetSharedPollTimer(timer, self.config.timeout));
     }
 
     /// A number for a new timer, never reused (D3).
@@ -821,24 +858,41 @@ impl Machine {
         timer
     }
 
-    /// A timer fired: a track or untrack request's reply deadline (D12),
-    /// over an emulated transport, where whether the keys are tracked is
-    /// unknown, so the client reconnects with `connecting` 3; or a refresh
-    /// or a retry of a subscription (D7).
+    /// A timer fired: a track or untrack request's reply deadline, or a
+    /// refresh or a retry of a subscription (D7). Over an emulated
+    /// transport, where whether the keys are tracked is unknown, a deadline
+    /// passing makes the client reconnect with `connecting` 3 (D12); over
+    /// websocket it fails the request with error 1, as a reply would.
     fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
-        let pending = self
+        let command = self
             .subscriptions
             .track_commands
-            .values()
-            .any(|command| command.timer == Some(timer));
-        if pending {
+            .iter()
+            .find(|(_, command)| command.timer == Some(timer))
+            .map(|(command, _)| *command);
+        let Some(command) = command else {
+            return self.flow_timer_fired(timer);
+        };
+        if self.transport_kind().is_emulated() {
             return self.disconnect(
                 codes::connecting::SUBSCRIBE_TIMEOUT,
                 REQUEST_TIMEOUT_REASON,
                 true,
             );
         }
-        self.flow_timer_fired(timer);
+        // It fired: nothing to cancel.
+        if let Some(pending) = self.subscriptions.track_commands.get_mut(&command) {
+            pending.timer = None;
+        }
+        self.track_command_reply(Reply {
+            id: command,
+            error: Some(crate::wire::Error {
+                code: codes::error::TIMEOUT,
+                message: "timeout".to_owned(),
+                temporary: false,
+            }),
+            result: ReplyResult::Empty,
+        });
     }
 
     /// The reply to track or untrack request `command` was read: its
@@ -925,7 +979,12 @@ impl Machine {
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
             self.actions.extend(flow.restart(id));
         }
+        // What was not taken goes before the epoch decides the versions,
+        // so that no update of an earlier epoch moves one once taken.
         self.withdraw(&Owner::Client(id));
+        if let Some(flow) = self.shared_poll_flow(id) {
+            flow.new_epoch(result.epoch);
+        }
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
         self.emit_subscription(
             id,
@@ -945,8 +1004,10 @@ impl Machine {
     }
 
     /// Tracks again after a subscribe (D8): one track request with every
-    /// signature held, at the versions held; then the keys no signature
-    /// covers, signed by the callback.
+    /// signature held, at the versions held, 0 for a key since untracked,
+    /// which goes in the `untrack` field of the frame carrying it; then the
+    /// keys no signature covers, signed by the callback. Also the retry of
+    /// a track request that failed for a while (D7).
     fn shared_poll_replay(&mut self, id: SubscriptionId) {
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
@@ -956,8 +1017,15 @@ impl Machine {
             .iter()
             .map(|signed| flow.batch(signed))
             .collect();
+        let untracked: HashSet<String> = flow
+            .library
+            .iter()
+            .flat_map(|signed| &signed.keys)
+            .filter(|key| !flow.tracked.contains_key(*key))
+            .cloned()
+            .collect();
         if !batches.is_empty() {
-            self.send_track(id, batches, Vec::new(), Purpose::Track);
+            self.send_track(id, batches, &untracked, Purpose::Track);
         }
         self.sign_unsigned(id);
     }
@@ -1028,6 +1096,10 @@ impl Machine {
                 } else {
                     self.start_refresh(id);
                 }
+            } else {
+                // Temporary, below 100 or no reply in time: the replay runs
+                // again after the backoff (D7).
+                self.replay_failed(id);
             }
             return;
         }
@@ -1061,13 +1133,17 @@ impl Machine {
                 .cloned()
                 .collect(),
         );
-        if command.purpose == Purpose::Refresh
-            && !flow
-                .queue
-                .iter()
-                .any(|queued| queued.group == command.group)
+        // The whole request accepted: the backoffs of what it was for
+        // start over (D7).
+        if !flow
+            .queue
+            .iter()
+            .any(|queued| queued.group == command.group)
         {
-            flow.refresh_attempts = 0;
+            flow.replay_attempts = 0;
+            if command.purpose == Purpose::Refresh {
+                flow.refresh_attempts = 0;
+            }
         }
         if !stale.is_empty() {
             self.send_untrack(id, stale);

@@ -35,6 +35,11 @@ pub(super) fn unknown_signature_cost() -> usize {
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
+/// The bounds of the replay after a track request failed with a temporary
+/// error, one below 100 or no reply in time (D7, `src/subscription.ts:1926-1929`).
+const REPLAY_MIN: Duration = Duration::from_secs(1);
+const REPLAY_MAX: Duration = Duration::from_secs(15);
+
 /// The bounds of the refresh after replies with `expires` and no `ttl`:
 /// a signature accepted within the server's grace period (D7).
 const GRACE_MIN: Duration = Duration::from_secs(1);
@@ -74,6 +79,8 @@ enum Retry {
     Refresh,
     /// Signing the keys tracked without a signature.
     Sign,
+    /// The replay of the signatures held, after a failing track request.
+    Replay,
 }
 
 /// A retry timer of a subscription's `subscribed` period (D7); the
@@ -85,6 +92,8 @@ pub(in crate::machine) enum FlowTimer {
     RefreshRetry,
     /// Signing the keys without a signature failed and runs again.
     SignRetry,
+    /// A track request failed for a while: the replay runs again.
+    ReplayRetry,
 }
 
 impl SharedPollFlow {
@@ -333,7 +342,7 @@ impl Machine {
             .collect();
         let covered: HashSet<String> = returned.into_iter().cloned().collect();
         let mut batches = Vec::new();
-        let mut untracked = Vec::new();
+        let mut untracked = HashSet::new();
         let mut entries = Vec::new();
         for entry in signed {
             if !entry.keys.iter().any(|key| flow.tracked.contains_key(key)) {
@@ -382,7 +391,7 @@ impl Machine {
             } else {
                 Purpose::Track
             };
-            self.send_track(id, batches, untracked, purpose);
+            self.send_track(id, batches, &untracked, purpose);
         }
         if again {
             self.start_refresh(id);
@@ -446,6 +455,12 @@ impl Machine {
         self.schedule_retry(id, Retry::Refresh);
     }
 
+    /// A track request failed with a temporary error, one below 100 or no
+    /// reply in time: the replay runs again after the backoff (D7).
+    pub(super) fn replay_failed(&mut self, id: SubscriptionId) {
+        self.schedule_retry(id, Retry::Replay);
+    }
+
     /// A track reply with `expires`: the refresh runs at the earliest
     /// deadline seen (D7), `ttl` seconds from now, or, for a signature
     /// accepted within the server's grace period (`ttl` 0), 1 s from now,
@@ -492,8 +507,9 @@ impl Machine {
         }
     }
 
-    /// Schedules `retry` after Block 2's backoff between 5 s and 30 s, its
-    /// step counting the failures in a row (D7), replacing one scheduled.
+    /// Schedules `retry` after Block 2's backoff, between 5 s and 30 s, or
+    /// 1 s and 15 s for the replay, its step counting the failures in a row
+    /// (D7), replacing one scheduled.
     fn schedule_retry(&mut self, id: SubscriptionId, retry: Retry) {
         let Some(flow) = self
             .subscriptions
@@ -503,11 +519,24 @@ impl Machine {
         else {
             return;
         };
-        let (attempts, kind) = match retry {
-            Retry::Refresh => (&mut flow.refresh_attempts, FlowTimer::RefreshRetry),
-            Retry::Sign => (&mut flow.sign_attempts, FlowTimer::SignRetry),
+        let (attempts, kind, (min, max)) = match retry {
+            Retry::Refresh => (
+                &mut flow.refresh_attempts,
+                FlowTimer::RefreshRetry,
+                (RETRY_MIN, RETRY_MAX),
+            ),
+            Retry::Sign => (
+                &mut flow.sign_attempts,
+                FlowTimer::SignRetry,
+                (RETRY_MIN, RETRY_MAX),
+            ),
+            Retry::Replay => (
+                &mut flow.replay_attempts,
+                FlowTimer::ReplayRetry,
+                (REPLAY_MIN, REPLAY_MAX),
+            ),
         };
-        let delay = backoff::delay(*attempts, RETRY_MIN, RETRY_MAX, &mut self.rng);
+        let delay = backoff::delay(*attempts, min, max, &mut self.rng);
         *attempts = attempts.saturating_add(1);
         let replaced = flow.take_timers(|scheduled| {
             std::mem::discriminant(&scheduled) == std::mem::discriminant(&kind)
@@ -539,6 +568,7 @@ impl Machine {
         match kind {
             FlowTimer::RefreshRetry => self.start_refresh(id),
             FlowTimer::SignRetry => self.sign_unsigned(id),
+            FlowTimer::ReplayRetry => self.shared_poll_replay(id),
         }
     }
 }

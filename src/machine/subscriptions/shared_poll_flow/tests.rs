@@ -1015,17 +1015,46 @@ fn the_track_cost_bounds_every_encoding() {
             })
             .collect();
         let budget = rng.usize(400..6000);
-        let frames = SharedPollFlow::track_frames(&channel, batches.clone(), budget);
-        assert_eq!(frames.concat(), batches);
-        for frame in frames {
-            let cost = SharedPollFlow::track_cost(&channel, &frame);
-            assert!(frame.len() == 1 || cost <= budget, "{cost} over {budget}");
+        // Some keys since untracked, carried inline by their frames (D8).
+        let untracked: std::collections::HashSet<String> = batches
+            .iter()
+            .flat_map(|batch| &batch.items)
+            .filter(|_| rng.bool())
+            .map(|item| item.key.clone())
+            .collect();
+        let frames = SharedPollFlow::track_frames(&channel, batches.clone(), &untracked, budget);
+        let sent: Vec<TrackBatch> = frames
+            .iter()
+            .flat_map(|(frame, _)| frame.iter().cloned())
+            .collect();
+        assert_eq!(sent, batches);
+        for (frame, untrack) in frames {
+            let keys: std::collections::HashSet<&String> = frame
+                .iter()
+                .flat_map(|batch| batch.items.iter().map(|item| &item.key))
+                .collect();
+            assert!(
+                untrack
+                    .iter()
+                    .all(|key| keys.contains(key) && untracked.contains(key)),
+                "{untrack:?}"
+            );
+            let cost = SharedPollFlow::track_cost(&channel, &frame)
+                + untrack
+                    .iter()
+                    .map(|key| untrack_key_cost(key))
+                    .sum::<usize>();
+            assert!(
+                (frame.len() == 1 && untrack.is_empty()) || cost <= budget,
+                "{cost} over {budget}"
+            );
             let command = Command {
                 id: u32::MAX,
                 method: Method::SubRefresh(SubRefreshRequest {
                     channel: channel.clone(),
                     kind: TRACK,
                     track: frame,
+                    untrack,
                     ..SubRefreshRequest::default()
                 }),
             };
