@@ -43,7 +43,11 @@ use crate::{
 /// request failing with a temporary error, or without a reply in time,
 /// is tracked again after 1 to 15 s. With the callback, the client also
 /// renews signatures as they expire. Keys and signatures are not bounded by the client: the server's
-/// `max_keys_per_connection` (5000 by default) is the usual limit.
+/// `max_keys_per_connection` (5000 by default) is the usual limit. With
+/// [`SharedPollSubscriptionBuilder::delta`], each key's changes may come as
+/// deltas against its previous value; the client rebuilds them, holding
+/// one base per tracked key within
+/// [`SharedPollSubscriptionBuilder::max_delta_bases_bytes`].
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
