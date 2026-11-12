@@ -47,7 +47,9 @@ use crate::{
 /// [`SharedPollSubscriptionBuilder::delta`], each key's changes may come as
 /// deltas against its previous value; the client rebuilds them, holding
 /// one base per tracked key within
-/// [`SharedPollSubscriptionBuilder::max_delta_bases_bytes`].
+/// [`SharedPollSubscriptionBuilder::max_delta_bases_bytes`]. A
+/// [`crate::SharedPollSubscriptionHandler`] may take the events instead of
+/// the stream ([`Self::set_handler`]).
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and

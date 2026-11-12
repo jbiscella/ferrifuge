@@ -619,6 +619,23 @@ shared poll subscription shares the registry with the other kinds, one per
 channel: `get_shared_poll_subscription` and `shared_poll_subscriptions()`
 list shared poll ones only.
 
+`SharedPollSubscriptionBuilder::handler` or `set_handler` takes the events
+in place of the stream, a closure or a `SharedPollSubscriptionHandler` with
+`on_update`, run by the client's consumer as any handler (see Event
+handlers): an update counts as taken, and its key's version moves, when
+the method returns; one whose handler panics leaves the version as it was,
+so the next subscribe asks for the value again. `track`, `untrack` and
+`track_with_signature` return at once and may be called from a handler;
+`ready()`, `presence()` and `presence_stats()` there fail with "would
+deadlock" as for any subscription. The `get_signature` callback runs
+beside the client, not as a handler: it may call the client, and await
+its calls. `SharedPollUpdate::json` decodes a value. With `test-util`,
+`SharedPollUpdate::new`, `removal` and `version` build events for an
+application's tests; the server double (`test_util::Server`) does not
+model shared poll subscriptions: it answers their subscribe as a server
+older than 6.8.0 does, so they end with `unsubscribed` 8. Shared poll
+subscriptions work in the browser too.
+
 ### Join and leave
 
 A subscription built with `.join_leave(true)` asks the server to tell it

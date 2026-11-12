@@ -85,6 +85,14 @@ repository held while it carried that version, from the blocks of
   that its failure would withdraw.
 - `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE` (7), with its
   row in the table of codes.
+- Unstable (`unstable` feature): `SharedPollSubscriptionHandler`, set with
+  `SharedPollSubscriptionBuilder::handler` or
+  `SharedPollSubscription::set_handler`, run by the client's consumer under
+  its `EventDelivery` mode; a handler that panics leaves the version its
+  update moved as it was. `SharedPollUpdate::json`; with `test-util`,
+  `SharedPollUpdate::new`, `SharedPollUpdate::removal` and the `version`
+  setter. Shared poll subscriptions work in the browser (Block 47e). The
+  server double's documentation says it does not model them.
 
 - Publish debouncing as advised by the server (Centrifugo PRO):
   `Subscription::publish` and `publish_json` send the first value at once
