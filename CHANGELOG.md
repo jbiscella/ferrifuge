@@ -35,6 +35,20 @@ repository held while it carried that version, from the blocks of
   request timeout" when one is not answered in time;
   `machine::SharedPollTimer`, `Action::SetSharedPollTimer` and
   `CancelSharedPollTimer`, `Input::SharedPollTimerFired`.
+- Unstable (`unstable` feature): shared poll subscriptions keep their keys
+  across reconnects (Block 47c). Each subscribe tracks every key again
+  with the signatures and versions held, a key untracked meanwhile in the
+  `untrack` field of the frame carrying its signature's batch, within
+  `max_track_frame_bytes`, else in an untrack request once that frame is
+  answered. A subscribe reply whose epoch differs from the one before
+  (an absent one counting as empty) tracks every key from version 0; the
+  first subscribe after `unsubscribe()` keeps the versions given. A track
+  request failing with a temporary error or one below 100 tracks the
+  signatures held again after 1 to 15 s, growing with each failure in a
+  row. Every track and untrack request has a reply deadline of
+  `Config::timeout`; over websocket, one passing reports error 1 of kind
+  `Track` (then the retry) or `Untrack`; over `http_stream` and `sse` it
+  still reconnects with `connecting` 3.
 - `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` (8) and
   `codes::error::SHARED_POLL_GET_SIGNATURE` (14), with their rows in the
   table of codes.
