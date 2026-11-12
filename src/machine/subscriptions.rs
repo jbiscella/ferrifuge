@@ -2480,7 +2480,7 @@ mod tests {
     }
 
     #[test]
-    fn a_state_invalidated_disconnect_drops_a_fixed_subscription_token() {
+    fn a_state_invalidated_disconnect_keeps_a_fixed_subscription_token() {
         let (mut machine, transport, id) =
             connected_with(SubscriptionOptions::default().token("t1".into()));
         machine.handle(Input::Subscribe(id));
@@ -2491,31 +2491,43 @@ mod tests {
         let resubscribed = with_connect(&machine.handle(Input::TransportOpened(transport)));
         machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
-        // No callback gives a new token: the resubscribe carries none.
+        // No callback could replace it: the resubscribe sends it again, as
+        // after any other reconnect (Block 11, owner decision, 2026-11-12).
         assert_eq!(
             sent(&resubscribed),
-            [r#"{"id":4,"subscribe":{"channel":"news"}}"#]
+            [r#"{"id":4,"subscribe":{"channel":"news","token":"t1"}}"#]
         );
     }
 
-    #[test]
-    fn a_state_invalidated_disconnect_cancels_the_refresh_of_a_fixed_token() {
-        let (mut machine, transport, id) =
-            connected_with(SubscriptionOptions::default().token("t1".into()));
+    /// A subscription subscribed with token `t1`, from a callback when
+    /// `source`, which expires: the actions of a disconnect 3014.
+    fn expiring_token_invalidated(source: bool) -> (SubscriptionId, Vec<Action>) {
+        let options = SubscriptionOptions::default().token("t1".into());
+        let options = if source {
+            options.token_source()
+        } else {
+            options
+        };
+        let (mut machine, transport, id) = connected_with(options);
         machine.handle(Input::Subscribe(id));
         machine.handle(reply(
             transport,
             r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
         ));
-
         let closed = machine.handle(Input::TransportClosed {
             transport,
             code: Some(3014),
             reason: "closed by the test".into(),
         });
+        (id, closed)
+    }
 
-        // A refresh left scheduled would unsubscribe the subscription,
-        // which resubscribes without a token, once it fires.
+    #[test]
+    fn a_state_invalidated_disconnect_cancels_the_refresh_of_a_dropped_token() {
+        let (id, closed) = expiring_token_invalidated(true);
+
+        // The callback gives the resubscribe a new token, whose reply
+        // schedules the next refresh.
         for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
             assert!(
                 closed.iter().any(|action| matches!(
@@ -2525,6 +2537,15 @@ mod tests {
                 "{timer:?} not cancelled: {closed:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_state_invalidated_disconnect_keeps_the_refresh_of_a_fixed_token() {
+        let (id, closed) = expiring_token_invalidated(false);
+
+        // The token is kept, so its refresh timer runs on, as after any
+        // other reconnect (Block 25, D3).
+        assert!(!cancels_refresh(&closed, id), "{closed:?}");
     }
 
     /// A subscription with a token callback, subscribed over `transport`

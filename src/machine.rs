@@ -4172,6 +4172,40 @@ mod tests {
     }
 
     #[test]
+    fn a_state_invalidated_disconnect_keeps_a_fixed_connection_token() {
+        let mut machine = Machine::with_rng(
+            Config {
+                token: "t0".to_owned(),
+                ..Config::default()
+            },
+            false,
+            fastrand::Rng::with_seed(7),
+        );
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3014),
+            reason: "state invalidated".into(),
+        });
+
+        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let opened = machine.handle(Input::TransportOpened(transport));
+
+        // No callback could replace it: the connect sends it again, as
+        // after any other reconnect (Block 11, owner decision, 2026-11-12).
+        let connect = opened
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { frame, .. } => Some(String::from_utf8_lossy(frame).into_owned()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no connect command: {opened:?}"));
+        assert!(connect.contains(r#""token":"t0""#), "{connect}");
+    }
+
+    #[test]
     fn token_fetched_after_disconnect_is_ignored() {
         let mut machine = token_machine("");
         let fetch = fetch_requested(&machine.handle(Input::Connect));
