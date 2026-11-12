@@ -90,7 +90,7 @@
 //! | disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` (Block 3) |
 //! | disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff (Block 3) |
 //! | disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15); during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again (Block 45) |
-//! | disconnect 3014 | `Connecting` | drops the tokens, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
+//! | disconnect 3014 | `Connecting` | drops the tokens a token callback can fetch again, keeps a fixed token without one, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
 //! | websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()` (Block 3); other close codes below 3000 give `Connecting` 1 |
 //! | unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed (Block 10) |
 //! | unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112 (Block 45); any code ends a server-side subscription (Block 12) |
