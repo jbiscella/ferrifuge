@@ -5,9 +5,10 @@
 //! an error. The same fields also carry server codes, in their own ranges
 //! (the last table). The client's logs show the state, code and reason
 //! (Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
-//! adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6, and
-//! errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code, unused
-//! until Block 47. Blocks are those of the repository's `CLAUDE.md`.
+//! adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 6 and 8
+//! (8: Block 47), and errors 15, 16 and 17; error 14 is centrifuge-js's
+//! shared-poll code (Block 47). Blocks are those of the repository's
+//! `CLAUDE.md`.
 //!
 //! ## `connecting`
 //!
@@ -59,6 +60,7 @@
 //! | 4 | [`unsubscribed::NOT_GRANTED_ON_RECONNECT`] | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
 //! | 5 | [`unsubscribed::MAP_STATE_TOO_LARGE`] | `"map state too large"` | a map subscription's load passed its `max_state_bytes` (Block 45, D5; `unstable`) | never, until `subscribe()` |
 //! | 6 | [`unsubscribed::MAP_NOT_SUPPORTED`] | `"map subscriptions not supported"` | the server answered a map subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 45, D15; `unstable`) | never, until `subscribe()` |
+//! | 8 | [`unsubscribed::SHARED_POLL_NOT_SUPPORTED`] | `"shared poll subscriptions not supported"` | the server answered a shared poll subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 47, D4; `unstable`) | never, until `subscribe()` |
 //!
 //! ## `error`
 //!
@@ -79,6 +81,7 @@
 //! | 11 | [`error::CONNECTION_CLOSED`] | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
 //! | 12 | [`error::BAD_CONFIGURATION`] | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
 //! | 13 | [`error::SUBSCRIPTION_GET_STATE`] | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
+//! | 14 | [`error::SHARED_POLL_GET_SIGNATURE`] | the `get_signature` callback's message | a shared poll subscription's `get_signature` callback failed (Block 47, D6; `unstable`) | an `Error` event of kind `Track`; the keys stay tracked and are asked for again on the next subscribe |
 //! | 15 | [`error::DELTA`] | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
 //! | 16 | [`error::WOULD_DEADLOCK`] | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
 //! | 17 | [`error::PUBLISH_DROPPED`] | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
@@ -105,6 +108,9 @@
 //! | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 //! | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
 //! | `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
+//! | shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | except for 109, a temporary error or one below 100, the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit) (Block 47, D7) |
+//! | shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
+//! | shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
 //! | call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |
 
 /// Codes of [`crate::ClientEvent::Connecting`].
@@ -191,6 +197,10 @@ pub mod unsubscribed {
     /// a Centrifugo before v6.8.0 does (Block 45, D15). Only map
     /// subscriptions, which need the `unstable` feature, use it.
     pub const MAP_NOT_SUPPORTED: u32 = 6;
+    /// The server answered a shared poll subscription as a stream
+    /// subscription, as a Centrifugo before v6.8.0 does (Block 47, D4). Only
+    /// shared poll subscriptions, which need the `unstable` feature, use it.
+    pub const SHARED_POLL_NOT_SUPPORTED: u32 = 8;
 }
 
 /// Codes of [`crate::ClientError`] and [`crate::CallError`].
@@ -233,6 +243,10 @@ pub mod error {
     /// The subscription getState callback failed (centrifuge-js
     /// `subscriptionGetState`).
     pub const SUBSCRIPTION_GET_STATE: u32 = 13;
+    /// A shared poll subscription's `get_signature` callback failed
+    /// (centrifuge-js's value, Block 47, D6). Only shared
+    /// poll subscriptions, which need the `unstable` feature, use it.
+    pub const SHARED_POLL_GET_SIGNATURE: u32 = 14;
     /// A delta publication could not be applied (Block 19, D8).
     pub const DELTA: u32 = 15;
     /// A handler of the client waited on that client (Block 41, D6).
