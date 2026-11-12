@@ -417,23 +417,29 @@ fn consumer_holds_messages(core: &Core, outboxes: &Outboxes, handlers: &Handlers
                     .get(of)
                     .is_some_and(|outbox| outbox.holds(slot.stream, event))
             })
-            || map_slot_holds(outboxes, handlers, event)
+            || unstable_slot_holds(outboxes, handlers, event)
     })
 }
 
-/// Whether a map subscription's handler has `event` queued (Block 45, D13).
+/// Whether a map or shared poll subscription's handler has `event` queued
+/// (Block 45, D13; Block 47, D15).
 #[cfg(feature = "unstable")]
-fn map_slot_holds(outboxes: &Outboxes, handlers: &Handlers, event: EventId) -> bool {
+fn unstable_slot_holds(outboxes: &Outboxes, handlers: &Handlers, event: EventId) -> bool {
     handlers.maps.iter().any(|(of, slot)| {
         outboxes
             .maps
+            .get(of)
+            .is_some_and(|outbox| outbox.holds(slot.stream, event))
+    }) || handlers.shared_polls.iter().any(|(of, slot)| {
+        outboxes
+            .shared_polls
             .get(of)
             .is_some_and(|outbox| outbox.holds(slot.stream, event))
     })
 }
 
 #[cfg(not(feature = "unstable"))]
-fn map_slot_holds(_: &Outboxes, _: &Handlers, _: EventId) -> bool {
+fn unstable_slot_holds(_: &Outboxes, _: &Handlers, _: EventId) -> bool {
     false
 }
 
@@ -519,6 +525,8 @@ pub(super) struct Handlers {
     subscriptions: HashMap<SubscriptionId, Slot<dyn SubscriptionHandler>>,
     #[cfg(feature = "unstable")]
     maps: HashMap<SubscriptionId, Slot<dyn MapSubscriptionHandler>>,
+    #[cfg(feature = "unstable")]
+    shared_polls: HashMap<SubscriptionId, Slot<dyn SharedPollSubscriptionHandler>>,
     /// The consumer runs, from the first handler set.
     started: bool,
     waker: Option<Waker>,
@@ -554,10 +562,10 @@ impl Handlers {
         }
     }
 
-    /// No subscription of either kind has a handler.
+    /// No subscription of any kind has a handler.
     fn no_subscription_handler(&self) -> bool {
         #[cfg(feature = "unstable")]
-        if !self.maps.is_empty() {
+        if !self.maps.is_empty() || !self.shared_polls.is_empty() {
             return false;
         }
         self.subscriptions.is_empty()
@@ -576,6 +584,8 @@ pub(super) enum Dropped {
     Subscription(Box<dyn SubscriptionHandler>),
     #[cfg(feature = "unstable")]
     Map(Box<dyn MapSubscriptionHandler>),
+    #[cfg(feature = "unstable")]
+    SharedPoll(Box<dyn SharedPollSubscriptionHandler>),
 }
 
 /// Sets the client's handler, which takes over its stream (D1, D3); none
@@ -694,6 +704,54 @@ pub(super) fn set_map_handler(
 ) {
     let mut core = lock(&shared.core);
     let old = install_map_handler(shared, &mut core, of, handler);
+    drop(core);
+    drop(old);
+}
+
+/// Sets the handler of the shared poll subscription `of` under the core
+/// lock, as [`install_subscription_handler`] does a subscription's (Block
+/// 47, D15).
+#[cfg(feature = "unstable")]
+pub(super) fn install_shared_poll_handler(
+    shared: &Arc<Shared>,
+    core: &mut Core,
+    of: SubscriptionId,
+    handler: Box<dyn SharedPollSubscriptionHandler>,
+) -> Option<Dropped> {
+    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
+        return Some(Dropped::SharedPoll(handler));
+    }
+    let stream = lock(&shared.outboxes)
+        .shared_polls
+        .entry(of)
+        .or_default()
+        .open_stream();
+    shared.handle(core, Input::StreamOpened(Some(of)));
+    install(shared, core, |handlers| {
+        handlers
+            .shared_polls
+            .insert(
+                of,
+                Slot {
+                    stream,
+                    handler: Some(handler),
+                },
+            )
+            .and_then(|slot| slot.handler)
+            .map(Dropped::SharedPoll)
+    })
+}
+
+/// Sets the handler of the shared poll subscription `of`, which takes over
+/// its stream (Block 47, D15).
+#[cfg(feature = "unstable")]
+pub(super) fn set_shared_poll_handler(
+    shared: &Arc<Shared>,
+    of: SubscriptionId,
+    handler: Box<dyn SharedPollSubscriptionHandler>,
+) {
+    let mut core = lock(&shared.core);
+    let old = install_shared_poll_handler(shared, &mut core, of, handler);
     drop(core);
     drop(old);
 }
@@ -820,6 +878,14 @@ pub(super) enum Handed {
         handler: Box<dyn MapSubscriptionHandler>,
         stream: u64,
     },
+    #[cfg(feature = "unstable")]
+    SharedPoll {
+        of: SubscriptionId,
+        id: EventId,
+        event: crate::SharedPollSubscriptionEvent,
+        handler: Box<dyn SharedPollSubscriptionHandler>,
+        stream: u64,
+    },
 }
 
 /// The consumer of a client's handlers (D2: `Task`).
@@ -940,35 +1006,45 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
         }
         #[cfg(feature = "unstable")]
         Some(of) if handlers.maps.contains_key(&of) => {
-            let slot = handlers.maps.get_mut(&of)?;
-            let outbox = outboxes.maps.get_mut(&of)?;
-            let polled = outbox.poll_take(slot.stream, cx);
-            remove_finished(&mut outboxes.maps, of);
-            let Poll::Ready(Some((id, event))) = polled else {
-                return None;
-            };
+            let (id, event, handler, stream) =
+                take_from(&mut handlers.maps, &mut outboxes.maps, of, cx)?;
             Some(Handed::Map {
                 of,
                 id,
                 event,
-                handler: slot.handler.take()?,
-                stream: slot.stream,
+                handler,
+                stream,
+            })
+        }
+        #[cfg(feature = "unstable")]
+        Some(of) if handlers.shared_polls.contains_key(&of) => {
+            let (id, event, handler, stream) = take_from(
+                &mut handlers.shared_polls,
+                &mut outboxes.shared_polls,
+                of,
+                cx,
+            )?;
+            Some(Handed::SharedPoll {
+                of,
+                id,
+                event,
+                handler,
+                stream,
             })
         }
         Some(of) => {
-            let slot = handlers.subscriptions.get_mut(&of)?;
-            let outbox = outboxes.subscriptions.get_mut(&of)?;
-            let polled = outbox.poll_take(slot.stream, cx);
-            remove_finished(&mut outboxes.subscriptions, of);
-            let Poll::Ready(Some((id, event))) = polled else {
-                return None;
-            };
+            let (id, event, handler, stream) = take_from(
+                &mut handlers.subscriptions,
+                &mut outboxes.subscriptions,
+                of,
+                cx,
+            )?;
             Some(Handed::Subscription {
                 of,
                 id,
                 event,
-                handler: slot.handler.take()?,
-                stream: slot.stream,
+                handler,
+                stream,
             })
         }
     });
@@ -978,22 +1054,16 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
         if let Some(slot) = &handlers.client {
             outboxes.client.watch(slot.stream, cx);
         }
-        for (of, slot) in &handlers.subscriptions {
-            if let Some(outbox) = outboxes.subscriptions.get_mut(of) {
-                outbox.watch(slot.stream, cx);
-            }
-        }
+        watch_slots(&handlers.subscriptions, &mut outboxes.subscriptions, cx);
         #[cfg(feature = "unstable")]
-        for (of, slot) in &handlers.maps {
-            if let Some(outbox) = outboxes.maps.get_mut(of) {
-                outbox.watch(slot.stream, cx);
-            }
-        }
+        watch_slots(&handlers.maps, &mut outboxes.maps, cx);
+        #[cfg(feature = "unstable")]
+        watch_slots(&handlers.shared_polls, &mut outboxes.shared_polls, cx);
     }
     let id = match &handed {
         Some(Handed::Client { id, .. } | Handed::Subscription { id, .. }) => Some(*id),
         #[cfg(feature = "unstable")]
-        Some(Handed::Map { id, .. }) => Some(*id),
+        Some(Handed::Map { id, .. } | Handed::SharedPoll { id, .. }) => Some(*id),
         None => None,
     };
     if id.is_some() {
@@ -1010,6 +1080,37 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
         Some(handed) => Poll::Ready(Some(handed)),
         None if idle && shared.closed.load(Ordering::Acquire) => Poll::Ready(None),
         None => Poll::Pending,
+    }
+}
+
+/// The next event of the subscription `of` for its handler in `slots`,
+/// with the handler and its stream; the outbox of a removed subscription
+/// goes once its last event is taken.
+fn take_from<H: ?Sized, E>(
+    slots: &mut HashMap<SubscriptionId, Slot<H>>,
+    outboxes: &mut HashMap<SubscriptionId, Outbox<E>>,
+    of: SubscriptionId,
+    cx: &mut Context<'_>,
+) -> Option<(EventId, E, Box<H>, u64)> {
+    let slot = slots.get_mut(&of)?;
+    let polled = outboxes.get_mut(&of)?.poll_take(slot.stream, cx);
+    remove_finished(outboxes, of);
+    let Poll::Ready(Some((id, event))) = polled else {
+        return None;
+    };
+    Some((id, event, slot.handler.take()?, slot.stream))
+}
+
+/// Has the outbox of each handler in `slots` wake the consumer.
+fn watch_slots<H: ?Sized, E>(
+    slots: &HashMap<SubscriptionId, Slot<H>>,
+    outboxes: &mut HashMap<SubscriptionId, Outbox<E>>,
+    cx: &mut Context<'_>,
+) {
+    for (of, slot) in slots {
+        if let Some(outbox) = outboxes.get_mut(of) {
+            outbox.watch(slot.stream, cx);
+        }
     }
 }
 
@@ -1046,6 +1147,13 @@ fn earliest(
         &mut outboxes.maps,
         &mut earliest,
         |handler| dropped.push(Dropped::Map(handler)),
+    );
+    #[cfg(feature = "unstable")]
+    earliest_of(
+        &mut handlers.shared_polls,
+        &mut outboxes.shared_polls,
+        &mut earliest,
+        |handler| dropped.push(Dropped::SharedPoll(handler)),
     );
     earliest
 }
@@ -1098,56 +1206,41 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
         Handed::Client {
             id,
             event,
-            mut handler,
+            handler,
             stream,
         } => {
-            let outcome = {
-                let _marked = Marked::new(shared, thread);
-                run(|| handler.on_event(event), thread)
-            };
-            let mut handlers = lock(&shared.handlers);
-            handlers.running = None;
-            // Waits are watched only while the handler that made them runs
-            // (Codex, #171).
-            handlers.watched.clear();
-            handlers.watched_ready.clear();
-            let old = match handlers.client.as_mut() {
-                Some(slot) if slot.stream == stream && slot.handler.is_none() => {
-                    slot.handler = Some(handler);
-                    None
-                }
-                _ => Some(Dropped::Client(handler)),
-            };
-            drop(handlers);
-            drop(old);
+            let outcome = run_handler(
+                shared,
+                thread,
+                handler,
+                |handler| handler.on_event(event),
+                |handlers, handler| match handlers.client.as_mut() {
+                    Some(slot) if slot.stream == stream && slot.handler.is_none() => {
+                        slot.handler = Some(handler);
+                        None
+                    }
+                    _ => Some(Dropped::Client(handler)),
+                },
+            );
             (id, outcome)
         }
         Handed::Subscription {
             of,
             id,
             event,
-            mut handler,
+            handler,
             stream,
         } => {
-            let outcome = {
-                let _marked = Marked::new(shared, thread);
-                run(|| handler.on_event(event), thread)
-            };
-            let mut handlers = lock(&shared.handlers);
-            handlers.running = None;
-            // Waits are watched only while the handler that made them runs
-            // (Codex, #171).
-            handlers.watched.clear();
-            handlers.watched_ready.clear();
-            let old = match handlers.subscriptions.get_mut(&of) {
-                Some(slot) if slot.stream == stream && slot.handler.is_none() => {
-                    slot.handler = Some(handler);
-                    None
-                }
-                _ => Some(Dropped::Subscription(handler)),
-            };
-            drop(handlers);
-            drop(old);
+            let outcome = run_handler(
+                shared,
+                thread,
+                handler,
+                |handler| handler.on_event(event),
+                |handlers, handler| {
+                    give_back(&mut handlers.subscriptions, of, stream, handler)
+                        .map(Dropped::Subscription)
+                },
+            );
             (id, outcome)
         }
         #[cfg(feature = "unstable")]
@@ -1155,26 +1248,38 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             of,
             id,
             event,
-            mut handler,
+            handler,
             stream,
         } => {
-            let outcome = {
-                let _marked = Marked::new(shared, thread);
-                run(|| handler.on_event(event), thread)
-            };
-            let mut handlers = lock(&shared.handlers);
-            handlers.running = None;
-            handlers.watched.clear();
-            handlers.watched_ready.clear();
-            let old = match handlers.maps.get_mut(&of) {
-                Some(slot) if slot.stream == stream && slot.handler.is_none() => {
-                    slot.handler = Some(handler);
-                    None
-                }
-                _ => Some(Dropped::Map(handler)),
-            };
-            drop(handlers);
-            drop(old);
+            let outcome = run_handler(
+                shared,
+                thread,
+                handler,
+                |handler| handler.on_event(event),
+                |handlers, handler| {
+                    give_back(&mut handlers.maps, of, stream, handler).map(Dropped::Map)
+                },
+            );
+            (id, outcome)
+        }
+        #[cfg(feature = "unstable")]
+        Handed::SharedPoll {
+            of,
+            id,
+            event,
+            handler,
+            stream,
+        } => {
+            let outcome = run_handler(
+                shared,
+                thread,
+                handler,
+                |handler| handler.on_event(event),
+                |handlers, handler| {
+                    give_back(&mut handlers.shared_polls, of, stream, handler)
+                        .map(Dropped::SharedPoll)
+                },
+            );
             (id, outcome)
         }
     };
@@ -1193,6 +1298,48 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
     shared.handle(&mut core, input);
     drop(core);
     shared.notify_actions();
+}
+
+/// Calls `handler` with `call`, marked as running a handler of `shared`,
+/// then gives it back with `back`, which returns it to drop when its slot
+/// has another stream or handler now; the handler's waits are watched only
+/// while it runs (Codex, #171).
+fn run_handler<H: ?Sized>(
+    shared: &Shared,
+    thread: bool,
+    mut handler: Box<H>,
+    call: impl FnOnce(&mut H),
+    back: impl FnOnce(&mut Handlers, Box<H>) -> Option<Dropped>,
+) -> std::thread::Result<()> {
+    let outcome = {
+        let _marked = Marked::new(shared, thread);
+        run(|| call(&mut handler), thread)
+    };
+    let mut handlers = lock(&shared.handlers);
+    handlers.running = None;
+    handlers.watched.clear();
+    handlers.watched_ready.clear();
+    let old = back(&mut handlers, handler);
+    drop(handlers);
+    drop(old);
+    outcome
+}
+
+/// Puts `handler` back in its slot of `slots` when the slot still waits for
+/// it from the same stream; gives it back to drop otherwise.
+fn give_back<H: ?Sized>(
+    slots: &mut HashMap<SubscriptionId, Slot<H>>,
+    of: SubscriptionId,
+    stream: u64,
+    handler: Box<H>,
+) -> Option<Box<H>> {
+    match slots.get_mut(&of) {
+        Some(slot) if slot.stream == stream && slot.handler.is_none() => {
+            slot.handler = Some(handler);
+            None
+        }
+        _ => Some(handler),
+    }
 }
 
 /// Runs a handler call, catching its panic (D4). On a worker of a

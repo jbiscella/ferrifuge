@@ -185,7 +185,7 @@ impl SharedPollSubscription {
     /// client's other handlers; its events count as delivered when its
     /// method returns.
     pub fn set_handler(&self, handler: impl super::SharedPollSubscriptionHandler) {
-        drop(Box::new(handler));
+        super::handler::set_shared_poll_handler(&self.shared, self.id, Box::new(handler));
     }
 
     /// Events of the subscription queued for its streams and not yet
@@ -446,7 +446,14 @@ impl SharedPollSubscriptionBuilder {
                 },
             );
         }
+        let replaced = self.handler.and_then(|handler| {
+            let handler = handler
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            super::handler::install_shared_poll_handler(&self.shared, &mut core, id, handler)
+        });
         drop(core);
+        drop(replaced);
         Ok(SharedPollSubscription {
             shared: self.shared,
             id,

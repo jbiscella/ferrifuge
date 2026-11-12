@@ -39,8 +39,11 @@ type Rpc = Arc<dyn Fn(&str, &[u8]) -> Result<Vec<u8>, CallError> + Send + Sync>;
 /// Every channel has one stream and one epoch, with offsets from 1 and a
 /// history of every publication, which a subscribe asking to recover from
 /// a position of that stream gets back. Clones share one double, and
-/// several clients may connect to it. It does not model map subscriptions
-/// while they are unstable.
+/// several clients may connect to it. It does not model map or shared poll
+/// subscriptions while they are unstable: it answers their subscribe as a
+/// stream subscription's, as Centrifugo before 6.8.0 does, so a shared poll
+/// subscription sends an unsubscribe command and ends with `unsubscribed`
+/// 8, tracking no key.
 ///
 /// ```
 /// use ferrifuge::test_util::Server;
@@ -1716,6 +1719,54 @@ mod tests {
         drop((bye, next));
 
         assert_eq!(ended.ok().flatten(), Some(3500));
+    }
+
+    // Block 47, D19: the double does not model shared poll subscriptions;
+    // it answers one as Centrifugo v6.7.0 does (verified with a raw client:
+    // `subscribe { type: 4 }` gets a plain `subscribe` result), and the
+    // subscription ends with `unsubscribed` 8 without tracking a key.
+    #[cfg(feature = "unstable")]
+    #[tokio::test]
+    async fn a_shared_poll_subscription_ends_with_unsubscribed_8() {
+        use futures_util::StreamExt as _;
+
+        let server = Server::new();
+        let client = crate::Client::builder(server.endpoint())
+            .connector(server.connector())
+            .build()
+            .unwrap();
+        let items = client.new_shared_poll_subscription("items").unwrap();
+        let mut events = items.events();
+        items.track_with_signature([crate::SharedPollTrackItem::new("a", 0)], "sig");
+        client.connect();
+        items.subscribe();
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.next().await {
+                    Some(crate::SharedPollSubscriptionEvent::Unsubscribed { code, .. }) => {
+                        return Some(code);
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        let unsubscribed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !server.received().contains(&Command::Unsubscribe {
+                channel: "items".into(),
+            }) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        assert_eq!(
+            ended.ok().flatten(),
+            Some(crate::codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED)
+        );
+        assert!(unsubscribed.is_ok(), "{:?}", server.received());
     }
 
     // Codex on #161: an RPC handler may use the double, whose state is not
