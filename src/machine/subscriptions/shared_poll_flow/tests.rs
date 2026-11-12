@@ -4,8 +4,9 @@ use serde_json::Value;
 
 use super::*;
 use crate::Config;
+use crate::TokenError;
 use crate::codec::Codec;
-use crate::machine::{EventId, Input, SubscriptionOptions, TransportId};
+use crate::machine::{EventId, FetchId, Input, SubscriptionOptions, TransportId};
 
 /// A machine connected over a transport.
 fn connected() -> (Machine, TransportId) {
