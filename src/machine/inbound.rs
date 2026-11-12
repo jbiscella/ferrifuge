@@ -154,6 +154,12 @@ impl Machine {
             self.optimistic_answered(id);
             self.actions
                 .push(Action::CancelSubscriptionTimer(subscription, timer));
+        } else {
+            // A shared poll request's deadline (Block 47, D12).
+            #[cfg(feature = "unstable")]
+            if let Some(timer) = self.track_command_timer(id) {
+                self.actions.push(Action::CancelSharedPollTimer(timer));
+            }
         }
     }
 

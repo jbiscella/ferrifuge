@@ -28,6 +28,13 @@ repository held while it carried that version, from the blocks of
   is split within `max_track_frame_bytes`; a refused track untracks its
   keys with a removal update each. No delta compression yet: the
   subscribe never asks for it until per-key bases come (Block 47d).
+  A `track_with_signature` batch over `max_track_frame_bytes` is refused
+  with error 12, the tracking after a reconnect goes in frames within it,
+  one after the other, and over `http_stream` and `sse` a subscription's
+  requests go one at a time, reconnecting with `connecting` 3 "shared poll
+  request timeout" when one is not answered in time;
+  `machine::SharedPollTimer`, `Action::SetSharedPollTimer` and
+  `CancelSharedPollTimer`, `Input::SharedPollTimerFired`.
 - `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` (8) and
   `codes::error::SHARED_POLL_GET_SIGNATURE` (14), with their rows in the
   table of codes.
