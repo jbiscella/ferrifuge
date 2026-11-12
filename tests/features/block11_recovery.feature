@@ -148,10 +148,16 @@ Feature: Subscription recovery
     And the next subscribe command for "news" asks to recover from offset 0 and epoch "_"
 
   @D
-  Scenario: Connection state invalidation drops a fixed connection token
+  Scenario: Connection state invalidation keeps a fixed connection token
     Given a client using a fixed connection token and no token callback, connected to the fake server
     When the fake server disconnects the client with code 3014
-    Then the next connect command carries no token
+    Then the next connect command carries that token
+
+  @D
+  Scenario: Connection state invalidation keeps a fixed subscription token
+    Given a client subscribed to channel "news" on the fake server using a fixed subscription token
+    When the fake server disconnects the client with code 3014
+    Then the next subscribe command for "news" carries that token
 
   @D
   Scenario: State invalidation drops a fixed subscription token
