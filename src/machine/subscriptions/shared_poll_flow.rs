@@ -112,8 +112,10 @@ pub(in crate::machine) struct SharedPollFlow {
     /// answered (D7, D10): the server applies an inline untrack after it
     /// tracked the key, answered and sent its value (centrifuge
     /// `handleTrack`), so a delta of the key may follow while the client,
-    /// which tracked it again, holds no base. Library keys only, so at most
-    /// the subscription's keys.
+    /// which tracked it again, holds no base. Once a key is in no held
+    /// signature and its frame is answered, it goes in an untrack request
+    /// instead ([`Machine::untrack_inline_untracked`]), so the set holds
+    /// only keys of held signatures and of frames awaiting their reply.
     inline_untracked: HashSet<String>,
     /// Track requests failed in a row with a temporary error, one below
     /// 100 or no reply in time: the step of the replay's backoff (D7).
@@ -1161,9 +1163,75 @@ impl Machine {
                     }
                 }
             }
+            let track = command.purpose != Purpose::Untrack;
             self.track_command_answered(command, reply);
+            if track {
+                self.untrack_inline_untracked(id);
+            }
         }
         self.requests_settled(id, &channel);
+    }
+
+    /// The inline untracks of keys no held signature covers, whose frames
+    /// are answered, go in an untrack request (D10), which bounds them
+    /// (Codex on #221). Safe: such a key is not tracked, so a publication of
+    /// it is dropped (D9) until it is tracked again, and while the request
+    /// awaits its reply a delta of the key is dropped as for any untrack
+    /// request. Its reply comes after the server applied the inline untrack
+    /// and wrote what that frame's tracking sent: centrifuge 7ac037196c95
+    /// `handleUntrack` waits for the track requests of the channel in
+    /// progress (`waitTrackRequests`), and a track request is in progress
+    /// from before its reply is written (`startTrackRequestLocked`) until
+    /// after its inline untrack (step 8), so the frame's reply having been
+    /// read before the request was sent, the request is answered after
+    /// step 8. Not for a key a frame awaiting its reply carries inline: an
+    /// untrack handled before that frame would prove nothing.
+    fn untrack_inline_untracked(&mut self, id: SubscriptionId) {
+        if !self.subscribed_now(id) {
+            return;
+        }
+        let Some(generation) = self
+            .subscriptions
+            .by_id
+            .get(&id)
+            .and_then(|sub| sub.shared_poll.as_ref())
+            .map(|flow| flow.generation)
+        else {
+            return;
+        };
+        let in_flight: HashSet<&String> = self
+            .subscriptions
+            .track_commands
+            .values()
+            .filter(|command| command.subscription == id && command.generation == generation)
+            .flat_map(|command| &command.untracked)
+            .collect();
+        let Some(flow) = self
+            .subscriptions
+            .by_id
+            .get(&id)
+            .and_then(|sub| sub.shared_poll.as_deref())
+        else {
+            return;
+        };
+        let gone: Vec<String> = flow
+            .inline_untracked
+            .iter()
+            .filter(|key| {
+                !in_flight.contains(key)
+                    && !flow.library.iter().any(|signed| signed.keys.contains(key))
+            })
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        if let Some(flow) = self.shared_poll_flow(id) {
+            for key in &gone {
+                flow.inline_untracked.remove(key);
+            }
+        }
+        self.send_untrack(id, gone);
     }
 
     /// The reply to a current track or untrack request (D7).
@@ -1397,7 +1465,12 @@ impl Machine {
             return Item::Dropped;
         };
         let held = tracked.version.max(handled.get(&key).copied().unwrap_or(0));
-        if !removed && version > 0 && held > 0 && version <= held {
+        let duplicate = !removed && version > 0 && held > 0 && version <= held;
+        // A whole duplicate with delta on is no update, but the server's
+        // next delta of the key applies to it: the server sends it again
+        // after a track from version 0, the first value after that track
+        // (Codex on #221). A delta duplicate changes nothing.
+        if duplicate && (publication.delta || !flow.bases.on) {
             return Item::Dropped;
         }
         if removed {
@@ -1417,12 +1490,15 @@ impl Machine {
                 },
                 (true, None) => return self.delta_without_base(id, &key),
             };
-            // As carried and as rebuilt (Block 31, D3).
-            sub.delta_statistics.get_or_insert_default().count(
-                publication.delta,
-                received,
-                data.len(),
-            );
+            // As carried and as rebuilt (Block 31, D3); a duplicate is no
+            // publication counted.
+            if !duplicate {
+                sub.delta_statistics.get_or_insert_default().count(
+                    publication.delta,
+                    received,
+                    data.len(),
+                );
+            }
             let bases =
                 flow.bases.bytes - tracked.base.as_ref().map_or(0, |base| base.len()) + data.len();
             if bases > flow.bases.max {
@@ -1430,6 +1506,9 @@ impl Machine {
             }
             flow.bases.bytes = bases;
             tracked.base = Some(data.clone().into_boxed_slice());
+            if duplicate {
+                return Item::Dropped;
+            }
             publication.data = data;
             publication.delta = false;
         } else if publication.delta {
