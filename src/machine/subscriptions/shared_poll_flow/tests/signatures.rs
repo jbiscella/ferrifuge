@@ -625,3 +625,21 @@ fn what_was_asked_before_leaving_subscribed_changes_nothing() {
         assert!(timers_cancelled(&actions).contains(&timer), "{actions:?}");
     }
 }
+
+// I13: an answer that comes while the subscription is not subscribed, the
+// connection lost, revokes nothing and tracks nothing; the next subscribe
+// asks again.
+#[test]
+fn an_answer_while_not_subscribed_changes_nothing() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let (request, _) = the_fetch(&machine.handle(Input::TrackKeys(id, names(&["a", "b"]))));
+    let lost = machine.handle(Input::Disconnect);
+    take_all(&mut machine, &lost);
+
+    let late = signed(&mut machine, id, request, &["a"], "sig1");
+
+    assert!(updates(&late).is_empty(), "{late:?}");
+    assert_eq!(tracked_keys(&machine, id), ["a", "b"]);
+    let (_, replay) = reconnect(&mut machine, transport);
+    assert_eq!(the_fetch(&replay).1, ["a", "b"]);
+}
