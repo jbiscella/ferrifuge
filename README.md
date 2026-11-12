@@ -604,8 +604,9 @@ that one after its reply) and before the key's new track is answered,
 which the server sent before applying the untrack, is dropped (once no
 held signature covers such a key, the client sends its untrack again in
 an untrack request, whose reply ends it, so what it remembers stays
-bounded); a value sent again whole at the version held, as after a track
-from version 0, is no update but becomes the key's base; any other
+bounded); a value at or below the version held, whole or as a delta, as
+the server sends after a track from version 0, is no update but becomes the
+key's base, which the server's next delta applies to; any other
 delta that cannot be applied reports an `error` event (`ErrorKind::Delta`,
 code 15), and the subscription subscribes again after its backoff
 (`subscribing` 2) and tracks its keys again, each value coming back whole.

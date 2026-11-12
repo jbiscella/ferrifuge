@@ -74,8 +74,9 @@ repository held while it carried that version, from the blocks of
   flight across an unanswered untrack of its key, or across an inline
   untrack until the key's next track is answered, is dropped; an inline
   untrack of a key no held signature covers goes in an untrack request
-  once its frame is answered, so those remembered stay bounded. A whole
-  value at the version held is no update but becomes the key's base. The bases
+  once its frame is answered, so those remembered stay bounded. A value
+  at or below the version held, whole or as a delta, is no update but
+  becomes the key's base. The bases
   together are bounded by `SharedPollSubscriptionBuilder::max_delta_bases_bytes`
   (`SharedPollSubscriptionOptions::max_delta_bases_bytes`, 64 MiB by
   default), past which the subscription ends with `unsubscribed` 7.
