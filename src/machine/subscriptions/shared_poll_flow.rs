@@ -979,8 +979,9 @@ impl Machine {
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
             self.actions.extend(flow.restart(id));
         }
-        // What was not taken goes before the epoch decides the versions,
-        // so that no update of an earlier epoch moves one once taken.
+        // What was not taken is withdrawn here, so no update of an earlier
+        // epoch can move a version the epoch rule below resets; one handed
+        // to a handler moved it already (Block 41, D3).
         self.withdraw(&Owner::Client(id));
         if let Some(flow) = self.shared_poll_flow(id) {
             flow.new_epoch(result.epoch);
