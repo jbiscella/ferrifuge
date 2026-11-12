@@ -522,3 +522,49 @@ fn the_values_of_one_reply_stay_within_the_inbound_limit() {
     assert_eq!(delta_errors(&reply), [codes::error::DELTA], "{reply:?}");
     assert_eq!(values(&reply), []);
 }
+
+// D10: only an untrack request counts, of this subscription and of the
+// current `subscribed` period: a track of the key in flight, another
+// subscription's untrack of the same key, or an untrack sent before the
+// last subscribe leaves a delta with no base a failure.
+#[test]
+fn only_an_unanswered_untrack_of_this_period_counts() {
+    // A track of the key in flight, unanswered.
+    let (mut machine, transport, id) = tracking(&["a"]);
+    track(&mut machine, id, &[("a", 0)], "s2");
+    let failed = machine.handle(pushed(transport, &delta("a", 2, &value(1), &value(2))));
+    assert_eq!(delta_errors(&failed), [codes::error::DELTA], "a track");
+
+    // Another subscription's untrack of the same key, unanswered.
+    let (mut machine, transport, _) = tracking(&["a"]);
+    let other = machine
+        .add_shared_poll_subscription("other".into(), options(false))
+        .unwrap();
+    let subscribing = machine.handle(Input::Subscribe(other));
+    take_all(&mut machine, &subscribing);
+    answer_subscribe(&mut machine, transport, &subscribing);
+    let tracked = track(&mut machine, other, &[("a", 0)], "s");
+    machine.handle(reply_to(transport, &requests(&tracked, 1)[0]));
+    let untracked = machine.handle(Input::UntrackKeys(other, vec!["a".into()]));
+    assert_eq!(requests(&untracked, 2).len(), 1);
+    let failed = machine.handle(pushed(transport, &delta("a", 2, &value(1), &value(2))));
+    assert_eq!(delta_errors(&failed), [codes::error::DELTA], "another's");
+
+    // An untrack sent before a resubscribe, unanswered.
+    let (mut machine, transport, id) = tracking(&["a"]);
+    machine.handle(Input::UntrackKeys(id, vec!["a".into()]));
+    let resubscribe = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"items","unsubscribe":{"code":2500,"reason":"r"}}}"#,
+    ));
+    take_all(&mut machine, &resubscribe);
+    answer_with_delta(&mut machine, transport, &resubscribe);
+    let again = track(&mut machine, id, &[("a", 0)], "s2");
+    machine.handle(reply_to(transport, &requests(&again, 1)[0]));
+    let failed = machine.handle(pushed(transport, &delta("a", 2, &value(1), &value(2))));
+    assert_eq!(
+        delta_errors(&failed),
+        [codes::error::DELTA],
+        "an earlier period's"
+    );
+}
