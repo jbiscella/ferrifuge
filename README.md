@@ -67,8 +67,9 @@ Available now:
   or unsubscribed, and the `since`, `positioned` and `recoverable` options;
 - a `get_state` callback reloading the application's state when there is
   no position to recover from, or a recovery fails;
-- the server's "state invalidated" codes: tokens and stream positions are
-  dropped before subscribing or connecting again;
+- the server's "state invalidated" codes: stream positions, and the tokens
+  a token callback can fetch again, are dropped before subscribing or
+  connecting again;
 - Fossil delta compression: publications sent as deltas against the
   previous one and rebuilt by the client, a broken delta making the
   subscription subscribe again rather than reach the application;
@@ -343,12 +344,14 @@ When the server invalidates a subscription's state (unsubscribe code 2502),
 the subscription drops its token and its stream position before subscribing
 again: the token callback gives a new token, and `get_state` reloads the
 state. When it invalidates the connection's state (disconnect code 3014), the
-client drops its connection token and the token of every subscription, fixed
-ones too, before reconnecting. A token callback then gives a new token; without
-one, the connect or subscribe carries no token. A subscription that has a
-stream position keeps it with the epoch `_`, so its next recovery fails and you
-are told: with `get_state` your state is reloaded; without it, the `subscribed`
-event reports `was_recovering` true and `recovered` false.
+client drops its connection token and the token of every subscription that has
+a token callback, before reconnecting, and the callback gives a new token. A
+fixed token without a callback is kept and sent again, as after any other
+reconnect; if the server finds it expired, the client or the subscription ends
+with code 1 "unauthorized", after an `error` event with code 12. A subscription
+that has a stream position keeps it with the epoch `_`, so its next recovery
+fails and you are told: with `get_state` your state is reloaded; without it,
+the `subscribed` event reports `was_recovering` true and `recovered` false.
 
 ### Map subscriptions (unstable)
 
@@ -435,8 +438,8 @@ every resubscribe loads the state again. A `Sync` not taken before the
 subscription stops is withdrawn, and the next subscribe loads the state
 again. The server's "state invalidated" (unsubscribe 2502, disconnect
 3014) and `set_tag_filter` drop the position, so the next subscribe loads
-the state; 2502 and 3014 also drop the subscription token, which a token
-callback replaces. A load that fails with a temporary error (113
+the state; 2502 also drops the subscription token, and 3014 drops it when a
+token callback can replace it, keeping a fixed token without one. A load that fails with a temporary error (113
 "concurrent pagination", say) is unsubscribed on the server first, then
 starts again after the backoff.
 
@@ -989,7 +992,7 @@ Block 47. Blocks are those of the repository's `CLAUDE.md`.
 | disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` (Block 3) |
 | disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff (Block 3) |
 | disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15); during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again (Block 45) |
-| disconnect 3014 | `Connecting` | drops the tokens, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
+| disconnect 3014 | `Connecting` | drops the tokens a token callback can fetch again, keeps a fixed token without one, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
 | websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()` (Block 3); other close codes below 3000 give `Connecting` 1 |
 | unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed (Block 10) |
 | unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112 (Block 45); any code ends a server-side subscription (Block 12) |

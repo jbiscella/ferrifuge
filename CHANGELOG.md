@@ -34,7 +34,8 @@ repository held while it carried that version, from the blocks of
   `UnrecoverableStrategy::FromScratch`, the default, and ends the
   subscription with `unsubscribed` 112 with `UnrecoverableStrategy::Fatal`.
   2502, 3014 and `set_tag_filter` drop a map subscription's position, and
-  2502 and 3014 its token.
+  2502 its token; 3014 drops its token only when a token callback can
+  fetch another (see Changed).
 - Unstable (`unstable` feature): per-key delta and tag filters on map
   subscriptions (Block 45d). `MapSubscriptionBuilder::delta` asks for
   per-key Fossil deltas: the client keeps a base per key, across a
@@ -47,6 +48,16 @@ repository held while it carried that version, from the blocks of
   and `MapUpdate::json`; with `test-util`, `MapEntry::new`,
   `MapUpdate::new` and `MapUpdate::removal` with setters for the optional
   fields; map subscriptions work in the browser (Block 45e).
+
+### Changed
+
+- Disconnect code 3014 "state invalidated" drops the connection token,
+  and each client-side subscription's, only where a token callback can
+  fetch a new one; a fixed token without a callback is kept and sent again,
+  its refresh timer running on, as after any other reconnect (Block 11;
+  centrifuge-js does the same). Before, 3014 dropped fixed tokens too, and
+  the next connect or subscribe carried none.
+  Unsubscribe code 2502 still drops the subscription token always.
 
 ### Fixed
 
