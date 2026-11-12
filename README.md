@@ -536,7 +536,20 @@ The client keeps the keys, the versions taken and the signatures across
 reconnects: each subscribe tracks every key again, with the signatures it
 holds and the versions taken, so a mass reconnect asks the backend for
 nothing while its signatures stay valid, and a device gets a value again
-only when it missed it. `unsubscribe()` forgets them. With
+only when it missed it. A key untracked while the client was away goes,
+at version 0, with the other keys of the signature that covers it, and is
+untracked in the same request. When the subscribe reply's epoch differs
+from the one before, as after the server recreated the channel's state or
+the backend reported a new epoch (the server then resubscribes the
+subscription with `subscribing` 2500), the server's versions restarted
+lower, so every key is tracked from version 0 and each value comes again;
+the first subscribe after `unsubscribe()` keeps the versions given. A
+track request failing with a temporary error or one below 100, or getting
+no reply within `Config::timeout` over websocket (error 1), reports an
+`Error` event of kind `Track`, and the client tracks the signatures it
+holds again after 1 to 15 s, longer with each failure in a row; an untrack
+without a reply reports error 1 of kind `Untrack`.
+`unsubscribe()` forgets them. With
 `get_signature`, the client renews signatures that expire: at the earliest
 expiry the server reports, it asks the callback once to sign every key
 tracked, and the new signatures replace those they cover. A signature the
@@ -555,7 +568,9 @@ Track and untrack requests are `sub_refresh` commands, none larger than
 `max_track_frame_bytes` (60 000 by default) by its worst-case size: an
 untrack of many keys is split, the tracking after a reconnect and that of
 keys signed in chunks go in frames, each sent once the one before is
-answered, and a
+answered, a key untracked meanwhile going in the `untrack` field of the
+frame carrying its signature when it fits there, else in an untrack
+request once that frame is answered, and a
 `track_with_signature` batch larger than that, which a signature over
 exactly its keys makes impossible to split, is refused before it is sent:
 an `Error` event of kind `Track` with code 12, and a removal `Update` for
@@ -1073,7 +1088,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription (Block 13) | a call fails and may succeed when retried; a refresh is retried |
+| 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription (Block 13); over websocket, a shared poll track or untrack request got none (Block 47, D7; `unstable`) | a call fails and may succeed when retried; a refresh is retried; for a shared poll request, an `Error` event of kind `Track` or `Untrack`, and the signatures held are tracked again after 1 to 15 s (track only) |
 | 2 | `codes::error::TRANSPORT_CLOSED` | the transport's own message | a transport failed to open or closed while connecting (Blocks 1, 8) | an `Error` event; the client keeps trying |
 | 3 | `codes::error::DISCONNECTED` | `"disconnected"` | the client entered `disconnected` while a call was pending, or a `ready()` waited (Blocks 13, 30) | the call fails; a retry can succeed after `connect()` |
 | 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | the call fails; a retry never succeeds |
@@ -1113,7 +1128,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
 | `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
-| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109: `get_signature` signs every key tracked again at once, and a 109 to that refresh's own track request retries it after 5 to 30 s; without the callback, nothing more until the next subscribe tracks the keys again; a temporary error or one below 100: nothing more until the next subscribe tracks the keys again (D7's retry: 47c); any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and those of the request's frames not yet sent with them (Block 47, D7) |
+| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109: `get_signature` signs every key tracked again at once, and a 109 to that refresh's own track request retries it after 5 to 30 s; without the callback, nothing more until the next subscribe tracks the keys again; a temporary error, one below 100, or no reply within `Config::timeout` over websocket (error 1): the signatures held are tracked again after 1 to 15 s, longer with each failure in a row; any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and those of the request's frames not yet sent with them (Block 47, D7) |
 | shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
 | shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
 | call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |

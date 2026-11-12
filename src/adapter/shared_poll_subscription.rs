@@ -38,9 +38,11 @@ use crate::{
 /// [`SharedPollSubscriptionBuilder::get_signature`] callback signs. The
 /// client keeps the keys, their versions and the signatures across
 /// reconnects, and tracks them again on each subscribe without calling the
-/// backend for keys it holds a signature for; [`Self::unsubscribe`] forgets
-/// them. With the callback, the client also renews signatures as they
-/// expire. Keys and signatures are not bounded by the client: the server's
+/// backend for keys it holds a signature for, from version 0 when the
+/// server's epoch changed; [`Self::unsubscribe`] forgets them. A track
+/// request failing with a temporary error, or without a reply in time,
+/// is tracked again after 1 to 15 s. With the callback, the client also
+/// renews signatures as they expire. Keys and signatures are not bounded by the client: the server's
 /// `max_keys_per_connection` (5000 by default) is the usual limit.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
