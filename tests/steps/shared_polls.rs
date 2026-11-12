@@ -23,6 +23,7 @@ use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, recorded};
 use crate::support::token::{shared_poll_signature, subscription_token};
 
 mod delta;
+mod integrations;
 mod replay;
 
 type Events = Pin<Box<dyn Stream<Item = SharedPollSubscriptionEvent> + Send>>;
@@ -60,6 +61,10 @@ pub(crate) struct SharedPolls {
     base: Option<(String, u64)>,
     /// The ids of the requests the fake server holds unanswered (47d).
     held: Vec<Value>,
+    /// The events a shared poll subscription handler received (47e).
+    handled: integrations::Handled,
+    /// The events a test built with the constructors (47e).
+    built: Vec<SharedPollSubscriptionEvent>,
 }
 
 impl ClientWorld {

@@ -517,6 +517,28 @@ impl crate::MapUpdate {
     }
 }
 
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
+impl crate::SharedPollUpdate {
+    /// A new value of `key`, `data`, with no version.
+    #[must_use]
+    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
+        Self::default()
+    }
+
+    /// The removal of `key`.
+    #[must_use]
+    pub fn removal(_key: impl Into<String>) -> Self {
+        Self::default()
+    }
+
+    /// Sets its version.
+    #[must_use]
+    pub fn version(self, _version: u64) -> Self {
+        self
+    }
+}
+
 #[cfg(test)]
 // Each setter is compared with assigning its field (Block 37, D2).
 #[allow(clippy::field_reassign_with_default)]

@@ -855,6 +855,9 @@ const SHARED_POLLS: &[&str] = &[
     "Delta bases past their bound end the subscription",
     "A delta that cannot be applied resubscribes and tracks again",
     "Statistics count shared poll subscriptions and their updates",
+    // 47e: handlers, the JSON helper, test constructors.
+    "A shared poll subscription handler receives the events in order",
+    "A test builds shared poll events without a server",
 ];
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];

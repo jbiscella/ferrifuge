@@ -709,7 +709,7 @@ impl Machine {
             self.send_untrack(id, held);
         }
         for key in keys {
-            self.emit_shared_poll_update(id, SharedPollUpdate::removal(key), None, false);
+            self.emit_shared_poll_update(id, SharedPollUpdate::removal_of(key), None, false);
         }
     }
 
@@ -1375,7 +1375,7 @@ impl Machine {
             .collect();
         self.send_untrack(id, keys);
         for key in removed {
-            self.emit_shared_poll_update(id, SharedPollUpdate::removal(key), None, false);
+            self.emit_shared_poll_update(id, SharedPollUpdate::removal_of(key), None, false);
         }
     }
 
@@ -1465,7 +1465,7 @@ impl Machine {
         }
         if removed {
             flow.untrack(&key);
-            return Item::Update(SharedPollUpdate::removal(key), None);
+            return Item::Update(SharedPollUpdate::removal_of(key), None);
         }
         if flow.bases.on {
             let Some(payload) = codec.delta_payload(std::mem::take(&mut publication.data)) else {

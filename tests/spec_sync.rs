@@ -50,7 +50,7 @@ const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet. A scenario
 /// leaves the list when a test claims it.
-const W_NOT_YET_WRITTEN: &[&str] = &["A browser client tracks a key and receives its updates"];
+const W_NOT_YET_WRITTEN: &[&str] = &[];
 
 /// How a wasm test claims a `@W` scenario: a line of its own reading
 /// `// @W scenario: <scenario name>`.
