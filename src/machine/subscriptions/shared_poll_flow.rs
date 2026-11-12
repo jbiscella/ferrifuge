@@ -698,6 +698,13 @@ impl Machine {
     /// Queues untrack requests of `keys`, as many as the frame budget needs
     /// (D7).
     fn send_untrack(&mut self, id: SubscriptionId, keys: Vec<String>) {
+        self.send_untrack_ahead_of(id, keys, None);
+    }
+
+    /// Queues untrack requests of `keys` as [`Self::send_untrack`] does,
+    /// ahead of the queued frames of request `group` when given, so that
+    /// they go before its next frame (D7).
+    fn send_untrack_ahead_of(&mut self, id: SubscriptionId, keys: Vec<String>, group: Option<u64>) {
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
             return;
         };
@@ -706,8 +713,12 @@ impl Machine {
         };
         let requests =
             SharedPollFlow::untrack_requests(&sub.channel, keys, flow.max_track_frame_bytes);
+        // Where they go: before the first queued frame of `group`, in order.
+        let mut at = self.shared_poll_flow(id).and_then(|flow| {
+            group.and_then(|group| flow.queue.iter().position(|queued| queued.group == group))
+        });
         for keys in requests {
-            let group = self.shared_poll_flow(id).map_or(0, |flow| {
+            let own = self.shared_poll_flow(id).map_or(0, |flow| {
                 flow.next_group += 1;
                 flow.next_group - 1
             });
@@ -720,8 +731,14 @@ impl Machine {
                 },
                 Purpose::Untrack,
                 keys,
-                (group, false),
+                (own, false),
             );
+            if let (Some(index), Some(flow)) = (at, self.shared_poll_flow(id))
+                && let Some(queued) = flow.queue.pop_back()
+            {
+                flow.queue.insert(index, queued);
+                at = Some(index + 1);
+            }
         }
         self.pump_requests(id);
     }
@@ -1146,8 +1163,10 @@ impl Machine {
                 flow.refresh_attempts = 0;
             }
         }
+        // Before the request's next frame: until then the server counts
+        // these keys against `max_keys_per_connection` (D7, D8).
         if !stale.is_empty() {
-            self.send_untrack(id, stale);
+            self.send_untrack_ahead_of(id, stale, Some(command.group));
         }
         if expires {
             self.refresh_deadline(id, ttl);
