@@ -511,9 +511,15 @@ in their order: the server refuses it for the same keys in another order
 `max_keys_per_connection` (106). The client checks no signature;
 it carries it. `SharedPollSubscriptionBuilder::get_signature` gives the
 client a callback signing keys itself: `track(keys)` then asks it for the
-keys, and the keys tracked without a signature are signed after each
-subscribe. A callback that fails reports an `Error` event of kind `Track`
-with code 14, and the keys stay tracked.
+keys, in chunks when one batch of them would pass `max_track_frame_bytes`,
+and the keys tracked without a signature are signed after each subscribe.
+A key the callback does not return is revoked, with a removal `Update`. A
+callback that fails reports an `Error` event with code 14, of kind `Track`,
+or `SignatureRefresh` when refreshing or signing after a subscribe; the
+keys stay tracked, and the callback is asked again after 5 to 30 s,
+longer with each failure. One returning `TokenError::Unauthorized` ends
+the subscription with `unsubscribed` 1. Without a callback, `track(keys)`
+reports error 14 and keeps the keys.
 
 The stream yields `subscribing`, `subscribed`, then an `Update` per new
 version of a tracked key's value, each version once: `update.version` is
@@ -530,18 +536,26 @@ The client keeps the keys, the versions taken and the signatures across
 reconnects: each subscribe tracks every key again, with the signatures it
 holds and the versions taken, so a mass reconnect asks the backend for
 nothing while its signatures stay valid, and a device gets a value again
-only when it missed it. `unsubscribe()` forgets them. A signature with an
-expiry is the application's to renew: call `track_with_signature` again
-before it expires, as the server drops its keys some time after, with no
-event, while `tracked_keys()` still lists them. Keys and signatures grow
+only when it missed it. `unsubscribe()` forgets them. With
+`get_signature`, the client renews signatures that expire: at the earliest
+expiry the server reports, it asks the callback once to sign every key
+tracked, and the new signatures replace those they cover. A signature the
+server accepted within its 5 s grace period is renewed after 1 s, then
+after up to 15 s while the backend keeps signing expired ones; a track
+refused with 109 renews at once, and a 109 to that renewal waits 5 to 30 s
+before the next. Without the callback, a signature with an expiry is the
+application's to renew: call `track_with_signature` again before it
+expires, as the server drops its keys some time after, with no event,
+while `tracked_keys()` still lists them. Keys and signatures grow
 only by the application's calls and its backend's answers, not by the
 server, and are not bounded by the client: `max_keys_per_connection` is
 the usual limit.
 
 Track and untrack requests are `sub_refresh` commands, none larger than
 `max_track_frame_bytes` (60 000 by default) by its worst-case size: an
-untrack of many keys is split, the tracking after a reconnect goes in
-frames, each sent once the one before is answered, and a
+untrack of many keys is split, the tracking after a reconnect and that of
+keys signed in chunks go in frames, each sent once the one before is
+answered, and a
 `track_with_signature` batch larger than that, which a signature over
 exactly its keys makes impossible to split, is refused before it is sent:
 an `Error` event of kind `Track` with code 12, and a removal `Update` for
@@ -1045,7 +1059,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
 | 0 | `codes::unsubscribed::UNSUBSCRIBE_CALLED` | `"unsubscribe called"` | `unsubscribe()` was called, or the subscription was removed (Block 9) | never, until `subscribe()` |
-| 1 | `codes::unsubscribed::UNAUTHORIZED` | `"unauthorized"` | a subscription token or data callback denied access, or returned an empty token, or error 109 came without a token callback (Blocks 9, 10) | never, until `subscribe()` |
+| 1 | `codes::unsubscribed::UNAUTHORIZED` | `"unauthorized"` | a subscription token or data callback denied access, or returned an empty token, or error 109 came without a token callback (Blocks 9, 10), or a shared poll subscription's `get_signature` callback denied access (Block 47, D6; `unstable`) | never, until `subscribe()` |
 | 2 | `codes::unsubscribed::CLIENT_CLOSED` | `"client closed"` | the client was closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | never: the client is closed |
 | 3 | `codes::unsubscribed::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server refused a subscribe or `sub_refresh` with HTTP 413 (Block 8) | never, until `subscribe()` |
 | 4 | `codes::unsubscribed::NOT_GRANTED_ON_RECONNECT` | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
@@ -1070,9 +1084,9 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | 9 | `codes::error::SUBSCRIPTION_REFRESH_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to refresh with (Block 10) | an `Error` event; the refresh is retried after 10 to 20 s |
 | 10 | `codes::error::TRANSPORT_WRITE` | `"transport write error"` | an emulation request carrying the call was answered with HTTP 413 (Block 8) | the call fails; a retry with the same data never succeeds |
 | 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
-| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17), or a shared poll track batch over `max_track_frame_bytes` (Block 47; `unstable`) | building fails; for a data callback, an `Error` event and a retry after the backoff; for a track batch, an `Error` event of kind `Track`, and its keys end with a removal `Update` each |
+| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17), or a shared poll track batch, given or signed by `get_signature`, over `max_track_frame_bytes` (Block 47; `unstable`) | building fails; for a data callback, an `Error` event and a retry after the backoff; for a track batch given, an `Error` event of kind `Track`, and its keys end with a removal `Update` each; for a signature from `get_signature`, as error 14 |
 | 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
-| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message | a shared poll subscription's `get_signature` callback failed (Block 47, D6; `unstable`) | an `Error` event of kind `Track`; the keys stay tracked and are asked for again on the next subscribe |
+| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message; `"get_signature callback required for track(keys)"` without one | a shared poll subscription's `get_signature` callback failed, or keys need a signature and there is no callback (Block 47, D6; `unstable`) | an `Error` event of kind `Track`, or `SignatureRefresh` when refreshing or signing after a subscribe; the keys stay tracked, and the callback is asked again after 5 to 30 s, growing with each failure; without a callback, the next subscribe reports it again |
 | 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
 | 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
 | 17 | `codes::error::PUBLISH_DROPPED` | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
@@ -1099,7 +1113,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
 | `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
-| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109, a temporary error or one below 100: nothing more until the next subscribe tracks the keys again (D7's retries: 47b, 47c); any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and a replay's frames not yet sent with them (Block 47, D7) |
+| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109: `get_signature` signs every key tracked again at once, and a 109 to that refresh's own track request retries it after 5 to 30 s; without the callback, nothing more until the next subscribe tracks the keys again; a temporary error or one below 100: nothing more until the next subscribe tracks the keys again (D7's retry: 47c); any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and those of the request's frames not yet sent with them (Block 47, D7) |
 | shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
 | shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
 | call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |

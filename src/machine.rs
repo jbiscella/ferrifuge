@@ -147,10 +147,12 @@ impl FrameId {
 pub struct DebounceTimer(u64);
 
 /// Identifies a timer of a shared poll subscription (Block 47, D3): the
-/// reply deadline of a track or untrack request. The owner runs it for the
+/// reply deadline of a track or untrack request, the refresh of its
+/// signatures, or a retry. The owner runs it for the
 /// [`Action::SetSharedPollTimer`] and reports it with
 /// [`Input::SharedPollTimerFired`]; a machine never reuses a number, so a
-/// firing for a request already answered is ignored.
+/// firing for a request already answered, or a timer since cancelled, is
+/// ignored.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
@@ -337,7 +339,8 @@ impl MapSubscriptionOptions {
 #[non_exhaustive]
 pub struct SharedPollSubscriptionOptions {
     /// Ask the owner to sign keys with [`Action::FetchSignature`] (Block 47,
-    /// D6), for keys tracked without a signature.
+    /// D6), for keys tracked without a signature and to renew signatures as
+    /// they expire (D7).
     pub signature_source: bool,
     /// Bytes a track or untrack request may take on the wire, in the worst
     /// encoding (Block 47, D7); 60 000 by default, below Centrifugo's
@@ -819,7 +822,8 @@ pub enum Input {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     UntrackKeys(SubscriptionId, Vec<String>),
-    /// A timer set by [`Action::SetSharedPollTimer`] fired (Block 47, D12).
+    /// A timer set by [`Action::SetSharedPollTimer`] fired (Block 47, D7,
+    /// D12).
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
@@ -935,8 +939,8 @@ pub enum Action {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitSharedPollSubscription(EventId, SubscriptionId, crate::SharedPollSubscriptionEvent),
-    /// Start a shared poll subscription's timer (Block 47, D12); report it
-    /// with [`Input::SharedPollTimerFired`].
+    /// Start a shared poll subscription's timer (Block 47, D7, D12); report
+    /// it with [`Input::SharedPollTimerFired`].
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions

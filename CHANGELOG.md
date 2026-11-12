@@ -38,6 +38,19 @@ repository held while it carried that version, from the blocks of
 - `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` (8) and
   `codes::error::SHARED_POLL_GET_SIGNATURE` (14), with their rows in the
   table of codes.
+- Unstable (`unstable` feature): shared poll subscriptions ask for
+  signatures and renew them (Block 47b). `track(keys)` asks the
+  `get_signature` callback in chunks within `max_track_frame_bytes`,
+  revokes the keys it does not return and untracks a key untracked
+  meanwhile in the same request; without a callback it reports error 14.
+  A failing callback reports error 14 and is asked again after 5 s to
+  30 s; `TokenError::Unauthorized` ends the subscription with
+  `unsubscribed` 1. Signatures are renewed at the earliest expiry the
+  server reports, after 1 s for one accepted within the server's grace
+  period (backing off to 15 s), and at once after a 109, a 109 to the
+  renewal itself waiting 5 s to 30 s. `ErrorKind::SignatureRefresh`.
+  The rows of `unsubscribed` 1, errors 12 and 14 and the track errors in
+  the table of codes say so.
 
 - Publish debouncing as advised by the server (Centrifugo PRO):
   `Subscription::publish` and `publish_json` send the first value at once
