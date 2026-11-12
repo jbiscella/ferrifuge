@@ -1079,3 +1079,148 @@ fn a_reply_read_behind_an_event_not_taken_stops_the_deadline() {
         "{fired:?}"
     );
 }
+
+// Codex on #218, 1 (D12): a subscription recreated after a removal waits
+// for the removed one's requests still in flight on the channel, not only
+// for the unsubscribe.
+#[test]
+fn a_recreated_subscription_waits_for_the_removed_ones_requests() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    let request = emulated_requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+    let removed = machine.handle(Input::RemoveSubscription(id));
+    let unsubscribe = sent_emulated(&removed)
+        .into_iter()
+        .find(|command| command.get("unsubscribe").is_some())
+        .expect("an unsubscribe command");
+    let again = machine
+        .add_shared_poll_subscription("items".into(), options(false))
+        .unwrap();
+    machine.handle(Input::Subscribe(again));
+
+    let unsubscribed = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": unsubscribe["id"], "unsubscribe": {}}).to_string(),
+    ));
+    let answered = machine.handle(reply_to(transport, &request));
+
+    let subscribes = |actions: &[Action]| {
+        sent_emulated(actions)
+            .into_iter()
+            .filter(|command| command.get("subscribe").is_some())
+            .count()
+    };
+    assert_eq!(subscribes(&unsubscribed), 0, "{unsubscribed:?}");
+    assert_eq!(subscribes(&answered), 1, "{answered:?}");
+}
+
+// Codex on #218, 2 (D5): unsubscribe() forgets the keys and signatures even
+// when the subscription never subscribed.
+#[test]
+fn unsubscribe_before_any_subscribe_forgets_the_keys() {
+    let (mut machine, transport) = connected();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options(false))
+        .unwrap();
+    track(&mut machine, id, &[("a", 3)], "sig1");
+
+    machine.handle(Input::Unsubscribe(id));
+    let actions = machine.handle(Input::Subscribe(id));
+    let replay = answer_subscribe(&mut machine, transport, &actions);
+
+    assert_eq!(
+        machine.shared_poll_tracked_keys(id).unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(requests(&replay, 1), Vec::<Value>::new());
+}
+
+// Codex on #218, 3 (Block 18 D6, Block 8): a request of several commands
+// refused with HTTP 413 resends a track request alone; one refused alone
+// ends the subscription with unsubscribed 3, as any sub_refresh.
+#[test]
+fn a_track_request_refused_with_413_is_resent_alone_then_unsubscribes() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let actions = track(&mut machine, id, &[("a", 0)], "sig1");
+    let body = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let line = String::from_utf8(Codec::Json.emulation_frame(&body).unwrap()).unwrap();
+    let batched = Codec::Json.emulation_request(
+        "s",
+        "n",
+        format!("{line}\n{}", r#"{"id":4242,"rpc":{"data":{}}}"#).as_bytes(),
+    );
+
+    let resent = machine.handle(Input::SendRejected {
+        transport,
+        frame: batched,
+    });
+    let resent_body = resent
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the track request resent alone");
+    assert_eq!(emulated_requests(&resent, 1).len(), 1, "{resent:?}");
+
+    let refused = machine.handle(Input::SendRejected {
+        transport,
+        frame: resent_body,
+    });
+
+    assert!(
+        events(&refused).iter().any(|(_, event)| matches!(
+            event,
+            SharedPollSubscriptionEvent::Unsubscribed { code: 3, .. }
+        )),
+        "{refused:?}"
+    );
+    assert!(
+        sent_emulated(&refused)
+            .iter()
+            .any(|command| command.get("unsubscribe").is_some()),
+        "{refused:?}"
+    );
+}
+
+// Codex on #218, 4 (D9, Block 15): a delta among a track reply's items
+// fails before any of the reply's updates is emitted, so no withdrawn
+// update holds the next messages.
+#[test]
+fn a_delta_in_a_track_reply_holds_no_message() {
+    let (mut machine, transport, id) = subscribed(false, true);
+    let command =
+        requests(&track(&mut machine, id, &[("a", 0), ("b", 0)], "s"), 1)[0]["id"].clone();
+
+    let reply = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": command, "sub_refresh": {"items": [
+            {"key": "a", "data": {"v": 1}, "version": 1},
+            {"key": "b", "data": "patch", "version": 1, "delta": true},
+        ]}})
+        .to_string(),
+    ));
+    // The application takes what reaches its stream: never a withdrawn
+    // event.
+    let withdrawn: Vec<EventId> = reply
+        .iter()
+        .filter_map(|action| match action {
+            Action::Withdraw(ids) => Some(ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for (event_id, _) in events(&reply) {
+        if !withdrawn.contains(&event_id) {
+            machine.handle(Input::EventTaken(event_id));
+        }
+    }
+
+    assert!(!machine.events_hold_inbound(), "{reply:?}");
+}
