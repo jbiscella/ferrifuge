@@ -2513,12 +2513,12 @@ impl Machine {
     fn tear_down(&mut self, code: u32, reason: &str, reconnect: bool) -> Option<bool> {
         let cancelled = std::mem::take(&mut self.counters.cancelling);
         // "State invalidated" (Block 11): the connection token and every
-        // subscription token, fixed ones too, are dropped and every stream
-        // position is made unmatchable, whether a push or a close frame
-        // carries the code (centrifuge-js `_disconnect`, which keeps fixed
-        // tokens).
+        // subscription token a token callback can fetch again are dropped,
+        // a fixed token without one is kept, and every stream position is
+        // made unmatchable, whether a push or a close frame carries the
+        // code (centrifuge-js `_disconnect`).
         if code == STATE_INVALIDATED {
-            self.tokens.invalidate();
+            self.tokens.invalidate_replaceable();
             self.invalidate_subscriptions();
             self.invalidate_server_subscriptions();
         }

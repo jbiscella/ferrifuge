@@ -221,17 +221,29 @@ impl Tokens {
         self.refresh_required = false;
     }
 
-    /// The server invalidated the state the token belongs to (`client.proto`
-    /// codes 2502 and 3014): the token is dropped, so the next connect or
-    /// subscribe fetches a new one when there is a source, and carries none
-    /// otherwise. A fetch in flight was asked for the invalidated state: its
-    /// answer, even a refresh's that would outlive a reconnect, is ignored.
+    /// The server invalidated the state the token belongs to: the token is
+    /// dropped, so the next connect or subscribe fetches a new one when
+    /// there is a source, and carries none otherwise. A fetch in flight was
+    /// asked for the invalidated state: its answer, even a refresh's that
+    /// would outlive a reconnect, is ignored. Unsubscribe code 2502 drops a
+    /// subscription token always (`client.proto`, `Unsubscribe`);
+    /// disconnect code 3014 only through [`Tokens::invalidate_replaceable`].
     pub(super) fn invalidate(&mut self) {
         self.current = Secret::default();
         self.refresh_required = false;
         self.refreshing = false;
         self.fetch = None;
         self.stale_fetch = None;
+    }
+
+    /// Disconnect code 3014 invalidated the connection's state (Block 11):
+    /// a token a source can replace is dropped, as [`Tokens::invalidate`]
+    /// does; a fixed token, which nothing could replace, is kept and sent
+    /// again, as after any other reconnect.
+    pub(super) fn invalidate_replaceable(&mut self) {
+        if self.source {
+            self.invalidate();
+        }
     }
 
     /// The token for refresh command `id`, which is now the pending one.
@@ -306,6 +318,19 @@ mod tests {
         assert_eq!(with_source.before_connect(), BeforeConnect::Fetch);
         assert_eq!(fixed.before_connect(), BeforeConnect::Ready);
         assert_eq!(fixed.for_connect(), "");
+    }
+
+    #[test]
+    fn a_state_invalidation_drops_only_a_token_a_source_can_replace() {
+        let mut with_source = Tokens::new("t".into(), true);
+        let mut fixed = Tokens::new("t".into(), false);
+
+        with_source.invalidate_replaceable();
+        fixed.invalidate_replaceable();
+
+        assert_eq!(with_source.before_connect(), BeforeConnect::Fetch);
+        assert_eq!(fixed.before_connect(), BeforeConnect::Ready);
+        assert_eq!(fixed.for_connect(), "t");
     }
 
     #[test]
