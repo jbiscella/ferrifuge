@@ -216,8 +216,9 @@ fn reconnect(machine: &mut Machine, _transport: TransportId) -> (TransportId, Ve
     (transport, replay)
 }
 
-// D4; delta waits for 47d's per-key bases (D10), as map subscriptions
-// did before 45d: asked for or not, the subscribe carries none.
+// D4: none of a stream subscription's options; delta, which a shared poll
+// subscription asks for only when built with it, is tested with 47d's
+// per-key bases (D10).
 #[test]
 fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
     let (mut machine, _) = connected();
@@ -227,8 +228,7 @@ fn the_subscribe_command_has_type_4_and_nothing_a_stream_subscription_adds() {
         .positioned(true)
         .recoverable(true)
         .join_leave(true)
-        .channel_compaction(true)
-        .delta(crate::DeltaFormat::Fossil);
+        .channel_compaction(true);
     let id = machine
         .add_shared_poll_subscription("items".into(), options)
         .unwrap();
@@ -1255,5 +1255,6 @@ fn a_delta_in_a_track_reply_holds_no_message() {
     assert!(!machine.events_hold_inbound(), "{reply:?}");
 }
 
+mod delta;
 mod replay;
 mod signatures;
