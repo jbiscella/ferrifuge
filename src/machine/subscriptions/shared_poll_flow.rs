@@ -1454,11 +1454,11 @@ impl Machine {
         };
         let held = tracked.version.max(handled.get(&key).copied().unwrap_or(0));
         let duplicate = !removed && version > 0 && held > 0 && version <= held;
-        // A whole duplicate with delta on is no update, but the server's
-        // next delta of the key applies to it: the server sends it again
-        // after a track from version 0, the first value after that track
-        // (Codex on #221). A delta duplicate changes nothing.
-        if duplicate && (publication.delta || !flow.bases.on) {
+        // With delta on a duplicate, whole or delta, is no update but
+        // becomes the key's base: the server's next delta applies to the
+        // last value it sent (centrifuge `keyedWritePublication`), which
+        // after a re-track can be an older value sent late (Codex on #221).
+        if duplicate && !flow.bases.on {
             return Item::Dropped;
         }
         if removed {
