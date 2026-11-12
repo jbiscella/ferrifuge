@@ -22,6 +22,7 @@ use super::delivery::wait_until;
 use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, recorded};
 use crate::support::token::{shared_poll_signature, subscription_token};
 
+mod delta;
 mod replay;
 
 type Events = Pin<Box<dyn Stream<Item = SharedPollSubscriptionEvent> + Send>>;
@@ -54,6 +55,11 @@ pub(crate) struct SharedPolls {
     answers_given: bool,
     /// When a step tracked keys, saw an error or answered a request.
     at: Option<std::time::Instant>,
+    /// The JSON text and version of the value key "a" holds, which the
+    /// next delta applies to (47d).
+    base: Option<(String, u64)>,
+    /// The ids of the requests the fake server holds unanswered (47d).
+    held: Vec<Value>,
 }
 
 impl ClientWorld {
@@ -403,7 +409,8 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
         other => {
             assert!(
                 a_signing_subscription(world, &channel, other).await
-                    || replay::a_replaying_subscription(world, &channel, other).await,
+                    || replay::a_replaying_subscription(world, &channel, other).await
+                    || delta::a_delta_subscription(world, &channel, other).await,
                 "no such shared poll subscription: {other}"
             );
         }

@@ -848,6 +848,13 @@ const SHARED_POLLS: &[&str] = &[
     "A failing track is retried or untracked by its error",
     "Updates not taken before disconnect come back on the next connection",
     "A removal not taken before disconnect is still delivered",
+    // 47d: per-key delta compression, its bound, statistics.
+    "Delta compression decodes each tracked key's changes",
+    "Delta bases are dropped at each subscribe",
+    "A delta in flight when its key was tracked again is dropped",
+    "Delta bases past their bound end the subscription",
+    "A delta that cannot be applied resubscribes and tracks again",
+    "Statistics count shared poll subscriptions and their updates",
 ];
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];
