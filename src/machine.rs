@@ -331,9 +331,10 @@ pub struct SharedPollSubscriptionOptions {
     /// `max_request_body_size` (65 536 each by default).
     pub max_track_frame_bytes: std::num::NonZeroUsize,
     /// The options a shared poll subscription shares with a stream
-    /// subscription: `data`, the token and its callback, the resubscribe
-    /// delays and `delta`. The others do not apply to shared poll
-    /// subscriptions and are ignored (Block 47, out of scope).
+    /// subscription: `data`, the token and its callback and the resubscribe
+    /// delays. The others do not apply to shared poll subscriptions and are
+    /// ignored (Block 47, out of scope); `delta` waits for per-key delta
+    /// bases (Block 47, D10).
     pub common: SubscriptionOptions,
 }
 

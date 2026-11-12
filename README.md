@@ -544,9 +544,7 @@ by default) by its worst-case size; keep it below the server's
 `websocket.message_size_limit` and the emulation endpoint's
 `max_request_body_size`, 65 536 bytes each by default, as a larger
 websocket message closes the connection with 1009, which ends the client.
-`.delta(DeltaFormat::Fossil)` asks for deltas on namespaces with
-`allowed_delta_types`; on Centrifugo OSS a delta exists only when the
-backend's refresh returns `prev_data`. A server older than 6.8.0 answers
+Delta compression is not offered yet for shared poll subscriptions. A server older than 6.8.0 answers
 a shared poll subscription as a stream one, and the subscription ends with
 `unsubscribed` 8; a namespace of another type refuses it with 108. A
 shared poll subscription shares the registry with the other kinds, one per
