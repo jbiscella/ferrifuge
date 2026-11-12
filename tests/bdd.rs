@@ -819,6 +819,18 @@ const SHARED_POLLS: &[&str] = &[
     "A server without shared poll ends the subscription",
     "A private namespace gets its token and refreshes it",
     "A signature batch over the frame budget is refused before it is sent",
+    // 47b: signatures asked for and refreshed by the client.
+    "track asks get_signature for the keys and tracks what it returns",
+    "A key the callback does not return is revoked",
+    "A key untracked while get_signature runs is untracked in the same request",
+    "Without get_signature a key set reports error 14",
+    "A failing get_signature reports error 14 and retries",
+    "An unauthorized get_signature unsubscribes with code 1",
+    "A signature with an expiry is refreshed when it expires",
+    "A track refused with 109 refreshes the signature",
+    "A track refused with 109 again waits before the next refresh",
+    "A signature accepted within the grace period is refreshed soon",
+    "A key set larger than one frame is signed and tracked in chunks",
 ];
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];
