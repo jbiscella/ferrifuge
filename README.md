@@ -570,7 +570,7 @@ untrack of many keys is split, the tracking after a reconnect and that of
 keys signed in chunks go in frames, each sent once the one before is
 answered, a key untracked meanwhile going in the `untrack` field of the
 frame carrying its signature when it fits there, else in an untrack
-request once that frame is answered, and a
+request once that frame is answered, before the next one, and a
 `track_with_signature` batch larger than that, which a signature over
 exactly its keys makes impossible to split, is refused before it is sent:
 an `Error` event of kind `Track` with code 12, and a removal `Update` for

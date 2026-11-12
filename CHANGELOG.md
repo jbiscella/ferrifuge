@@ -40,7 +40,7 @@ repository held while it carried that version, from the blocks of
   with the signatures and versions held, a key untracked meanwhile in the
   `untrack` field of the frame carrying its signature's batch, within
   `max_track_frame_bytes`, else in an untrack request once that frame is
-  answered. A subscribe reply whose epoch differs from the one before
+  answered, before the request's next frame. A subscribe reply whose epoch differs from the one before
   (an absent one counting as empty) tracks every key from version 0; the
   first subscribe after `unsubscribe()` keeps the versions given. A track
   request failing with a temporary error or one below 100 tracks the
