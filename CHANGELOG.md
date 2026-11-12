@@ -71,7 +71,8 @@ repository held while it carried that version, from the blocks of
   subscriptions (Block 47d). `SharedPollSubscriptionBuilder::delta` asks
   for Fossil deltas; the client keeps a base per tracked key, deleted with
   the key and at each subscribe, and delivers whole values; a delta in
-  flight across an unanswered untrack of its key is dropped. The bases
+  flight across an unanswered untrack of its key, or across an inline
+  untrack until the key's next track is answered, is dropped. The bases
   together are bounded by `SharedPollSubscriptionBuilder::max_delta_bases_bytes`
   (`SharedPollSubscriptionOptions::max_delta_bases_bytes`, 64 MiB by
   default), past which the subscription ends with `unsubscribed` 7.
