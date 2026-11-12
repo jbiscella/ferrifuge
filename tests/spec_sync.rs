@@ -21,6 +21,7 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
     "Byte-split matrix",
     "Real-server chaos",
     "Soak run",
+    "WebTransport (unstable)",
 ];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
@@ -50,7 +51,11 @@ const P_HARNESS_DIRS: &[&str] = &["benches", "tests"];
 
 /// `@W` scenarios of `CLAUDE.md` that no wasm test claims yet. A scenario
 /// leaves the list when a test claims it.
-const W_NOT_YET_WRITTEN: &[&str] = &[];
+const W_NOT_YET_WRITTEN: &[&str] = &[
+    "A browser client connects over WebTransport and receives a publication",
+    "A browser without WebTransport skips the transport",
+    "A browser client falls back from WebTransport to websocket when the session is refused",
+];
 
 /// How a wasm test claims a `@W` scenario: a line of its own reading
 /// `// @W scenario: <scenario name>`.

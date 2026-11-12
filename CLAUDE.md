@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–47 and 49–52 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–52 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -24,7 +24,7 @@ Markers used below:
 | Implementation reference | centrifuge-js | Widest feature set |
 | Wire contract | `client.proto` of centrifugal/protocol | Source of truth for frames |
 | Serialization | JSON and Protobuf | Both supported by centrifuge-js |
-| Transports | websocket, http_stream, sse | Fallback in this order |
+| Transports | websocket, http_stream, sse; webtransport, unstable (Block 48: `unstable-webtransport` natively, `unstable` in the browser), anywhere in the list | Fallback in the configured order |
 | `closed` client state | Not implemented; a closed client reports `disconnected`, and `Client::is_closed()` tells it apart (Block 33) | Spec marks it optional |
 | Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) on native targets, browser adapter behind the `browser` cargo feature (default) on wasm32-unknown-unknown (Block 44) | Owner's choice |
 | Scenario execution | cucumber-rs; `.feature` files under `tests/features/` are verbatim copies of the Gherkin in this file | Scenario text is the test; drift is checked mechanically |
@@ -57,7 +57,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 
 ### Out of scope (v1)
 
-- sockjs, webtransport transports (webtransport planned: Block 48)
+- sockjs transport (not adopted: item 34, "Planned after Block 19"); webtransport (reversed by the owner decision of 2026-11-06, late: Block 48, behind the `unstable` feature)
 - map subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 45, behind the `unstable` feature), shared poll subscriptions (experimental; reversed by the owner decision of 2026-11-06, late: Block 47, behind the `unstable` feature)
 - client publish debouncing (Centrifugo PRO; reversed by the owner decision of 2026-11-06, late: Block 46)
 - channel compaction (Centrifugo PRO; owner decision, 2026-11-04): the client never offers it (reversed by the owner decision of 2026-11-06: Block 35)
@@ -85,6 +85,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 0, Block 9 and Block 11, out of scope | map subscriptions | owner, 2026-11-06, late (item 29) | 45 |
 | Block 0, Block 13 and Block 18, out of scope | client publish debouncing | owner, 2026-11-06, late (item 32) | 46 |
 | Block 0, Block 9, Block 11 and Block 19, out of scope | shared poll subscriptions | owner, 2026-11-06, late (item 30) | 47 |
+| Block 0 and Block 8, out of scope | the webtransport transport | owner, 2026-11-06, late (item 33) | 48 |
 | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |
 
 ### Test layers
@@ -529,11 +530,11 @@ Feature: Protobuf encoding
 
 **Dependencies:** Blocks 5 (5d transport kind), 6.
 
-**Out of scope:** sockjs, webtransport, unidirectional http_stream and sse (Block 0); Protobuf over sse (rejected, see decisions); browser-only shims.
+**Out of scope:** sockjs, ~~webtransport~~ (reversed: Block 48), unidirectional http_stream and sse (Block 0); Protobuf over sse (rejected, see decisions); browser-only shims.
 
 **Decisions** (documented in the centrifuge-js README unless noted):
 - the client takes a list of (transport, endpoint); a single endpoint string means websocket only;
-- transports are tried in order during the initial handshake only, until the server answers on one: a connect reply, an error reply to the connect, a Disconnect push, or, over websocket, a close code from 3000 (review items C2 and C3; centrifuge-js 63ed73e `_transportWasOpen`); reconnects then use only that transport, the first of them after the reconnect backoff delay (Block 2);
+- transports are tried in order during the initial handshake only, until the server answers on one: a connect reply, an error reply to the connect, a Disconnect push, or, over websocket, a close code from 3000 (review items C2 and C3; centrifuge-js 63ed73e `_transportWasOpen`); reconnects then use only that transport, the first of them after the reconnect backoff delay (Block 2); a WebTransport stream that ends before the server answered is a failed attempt even after WebTransport was chosen (Block 48 D9, owner decision of 2026-11-12) (owner-pending);
 - reqwest as the HTTP client (Block 0); cargo-deny checks only the targets the crate supports (Linux, macOS, Windows), so data crates used only on wasm32 are not in scope;
 - a client configured with the Protobuf protocol and an sse endpoint is rejected when it is built, with a configuration error naming the combination (Centrifugo's sse carries JSON only; Protobuf over http_stream: Block 27), rather than failing at run time;
 - the http_stream and sse decoders buffer across body chunks: network chunk boundaries are unrelated to message boundaries, so a message split over several chunks and several messages in one chunk both decode exactly; unit tests cover both cases for each transport (the real server's chunking in @A cannot be controlled);
@@ -543,7 +544,7 @@ Feature: Protobuf encoding
 - a failed emulation request (network error, rejection, or a 404 or 5xx response) closes the transport and the client reconnects, since the command it carried can no longer be answered (centrifuge-js `transport_sse.ts`);
 - an emulation request answered with HTTP 413 keeps the transport and ends only the commands it carried, at once; none is retried automatically with the same payload (owner decision, 2026-11-04; diverges from centrifuge-js 63ed73e, which leaves the command to its reply timeout, `transport_http_stream.ts:199-205`): a call the application awaits (publish, RPC, history, presence, presence stats, send) fails with error code 10 "transport write error" (centrifuge-js `errorCodes.transportWriteError`); a subscribe or a sub_refresh moves the subscription to `unsubscribed` with code 3 "message size limit exceeded", sending an unsubscribe command when the server holds the subscription (after a sub_refresh); a connection refresh disconnects the client with code 3 "message size limit exceeded", the code and reason review item C4 uses for websocket close code 1009 (centrifuge-js `disconnectedCodes.messageSizeLimit`); an unsubscribe fails as any unsubscribe error, so the client reconnects with code 4 (Block 9);
 - a websocket write never blocks the client: frames are queued and written while the client goes on handling timers, incoming frames and calls; a frame not written within `Config::timeout` of being queued closes the transport, and the client reconnects with code 1 "transport closed", as for any lost transport; closing a websocket, its close handshake included, is bounded by `Config::timeout` too, after which the connection is aborted (owner decision, 2026-11-05, review item C1; centrifuge-js 63ed73e has no counterpart, since a browser's `WebSocket.send` never blocks);
-- no construction path accepts an empty endpoint, or an `http://` or `https://` endpoint configured for the websocket transport: building the client fails with a configuration error naming the transport, and `Client::new` returns that error instead of panicking; `http(s)://` endpoints stay valid for http_stream and sse (owner decision, 2026-11-04).
+- no construction path accepts an empty endpoint, or an `http://` or `https://` endpoint configured for the websocket transport: building the client fails with a configuration error naming the transport, and `Client::new` returns that error instead of panicking; `http(s)://` endpoints stay valid for http_stream and sse (owner decision, 2026-11-04); a WebTransport endpoint must be `https://` (Block 48 D2).
 
 `VERIFY:` the bidirectional emulation protocol (stream request, `/emulation` command requests and their session and node fields) in centrifuge-js `transport_http_stream.ts` and `transport_sse.ts`; there is no other implementation to cross-check against. Centrifugo v6 defaults verified: `http_stream.enabled` and `sse.enabled` are false, the emulation handler prefix is `/emulation`.
 
@@ -2095,7 +2096,7 @@ Feature: Footprint, performance and fleet behaviour
 - **In order, one message at a time.** Messages from the server are handled in order, and a message is handled only after every event of earlier messages, of any connection, has been taken or withdrawn. When a message is read, before it is handled, the client answers it if it is a ping and the connect reply asked for pongs, re-arms the no-ping deadline, and matches a reply to its command. A map subscription's intermediate page reply, which makes no event, is the exception: it is handled when read, once its connection's connect reply has been handled (amended by Block 45 D5).
 - **Bounded read-ahead.** Messages read but not yet handled wait in a read-ahead of at most a number of messages (default 256) and a number of bytes (default 4 MiB), two `Config` fields; each must be at least 1, or `Client::new` returns an error. A single message larger than the byte limit is admitted alone when the read-ahead is empty. When the read-ahead is full, the client stops reading the connection (the websocket, or the response stream of an HTTP streaming transport; on every browser transport a bounded inbox stands instead, amended by Block 44 D7), so the server's slow-client handling acts: 3008 "slow" when its client queue (`client.queue_max_size`, 1 MiB by default) overflows, dropping what it had queued, or 3009 "write error" when a write times out (Centrifugo v6.10.1).
 - **Recovery larger than the server's queue.** A recovery reply (a subscribe reply, or a connect reply recovering server-side subscriptions) is queued whole, so one larger than `client.queue_max_size` is answered with 3008 "slow" however fast the client reads, and the queued reply is dropped (Centrifugo v6.10.1: centrifuge `writer.go` `enqueue`, `client.go` `writeEncodedCommandReply`; a 3008 close does not flush the queue). Each reconnect asks for the same backlog, so the client keeps reconnecting, its backoff growing up to `max_reconnect_delay` ("Backoff after 3008"; a connect reply that is itself dropped resets nothing), until the backlog passes `client.recovery_max_publication_limit` or the history expires. The client cannot ask for a smaller batch (`client.proto`, `SubscribeRequest`); the README tells operators to keep `client.queue_max_size` above `client.recovery_max_publication_limit` × the largest publication, summed over the server-side subscriptions one connect recovers.
-- **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.)
+- **Backoff after 3008.** A connection the server closes with 3008 "slow", by close code or by Disconnect push, before the client has read a server ping on it, does not reset the reconnect backoff: the next reconnect delay is computed from the attempt counter as it stood when that connection's connect reply arrived, as if neither the connect reply nor a reply to a command had reset it (Block 2). A server ping read on the connection lets the reset stand, as does a close with any other code. With a server that sends no pings (`ConnectResult.ping` 0), every 3008 close keeps the backoff growing, up to `max_reconnect_delay`. The reconnect jitter window (Block 14) still applies to the first reconnect after each connection; stream positions and recovery are unchanged. (Reviewer decision, 2026-11-06, delegated by the owner. Diverges from centrifuge-js 63ed73e, which resets the counter on every connect reply over websocket, `centrifuge.ts:2308-2320`, in the spirit of its own deferred reset for emulated transports, which keeps a client failing right after each connect from reconnecting "at the minimum delay forever". The spec does not say when the counter resets.) A connection over WebTransport that ends without a disconnect push after its connect reply and before a server ping is read on it is handled as a 3008 close (Block 48 D9).
 - **Timers keep running** while the application holds events, with two pauses. The no-ping deadline pauses while the client has stopped reading because the read-ahead is full, and restarts in full when reading resumes; without this pause an application stuck with a full read-ahead would make the client reconnect with code 2 about every 35 s, recovering a full read-ahead each time. A reply deadline (connect, refresh, subscribe, unsubscribe, sub_refresh) pauses while its reply has been read but waits to be handled.
 - **One active stream per object.** The client and each subscription have one active stream. A second `events()` call (or `publications()`, Block 39) ends the earlier stream, whose next item is its end, and every event not yet taken moves to the new stream, in order. `next()` is cancel-safe: a cancelled read loses no event.
 - **No stream, no hold-up.** An object whose stream was never requested, or was dropped, takes its events at once: they count as delivered and positions move, events not yet taken included (centrifuge-rust §9.4: "a dropped stream acks like an unregistered handler"); so an application that needs every event, and exactly-once delivery on recoverable channels, takes the stream before calling connect() or subscribe(): events emitted before the first events() call count as delivered (documented, with the README examples in that order).
@@ -3114,12 +3115,12 @@ Decisions that bind the blocks:
 - **JSON helpers (item 18):** always available, no `serde` feature: serde and serde_json are unconditional dependencies, so a feature would only hide API.
 - **Components audit:** the in-house sse decoder is replaced by a maintained parser (sse-parse, finesse or sse-core, chosen in that block's spec by fuzzing and benchmarks), the http_stream splitter by tokio-util's `AnyDelimiterCodec` with a maximum length, the content-type check by a maintained media-type parser (mediatype, Block 27 D4); the Block 5c drift (`machine.rs` calling `json::` directly) is refactored through `Codec`, with no API change.
 - **Handlers (item 17):** a handler trait (`ClientHandler`, `SubscriptionHandler`) with a default no-op method per event kind, and a blanket implementation for `FnMut(Event) + Send` closures; one handler per object, taking over its stream (Block 15); methods are synchronous. Delivery modes: `Task` (default), `Thread` (one OS thread per client, started lazily), `Inline` (gives up "timers keep running while events are held", and says so). A panicking handler is caught, its event is not taken, and the client disconnects with code 2 "exception in event handler" without reconnecting, as centrifuge-js 63ed73e does (README.md:1063-1072, centrifuge.ts:1813). `Client: Clone` around an `Arc`, the last drop shutting it down, with `downgrade` and `upgrade` as tokio's `WeakSender`; `close()` ends every clone. Deadlock detection: a thread-local marker around each handler call; under `Inline` a call from a handler fails at once with `WouldDeadlock`; under `Task` and `Thread` a marked call fails with it only when reading pauses on a full read-ahead while that handler still runs (amended by Block 41 D6: under `Task` too a marked call fails at once, and under `Thread` a wait that only a message held back by the handler's event can complete fails as well).
-- **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` off, as Block 43 D1 decides; `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`).
+- **Cookies (item 24):** a `CookieJar` trait in the shape of reqwest's `CookieStore`, and `MemoryJar` on cookie_store 0.22.1 (`public_suffix` off, as Block 43 D1 decides; `log_secure_cookie_values` off), opt-in through `cookie_jar` behind a non-default `cookies` feature. The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport, merging the jar's cookies with a `Cookie` from `http_headers` into one header (RFC 6265 §5.4), without reqwest's `cookies` feature, which skips the jar when a `Cookie` header is set (reqwest 0.13.5 `src/cookie.rs:242`); over WebTransport `Set-Cookie` is not read (Block 48 D14).
 - **Optimistic subscriptions (item 31):** on by default, with no option, over websocket and WebTransport, as centrifuge-js does; only subscribes that fit `batch_frame_bytes` together with the connect go in its frame, and subscribes still waiting for their callbacks wait for the connect reply. Verified: the server handles a frame's commands in order (centrifuge `handler_websocket.go:416-425`), and after a connect error it drops the rest of the frame and answers the next frame with 3501 (`client.go:1965-1968`, `:2025-2037`).
 - **Publish debouncing (item 32):** in the core, also for stream publishes (key ""); the first publish is sent at once; a superseded publish resolves with the result of the send that carried later data, never with a success before the server answers.
-- **WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`. `VERIFY:` that it accepts the client's own `rustls::ClientConfig`.
-- **Connector (item 35):** a `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures, given the endpoint as an `http::Uri` and yielding `AsyncRead + AsyncWrite + Send + Unpin + 'static`; Ferrifuge runs TLS and the websocket handshake over it. Websocket only: a connector with an HTTP transport, or with a proxy setting given with `ClientBuilder::proxy`, fails `build()`, as reqwest's connector layer cannot carry an outside connection (reqwest 0.13.5 `client.rs:2475-2481`, `connect.rs:1346-1352`); with a connector no proxy setting is read, the environment's and the system's included (Block 37 D4).
-- **Unstable APIs (items 29, 30, 33):** behind a non-default `unstable` feature, since the release check runs cargo-semver-checks on default features (Block 20, D1; precedent: `tokio_unstable`, `reqwest_unstable`).
+- **WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`. Verified: wtransport accepts the client's own `rustls::ClientConfig`, which must offer TLS 1.3 and `TLS13_AES_128_GCM_SHA256`, through `build_with_quic_config` (Block 48 D4).
+- **Connector (item 35):** a `Connector` trait taken as an `Arc` and returning a boxed future (the shape of reqwest's `dns::Resolve`), with a blanket implementation for closures, given the endpoint as an `http::Uri` and yielding `AsyncRead + AsyncWrite + Send + Unpin + 'static`; Ferrifuge runs TLS and the websocket handshake over it. Websocket only: a connector with an HTTP or WebTransport transport, or with a proxy setting given with `ClientBuilder::proxy`, fails `build()`, as reqwest's connector layer cannot carry an outside connection (reqwest 0.13.5 `client.rs:2475-2481`, `connect.rs:1346-1352`); with a connector no proxy setting is read, the environment's and the system's included (Block 37 D4).
+- **Unstable APIs (items 29, 30, 33):** behind a non-default `unstable` feature, since the release check runs cargo-semver-checks on default features (Block 20, D1; precedent: `tokio_unstable`, `reqwest_unstable`); WebTransport's native dependency is behind `unstable-webtransport`, which enables `unstable` (Block 48 D1).
 - **Copied trace data (item 20):** the trace files copied from centrifuge-rust sit in `tests/fixtures/tla-traces/` with its MIT text and copyright line (`LICENSE`) and a README naming the source commit, as the fossil vectors do; `LICENSE`'s "Exceptions" and `REUSE.toml` gain an entry for them (owner request, 2026-11-07).
 
 Order of the blocks:
@@ -3357,7 +3358,7 @@ This block reverses Block 6's exclusion of custom root certificates; Block 0's "
   - The fips build, on every platform: webpki over the platform's root certificates and the extra roots, as today. The platform verifier checks chains inside the operating system, outside the AWS-LC FIPS module, while `ClientConfig::fips()` would still report true (rustls 0.23.46 `client_conn.rs:396-409`) (plan "Planned after Block 19").
   - On the webpki path, a read finding no platform certificate builds with the extra roots alone (as `others.rs:102-107`); with none, it fails as today.
 - **D2 Extra root certificates.** `ClientBuilder::root_certificates(roots)`, `roots` an `IntoIterator<Item = rustls::pki_types::CertificateDer<'static>>`, adding to earlier calls as `http_headers` does: the shape of reqwest 0.13.5 `tls_certs_merge`, tonic's `trust_anchors` and the platform verifier's `new_with_extra_roots`; no Ferrifuge certificate type, since rustls is public (D3). The documentation shows PEM parsing with `rustls::pki_types::pem::PemObject::pem_slice_iter`. They are trusted in addition to the platform's, on every platform and build. `build()` checks each with webpki and fails with a configuration error naming the first that does not parse by its index. An empty list is no extra roots.
-- **D3 Raw configuration.** `ClientBuilder::tls_config(Arc<rustls::ClientConfig>)` (tokio-tungstenite's `Connector::Rustls`, rumqttc): used for `wss://` and every `https://` request of http_stream and sse, with no root, provider or verifier of Ferrifuge's. Ferrifuge only sets the ALPN list of its copy to `http/1.1`, as its transports speak HTTP/1.1 only and a configuration offering `h2` would fail them (hyper-rustls rewrites ALPN the same way). `ferrifuge::rustls` re-exports rustls (as tokio-rustls does). Public, not behind a semver-exempt feature (plan). `build()` fails with a configuration error when both `tls_config` and extra roots are given, naming both, and, in the fips build, when the configuration's `fips()` is false. The verifier of a raw configuration is the application's: the README says so for the fips build.
+- **D3 Raw configuration.** `ClientBuilder::tls_config(Arc<rustls::ClientConfig>)` (tokio-tungstenite's `Connector::Rustls`, rumqttc): used for `wss://` and every `https://` request of http_stream and sse, with no root, provider or verifier of Ferrifuge's. Ferrifuge only sets the ALPN list of its copy to `http/1.1`, as its transports speak HTTP/1.1 only and a configuration offering `h2` would fail them (hyper-rustls rewrites ALPN the same way); for WebTransport, `h3` and then none (Block 48 D5); `build()` also fails when a WebTransport endpoint is configured with a configuration that QUIC cannot use: no TLS 1.3 or no `TLS13_AES_128_GCM_SHA256` (Block 48 D4). `ferrifuge::rustls` re-exports rustls (as tokio-rustls does). Public, not behind a semver-exempt feature (plan). `build()` fails with a configuration error when both `tls_config` and extra roots are given, naming both, and, in the fips build, when the configuration's `fips()` is false. The verifier of a raw configuration is the application's: the README says so for the fips build.
 - **D4 Sharing and C7.** A client without extra roots or a raw configuration keeps the process-wide TLS settings and HTTP clients of Blocks 6 and 8. A client with extra roots builds its own at its first secure attempt, with C7's rules where roots are read (a failed build is not kept; a read with errors serves the attempt and is read again next time); on the webpki path it holds its own root store, so the README tells an application with many clients to give them one raw configuration. A raw configuration is shared as given; its HTTP clients are built once per client, a failed build not kept. The Block 14 @P gates pass unchanged.
 - **D5 Logging.** `ClientBuilder`'s `Debug` shows the number of extra roots and whether a raw configuration is set, never their content (Block 21, D5). The README's list of dependencies logging on their own (Block 21, D6) adds rustls-platform-verifier: each failed verification at ERROR through `log`, with no secret.
 - **D6 Version and changelog.** 0.14.0: verification on macOS, iOS and Windows changes, and rustls 0.23 enters the public API. `Unreleased` entries: "Added" `root_certificates`, `tls_config`, `ferrifuge::rustls`; "Changed" the operating system's verifier on macOS, iOS and Windows, where `SSL_CERT_FILE` and `SSL_CERT_DIR` are no longer read. The README states that moving to another rustls 0.x line is a breaking release of Ferrifuge, and where `SSL_CERT_FILE` still applies.
@@ -3463,7 +3464,7 @@ This block reverses Block 14's exclusion of HTTP proxy (CONNECT) support; Block 
   - `no_proxy(list)`, for `all` and `custom`: a host in the list, in `NO_PROXY` syntax (a domain and its subdomains, an IP address, a CIDR range, `*`), is reached directly, without calling `f`; `system` and `from_env` ignore it and take `NO_PROXY` and the system's exceptions.
   - `ProxyTarget::new(url)` takes `http://`, `https://` (TLS to the proxy), `socks5://` (DNS by the client) or `socks5h://` (DNS by the proxy), with optional `user:password@`, percent-encoded; `basic_auth(user, password)` sets them unencoded: Basic for an HTTP proxy, username and password for SOCKS5. A URL that does not parse, or of another scheme, fails at once with a configuration error naming the scheme, never the credentials; `build()` and `set_proxy` then cannot fail on a proxy.
   - `Client::set_proxy(proxy)` replaces the setting from the next connection attempt, as Block 17's setters; the current connection is kept. The setting stays in the adapter; the sans-IO core does not change.
-- **D2 One decision.** One function decides, for each URL a transport opens (websocket upgrade, http_stream or sse stream request, emulation request), direct or which proxy, from the setting and the URL; `ws` and `wss` are asked as `http` and `https`, the only schemes hyper-util's matcher knows. `system` and `from_env` are read once per process, at the first attempt that needs them, and shared by every client, as reqwest reads them when a client is built. Both transports use that decision, so a proxy from the environment or the system now applies to websocket too (F2). A proxy found in the environment or the system with a scheme `ProxyTarget` refuses (`socks4`, `socks4a`) fails the attempt on every transport, with an error naming the scheme, and never connects directly.
+- **D2 One decision.** One function decides, for each URL a transport opens (websocket upgrade, http_stream or sse stream request, emulation request), direct or which proxy, from the setting and the URL; `ws` and `wss` are asked as `http` and `https`, the only schemes hyper-util's matcher knows. `system` and `from_env` are read once per process, at the first attempt that needs them, and shared by every client, as reqwest reads them when a client is built. Both transports use that decision, so a proxy from the environment or the system now applies to websocket too (F2). A proxy found in the environment or the system with a scheme `ProxyTarget` refuses (`socks4`, `socks4a`) fails the attempt on every transport, with an error naming the scheme, and never connects directly. A WebTransport endpoint for which a proxy is decided fails the attempt without connecting (Block 48 D13).
 - **D3 Websocket executor.** Ferrifuge opens the stream and tokio-tungstenite runs over it (`client_async_tls_with_config`):
   - direct TCP; or hyper-util's `Tunnel` (HTTP CONNECT, with `Proxy-Authorization: Basic` from the credentials), over TCP or, for an `https://` proxy, over TLS to the proxy through hyper-rustls's `HttpsConnector`, with the client's TLS settings (Block 22) and no ALPN, as reqwest does; or hyper-util's `SocksV5`, with username and password when given;
   - then TLS to Centrifugo for `wss://`, verifying Centrifugo's certificate, then the websocket handshake.
@@ -4049,8 +4050,8 @@ Feature: Tokio runtime handle
 - `#[non_exhaustive]` on other public structs.
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
-- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), an application's connector (Block 37 D4), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
-- **D2 Maximum incoming message size.** `Config::max_message_bytes`, default 64 MiB (today's fixed `MAX_MESSAGE_BYTES`, which it replaces), is at least 1, or `build()` and `Client::new` return a configuration error naming it, as the read-ahead limits do (Block 15). It bounds what a transport delivers as one message: a websocket message whole, even when it holds several JSON or Protobuf replies (Block 7), and each of its frames (tungstenite's `max_message_size` and `max_frame_size`); an http_stream JSON line; an http_stream Protobuf reply, by its length prefix (Block 27 D3); an sse event's data. It is also the core's bound of Block 19 D6 (a delta target, and the decoded publications of one subscribe reply), which keeps its outcome. The read-ahead keeps admitting one message larger than `read_ahead_bytes` alone (Block 15), so this field is the per-message memory bound; the documentation says so for devices with little memory. `Config`'s `Debug` shows both new fields.
+- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), an application's connector (Block 37 D4), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers, or, for WebTransport, DNS, the UDP bind, the QUIC handshakes (Block 48 D5's retry included), the HTTP/3 SETTINGS, the extended CONNECT and the stream's opening. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
+- **D2 Maximum incoming message size.** `Config::max_message_bytes`, default 64 MiB (today's fixed `MAX_MESSAGE_BYTES`, which it replaces), is at least 1, or `build()` and `Client::new` return a configuration error naming it, as the read-ahead limits do (Block 15). It bounds what a transport delivers as one message: a websocket message whole, even when it holds several JSON or Protobuf replies (Block 7), and each of its frames (tungstenite's `max_message_size` and `max_frame_size`); an http_stream JSON line; an http_stream Protobuf reply, by its length prefix (Block 27 D3); an sse event's data; a WebTransport JSON line and Protobuf reply (Block 48 D7). It is also the core's bound of Block 19 D6 (a delta target, and the decoded publications of one subscribe reply), which keeps its outcome. The read-ahead keeps admitting one message larger than `read_ahead_bytes` alone (Block 15), so this field is the per-message memory bound; the documentation says so for devices with little memory. `Config`'s `Debug` shows both new fields.
 - **D3 An oversized message.** The adapter refuses a message once it is known to exceed `max_message_bytes`, holding at most the limit and one read (tungstenite checks a frame from its header and a message as its frames arrive; the line and sse decoders once the part buffered exceeds the limit; the Protobuf splitter from the length prefix). It ends the transport and reports it with a new `Input::MessageTooLarge(TransportId)` instead of `Input::TransportClosed` (additive: `Input` is `#[non_exhaustive]`, Block 17).
   - Before the connect reply on that transport, the attempt fails as a refused one (Block 8), with an error event whose message is "message larger than the size limit": before the server has answered, the bytes may not be Centrifugo's (centrifuge-rust `docs/spec.md` §5.3, "an HTML page read as a varint").
   - Once the client is connected on it, the client ends: `disconnected` with code 3 "message size limit exceeded" and no reconnect, as for close code 1009 (Block 3, review item C4; centrifuge-rust §5.3: "never a silent reconnect loop"), since a reconnect would ask for the same data again. The field's documentation says that the application decides when to connect again, and that the limit must exceed the largest reply it expects (history, recovery).
@@ -4998,7 +4999,7 @@ Feature: Tag filters, channel compaction, publication channel, recovered publica
 **Out of scope:**
 - a batch delay timer: an idle client sends each command when its driver next runs (centrifuge-rust `docs/spec.md` §9.10, commit 88d6edf, "Why no delay timer");
 - an option to turn either behaviour off: `batch_frame_bytes` of 1 makes every command go alone, which turns off both (D2, D5);
-- optimistic subscriptions over http_stream and sse: an emulated transport's commands need the session of the connect reply (centrifuge-js 63ed73e `centrifuge.ts:1242-1244` returns before the batch on emulation); WebTransport gets D5 in Block 48;
+- optimistic subscriptions over http_stream and sse: an emulated transport's commands need the session of the connect reply (centrifuge-js 63ed73e `centrifuge.ts:1242-1244` returns before the batch on emulation); WebTransport has D5 (Block 48 D10);
 - starting a subscription's token, data or getState callback before the connect reply: such a subscription subscribes after it, as today (D5);
 - sending a subscribe command made by `subscribe()` after the connect command left, before the connect reply;
 - server-side subscriptions (Block 12): the connect command recovers them itself (`ConnectRequest.subs`).
@@ -6511,7 +6512,7 @@ Feature: Cookie jar
 
 **Out of scope:**
 - wasm targets other than wasm32-unknown-unknown (wasip1, wasip2, emscripten, wasm64, wasm32v1-none), wasm threads (`+atomics`), and non-JS wasm hosts, which keep the core alone (Block 40);
-- WebTransport (Block 48) and SockJS (item 34) in the browser;
+- SockJS (item 34) in the browser;
 - `WebSocketStream`, the streams-based WebSocket with backpressure: experimental and "not currently a part of any specification" (MDN, 2026-11-09; whatwg/websockets PR #48 open);
 - the Page Lifecycle `freeze` and `resume` events, `visibilitychange`, `beforeunload`: centrifuge-js 63ed73e listens to none of them;
 - counter-measures to timer throttling in hidden tabs (D16);
@@ -6617,7 +6618,7 @@ This block reverses Block 0's exclusion "browser-only options: online/offline ne
 
 - **D12 Shims (item 39).** `ClientBuilder::websocket(js_sys::Function)`, `fetch(js_sys::Function)`, `readable_stream(js_sys::Function)` and `event_source(js_sys::Function)`, as centrifuge-js's `websocket`, `fetch`, `readableStream` and `eventsource` options (`types.ts:157-165`; `README.md:430-446`):
   - each transport attempt resolves its constructors as centrifuge-js `_resolveTransportDeps` does (`centrifuge.ts:1020-1066`): the shim given, else the global of that name on `globalThis`, else none;
-  - a transport whose constructors are missing is skipped in the round, as centrifuge-js `_initializeTransport` skips one whose `supported()` is false (`:1128-1153`): websocket needs `WebSocket`, http_stream `fetch`, `ReadableStream` and `AbortController` (`transport_http_stream.ts:93-102`), sse `EventSource` and `fetch` (`transport_sse.ts:31-33`); `build()` fails with a configuration error naming the transports and the shim options when none of the configured transports can be used, as centrifuge-js's `connect()` throws "no supported transport found" (`:1106-1126`), and an attempt that finds none later (a global removed under a running client) is a failed attempt with that message (`:1154-1170`);
+  - a transport whose constructors are missing is skipped in the round, as centrifuge-js `_initializeTransport` skips one whose `supported()` is false (`:1128-1153`): websocket needs `WebSocket`, http_stream `fetch`, `ReadableStream` and `AbortController` (`transport_http_stream.ts:93-102`), sse `EventSource` and `fetch` (`transport_sse.ts:31-33`), webtransport `WebTransport` (no shim); `build()` fails with a configuration error naming the transports and the shim options when none of the configured transports can be used, as centrifuge-js's `connect()` throws "no supported transport found" (`:1106-1126`), and an attempt that finds none later (a global removed under a running client) is a failed attempt with that message (`:1154-1170`);
   - a WebSocket or EventSource shim is called as a constructor (`Reflect::construct`) and the object it returns is used through web-sys's bindings with `unchecked_into`, which call its methods and properties by name (verified: wasm-bindgen 0.2.130 bindings are structural unless marked `final`, and web-sys 0.3.107 `gen_WebSocket.rs`, `gen_EventSource.rs` and `gen_EventTarget.rs` carry no `final`); a fetch shim is called in place of the global `fetch` (D8);
   - the ReadableStream shim decides whether http_stream is usable, and when it is given the response body is read through a stream built with it, as centrifuge-js reads the body through a stream built with the resolved constructor (`transport_http_stream.ts:34-91`): an underlying source whose `pull` reads one chunk from the body's reader and enqueues that chunk object unchanged, with `highWaterMark` 0, so the shim's stream reads one chunk for each read of the transport's task (D8); no chunk is copied. Without the shim the body is read directly.
 
@@ -8519,6 +8520,520 @@ Feature: Shared poll subscriptions (unstable)
 
 ---
 
+## Block 48 — WebTransport (unstable)
+
+**Goal:** a client can connect to Centrifugo over WebTransport, one bidirectional stream of an HTTP/3 session over QUIC, as a fourth transport in the fallback list, natively and in the browser. It speaks JSON and Protobuf, uses the client's own TLS settings and the build's crypto provider (FIPS included), never panics on a configuration it is given, and has the same guarantees as websocket. Natively it is behind the non-default `unstable-webtransport` feature, which enables `unstable`; in the browser, behind `unstable`. Source: parity item 33, design A ("Planned after Block 19": "**WebTransport (item 33):** the `wtransport` crate, whose `fips` build maps to quinn's `aws-lc-rs-fips` and rustls `fips`"; "Experimental APIs (items 29, 30, 33) are behind a non-default `unstable` feature, documented unstable and pinned to 63ed73e"; `ANALYSIS-PARITY.md`, branch `analysis/parity`, "33. WebTransport transport (experimental)": "Recommendation. A"). It also takes up Block 36's "WebTransport gets D5 in Block 48" and Block 44's "WebTransport (Block 48) … in the browser". References: centrifuge-js 63ed73e `src/transport_webtransport.ts:1-148`, `src/centrifuge.ts:1076-1081`, `:1236-1345`; Centrifugo v6.10.1 and v6.10.3, whose WebTransport handler is `internal/wt/handler.go` and `internal/wt/transport.go` (on webtransport-go v0.13.0 and quic-go v0.64.1, `go.mod:36-37`).
+
+The spec (`transports/client_api`, read 2026-11-12) does not describe WebTransport: "Centrifugo SDKs use WebSocket as the main data transport". The server documentation (`transports/webtransport.md`, read 2026-11-12) marks it "EXPERIMENTAL and not recommended for production usage" and requires TLS and the experimental HTTP/3 server. So the wire contract is `client.proto` plus the framing of `transports/client_protocol.md` (JSON commands each ended by `\n`, Protobuf messages each prefixed with a varint length). The behaviour follows centrifuge-js 63ed73e, checked against the server.
+
+**The server today.** Centrifugo serves WebTransport only when `http_server.http3.enabled` and `webtransport.enabled` are both set and TLS is configured, without autocert (`internal/app/mux.go:552-556`, `:743-750`). It serves on the same port number over UDP, at `/connection/webtransport`. One handler accepts the first bidirectional stream within 10 s (`handler.go:32`, `:45-53`). It reads JSON, or Protobuf when the query has `cf_protocol=protobuf` (`:55-58`), and stops at the first command that fails (`:93-106`). Each command is bounded by `webtransport.message_size_limit`, 65536 by default (`:79-91`). Every write has a deadline of 1 s, and each JSON write ends with `\n` (`transport.go:82-108`). To close, the server ends the stream, sleeps 1 s and then closes the session with the disconnect code (`transport.go:145-167`). Three defects of the server shape this block, all Verified below:
+- **No ALPN.** webtransport-go since v0.10.0 listens with `quic.ListenEarly(conn, s.H3.TLSConfig, …)` (v0.13.0 `server.go:151`), where `http3.Server.Serve` would first apply `ConfigureTLSConfig`, which sets `NextProtos` to `h3` (quic-go v0.64.1 `http3/server.go:48-58`). Centrifugo hands it its TLS configuration as given (`mux.go:686-693`, `:852`). So the server selects no application protocol. rustls, following RFC 9001 §8.1, refuses such a handshake when it offered `h3`, and so does Chrome. A client that offers no ALPN gets through.
+- **No close code.** A session the server ends for an invalid token, a bad command or an oversized command carries no disconnect push; its session close, 1 s later, says 3000 "connection closed" whatever the cause. A disconnect from the server API does send its push, and the session close repeats its code.
+- **Lost connect errors.** The error reply to a refused connect races with the end of the stream: for an expired token, the 109 reply arrived in 3 of 20 runs; the stream ended right after it every time.
+
+**How @A tests it.** The @A container (`tests/support/centrifugo.rs`) gains a WebTransport variant: the TLS variant with `CENTRIFUGO_HTTP_SERVER_HTTP3_ENABLED=true` and `CENTRIFUGO_WEBTRANSPORT_ENABLED=true`, plus a UDP mapping of the TLS port. The API stays on the internal port. The client trusts the test CA as for `wss://` (Block 6). For what Centrifugo cannot be made to do (an ALPN that matches, a stalled reader, an oversized reply, a push right before the end, a connect never answered), a fake WebTransport server built on wtransport's server API serves @D (D19).
+
+**Dependencies:** Blocks 0 (references, precedence, Components rule, dependency policy, test layers), 2 (backoff), 3 and 34 (codes), 4 (pings), 6 (providers, FIPS), 7 (Protobuf), 8 (transports, fallback, endpoint rules, write timeout), 10 (token callback, error 109), 13 (write queue), 14 (@P gates, footprint), 15 (read-ahead, "Backoff after 3008"), 16 (runners), 17 and 32 (real HTTP headers), 18 and 36 (frame cap, automatic batching, optimistic subscriptions), 20 (semver check, docs.rs, changelog), 21 (logging, redaction), 22 (TLS verifier, extra roots, raw configuration), 23 (proxies), 24 (Android, iOS), 25 (network changes, `reconnect()`), 26 and 27 (Codec seam, stream decoders), 29 (handshake timeout, message size), 31 (statistics), 33 (`close()`), 37 (connector, fake server, test support), 40 (clippy configuration), 41 (handlers), 43 (cookies), 44 (browser target, inbox, shims), 45 and 47 (the `unstable` pattern), 49 (D10), 50 (byte splits), 51 and 52 (real-server runs).
+
+**Out of scope:**
+- datagrams, unidirectional streams and more than one stream per session: Centrifugo uses one bidirectional stream (`handler.go:45-60`; docs: "we utilize a single bidirectional stream"), and so does centrifuge-js (`transport_webtransport.ts:70-78`);
+- QUIC connection migration: Block 25's network change still reconnects (D6). Centrifugo documents nothing about migration, and a reconnect recovers the stream (Block 11);
+- WebTransport over HTTP/2 (RFC 9297 capsules over TCP): Centrifugo serves none;
+- proxies for WebTransport: no maintained Rust client of MASQUE (CONNECT-UDP, RFC 9298) or of SOCKS5 UDP ASSOCIATE exists, and hyper-util's tunnels are TCP only. A proxied WebTransport attempt fails (D13);
+- the browser's `serverCertificateHashes` option and a WebTransport shim: centrifuge-js passes no options and always uses `globalThis.WebTransport` (`centrifuge.ts:1076-1081`, `transport_webtransport.ts:52`);
+- WebTransport in Block 51's matrix and Block 52's soak: Toxiproxy relays TCP only (D20);
+- reading `Set-Cookie` from the session response: wtransport 0.7.2 does not expose the response's headers (`endpoint.rs:375-392` keeps only the status). `Cookie` is still sent (D14);
+- fixing the server's defects: that is upstream's.
+
+This block reverses Block 0's exclusion "sockjs, webtransport transports (webtransport planned: Block 48)" for WebTransport, and Block 8's "webtransport" out-of-scope entry. Block 0's "Reversed exclusions" gains its row, and Block 44's out-of-scope line names this block. D9's "An end before an answer" narrows, for WebTransport only, Block 8's "a transport that worked once is still kept" (owner decision, 2026-11-04): it needs the owner's approval before this block merges. The full list of amendments follows the block.
+
+**Sub-increments** (one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 48a | As an app developer whose users' networks pass UDP, I want the client to connect over WebTransport with my TLS settings and the build's crypto provider, and to fall back to websocket when it cannot, so that QUIC's loss recovery without head-of-line blocking serves my users with the guarantees websocket gives | "A client connects over WebTransport and receives a publication", "Binary publication delivered over Protobuf on WebTransport", "Server pings over WebTransport are answered", "A server disconnect over WebTransport reaches the client with its code", "WebTransport falls back to websocket when UDP is unreachable", "A server without WebTransport refuses the session and the client falls back", "A connect refused over WebTransport is reported by the next transport", "TLS settings apply to WebTransport", "Real HTTP headers go with the WebTransport session request", "Subscribes go with the connect command over WebTransport", "A WebTransport endpoint that is not https is rejected", "A raw TLS configuration unfit for QUIC is rejected for WebTransport", "A connector with a WebTransport endpoint is rejected", "A WebTransport attempt with a proxy fails without sending a datagram", "A WebTransport open that never completes is bounded by the handshake timeout" |
+| 48b | As an operator of a fleet, I want a WebTransport connection to recover from what the server cannot tell it (no ALPN, no close code, a lost connect error, a stalled reader, an oversized message), within the memory and time bounds of websocket, so that an experimental server feature cannot hang, flood or exhaust my devices | "A server that selects no application protocol is reached on a second handshake", "A server that requires h3 is reached on the first handshake", "An endpoint remembered without ALPN that starts requiring h3 is reached again", "A disconnect push right before the end of the WebTransport stream stops the client", "A WebTransport stream that ends without a disconnect push makes the client reconnect", "A WebTransport connection ended without a disconnect push before a server ping keeps the backoff growing", "A chosen WebTransport that ends before answering the connect gives way to the next transport", "A WebTransport write the server never reads closes the transport", "A message over the limit ends a client connected over WebTransport", "Closing a WebTransport client ends the session within the timeout" |
+| 48c | As an app developer writing a web front-end in Rust, I want the browser client to use the browser's WebTransport when the browser has it and to skip it when it does not, so that my web and native builds share one transport list | "A browser client connects over WebTransport and receives a publication", "A browser without WebTransport skips the transport", "A browser client falls back from WebTransport to websocket when the session is refused" |
+
+**Decisions** (reviewer, 2026-11-12, delegated by the owner, after a three-amigos round table on the draft; D9's "An end before an answer" pending the owner's approval):
+
+- **D1 Design A, behind `unstable`, with an `unstable-webtransport` cargo feature.**
+  - **The variant.** `TransportKind::WebTransport` is `#[cfg(feature = "unstable")]` with `#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]`. Its rustdoc opens with: "Unstable: requires the `unstable` feature (natively, `unstable-webtransport`), follows centrifuge-js 63ed73e and Centrifugo's experimental WebTransport (HTTP/3), and may change in any minor release." `TransportKind` is `#[non_exhaustive]` (`src/machine.rs:66-81`), so the variant is additive.
+  - **The native dependency.** `unstable-webtransport = ["unstable", "tokio", "dep:wtransport"]`. The provider features forward weakly: `ring` gains `"wtransport?/ring"`, `aws-lc-rs` gains `"wtransport?/aws-lc-rs"`, `fips` gains `"wtransport?/fips"`. quinn is reached through `wtransport::quinn`, never as a direct dependency, so its version is wtransport's.
+  - **Why its own feature.** `unstable = ["dep:wtransport"]` breaks the core-only build `--no-default-features --features unstable`: quinn has no `rustls` crypto without a provider feature (Verified by the drafter). It would also add 35 crates to every user of Blocks 45 and 47 (Verified).
+  - **Why this name.** cargo-semver-checks 0.51.0 treats a feature matching `^(?:unstable|nightly|bench)(?:[-_].*)?$` as unstable: renaming or removing it, or changing what it enables, is not reported (`src/lints/feature_missing.ron:13-26`, `:44`; cargo issue 10881). A feature named `webtransport` would be held to semver although everything it enables is not. reqwest's HTTP/3 (`http3` plus `--cfg reqwest_unstable`) is the same idea in two switches.
+  - **With `unstable` but without `unstable-webtransport`.** On native targets, a configured WebTransport endpoint fails `build()` with a configuration error naming the `unstable-webtransport` feature. The browser target needs no new crate (D17), so `unstable` with `browser` is enough there.
+
+- **D2 Public API and endpoints.**
+  - `TransportKind::WebTransport.name()` is `"webtransport"`, as centrifuge-js's `name()` (`transport_webtransport.ts:21-23`), and `is_emulated()` is false (`:29-31`). Transports are configured as today, `Client::builder_with_transports([(TransportKind::WebTransport, "https://host:8443/connection/webtransport"), (TransportKind::WebSocket, "wss://…")])`. No `ClientBuilder` method is added.
+  - **Endpoint scheme.** Building fails with a configuration error naming webtransport and `https` for any other scheme or an empty endpoint. This extends Block 8's endpoint rules: WebTransport is defined over `https` only, and wtransport refuses anything else at connect time (`endpoint.rs:264-268`).
+  - **Protobuf.** The adapter appends `cf_protocol=protobuf` to the endpoint's query, keeping any query given, as centrifuge-js does (`transport_webtransport.ts:45-47`) and the server reads (`handler.go:55-58`). JSON adds nothing.
+  - **What Ferrifuge diverges on.** centrifuge-js treats a WebTransport that opened as chosen (`centrifuge.ts:1248`). Ferrifuge keeps Block 8's rule that only a server answer chooses a transport (D6), and leaves a chosen WebTransport that ends before an answer (D9).
+  - **Semver.** Nothing else public is added. `cargo-semver-checks` runs on default features (Block 20 D1, Block 43 D8) and sees no change.
+
+- **D3 The component: wtransport 0.7.2.**
+  - **Facts** (crates.io and the repository, read 2026-11-12): released 2026-08-11; last commit 2026-09-22; MIT OR Apache-2.0; `rust-version` 1.88, Ferrifuge's MSRV. Features `ring`, `aws-lc-rs`, `aws-lc-rs-fips`/`fips`, `quinn`, `quinn-log`, `self-signed`, `dangerous-configuration`; default `["self-signed", "ring"]`. It builds on quinn 0.11.12, quinn-proto 0.11.19, quinn-udp 0.5.16 and rustls 0.23.46. Maintained by Block 0's rule.
+  - **How it is used.** `default-features = false`, with `quinn`, in the native dependency table (quinn-udp and socket2 are not built for wasm32, D17).
+  - **What it adds.** 35 crates in the default build with `unstable-webtransport` (`cargo tree -e normal`, Verified): quinn, quinn-proto, quinn-udp, wtransport-proto, x509-parser 0.18.1 (with asn1-rs, der-parser, nom 7, oid-registry, num-bigint), sha2 0.11.1, pem, octets, httlib-huffman, time, tracing-attributes. New duplicates: base64 0.22 and synstructure 0.13. `cargo deny check` with the repository's `deny.toml` passes. No `ring` in the `aws-lc-rs` or `fips` builds, no `aws-lc-rs` in the default build (all Verified).
+  - **Cryptography (Block 0, "Components").** sha2 (RustCrypto) and x509-parser are unconditional dependencies of wtransport (no feature drops them), used only by `Certificate::hash` (`tls.rs:112-115`, for `with_server_certificate_hashes`), `Certificate::from_der` and `Certificate::serial` (`tls.rs:33-35`, `:89-93`, the last behind `Certificate`'s `Debug`). Ferrifuge calls none of them, and a release build that does not links neither crate (Verified: no `sha2::` or `x509_parser::` symbol). This is compatible with Block 0: the clause forbids cryptography written in-house and sends to the owner a cryptographic *need* that no maintained component meets; here there is no need, and every cryptographic operation of a WebTransport attempt (QUIC packet and header protection, the handshake, certificate verification, the stateless-reset key of D15) goes through the client's rustls configuration and the build's provider. Precedent: tungstenite's RustCrypto `sha1`, linked in every build including fips and run for `Sec-WebSocket-Accept` since Block 1. Guards: the clippy configuration of D4 forbids the calls that would reach them, `Connection::peer_identity` included (a server's certificate parsed by x509-parser, which `expect`s, `tls.rs:91`); a CI check on Linux finds no `sha2::` or `x509_parser::` symbol in a release build of the WebTransport example; the README's fips section names both crates as linked by wtransport and unused.
+  - **Alternatives weighed.** web-transport-quinn 0.13.6 (moq-dev, released 2026-11-03) computes certificate hashes through the rustls provider and offers `Session::connect` over a quinn connection the caller owns, but forces quinn's `platform-verifier` and `bloom` features, depends on `kio`, declares no MSRV and has broken its API thirteen times; its fit with Centrifugo is unverified. It is the fallback if wtransport stops passing the maintained test. hyperium's h3-webtransport 0.1.2 (last release 2025-05-06) is server-oriented. Building on quinn alone would write HTTP/3 SETTINGS, QPACK and the extended CONNECT in-house, against the Components rule.
+
+- **D4 TLS: the client's settings, never wtransport's, never a panic.**
+  - **Which settings.** Each attempt builds its QUIC client from a copy of the client's TLS settings: Block 22 D1's verifier for the build and platform, D2's extra roots, or D3's raw configuration. Block 6 C7's sharing and failure rules apply as for `wss://`. Ferrifuge clones the configuration, so an application's raw configuration is never changed (Block 49 row 53). wtransport accepts the client's own `rustls::ClientConfig` (Verified: a Ferrifuge-shaped configuration connects in the ring and fips builds).
+  - **The checks before quinn.** The adapter turns the copy into quinn's configuration with `QuicClientConfig::try_from`, which fails without `TLS13_AES_128_GCM_SHA256` ("no initial cipher suite found"). It also creates, and drops, a `rustls::quic::ClientConnection` with the copy, `Version::V1` and the endpoint's host name, the call quinn-proto unwraps when the handshake starts (`crypto/rustls.rs:370-377`). A configuration without TLS 1.3 passes the first check and wtransport's `build()`, then makes quinn-proto panic under the endpoint's lock: the poisoned lock panics again during unwinding and the process aborts (Verified). So:
+    - `build()` of a client with a WebTransport endpoint and a raw configuration fails with a configuration error naming TLS 1.3 and webtransport when either check fails;
+    - every attempt runs both checks on the configuration it hands to quinn and fails as a transport attempt, without connecting, if one fails. Ferrifuge's own configurations always pass (rustls's safe defaults include TLS 1.3; all three providers have the suite).
+  - **wtransport's builders are never finished by Ferrifuge.** The adapter builds quinn's `ClientConfig` itself and passes it with `ClientConfigBuilder::build_with_quic_config` (`config.rs:1051-1058`). wtransport's `build()` (`config.rs:1083-1088`, an `expect`), `with_native_certs`, `with_custom_transport`, `ClientConfig::default`, `with_no_cert_validation`, `with_server_certificate_hashes`, `Certificate::hash`, `Certificate::from_der`, `Certificate::serial` and `Connection::peer_identity` are listed in a root `clippy.toml` as `disallowed-methods`, each with its reason, and the `dangerous-configuration` feature is never enabled. Block 40 D2's wasm configuration is unaffected (`CLIPPY_CONF_DIR`).
+  - **`SSL_CERT_FILE`.** `with_native_certs` and `with_custom_transport` remove `SSL_CERT_FILE` and `SSL_CERT_DIR` from the process environment while they read the platform's roots (`tls.rs:592-593`, `:1289-1302`). Another thread reading the environment meanwhile sees them gone (Verified: millions of reads during 20 calls), and on glibc a concurrent `getenv` is undefined behaviour. They also ignore the test CA of Block 6. Ferrifuge reads the platform's roots itself (Block 22), so the disallowed list is the whole remedy; the README's dependency notes say that an application calling those wtransport functions itself races with every TLS setup.
+  - **fips.** In the fips build the copy keeps `fips() == true` (Verified by the drafter). The Block 22 D3 check that refuses a raw configuration whose `fips()` is false covers WebTransport.
+
+- **D5 ALPN: `h3`, then none, remembered per endpoint.**
+  - **What the copy offers.** Ferrifuge sets the ALPN of the copy (Block 22 D3 sets `http/1.1` for the HTTP transports). The first handshake offers `["h3"]` (RFC 9114 §3.1).
+  - **The retry.** When the handshake fails because the server selected no application protocol, the same attempt retries once offering no ALPN, within the same handshake timeout. That failure is raised locally: wtransport's `ConnectingError::ConnectionError(ConnectionError::QuicProto)` with code 0x178 (crypto error, alert 120). Nothing else starts the retry.
+  - **The memory.** The client then remembers, per endpoint index, that this endpoint takes no ALPN, and starts there on later attempts, including after `reconnect()` and a network change. If a handshake without ALPN is closed by the peer with crypto error 0x78 (wtransport's `ConnectionClosed`), the memory is dropped and the attempt retries once with `h3`. An attempt makes at most two handshakes.
+  - **Why.** Centrifugo v6.10.1 and v6.10.3 select no ALPN on their WebTransport listener, so a client offering `h3` fails; a strict HTTP/3 server (the same Centrifugo with `webtransport.enabled` off) closes a client offering none with 0x78 (both Verified). Offering none only would break the day the server is fixed; offering `h3` only fails against every Centrifugo today. The memory saves each reconnect a failed handshake, and with it a server signature.
+  - **Not a downgrade.** ALPN travels in TLS 1.3's encrypted, authenticated extensions, so a network attacker cannot strip it to force the retry. Both handshakes verify the same certificate with the same verifier.
+  - **The record.** The attempt's DEBUG record (Block 21) gains `alpn = "h3" | "none"`.
+  - **The canary.** An @A test outside cucumber asserts that the server at `TAG` selects no ALPN. When a Centrifugo release negotiates `h3` it fails, naming this decision, D17 and the README sections to update.
+
+- **D6 Opening, the handshake timeout, fallback.**
+  - **The steps of an open.** Resolve the host, bind a UDP socket of the resolved address's family (`0.0.0.0:0` or `[::]:0`, never relying on dual-stack), the QUIC handshake (D5), the HTTP/3 SETTINGS, the extended CONNECT with the real HTTP headers (D14), then `open_bi`. Ferrifuge gives wtransport a resolver returning the address it resolved (`ClientConfig::set_dns_resolver`). The transport has opened when the stream is open; the connect command then goes on it as over websocket (`transport_opened`, `src/machine.rs:2163-2192`). Opening the stream is not proof of the transport: as Block 8 says, only a connect reply, an error reply to the connect or a disconnect push choose it.
+  - **The bound.** Block 29's `handshake_timeout` (default 5 s) bounds the whole open, the ALPN retry included. quinn's idle timeout never decides it.
+  - **Failures.** Each is a failed transport attempt (Block 8: an error event, the next transport within the first round, backoff after it), with a message naming the cause:
+    - "webtransport session rejected by the server" for wtransport's `SessionRejected`: a path without the handler, or a server with HTTP/3 on and WebTransport off, which accepts the `h3` handshake and refuses the CONNECT (Verified: 8 ms);
+    - rustls's "invalid peer certificate" for an untrusted certificate (Verified by the drafter: "invalid peer certificate: UnknownIssuer");
+    - the DNS error;
+    - "handshake timeout".
+  - **DNS.** The first resolved address is used, with no Happy Eyeballs, as wtransport does (`config.rs:1261-1266`). The README says so; an endpoint whose first address is unreachable fails within the handshake timeout and falls back.
+  - **Fallback order.** It is the application's list (Block 8). The README recommends WebTransport first with websocket after it, and a handshake timeout fitting the fleet's networks, since a network that drops UDP silently costs one handshake timeout per first round.
+  - **Network changes.** Block 25 D6's `reconnect()` and network changes start again from the first transport, so WebTransport is tried again on a new network.
+
+- **D7 Framing and codecs** (Blocks 7, 26, 27).
+  - **Outgoing.** The frames are Block 18's and Block 36's frames, the core's `Action::Send` bytes, unchanged. JSON frames get one `\n` appended (`transport_webtransport.ts:136-139`; the server reads lines). Protobuf frames go as they are, varint-delimited commands, the same bytes as a binary websocket frame. `bytes_out` counts the appended `\n` (Block 36 D8: "separators included").
+  - **Incoming.** The server's bytes are a stream, with the format of http_stream's body without the emulation envelope (`transport.go:94-105`). JSON goes through Block 27 D2's `AnyDelimiterCodec` with `max_message_bytes` (empty lines skipped, a trailing `\r` stripped). Protobuf goes through Block 27 D3's varint splitter with `max_message_bytes`, where a zero length is the server's ping and is delivered. The decoders are the same code, so Block 27's fuzz targets and Block 50's byte-split tests cover them. A unit test asserts that the WebTransport reader is built on them.
+  - **Codec seam.** No codec module is named in `src/machine*` (Block 26 D3 unchanged).
+
+- **D8 Writing never blocks** (Block 8, review item C1). Frames are queued and written while `recv` runs, as for websocket. A frame counts as written (`Input::FrameWritten`) once quinn's send stream has accepted all of it.
+  - **Flow control.** A frame not accepted within `Config::timeout` of being queued closes the transport, and the client reconnects with code 1 "transport closed". This happens when the server stops reading and QUIC flow control fills: quinn's window and D12's `send_window` bound what it accepts.
+  - **Server side.** Centrifugo's own writes have a 1 s deadline (`transport.go:97`), so a client that stops reading (Block 15's full read-ahead) is dropped by the server about 1 s after QUIC flow control stops it. This is the websocket behaviour of Block 15's "holds the server back", and the README says so.
+
+- **D9 Reading and the end of the stream.**
+  - **Order.** Messages decoded before the stream's end, a stream error or the session's close are handed to the core first, then the end. The server writes its disconnect push and ends the stream at once (Verified: push and end within the same millisecond), so a final push is never lost (Block 49 row 18's pattern).
+  - **An end with no code.** The end of the stream, its reset, the session's close and the connection's loss all become `Input::TransportClosed { code: None, … }`: code 1 "transport closed", reconnecting, as centrifuge-js maps every code under 3000 to `transportClosed` (`centrifuge.ts:1312-1316`).
+  - **The session close code is not read.** It comes 1 s after the stream's end and is the push's code or 3000 (Verified); wtransport surfaces it only through stream calls while `Connection::closed()` says `LocallyClosed` (Verified). Waiting for it would delay every reconnect by 1 s and add nothing.
+  - **An end before an answer** (owner approval pending; narrows Block 8's "a transport that worked once is still kept" for WebTransport). A WebTransport stream that ends before the server answered on it (a connect reply, an error reply to the connect, a disconnect push) is a failed transport attempt even when WebTransport was chosen before: an error event, then the next transport in the list at once, as in Block 8's first sequence, and whichever transport answers is chosen. WebTransport is tried again when a whole sequence has failed, at `reconnect()` and at a network change. Why: an invalid token ends the stream with no reply in 10 runs of 10 and an expired token's 109 is lost in 17 of 20 (Verified), so a chosen WebTransport would retry a revoked token forever, where websocket stops with 3500, and would rarely call the token callback for an expired one, where websocket gets 109. The next transport shows the real answer. In a first sequence this is already Block 8's rule (scenario "A connect refused over WebTransport is reported by the next transport"). If the owner declines, this bullet goes, a chosen WebTransport keeps reconnecting as centrifuge-js does, and the README says that a refused token then never stops the client.
+  - **"Backoff after 3008" extended** (amends Block 15). A connection over WebTransport that got its connect reply and then ends without a disconnect push before the client has read a server ping on it does not reset the reconnect backoff, as a 3008 close does not. A command over the server's per-command limit ends the session without a reply or a push (Verified), and a subscribe of that size, sent on every reconnect, would otherwise make the client reconnect at the minimum delay forever. Block 44 D7 applied the same rule to an inbox overflow. The cost: a real network drop in the first ping interval after a connect also keeps the backoff growing.
+
+- **D10 Optimistic subscriptions** (Block 36 D5, D6, D7). They apply to WebTransport unchanged: D5's choice is made for every transport that is not emulated (`send_connect`, `src/machine.rs:2194-2205`). So "WebTransport gets D5 in Block 48" needs no core change, and an @E scenario pins it. Verified on the server: a connect and a subscribe written together get both replies in order. After a failed connect the subscribe gets no reply and the session ends (`handler.go:93-106`), which is Block 36 D7's assumption.
+
+- **D11 Closing** (Block 33 D1). A client closing its transport finishes the send stream, as centrifuge-js closes its writer (`transport_webtransport.ts:123-132`). It then closes the connection with code 0 and an empty reason, and waits for the endpoint to go idle (`Endpoint::wait_idle`). The whole close is bounded by `Config::timeout`, after which the endpoint is dropped. One endpoint (one UDP socket and its driver) belongs to one attempt and ends with it; nothing is shared between attempts or clients.
+
+- **D12 QUIC settings and memory bounds** (Block 14's footprint, Block 15's bound). The adapter sets quinn's `TransportConfig` explicitly, with constants in `src/adapter/tokio/webtransport.rs` that a unit test reads back:
+  - `stream_receive_window` 1 MiB (quinn's default 1.25 MB);
+  - the connection's `receive_window` 2 MiB (default `VarInt::MAX`, unbounded across streams);
+  - `send_window` 1 MiB (default 10 MB);
+  - `max_concurrent_bidi_streams` 0, since the server opens none;
+  - `max_concurrent_uni_streams` 3, the least RFC 9114 §6.2 allows (control and two QPACK streams). Centrifugo opens only its control stream: 1 works, 0 never opens the session (Verified);
+  - `datagram_receive_buffer_size` 64 KiB: without datagram support the server closes the connection, "missing QUIC Datagram support" (Verified);
+  - `keep_alive_interval` 15 s, measured by quinn from the last packet received (`on_packet_authenticated`), so with Centrifugo's default 25 s pings it adds one PING per ping period, and it keeps the session within quic-go's 30 s idle timeout when an operator sets `ping_interval` to 30 s or more;
+  - `max_idle_timeout` 30 s, quinn's default; the effective timeout is the smaller of the two peers'.
+  So a WebTransport client holds at most Block 15's read-ahead, plus Block 29's decoder bound, plus about 4 MiB of QUIC buffers per connection. The README's memory section says so. The full set was Verified on v6.10.1 and v6.10.3.
+
+- **D13 Proxies** (Block 23). Block 23 D2's single decision is asked for each WebTransport endpoint as `https`.
+  - **Direct.** Nothing changes.
+  - **A proxy.** The attempt fails at once with "webtransport cannot go through a proxy: <scheme://host:port>" and is a failed attempt (Block 23 D5). It never connects directly and sends no datagram, as D2 refuses a `socks4` proxy. Its no-proxy list and `Proxy::none()` decide as for any endpoint.
+  - **Why fail closed.** With the default `Proxy::system()`, a device whose environment or system names an HTTPS proxy skips WebTransport and falls back, which the README says. A network that requires a proxy is one whose policy a direct UDP connection would bypass, and Block 23 D2 never bypasses a configured proxy.
+
+- **D14 Connector, headers, cookies.**
+  - **Connector.** A connector (Block 37 D4) with a WebTransport endpoint fails `build()`, as one with an HTTP transport does: a connector yields a byte stream, and QUIC needs datagrams.
+  - **Headers.** Block 17's real HTTP headers, and Block 32's `set_http_headers` from the next attempt, go on the extended CONNECT request (`ConnectOptions::add_header`). wtransport reserves only the pseudo-headers (`wtransport-proto session.rs:128`), which `http::HeaderName` cannot name. It takes names and values as `String` in a map (`endpoint.rs:430`), which Block 17's "one value each" fits; a value that is not visible ASCII fails `build()` of a client with a WebTransport endpoint, naming the header, never its value.
+  - **Cookies.** The cookie jar's `Cookie` (Block 43) goes with them. `Set-Cookie` is not read, since wtransport 0.7.2 keeps only the response's status. The jar's rustdoc and the README say so.
+  - **No `Origin`.** It is sent only if the application sets it; Centrifugo accepted a session without one, with `allowed_origins` empty or `*` (Verified).
+
+- **D15 FIPS and provider builds** (Block 6).
+  - **Features.** `ring`, `aws-lc-rs` and `fips` each forward to wtransport's feature of that name; `fips` gives quinn `aws-lc-rs-fips` and rustls `fips` (wtransport `Cargo.toml`, `aws-lc-rs-fips = ["quinn/aws-lc-rs-fips", "quinn/rustls-aws-lc-rs-fips", "rustls/fips", …]`).
+  - **Which provider is used.** wtransport's own default provider is never used (D4). Every TLS and QUIC packet operation goes through the configuration's provider.
+  - **The stateless-reset key.** quinn-proto's `EndpointConfig::default()` draws its HMAC key from `rand` and signs with ring whenever ring is linked, even in a build where aws-lc-rs or fips wins (`config/mod.rs:177-190`). The adapter instead gives the endpoint (`ClientConfig::quic_endpoint_config_mut`) a key from the configuration provider's `secure_random`, signed through the provider's TLS 1.3 SHA-256 HKDF (`Hkdf::hmac_sign`): no key of a QUIC function comes from outside the provider, and "strongest wins" holds for it. Left to quinn's compile-time backend: the Retry integrity check, whose key is public (RFC 9001 §5.8); ring in a mixed build, AWS-LC in the fips build. The README's fips section says so.
+  - **aws-lc-sys.** quinn-proto's `aws-lc-rs` feature also enables aws-lc-sys, which the fips build already compiles today through rustls (Verified by the drafter). Block 6's "links only aws-lc" still holds.
+  - **CI.** Block 6's `providers` matrix adds `unstable-webtransport` to its three builds. In each it runs the unit tests and the @A WebTransport scenarios, and the ring and aws-lc isolation checks run with it too. The fips unit test asserts that the configuration of a WebTransport attempt reports `fips() == true`.
+
+- **D16 Android and iOS** (Block 24).
+  - **CI.** The `android` and `ios` jobs add `--features unstable-webtransport` to their clippy and `--no-run` steps. If quinn-udp 0.5.16 or socket2 0.6 does not build for one of the two targets, the README says WebTransport is unavailable there and `build()` refuses the endpoint on that target.
+  - **Verification.** The platform verifier of Block 24 D2 applies through D4's copy, Block 24 D5's setup gate included: a WebTransport endpoint is an `https://` connection known at build.
+  - **Backgrounding.** The mobile guide adds that a backgrounded app loses its UDP flows as it loses TCP ones, so Block 24 D6's advice stands.
+  - **Binding.** D6 binds the resolved address's family, so a host without IPv6 or without dual-stack sockets still connects.
+  - **fips.** It stays unsupported on mobile (Block 24).
+
+- **D17 The browser (48c; Block 44).**
+  - **Bindings.** The browser's WebTransport is the component (TLS, QUIC, HTTP/3). web-sys 0.3.107 has bindings only behind `--cfg=web_sys_unstable_apis`, which every application would have to put in its `RUSTFLAGS`, and web-transport-wasm uses those same bindings. So the adapter declares its own `#[wasm_bindgen] extern "C"` bindings for the members centrifuge-js uses (`transport_webtransport.ts:52-78`, `:123-147`): the constructor (`catch`), `ready`, `closed`, `createBidirectionalStream`, `close`, and the stream's `readable` and `writable` as web-sys `ReadableStream` and `WritableStream`. Declarations only, no parsing; they compile under the crate's `unsafe_code = "forbid"` (Verified with wasm-bindgen 0.2.130, edition 2024).
+  - **Opening.** The adapter looks up `globalThis.WebTransport`; there is no shim option, as centrifuge-js reads the global (`centrifuge.ts:1078`). If it is missing, the transport is not usable: Block 44 D12's list gains "webtransport needs `WebTransport`", and the transport is skipped in the round. A constructor that throws is a failed attempt carrying its message.
+  - **Reading.** A task of the transport reads `readable` with wasm-streams into Block 44 D7's bounded inbox, through D7's decoders, as http_stream does (Block 44 D8). The inbox overflow, code 7 and its backoff apply.
+  - **Writing.** Frames go through the writer of `writable`, JSON with `\n` appended. The writer's `write` returns a promise that settles when the stream has taken the chunk, so a frame counts as written when it resolves. A write not resolved within `Config::timeout` closes the transport, as natively (D8). The timer exists only while a write is pending, so an idle page keeps Block 14's no-timer rule.
+  - **Closing and the end.** `close()` closes the writer and then the session, bounded by `Config::timeout`. The end of `readable` or a rejected `closed` is `Input::TransportClosed { code: None }`, after the messages before it (D9); D9's rules apply unchanged.
+  - **Where it works.** Chrome 97, Firefox 114, Safari 26.4 (MDN browser-compat-data `api/WebTransport.json`, read 2026-11-12). A browser offers `h3` and cannot retry without ALPN, so against Centrifugo up to v6.10.3 the browser transport fails its handshake (Verified by the drafter with Chrome 150: "NO_APPLICATION_PROTOCOL") and the client falls back. 48c is built now, after 48b: the owner's scope covers it, centrifuge-js ships the same transport against the same server, the fallback costs one failed handshake per first round, and the transport works unchanged once the server negotiates `h3`. The README states the limitation as the first sentence of the browser WebTransport section, and D5's canary flags the release that lifts it.
+  - **@W tests.** These run through a WebTransport relay that negotiates `h3` (D19).
+  - **No credentials option.** The browser decides cookies for WebTransport; `include_credentials` (Block 44 D13) does not apply, and its rustdoc says so.
+
+- **D18 Logging and statistics** (Blocks 21, 31).
+  - **Logging.** The attempt's DEBUG record names `transport = "webtransport"`, the `proxy` field (D13) and `alpn` (D5). No record carries a header value or a token.
+  - **The dependencies' own records.** The README's list of dependencies that log on their own (Block 21 D6) adds wtransport and quinn: tracing records at DEBUG and TRACE, such as connection and stream events. A capture test in 48a checks that none holds a header value at TRACE; if one does, the README says so, as for `log`.
+  - **Statistics.** `Statistics::transport` is `Some(TransportKind::WebTransport)` while connected over it. `bytes_in` counts the stream's bytes and `bytes_out` the frames with their `\n`; no field is added.
+
+- **D19 Tests.**
+  - **@A.** The WebTransport container variant of the introduction. `tests/support/centrifugo.rs` gains `webtransport_url()`, built from the UDP host port, which Docker may map apart from the TCP one. The @A server runs on v6.10.1 until Block 51 D13 moves `TAG`; the flows were Verified on v6.10.1 and v6.10.3. D5's canary runs here.
+  - **@B.** The connect proxy observes the WebTransport CONNECT request's headers through Centrifugo's `proxy_http_headers`.
+  - **@D.** A fake WebTransport server in `tests/support/fake_webtransport.rs` on wtransport's server API (`Endpoint::server`, `Identity` from the test CA's rcgen certificate), driving the script engine of `tests/support/fake_server.rs` over the accepted stream with D7's framing. Its switches: the ALPN list of its rustls `ServerConfig`, empty or `["h3"]`, changeable between sessions; a count of QUIC handshakes; not reading the stream, with a small stream window; ending the stream after a frame, or before answering a connect; refusing the session; a malformed frame on the HTTP/3 control stream. wtransport becomes a dev-dependency with the same features, so no second copy. If the script engine needs a websocket, 48b adds a small script runner over a byte stream.
+  - **@E.** Core scenarios on `TransportKind::WebTransport`.
+  - **Untagged scenarios** run without Docker: a local UDP socket that counts or swallows datagrams.
+  - **@W (48c).** The browser harness (Block 44 D18) starts a WebTransport relay next to its HTTP relay: a wtransport server with a certificate from the test CA offering `h3`. For each session it opens one to Centrifugo's WebTransport endpoint with D5's ALPN rule, on the same path and query, and copies the bidirectional stream both ways. It refuses sessions on a switch. Chrome trusts the relay's certificate through `--ignore-certificate-errors-spki-list` with `--origin-to-force-quic-on` (Verified by the drafter to reach the handshake in Chrome 150 on Linux). Safari is dropped from these scenarios if the runner's Safari is older than 26.4.
+  - **Gating.** The WebTransport scenarios are in `IMPLEMENTED` only with `unstable-webtransport` (natively) or `unstable` (browser), Block 43 D8's pattern.
+
+- **D20 Chaos runners and the bug-pattern catalogue** (Blocks 16, 49, 50, 51, 52).
+  - **Block 16.** The core runner needs no change: WebTransport takes websocket's core paths (`is_emulated()` false). An @E unit test shows that the core's actions for a WebTransport connection equal those for a websocket one, step by step, over the same inputs, apart from the kind and D9's two rules.
+  - **Block 50.** It covers D7's decoders, which are http_stream's; no new matrix row.
+  - **Block 51.** Its matrix does not run WebTransport: Toxiproxy relays TCP only. Block 51's out-of-scope list gains the line while WebTransport is unstable.
+  - **Block 52.** Its soak stays websocket and JSON.
+  - **Block 49 D10 review** of the rows marked `not reconstructible` or `not applicable` that touch transports:
+    - 2, 3, 10, 17 stay `not reconstructible`: network events act on the client, not the transport (Block 25 D6 restarts the round, WebTransport included).
+    - 12's sse-specific half stays `not reconstructible`; its generic half gains "WebTransport falls back to websocket when UDP is unreachable".
+    - 53 stays `not applicable`: D4 clones the application's `ClientConfig`; the reason gains "and WebTransport (Block 48 D4)".
+    - 7, 31, 44, 46, 48, 54, 76, S6, S17 and C14 do not touch the transport; reviewed, unchanged.
+    - No new row: no client defect was fixed here. Row 18's end-of-stream half is shown for WebTransport by "A disconnect push right before the end of the WebTransport stream stops the client"; row 18 stays `gap` until its http_stream probe exists.
+
+- **D21 Semver, version, docs.**
+  - **Semver.** Everything public is under `unstable`, and the feature's name is one cargo-semver-checks treats as unstable (D1). No version bump (Block 45 D17, Block 47 D20).
+  - **Changelog.** `Unreleased`, "Added", prefixed "Unstable (`unstable` feature):": `TransportKind::WebTransport` and the `unstable-webtransport` cargo feature in 48a; the recovery of 48b; the browser transport in 48c.
+  - **docs.rs.** Its features gain `unstable-webtransport` (Block 20 D7): a ring build that needs no CMake or Go.
+  - **README.** A "WebTransport (unstable)" section: the server configuration (TLS, `http3`, `webtransport`, the UDP port); the fallback order and the handshake timeout (D6); the ALPN behaviour and the browser limitation (D5, D17); a refused connect and the end of a session without a code (D9); no proxies (D13); `Set-Cookie` not read (D14); the memory bounds (D12); FIPS, sha2 and x509-parser (D3, D15); the mobile note (D16) and the browser versions (D17).
+
+Verified (2026-11-12, by the reviewer, with a throwaway probe on wtransport 0.7.2 and rustls 0.23.46 (ring), not committed: Centrifugo v6.10.1 and v6.10.3 in Docker, a P-256 certificate for `localhost` from a test CA, the TLS port mapped for TCP and UDP; Node 22 for websocket):
+- **ALPN.** Offering `h3`, or `h2` and `http/1.1`, fails on both versions in 7 to 9 ms with a local `QuicProto` error, code 376 (0x178), "peer doesn't support any known protocol". Offering none, the session opens in 7 to 26 ms. `h3` then none in one attempt: 23 to 39 ms in all. With HTTP/3 on and WebTransport off (v6.10.3): offering none, the peer closes with crypto error 0x78 in 3 ms; offering `h3`, the handshake succeeds and the session is refused (`SessionRejected`) in 8 ms.
+- **Flows.** Connect and subscribe in one write get `{"id":1,"connect":{…,"ping":25,"pong":true}}` and `{"id":2,"subscribe":{}}`, in order. The API's `disconnect` with code 4501 arrives as `{"push":{"disconnect":{"code":4501,"reason":"b48 test"}}}` with the stream's end in the same millisecond; 1 s later the session close carries 4501, readable only through `accept_uni()`, while `Connection::closed()` says `LocallyClosed`.
+- **Ends without a push.** An invalid token (10 of 10 runs), a bad command and a 70 000-byte command end the stream without a reply or a push; the session closes 1 s later with 3000 "connection closed". An expired token: the 109 reply arrived in 3 of 20 runs, the stream ending right after it each time; over websocket the same token gets `{"id":1,"error":{"code":109,"message":"token expired"}}` and the connection stays open, and an invalid one gets close 3500.
+- **QUIC settings.** D12's full set connects on both versions; `max_concurrent_uni_streams` 1 works and 0 times out; datagrams off are refused with "missing QUIC Datagram support".
+- **Panics.** wtransport's `build()` with a configuration without `TLS13_AES_128_GCM_SHA256` panics; `QuicClientConfig::try_from` returns "no initial cipher suite found" for it. A TLS 1.2-only configuration passes both, and its first connect aborts the process (quinn-proto `crypto/rustls.rs:377`, then quinn `endpoint.rs:724` on the poisoned lock, "panic in a destructor during cleanup"). `rustls::quic::ClientConnection::new` returns "TLS 1.3 support is required for QUIC" for it.
+- **Environment.** During 20 calls of wtransport's `with_native_certs()`, another thread saw `SSL_CERT_FILE` unset 4.8 million times.
+- **Dependencies.** On a copy of `main` (8d984bb) with wtransport added: 35 new crates, new duplicates base64 0.22 and synstructure 0.13, `cargo deny check` ok, `unstable` alone pulls no wtransport, sha2 and x509-parser reached only through wtransport. A release build of the probe has no `sha2::` or `x509_parser::` symbol (its debug build has 8 `sha2::` symbols).
+- **Browser bindings.** A crate with `unsafe_code = "forbid"`, edition 2024, declaring the WebTransport constructor, `ready` and `createBidirectionalStream` through `#[wasm_bindgen] extern "C"` builds for `wasm32-unknown-unknown`.
+- Verified by the drafter only, not re-run: v6.7.0's ALPN; Chrome 150's handshake failure and the relay flags; Protobuf on WebTransport; the fips build's `fips()` and flow; aws-lc-sys in `main`'s fips build; Rust 1.88; "invalid peer certificate: UnknownIssuer"; `TimedOut` after 30 s without a listener; the core-only build failure of D1.
+
+`VERIFY:`
+- D5's retry against a server that requires `h3`, inside one attempt (each side verified alone; the @D scenarios are the gate);
+- the mobile builds of quinn-udp and socket2 (D16);
+- the testcontainers 0.28 API for a UDP host port, and that Centrifugo copies the extended CONNECT's headers into the connect proxy request (D19 @B; the handler takes `r.Context()`, `handler.go:61`);
+- whether wtransport's or quinn's TRACE records hold a header value (D18);
+- that `disallowed-methods` matches wtransport's generic builder methods by path (D4); otherwise a source check names them;
+- the provider-backed stateless-reset key through rustls 0.23.46's public `Hkdf::hmac_sign` and `OkmBlock` (D15);
+- the @W capabilities in Firefox and Safari (D19);
+- whether the fake server's script engine runs over a byte stream (D19).
+
+Value clause: As an app developer whose users' networks pass UDP, I want the client to connect over WebTransport, natively and in the browser, with my TLS settings, the build's provider and websocket's guarantees, and to fall back when WebTransport cannot work, so that my users get QUIC's transport where it works and lose nothing where it does not.
+
+**Structural acceptance:**
+- **Features.** With default features, and with `unstable` alone, `cargo tree -e normal` lists no wtransport, quinn, sha2 or x509-parser crate. With `unstable-webtransport` it lists them once each, sha2 and x509-parser with wtransport as their only parent, and no new duplicate beyond base64 0.22 and synstructure 0.13. `cargo deny check` (native and `--target wasm32-unknown-unknown`, Block 44 D19) passes with `--features unstable-webtransport`. The `providers` CI jobs run with it and keep Block 6's isolation checks.
+- **Symbols.** On Linux, a release build of the WebTransport example has no `sha2::` or `x509_parser::` symbol (D3).
+- **Clippy.** The root `clippy.toml` lists D4's methods; a temporary mutation calling `with_native_certs` and one calling wtransport's `build()` each fail clippy (checked once, from a clean state, in 48a).
+- **Docs.** With default features `cargo doc` lists no WebTransport item; with `unstable` the variant carries the `doc(cfg)` badge and the unstable sentence.
+- **Unit tests:**
+  - the copy of each kind of TLS configuration (platform, extra roots, raw) offers `h3`, and on retry none, and leaves the application's `Arc` unchanged (D4, D5);
+  - a raw configuration without TLS 1.3, and one without `TLS13_AES_128_GCM_SHA256`, fail `build()`; an attempt handed either fails without a datagram and the process lives (D4);
+  - D5's retry starts only on the local 0x178, and the memory per endpoint drops on the peer's 0x78;
+  - D12's constants read back from the `TransportConfig`;
+  - the JSON writer appends one `\n`, the Protobuf writer none;
+  - the reader is Block 27's `AnyDelimiterCodec` and varint splitter (D7);
+  - the proxy refusal sends no datagram (D13);
+  - the endpoint's reset key signs through the configuration's provider (D15); in the fips build, the WebTransport configuration's `fips()` is true;
+  - a malformed frame from the fake server on the HTTP/3 control stream fails the attempt and the process lives (48b).
+- **@E core tests:** `TransportKind::WebTransport` has the websocket core's actions step for step (D20), apart from D9's two rules, each with its mutation failing it.
+- **@P:** `tests/perf_footprint.rs` measures, with `unstable-webtransport`, an idle client connected to the fake WebTransport server and reports its live heap. Not a gate while unstable. The Block 14 gates pass unchanged with default features.
+- **Canary.** D5's @A test.
+- **Mutations.** Each scenario is seen failing once on a mutation, recorded in the PR: the ALPN retry removed; the endpoint memory removed; the memory never dropped; the ALPN rewrite removed; the trailing `\n` removed; the end handed to the core before the messages before it; the write timeout ignored; the size limit ignored; the proxy refusal replaced by a direct connection; the WebTransport kind made emulated; the backoff rule removed; a chosen WebTransport kept after an end before an answer.
+- **README, rustdoc, changelog.** As in D21.
+
+```gherkin
+Feature: WebTransport (unstable)
+
+  @A
+  Scenario: A client connects over WebTransport and receives a publication
+    Given a server serving TLS with a certificate from the test CA, with HTTP/3 and WebTransport enabled
+    And a client configured with only the server's WebTransport endpoint
+    When connect is called
+    Then the client emits "connecting"
+    And then the client emits "connected" over transport "webtransport"
+    When the client subscribes to channel "news" and the server API publishes {"n":1} to channel "news"
+    Then the subscription receives a publication with data {"n":1}
+
+  @A
+  Scenario: Binary publication delivered over Protobuf on WebTransport
+    Given a server serving TLS with a certificate from the test CA, with HTTP/3 and WebTransport enabled
+    And a client configured with the Protobuf protocol connected over transport "webtransport" and subscribed to channel "news"
+    When the server API publishes the bytes ff 0a 00 fe to channel "news"
+    Then the subscription receives a publication with the bytes ff 0a 00 fe
+
+  @A
+  Scenario: Server pings over WebTransport are answered
+    Given a server with HTTP/3 and WebTransport enabled, a ping interval of 2 s and a pong timeout of 1 s
+    And a client connected over transport "webtransport"
+    When 6 s elapse
+    Then the client stays "connected"
+
+  @A
+  Scenario: A server disconnect over WebTransport reaches the client with its code
+    Given a client connected over transport "webtransport"
+    When the server API disconnects the client with code 4501 and reason "b48 test"
+    Then the client emits "disconnected" with code 4501 and reason "b48 test"
+    And the client makes no new connection attempt
+
+  @A
+  Scenario: WebTransport falls back to websocket when UDP is unreachable
+    Given a server serving TLS with a certificate from the test CA, with HTTP/3 and WebTransport enabled
+    And a client with a handshake timeout of 2 s, configured with a WebTransport endpoint on a UDP port where nothing listens and the server's wss endpoint
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt whose message ends with "handshake timeout"
+    And within the configured handshake timeout plus tolerance the client emits "connected" over transport "websocket"
+
+  @A
+  Scenario: A server without WebTransport refuses the session and the client falls back
+    Given a server serving TLS with a certificate from the test CA, with HTTP/3 enabled and WebTransport disabled
+    And a client configured with the server's WebTransport and wss endpoints
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt over transport "webtransport"
+    And then the client emits "connected" over transport "websocket"
+
+  @A
+  Scenario: A connect refused over WebTransport is reported by the next transport
+    Given a server serving TLS with a certificate from the test CA, with HTTP/3 and WebTransport enabled, that requires a connection token
+    And a client with an invalid connection token, configured with the server's WebTransport and wss endpoints
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt over transport "webtransport"
+    And then the client emits "disconnected" with code 3500 and reason "invalid token"
+    And the client makes no new connection attempt
+
+  @A
+  Scenario Outline: TLS settings apply to WebTransport
+    Given a server serving TLS with a certificate from a private CA the platform does not trust, with HTTP/3 and WebTransport enabled
+    And a client configured with only the server's WebTransport endpoint and <trust>
+    When connect is called
+    Then <outcome>
+
+    Examples:
+      | trust                                                                               | outcome                                                                                                             |
+      | that CA as an extra root certificate                                                | the client emits "connected" over transport "webtransport"                                                          |
+      | no extra root certificate                                                           | the client emits an "error" event for the failed transport attempt, saying the server's certificate is not trusted |
+      | a raw rustls configuration trusting only that CA, offering ALPN "h2" and "http/1.1" | the client emits "connected" over transport "webtransport"                                                          |
+
+  @B
+  Scenario: Real HTTP headers go with the WebTransport session request
+    Given a server with HTTP/3 and WebTransport enabled and a connect proxy that receives header "X-Probe"
+    And a client configured with only the server's WebTransport endpoint and the HTTP header "X-Probe" set to "b48"
+    When connect is called
+    Then the client emits "connected" over transport "webtransport"
+    And the connect proxy received the header "X-Probe" with value "b48"
+
+  @E
+  Scenario: Subscribes go with the connect command over WebTransport
+    Given a client configured with a WebTransport endpoint and two subscriptions in state "subscribing" that need no callback
+    When the WebTransport transport opens
+    Then the first frame sent carries the connect command followed by the two subscribe commands, in registry order
+    And no subscription reaches "subscribed" before the connect reply is handled
+
+  Scenario Outline: A WebTransport endpoint that is not https is rejected
+    Given client options with transport "webtransport" and endpoint "<endpoint>"
+    When the client is built
+    Then building fails with a configuration error naming webtransport and https
+
+    Examples:
+      | endpoint                                      |
+      | wss://localhost:8443/connection/webtransport  |
+      | http://localhost:8000/connection/webtransport |
+      |                                               |
+
+  Scenario Outline: A raw TLS configuration unfit for QUIC is rejected for WebTransport
+    Given client options with a WebTransport endpoint and a raw rustls configuration <configuration>
+    When the client is built
+    Then building fails with a configuration error naming TLS 1.3 and webtransport
+
+    Examples:
+      | configuration                                   |
+      | offering TLS 1.2 only                           |
+      | offering TLS 1.3 without TLS13_AES_128_GCM_SHA256 |
+
+  Scenario: A connector with a WebTransport endpoint is rejected
+    Given client options with a connector and a WebTransport endpoint
+    When the client is built
+    Then building fails with a configuration error naming the connector and webtransport
+
+  Scenario: A WebTransport attempt with a proxy fails without sending a datagram
+    Given a UDP socket on 127.0.0.1 that counts the datagrams it receives
+    And a client configured with only a WebTransport endpoint at that socket's port and the proxy "http://127.0.0.1:9" for every endpoint
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt whose message contains "webtransport cannot go through a proxy"
+    And the client state is "connecting"
+    And the socket received no datagram
+
+  Scenario: A WebTransport open that never completes is bounded by the handshake timeout
+    Given a UDP socket on 127.0.0.1 that receives and never answers
+    And a client with a handshake timeout of 1 s and a timeout of 10 s, configured with only a WebTransport endpoint at that socket's port
+    When connect is called
+    Then within 1 s plus tolerance the client emits an "error" event for the failed transport attempt whose message ends with "handshake timeout"
+    And the socket received at least one datagram
+
+  @D
+  Scenario: A server that selects no application protocol is reached on a second handshake
+    Given a fake WebTransport server whose TLS configuration offers no application protocol
+    And a client configured with only the fake server's WebTransport endpoint
+    When connect is called
+    Then the client emits "connected" over transport "webtransport"
+    And the fake server counted 2 QUIC handshakes
+    When the fake server ends the session after a disconnect push with a reconnect-advised code
+    Then the client emits "connected" over transport "webtransport"
+    And the fake server counted 3 QUIC handshakes
+
+  @D
+  Scenario: A server that requires h3 is reached on the first handshake
+    Given a fake WebTransport server whose TLS configuration offers only "h3"
+    And a client configured with only the fake server's WebTransport endpoint
+    When connect is called
+    Then the client emits "connected" over transport "webtransport"
+    And the fake server counted 1 QUIC handshake
+
+  @D
+  Scenario: An endpoint remembered without ALPN that starts requiring h3 is reached again
+    Given a fake WebTransport server whose TLS configuration offers no application protocol
+    And a client connected to the fake WebTransport server after 2 QUIC handshakes
+    When the fake server's TLS configuration changes to offer only "h3"
+    And the fake server ends the session after a disconnect push with a reconnect-advised code
+    Then the client emits "connected" over transport "webtransport"
+    And the fake server counted 4 QUIC handshakes
+    When the fake server ends the session after a disconnect push with a reconnect-advised code
+    Then the client emits "connected" over transport "webtransport"
+    And the fake server counted 5 QUIC handshakes
+
+  @D
+  Scenario: A disconnect push right before the end of the WebTransport stream stops the client
+    Given a client connected to the fake WebTransport server
+    When the fake server writes a disconnect push with code 3500 and reason "bye" and ends the stream in the same write
+    Then the client emits "disconnected" with code 3500 and reason "bye"
+    And the client makes no new connection attempt
+
+  @D
+  Scenario: A WebTransport stream that ends without a disconnect push makes the client reconnect
+    Given a client connected to the fake WebTransport server
+    When the fake server ends the stream without a disconnect push
+    Then the client emits "connecting" with code 1 and reason "transport closed"
+    And then the client emits "connected" over transport "webtransport"
+
+  @E
+  Scenario: A WebTransport connection ended without a disconnect push before a server ping keeps the backoff growing
+    Given a client with a minimum reconnect delay of 1 s and a maximum of 20 s, configured with a WebTransport endpoint
+    When three times in a row the transport opens, the connect reply arrives and the transport ends with no code before a server ping is read
+    Then the third reconnect delay lies within the backoff bounds of attempt 3
+    When the next connection reads a server ping before its transport ends with no code
+    Then the reconnect delay after it lies within the backoff bounds of attempt 1
+
+  @D
+  Scenario: A chosen WebTransport that ends before answering the connect gives way to the next transport
+    Given a client configured with the fake WebTransport server's endpoint and the fake websocket server's endpoint, connected over transport "webtransport"
+    And the fake WebTransport server ends every new stream before answering the connect
+    When the fake WebTransport server ends the session after a disconnect push with a reconnect-advised code
+    Then the client emits an "error" event for the failed transport attempt over transport "webtransport"
+    And then the client emits "connected" over transport "websocket"
+
+  @D
+  Scenario: A WebTransport write the server never reads closes the transport
+    Given a client with a timeout of 2 s connected to the fake WebTransport server
+    And the fake server stops reading the stream
+    When the client sends more data than the stream's flow-control window
+    Then within the configured timeout plus tolerance the client emits "connecting" with code 1
+    And the client opens a new connection
+
+  @D
+  Scenario Outline: A message over the limit ends a client connected over WebTransport
+    Given a client with a maximum message size of 1024 bytes and the <protocol> protocol, connected to the fake WebTransport server
+    When the fake server writes a publication push of 1025 bytes, split over three writes
+    Then the client emits "disconnected" with code 3 and reason "message size limit exceeded"
+    And the client makes no new connection attempt
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @D
+  Scenario: Closing a WebTransport client ends the session within the timeout
+    Given a client with a timeout of 2 s connected to the fake WebTransport server
+    When disconnect is called
+    Then the client emits "disconnected" before the configured timeout
+    And the fake server sees the stream finished and the QUIC connection closed within the configured timeout plus tolerance
+
+  @W
+  Scenario Outline: A browser client connects over WebTransport and receives a publication
+    Given a browser client with the <protocol> protocol, configured with only the WebTransport relay's endpoint
+    When connect is called and the client subscribes to channel "news"
+    And the server API publishes to channel "news"
+    Then the client emits "connected" over transport "webtransport"
+    And the subscription receives that publication
+
+    Examples:
+      | protocol |
+      | JSON     |
+      | Protobuf |
+
+  @W
+  Scenario: A browser without WebTransport skips the transport
+    Given the test has removed WebTransport from globalThis
+    And a browser client configured with the WebTransport relay's endpoint and the server's websocket endpoint
+    When connect is called
+    Then the client emits "connected" over transport "websocket"
+    And the WebTransport relay accepted no session
+
+  @W
+  Scenario: A browser client falls back from WebTransport to websocket when the session is refused
+    Given the WebTransport relay refuses every session
+    And a browser client configured with the WebTransport relay's endpoint and the server's websocket endpoint
+    When connect is called
+    Then the client emits an "error" event for the failed transport attempt over transport "webtransport"
+    And then the client emits "connected" over transport "websocket"
+```
+
+"Not trusted" is Block 22's meaning (rustls's invalid peer certificate). "A UDP port where nothing listens" is a port of 127.0.0.1 that the test bound and closed; the client runs on the host. "The backoff bounds of attempt n" are Block 2's. In "TLS settings apply to WebTransport", the third row fails when D5's ALPN rewrite is removed: Centrifugo selects no ALPN for a client offering `h2` and `http/1.1`, and rustls refuses it (Verified). "A connect refused over WebTransport is reported by the next transport" runs in the first sequence, Block 8's rule today; "A chosen WebTransport that ends before answering the connect gives way to the next transport" is D9's owner-pending rule and leaves the block with it if the owner declines. In "An endpoint remembered without ALPN that starts requiring h3 is reached again", the reconnect makes two handshakes (none, refused by the peer; then `h3`) and the next one a single `h3` handshake.
+
+**Exceptions introduced:**
+- **An end with no code** (D9). A session that ends without a disconnect push after its connect reply is reported with code 1 and reconnects. Over websocket the same server causes would give 3501 or 1009. The server does not send those codes over WebTransport (Verified). centrifuge-js reports code 4 there.
+- **A chosen transport left** (D9, owner-pending). Against Block 8's "a transport that worked once is still kept", for WebTransport ends before an answer.
+- **No `Set-Cookie`** (D14), against Block 43's "on every transport".
+- **No proxies** (D13).
+- **The ALPN retry** (D5). centrifuge-js, a browser, has no counterpart.
+- **An opened session is not proof of the transport** (D6, Block 8). centrifuge-js treats it as chosen (`centrifuge.ts:1248`).
+- **QUIC buffers, keep-alive and the reset key** (D12, D15). Set explicitly; centrifuge-js leaves them to the browser.
+- **Block 51 and Block 52** do not run WebTransport (D20).
+
+**Amendments to earlier blocks** (the text of this file is amended with this block's spec; the code follows in 48a unless noted):
+
+- **Block 0, "Out of scope (v1)":** "sockjs, webtransport transports (webtransport planned: Block 48)" becomes "sockjs transport (not adopted: item 34, "Planned after Block 19"); webtransport (reversed by the owner decision of 2026-11-06, late: Block 48, behind the `unstable` feature)".
+- **Block 0, "Reversed exclusions"**, new row:
+
+  | Block 0 and Block 8, out of scope | the webtransport transport | owner, 2026-11-06, late (item 33) | 48 |
+
+- **Block 0, "Transports" row:** "websocket, http_stream, sse; webtransport, unstable (Block 48: `unstable-webtransport` natively, `unstable` in the browser), anywhere in the list" | "Fallback in the configured order".
+- **Block 6:** the `providers` matrix and its isolation checks run with `unstable-webtransport`; the fips unit test covers the WebTransport configuration (D15).
+- **Block 8, out of scope:** "webtransport" is struck, with "(reversed: Block 48)". The endpoint rule gains: a WebTransport endpoint must be `https://` (D2). The decision "transports are tried in order during the initial handshake only" gains "; a WebTransport stream that ends before the server answered is a failed attempt even after WebTransport was chosen (Block 48 D9, owner decision of 2026-11-12)" (owner-pending).
+- **Block 15, "Backoff after 3008":** append "A connection over WebTransport that ends without a disconnect push after its connect reply and before a server ping is read on it is handled as a 3008 close (Block 48 D9)."
+- **Block 20 D7:** docs.rs's features gain `unstable-webtransport`.
+- **Block 22 D3:** "Ferrifuge only sets the ALPN list of its copy to `http/1.1`" gains "; for WebTransport, `h3` and then none (Block 48 D5); `build()` also fails when a WebTransport endpoint is configured with a configuration that QUIC cannot use: no TLS 1.3 or no `TLS13_AES_128_GCM_SHA256` (Block 48 D4)".
+- **Block 23 D2:** append "A WebTransport endpoint for which a proxy is decided fails the attempt without connecting (Block 48 D13)."
+- **Block 24 D1:** the `android` and `ios` jobs add `--features unstable-webtransport` (D16).
+- **Block 29 D1:** the open covers, for WebTransport, DNS, the UDP bind, the QUIC handshakes (Block 48 D5's retry included), the HTTP/3 SETTINGS, the extended CONNECT and the stream's opening. **D2:** `max_message_bytes` also bounds a WebTransport JSON line and Protobuf reply (Block 48 D7).
+- **Block 36, out of scope:** "WebTransport gets D5 in Block 48" becomes "WebTransport has D5 (Block 48 D10)".
+- **Block 37 D4** and "Planned after Block 19", "Connector (item 35)": "a connector with an HTTP transport … fails `build()`" becomes "a connector with an HTTP or WebTransport transport … fails `build()`".
+- **Block 43:** "The adapter sets `Cookie` and reads `Set-Cookie` itself on every transport" gains "; over WebTransport `Set-Cookie` is not read (Block 48 D14)".
+- **Block 44:** out of scope "WebTransport (Block 48) and SockJS (item 34) in the browser" becomes "SockJS (item 34) in the browser"; D12's list of what each transport needs gains "webtransport `WebTransport` (no shim)" (48c).
+- **Block 49:** D10's review recorded in D20; row 53's reason gains "and WebTransport (Block 48 D4)"; row 12's covered scenarios gain "WebTransport falls back to websocket when UDP is unreachable".
+- **Block 51, out of scope:** gains "WebTransport: Toxiproxy relays TCP only (Block 48 D20)".
+- **"Planned after Block 19", "WebTransport (item 33)":** the `VERIFY:` is resolved: "wtransport accepts the client's own `rustls::ClientConfig`, which must offer TLS 1.3 and `TLS13_AES_128_GCM_SHA256`, through `build_with_quic_config` (Block 48 D4)"; "Unstable APIs (items 29, 30, 33)" gains "; WebTransport's native dependency is behind `unstable-webtransport`, which enables `unstable` (Block 48 D1)".
+
+---
+
 ## Block 49 — Bug-pattern catalogue
 
 **Goal:** every known failure pattern of Centrifugo client SDKs has an explicit status here: covered by a named scenario or test, a gap that a probe scenario closes, not applicable with the reason, or not reconstructible, so that fixes other SDKs paid for are not paid for again on a fleet of end-user devices (owner request, 2026-11-09).
@@ -8581,7 +9096,7 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 8 | R | A call made while `disconnected` either hangs or fails, depending on the path | §9.3 | covered | "A call on a client never connected fails after the timeout"; "A call made while connecting waits for the connection" (Block 13 keeps the same rule) |
 | 9, 42 | R | A refresh of an ended session acts on the current one, or doubles the refresh chain | §6.6, §7.6 | covered | `src/machine.rs::late_refresh_token_after_reconnect_is_discarded`; `tests/adapter_tokens.rs::a_late_refresh_denial_disconnects_after_the_new_connection_refreshed` |
 | 11 | R | The failure of a superseded connect attempt is reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |
-| 12 | R (part) | Each failed transport advances the fallback exactly once; a transport-specific sse half is unknown | §5.8, §12 | covered | generic half: "The fallback sequence is retried until a transport succeeds". sse-specific half: not reconstructible (§12 names it, no rule states it) |
+| 12 | R (part) | Each failed transport advances the fallback exactly once; a transport-specific sse half is unknown | §5.8, §12 | covered | generic half: "The fallback sequence is retried until a transport succeeds"; "WebTransport falls back to websocket when UDP is unreachable". sse-specific half: not reconstructible (§12 names it, no rule states it) |
 | 13, 66 | F, R | A transport that hangs or was never proven pins the client; a temporary error must not loop at zero delay | §5.8 | covered | "An HTTP stream that never answers the handshake falls back", "An emulated transport the server answered is kept", "A failed fallback sequence is retried after the reconnect backoff" |
 | 14 | R | The close or read error of a transport the client itself closed is reported as an error event | §6.5 | gap | probe "A transport the client closed reports no error" |
 | 15, 81 | R | A live publication overtakes recovered ones; items after a teardown in the same frame are dispatched | §9.2, §5.3 | covered | I8 ("Seeded chaos with subscriptions on the core keeps every invariant"); "Messages after a disconnect in the same frame are discarded"; `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects` |
@@ -8980,6 +9495,7 @@ Feature: Byte-split matrix
 - Redis failures (Redis stays up across a Centrifugo restart; losing Redis's own data is its operator's persistence choice);
 - the deterministic relay scenarios (Block 50 owns 1-byte chunking); nothing here runs on a pull request.
 - packet loss: Toxiproxy's `packet_loss` toxic is not network loss (D3) and `tc netem` is not added: the stalled stream that loss causes on TCP is what the latency and timeout toxics already show to the client.
+- WebTransport: Toxiproxy relays TCP only (Block 48 D20).
 
 This block reverses Block 16's exclusion of a chaos TCP proxy against a real Centrifugo; Block 0's "Reversed exclusions" gains the row | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |, and Block 16's out-of-scope line says so.
 
