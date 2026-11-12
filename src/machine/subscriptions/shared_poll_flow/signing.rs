@@ -112,16 +112,15 @@ impl SharedPollFlow {
     /// The keys tracked that no signature held covers, nor a request to the
     /// callback in flight.
     fn unsigned(&self) -> Vec<String> {
-        let asked: HashSet<&String> = self
+        let covered: HashSet<&String> = self
             .signing
             .iter()
             .flat_map(|signing| &signing.keys)
+            .chain(self.library.iter().flat_map(|signed| &signed.keys))
             .collect();
         self.keys()
             .into_iter()
-            .filter(|key| {
-                !asked.contains(key) && !self.library.iter().any(|signed| signed.keys.contains(key))
-            })
+            .filter(|key| !covered.contains(key))
             .collect()
     }
 
@@ -417,7 +416,8 @@ impl Machine {
             .find(|signing| signing.origin == Origin::Refresh);
         let start = match running {
             Some(running) => {
-                if keys.iter().any(|key| !running.keys.contains(key)) {
+                let asked: HashSet<&String> = running.keys.iter().collect();
+                if keys.iter().any(|key| !asked.contains(key)) {
                     flow.refresh_again = true;
                 }
                 false
