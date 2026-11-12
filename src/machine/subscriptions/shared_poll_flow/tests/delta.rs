@@ -711,3 +711,191 @@ fn an_inline_untrack_counts_in_its_period_only() {
     let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
     assert!(events(&dropped).is_empty(), "a late reply: {dropped:?}");
 }
+
+/// The keys of the untrack requests among `actions`.
+fn untracked_keys(actions: &[Action]) -> Vec<String> {
+    requests(actions, 2)
+        .iter()
+        .flat_map(|request| {
+            request["sub_refresh"]["untrack"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .map(|key| key.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Answers every request among `actions`: the actions of the answers.
+fn answer_all(machine: &mut Machine, transport: TransportId, actions: &[Action]) -> Vec<Action> {
+    let mut answered = Vec::new();
+    for kind in [1, 2] {
+        for request in requests(actions, kind) {
+            answered.extend(machine.handle(reply_to(transport, &request)));
+        }
+    }
+    answered
+}
+
+/// A subscription to "items" with delta and a `get_signature` callback,
+/// subscribed with delta on.
+fn signing_with_delta() -> (Machine, TransportId, SubscriptionId) {
+    let (mut machine, transport) = connected();
+    let mut options = delta_options(64 << 20);
+    options.signature_source = true;
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let actions = machine.handle(Input::Subscribe(id));
+    take_all(&mut machine, &actions);
+    answer_with_delta(&mut machine, transport, &actions);
+    (machine, transport, id)
+}
+
+/// `track([first, second])`, `first` untracked while the callback runs
+/// (its untrack answered), then the callback's signature over both: the
+/// track request, which carries `first` inline (D6, D7), unanswered.
+fn signed_with_one_untracked(
+    machine: &mut Machine,
+    transport: TransportId,
+    id: SubscriptionId,
+    first: &str,
+    second: &str,
+) -> Value {
+    let asked = machine.handle(Input::TrackKeys(id, vec![first.into(), second.into()]));
+    let (request, _) = fetches(&asked)[0].clone();
+    let untracked = machine.handle(Input::UntrackKeys(id, vec![first.into()]));
+    answer_all(machine, transport, &untracked);
+    let signed = machine.handle(Input::SignatureFetched {
+        subscription: id,
+        request,
+        result: Ok(crate::SharedPollSignature::new(
+            vec![first.into(), second.into()],
+            "s",
+        )),
+    });
+    let frames = requests(&signed, 1);
+    assert_eq!(frames.len(), 1, "{signed:?}");
+    assert_eq!(
+        frames[0]["sub_refresh"]["untrack"],
+        serde_json::json!([first])
+    );
+    frames[0].clone()
+}
+
+// Codex on #221 (D10): an inline untrack of a key no held signature covers
+// any more does not stay forever: fresh keys churned through the race of
+// D6 leave a bounded set behind.
+#[test]
+fn inline_untracks_of_keys_gone_stay_bounded() {
+    let (mut machine, transport, id) = subscribed(true, true);
+    for n in 0..50 {
+        let (first, second) = (format!("a{n}"), format!("b{n}"));
+        let frame = signed_with_one_untracked(&mut machine, transport, id, &first, &second);
+        let answered = machine.handle(reply_to(transport, &frame));
+        answer_all(&mut machine, transport, &answered);
+        let untracked = machine.handle(Input::UntrackKeys(id, vec![second]));
+        answer_all(&mut machine, transport, &untracked);
+    }
+
+    let flow = machine.subscriptions.by_id[&id]
+        .shared_poll
+        .as_ref()
+        .unwrap();
+    assert!(
+        flow.inline_untracked.len() <= 2,
+        "{} inline untracks held",
+        flow.inline_untracked.len()
+    );
+}
+
+// Codex on #221 (D10): once no held signature covers a key untracked
+// inline and its frame is answered, the key goes in an untrack request,
+// whose reply comes after the server applied the inline untrack (centrifuge
+// `handleUntrack` waits for the track requests in progress, and that
+// frame's reply was read before it was sent). Until then a delta of the
+// key tracked again is dropped; after it, one with no base is a failure.
+#[test]
+fn an_inline_untrack_of_a_key_gone_becomes_an_untrack_request() {
+    let (mut machine, transport, id) = signing_with_delta();
+    let frame = signed_with_one_untracked(&mut machine, transport, id, "a", "b");
+    let answered = machine.handle(reply_to(transport, &frame));
+    assert!(
+        !untracked_keys(&answered).contains(&"a".to_owned()),
+        "b holds its signature"
+    );
+    answer_all(&mut machine, transport, &answered);
+    let untracked = machine.handle(Input::UntrackKeys(id, vec!["b".into()]));
+    answer_all(&mut machine, transport, &untracked);
+
+    let other = track(&mut machine, id, &[("c", 0)], "s3");
+    let answered = machine.handle(reply_to(transport, &requests(&other, 1)[0]));
+
+    let untrack: Vec<Value> = requests(&answered, 2)
+        .into_iter()
+        .filter(|request| request["sub_refresh"]["untrack"] == serde_json::json!(["a"]))
+        .collect();
+    assert_eq!(untrack.len(), 1, "{answered:?}");
+    track(&mut machine, id, &[("a", 0)], "s4");
+    let dropped = machine.handle(pushed(transport, &delta("a", 2, &value(1), &value(2))));
+    assert!(events(&dropped).is_empty(), "{dropped:?}");
+    machine.handle(reply_to(transport, &untrack[0]));
+    let failed = machine.handle(pushed(transport, &delta("a", 2, &value(1), &value(2))));
+    assert_eq!(delta_errors(&failed), [codes::error::DELTA], "{failed:?}");
+}
+
+// Codex on #221 (D10): not while the frame carrying the key inline awaits
+// its reply: an untrack handled before that frame would prove nothing.
+#[test]
+fn an_inline_untrack_waits_for_its_frame_before_becoming_an_untrack_request() {
+    let (mut machine, transport, id) = signing_with_delta();
+    let frame = signed_with_one_untracked(&mut machine, transport, id, "a", "b");
+    let untracked = machine.handle(Input::UntrackKeys(id, vec!["b".into()]));
+    answer_all(&mut machine, transport, &untracked);
+
+    let other = track(&mut machine, id, &[("c", 0)], "s3");
+    let before = machine.handle(reply_to(transport, &requests(&other, 1)[0]));
+    let after = machine.handle(reply_to(transport, &frame));
+
+    assert!(
+        !untracked_keys(&before).contains(&"a".to_owned()),
+        "{before:?}"
+    );
+    assert!(
+        untracked_keys(&after).contains(&"a".to_owned()),
+        "{after:?}"
+    );
+}
+
+// Codex on #221 (D9, D10): a whole value at the version held, which the
+// server sends again after a track from version 0, is no update, but it is
+// what the server's next delta of the key applies to: it becomes the base.
+// A delta at the version held changes no base.
+#[test]
+fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
+    let (mut machine, transport, id) = tracking(&["a"]);
+    push_all(&mut machine, transport, &[whole("a", 5, &value(5))]);
+    let (transport, replay) = away_and_back(&mut machine, id, &[]);
+    answer_all(&mut machine, transport, &replay);
+    let again = track(&mut machine, id, &[("a", 0)], "s2");
+    answer_all(&mut machine, transport, &again);
+
+    let duplicates = push_all(
+        &mut machine,
+        transport,
+        &[
+            delta("a", 5, &value(4), &value(5)),
+            whole("a", 5, &value(5)),
+        ],
+    );
+    assert!(events(&duplicates).is_empty(), "{duplicates:?}");
+    let next = push_all(
+        &mut machine,
+        transport,
+        &[delta("a", 6, &value(5), &value(6))],
+    );
+
+    assert_eq!(delta_errors(&next), Vec::<u32>::new(), "{next:?}");
+    assert_eq!(values(&next), [("a".to_owned(), value(6).into_bytes())]);
+}
