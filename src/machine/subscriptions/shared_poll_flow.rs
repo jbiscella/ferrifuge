@@ -8,9 +8,11 @@
 
 use std::collections::{HashMap, VecDeque};
 
+mod signing;
+
 use super::super::delivery::Owner;
 use super::super::{
-    Action, FetchId, Machine, SharedPollSubscriptionOptions, SharedPollTimer, SubscriptionId,
+    Action, Machine, SharedPollSubscriptionOptions, SharedPollTimer, SubscriptionId,
 };
 use crate::fossil::DeltaError;
 use crate::shared_poll::SharedPollUpdate;
@@ -21,7 +23,7 @@ use crate::wire::{
 };
 use crate::{
     ClientError, ErrorKind, Publication, SharedPollSubscriptionEvent, SharedPollTrackItem, State,
-    Subscribed, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError, codes,
+    Subscribed, SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
 };
 
 /// `type` of a shared poll subscription's subscribe command and reply
@@ -71,13 +73,39 @@ pub(in crate::machine) struct SharedPollFlow {
     /// Counts the times the subscription became `subscribed`: a request of
     /// an earlier count was abandoned, and its answer changes nothing (I13).
     generation: u64,
-    /// Signature requests awaiting their answer, with the generation that
-    /// made them.
-    fetches: HashMap<FetchId, u64>,
     /// Requests not sent yet: over an emulated transport each waits for
-    /// the reply of the one before (D12), and a replay's frames each wait
+    /// the reply of the one before (D12), and a request's frames each wait
     /// for the reply of the frame before (D7).
     queue: VecDeque<Queued>,
+    /// Numbers the requests, each of one or more frames (D7).
+    next_group: u64,
+    /// The signature requests of this `subscribed` period awaiting the
+    /// callback (D6); those of an earlier one were abandoned.
+    signing: Vec<signing::Signing>,
+    /// A refresh was asked for while one ran that did not cover every key
+    /// tracked: it runs again once that one ends (D7).
+    refresh_again: bool,
+    /// The refresh deadlines and the retries scheduled in this `subscribed`
+    /// period (D7).
+    timers: Vec<(SharedPollTimer, signing::FlowTimer)>,
+    /// Failures in a row of the refresh, of signing the keys without a
+    /// signature, and replies with `expires` and no `ttl` in a row: the
+    /// steps of their backoffs (D7).
+    refresh_attempts: u32,
+    sign_attempts: u32,
+    grace_attempts: u32,
+}
+
+/// What a track or untrack request is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::machine) enum Purpose {
+    /// Tracks keys: an application's call, a signature fetched for it, or
+    /// the replay of a subscribe.
+    Track,
+    /// Tracks the keys a signature refresh signed (D7).
+    Refresh,
+    /// Stops tracking keys.
+    Untrack,
 }
 
 /// A track or untrack request waiting to be sent.
@@ -85,11 +113,11 @@ pub(in crate::machine) struct SharedPollFlow {
 struct Queued {
     generation: u64,
     request: SubRefreshRequest,
-    track: bool,
+    purpose: Purpose,
     keys: Vec<String>,
-    /// A frame of a replay (D7).
-    replay: bool,
-    /// Waits for the reply of the replay frame before it (D7).
+    /// The request it is a frame of (D7).
+    group: u64,
+    /// Waits for the reply of the frame before it (D7).
     after_reply: bool,
 }
 
@@ -114,10 +142,12 @@ pub(in crate::machine) struct TrackCommand {
     /// for it too (D12).
     channel: String,
     generation: u64,
-    track: bool,
+    purpose: Purpose,
     keys: Vec<String>,
-    /// A frame of a replay (D7).
-    replay: bool,
+    /// The keys of its `untrack` field.
+    untracked: Vec<String>,
+    /// The request it is a frame of (D7).
+    group: u64,
     /// Its reply deadline, over an emulated transport (D12).
     timer: Option<SharedPollTimer>,
 }
@@ -138,8 +168,14 @@ impl SharedPollFlow {
             next_place: 0,
             library: Vec::new(),
             generation: 0,
-            fetches: HashMap::new(),
             queue: VecDeque::new(),
+            next_group: 0,
+            signing: Vec::new(),
+            refresh_again: false,
+            timers: Vec::new(),
+            refresh_attempts: 0,
+            sign_attempts: 0,
+            grace_attempts: 0,
         }
     }
 
@@ -216,12 +252,32 @@ impl SharedPollFlow {
     }
 
     /// `unsubscribe()`: the keys and signatures go with it, so the next
-    /// subscribe starts cold (D5, `set_unsubscribed`).
-    pub(in crate::machine) fn forget(&mut self) {
+    /// subscribe starts cold (D5, `set_unsubscribed`); what it asked for
+    /// and scheduled ends. The timers to cancel.
+    #[must_use]
+    pub(in crate::machine) fn forget(&mut self) -> Vec<SharedPollTimer> {
         self.tracked.clear();
         self.library.clear();
-        self.fetches.clear();
         self.queue.clear();
+        self.end_period()
+    }
+
+    /// The subscription became `subscribed` again: what an earlier period
+    /// asked for or scheduled is abandoned, and the retries start over (D7,
+    /// I13). The timers to cancel.
+    #[must_use]
+    fn restart(&mut self) -> Vec<SharedPollTimer> {
+        self.generation += 1;
+        self.end_period()
+    }
+
+    fn end_period(&mut self) -> Vec<SharedPollTimer> {
+        self.signing.clear();
+        self.refresh_again = false;
+        self.refresh_attempts = 0;
+        self.sign_attempts = 0;
+        self.grace_attempts = 0;
+        self.timers.drain(..).map(|(timer, _)| timer).collect()
     }
 
     /// The connection is gone: nothing queued for it is sent.
@@ -419,8 +475,13 @@ impl Machine {
         for key in &keys {
             flow.track(key, 0);
         }
+        // The keys stay tracked, and the next replay reports it again
+        // (D6).
+        if !flow.signature_source {
+            return self.signature_callback_missing(id);
+        }
         if self.subscribed_now(id) {
-            self.fetch_signature(id, keys);
+            self.request_signature(id, keys, signing::Origin::Track);
         }
     }
 
@@ -464,7 +525,7 @@ impl Machine {
         }
         flow.add_signature(keys, batch.signature.0.clone());
         if self.subscribed_now(id) {
-            self.send_track(id, vec![batch], false);
+            self.send_track(id, vec![batch], Vec::new(), Purpose::Track);
         }
     }
 
@@ -510,97 +571,58 @@ impl Machine {
         }
     }
 
-    /// Asks the `get_signature` callback to sign `keys`, when there is one
-    /// (D6).
-    fn fetch_signature(&mut self, id: SubscriptionId, keys: Vec<String>) {
-        let request = self.subscriptions.new_fetch();
-        let Some(flow) = self.shared_poll_flow(id) else {
-            return;
-        };
-        if !flow.signature_source {
-            return;
-        }
-        flow.fetches.insert(request, flow.generation);
-        self.actions.push(Action::FetchSignature {
-            subscription: id,
-            request,
-            keys,
-        });
-    }
-
-    /// The `get_signature` callback answered `request` (D6): the keys it
-    /// signed are tracked under the signature; a failure is reported.
-    fn signature_fetched(
+    /// Queues a track request of `batches` (D7), in frames within the frame
+    /// budget, each after the reply to the one before. The keys of
+    /// `untracked` its first frame carries go in its `untrack` field, as
+    /// many as the budget lets; the others are untracked once a reply shows
+    /// them tracked (the stale rule of [`Self::track_command_answered`]).
+    fn send_track(
         &mut self,
         id: SubscriptionId,
-        request: FetchId,
-        result: Result<crate::SharedPollSignature, TokenError>,
+        batches: Vec<TrackBatch>,
+        untracked: Vec<String>,
+        purpose: Purpose,
     ) {
-        let subscribed = self.subscribed_now(id);
-        let Some(flow) = self.shared_poll_flow(id) else {
+        let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        // Abandoned: the subscription left `subscribed` meanwhile (I13).
-        let Some(generation) = flow.fetches.remove(&request) else {
+        let Some(flow) = sub.shared_poll.as_deref_mut() else {
             return;
         };
-        if !subscribed || generation != flow.generation {
-            return;
-        }
-        match result {
-            Ok(signed) => {
-                // Keys untracked meanwhile need no signature.
-                if !signed.keys.iter().any(|key| flow.tracked.contains_key(key)) {
-                    return;
-                }
-                let signed = Signed {
-                    keys: signed.keys,
-                    signature: Secret(signed.signature),
-                };
-                let batch = flow.batch(&signed);
-                flow.add_signature(signed.keys, signed.signature.0);
-                self.send_track(id, vec![batch], false);
-            }
-            Err(error) => self.emit_shared_poll_error(
-                id,
-                ErrorKind::Track,
-                codes::error::SHARED_POLL_GET_SIGNATURE,
-                error.to_string(),
-            ),
-        }
-    }
-
-    /// Queues a track request of `batches` (D7), or the frames of a
-    /// `replay` within the frame budget, each after the reply to the one
-    /// before.
-    fn send_track(&mut self, id: SubscriptionId, batches: Vec<TrackBatch>, replay: bool) {
-        let Some(sub) = self.subscriptions.by_id.get(&id) else {
-            return;
-        };
-        let Some(flow) = sub.shared_poll.as_ref() else {
-            return;
-        };
-        let frames = if replay {
-            SharedPollFlow::track_frames(&sub.channel, batches, flow.max_track_frame_bytes)
-        } else {
-            vec![batches]
-        };
+        let budget = flow.max_track_frame_bytes;
+        let group = flow.next_group;
+        flow.next_group += 1;
+        let frames = SharedPollFlow::track_frames(&sub.channel, batches, budget);
+        let mut requests = Vec::with_capacity(frames.len());
         for (number, batches) in frames.into_iter().enumerate() {
-            let keys = batches
+            let keys: Vec<String> = batches
                 .iter()
                 .flat_map(|batch| batch.items.iter().map(|item| item.key.clone()))
                 .collect();
-            self.queue_request(
-                id,
+            let mut untrack = Vec::new();
+            if number == 0 {
+                let mut cost = SharedPollFlow::track_cost(&sub.channel, &batches);
+                for key in distinct(untracked.clone()) {
+                    let key_cost = escaped_twice(&key) + UNTRACK_KEY_COST;
+                    if keys.contains(&key) && cost + key_cost <= budget {
+                        cost += key_cost;
+                        untrack.push(key);
+                    }
+                }
+            }
+            requests.push((
                 SubRefreshRequest {
                     kind: TRACK,
                     track: batches,
+                    untrack,
                     ..SubRefreshRequest::default()
                 },
-                true,
                 keys,
-                (replay, number > 0),
-            );
+                number > 0,
+            ));
+        }
+        for (request, keys, after_reply) in requests {
+            self.queue_request(id, request, purpose, keys, (group, after_reply));
         }
         self.pump_requests(id);
     }
@@ -617,6 +639,10 @@ impl Machine {
         let requests =
             SharedPollFlow::untrack_requests(&sub.channel, keys, flow.max_track_frame_bytes);
         for keys in requests {
+            let group = self.shared_poll_flow(id).map_or(0, |flow| {
+                flow.next_group += 1;
+                flow.next_group - 1
+            });
             self.queue_request(
                 id,
                 SubRefreshRequest {
@@ -624,40 +650,41 @@ impl Machine {
                     untrack: keys.clone(),
                     ..SubRefreshRequest::default()
                 },
-                false,
+                Purpose::Untrack,
                 keys,
-                (false, false),
+                (group, false),
             );
         }
         self.pump_requests(id);
     }
 
-    /// Queues `request` of subscription `id`; `(replay, after_reply)` says
-    /// whether it is a replay frame, and one waiting for the frame before.
+    /// Queues `request` of subscription `id`; `(group, after_reply)` says
+    /// which request it is a frame of, and whether it waits for the frame
+    /// before.
     fn queue_request(
         &mut self,
         id: SubscriptionId,
         request: SubRefreshRequest,
-        track: bool,
+        purpose: Purpose,
         keys: Vec<String>,
-        (replay, after_reply): (bool, bool),
+        (group, after_reply): (u64, bool),
     ) {
         if let Some(flow) = self.shared_poll_flow(id) {
             let generation = flow.generation;
             flow.queue.push_back(Queued {
                 generation,
                 request,
-                track,
+                purpose,
                 keys,
-                replay,
+                group,
                 after_reply,
             });
         }
     }
 
-    /// The requests of `id` in flight: whether any is, and whether a replay
-    /// frame is.
-    fn requests_in_flight(&self, id: SubscriptionId) -> (bool, bool) {
+    /// Whether a request of `id` is in flight, and whether a frame of its
+    /// request `group` is.
+    fn requests_in_flight(&self, id: SubscriptionId, group: u64) -> (bool, bool) {
         let mine = || {
             self.subscriptions
                 .track_commands
@@ -666,20 +693,30 @@ impl Machine {
         };
         (
             mine().next().is_some(),
-            mine().any(|command| command.replay),
+            mine().any(|command| command.group == group),
         )
     }
 
     /// Sends what the queue of `id` lets go: over an emulated transport one
-    /// request at a time (D12); a replay frame after the reply to the one
-    /// before (D7); a request of an earlier subscription is dropped.
+    /// request at a time (D12); a frame after the reply to the one before
+    /// (D7); a request of an earlier subscription is dropped.
     fn pump_requests(&mut self, id: SubscriptionId) {
         loop {
             if !self.subscribed_now(id) {
                 return;
             }
             let emulated = self.transport_kind().is_emulated();
-            let (busy, replaying) = self.requests_in_flight(id);
+            let Some(group) = self
+                .subscriptions
+                .by_id
+                .get(&id)
+                .and_then(|sub| sub.shared_poll.as_ref())
+                .and_then(|flow| flow.queue.front())
+                .map(|front| front.group)
+            else {
+                return;
+            };
+            let (busy, sending) = self.requests_in_flight(id, group);
             let Some(flow) = self.shared_poll_flow(id) else {
                 return;
             };
@@ -690,7 +727,7 @@ impl Machine {
                 flow.queue.pop_front();
                 continue;
             }
-            if (emulated && busy) || (front.after_reply && replaying) {
+            if (emulated && busy) || (front.after_reply && sending) {
                 return;
             }
             let queued = flow.queue.pop_front().expect("checked above");
@@ -711,27 +748,28 @@ impl Machine {
         let Queued {
             generation,
             mut request,
-            track,
+            purpose,
             keys,
-            replay,
+            group,
             ..
         } = queued;
         request.channel.clone_from(&sub.channel);
         let command_id = self.command_id();
-        let timer = emulated.then(|| {
-            let timer = SharedPollTimer(self.subscriptions.next_track_timer);
-            self.subscriptions.next_track_timer += 1;
-            timer
-        });
+        let timer = emulated.then(|| self.new_shared_poll_timer());
         self.subscriptions.track_commands.insert(
             command_id,
             TrackCommand {
                 subscription: id,
                 channel: request.channel.clone(),
                 generation,
-                track,
+                purpose,
+                untracked: if purpose == Purpose::Untrack {
+                    Vec::new()
+                } else {
+                    request.untrack.clone()
+                },
                 keys,
-                replay,
+                group,
                 timer,
             },
         );
@@ -748,9 +786,17 @@ impl Machine {
         }
     }
 
-    /// A track or untrack request's reply deadline passed (D12): over an
-    /// emulated transport whether the keys are tracked is unknown, so the
-    /// client reconnects with `connecting` 3.
+    /// A number for a new timer, never reused (D3).
+    fn new_shared_poll_timer(&mut self) -> SharedPollTimer {
+        let timer = SharedPollTimer(self.subscriptions.next_track_timer);
+        self.subscriptions.next_track_timer += 1;
+        timer
+    }
+
+    /// A timer fired: a track or untrack request's reply deadline (D12),
+    /// over an emulated transport, where whether the keys are tracked is
+    /// unknown, so the client reconnects with `connecting` 3; or a refresh
+    /// or a retry of a subscription (D7).
     fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
         let pending = self
             .subscriptions
@@ -758,12 +804,13 @@ impl Machine {
             .values()
             .any(|command| command.timer == Some(timer));
         if pending {
-            self.disconnect(
+            return self.disconnect(
                 codes::connecting::SUBSCRIBE_TIMEOUT,
                 REQUEST_TIMEOUT_REASON,
                 true,
             );
         }
+        self.flow_timer_fired(timer);
     }
 
     /// The reply to track or untrack request `command` was read: its
@@ -848,7 +895,9 @@ impl Machine {
         sub.backoff.reset();
         sub.tokens.connected();
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
-            flow.generation += 1;
+            for timer in flow.restart() {
+                self.actions.push(Action::CancelSharedPollTimer(timer));
+            }
         }
         self.withdraw(&Owner::Client(id));
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
@@ -881,17 +930,10 @@ impl Machine {
             .iter()
             .map(|signed| flow.batch(signed))
             .collect();
-        let unsigned: Vec<String> = flow
-            .keys()
-            .into_iter()
-            .filter(|key| !flow.library.iter().any(|signed| signed.keys.contains(key)))
-            .collect();
         if !batches.is_empty() {
-            self.send_track(id, batches, true);
+            self.send_track(id, batches, Vec::new(), Purpose::Track);
         }
-        if !unsigned.is_empty() {
-            self.fetch_signature(id, unsigned);
-        }
+        self.sign_unsigned(id);
     }
 
     /// Whether `command` is a track or untrack request awaiting its reply.
@@ -928,7 +970,7 @@ impl Machine {
     fn track_command_answered(&mut self, command: TrackCommand, reply: Reply) {
         let id = command.subscription;
         if let Some(error) = reply.error {
-            if !command.track {
+            if command.purpose == Purpose::Untrack {
                 return self.emit_shared_poll_error(
                     id,
                     ErrorKind::Untrack,
@@ -936,16 +978,14 @@ impl Machine {
                     error.message,
                 );
             }
-            let refused = !(error.code == SIGNATURE_EXPIRED || error.code < 100 || error.temporary);
-            self.emit_shared_poll_error(id, ErrorKind::Track, error.code, error.message);
+            let code = error.code;
+            let refused = !(code == SIGNATURE_EXPIRED || code < 100 || error.temporary);
+            self.emit_shared_poll_error(id, ErrorKind::Track, code, error.message);
             let mut keys = command.keys;
-            // A failing replay frame stops the rest (D7).
-            if command.replay
-                && let Some(flow) = self.shared_poll_flow(id)
-            {
-                let generation = flow.generation;
+            // A failing frame stops the rest of its request (D7).
+            if let Some(flow) = self.shared_poll_flow(id) {
                 flow.queue.retain_mut(|queued| {
-                    let rest = queued.replay && queued.generation == generation;
+                    let rest = queued.group == command.group;
                     if rest {
                         keys.append(&mut queued.keys);
                     }
@@ -954,14 +994,60 @@ impl Machine {
             }
             if refused {
                 self.track_refused(id, keys);
+            } else if code == SIGNATURE_EXPIRED {
+                // A refresh's own track request refused so fails that
+                // refresh, which waits before the next (D7).
+                if command.purpose == Purpose::Refresh {
+                    self.refresh_failed(id);
+                } else {
+                    self.start_refresh(id);
+                }
             }
             return;
         }
         let ReplyResult::SubRefresh(result) = reply.result else {
             return self.reply_without_result("sub_refresh");
         };
-        if command.track {
-            self.shared_poll_publications(id, result.items);
+        if command.purpose == Purpose::Untrack {
+            return;
+        }
+        self.shared_poll_publications(id, result.items);
+        if !self.subscribed_now(id) {
+            return;
+        }
+        self.track_accepted(&command, result.expires, result.ttl);
+    }
+
+    /// A track request was accepted (D7): its keys no longer tracked, as
+    /// one removed meanwhile, are untracked on the server too (the stale
+    /// rule); `expires` schedules the refresh; an accepted refresh starts
+    /// its backoff over.
+    fn track_accepted(&mut self, command: &TrackCommand, expires: bool, ttl: u32) {
+        let id = command.subscription;
+        let Some(flow) = self.shared_poll_flow(id) else {
+            return;
+        };
+        let stale: Vec<String> = distinct(
+            command
+                .keys
+                .iter()
+                .filter(|key| !flow.tracked.contains_key(*key) && !command.untracked.contains(key))
+                .cloned()
+                .collect(),
+        );
+        if command.purpose == Purpose::Refresh
+            && !flow
+                .queue
+                .iter()
+                .any(|queued| queued.group == command.group)
+        {
+            flow.refresh_attempts = 0;
+        }
+        if !stale.is_empty() {
+            self.send_untrack(id, stale);
+        }
+        if expires {
+            self.refresh_deadline(id, ttl);
         }
     }
 
