@@ -529,3 +529,81 @@ fn the_deadline_of_an_earlier_subscribe_changes_nothing() {
     assert!(timers_set(&fired).is_empty(), "{fired:?}");
     let _ = id;
 }
+
+// D7 (47c): one replay retry per subscription: a second failure replaces
+// the timer of the first; close() ends it, and a firing then does nothing.
+#[test]
+fn one_replay_retry_per_subscription_and_close_ends_it() {
+    let (mut machine, transport, id) = subscribed(false, false);
+    let first = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+    let second = requests(&track(&mut machine, id, &[("b", 0)], "sig2"), 1)[0].clone();
+
+    let (timer, _) = retries_set(&machine.handle(failing(transport, &first, 500, true)))[0];
+    let replaced = machine.handle(failing(transport, &second, 1, false));
+    let (again, _) = retries_set(&replaced)[0];
+    assert!(cancelled(&replaced).contains(&timer), "{replaced:?}");
+    assert!(
+        requests(&machine.handle(Input::SharedPollTimerFired(timer)), 1).is_empty(),
+        "the replaced timer does nothing"
+    );
+
+    let closed = machine.handle(Input::Close);
+    assert!(cancelled(&closed).contains(&again), "{closed:?}");
+    let fired = machine.handle(Input::SharedPollTimerFired(again));
+    assert!(sent(&fired).is_empty(), "{fired:?}");
+}
+
+// D7, D8 (47c): a failure on a later frame of a replay stops the frames
+// after it; a temporary one replays from the first frame after the
+// backoff, keeping every key.
+#[test]
+fn a_temporary_failure_of_a_later_replay_frame_replays_from_the_start() {
+    let (mut machine, transport, id, replay) = replaying(1000, 30, 5);
+    let first = requests(&replay, 1)[0].clone();
+    let second = requests(&machine.handle(reply_to(transport, &first)), 1)[0].clone();
+
+    let failed = machine.handle(failing(transport, &second, 500, true));
+    assert!(
+        requests(&failed, 1).is_empty(),
+        "the rest stops: {failed:?}"
+    );
+    let (timer, _) = retries_set(&failed)[0];
+    let again = requests(&machine.handle(Input::SharedPollTimerFired(timer)), 1);
+
+    assert_eq!(again.len(), 1, "one frame at a time");
+    assert_eq!(items(&again[0]), items(&first), "from the first frame");
+    assert_eq!(machine.shared_poll_tracked_keys(id).unwrap().len(), 30);
+}
+
+// D8 (47c): an epoch that changes while a replay's frames are in flight
+// abandons that replay: its replies change nothing, its frames not sent
+// never go, and the new replay tracks every key once, from version 0.
+#[test]
+fn an_epoch_flip_during_a_replay_starts_it_over_from_version_0() {
+    let (mut machine, transport, _, replay) = replaying(1000, 30, 5);
+    let old = requests(&replay, 1)[0].clone();
+
+    let flipped = resubscribed_by_the_server(
+        &mut machine,
+        transport,
+        &serde_json::json!({"type": 4, "epoch": "e9"}),
+    );
+    let late = machine.handle(reply_to(transport, &old));
+    assert!(requests(&late, 1).is_empty(), "{late:?}");
+
+    let mut frames = requests(&flipped, 1);
+    assert_eq!(frames.len(), 1, "{flipped:?}");
+    loop {
+        let next = requests(
+            &machine.handle(reply_to(transport, frames.last().unwrap())),
+            1,
+        );
+        if next.is_empty() {
+            break;
+        }
+        frames.extend(next);
+    }
+    let carried: Vec<(String, u64)> = frames.iter().flat_map(items).collect();
+    let expected: Vec<(String, u64)> = (0..30).map(|n| (format!("k{n:03}"), 0)).collect();
+    assert_eq!(carried, expected);
+}
