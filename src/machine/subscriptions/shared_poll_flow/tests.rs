@@ -694,3 +694,283 @@ fn no_debug_output_shows_a_signature() {
         "sent on the wire"
     );
 }
+
+/// A machine connected over an emulated transport (`http_stream`).
+fn connected_emulated() -> (Machine, TransportId) {
+    let mut machine = Machine::new(Config::default())
+        .with_transports(vec![crate::machine::TransportKind::HttpStream])
+        .expect("an emulated transport");
+    let transport = opened(&machine.handle(Input::Connect)).expect("a transport");
+    machine.handle(Input::TransportOpened(transport));
+    machine.handle(frame(
+        transport,
+        r#"{"id":1,"connect":{"client":"c","session":"s","node":"n"}}"#,
+    ));
+    (machine, transport)
+}
+
+/// The commands the emulation requests among `actions` carry, decoded.
+fn sent_emulated(actions: &[Action]) -> Vec<Value> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { frame, .. } => Codec::Json.emulation_frame(frame),
+            _ => None,
+        })
+        .flat_map(|frame| {
+            String::from_utf8(frame)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn emulated_requests(actions: &[Action], kind: i64) -> Vec<Value> {
+    sent_emulated(actions)
+        .into_iter()
+        .filter(|command| command["sub_refresh"]["type"] == kind)
+        .collect()
+}
+
+/// A shared poll subscription to "items" subscribed over an emulated
+/// transport, its stream open and its events taken.
+fn subscribed_emulated() -> (Machine, TransportId, SubscriptionId) {
+    let (mut machine, transport) = connected_emulated();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options(false))
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let actions = machine.handle(Input::Subscribe(id));
+    take_all(&mut machine, &actions);
+    let subscribe = sent_emulated(&actions)
+        .into_iter()
+        .find(|command| command.get("subscribe").is_some())
+        .expect("a subscribe command");
+    let answered = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": subscribe["id"], "subscribe": {"type": 4}}).to_string(),
+    ));
+    take_all(&mut machine, &answered);
+    (machine, transport, id)
+}
+
+fn reply_to(transport: TransportId, command: &Value) -> Input {
+    frame(
+        transport,
+        &serde_json::json!({"id": command["id"], "sub_refresh": {}}).to_string(),
+    )
+}
+
+// D12: over an emulated transport a subscription's requests go one at a
+// time, in the order made, each waiting for its reply.
+#[test]
+fn emulated_track_and_untrack_requests_go_one_at_a_time() {
+    let (mut machine, transport, id) = subscribed_emulated();
+
+    let tracked = emulated_requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1);
+    let held = machine.handle(Input::UntrackKeys(id, vec!["a".into()]));
+    let released = machine.handle(reply_to(transport, &tracked[0]));
+
+    assert_eq!(tracked.len(), 1);
+    assert!(emulated_requests(&held, 2).is_empty(), "{held:?}");
+    let untracked = emulated_requests(&released, 2);
+    assert_eq!(untracked.len(), 1);
+    assert_eq!(
+        untracked[0]["sub_refresh"]["untrack"],
+        serde_json::json!(["a"])
+    );
+}
+
+// D12: a reply deadline passing over emulation reconnects with connecting
+// 3 "shared poll request timeout"; a reply read stops it.
+#[test]
+fn an_emulated_request_without_a_reply_reconnects_with_code_3() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    machine.handle(Input::StreamOpened(None));
+    let actions = track(&mut machine, id, &[("a", 0)], "sig1");
+    let timer = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetSharedPollTimer(timer, delay) => Some((*timer, *delay)),
+            _ => None,
+        })
+        .expect("a reply deadline");
+    assert_eq!(timer.1, Config::default().timeout);
+
+    let fired = machine.handle(Input::SharedPollTimerFired(timer.0));
+
+    assert!(
+        fired.iter().any(|action| matches!(
+            action,
+            Action::Emit(_, crate::ClientEvent::Connecting { code: 3, reason })
+                if reason == "shared poll request timeout"
+        )),
+        "{fired:?}"
+    );
+
+    let (mut machine, transport2, id) = subscribed_emulated();
+    let _ = transport;
+    let actions = track(&mut machine, id, &[("a", 0)], "sig1");
+    let request = emulated_requests(&actions, 1)[0].clone();
+    let timer = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetSharedPollTimer(timer, _) => Some(*timer),
+            _ => None,
+        })
+        .unwrap();
+    machine.handle(reply_to(transport2, &request));
+    let late = machine.handle(Input::SharedPollTimerFired(timer));
+    assert!(
+        !late
+            .iter()
+            .any(|action| matches!(action, Action::CloseTransport(_))),
+        "{late:?}"
+    );
+}
+
+// D12: the next subscribe waits until the requests in flight are answered;
+// a queued request of the earlier subscription is dropped.
+#[test]
+fn an_emulated_resubscribe_waits_for_the_requests_in_flight() {
+    let (mut machine, transport, id) = subscribed_emulated();
+    let request = emulated_requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+    machine.handle(Input::UntrackKeys(id, vec!["b".into()]));
+
+    let resubscribing = machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"items","unsubscribe":{"code":2500,"reason":"resubscribe"}}}"#,
+    ));
+    take_all(&mut machine, &resubscribing);
+    let answered = machine.handle(reply_to(transport, &request));
+
+    assert!(
+        !sent_emulated(&resubscribing)
+            .iter()
+            .any(|command| command.get("subscribe").is_some()),
+        "{resubscribing:?}"
+    );
+    let commands = sent_emulated(&answered);
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.get("subscribe").is_some()),
+        "{answered:?}"
+    );
+    assert!(
+        emulated_requests(&answered, 2).is_empty(),
+        "the earlier untrack is dropped"
+    );
+}
+
+/// A shared poll subscription to "items" with a frame budget of `budget`,
+/// tracking keys `k0`.. under one signature per `per_batch` keys before
+/// subscribing, then subscribed: the machine, transport, id and the
+/// actions of the subscribe reply, which hold the replay.
+fn replaying(
+    budget: usize,
+    keys: usize,
+    per_batch: usize,
+) -> (Machine, TransportId, SubscriptionId, Vec<Action>) {
+    let (mut machine, transport) = connected();
+    let mut options = options(false);
+    options.max_track_frame_bytes = std::num::NonZeroUsize::new(budget).unwrap();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+    let names: Vec<String> = (0..keys).map(|n| format!("k{n:03}")).collect();
+    for (number, batch) in names.chunks(per_batch).enumerate() {
+        let items: Vec<(&str, u64)> = batch.iter().map(|key| (key.as_str(), u64::MAX)).collect();
+        track(&mut machine, id, &items, &format!("sig{number}"));
+    }
+    let actions = machine.handle(Input::Subscribe(id));
+    let replay = answer_subscribe(&mut machine, transport, &actions);
+    (machine, transport, id, replay)
+}
+
+// D7: the replay's batches are split over frames within the budget, sent
+// one after the other.
+#[test]
+fn a_replay_over_the_budget_goes_in_frames_one_after_the_other() {
+    let (mut machine, transport, _, replay) = replaying(1000, 30, 5);
+
+    let first = requests(&replay, 1);
+    assert_eq!(first.len(), 1, "one frame at a time");
+    let mut frames = vec![first[0].clone()];
+    loop {
+        let next = requests(
+            &machine.handle(reply_to(transport, frames.last().unwrap())),
+            1,
+        );
+        match next.len() {
+            0 => break,
+            1 => frames.push(next[0].clone()),
+            more => panic!("{more} frames at once"),
+        }
+    }
+    assert!(frames.len() > 1);
+    let mut keys = Vec::new();
+    for request in &frames {
+        assert!(request.to_string().len() <= 1000, "{request}");
+        keys.extend(items(request).into_iter().map(|(key, _)| key));
+    }
+    let expected: Vec<String> = (0..30).map(|n| format!("k{n:03}")).collect();
+    assert_eq!(keys, expected);
+}
+
+// D7: a permanent error on a replay frame untracks the keys of every frame
+// not accepted, the rest never sent.
+#[test]
+fn a_refused_replay_frame_untracks_the_keys_of_the_frames_not_sent() {
+    let (mut machine, transport, id, replay) = replaying(1000, 30, 5);
+    let first = requests(&replay, 1)[0].clone();
+
+    let refused = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": first["id"], "error": {"code": 103, "message": "permission denied"}})
+            .to_string(),
+    ));
+
+    assert!(requests(&refused, 1).is_empty(), "{refused:?}");
+    assert_eq!(updates(&refused).len(), 30);
+    assert_eq!(
+        machine.shared_poll_tracked_keys(id).unwrap(),
+        [] as [std::string::String; 0]
+    );
+}
+
+// D6: a batch over the budget is refused before it enters the library or
+// the wire: error 12 of kind Track, its keys removed.
+#[test]
+fn a_batch_over_the_budget_is_refused_before_it_is_sent() {
+    let (mut machine, transport) = connected();
+    let mut options = options(false);
+    options.max_track_frame_bytes = std::num::NonZeroUsize::new(1000).unwrap();
+    let id = machine
+        .add_shared_poll_subscription("items".into(), options)
+        .unwrap();
+    let keys: Vec<String> = (0..100).map(|n| format!("{n:020}")).collect();
+    let items: Vec<(&str, u64)> = keys.iter().map(|key| (key.as_str(), 0)).collect();
+
+    let refused = track(&mut machine, id, &items, "sig1");
+    let actions = machine.handle(Input::Subscribe(id));
+    let replay = answer_subscribe(&mut machine, transport, &actions);
+
+    assert!(
+        matches!(
+            &events(&refused)[0].1,
+            SharedPollSubscriptionEvent::Error(error)
+                if error.kind == ErrorKind::Track && error.code == codes::error::BAD_CONFIGURATION
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(updates(&refused).len(), 100);
+    assert_eq!(sent(&refused), [] as [serde_json::Value; 0]);
+    assert!(requests(&replay, 1).is_empty(), "not kept for the replay");
+    assert_eq!(
+        machine.shared_poll_tracked_keys(id).unwrap(),
+        [] as [std::string::String; 0]
+    );
+}

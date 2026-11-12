@@ -343,6 +343,12 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
                 builder.get_signature(signing_with(&calls, "sig1"))
             });
         }
+        " with max_track_frame_bytes 1000, subscribed, whose stream was taken" => {
+            a_shared_poll_subscription(world, &channel, |builder| {
+                builder.max_track_frame_bytes(std::num::NonZeroUsize::new(1000).unwrap())
+            });
+            subscribed(world).await;
+        }
         " with a get_signature callback that has subscribed" => {
             a_shared_poll_subscription(world, &channel, |builder| {
                 builder.get_signature(signing_with(&calls, "sig1"))
@@ -1124,4 +1130,45 @@ async fn yields_a_removal(world: &mut ClientWorld, key: String) {
         (update.key, update.removed, update.data, update.version),
         (key, true, Vec::new(), None)
     );
+}
+
+#[when(
+    regex = r#"^track_with_signature is called with (\d+) keys of (\d+) bytes and signature "(\w+)"$"#
+)]
+fn track_many(world: &mut ClientWorld, count: usize, size: usize, signature: String) {
+    let keys: Vec<String> = (0..count).map(|n| format!("{n:0>size$}")).collect();
+    world.shared_polls.keys.clone_from(&keys);
+    world.shared_poll().track_with_signature(
+        keys.into_iter().map(|key| SharedPollTrackItem::new(key, 0)),
+        signature,
+    );
+}
+
+#[then(
+    regex = r"^the stream yields an error with code (\d+) of kind Track and (\d+) updates with removed true$"
+)]
+async fn an_error_and_many_removals(world: &mut ClientWorld, code: u32, count: usize) {
+    let events = world.shared_polls.events.as_mut().expect("a stream");
+    let SharedPollSubscriptionEvent::Error(error) = next_of(events).await else {
+        panic!("expected an error first");
+    };
+    assert_eq!(
+        (error.code, error.kind),
+        (code, ErrorKind::Track),
+        "{error:?}"
+    );
+    let mut removed = Vec::new();
+    for _ in 0..count {
+        let update = next_update(events).await;
+        assert!(update.removed, "{update:?}");
+        removed.push(update.key);
+    }
+    assert_eq!(removed, world.shared_polls.keys);
+}
+
+#[then("the fake server receives no sub_refresh")]
+async fn no_sub_refresh(world: &mut ClientWorld) {
+    tokio::time::sleep(QUIET_PERIOD).await;
+    let channel = world.shared_poll().channel().to_owned();
+    assert_eq!(sub_refreshes(world, &channel), Vec::<Value>::new());
 }
