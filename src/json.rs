@@ -13,7 +13,7 @@ use crate::wire::{
     ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, FOSSIL,
     HistoryRequest, HistoryResult, Method, PresenceStatsResult, PublishRequest, Push,
     RefreshRequest, RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest,
-    SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    SubRefreshResult, SubscribeRequest, SubscribeResult, TrackBatch, UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -272,7 +272,45 @@ struct JsonUnsubscribeRequest<'a> {
 #[derive(Serialize)]
 struct JsonSubRefreshRequest<'a> {
     channel: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
     token: &'a str,
+    /// A shared poll track (1) or untrack (2) request (Block 47, D3).
+    #[serde(rename = "type", skip_serializing_if = "is_zero_i32")]
+    kind: i32,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    track: Vec<JsonTrackBatch<'a>>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    untrack: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonTrackBatch<'a> {
+    signature: &'a str,
+    items: Vec<JsonKeyedItem<'a>>,
+}
+
+/// A key at version 0 goes as `{"key":"k"}` (Block 47, D3).
+#[derive(Serialize)]
+struct JsonKeyedItem<'a> {
+    key: &'a str,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    version: u64,
+}
+
+impl<'a> From<&'a TrackBatch> for JsonTrackBatch<'a> {
+    fn from(batch: &'a TrackBatch) -> Self {
+        Self {
+            signature: &batch.signature.0,
+            items: batch
+                .items
+                .iter()
+                .map(|item| JsonKeyedItem {
+                    key: &item.key,
+                    version: item.version,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -421,10 +459,19 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
             Method::Unsubscribe(UnsubscribeRequest { channel }) => {
                 json.unsubscribe = Some(JsonUnsubscribeRequest { channel });
             }
-            Method::SubRefresh(SubRefreshRequest { channel, token }) => {
+            Method::SubRefresh(SubRefreshRequest {
+                channel,
+                token,
+                kind,
+                track,
+                untrack,
+            }) => {
                 json.sub_refresh = Some(JsonSubRefreshRequest {
                     channel,
                     token: &token.0,
+                    kind: *kind,
+                    track: track.iter().map(JsonTrackBatch::from).collect(),
+                    untrack,
                 });
             }
             Method::Rpc(RpcRequest { method, data }) => {
@@ -540,10 +587,11 @@ fn reply(fields: BTreeMap<String, Box<RawValue>>) -> Result<Reply, DecodeError> 
                 result = Some(ReplyResult::Unsubscribe);
             }
             "sub_refresh" => {
-                let refresh: JsonRefreshResult = field(&value)?;
-                result = Some(ReplyResult::SubRefresh(RefreshResult {
+                let refresh: JsonSubRefreshResult = field(&value)?;
+                result = Some(ReplyResult::SubRefresh(SubRefreshResult {
                     expires: refresh.expires,
                     ttl: refresh.ttl,
+                    items: refresh.items.into_iter().map(Publication::from).collect(),
                 }));
             }
             "rpc" => {
@@ -669,6 +717,15 @@ impl From<JsonConnectResult> for ConnectResult {
 struct JsonRefreshResult {
     expires: bool,
     ttl: u32,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct JsonSubRefreshResult {
+    expires: bool,
+    ttl: u32,
+    /// A shared poll track reply's values (Block 47, D7).
+    items: Vec<JsonPublication>,
 }
 
 #[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeResult.
@@ -855,6 +912,9 @@ struct JsonPublication {
     key: String,
     #[serde(default)]
     removed: bool,
+    /// A shared poll value's version (Block 47, D3).
+    #[serde(default)]
+    version: u64,
 }
 
 impl From<JsonPublication> for Publication {
@@ -871,7 +931,11 @@ impl From<JsonPublication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
-            map: crate::subscription::MapPart::of(publication.key, publication.removed),
+            map: crate::subscription::MapPart::of(
+                publication.key,
+                publication.removed,
+                publication.version,
+            ),
         }
     }
 }
@@ -1659,6 +1723,7 @@ mod tests {
                 method: Method::SubRefresh(SubRefreshRequest {
                     channel: "news".into(),
                     token: Secret("t2".into()),
+                    ..SubRefreshRequest::default()
                 }),
             },
         ]);
@@ -1692,9 +1757,10 @@ mod tests {
         );
         assert_eq!(
             replies[1].result,
-            ReplyResult::SubRefresh(RefreshResult {
+            ReplyResult::SubRefresh(SubRefreshResult {
                 expires: true,
-                ttl: 30
+                ttl: 30,
+                items: Vec::new(),
             })
         );
         assert_eq!(
@@ -1839,5 +1905,100 @@ mod tests {
     fn malformed_frame_is_an_error() {
         assert!(decode(b"{\"id\":1,").is_err());
         assert!(decode(b"[1,2]").is_err());
+    }
+
+    // Block 47, D3: a track request carries its batches, a key at version 0
+    // without a version; an untrack request its keys; neither a token.
+    #[test]
+    fn encodes_shared_poll_track_and_untrack_requests() {
+        use crate::wire::{KeyedItem, TRACK, UNTRACK};
+        let frame = encode(&[
+            Command {
+                id: 4,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "items".into(),
+                    kind: TRACK,
+                    track: vec![TrackBatch {
+                        signature: Secret("sig1".into()),
+                        items: vec![
+                            KeyedItem {
+                                key: "a".into(),
+                                version: 3,
+                            },
+                            KeyedItem {
+                                key: "b".into(),
+                                version: 0,
+                            },
+                        ],
+                    }],
+                    untrack: vec!["c".into()],
+                    ..SubRefreshRequest::default()
+                }),
+            },
+            Command {
+                id: 5,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "items".into(),
+                    kind: UNTRACK,
+                    untrack: vec!["a".into(), "b".into()],
+                    ..SubRefreshRequest::default()
+                }),
+            },
+        ]);
+
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            concat!(
+                r#"{"id":4,"sub_refresh":{"channel":"items","type":1,"track":[{"signature":"sig1","items":[{"key":"a","version":3},{"key":"b"}]}],"untrack":["c"]}}"#,
+                "\n",
+                r#"{"id":5,"sub_refresh":{"channel":"items","type":2,"untrack":["a","b"]}}"#,
+            )
+        );
+    }
+
+    // Block 47, D3: a track reply's items and a pushed value keep their key,
+    // data and version; a removal has neither data nor version.
+    #[test]
+    fn decodes_shared_poll_items_and_versions() {
+        let frame = concat!(
+            r#"{"id":4,"sub_refresh":{"items":[{"key":"a","data":{"v":2},"version":2}]}}"#,
+            "\n",
+            r#"{"push":{"channel":"items","pub":{"key":"b","data":{"v":3},"version":3}}}"#,
+            "\n",
+            r#"{"push":{"channel":"items","pub":{"key":"c","removed":true}}}"#,
+        );
+
+        let replies = decode(frame.as_bytes()).unwrap();
+
+        let ReplyResult::SubRefresh(result) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        let keyed = |publication: &Publication| {
+            let part = publication.map.as_deref().unwrap();
+            (
+                part.key.clone(),
+                publication.data.clone(),
+                part.removed,
+                part.version,
+            )
+        };
+        assert_eq!(
+            keyed(&result.items[0]),
+            ("a".into(), br#"{"v":2}"#.to_vec(), false, 2)
+        );
+        let pushed: Vec<_> = replies[1..]
+            .iter()
+            .map(|reply| match &reply.result {
+                ReplyResult::Push(Push::Publication { publication, .. }) => keyed(publication),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            pushed,
+            [
+                ("b".into(), br#"{"v":3}"#.to_vec(), false, 3),
+                ("c".into(), Vec::new(), true, 0),
+            ]
+        );
     }
 }

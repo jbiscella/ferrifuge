@@ -114,12 +114,45 @@ pub(crate) struct UnsubscribeRequest {
     pub(crate) channel: String,
 }
 
-/// `SubRefreshRequest` of `client.proto`.
+/// `SubRefreshRequest` of `client.proto`: a token refresh (`type` 0), or a
+/// shared poll subscription's track (1) or untrack (2) request (Block 47,
+/// D3). Zero and empty fields are not encoded, so a token refresh's frame is
+/// unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubRefreshRequest {
     pub(crate) channel: String,
     pub(crate) token: Secret,
+    /// `type`: 0 token refresh, 1 track, 2 untrack.
+    pub(crate) kind: i32,
+    /// Batches of keys to track, for `type` 1.
+    pub(crate) track: Vec<TrackBatch>,
+    /// Keys to stop tracking, for `type` 2; also honoured with `type` 1.
+    pub(crate) untrack: Vec<String>,
 }
+
+/// `TrackBatch` of `client.proto`: keys tracked under one signature, which
+/// covers exactly these keys in this order. Its `Debug` output redacts the
+/// signature, a credential (Block 47, D16).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TrackBatch {
+    pub(crate) signature: Secret,
+    pub(crate) items: Vec<KeyedItem>,
+}
+
+/// `KeyedItem` of `client.proto`: a key, and the version of its value the
+/// client holds, 0 for none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeyedItem {
+    pub(crate) key: String,
+    pub(crate) version: u64,
+}
+
+/// `SubRefreshRequest.type` of a shared poll track request.
+#[allow(dead_code)] // Shared poll only, sent from 47a's core.
+pub(crate) const TRACK: i32 = 1;
+/// `SubRefreshRequest.type` of a shared poll untrack request.
+#[allow(dead_code)] // Shared poll only, sent from 47a's core.
+pub(crate) const UNTRACK: i32 = 2;
 
 /// `RPCRequest` of `client.proto`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -181,8 +214,8 @@ pub(crate) enum ReplyResult {
     Refresh(RefreshResult),
     Subscribe(SubscribeResult),
     Unsubscribe,
-    /// `SubRefreshResult`, which has the fields of a `RefreshResult`.
-    SubRefresh(RefreshResult),
+    /// `SubRefreshResult`.
+    SubRefresh(SubRefreshResult),
     /// `RPCResult.data`: raw JSON with the JSON protocol, any bytes with
     /// Protobuf; empty when the server sent none.
     Rpc(Vec<u8>),
@@ -248,6 +281,16 @@ pub(crate) struct PresenceStatsResult {
 pub(crate) struct RefreshResult {
     pub(crate) expires: bool,
     pub(crate) ttl: u32,
+}
+
+/// `SubRefreshResult` of `client.proto`: a `RefreshResult`'s fields, and the
+/// values a shared poll track request's reply carries (Block 47, D7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubRefreshResult {
+    pub(crate) expires: bool,
+    pub(crate) ttl: u32,
+    /// Track replies: values of tracked keys newer than the versions sent.
+    pub(crate) items: Vec<Publication>,
 }
 
 /// `SubscribeResult` of `client.proto`, for the fields implemented so far.

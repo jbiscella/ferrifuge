@@ -10,8 +10,8 @@ use crate::protocol as pb;
 use crate::wire::{
     ChannelRequest, Command, ConnectRequest, ConnectResult, Disconnect, Error, HistoryRequest,
     HistoryResult, Method, PresenceStatsResult, PublishRequest, Push, RefreshRequest,
-    RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubscribeRequest,
-    SubscribeResult, UnsubscribeRequest,
+    RefreshResult, Reply, ReplyResult, RpcRequest, SubRefreshRequest, SubRefreshResult,
+    SubscribeRequest, SubscribeResult, UnsubscribeRequest,
 };
 use crate::{ClientInfo, Publication};
 
@@ -196,11 +196,32 @@ impl From<&Command> for pb::Command {
                     channel: channel.clone(),
                 });
             }
-            Method::SubRefresh(SubRefreshRequest { channel, token }) => {
+            Method::SubRefresh(SubRefreshRequest {
+                channel,
+                token,
+                kind,
+                track,
+                untrack,
+            }) => {
                 pb.sub_refresh = Some(pb::SubRefreshRequest {
                     channel: channel.clone(),
                     token: token.0.clone(),
-                    ..pb::SubRefreshRequest::default()
+                    r#type: *kind,
+                    track: track
+                        .iter()
+                        .map(|batch| pb::TrackBatch {
+                            signature: batch.signature.0.clone(),
+                            items: batch
+                                .items
+                                .iter()
+                                .map(|item| pb::KeyedItem {
+                                    key: item.key.clone(),
+                                    version: item.version,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    untrack: untrack.clone(),
                 });
             }
             Method::Rpc(RpcRequest { method, data }) => {
@@ -317,9 +338,10 @@ impl From<pb::Reply> for Reply {
         } else if reply.unsubscribe.is_some() {
             ReplyResult::Unsubscribe
         } else if let Some(refresh) = reply.sub_refresh {
-            ReplyResult::SubRefresh(RefreshResult {
+            ReplyResult::SubRefresh(SubRefreshResult {
                 expires: refresh.expires,
                 ttl: refresh.ttl,
+                items: refresh.items.into_iter().map(Publication::from).collect(),
             })
         } else if let Some(rpc) = reply.rpc {
             ReplyResult::Rpc(rpc.data)
@@ -442,7 +464,11 @@ impl From<pb::Publication> for Publication {
             epoch: (!publication.epoch.is_empty()).then_some(publication.epoch),
             channel: (!publication.channel.is_empty()).then_some(publication.channel),
             delta: publication.delta,
-            map: crate::subscription::MapPart::of(publication.key, publication.removed),
+            map: crate::subscription::MapPart::of(
+                publication.key,
+                publication.removed,
+                publication.version,
+            ),
         }
     }
 }
@@ -1525,6 +1551,7 @@ mod tests {
                 method: Method::SubRefresh(SubRefreshRequest {
                     channel: "news".into(),
                     token: Secret("t2".into()),
+                    ..SubRefreshRequest::default()
                 }),
             },
         ]);
@@ -1578,9 +1605,10 @@ mod tests {
         );
         assert_eq!(
             replies[1].result,
-            ReplyResult::SubRefresh(RefreshResult {
+            ReplyResult::SubRefresh(SubRefreshResult {
                 expires: true,
-                ttl: 30
+                ttl: 30,
+                items: Vec::new(),
             })
         );
         assert_eq!(
@@ -1590,6 +1618,112 @@ mod tests {
                 code: 2500,
                 reason: "resubscribe".into()
             })
+        );
+    }
+
+    // Block 47, D3: a token refresh is encoded byte for byte as before the
+    // track fields; a track request carries its batches and inline untrack,
+    // an untrack request its keys; a track reply's items keep their key,
+    // data and version.
+    #[test]
+    fn shared_poll_fields_round_trip_and_leave_a_token_refresh_unchanged() {
+        use crate::wire::{KeyedItem, TRACK, TrackBatch, UNTRACK};
+        let refresh = encode(&[Command {
+            id: 3,
+            method: Method::SubRefresh(SubRefreshRequest {
+                channel: "news".into(),
+                token: Secret("t2".into()),
+                ..SubRefreshRequest::default()
+            }),
+        }]);
+        let before = pb::Command {
+            id: 3,
+            sub_refresh: Some(pb::SubRefreshRequest {
+                channel: "news".into(),
+                token: "t2".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+        assert_eq!(refresh, before);
+
+        let frame = encode(&[
+            Command {
+                id: 4,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "items".into(),
+                    kind: TRACK,
+                    track: vec![TrackBatch {
+                        signature: Secret("sig1".into()),
+                        items: vec![KeyedItem {
+                            key: "a".into(),
+                            version: 3,
+                        }],
+                    }],
+                    untrack: vec!["c".into()],
+                    ..SubRefreshRequest::default()
+                }),
+            },
+            Command {
+                id: 5,
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel: "items".into(),
+                    kind: UNTRACK,
+                    untrack: vec!["a".into()],
+                    ..SubRefreshRequest::default()
+                }),
+            },
+        ]);
+        let mut commands = frame.as_slice();
+        let track = pb::Command::decode_length_delimited(&mut commands)
+            .unwrap()
+            .sub_refresh
+            .unwrap();
+        let untrack = pb::Command::decode_length_delimited(&mut commands)
+            .unwrap()
+            .sub_refresh
+            .unwrap();
+        assert_eq!((track.r#type, track.token.as_str()), (1, ""));
+        assert_eq!(track.track[0].signature, "sig1");
+        assert_eq!(
+            (
+                track.track[0].items[0].key.as_str(),
+                track.track[0].items[0].version
+            ),
+            ("a", 3)
+        );
+        assert_eq!(track.untrack, ["c"]);
+        assert_eq!(
+            (untrack.r#type, untrack.untrack.clone()),
+            (2, vec!["a".to_owned()])
+        );
+
+        let replies = decode(&frame_of(&[pb::Reply {
+            id: 4,
+            sub_refresh: Some(pb::SubRefreshResult {
+                items: vec![pb::Publication {
+                    key: "a".into(),
+                    data: vec![0xff, 0x00],
+                    version: 7,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]))
+        .unwrap();
+        let ReplyResult::SubRefresh(result) = &replies[0].result else {
+            panic!("{:?}", replies[0]);
+        };
+        let part = result.items[0].map.as_deref().unwrap();
+        assert_eq!(
+            (
+                part.key.as_str(),
+                part.version,
+                result.items[0].data.as_slice()
+            ),
+            ("a", 7, [0xff, 0x00].as_slice())
         );
     }
 

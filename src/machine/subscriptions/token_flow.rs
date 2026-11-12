@@ -12,7 +12,9 @@ use super::super::tokens::{FetchPurpose, TOKEN_EXPIRED, refresh_delay};
 use super::super::{Action, FetchId, Machine, SubscriptionId, SubscriptionTimer};
 use crate::backoff;
 use crate::token::Secret;
-use crate::wire::{Command, Error, Method, RefreshResult, Reply, ReplyResult, SubRefreshRequest};
+use crate::wire::{
+    Command, Error, Method, Reply, ReplyResult, SubRefreshRequest, SubRefreshResult,
+};
 use crate::{
     ClientError, ErrorKind, State, SubscriptionEvent, SubscriptionState, TokenError, codes,
 };
@@ -203,7 +205,11 @@ impl Machine {
             transport,
             Command {
                 id: command_id,
-                method: Method::SubRefresh(SubRefreshRequest { channel, token }),
+                method: Method::SubRefresh(SubRefreshRequest {
+                    channel,
+                    token,
+                    ..SubRefreshRequest::default()
+                }),
             },
         );
         self.actions.push(Action::SetSubscriptionTimer(
@@ -255,7 +261,7 @@ impl Machine {
                 self.retry_subscription_refresh(id);
             }
             (Some(error), _) => self.set_unsubscribed(id, error.code, &error.message, true),
-            (None, ReplyResult::SubRefresh(RefreshResult { expires, ttl })) => {
+            (None, ReplyResult::SubRefresh(SubRefreshResult { expires, ttl, .. })) => {
                 if expires {
                     self.schedule_subscription_refresh(id, ttl);
                 }
