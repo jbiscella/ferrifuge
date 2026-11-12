@@ -1132,9 +1132,7 @@ impl Machine {
             .get_mut(&id)
             .and_then(|sub| sub.shared_poll.as_deref_mut())
         {
-            for timer in flow.forget() {
-                self.actions.push(Action::CancelSharedPollTimer(timer));
-            }
+            self.actions.extend(flow.forget(id));
         }
         self.set_unsubscribed(
             id,
@@ -1207,9 +1205,7 @@ impl Machine {
         // to its requests in flight change nothing (Block 47, D5, D12).
         #[cfg(feature = "unstable")]
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
-            for timer in flow.forget() {
-                self.actions.push(Action::CancelSharedPollTimer(timer));
-            }
+            self.actions.extend(flow.forget(id));
         }
         // A later subscribe() starts its retries over (centrifuge-js
         // `_clearSubscribingState`).
@@ -1670,6 +1666,17 @@ impl Machine {
             SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Unsubscribed { .. }
         ) {
             self.withdraw(&Owner::Client(id));
+            // A shared poll subscription's refresh and retries stop (Block
+            // 47, D7).
+            #[cfg(feature = "unstable")]
+            if let Some(flow) = self
+                .subscriptions
+                .by_id
+                .get_mut(&id)
+                .and_then(|sub| sub.shared_poll.as_deref_mut())
+            {
+                self.actions.extend(flow.left_subscribed(id));
+            }
         }
         #[cfg(feature = "unstable")]
         if self.is_map(id) {

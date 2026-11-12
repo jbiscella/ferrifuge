@@ -94,6 +94,11 @@ pub(in crate::machine) struct SharedPollFlow {
     refresh_attempts: u32,
     sign_attempts: u32,
     grace_attempts: u32,
+    /// The owner runs the subscription's refresh timer (D7).
+    refresh_armed: bool,
+    /// The worst-case cost of the longest signature received, at least
+    /// that of one of 128 bytes: chunks are sized for it (D6).
+    signature_cost: usize,
 }
 
 /// What a track or untrack request is for.
@@ -176,6 +181,8 @@ impl SharedPollFlow {
             refresh_attempts: 0,
             sign_attempts: 0,
             grace_attempts: 0,
+            refresh_armed: false,
+            signature_cost: signing::unknown_signature_cost(),
         }
     }
 
@@ -251,33 +258,52 @@ impl SharedPollFlow {
         }
     }
 
-    /// `unsubscribe()`: the keys and signatures go with it, so the next
-    /// subscribe starts cold (D5, `set_unsubscribed`); what it asked for
-    /// and scheduled ends. The timers to cancel.
+    /// `unsubscribe()` of subscription `id`: the keys and signatures go
+    /// with it, so the next subscribe starts cold (D5, `set_unsubscribed`);
+    /// what it asked for and scheduled ends. The actions cancelling its
+    /// timers.
     #[must_use]
-    pub(in crate::machine) fn forget(&mut self) -> Vec<SharedPollTimer> {
+    pub(in crate::machine) fn forget(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.tracked.clear();
         self.library.clear();
         self.queue.clear();
-        self.end_period()
+        self.end_period(id)
     }
 
-    /// The subscription became `subscribed` again: what an earlier period
+    /// Subscription `id` became `subscribed` again: what an earlier period
     /// asked for or scheduled is abandoned, and the retries start over (D7,
-    /// I13). The timers to cancel.
+    /// I13). The actions cancelling its timers.
     #[must_use]
-    fn restart(&mut self) -> Vec<SharedPollTimer> {
+    fn restart(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.generation += 1;
-        self.end_period()
+        self.end_period(id)
     }
 
-    fn end_period(&mut self) -> Vec<SharedPollTimer> {
+    fn end_period(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.signing.clear();
+        self.left_subscribed(id)
+    }
+
+    /// Subscription `id` left `subscribed`: its refresh and retry timers
+    /// stop, and the retries and the refresh guard start over (D7). A
+    /// request to the callback in flight stays until the next subscribe,
+    /// its answer then changing nothing (I13). The actions cancelling the
+    /// timers.
+    #[must_use]
+    pub(in crate::machine) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.refresh_again = false;
         self.refresh_attempts = 0;
         self.sign_attempts = 0;
         self.grace_attempts = 0;
-        self.timers.drain(..).map(|(timer, _)| timer).collect()
+        let mut cancel: Vec<Action> = self
+            .timers
+            .drain(..)
+            .map(|(timer, _)| Action::CancelSharedPollTimer(timer))
+            .collect();
+        if std::mem::take(&mut self.refresh_armed) {
+            cancel.push(Action::CancelSharedPollRefresh(id));
+        }
+        cancel
     }
 
     /// The connection is gone: nothing queued for it is sent.
@@ -452,6 +478,7 @@ impl Machine {
             }
             Input::UntrackKeys(id, keys) => self.untrack_keys(id, keys),
             Input::SharedPollTimerFired(timer) => self.shared_poll_timer_fired(timer),
+            Input::SharedPollRefreshFired(id) => self.refresh_fired(id),
             Input::SignatureFetched {
                 subscription,
                 request,
@@ -896,9 +923,7 @@ impl Machine {
         sub.backoff.reset();
         sub.tokens.connected();
         if let Some(flow) = sub.shared_poll.as_deref_mut() {
-            for timer in flow.restart() {
-                self.actions.push(Action::CancelSharedPollTimer(timer));
-            }
+            self.actions.extend(flow.restart(id));
         }
         self.withdraw(&Owner::Client(id));
         self.rearm_subscription_refresh(id, result.expires, result.ttl);

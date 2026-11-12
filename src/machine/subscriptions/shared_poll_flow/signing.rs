@@ -25,6 +25,11 @@ const CALLBACK_MISSING: &str = "get_signature callback required for track(keys)"
 /// (D6).
 const UNKNOWN_SIGNATURE_LENGTH: usize = 128;
 
+/// The worst-case cost of a signature not known yet (D6, D7).
+pub(super) fn unknown_signature_cost() -> usize {
+    escaped_twice(&"0".repeat(UNKNOWN_SIGNATURE_LENGTH))
+}
+
 /// The bounds of the retries of a refresh and of signing the keys without
 /// a signature (D7, `src/subscription.ts:2091`, `:2240-2245`).
 const RETRY_MIN: Duration = Duration::from_secs(5);
@@ -71,11 +76,11 @@ enum Retry {
     Sign,
 }
 
-/// A timer of a subscription's `subscribed` period (D7).
+/// A retry timer of a subscription's `subscribed` period (D7); the
+/// refresh at an expiry is the owner's timer of the subscription
+/// ([`Action::SetSharedPollRefresh`]).
 #[derive(Debug, Clone, Copy)]
 pub(in crate::machine) enum FlowTimer {
-    /// A signature expires after this delay from when it was set.
-    Refresh(Duration),
     /// The refresh failed and runs again.
     RefreshRetry,
     /// Signing the keys without a signature failed and runs again.
@@ -83,14 +88,13 @@ pub(in crate::machine) enum FlowTimer {
 }
 
 impl SharedPollFlow {
-    /// `keys` in chunks, in order, each a batch within `budget` by D7's
-    /// worst-case cost whatever versions it later holds, its signature
-    /// counted at [`UNKNOWN_SIGNATURE_LENGTH`] (D6); a key too large for
-    /// any goes alone.
-    fn chunks(channel: &str, keys: Vec<String>, budget: usize) -> VecDeque<Vec<String>> {
-        let base = Self::track_cost(channel, [])
-            + BATCH_COST
-            + escaped_twice(&"0".repeat(UNKNOWN_SIGNATURE_LENGTH));
+    /// `keys` in chunks, in order, each a batch within the frame budget by
+    /// D7's worst-case cost whatever versions it later holds, its signature
+    /// counted as the longest received, at least [`UNKNOWN_SIGNATURE_LENGTH`]
+    /// bytes (D6); a key too large for any goes alone.
+    fn chunks(&self, channel: &str, keys: Vec<String>) -> VecDeque<Vec<String>> {
+        let budget = self.max_track_frame_bytes;
+        let base = Self::track_cost(channel, []) + BATCH_COST + self.signature_cost;
         let mut chunks = VecDeque::new();
         let mut chunk = Vec::new();
         let mut cost = base;
@@ -166,8 +170,7 @@ impl Machine {
         if !flow.signature_source {
             return self.signature_callback_missing(id);
         }
-        let mut pending =
-            SharedPollFlow::chunks(&sub.channel, keys.clone(), flow.max_track_frame_bytes);
+        let mut pending = flow.chunks(&sub.channel, keys.clone());
         let Some(first) = pending.pop_front() else {
             return;
         };
@@ -239,6 +242,8 @@ impl Machine {
             }
             Ok(signature) => signature,
         };
+        // Later chunks are sized for it (D6).
+        flow.signature_cost = flow.signature_cost.max(escaped_twice(&signature.signature));
         let signed = Signed {
             keys: signature.keys,
             signature: Secret(signature.signature),
@@ -407,8 +412,14 @@ impl Machine {
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
         };
-        let ended = flow
-            .take_timers(|kind| matches!(kind, FlowTimer::Refresh(_) | FlowTimer::RefreshRetry));
+        let mut ended: Vec<Action> = flow
+            .take_timers(|kind| matches!(kind, FlowTimer::RefreshRetry))
+            .into_iter()
+            .map(Action::CancelSharedPollTimer)
+            .collect();
+        if std::mem::take(&mut flow.refresh_armed) {
+            ended.push(Action::CancelSharedPollRefresh(id));
+        }
         let keys = flow.keys();
         let running = flow
             .signing
@@ -424,9 +435,7 @@ impl Machine {
             }
             None => flow.signature_source && !keys.is_empty(),
         };
-        for timer in ended {
-            self.actions.push(Action::CancelSharedPollTimer(timer));
-        }
+        self.actions.extend(ended);
         if start {
             self.request_signature(id, keys, Origin::Refresh);
         }
@@ -466,19 +475,21 @@ impl Machine {
                 backoff::delay(step, GRACE_MIN, GRACE_MAX, &mut self.rng)
             }
         };
-        // A timer set earlier for no longer fires no later.
-        let earlier = flow
-            .timers
-            .iter()
-            .any(|(_, kind)| matches!(kind, FlowTimer::Refresh(set) if *set <= delay));
-        if earlier {
-            return;
+        // The owner keeps the earliest deadline, one timer per
+        // subscription, as it has the clock.
+        flow.refresh_armed = true;
+        self.actions.push(Action::SetSharedPollRefresh(id, delay));
+    }
+
+    /// The refresh timer of `id` fired (D7); one not armed, cancelled or of
+    /// a subscription no longer subscribed does nothing.
+    pub(super) fn refresh_fired(&mut self, id: SubscriptionId) {
+        let armed = self
+            .shared_poll_flow(id)
+            .is_some_and(|flow| std::mem::take(&mut flow.refresh_armed));
+        if armed && self.subscribed_now(id) {
+            self.start_refresh(id);
         }
-        let timer = self.new_shared_poll_timer();
-        if let Some(flow) = self.shared_poll_flow(id) {
-            flow.timers.push((timer, FlowTimer::Refresh(delay)));
-        }
-        self.actions.push(Action::SetSharedPollTimer(timer, delay));
     }
 
     /// Schedules `retry` after Block 2's backoff between 5 s and 30 s, its
@@ -526,7 +537,7 @@ impl Machine {
             return;
         }
         match kind {
-            FlowTimer::Refresh(_) | FlowTimer::RefreshRetry => self.start_refresh(id),
+            FlowTimer::RefreshRetry => self.start_refresh(id),
             FlowTimer::SignRetry => self.sign_unsigned(id),
         }
     }

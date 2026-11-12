@@ -147,8 +147,9 @@ impl FrameId {
 pub struct DebounceTimer(u64);
 
 /// Identifies a timer of a shared poll subscription (Block 47, D3): the
-/// reply deadline of a track or untrack request, the refresh of its
-/// signatures, or a retry. The owner runs it for the
+/// reply deadline of a track or untrack request, or a retry of its
+/// signature refresh or signing; the refresh itself runs on
+/// [`Action::SetSharedPollRefresh`]. The owner runs it for the
 /// [`Action::SetSharedPollTimer`] and reports it with
 /// [`Input::SharedPollTimerFired`]; a machine never reuses a number, so a
 /// firing for a request already answered, or a timer since cancelled, is
