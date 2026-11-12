@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use cucumber::{given, then, when};
 use ferrifuge::{
-    Client, DeltaFormat, ErrorKind, MapKind, Protocol, SharedPollSignature, SharedPollSubscription,
+    Client, ErrorKind, MapKind, Protocol, SharedPollSignature, SharedPollSubscription,
     SharedPollSubscriptionEvent, SharedPollTrackItem, SharedPollUpdate, State, SubscriptionState,
 };
 use futures_util::{Stream, StreamExt};
@@ -370,14 +370,11 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
 }
 
 #[given(
-    regex = r#"^a shared poll subscription to channel "(\w+)" with data \{"a":1\}, delta and a token$"#
+    regex = r#"^a shared poll subscription to channel "(\w+)" with data \{"a":1\} and a token$"#
 )]
 fn a_subscription_with_options(world: &mut ClientWorld, channel: String) {
     a_shared_poll_subscription(world, &channel, |builder| {
-        builder
-            .data(br#"{"a":1}"#.to_vec())
-            .delta(DeltaFormat::Fossil)
-            .token("t1")
+        builder.data(br#"{"a":1}"#.to_vec()).token("t1")
     });
 }
 
@@ -387,7 +384,7 @@ fn subscribe_is_called(world: &mut ClientWorld) {
 }
 
 #[then(
-    regex = r#"^the subscribe command for "(\w+)" has type 4, the data \{"a":1\}, delta "fossil" and the token$"#
+    regex = r#"^the subscribe command for "(\w+)" has type 4, the data \{"a":1\} and the token$"#
 )]
 async fn the_subscribe_command(world: &mut ClientWorld, channel: String) {
     let fake = world.fake();
@@ -405,7 +402,6 @@ async fn the_subscribe_command(world: &mut ClientWorld, channel: String) {
         .clone();
     assert_eq!(subscribe["type"], 4, "{subscribe}");
     assert_eq!(subscribe["data"], json!({"a": 1}), "{subscribe}");
-    assert_eq!(subscribe["delta"], "fossil", "{subscribe}");
     assert_eq!(subscribe["token"], "t1", "{subscribe}");
     world.shared_polls.subscribe = Some(subscribe);
 }
