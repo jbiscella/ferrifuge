@@ -281,6 +281,23 @@ impl ServerApi {
             None => Ok(body.get_mut("result").map(Value::take).unwrap_or_default()),
         }
     }
+
+    /// Sets `key` of the shared poll channel `channel` to `data` at
+    /// `version` (`shared_poll_publish`, on a namespace with
+    /// `publish_enabled`; Block 47, D18).
+    pub(crate) async fn shared_poll_publish(
+        &self,
+        channel: &str,
+        key: &str,
+        version: u64,
+        data: Value,
+    ) -> Result<Value, ApiError> {
+        self.call(
+            "shared_poll_publish",
+            serde_json::json!({"channel": channel, "key": key, "version": version, "data": data}),
+        )
+        .await
+    }
 }
 
 impl Drop for Centrifugo {

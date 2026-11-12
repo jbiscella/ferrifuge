@@ -44,6 +44,55 @@ pub(crate) fn subscription_token_with_info(
     }))
 }
 
+/// HMAC secret the test server verifies shared poll signatures with
+/// (Block 47, D18).
+pub(crate) const SHARED_POLL_SECRET: &str = "test-shared-poll-secret";
+
+/// A shared poll signature for `user` (empty for anonymous) over `keys` of
+/// `channel`, in that order, expiring `expiry` from now, or never for
+/// `None`: `iat:exp:hex(HMAC-SHA256(secret, iat \0 exp \0 user \0 channel
+/// \0 hex(SHA-256(keys joined by \0)))))` (Centrifugo's shared poll
+/// documentation, "Signature").
+pub(crate) fn shared_poll_signature(
+    channel: &str,
+    user: &str,
+    keys: &[&str],
+    expiry: Option<Duration>,
+) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs();
+    let exp = expiry.map_or(0, expires_in);
+    shared_poll_signature_at(channel, user, keys, now, exp)
+}
+
+/// As [`shared_poll_signature`], issued at `iat` and expiring at `exp`
+/// (Unix seconds, 0 for never).
+pub(crate) fn shared_poll_signature_at(
+    channel: &str,
+    user: &str,
+    keys: &[&str],
+    iat: u64,
+    exp: u64,
+) -> String {
+    use sha2::Digest;
+    let keys_hash = hex(&Sha256::digest(keys.join("\0").as_bytes()));
+    let payload = format!("{iat}\0{exp}\0{user}\0{channel}\0{keys_hash}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(SHARED_POLL_SECRET.as_bytes())
+        .expect("any key size is valid");
+    mac.update(payload.as_bytes());
+    format!("{iat}:{exp}:{}", hex(&mac.finalize().into_bytes()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 fn expires_in(lifetime: Duration) -> u64 {
     SystemTime::now()
         .checked_add(lifetime)
