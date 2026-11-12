@@ -871,9 +871,8 @@ fn an_inline_untrack_waits_for_its_frame_before_becoming_an_untrack_request() {
 // Codex on #221 (D9, D10): a whole value at the version held, which the
 // server sends again after a track from version 0, is no update, but it is
 // what the server's next delta of the key applies to: it becomes the base.
-// A delta at the version held changes no base.
 #[test]
-fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
+fn a_whole_duplicate_becomes_the_missing_base() {
     let (mut machine, transport, id) = tracking(&["a"]);
     push_all(&mut machine, transport, &[whole("a", 5, &value(5))]);
     let (transport, replay) = away_and_back(&mut machine, id, &[]);
@@ -882,15 +881,8 @@ fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
     answer_all(&mut machine, transport, &again);
 
     let counted = machine.delta_statistics(id).unwrap();
-    let duplicates = push_all(
-        &mut machine,
-        transport,
-        &[
-            delta("a", 5, &value(4), &value(5)),
-            whole("a", 5, &value(5)),
-        ],
-    );
-    assert!(events(&duplicates).is_empty(), "{duplicates:?}");
+    let duplicate = push_all(&mut machine, transport, &[whole("a", 5, &value(5))]);
+    assert!(events(&duplicate).is_empty(), "{duplicate:?}");
     assert_eq!(
         machine.delta_statistics(id).unwrap(),
         counted,
@@ -904,6 +896,42 @@ fn a_whole_duplicate_becomes_the_base_and_a_delta_duplicate_does_not() {
 
     assert_eq!(delta_errors(&next), Vec::<u32>::new(), "{next:?}");
     assert_eq!(values(&next), [("a".to_owned(), value(6).into_bytes())]);
+}
+
+// Review of #221 (D9, D10): a re-track from version 0 while v6 and v7 are
+// on their way makes the server send v6 whole, then v7 as a delta against
+// it (centrifuge `keyedWritePublication`), both at or below the version
+// held: each is no update, but each becomes the base, so v8, a delta
+// against v7, applies.
+#[test]
+fn every_duplicate_moves_the_base() {
+    // Values unlike each other, so that a delta applies to its own base only.
+    let v6 = serde_json::json!({"v": "six"}).to_string();
+    let v7 =
+        serde_json::json!({"v": "seven, a value much longer than the one before it"}).to_string();
+    let v8 =
+        serde_json::json!({"v": "seven, a value much longer than the one before it!"}).to_string();
+    let (mut machine, transport, id) = tracking(&["a"]);
+    push_all(&mut machine, transport, &[whole("a", 7, &v7)]);
+    let again = track(&mut machine, id, &[("a", 0)], "s2");
+    answer_all(&mut machine, transport, &again);
+
+    let counted = machine.delta_statistics(id).unwrap();
+    let duplicates = push_all(
+        &mut machine,
+        transport,
+        &[whole("a", 6, &v6), delta("a", 7, &v6, &v7)],
+    );
+    assert!(events(&duplicates).is_empty(), "{duplicates:?}");
+    assert_eq!(
+        machine.delta_statistics(id).unwrap(),
+        counted,
+        "no duplicate counts"
+    );
+    let next = push_all(&mut machine, transport, &[delta("a", 8, &v7, &v8)]);
+
+    assert_eq!(delta_errors(&next), Vec::<u32>::new(), "{next:?}");
+    assert_eq!(values(&next), [("a".to_owned(), v8.into_bytes())]);
 }
 
 // Codex on #221 (D10): only this subscription's frames in flight hold an
