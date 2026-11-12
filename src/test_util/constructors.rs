@@ -520,21 +520,45 @@ impl crate::MapUpdate {
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
 impl crate::SharedPollUpdate {
-    /// A new value of `key`, `data`, with no version.
+    /// A new value of `key`, `data`, with no version, as a namespace in
+    /// versionless mode gives it.
+    ///
+    /// ```
+    /// use ferrifuge::SharedPollUpdate;
+    ///
+    /// let update = SharedPollUpdate::new("a", br#"{"x":1}"#.to_vec()).version(2);
+    /// assert!(!update.removed);
+    /// assert_eq!(update.version, Some(2));
+    /// ```
     #[must_use]
-    pub fn new(_key: impl Into<String>, _data: impl Into<Vec<u8>>) -> Self {
-        Self::default()
+    pub fn new(key: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            key: key.into(),
+            data: data.into(),
+            ..Self::default()
+        }
     }
 
-    /// The removal of `key`.
+    /// The removal of `key`: no data, no version, as the client gives it
+    /// for a key the backend removed or the server refused to track.
+    ///
+    /// ```
+    /// use ferrifuge::SharedPollUpdate;
+    ///
+    /// let update = SharedPollUpdate::removal("a");
+    /// assert!(update.removed);
+    /// assert!(update.data.is_empty());
+    /// assert_eq!(update.version, None);
+    /// ```
     #[must_use]
-    pub fn removal(_key: impl Into<String>) -> Self {
-        Self::default()
+    pub fn removal(key: impl Into<String>) -> Self {
+        Self::removal_of(key.into())
     }
 
-    /// Sets its version.
+    /// Sets the value's version.
     #[must_use]
-    pub fn version(self, _version: u64) -> Self {
+    pub fn version(mut self, version: u64) -> Self {
+        self.version = Some(version);
         self
     }
 }

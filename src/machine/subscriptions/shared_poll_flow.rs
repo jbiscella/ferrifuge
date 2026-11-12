@@ -1583,6 +1583,37 @@ impl Machine {
         }
     }
 
+    /// The version held for `key` of the shared poll subscription `id`, if
+    /// tracked.
+    pub(in crate::machine) fn shared_poll_key_version(
+        &mut self,
+        id: SubscriptionId,
+        key: &str,
+    ) -> Option<u64> {
+        self.shared_poll_flow(id)
+            .and_then(|flow| flow.tracked.get(key))
+            .map(|tracked| tracked.version)
+    }
+
+    /// The handler of an update that moved `key` from `before` to `after`
+    /// panicked (Block 41 D4, Block 47 D15): the version goes back unless
+    /// another step moved it since.
+    pub(in crate::machine) fn shared_poll_version_voided(
+        &mut self,
+        id: SubscriptionId,
+        key: &str,
+        before: u64,
+        after: u64,
+    ) {
+        if let Some(tracked) = self
+            .shared_poll_flow(id)
+            .and_then(|flow| flow.tracked.get_mut(key))
+            .filter(|tracked| tracked.version == after)
+        {
+            tracked.version = before;
+        }
+    }
+
     fn emit_shared_poll_error(
         &mut self,
         id: SubscriptionId,

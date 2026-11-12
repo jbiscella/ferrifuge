@@ -63,6 +63,10 @@ struct InFlight {
     before: Option<StreamPosition>,
     after: Option<StreamPosition>,
     publication: bool,
+    /// A shared poll update's key and the versions it moved from and to
+    /// (Block 47, D15).
+    #[cfg(feature = "unstable")]
+    key_version: Option<Box<(String, u64, u64)>>,
 }
 
 /// Untaken events a stream holds past which further `error` events for it
@@ -369,9 +373,21 @@ impl Machine {
         };
         let owner = commit.owner.clone();
         let publication = commit.publication;
+        #[cfg(feature = "unstable")]
+        let key_before = match (&owner, commit.key_version.as_deref()) {
+            (Owner::Client(of), Some((key, _))) => self
+                .shared_poll_key_version(*of, key)
+                .map(|version| (*of, key.clone(), version)),
+            _ => None,
+        };
         let before = self.position_of(&owner);
         self.move_position(commit);
         let after = self.position_of(&owner);
+        #[cfg(feature = "unstable")]
+        let key_version = key_before.and_then(|(of, key, before)| {
+            let after = self.shared_poll_key_version(of, &key)?;
+            Some(Box::new((key, before, after)))
+        });
         self.deliveries.in_flight.insert(
             id,
             InFlight {
@@ -379,6 +395,8 @@ impl Machine {
                 before,
                 after,
                 publication,
+                #[cfg(feature = "unstable")]
+                key_version,
             },
         );
     }
@@ -387,10 +405,17 @@ impl Machine {
     pub(super) fn handler_panicked(&mut self, id: EventId, message: &str) {
         self.untake(id);
         self.deliveries.pending.remove(&id);
-        if let Some(handed) = self.deliveries.in_flight.remove(&id)
-            && self.position_of(&handed.owner) == handed.after
-        {
-            self.set_position_of(&handed.owner, handed.before);
+        if let Some(handed) = self.deliveries.in_flight.remove(&id) {
+            // A shared poll update's version, as a position (Block 47,
+            // D15): one moved since by another step stays.
+            #[cfg(feature = "unstable")]
+            if let (Owner::Client(of), Some(moved)) = (&handed.owner, &handed.key_version) {
+                let (key, before, after) = &**moved;
+                self.shared_poll_version_voided(*of, key, *before, *after);
+            }
+            if self.position_of(&handed.owner) == handed.after {
+                self.set_position_of(&handed.owner, handed.before);
+            }
         }
         self.settle_event(id);
         if self.state() != crate::State::Disconnected {
