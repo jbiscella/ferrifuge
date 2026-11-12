@@ -1064,7 +1064,7 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
 | 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17) | building fails; for a data callback, an `Error` event and a retry after the backoff |
 | 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
-| 8 | `codes::error::SUBSCRIPTION_SUBSCRIBE_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to subscribe with (Block 10) | an `Error` event; the subscribe is retried after the resubscribe backoff |
+| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message | a shared poll subscription's `get_signature` callback failed (Block 47, D6; `unstable`) | an `Error` event of kind `Track`; the keys stay tracked and are asked for again on the next subscribe |
 | 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
 | 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
 | 17 | `codes::error::PUBLISH_DROPPED` | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
@@ -1091,7 +1091,6 @@ shared-poll code (Block 47). Blocks are those of the repository's
 | subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
 | `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
 | `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
-| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message | a shared poll subscription's `get_signature` callback failed (Block 47, D6; `unstable`) | an `Error` event of kind `Track`; the keys stay tracked and are asked for again on the next subscribe |
 | shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | except for 109, a temporary error or one below 100, the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit) (Block 47, D7) |
 | shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
 | shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
