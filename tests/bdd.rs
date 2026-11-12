@@ -832,6 +832,20 @@ const SHARED_POLLS: &[&str] = &[
     "A track refused with 109 again waits before the next refresh",
     "A signature accepted within the grace period is refreshed soon",
     "A key set larger than one frame is signed and tracked in chunks",
+    // 47c: keys kept across reconnects, epochs, retries.
+    "Tracked keys come back after a reconnect with the versions held",
+    "A replay reuses the signatures it holds",
+    "A key untracked while offline is untracked in the replay frame",
+    "A replay signs only the keys without a signature",
+    "A changed epoch sends every key from version 0",
+    "A first epoch from the backend sends every key from version 0",
+    "Versions given before the first subscribe are kept whatever its epoch",
+    "An epoch flip resubscribes and tracks again",
+    "A replay with held versions stays within the frame budget",
+    "unsubscribe forgets the keys and the signatures",
+    "A failing track is retried or untracked by its error",
+    "Updates not taken before disconnect come back on the next connection",
+    "A removal not taken before disconnect is still delivered",
 ];
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];
