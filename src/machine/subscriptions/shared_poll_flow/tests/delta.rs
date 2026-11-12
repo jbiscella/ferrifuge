@@ -604,7 +604,7 @@ fn away_and_back(
 /// replay carries it inline (D7), its frame answered and a whole value of
 /// k1 dropped (D9); then k1 tracked again, that request unanswered: the
 /// machine, its transport, the subscription and that request.
-fn tracked_again_after_an_inline_untrack() -> (Machine, TransportId, SubscriptionId, Value) {
+fn tracked_again_after_an_inline_untrack() -> (Machine, TransportId, SubscriptionId, Vec<Action>) {
     let (mut machine, _, id) = tracking(&["k1", "k2"]);
     let (transport, replay) = away_and_back(&mut machine, id, &["k1"]);
     let frames = requests(&replay, 1);
@@ -617,8 +617,7 @@ fn tracked_again_after_an_inline_untrack() -> (Machine, TransportId, Subscriptio
     let dropped = push_all(&mut machine, transport, &[whole("k1", 1, &value(1))]);
     assert_eq!(values(&dropped), []);
     let again = track(&mut machine, id, &[("k1", 0)], "s2");
-    let request = requests(&again, 1)[0].clone();
-    (machine, transport, id, request)
+    (machine, transport, id, again)
 }
 
 // D7, D10: the server applies a frame's inline untrack after it tracked the
@@ -627,7 +626,8 @@ fn tracked_again_after_an_inline_untrack() -> (Machine, TransportId, Subscriptio
 // base: dropped, until a later track request carrying the key is answered.
 #[test]
 fn a_delta_after_an_inline_untrack_is_dropped_until_the_key_is_tracked_again() {
-    let (mut machine, transport, id, request) = tracked_again_after_an_inline_untrack();
+    let (mut machine, transport, id, again) = tracked_again_after_an_inline_untrack();
+    let request = requests(&again, 1)[0].clone();
 
     let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
 
@@ -648,7 +648,8 @@ fn a_delta_after_an_inline_untrack_is_dropped_until_the_key_is_tracked_again() {
 // the key with no base is Block 19's failure again.
 #[test]
 fn an_answered_track_ends_the_inline_untrack() {
-    let (mut machine, transport, _, request) = tracked_again_after_an_inline_untrack();
+    let (mut machine, transport, _, again) = tracked_again_after_an_inline_untrack();
+    let request = requests(&again, 1)[0].clone();
     machine.handle(reply_to(transport, &request));
 
     let failed = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
@@ -960,5 +961,90 @@ fn another_subscriptions_frame_holds_no_inline_untrack_back() {
                 && request["sub_refresh"]["untrack"] == serde_json::json!(["a"])
         }),
         "{answered:?}"
+    );
+}
+
+// Codex on #221 (D10): only an accepted track of the key ends its inline
+// untrack. A track failing with a temporary error, or with no reply in
+// time over websocket, shows nothing of the server's state for the key: a
+// delta of it with no base is still dropped, and the next accepted track
+// ends the inline untrack.
+#[test]
+fn a_failed_track_keeps_the_inline_untrack() {
+    for failure in ["temporary", "timeout"] {
+        let (mut machine, transport, id, again) = tracked_again_after_an_inline_untrack();
+        let request = requests(&again, 1)[0].clone();
+        match failure {
+            "temporary" => {
+                let failed = machine.handle(frame(
+                    transport,
+                    &serde_json::json!({"id": request["id"], "error": {
+                        "code": 500, "message": "busy", "temporary": true,
+                    }})
+                    .to_string(),
+                ));
+                take_all(&mut machine, &failed);
+            }
+            _ => {
+                let deadline = again
+                    .iter()
+                    .find_map(|action| match action {
+                        Action::SetSharedPollTimer(timer, delay)
+                            if *delay == Config::default().timeout =>
+                        {
+                            Some(*timer)
+                        }
+                        _ => None,
+                    })
+                    .expect("a reply deadline");
+                let failed = machine.handle(Input::SharedPollTimerFired(deadline));
+                take_all(&mut machine, &failed);
+            }
+        }
+
+        let dropped = machine.handle(pushed(transport, &delta("k1", 2, &value(1), &value(2))));
+
+        assert!(events(&dropped).is_empty(), "{failure}: {dropped:?}");
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Subscribed),
+            "{failure}"
+        );
+        let accepted = track(&mut machine, id, &[("k1", 0)], "s3");
+        machine.handle(reply_to(transport, &requests(&accepted, 1)[0]));
+        let flow = machine.subscriptions.by_id[&id]
+            .shared_poll
+            .as_ref()
+            .unwrap();
+        assert!(!flow.inline_untracked.contains("k1"), "{failure}");
+    }
+}
+
+// Codex on #221 (D7, D10): a key whose track the server refuses for good
+// is untracked, and leaves no inline untrack behind once no held signature
+// covers it.
+#[test]
+fn a_refused_track_leaves_no_inline_untrack() {
+    let (mut machine, transport, id, again) = tracked_again_after_an_inline_untrack();
+    let request = requests(&again, 1)[0].clone();
+    let refused = machine.handle(frame(
+        transport,
+        &serde_json::json!({"id": request["id"], "error": {"code": 103, "message": "permission denied"}})
+            .to_string(),
+    ));
+    let answered = answer_all(&mut machine, transport, &refused);
+    answer_all(&mut machine, transport, &answered);
+    let untracked = machine.handle(Input::UntrackKeys(id, vec!["k2".into()]));
+    let answered = answer_all(&mut machine, transport, &untracked);
+    answer_all(&mut machine, transport, &answered);
+
+    let flow = machine.subscriptions.by_id[&id]
+        .shared_poll
+        .as_ref()
+        .unwrap();
+    assert!(
+        flow.inline_untracked.is_empty(),
+        "{:?}",
+        flow.inline_untracked
     );
 }
