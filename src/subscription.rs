@@ -175,24 +175,34 @@ pub struct Publication {
     /// previous publication. Cleared once the delta is applied, so a
     /// publication the application takes never has it (Block 19, D4).
     pub(crate) delta: bool,
-    /// A map publication's key, and whether it removes the key (Block 45,
-    /// D3); boxed, as a stream publication has none.
+    /// A map or shared poll publication's key, whether it removes the key,
+    /// and its version (Blocks 45, 47, D3); boxed, as a stream publication
+    /// has none.
     pub(crate) map: Option<Box<MapPart>>,
 }
 
-/// What a map publication carries besides a stream publication's fields
-/// (`client.proto`, `Publication.key` and `Publication.removed`).
+/// What a map or shared poll publication carries besides a stream
+/// publication's fields (`client.proto`, `Publication.key`,
+/// `Publication.removed` and `Publication.version`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MapPart {
     pub(crate) key: String,
     pub(crate) removed: bool,
+    /// A shared poll value's version; 0 when none is known (Block 47, D3).
+    pub(crate) version: u64,
 }
 
 impl MapPart {
-    /// The map part of a publication with `key` and `removed`, `None` for
-    /// a stream publication's empty key and false.
-    pub(crate) fn of(key: String, removed: bool) -> Option<Box<Self>> {
-        (!key.is_empty() || removed).then(|| Box::new(Self { key, removed }))
+    /// The keyed part of a publication with `key`, `removed` and `version`,
+    /// `None` for a stream publication's empty key, false and 0.
+    pub(crate) fn of(key: String, removed: bool, version: u64) -> Option<Box<Self>> {
+        (!key.is_empty() || removed || version > 0).then(|| {
+            Box::new(Self {
+                key,
+                removed,
+                version,
+            })
+        })
     }
 }
 
