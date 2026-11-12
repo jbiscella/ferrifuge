@@ -240,7 +240,8 @@ pub enum ErrorKind {
     /// reconnects (Block 19, D8).
     Delta,
     /// A shared poll subscription's track request failed: the server refused
-    /// it, or the `get_signature` callback failed (Block 47, D7, D6).
+    /// it, or the `get_signature` callback failed for the keys given to
+    /// `track`, or there is none (Block 47, D7, D6).
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
@@ -257,6 +258,17 @@ pub enum ErrorKind {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     Untrack,
+    /// A shared poll subscription's `get_signature` callback failed while
+    /// refreshing the signatures held, or while signing the keys tracked
+    /// without one after a subscribe; it is retried after 5 s to 30 s
+    /// (Block 47, D6, D7).
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SignatureRefresh,
 }
 
 #[cfg(test)]
