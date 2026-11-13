@@ -588,6 +588,8 @@ const IMPLEMENTED: &[&str] = &[
     // Block 50a: the byte-split matrix of the stream decoders.
     "A stream body split at every byte offset decodes the same",
     "A stream body delivered one byte per chunk decodes the same",
+    // Block 50b: a websocket relayed one byte per write.
+    "A websocket relayed one byte per write works",
 ];
 
 /// Server configuration of @A scenarios.

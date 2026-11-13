@@ -1,17 +1,24 @@
-//! Steps of Block 50's @E scenarios: a stream body split at every byte
-//! offset, or delivered one byte per chunk, decodes to the same three
-//! messages, given as literals (D1, D2), through `decode_stream` (D3).
+//! Steps of Block 50: a stream body split at every byte offset, or
+//! delivered one byte per chunk, decodes to the same three messages, given
+//! as literals (D1, D2), through `decode_stream` (D3); a websocket relayed
+//! one byte per write works (D4).
 
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use std::time::Duration;
+
 use cucumber::{given, then, when};
-use ferrifuge::{StreamFormat, decode_stream};
+use ferrifuge::{Protocol, StreamFormat, decode_stream};
 use prost::Message as _;
 use serde_json::json;
 
-use super::ClientWorld;
+use super::ping::QUIET_PING_INTERVAL;
+use super::subscriptions::{CHANNEL, a_client_subscribed, next_publication};
+use super::{ClientWorld, EVENT_TIMEOUT};
+use crate::support::fake_server::Announce;
 use crate::support::protobuf;
+use crate::support::relay::Mode;
 
 /// The JSON connect reply of every body.
 const CONNECT_JSON: &str =
@@ -52,6 +59,8 @@ pub(crate) struct ByteSplit {
     ends: Vec<usize>,
     /// The outcome for each split offset, or for one byte per chunk.
     outcomes: Vec<(usize, Outcome)>,
+    /// The pongs the fake server had received before the ping (@D).
+    pongs_before: Option<usize>,
 }
 
 impl ByteSplit {
@@ -241,4 +250,101 @@ fn no_message_early(world: &mut ClientWorld) {
         })
         .collect();
     assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+// --- A websocket relayed one byte per write works (@D, D4) ---------------
+
+/// The publication's data: a 3-byte and a 4-byte character, which the
+/// relay's single bytes split.
+const RELAYED_DATA: &str = r#"{"text":"€ and 𝄞"}"#;
+
+#[given(
+    regex = r#"^a client configured with the (JSON|Protobuf) protocol, subscribed to channel "news" on the fake server through a relay writing one byte per write in both directions$"#
+)]
+async fn a_client_behind_a_one_byte_relay(world: &mut ClientWorld, protocol: String) {
+    world
+        .restart_fake(Announce {
+            ping: QUIET_PING_INTERVAL,
+            pong: true,
+            ..Announce::default()
+        })
+        .await;
+    world
+        .relay
+        .as_ref()
+        .expect("a relay")
+        .set_mode(Mode::OneBytePerWrite);
+    if protocol == "Protobuf" {
+        world.protocol = Protocol::Protobuf;
+    }
+    a_client_subscribed(world).await;
+}
+
+#[when(r#"the fake server sends a publication on "news" and a ping in one frame"#)]
+fn a_publication_and_a_ping_in_one_frame(world: &mut ClientWorld) {
+    world.byte_split.pongs_before = Some(pongs(world));
+    if world.protocol == Protocol::Protobuf {
+        let publication = protobuf::Reply {
+            push: Some(protobuf::Push {
+                channel: CHANNEL.to_owned(),
+                r#pub: Some(protobuf::Publication {
+                    data: RELAYED_DATA.as_bytes().to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        world
+            .fake()
+            .send_protobuf(&[publication, protobuf::Reply::default()]);
+    } else {
+        let publication = json!({"push": {"channel": CHANNEL, "pub": {"data": "DATA"}}})
+            .to_string()
+            .replace(r#""DATA""#, RELAYED_DATA);
+        // Several JSON replies in one frame are separated by newlines.
+        world.fake().send(&format!("{publication}\n{{}}"));
+    }
+}
+
+#[then("the subscription receives that publication with its exact data")]
+async fn that_publication_with_its_exact_data(world: &mut ClientWorld) {
+    let publication = next_publication(world, false).await;
+    assert_eq!(
+        String::from_utf8_lossy(&publication.data),
+        RELAYED_DATA,
+        "{publication:?}"
+    );
+}
+
+#[then("the fake server received a pong after the ping")]
+async fn a_pong_after_the_ping(world: &mut ClientWorld) {
+    let before = world.byte_split.pongs_before.expect("a ping sent");
+    let ponged = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while pongs(world) <= before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(ponged.is_ok(), "no pong after the ping: {before} before");
+}
+
+#[then("the relay made at least one write per byte relayed")]
+fn one_write_per_byte(world: &mut ClientWorld) {
+    let (writes, bytes) = world.relay.as_ref().expect("a relay").single_byte_writes();
+    assert!(bytes > 0, "nothing relayed one byte per write");
+    assert!(writes >= bytes, "{writes} writes for {bytes} bytes");
+}
+
+/// The pongs the fake server has received: empty commands, in either
+/// encoding.
+fn pongs(world: &ClientWorld) -> usize {
+    let fake = world.fake();
+    let json = fake.received().iter().filter(|m| **m == json!({})).count();
+    let protobuf = fake
+        .received_protobuf()
+        .iter()
+        .filter(|command| **command == protobuf::Command::default())
+        .count();
+    json + protobuf
 }
