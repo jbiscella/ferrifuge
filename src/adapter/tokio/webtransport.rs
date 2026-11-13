@@ -105,6 +105,42 @@ pub(in crate::adapter) struct Target<'a> {
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) headers: &'a http::HeaderMap,
     pub(in crate::adapter) max_message: usize,
+    /// The endpoint's index, under which D5's memory is kept.
+    pub(in crate::adapter) endpoint: usize,
+}
+
+/// The handshakes an attempt makes at most (D5).
+const MAX_HANDSHAKES: usize = 2;
+
+/// The endpoints, by index, found to take no ALPN (D5): an attempt there
+/// starts without it. A client keeps it across attempts, `reconnect()` and
+/// network changes.
+#[derive(Debug, Default)]
+pub(in crate::adapter) struct AlpnMemory(std::sync::Mutex<std::collections::HashSet<usize>>);
+
+impl AlpnMemory {
+    /// What the first handshake of an attempt at `endpoint` offers.
+    pub(in crate::adapter) fn first(&self, endpoint: usize) -> Alpn {
+        if self.endpoints().contains(&endpoint) {
+            Alpn::None
+        } else {
+            Alpn::H3
+        }
+    }
+
+    fn remember(&self, endpoint: usize) {
+        self.endpoints().insert(endpoint);
+    }
+
+    fn forget(&self, endpoint: usize) {
+        self.endpoints().remove(&endpoint);
+    }
+
+    fn endpoints(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<usize>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// The ALPN list one handshake offers (D5).
@@ -152,22 +188,39 @@ impl WebTransport {
         let (host, address) = resolve(&url).await?;
         let tls = network.tls.config()?;
         let options = connect_options(&url, target.headers, network)?;
-        let mut alpn = Alpn::H3;
+        let memory = &network.alpn;
+        let mut alpn = memory.first(target.endpoint);
+        let mut handshakes = 0;
         let (endpoint, connection) = loop {
+            handshakes += 1;
             let config = client_config(&tls, alpn, &host, address)?;
             let endpoint = Endpoint::client(config).map_err(|e| e.to_string())?;
-            match endpoint.connect(options.clone()).await {
+            let error = match endpoint.connect(options.clone()).await {
                 Ok(connection) => break (endpoint, connection),
-                Err(error) if alpn == Alpn::H3 && retries_without_alpn(&error) => {
-                    debug!(
-                        transport = "webtransport",
-                        alpn = Alpn::None.name(),
-                        "the server selected no application protocol: handshake again"
-                    );
-                    alpn = Alpn::None;
+                Err(error) => error,
+            };
+            let next = match alpn {
+                // The server selected no application protocol: remembered.
+                Alpn::H3 if retries_without_alpn(&error) => {
+                    memory.remember(target.endpoint);
+                    Alpn::None
                 }
-                Err(error) => return Err(connecting_error(&error)),
+                // The peer requires one: forgotten.
+                Alpn::None if refused_without_alpn(&error) => {
+                    memory.forget(target.endpoint);
+                    Alpn::H3
+                }
+                _ => return Err(connecting_error(&error)),
+            };
+            if handshakes == MAX_HANDSHAKES {
+                return Err(connecting_error(&error));
             }
+            debug!(
+                transport = "webtransport",
+                alpn = next.name(),
+                "the handshake failed on its application protocol: handshake again"
+            );
+            alpn = next;
         };
         let (send, recv) = connection
             .open_bi()
@@ -522,6 +575,20 @@ fn retries_without_alpn(error: &ConnectingError) -> bool {
     )
 }
 
+/// Whether a handshake offering no ALPN was closed by the peer with crypto
+/// error 0x78, `no_application_protocol`: the server requires one (D5).
+fn refused_without_alpn(error: &ConnectingError) -> bool {
+    let ConnectingError::ConnectionError(ConnectionError::ConnectionClosed(close)) = error else {
+        return false;
+    };
+    let shown = close.to_string();
+    let refused = format!(
+        "the cryptographic handshake failed: error {}",
+        NO_APPLICATION_PROTOCOL & 0xff
+    );
+    shown == refused || shown.starts_with(&format!("{refused}: "))
+}
+
 /// The message of a failed open (D6).
 fn connecting_error(error: &ConnectingError) -> String {
     match error {
@@ -731,6 +798,7 @@ mod tests {
                 timeout: TIMEOUT,
                 headers,
                 max_message: LIMIT,
+                endpoint: 0,
             },
             network,
         )
@@ -1006,6 +1074,79 @@ mod tests {
         assert_eq!(handshakes.load(Ordering::SeqCst), 1);
     }
 
+    // D5: an endpoint remembered without ALPN whose server now requires
+    // `h3` closes the handshake with crypto error 0x78; the memory of that
+    // endpoint is dropped and the attempt reaches it offering `h3`, on its
+    // second handshake. Another endpoint's memory stays.
+    #[tokio::test]
+    async fn the_memory_of_an_endpoint_drops_on_the_peers_refusal_without_alpn() {
+        let (ca, chain, key) = private_chain();
+        let network = Network::new(Tls::new(Trust::ExtraRoots(vec![ca].into())), Proxy::none());
+        network.alpn.remember(0);
+        network.alpn.remember(1);
+        let (url, handshakes, _) = server(chain, key, &[b"h3"]).await;
+
+        let opened = open(&url, &network, &http::HeaderMap::new()).await;
+
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        assert_eq!(handshakes.load(Ordering::SeqCst), 2);
+        assert_eq!(network.alpn.first(0), Alpn::H3);
+        assert_eq!(network.alpn.first(1), Alpn::None);
+    }
+
+    // 48b: a malformed frame on the server's HTTP/3 control stream (a
+    // SETTINGS frame whose identifier is a truncated varint) fails the
+    // attempt; the process lives.
+    #[tokio::test]
+    async fn a_malformed_frame_on_the_control_stream_fails_the_attempt() {
+        let (ca, chain, key) = private_chain();
+        let network = Network::new(Tls::new(Trust::ExtraRoots(vec![ca].into())), Proxy::none());
+        let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("TLS 1.3")
+            .with_no_client_auth()
+            .with_single_cert(vec![chain], key)
+            .expect("server configuration");
+        tls.alpn_protocols = vec![H3.to_vec()];
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).expect("QUIC TLS");
+        let local = tokio::net::lookup_host(("localhost", 0))
+            .await
+            .expect("localhost")
+            .next()
+            .expect("an address");
+        let endpoint =
+            quinn::Endpoint::server(quinn::ServerConfig::with_crypto(Arc::new(crypto)), local)
+                .expect("a QUIC server");
+        let port = endpoint.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                tokio::spawn(async move {
+                    let Ok(connection) = incoming.await else {
+                        return;
+                    };
+                    let Ok(mut control) = connection.open_uni().await else {
+                        return;
+                    };
+                    // The control stream's type (0x00), then SETTINGS (0x04)
+                    // of one byte, the first of a two-byte varint.
+                    let _ = control.write_all(&[0x00, 0x04, 0x01, 0x40]).await;
+                    let _ = connection.closed().await;
+                });
+            }
+        });
+        let url = format!("https://localhost:{port}/connection/webtransport");
+
+        let opened = tokio::time::timeout(TIMEOUT, open(&url, &network, &http::HeaderMap::new()))
+            .await
+            .expect("the attempt ends before the timeout");
+
+        assert!(
+            matches!(&opened, Err(error) if error.contains("FrameError")),
+            "{:?}",
+            opened.err()
+        );
+    }
+
     // D9: the messages before the end of the stream come first, then the
     // end, with no code.
     #[tokio::test]
@@ -1044,6 +1185,7 @@ mod tests {
                 timeout: TIMEOUT,
                 headers: &headers,
                 max_message: 1024,
+                endpoint: 0,
             },
             &network,
         )
@@ -1126,6 +1268,7 @@ mod tests {
                 timeout: TIMEOUT,
                 headers: &headers,
                 max_message: 64,
+                endpoint: 0,
             },
             &network,
         )

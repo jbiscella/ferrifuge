@@ -27,6 +27,9 @@ pub(in crate::adapter) struct Network {
     current: Mutex<Current>,
     /// The application's cookie jar (Block 43).
     cookie_jar: Jar,
+    /// The WebTransport endpoints found to take no ALPN (Block 48, D5).
+    #[cfg(feature = "unstable-webtransport")]
+    pub(in crate::adapter) alpn: super::webtransport::AlpnMemory,
 }
 
 /// A cookie jar, shown without its cookies.
@@ -123,6 +126,8 @@ impl Network {
                 shared: Arc::default(),
             }),
             cookie_jar: Jar::default(),
+            #[cfg(feature = "unstable-webtransport")]
+            alpn: super::webtransport::AlpnMemory::default(),
         }
     }
 

@@ -75,7 +75,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         .map_err(|e| e.to_string())
         .and_then(|parsed| network.decide(&parsed));
     #[cfg(feature = "unstable-webtransport")]
-    let alpn = (kind == TransportKind::WebTransport).then_some(webtransport::Alpn::H3.name());
+    let alpn = (kind == TransportKind::WebTransport).then(|| network.alpn.first(endpoint).name());
     #[cfg(not(feature = "unstable-webtransport"))]
     let alpn = None;
     log.attempt(
@@ -119,6 +119,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                 timeout,
                 headers: &headers,
                 max_message,
+                endpoint,
             };
             WebTransport::open(target, &network)
                 .await
