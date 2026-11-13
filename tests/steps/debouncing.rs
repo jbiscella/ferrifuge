@@ -46,16 +46,12 @@ pub(crate) struct Debouncing {
     /// The second client of the @A scenario, and the publications it took.
     second: Option<Client>,
     publications: Arc<Mutex<Vec<Value>>>,
-    /// The runner stalled so long before the step that should end the
-    /// window that its timer may have ended it first: the scenario's
-    /// premise did not hold, and that is not the client's fault (as Block
-    /// 13's scenarios do on a stalled runner).
-    stalled: bool,
 }
 
-/// How long before the 300 ms window ends a step still counts as before it.
-const STALL_MARGIN: Duration = Duration::from_millis(50);
-const WINDOW: Duration = Duration::from_millis(300);
+/// How long after the leading publish the trailing send of a 300 ms
+/// window may come at the soonest, as the scenarios' "no sooner than
+/// 200 ms" says.
+const TRAILING_NOT_BEFORE: Duration = Duration::from_millis(200);
 
 #[derive(Default)]
 struct HandlerRecord {
@@ -809,11 +805,20 @@ async fn the_fake_server_answers_the_subscribe(world: &mut ClientWorld) {
 #[then(regex = r"^the fake server receives one publish, with data (\{.*\})$")]
 async fn receives_one_publish(world: &mut ClientWorld, data: String) {
     let data = data_list(&data).remove(0);
-    received_at(world, &data).await;
+    let first = received_at(world, &data).await;
+    // By arrival times, not by what has arrived when this step runs: a
+    // runner stalled past the 300 ms window found the trailing send there
+    // too, as it should be.
+    let at_once: Vec<_> = world
+        .fake()
+        .commands_with_times("publish")
+        .into_iter()
+        .filter(|(_, at)| at.saturating_duration_since(first) < TRAILING_NOT_BEFORE)
+        .collect();
     assert_eq!(
-        world.fake().commands_with_times("publish").len(),
+        at_once.len(),
         1,
-        "only the leading publish at once"
+        "only the leading publish at once: {at_once:?}"
     );
 }
 
@@ -1012,9 +1017,6 @@ async fn the_publish_succeeds(world: &mut ClientWorld, data: String) {
 #[then(regex = r"^the publish of (\{.*\}) fails with code (\d+)$")]
 async fn the_publish_fails(world: &mut ClientWorld, data: String, code: u32) {
     let outcome = outcome_of(world, &data_list(&data).remove(0)).await;
-    if world.debouncing.stalled {
-        return;
-    }
     let error = outcome.expect_err("the publish succeeded");
     assert_eq!(error.code, code, "{error:?}");
 }
@@ -1046,18 +1048,34 @@ fn the_client_publishes(world: &mut ClientWorld, first: String, second: String) 
     regex = r#"^the publish of \{"n":1\} completed, and the publish of (\{.*\}) waits in the window$"#
 )]
 async fn one_completed_one_waiting(world: &mut ClientWorld, data: String) {
+    // The window ends when a step fires its timer: run by the clock, it
+    // ended 300 ms after the first publish, and a runner stalled for
+    // longer before the second publish saw it sent at once ("it was sent",
+    // macOS, run 43382077436). The steps checking that the window sent
+    // nothing fire it.
+    world.client().hold_debounce_timers();
     let first = json!({"n": 1});
     start_publish(world, first.clone());
     received_at(world, &first).await;
     outcome_of(world, &first).await.expect("the first publish");
+    wait_for_the_window(world).await;
     let second = data_list(&data).remove(0);
     start_publish(world, second.clone());
     assert!(received_of(world, &second).is_empty(), "it was sent");
 }
 
+/// Waits until the window the first publish opened has set its timer,
+/// which the client holds.
+async fn wait_for_the_window(world: &ClientWorld) {
+    let client = world.client().clone();
+    wait_until("the window's timer", move || {
+        client.held_debounce_timers() == 1
+    })
+    .await;
+}
+
 #[when(regex = r"^(.+) before the interval ends$")]
 async fn the_cause(world: &mut ClientWorld, cause: String) {
-    note_stall(world);
     let unsubscribe_push = |code: u32| {
         json!({"push": {"channel": CHANNEL, "unsubscribe": {"code": code, "reason": "server"}}})
             .to_string()
@@ -1082,29 +1100,14 @@ async fn the_cause(world: &mut ClientWorld, cause: String) {
 #[then(regex = r"^the fake server receives no publish command of data (\{.*\}) within (\d+) ms$")]
 async fn no_publish_within(world: &mut ClientWorld, data: String, ms: u64) {
     let data = data_list(&data).remove(0);
+    // The window's timer fires now: a window left open would send.
+    world.client().fire_held_debounce_timers();
     tokio::time::sleep(Duration::from_millis(ms)).await;
-    assert!(
-        world.debouncing.stalled || received_of(world, &data).is_empty(),
-        "it was sent"
-    );
-}
-
-/// Whether the time since the first publish reached the fake server
-/// leaves too little of the window for the step to come before its end.
-fn note_stall(world: &mut ClientWorld) {
-    let first = world.fake().commands_with_times("publish")[0].1;
-    if first.elapsed() + STALL_MARGIN >= WINDOW {
-        eprintln!(
-            "runner stall: the step ran {:?} after the first publish, too late for the 300 ms window",
-            first.elapsed()
-        );
-        world.debouncing.stalled = true;
-    }
+    assert!(received_of(world, &data).is_empty(), "it was sent");
 }
 
 #[when("the fake server closes the connection with code 3005")]
 fn the_fake_server_closes(world: &mut ClientWorld) {
-    note_stall(world);
     world.fake().close(3005, "advises reconnect");
 }
 
@@ -1118,9 +1121,6 @@ async fn subscribed_again(world: &mut ClientWorld) {
 #[then(regex = r"^the publish of (\{.*\}) has failed with code (\d+)$")]
 async fn has_failed_with(world: &mut ClientWorld, data: String, code: u32) {
     let outcome = outcome_of(world, &data_list(&data).remove(0)).await;
-    if world.debouncing.stalled {
-        return;
-    }
     let error = outcome.expect_err("the publish succeeded");
     assert_eq!(error.code, code, "{error:?}");
 }
@@ -1130,11 +1130,11 @@ async fn has_failed_with(world: &mut ClientWorld, data: String, code: u32) {
 )]
 async fn no_publish_after_the_new_subscribe(world: &mut ClientWorld, data: String, seconds: u64) {
     let data = data_list(&data).remove(0);
+    // The old window's timer fires now: a window the reconnect had kept
+    // would resend.
+    world.client().fire_held_debounce_timers();
     tokio::time::sleep(Duration::from_secs(seconds)).await;
-    assert!(
-        world.debouncing.stalled || received_of(world, &data).is_empty(),
-        "it was resent"
-    );
+    assert!(received_of(world, &data).is_empty(), "it was resent");
 }
 
 /// The handler's outcome for the publish of offset `n`.
@@ -1209,6 +1209,11 @@ async fn a_client_with_a_thread_handler(world: &mut ClientWorld, interval: u32) 
     regex = r#"^the handler, running on a publication event, has published \{"n":1\} and it completed$"#
 )]
 async fn the_handler_published_the_first(world: &mut ClientWorld) {
+    // The window ends when the step checking the second publish fires its
+    // timer: run by the clock, a runner stalled past its 300 ms before the
+    // second publish let it go out at once, and the scenario no longer
+    // had a publish waiting in a window.
+    world.client().hold_debounce_timers();
     world.fake().publish(CHANNEL, 1);
     let record = Arc::clone(&world.debouncing.handler);
     wait_until("the handler's first publish", || {
@@ -1218,6 +1223,7 @@ async fn the_handler_published_the_first(world: &mut ClientWorld) {
     handler_outcome(world, 1)
         .expect("checked above")
         .expect("the handler's first publish");
+    wait_for_the_window(world).await;
 }
 
 #[when(regex = r#"^the handler awaits a publish of \{"n":2\}, which waits in the window$"#)]
@@ -1231,6 +1237,16 @@ fn the_handler_awaits_the_second(world: &mut ClientWorld) {
 )]
 async fn receives_the_handlers_second(world: &mut ClientWorld, floor: u64) {
     let second = json!({"n": 2});
+    // The handler's publish waits in the window, its timer held; it is
+    // fired once the floor has passed since the first.
+    let first = world.fake().commands_with_times("publish")[0].1;
+    let floor_at = first + Duration::from_millis(floor);
+    tokio::time::sleep_until(floor_at.into()).await;
+    assert!(
+        received_of(world, &second).is_empty(),
+        "it was sent before the window ended"
+    );
+    world.client().fire_held_debounce_timers();
     let at = received_at(world, &second).await;
     let first = world.fake().commands_with_times("publish")[0].1;
     let gap = at.duration_since(first);
