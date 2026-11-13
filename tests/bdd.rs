@@ -941,6 +941,13 @@ async fn run_scenarios() {
         .before(|_, _, scenario, world| {
             Box::pin(async move {
                 running().push((scenario_key(scenario), Instant::now()));
+                if scenario
+                    .steps
+                    .iter()
+                    .any(|step| step.value == steps::PENDING_CALL_STEP)
+                {
+                    world.timeout = Some(steps::STALL_PROOF_TIMEOUT);
+                }
                 if scenario.tags.iter().any(|tag| tag == "A") {
                     world.server = Some(Centrifugo::start(SERVER_A).await);
                 } else if scenario.tags.iter().any(|tag| tag == "B") {

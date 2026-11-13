@@ -20,6 +20,8 @@ use crate::support::http_proxy::HttpProxy;
 use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
+pub(crate) use calls::PENDING_CALL_STEP;
+
 mod auto_batching;
 mod backoff;
 mod batching;
@@ -76,6 +78,12 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a step watches for events that must not happen. Well above the
 /// test clients' maximum reconnect delay.
 const QUIET_PERIOD: Duration = Duration::from_secs(1);
+/// The `Config::timeout` of a scenario whose premise is that a call or a
+/// connect is still pending when a later step runs: at the 5 s default, a
+/// runner stalled between the two steps let the timeout settle it first
+/// (Windows, #185: a step ran 6.02 s after the call). The scenario's steps
+/// settle it themselves, so it never fires there.
+pub(crate) const STALL_PROOF_TIMEOUT: Duration = Duration::from_secs(60);
 /// An endpoint nothing listens on: connections are refused at once.
 pub(crate) const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
 
@@ -124,6 +132,9 @@ pub(crate) struct ClientWorld {
     pub(crate) upper_bounds: Vec<Duration>,
     /// Client option set by a step before the client is created.
     pub(crate) max_server_ping_delay: Option<Duration>,
+    /// `Config::timeout` of the clients the scenario creates, when not the
+    /// default ([`STALL_PROOF_TIMEOUT`]).
+    pub(crate) timeout: Option<Duration>,
     /// Encoding of the clients the scenario creates.
     pub(crate) protocol: Protocol,
     /// Events seen while a step let time elapse.
@@ -297,6 +308,9 @@ impl ClientWorld {
         if let Some(delay) = self.max_server_ping_delay {
             config.max_server_ping_delay = delay;
         }
+        if let Some(timeout) = self.timeout {
+            config.timeout = timeout;
+        }
         self.delivery.configure(&mut config);
         if let Some(bytes) = self.calls.write_queue_bytes {
             config.write_queue_bytes = bytes;
@@ -306,6 +320,11 @@ impl ClientWorld {
         self.sleep.configure(&mut config);
         self.limits.configure(&mut config);
         config
+    }
+
+    /// The `Config::timeout` of the clients the scenario creates.
+    pub(crate) fn configured_timeout(&self) -> Duration {
+        self.client_config().timeout
     }
 
     /// Replaces the scenario's fake server with one announcing `announce`.
