@@ -174,6 +174,11 @@ repository held while it carried that version, from the blocks of
 
 ### Fixed
 
+- A reply or server ping that reached the socket while the process was
+  suspended is handled before a deadline that expired meanwhile: the
+  driver takes what the transport read first, with a turn for the timers
+  after 32 inputs in a row (Block 49c).
+
 - Browser http_stream no longer stalls in Safari, which stops delivering
   a `fetch` body left unread: it reads the body continuously into the
   inbox websocket and sse already use, and reconnects with `connecting`
