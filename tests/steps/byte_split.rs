@@ -1,0 +1,197 @@
+//! Steps of Block 50's @E scenarios: a stream body split at every byte
+//! offset, or delivered one byte per chunk, decodes to the same three
+//! messages, given as literals (D1, D2), through `decode_stream` (D3).
+
+// cucumber passes captures by value.
+#![allow(clippy::needless_pass_by_value)]
+
+use cucumber::{given, then, when};
+use ferrifuge::{StreamFormat, decode_stream};
+
+use super::ClientWorld;
+
+/// The JSON connect reply of every body.
+const CONNECT_JSON: &str =
+    r#"{"id":1,"connect":{"client":"c1","version":"0.0.0","ping":25,"pong":true}}"#;
+/// The JSON publication, whose data holds a 3-byte and a 4-byte character.
+const PUBLICATION_JSON: &str = r#"{"push":{"channel":"news","pub":{"data":{"text":"€ and 𝄞"}}}}"#;
+/// The JSON ping.
+const PING_JSON: &str = "{}";
+
+/// The Protobuf connect reply, with its 1-byte length: `Reply { id: 1,
+/// connect: { client: "c1", version: "0.0.0", ping: 25, pong: true } }`.
+const CONNECT_PROTOBUF: &[u8] = b"\x13\x08\x01\x2a\x0f\x0a\x02c1\x12\x050.0.0\x38\x19\x40\x01";
+/// The Protobuf publication's 2-byte length (300) and its fields up to its
+/// data: `Reply { push: { channel: "news", pub: { data } } }`, the data of
+/// 285 bytes being [`publication_data`].
+const PUBLICATION_PROTOBUF_HEAD: &[u8] =
+    b"\xac\x02\x22\xa9\x02\x12\x04news\x22\xa0\x02\x22\xa0\x02";
+/// The Protobuf ping: an empty reply, length 0.
+const PING_PROTOBUF: &[u8] = b"\x00";
+
+/// The Protobuf publication's data: JSON holding `€` and `𝄞`, padded so
+/// that the reply is 300 bytes and its length takes 2 bytes (D1).
+fn publication_data() -> String {
+    format!(r#"{{"text":"€ and 𝄞, {}"}}"#, "x".repeat(260))
+}
+
+/// The messages a decoder yielded, or its error.
+type Outcome = Result<Vec<Vec<u8>>, String>;
+
+/// What a Block 50 @E scenario holds.
+#[derive(Debug, Default)]
+pub(crate) struct ByteSplit {
+    format: Option<StreamFormat>,
+    /// The three messages as the decoder yields them, in order.
+    expected: Vec<Vec<u8>>,
+    /// The body, and where each message's last byte ends (exclusive).
+    body: Vec<u8>,
+    ends: Vec<usize>,
+    /// The outcome for each split offset, or for one byte per chunk.
+    outcomes: Vec<(usize, Outcome)>,
+}
+
+impl ByteSplit {
+    fn format(&self) -> StreamFormat {
+        self.format.expect("a body was given")
+    }
+
+    /// The offsets whose outcome is not exactly the three messages.
+    fn wrong(&self) -> Vec<String> {
+        self.outcomes
+            .iter()
+            .filter(|(_, outcome)| outcome.as_ref().ok() != Some(&self.expected))
+            .map(|(offset, outcome)| match outcome {
+                Ok(messages) => format!(
+                    "offset {offset}: {:?}",
+                    messages
+                        .iter()
+                        .map(|m| String::from_utf8_lossy(m))
+                        .collect::<Vec<_>>()
+                ),
+                Err(error) => format!("offset {offset}: {error}"),
+            })
+            .collect()
+    }
+}
+
+#[given(
+    regex = r"^a (http_stream JSON|sse JSON|http_stream Protobuf) body holding a connect reply, a publication with multi-byte data and a ping$"
+)]
+fn a_body(world: &mut ClientWorld, format: String) {
+    let split = &mut world.byte_split;
+    let (format, expected, framed): (_, Vec<Vec<u8>>, Vec<Vec<u8>>) = match format.as_str() {
+        "http_stream JSON" => {
+            let messages = [CONNECT_JSON, PUBLICATION_JSON, PING_JSON].map(str::as_bytes);
+            (
+                StreamFormat::HttpStreamJson,
+                messages.iter().map(|m| m.to_vec()).collect(),
+                messages.iter().map(|m| [m, &b"\n"[..]].concat()).collect(),
+            )
+        }
+        "sse JSON" => {
+            let messages = [CONNECT_JSON, PUBLICATION_JSON, PING_JSON].map(str::as_bytes);
+            (
+                StreamFormat::SseJson,
+                messages.iter().map(|m| m.to_vec()).collect(),
+                messages
+                    .iter()
+                    .map(|m| [&b"data: "[..], m, b"\n\n"].concat())
+                    .collect(),
+            )
+        }
+        _ => {
+            let publication = [PUBLICATION_PROTOBUF_HEAD, publication_data().as_bytes()].concat();
+            // A Protobuf reply comes with its length, as the codec takes it.
+            let messages = vec![
+                CONNECT_PROTOBUF.to_vec(),
+                publication,
+                PING_PROTOBUF.to_vec(),
+            ];
+            (StreamFormat::HttpStreamProtobuf, messages.clone(), messages)
+        }
+    };
+    if format == StreamFormat::HttpStreamProtobuf {
+        // D1: the publication's length is 300, in 2 bytes.
+        let prefix = &expected[1][..2];
+        assert!(
+            prefix[0] & 0x80 != 0 && prefix[1] & 0x80 == 0,
+            "the publication's length takes 2 bytes: {prefix:02x?}"
+        );
+        assert_eq!(
+            usize::from(prefix[0] & 0x7f) | usize::from(prefix[1]) << 7,
+            expected[1].len() - 2
+        );
+        assert_eq!(expected[1].len() - 2, 300);
+    }
+    split.ends = framed
+        .iter()
+        .scan(0, |end, frame| {
+            *end += frame.len();
+            Some(*end)
+        })
+        .collect();
+    split.body = framed.concat();
+    split.format = Some(format);
+    split.expected = expected;
+}
+
+#[when("it is delivered in two chunks, split at each byte offset in turn")]
+fn split_at_each_offset(world: &mut ClientWorld) {
+    let split = &mut world.byte_split;
+    let format = split.format();
+    // D's structural acceptance: every offset of 0..body.len().
+    split.outcomes = (0..split.body.len())
+        .map(|offset| {
+            let (first, second) = split.body.split_at(offset);
+            (offset, decode_stream(format, &[first, second]))
+        })
+        .collect();
+}
+
+#[when("it is delivered one byte per chunk")]
+fn one_byte_per_chunk(world: &mut ClientWorld) {
+    let split = &mut world.byte_split;
+    let chunks: Vec<&[u8]> = split.body.chunks(1).collect();
+    split.outcomes = vec![(1, decode_stream(split.format(), &chunks))];
+}
+
+#[then("the decoder yields exactly those three messages, in order, for every offset")]
+fn the_messages_at_every_offset(world: &mut ClientWorld) {
+    let split = &world.byte_split;
+    assert_eq!(split.outcomes.len(), split.body.len());
+    let wrong = split.wrong();
+    assert!(wrong.is_empty(), "{} offsets: {wrong:?}", wrong.len());
+}
+
+#[then("no offset gives an error")]
+fn no_offset_errs(world: &mut ClientWorld) {
+    let errors: Vec<_> = world
+        .byte_split
+        .outcomes
+        .iter()
+        .filter_map(|(offset, outcome)| outcome.as_ref().err().map(|e| format!("{offset}: {e}")))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[then("the decoder yields exactly those three messages, in order")]
+fn the_messages(world: &mut ClientWorld) {
+    let wrong = world.byte_split.wrong();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+#[then("the decoder emitted no message before the byte that ends it")]
+fn no_message_early(world: &mut ClientWorld) {
+    let split = &world.byte_split;
+    let chunks: Vec<&[u8]> = split.body.chunks(1).collect();
+    // After the first `bytes` bytes, exactly the messages ending by then.
+    let wrong: Vec<_> = (0..=chunks.len())
+        .filter_map(|bytes| {
+            let yielded = decode_stream(split.format(), &chunks[..bytes]).map(|m| m.len());
+            let ended = split.ends.iter().filter(|end| **end <= bytes).count();
+            (yielded != Ok(ended)).then(|| format!("after {bytes} bytes: {yielded:?}, not {ended}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
