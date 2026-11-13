@@ -286,26 +286,36 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
 }
 
 /// Sustained API calls must not starve the transport (Codex, #248): an rpc
-/// with a 200 ms timeout succeeds while a thread calls `send()` without
+/// with a 200 ms timeout succeeds while other threads call `send()` without
 /// pause, each call waking the driver's actions branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reply_is_read_while_another_thread_calls_send_without_pause() {
+    /// Threads calling `send()`, so that a wake is stored at every turn.
+    const CALLERS: usize = 4;
+    const RPCS: usize = 20;
     let server = FakeServer::start(Announce::default()).await;
     let process = Process::start();
     let config = Config::default().timeout(Duration::from_millis(200));
     let (client, _events) = connected(&server, &process, config).await;
     let calling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let caller = std::thread::spawn({
-        let (client, calling) = (client.clone(), std::sync::Arc::clone(&calling));
-        move || {
-            while calling.load(std::sync::atomic::Ordering::SeqCst) {
-                // Made and dropped: each wakes the actions branch.
-                drop(client.send(b"{}".to_vec()));
-            }
-        }
-    });
+    let threads = (0..CALLERS)
+        .map(|_| {
+            std::thread::spawn({
+                let (client, calling) = (client.clone(), std::sync::Arc::clone(&calling));
+                move || {
+                    while calling.load(std::sync::atomic::Ordering::SeqCst) {
+                        // Made and dropped: each wakes the actions branch.
+                        drop(client.send(b"{}".to_vec()));
+                    }
+                }
+            })
+        })
+        .collect();
+    // Stops and joins the callers also when an assertion panics, so that a
+    // starved reply fails the test rather than hanging it.
+    let callers = Callers { calling, threads };
     let mut outcomes = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..RPCS {
         let call = client.rpc("echo", b"{}".to_vec());
         let (settled, outcome) = oneshot::channel();
         process.handle.spawn(async move {
@@ -318,12 +328,27 @@ async fn a_reply_is_read_while_another_thread_calls_send_without_pause() {
                 .expect("its task runs"),
         );
     }
-    calling.store(false, std::sync::atomic::Ordering::SeqCst);
-    caller.join().expect("the calling thread");
+    drop(callers);
     for outcome in outcomes {
         assert!(
             outcome.is_ok(),
             "the reply was not read in time: {outcome:?}"
         );
+    }
+}
+
+/// The threads calling `send()`, stopped and joined when dropped.
+struct Callers {
+    calling: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Callers {
+    fn drop(&mut self) {
+        self.calling
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
     }
 }
