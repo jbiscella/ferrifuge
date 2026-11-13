@@ -9364,18 +9364,18 @@ Feature: Bug-pattern catalogue
 |---|---|---|
 | What arrived during a process suspension beats a deadline that fired meanwhile | driver loop `biased` with the timer branch first (D8: the unbiased order may already fail) | pending |
 | A stream decoder releases what a large reply grew | today's code: capacity never released (D8) | pending |
-| A websocket that answers with data that is not client protocol advances the fallback at once | undecodable data before the first message handled as "transport still silent" | pending |
-| Dropping the last clone of a client inside its handler ends the client | `Owner::drop` waiting until the events thread has exited, a join by hand (std's `JoinHandle::join` from that thread panics with EDEADLK on Linux instead of hanging) | pending |
-| Disconnect during a websocket handshake that never finishes ends it at once | `opening` kept when the core closes the attempt | pending |
-| A transport the client closed reports no error | the `self.is_current(transport)` guard removed from the `Input::TransportClosed` arm of `Machine::handle` | pending |
-| A terminal disconnect push right before the end of an HTTP stream stops the client | the end of the body handled before the frames decoded from it: after a chunk, the body's next item awaited for up to 50 ms, and an end then returned as the close with the chunk's frames dropped | pending |
-| A panic in the client's driver ends the client visibly | the drop guard not feeding `Input::DriverDropped` while panicking | pending |
-| An emulation request that never answers ends the transport within the timeout | `tokio::time::timeout` removed from the emulation request | pending |
-| Command ids skip 0 when they wrap | `.max(1)` removed | pending |
-| Seeded chaos on the core applies no stale answer | a token callback answer not checked against the flow | pending |
-| The core runner reports a planted continuity fault | the planted faults above | pending |
-| Seeded chaos on the core leaks no secret | a redaction removed from one `Debug` impl | pending |
-| Seeded chaos with handlers on the tokio client keeps the invariants | `Input::EventHanded` not sent for one handler path | pending |
+| A websocket that answers with data that is not client protocol advances the fallback at once | undecodable data before the first message handled as "transport still silent" | #247 |
+| Dropping the last clone of a client inside its handler ends the client | `Owner::drop` waiting until the events thread has exited, a join by hand (std's `JoinHandle::join` from that thread panics with EDEADLK on Linux instead of hanging) | #247 |
+| Disconnect during a websocket handshake that never finishes ends it at once | `opening` kept when the core closes the attempt | #247 |
+| A transport the client closed reports no error | the `self.is_current(transport)` guard removed from the `Input::TransportClosed` arm of `Machine::handle` | #247 |
+| A terminal disconnect push right before the end of an HTTP stream stops the client | the end of the body handled before the frames decoded from it: after a chunk, the body's next item awaited for up to 50 ms, and an end then returned as the close with the chunk's frames dropped | #247 |
+| A panic in the client's driver ends the client visibly | the drop guard not feeding `Input::DriverDropped` while panicking | #247 |
+| An emulation request that never answers ends the transport within the timeout | `tokio::time::timeout` removed from the emulation request | #247 |
+| Command ids skip 0 when they wrap | `.max(1)` removed | #247 |
+| Seeded chaos on the core applies no stale answer | a token callback answer not checked against the flow | #247 |
+| The core runner reports a planted continuity fault | the planted faults above | #247 |
+| Seeded chaos on the core leaks no secret | a redaction removed from one `Debug` impl | #247 |
+| Seeded chaos with handlers on the tokio client keeps the invariants | `Input::EventHanded` not sent for one handler path | #247 |
 
 **Findings for later pull requests** (a gap whose closing needs a behaviour decision; the pull request that decides it adds the rule, the scenario and the row's new status):
 

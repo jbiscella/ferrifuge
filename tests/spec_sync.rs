@@ -420,7 +420,7 @@ fn reports(problems: &[String], expected: &str) {
 }
 
 /// The probes table's row of the probe planted in.
-const PROBE_ROW: &str = "| Command ids skip 0 when they wrap | `.max(1)` removed | pending |";
+const PROBE_ROW: &str = "| Command ids skip 0 when they wrap | `.max(1)` removed | #247 |";
 
 /// Each check of the catalogue finds nothing on `CLAUDE.md` as it is. The
 /// cucumber scenarios run the same checks; the tests below plant a fault
