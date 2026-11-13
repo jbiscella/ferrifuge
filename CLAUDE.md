@@ -9139,7 +9139,7 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 65 | R | A server-side publication is lost to an unsubscribed client-side subscription of the channel | §8 | covered | "Client-side and server-side subscriptions to one channel stay separate" |
 | 67 | R | The backoff resets on the connect reply, so a failure that follows every connect loops at minimum delay | §6.2, §6.3 | covered | "Reconnect delays keep growing while the server closes each connection with 3008"; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff` |
 | 69 | R | A delta is decoded by what was requested, not what was negotiated | §7.5 | covered | "A delta on a subscription without delta on makes it resubscribe" |
-| 71 | R | A decoder rescans its buffer, or keeps forever what one large reply grew | §5.7 | gap | probe "A stream decoder releases what a large reply grew" (`src/adapter/body.rs` keeps capacity today: `drain` and `BytesMut` never shrink; D8). The rescan half: Block 50's @P |
+| 71 | R | A decoder rescans its buffer, or keeps forever what one large reply grew | §5.7 | gap | probe "A stream decoder releases what a large reply grew" (D8): every stream decoder is `src/adapter/body.rs`'s, which keeps at most 64 KiB once a large reply or chunk grew it, and hands each sse message over at its size (Block 49d); the websocket's frame buffer is tungstenite 0.30's, which keeps its largest frame's allocation: not ours. The rescan half: Block 50's @P |
 | 72 | R | A body without newlines or a bogus length buffers without limit; undecodable data re-arms the no-ping timer; garbage before the first message is not treated as a transport failure | §5.3, §5.7 | gap | limits: "A message over the limit ends a connected client", `src/adapter/tokio/http.rs::a_protobuf_reply_over_the_limit_fails_before_its_bytes`; timer: `src/machine.rs::blank_frames_do_not_rearm_the_ping_deadline`; garbage: probe "A websocket that answers with data that is not client protocol advances the fallback at once" |
 | 73 | R | Teardown after a decode error is asynchronous, so later items of the frame run | §5.3 | covered | `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects`; "Malformed Protobuf frame forces a reconnect" |
 | 74 | R | Configuration is validated only when used | §4.1 | covered | "A read-ahead limit of 0 is rejected"; "A maximum message size of 0 is rejected"; "A write queue limit of 0 is rejected" |
@@ -9363,7 +9363,7 @@ Feature: Bug-pattern catalogue
 | Probe | Mutation | Seen failing |
 |---|---|---|
 | What arrived during a process suspension beats a deadline that fired meanwhile | driver loop `biased` with the timer branch first (D8: the unbiased order may already fail) | #248 |
-| A stream decoder releases what a large reply grew | today's code: capacity never released (D8) | pending |
+| A stream decoder releases what a large reply grew | today's code: capacity never released (D8) | #249 |
 | A websocket that answers with data that is not client protocol advances the fallback at once | undecodable data before the first message handled as "transport still silent" | #247 |
 | Dropping the last clone of a client inside its handler ends the client | `Owner::drop` waiting until the events thread has exited, a join by hand (std's `JoinHandle::join` from that thread panics with EDEADLK on Linux instead of hanging) | #247 |
 | Disconnect during a websocket handshake that never finishes ends it at once | `opening` kept when the core closes the attempt | #247 |
