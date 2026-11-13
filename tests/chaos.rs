@@ -673,6 +673,10 @@ struct Continuity {
     previous: Option<TransportId>,
     /// Answers given so far, numbering the secrets.
     answers: u64,
+    /// The refresh fetch torn down last, which alone keeps D6's exception:
+    /// a later teardown of another refresh ends it for the earlier one, as
+    /// `tokens::teardown` keeps only the latest (Codex, #247).
+    excepted: Option<FetchId>,
     /// Every fetch id the core used, per series: none may come twice.
     used_tokens: std::collections::HashSet<FetchId>,
     used: std::collections::HashSet<FetchId>,
@@ -2150,16 +2154,33 @@ impl Run {
             ClientEvent::Disconnected { .. } => (true, false),
             _ => return,
         };
+        let mut latest = None;
         for &(fetch, refresh) in &self.continuity.tokens {
             if ended {
                 self.continuity
                     .abandoned_tokens
                     .insert(fetch, Abandoned::Ended);
-            } else if torn && refresh {
+            } else if torn
+                && refresh
+                && self.continuity.abandoned_tokens.get(&fetch) != Some(&Abandoned::Ended)
+            {
                 self.continuity
                     .abandoned_tokens
-                    .entry(fetch)
-                    .or_insert(Abandoned::TornDown);
+                    .insert(fetch, Abandoned::TornDown);
+                latest = Some(fetch);
+            }
+        }
+        if ended {
+            self.continuity.excepted = None;
+        } else if let Some(latest) = latest {
+            // The exception moves to the latest; an earlier one still
+            // unanswered is abandoned for good.
+            if let Some(earlier) = self.continuity.excepted.replace(latest)
+                && earlier != latest
+            {
+                self.continuity
+                    .abandoned_tokens
+                    .insert(earlier, Abandoned::Ended);
             }
         }
     }
@@ -2309,8 +2330,8 @@ impl Run {
         let stale = match judged.get(&fetch) {
             // D6's exception: a refresh's denial after a reconnect still
             // disconnects.
-            Some(Abandoned::TornDown | Abandoned::Superseded)
-                if denial && refresh == Some(true) =>
+            Some(Abandoned::TornDown)
+                if denial && refresh == Some(true) && self.continuity.excepted == Some(fetch) =>
             {
                 false
             }
