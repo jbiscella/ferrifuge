@@ -1598,6 +1598,8 @@ impl Client {
         let android = cfg!(target_os = "android");
         #[cfg(adapter_tokio)]
         let trust = trust(root_certificates, tls_config, android)?;
+        #[cfg(all(adapter_tokio, feature = "unstable"))]
+        check_webtransport(&endpoints, &trust)?;
         #[cfg(adapter_tokio)]
         android_gate(
             android && !tls::android_ready(),
@@ -3486,12 +3488,76 @@ fn check_usable(
     })
 }
 
+/// Whether `kind` is WebTransport (Block 48).
+#[cfg_attr(not(feature = "unstable"), allow(clippy::missing_const_for_fn))]
+fn is_webtransport(kind: TransportKind) -> bool {
+    #[cfg(feature = "unstable")]
+    {
+        kind == TransportKind::WebTransport
+    }
+    #[cfg(not(feature = "unstable"))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+#[cfg(all(adapter_tokio, feature = "unstable"))]
+/// Refuses WebTransport endpoints the native build cannot open: without
+/// the `unstable-webtransport` feature (Block 48, D1), or with a raw TLS
+/// configuration QUIC cannot use (D4).
+fn check_webtransport(
+    endpoints: &[(TransportKind, String)],
+    trust: &Trust,
+) -> Result<(), ClientError> {
+    let Some((kind, endpoint)) = endpoints.iter().find(|(kind, _)| is_webtransport(*kind)) else {
+        return Ok(());
+    };
+    let error = |message: String| ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message,
+        transport: Some(kind.name().to_owned()),
+    };
+    #[cfg(not(feature = "unstable-webtransport"))]
+    {
+        let _ = (endpoint, trust);
+        Err(error(super::tokio::NO_WEBTRANSPORT.to_owned()))
+    }
+    #[cfg(feature = "unstable-webtransport")]
+    {
+        use super::tokio::webtransport::{Alpn, check_quic, quic_tls};
+        let Trust::Raw(raw) = trust else {
+            // Ferrifuge's own configurations always pass (D4).
+            return Ok(());
+        };
+        let host = reqwest::Url::parse(endpoint.trim())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "localhost".to_owned());
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .map_or_else(|| host.clone(), str::to_owned);
+        check_quic(&quic_tls(raw, Alpn::H3), &host).map_err(error)
+    }
+}
+
 fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
     let endpoint = endpoint.trim();
     let http = endpoint.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
     });
-    let message = if endpoint.is_empty() {
+    let message = if is_webtransport(kind) {
+        // WebTransport is defined over https only (Block 48, D2).
+        let https = endpoint
+            .split_once("://")
+            .is_some_and(|(scheme, rest)| scheme.eq_ignore_ascii_case("https") && !rest.is_empty());
+        if https {
+            return Ok(());
+        }
+        "the webtransport transport needs an https:// endpoint".to_owned()
+    } else if endpoint.is_empty() {
         format!("no endpoint given for the {} transport", kind.name())
     } else if kind == TransportKind::WebSocket && http {
         "the websocket transport needs a ws:// or wss:// endpoint, not http:// or https://"
