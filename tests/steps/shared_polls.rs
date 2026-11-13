@@ -28,8 +28,42 @@ mod replay;
 
 type Events = Pin<Box<dyn Stream<Item = SharedPollSubscriptionEvent> + Send>>;
 
-/// The keys and signatures a `get_signature` callback was called with.
-type Signed = Arc<Mutex<Vec<Vec<String>>>>;
+/// The keys each `get_signature` call was given, with when it was made:
+/// windows are measured from the calls' own times, not from when a step
+/// noticed them (CI health, findings 8 and 10).
+#[derive(Clone, Default)]
+struct Signed(Arc<Mutex<Vec<SignatureCall>>>);
+
+/// The keys of one `get_signature` call and when it was made.
+type SignatureCall = (Vec<String>, std::time::Instant);
+
+impl Signed {
+    /// Records a call for `keys`, made now; how many calls there are.
+    fn push(&self, keys: Vec<String>) -> usize {
+        let mut calls = self.0.lock().unwrap();
+        calls.push((keys, std::time::Instant::now()));
+        calls.len()
+    }
+
+    fn keys(&self) -> Vec<Vec<String>> {
+        let calls = self.0.lock().unwrap();
+        calls.iter().map(|(keys, _)| keys.clone()).collect()
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// When the `n`th call, counting from 1, was made.
+    fn at(&self, n: usize) -> Option<std::time::Instant> {
+        let calls = self.0.lock().unwrap();
+        calls.get(n.checked_sub(1)?).map(|(_, at)| *at)
+    }
+}
 
 /// What a Block 47 scenario holds.
 #[derive(Default)]
@@ -152,9 +186,9 @@ fn signing_with(
 + Send
 + Sync
 + 'static {
-    let calls = Arc::clone(calls);
+    let calls = calls.clone();
     move |keys: Vec<String>| {
-        calls.lock().unwrap().push(keys.clone());
+        calls.push(keys.clone());
         std::future::ready(Ok(SharedPollSignature::new(keys, signature)))
     }
 }
@@ -169,9 +203,9 @@ fn answering(
 + Send
 + Sync
 + 'static {
-    let calls = Arc::clone(calls);
+    let calls = calls.clone();
     move |asked: Vec<String>| {
-        calls.lock().unwrap().push(asked);
+        calls.push(asked);
         std::future::ready(Ok(SharedPollSignature::new(
             keys.iter().map(|key| (*key).to_owned()).collect(),
             signature,
@@ -361,7 +395,7 @@ async fn tracked_on_the_fake(world: &mut ClientWorld, channel: &str, items: Vec<
 )]
 async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, how: String) {
     a_connected_client(world).await;
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     match how.as_str() {
         "" | " whose stream was taken" => a_shared_poll_subscription(world, &channel, |b| b),
         " that has subscribed" | " subscribed, whose stream was taken" => {
@@ -425,7 +459,7 @@ async fn a_client_with_a_subscription(world: &mut ClientWorld, channel: String, 
 /// The subscriptions of the 47b scenarios, with a `get_signature` callback
 /// or none, subscribed; false for a description it does not know.
 async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &str) -> bool {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     match how {
         r#" subscribed, with get_signature answering keys "a" and "b" with "sig1""# => {
             a_shared_poll_subscription(world, channel, |builder| {
@@ -445,7 +479,7 @@ async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &st
             let gate = Arc::clone(&world.shared_polls.gate);
             a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys| {
-                    calls.lock().unwrap().push(keys);
+                    calls.push(keys);
                     let gate = Arc::clone(&gate);
                     async move {
                         gate.notified().await;
@@ -466,9 +500,8 @@ async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &st
         {
             a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys: Vec<String>| {
-                    let mut calls = calls.lock().unwrap();
-                    calls.push(keys.clone());
-                    std::future::ready(if calls.len() == 1 {
+                    let count = calls.push(keys.clone());
+                    std::future::ready(if count == 1 {
                         Err(TokenError::Failed("backend down".to_owned()))
                     } else {
                         Ok(SharedPollSignature::new(keys, "sig1"))
@@ -481,7 +514,7 @@ async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &st
         {
             a_shared_poll_subscription(world, channel, move |builder| {
                 builder.get_signature(move |keys| {
-                    calls.lock().unwrap().push(keys);
+                    calls.push(keys);
                     std::future::ready(Err(TokenError::Unauthorized))
                 })
             });
@@ -628,8 +661,6 @@ fn not_called(world: &mut ClientWorld) {
         world
             .shared_polls
             .signature_calls
-            .lock()
-            .unwrap()
             .is_empty()
     );
 }
@@ -639,9 +670,9 @@ fn not_called(world: &mut ClientWorld) {
 )]
 async fn called_once_subscribed(world: &mut ClientWorld, key: String) {
     subscribed(world).await;
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
-    wait_until("a get_signature call", || !calls.lock().unwrap().is_empty()).await;
-    assert_eq!(*calls.lock().unwrap(), [vec![key]]);
+    let calls = world.shared_polls.signature_calls.clone();
+    wait_until("a get_signature call", || !calls.is_empty()).await;
+    assert_eq!(calls.keys(), [vec![key]]);
 }
 
 #[then(
@@ -718,8 +749,6 @@ async fn nothing_within_a_second(world: &mut ClientWorld) {
         world
             .shared_polls
             .signature_calls
-            .lock()
-            .unwrap()
             .is_empty()
     );
 }
@@ -1323,7 +1352,7 @@ fn keys_of(list: &str) -> Vec<String> {
 }
 
 fn signature_calls(world: &ClientWorld) -> Vec<Vec<String>> {
-    world.shared_polls.signature_calls.lock().unwrap().clone()
+    world.shared_polls.signature_calls.keys()
 }
 
 /// Waits until `get_signature` has been called `count` times, at most
@@ -1354,8 +1383,8 @@ fn track_is_called(world: &mut ClientWorld, keys: String) {
 
 #[then(regex = r#"^get_signature is called with keys ((?:"\w+"(?: and )?)+)$"#)]
 async fn get_signature_called_with(world: &mut ClientWorld, keys: String) {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
-    wait_until("a get_signature call", || !calls.lock().unwrap().is_empty()).await;
+    let calls = world.shared_polls.signature_calls.clone();
+    wait_until("a get_signature call", || !calls.is_empty()).await;
     assert_eq!(signature_calls(world), [keys_of(&keys)]);
 }
 
@@ -1492,7 +1521,7 @@ async fn a_connected_client_signing(
     seconds: String,
 ) {
     a_connected_client(world).await;
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     let lifetime = how
         .starts_with("every key")
         .then(|| Duration::from_secs(seconds.parse().expect("seconds")));
@@ -1500,7 +1529,7 @@ async fn a_connected_client_signing(
     let signed_channel = channel.clone();
     a_shared_poll_subscription(world, &channel, move |builder| {
         builder.get_signature(move |keys: Vec<String>| {
-            calls.lock().unwrap().push(keys.clone());
+            calls.push(keys.clone());
             let names: Vec<&str> = keys.iter().map(String::as_str).collect();
             let signature = shared_poll_signature(&signed_channel, user, &names, lifetime);
             std::future::ready(Ok(SharedPollSignature::new(keys, signature)))
@@ -1512,12 +1541,19 @@ async fn a_connected_client_signing(
 #[then(regex = r#"^get_signature is called for "(\w+)" a second time within (\d+) s$"#)]
 async fn called_a_second_time(world: &mut ClientWorld, key: String, seconds: u64) {
     let since = world.shared_polls.at.expect("keys tracked");
-    let deadline = since + Duration::from_secs(seconds);
+    let window = Duration::from_secs(seconds);
     assert!(
-        called(world, 2, deadline).await,
+        called(world, 2, since + window + EVENT_TIMEOUT).await,
         "get_signature calls: {:?}",
         signature_calls(world)
     );
+    // From the first call, which made the signature whose expiry the
+    // refresh follows, to the second, by their own times: a stall before
+    // the first call does not count (CI health, finding 10).
+    let calls = &world.shared_polls.signature_calls;
+    let (first, second) = (calls.at(1).expect("a call"), calls.at(2).expect("a call"));
+    let gap = second.duration_since(first);
+    assert!(gap <= window, "called a second time {gap:?} after the first");
     assert_eq!(signature_calls(world)[1], [key]);
 }
 
@@ -1560,8 +1596,8 @@ fn tracked_with_an_expired_signature(world: &mut ClientWorld, key: String, secon
 
 #[then(regex = r#"^get_signature is called for "(\w+)" and the next track request is accepted$"#)]
 async fn refreshed_and_accepted(world: &mut ClientWorld, key: String) {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
-    wait_until("a get_signature call", || !calls.lock().unwrap().is_empty()).await;
+    let calls = world.shared_polls.signature_calls.clone();
+    wait_until("a get_signature call", || !calls.is_empty()).await;
     assert_eq!(signature_calls(world), [vec![key.clone()]]);
     // Accepted: the key is tracked on the server, which sends its values.
     // The replies to the refused track request and to the next one.
@@ -1586,19 +1622,35 @@ fn every_track_refused(world: &mut ClientWorld, code: u32) {
 #[then(regex = r"^get_signature is called twice within (\d+) s$")]
 async fn called_twice(world: &mut ClientWorld, seconds: u64) {
     let since = world.shared_polls.at.expect("keys tracked");
+    let window = Duration::from_secs(seconds);
     assert!(
-        called(world, 2, since + Duration::from_secs(seconds)).await,
+        called(world, 2, since + window + EVENT_TIMEOUT).await,
         "get_signature calls: {:?}",
         signature_calls(world)
     );
-    world.shared_polls.at = Some(std::time::Instant::now());
+    let second = world.shared_polls.signature_calls.at(2).expect("a call");
+    let after = second.duration_since(since);
+    assert!(after <= window, "called twice {after:?} after track");
+    // The next window starts at the second call itself, not when this step
+    // noticed it (CI health, finding 8).
+    world.shared_polls.at = Some(second);
 }
 
 #[then(regex = r"^get_signature is not called a third time within (\d+) s$")]
 async fn not_a_third_time(world: &mut ClientWorld, seconds: u64) {
     let since = world.shared_polls.at.expect("a second call");
-    let third = called(world, 3, since + Duration::from_secs(seconds)).await;
-    assert!(!third, "get_signature calls: {:?}", signature_calls(world));
+    let window = Duration::from_secs(seconds);
+    called(world, 3, since + window).await;
+    // By the third call's own time: a step that looks only after the retry
+    // was due sees it, and it is not early (CI health, finding 8).
+    if let Some(third) = world.shared_polls.signature_calls.at(3) {
+        let after = third.duration_since(since);
+        assert!(
+            after >= window,
+            "called a third time {after:?} after the second: {:?}",
+            signature_calls(world)
+        );
+    }
 }
 
 #[when("the fake server answers with expires true and no ttl")]
@@ -1660,9 +1712,9 @@ fn worst_frame(channel: &str, keys: &[String]) -> usize {
 )]
 async fn signed_in_chunks(world: &mut ClientWorld) {
     let total = world.shared_polls.keys.len();
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     wait_until("every key asked for", || {
-        calls.lock().unwrap().iter().map(Vec::len).sum::<usize>() >= total
+        calls.keys().iter().map(Vec::len).sum::<usize>() >= total
     })
     .await;
     let channel = world.shared_poll().channel().to_owned();
