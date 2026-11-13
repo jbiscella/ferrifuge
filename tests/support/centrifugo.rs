@@ -4,11 +4,12 @@
 //! scenario can start its own config variant.
 
 use serde_json::Value;
+use std::sync::Arc;
+
 use testcontainers::core::logs::LogFrame;
-use testcontainers::core::wait::HttpWaitStrategy;
-use testcontainers::core::{ContainerPort, Host, WaitFor};
+use testcontainers::core::{ContainerPort, Host};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 
 pub(crate) const IMAGE: &str = "centrifugo/centrifugo";
 pub(crate) const TAG: &str = "v6.10.1";
@@ -30,13 +31,30 @@ const INTERNAL_PORT: u16 = 9000;
 /// and on a CI runner that many Centrifugo containers starting at the same
 /// time miss testcontainers' 60 s wait for their health endpoint.
 static STARTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
-/// How long one health probe may take. testcontainers' probe has no
-/// timeout of its own: a probe that hangs, e.g. on a connection the Docker
-/// proxy accepted before the container could take it, waits through the
-/// whole startup timeout instead of being sent again.
+/// How long one health probe may take. testcontainers' own probe has no
+/// timeout: a probe that hangs, e.g. on a connection the Docker proxy
+/// accepted before the container could take it, would wait through the
+/// whole startup wait instead of being sent again.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-/// The container's last log lines kept for a start that fails.
-const KEPT_LOG_LINES: usize = 50;
+/// How long a started container may take to answer its health endpoint,
+/// testcontainers' default startup timeout.
+const HEALTHY_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+/// Pause between health probes, testcontainers' default.
+const PROBE_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+/// The container's last log lines, and the last health probes, kept for a
+/// start that fails.
+const KEPT_LINES: usize = 50;
+
+/// Keeps the last [`KEPT_LINES`] of `lines` (the report shows the last 10 probes).
+fn keep(lines: &std::sync::Mutex<std::collections::VecDeque<String>>, line: String) {
+    let mut lines = lines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if lines.len() == KEPT_LINES {
+        lines.pop_front();
+    }
+    lines.push_back(line);
+}
 
 pub(crate) struct Centrifugo {
     /// Removed asynchronously by [`Centrifugo::stop`] or on drop: dropping
@@ -72,33 +90,23 @@ impl Centrifugo {
 
     async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>, config: Option<&str>) -> Self {
         let api_port = if tls.is_some() { INTERNAL_PORT } else { PORT };
-        let logs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let logs = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        // Set when the start is requested; the log lines are timed from it.
+        let requested = Arc::new(std::sync::OnceLock::<std::time::Instant>::new());
         let mut image = GenericImage::new(IMAGE, TAG).with_exposed_port(ContainerPort::Tcp(PORT));
         if tls.is_some() {
             image = image.with_exposed_port(ContainerPort::Tcp(INTERNAL_PORT));
         }
+        // The health endpoint is probed below rather than by testcontainers,
+        // so that a failed start says which phase took the time: Docker
+        // creating and starting the container, or the server answering.
         let mut request = image
-            .with_wait_for(WaitFor::http(
-                HttpWaitStrategy::new("/health")
-                    .with_port(ContainerPort::Tcp(api_port))
-                    .with_expected_status_code(200u16)
-                    .with_client(
-                        reqwest::Client::builder()
-                            .timeout(PROBE_TIMEOUT)
-                            .build()
-                            .expect("a probe client"),
-                    ),
-            ))
             .with_log_consumer({
-                let logs = std::sync::Arc::clone(&logs);
+                let (logs, requested) = (Arc::clone(&logs), Arc::clone(&requested));
                 move |frame: &LogFrame| {
-                    let mut logs = logs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if logs.len() == KEPT_LOG_LINES {
-                        logs.pop_front();
-                    }
-                    logs.push_back(String::from_utf8_lossy(frame.bytes()).trim_end().to_owned());
+                    let at = requested.get().map(std::time::Instant::elapsed);
+                    let line = String::from_utf8_lossy(frame.bytes()).trim_end().to_owned();
+                    keep(&logs, format!("{at:?} {line}"));
                 }
             })
             .with_cmd(match config {
@@ -126,21 +134,7 @@ impl Centrifugo {
         for (name, value) in env {
             request = request.with_env_var(*name, *value);
         }
-        let container = {
-            let _starting = STARTING.acquire().await.expect("never closed");
-            let started = std::time::Instant::now();
-            request.start().await.unwrap_or_else(|error| {
-                // What the server printed tells a slow start from one that
-                // failed (StartupTimeout, providers #43230880500).
-                let logs = logs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                panic!(
-                    "start Centrifugo container: {error:?} after {:?}, {} other starts in flight; its last log lines:\n{}",
-                    started.elapsed(),
-                    8 - STARTING.available_permits() - 1,
-                    logs.iter().cloned().collect::<Vec<_>>().join("\n")
-                )
-            })
-        };
+        let container = start_and_wait(request, api_port, &logs, &requested).await;
 
         let host = container.get_host().await.expect("container host");
         let port = container
@@ -335,6 +329,97 @@ impl ServerApi {
             serde_json::json!({"channel": channel, "key": key, "version": version, "data": data}),
         )
         .await
+    }
+}
+
+/// Starts `request` and waits until its health endpoint on `api_port`
+/// answers 200, within [`HEALTHY_WITHIN`]; a failure says which phase took
+/// the time, with the server's `logs` and when the start was `requested`.
+async fn start_and_wait(
+    request: ContainerRequest<GenericImage>,
+    api_port: u16,
+    logs: &std::sync::Mutex<std::collections::VecDeque<String>>,
+    requested: &std::sync::OnceLock<std::time::Instant>,
+) -> ContainerAsync<GenericImage> {
+    let _starting = STARTING.acquire().await.expect("never closed");
+    let requested_at = *requested.get_or_init(std::time::Instant::now);
+    let others = 8 - STARTING.available_permits() - 1;
+    // Which phase took the time, and what the server printed
+    // (StartupTimeout, providers, run 43230880500).
+    let report = |what: String| {
+        let logs = logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        format!(
+            "start Centrifugo container: {what}; {others} other starts in flight; its last log lines, timed from the start request:\n{}",
+            logs.iter().cloned().collect::<Vec<_>>().join("\n")
+        )
+    };
+    let container = request.start().await.unwrap_or_else(|error| {
+        panic!(
+            "{}",
+            report(format!(
+                "Docker failed after {:?}: {error:?}",
+                requested_at.elapsed()
+            ))
+        )
+    });
+    let started_in = requested_at.elapsed();
+    let host = container.get_host().await.expect("container host");
+    let health_port = container
+        .get_host_port_ipv4(api_port)
+        .await
+        .expect("container API port");
+    let probes = std::sync::Mutex::new(std::collections::VecDeque::new());
+    let url = format!("http://{host}:{health_port}/health");
+    let healthy =
+        tokio::time::timeout(HEALTHY_WITHIN, probe_health(&url, &probes, requested_at)).await;
+    if healthy.is_err() {
+        let probes = probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        panic!(
+            "{}",
+            report(format!(
+                "StartupTimeout: Docker started it in {started_in:?}, then no 200 from /health within {HEALTHY_WITHIN:?}; the last probes, timed from the start request:\n{}",
+                probes
+                    .iter()
+                    .skip(probes.len().saturating_sub(10))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        );
+    }
+    container
+}
+
+/// Probes `url` until it answers 200, each probe within [`PROBE_TIMEOUT`],
+/// keeping each other outcome in `probes`, timed from `requested_at`.
+async fn probe_health(
+    url: &str,
+    probes: &std::sync::Mutex<std::collections::VecDeque<String>>,
+    requested_at: std::time::Instant,
+) {
+    let http = reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .build()
+        .expect("a probe client");
+    loop {
+        let sent = requested_at.elapsed();
+        let outcome = match http.get(url).send().await {
+            Ok(response) if response.status() == reqwest::StatusCode::OK => return,
+            Ok(response) => format!("status {}", response.status()),
+            Err(error) => chain(&error),
+        };
+        keep(
+            probes,
+            format!(
+                "{sent:?} (took {:?}) {outcome}",
+                requested_at.elapsed().saturating_sub(sent)
+            ),
+        );
+        tokio::time::sleep(PROBE_PERIOD).await;
     }
 }
 
