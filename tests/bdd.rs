@@ -583,6 +583,8 @@ const IMPLEMENTED: &[&str] = &[
     "A panic in the client's driver ends the client visibly",
     "A terminal disconnect push right before the end of an HTTP stream stops the client",
     "An emulation request that never answers ends the transport within the timeout",
+    // Block 49d: a decoder releases what a large reply grew.
+    "A stream decoder releases what a large reply grew",
 ];
 
 /// Server configuration of @A scenarios.

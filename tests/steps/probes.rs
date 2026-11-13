@@ -162,6 +162,8 @@ pub(crate) struct Probes {
     subscription: Option<Subscription>,
     /// The transport a machine closed (Block 49, row 14).
     closed_transport: Option<TransportId>,
+    /// One stream decoder of each kind (Block 49d, row 71).
+    decoders: Vec<ferrifuge::StreamDecoder>,
 }
 
 impl std::fmt::Debug for Probes {
@@ -491,4 +493,65 @@ async fn it_connects_again_and_is_answered(world: &mut ClientWorld) {
         next.is_ok(),
         "no emulation request answered after the reconnect"
     );
+}
+
+// --- A stream decoder releases what a large reply grew (71) --------------
+
+/// The size limit of the decoders, above the large reply.
+const DECODER_LIMIT: usize = 2 << 20;
+/// The chunks a reply arrives in, as a network delivers it.
+const CHUNK: usize = 16 << 10;
+/// What a decoder's buffer may keep once the large reply is split.
+const KEPT: usize = 64 << 10;
+
+/// Pushes `message`, framed, to `decoder` in chunks of [`CHUNK`] bytes and
+/// checks that it comes out whole, alone: a Protobuf reply with its length,
+/// as the codec takes it.
+fn decode(decoder: &mut ferrifuge::StreamDecoder, message: &[u8]) {
+    let framed = decoder.frame(message);
+    let mut out = Vec::new();
+    for chunk in framed.chunks(CHUNK) {
+        out.extend(
+            decoder
+                .push(chunk)
+                .unwrap_or_else(|error| panic!("{}: {error}", decoder.name())),
+        );
+    }
+    assert!(
+        out.len() == 1 && (out[0] == message || out[0] == framed),
+        "{}: {} messages decoded, not the reply of {} bytes",
+        decoder.name(),
+        out.len(),
+        message.len()
+    );
+}
+
+#[given("a stream decoder that decoded a reply of 1 MiB")]
+fn a_decoder_after_a_large_reply(world: &mut ClientWorld) {
+    let large = vec![b'a'; 1 << 20];
+    let mut decoders = ferrifuge::StreamDecoder::every_kind(DECODER_LIMIT);
+    for decoder in &mut decoders {
+        decode(decoder, &large);
+    }
+    world.probes.decoders = decoders;
+}
+
+#[when("it decodes a reply of 64 bytes")]
+fn it_decodes_a_small_reply(world: &mut ClientWorld) {
+    let small = vec![b'b'; 64];
+    for decoder in &mut world.probes.decoders {
+        decode(decoder, &small);
+    }
+}
+
+#[then("the capacity of its buffer is at most 64 KiB")]
+fn its_buffer_is_released(world: &mut ClientWorld) {
+    let kept: Vec<_> = world
+        .probes
+        .decoders
+        .iter()
+        .filter(|decoder| decoder.capacity() > KEPT)
+        .map(|decoder| format!("{} keeps {} bytes", decoder.name(), decoder.capacity()))
+        .collect();
+    assert!(kept.is_empty(), "{kept:?}");
 }
