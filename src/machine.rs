@@ -41,6 +41,8 @@ mod tokens;
 mod transports;
 #[cfg(test)]
 mod unsupported_tests;
+#[cfg(all(test, feature = "unstable"))]
+mod webtransport_tests;
 
 use tokens::{
     BeforeConnect, FetchPurpose, REFRESH_RETRY_MAX, REFRESH_RETRY_MIN, TOKEN_EXPIRED, Tokens,
@@ -108,6 +110,26 @@ impl TransportKind {
     pub fn is_emulated(self) -> bool {
         matches!(self, Self::HttpStream | Self::Sse)
     }
+}
+
+/// Whether `kind` is WebTransport (Block 48).
+#[cfg_attr(not(feature = "unstable"), allow(clippy::missing_const_for_fn))]
+fn is_webtransport(kind: TransportKind) -> bool {
+    #[cfg(feature = "unstable")]
+    {
+        kind == TransportKind::WebTransport
+    }
+    #[cfg(not(feature = "unstable"))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+/// Whether transport `kind` ends each frame of `frame_type` with a `\n`:
+/// JSON over WebTransport, whose server reads lines (Block 48, D7).
+fn trailer(kind: TransportKind, frame_type: FrameType) -> bool {
+    is_webtransport(kind) && frame_type == FrameType::Text
 }
 
 /// Identifies one transport the machine asked to open. Inputs about a
@@ -2150,6 +2172,7 @@ impl Machine {
         self.transport = Some(id);
         self.transport_open = false;
         let kind = self.transport_kind();
+        self.counters.trailer = u64::from(trailer(kind, self.codec.frame_type()));
         // An emulated stream is opened by a request carrying the connect
         // command (centrifuge-js `_initializeTransport`).
         let initial_frame = kind.is_emulated().then(|| {
@@ -2308,6 +2331,12 @@ impl Machine {
                 false,
             ),
             _ if self.state == State::Connecting && !self.transport_open => {
+                self.transport_failed("transport closed".to_owned());
+            }
+            // A WebTransport stream that ends before the server answered on
+            // it is a failed attempt, reported (Block 48, D9: an invalid
+            // token ends the stream without a reply).
+            _ if self.state == State::Connecting && self.ended_before_an_answer() => {
                 self.transport_failed("transport closed".to_owned());
             }
             _ => self.reconnect_after_transport_closed(),
@@ -2635,6 +2664,12 @@ impl Machine {
     /// centrifuge-js 63ed73e `_transportWasOpen`).
     fn server_answered(&mut self) {
         self.transports.choose();
+    }
+
+    /// Whether the open transport is a WebTransport the server has not
+    /// answered on yet, in the first round (Block 48, D9).
+    fn ended_before_an_answer(&self) -> bool {
+        is_webtransport(self.transport_kind()) && !self.transports.is_chosen()
     }
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
