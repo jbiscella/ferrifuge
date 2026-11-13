@@ -1,5 +1,5 @@
 //! The WebTransport relay of the @W harness (Block 48, D17, D19): a
-//! wtransport server on `localhost` with the test CA's certificate,
+//! wtransport server on 127.0.0.1 with the test CA's certificate,
 //! offering `h3`, as a browser requires. Centrifugo up to v6.10.3 selects no
 //! application protocol, which a browser refuses (Chrome:
 //! `NO_APPLICATION_PROTOCOL`), so each session the browser opens here is
@@ -37,7 +37,7 @@ pub(crate) struct WebTransportRelay {
 impl WebTransportRelay {
     /// A relay to the WebTransport endpoint at `upstream`, `host:port` over
     /// UDP of a Centrifugo serving the test CA's certificate.
-    pub(crate) async fn start(upstream: String) -> Self {
+    pub(crate) fn start(upstream: String) -> Self {
         let (cert, key) = tls::server_pem();
         let chain: Vec<_> = CertificateDer::pem_slice_iter(cert.as_bytes())
             .collect::<Result<_, _>>()
@@ -51,11 +51,9 @@ impl WebTransportRelay {
             .with_single_cert(chain, key)
             .expect("the relay's TLS configuration");
         config.alpn_protocols = vec![b"h3".to_vec()];
-        let local = tokio::net::lookup_host(("localhost", 0))
-            .await
-            .expect("localhost")
-            .next()
-            .expect("an address");
+        // 127.0.0.1, which the certificate names: `localhost` resolves to
+        // `::1` first on some hosts, and a browser may dial either.
+        let local = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         let endpoint = wtransport::Endpoint::server(
             wtransport::ServerConfig::builder()
                 .with_bind_address(local)
@@ -82,12 +80,12 @@ impl WebTransportRelay {
 
     /// The relay's WebTransport endpoint.
     pub(crate) fn url(&self) -> String {
-        format!("https://localhost:{}/connection/webtransport", self.port)
+        format!("https://127.0.0.1:{}/connection/webtransport", self.port)
     }
 
     /// `host:port` Chrome forces QUIC on.
     pub(crate) fn origin(&self) -> String {
-        format!("localhost:{}", self.port)
+        format!("127.0.0.1:{}", self.port)
     }
 
     /// The base64 SHA-256 of the relay certificate's public key, as
