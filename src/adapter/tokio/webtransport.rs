@@ -1012,6 +1012,42 @@ mod tests {
         assert_eq!(end, lost());
     }
 
+    // D9, Block 29 D3: a message decoded in the same read as one over the
+    // limit is handed over before the transport ends as too large.
+    #[tokio::test]
+    async fn a_message_before_one_over_the_limit_comes_first() {
+        let (ca, chain, key) = private_chain();
+        let network = Network::new(Tls::new(Trust::ExtraRoots(vec![ca].into())), Proxy::none());
+        let (url, _, _) = server(chain, key, &[b"h3"]).await;
+        let headers = http::HeaderMap::new();
+        let mut transport = WebTransport::open(
+            Target {
+                url: &url,
+                protobuf: false,
+                timeout: TIMEOUT,
+                headers: &headers,
+                max_message: 64,
+            },
+            &network,
+        )
+        .await
+        .expect("opened");
+        // Echoed in one write: a line, then more than the limit.
+        let mut frame = b"{\"a\":1}\n".to_vec();
+        frame.extend_from_slice(&[b'x'; 200]);
+        transport.send(FrameId::for_tests(1), frame);
+
+        let first = tokio::time::timeout(TIMEOUT, next_message(&mut transport))
+            .await
+            .expect("a message");
+        let second = tokio::time::timeout(TIMEOUT, next_message(&mut transport))
+            .await
+            .expect("the end");
+
+        assert_eq!(first, Inbound::Frame(b"{\"a\":1}".to_vec()));
+        assert_eq!(second, Inbound::TooLarge);
+    }
+
     /// Every field of every record and span, as text (D18).
     #[derive(Clone, Default)]
     struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
