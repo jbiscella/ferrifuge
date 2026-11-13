@@ -7,13 +7,13 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use cucumber::{given, then, when};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdout};
+use tokio::process::{Child, ChildStdout, Command};
 
 use super::ClientWorld;
 use super::transports::server;
@@ -135,18 +135,21 @@ fn bash() -> PathBuf {
     }
 }
 
-/// Runs the release check for `tag` in `dir`.
-fn release_check(dir: &Path, tag: &str) -> Output {
+/// Runs the release check for `tag` in `dir`. Awaited, not waited for:
+/// the scenarios run as one future on one thread, which a blocking wait
+/// would stall for every scenario running at once.
+async fn release_check(dir: &Path, tag: &str) -> Output {
     Command::new(bash())
         .arg(repository().join("scripts").join("check-release-tag"))
         .arg(tag)
         .arg(dir)
         .output()
+        .await
         .expect("bash runs the release check")
 }
 
 #[when(regex = r#"^the release check runs for tag "([^"]+)"$"#)]
-fn the_release_check_runs(world: &mut ClientWorld, tag: String) {
+async fn the_release_check_runs(world: &mut ClientWorld, tag: String) {
     let tag = match tag.as_str() {
         "v followed by its version" => format!("v{VERSION}"),
         "its version without the v" => VERSION.to_owned(),
@@ -154,12 +157,12 @@ fn the_release_check_runs(world: &mut ClientWorld, tag: String) {
         literal => literal.to_owned(),
     };
     let dir = world.release.crate_dir.clone().expect("a crate");
-    world.release.check = Some(release_check(&dir, &tag));
+    world.release.check = Some(release_check(&dir, &tag).await);
 }
 
 #[when(r#"the release check runs for tag "v" followed by its version"#)]
-fn the_release_check_runs_for_the_version(world: &mut ClientWorld) {
-    the_release_check_runs(world, "v followed by its version".to_owned());
+async fn the_release_check_runs_for_the_version(world: &mut ClientWorld) {
+    the_release_check_runs(world, "v followed by its version".to_owned()).await;
 }
 
 fn check_output(world: &ClientWorld) -> (&Output, String) {
@@ -219,12 +222,14 @@ fn it_fails_naming_the_section(world: &mut ClientWorld) {
 }
 
 #[when("the files of its package are listed")]
-fn package_files(world: &mut ClientWorld) {
+async fn package_files(world: &mut ClientWorld) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    // Awaited: see `release_check`.
     let output = Command::new(cargo)
         .args(["package", "--list", "--allow-dirty", "--offline"])
         .current_dir(repository())
         .output()
+        .await
         .expect("cargo package --list");
     assert!(
         output.status.success(),
@@ -303,8 +308,8 @@ async fn a_server_with_the_examples_configuration(world: &mut ClientWorld) {
 
 /// The quickstart example's binary, built with the features of this test
 /// build: `cargo test --all-targets` builds examples only as test harnesses
-/// (Codex on PR #105).
-fn quickstart_binary() -> PathBuf {
+/// (Codex on PR #105). Awaited: see `release_check`.
+async fn quickstart_binary() -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let mut command = Command::new(cargo);
     command
@@ -322,7 +327,10 @@ fn quickstart_binary() -> PathBuf {
             &format!("tokio,{provider}"),
         ]);
     }
-    let output = command.output().expect("cargo build --example quickstart");
+    let output = command
+        .output()
+        .await
+        .expect("cargo build --example quickstart");
     assert!(
         output.status.success(),
         "{}",
@@ -339,9 +347,9 @@ fn quickstart_binary() -> PathBuf {
 }
 
 #[when("the quickstart example runs against the server's websocket endpoint")]
-fn the_quickstart_runs(world: &mut ClientWorld) {
+async fn the_quickstart_runs(world: &mut ClientWorld) {
     let endpoint = format!("ws://{}/connection/websocket", server(world).address());
-    let mut child = tokio::process::Command::new(quickstart_binary())
+    let mut child = Command::new(quickstart_binary().await)
         .env("FERRIFUGE_EXAMPLE_ENDPOINT", endpoint)
         .stdout(Stdio::piped())
         .kill_on_drop(true)
