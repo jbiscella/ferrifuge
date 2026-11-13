@@ -205,3 +205,77 @@ async fn a_ping_that_arrived_during_a_suspension_beats_the_no_ping_deadline() {
         assert_eq!(client.state(), ferrifuge::State::Connected);
     }
 }
+
+/// The fairness of the driver's bias (Block 49, row 28/55): with the
+/// transport ready on every turn, a refresh timer that is due fires within
+/// 33 inputs. While the client is held its refresh comes due and the fake
+/// server queues a flood of pings, all readable at once on resume; the
+/// token callback reads how many messages the client had read by then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
+    const FLOOD: usize = 10_000;
+    let server = FakeServer::start(Announce {
+        ttl: 1,
+        ..Announce::default()
+    })
+    .await;
+    let process = Process::start();
+    let client_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<ferrifuge::WeakClient>));
+    let read_at_refresh = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
+    let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
+        .config(Config::default().token("t0"))
+        .get_token({
+            let (client_slot, read_at_refresh) = (
+                std::sync::Arc::clone(&client_slot),
+                std::sync::Arc::clone(&read_at_refresh),
+            );
+            move || {
+                let read = client_slot
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(ferrifuge::WeakClient::upgrade)
+                    .map(|client| client.statistics().messages_in);
+                read_at_refresh
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(read.unwrap_or(0));
+                std::future::ready(Ok("t1".to_owned()))
+            }
+        })
+        .runtime(process.handle.clone())
+        .build()
+        .expect("a valid client");
+    *client_slot.lock().unwrap() = Some(client.downgrade());
+    let mut events = client.events();
+    client.connect();
+    let connected_at = std::time::Instant::now();
+    tokio::time::timeout(WAIT, async {
+        while let Some(event) = events.next().await {
+            if matches!(event, ClientEvent::Connected { .. }) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("connected");
+    let before = client.statistics().messages_in;
+    let release = process.suspend().await;
+    // While held: the flood is queued, and the refresh (at 80 to 90 % of
+    // the 1 s ttl) comes due.
+    for _ in 0..FLOOD {
+        server.send("{}");
+    }
+    tokio::time::sleep_until((connected_at + Duration::from_secs(1) + MARGIN).into()).await;
+    assert!(
+        read_at_refresh.lock().unwrap().is_none(),
+        "refreshed before the hold"
+    );
+    let _ = release.send(());
+    until("the refresh", || read_at_refresh.lock().unwrap().is_some()).await;
+    let taken = read_at_refresh.lock().unwrap().expect("checked above") - before;
+    assert!(
+        taken <= 33,
+        "the refresh fired after {taken} inputs of the flood"
+    );
+}
