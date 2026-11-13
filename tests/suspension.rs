@@ -207,8 +207,8 @@ async fn a_ping_that_arrived_during_a_suspension_beats_the_no_ping_deadline() {
 }
 
 /// The fairness of the driver's bias (Block 49, row 28/55): with the
-/// transport ready on every turn, a refresh timer that is due fires within
-/// 33 inputs. While the client is held its refresh comes due and the fake
+/// transport ready on every turn, a refresh timer that is due fires as the
+/// 33rd input, after 32 from the transport. While the client is held its refresh comes due and the fake
 /// server queues a flood of pings, all readable at once on resume; the
 /// token callback reads how many messages the client had read by then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -249,7 +249,6 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
     *client_slot.lock().unwrap() = Some(client.downgrade());
     let mut events = client.events();
     client.connect();
-    let connected_at = std::time::Instant::now();
     tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
             if matches!(event, ClientEvent::Connected { .. }) {
@@ -259,6 +258,9 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
     })
     .await
     .expect("connected");
+    // The refresh is armed at the connect reply: measured from it, however
+    // slow the handshake.
+    let connected_at = std::time::Instant::now();
     let before = client.statistics().messages_in;
     let release = process.suspend().await;
     // While held: the flood is queued, and the refresh (at 80 to 90 % of
@@ -274,8 +276,10 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
     let _ = release.send(());
     until("the refresh", || read_at_refresh.lock().unwrap().is_some()).await;
     let taken = read_at_refresh.lock().unwrap().expect("checked above") - before;
+    // The resumed select! had waited, so the streak runs 1 to 32 and the
+    // turn the transport sits out fires the refresh: the 33rd input.
     assert!(
-        taken <= 33,
+        taken <= 32,
         "the refresh fired after {taken} inputs of the flood"
     );
 }
