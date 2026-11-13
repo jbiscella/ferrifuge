@@ -1638,6 +1638,26 @@ the client emits `connecting` with code 1 "transport closed" and
 reconnects by its backoff. `EventSource` shows neither status nor
 headers, so a failed attempt names no captive portal.
 
+**WebTransport (unstable).** Against Centrifugo up to v6.10.3 the browser
+transport fails its handshake: the server selects no application protocol,
+and a browser offers `h3` and cannot retry without it (Chrome:
+"NO_APPLICATION_PROTOCOL"), so the client falls back to the next transport,
+at the cost of one failed handshake per first round. It works unchanged
+once the server negotiates `h3`, or behind a proxy that does. With the
+`unstable` feature, a WebTransport endpoint is opened with the page's
+`WebTransport`, in Chrome 97, Firefox 114 and Safari 26.4 or later; there
+is no shim, and a page without it skips the transport in the fallback
+round. One bidirectional stream carries the session, JSON commands each
+ended by `\n`, Protobuf ones prefixed with their length (`cf_protocol=protobuf`
+in the URL). Its messages wait in the inbox, as over http_stream. A frame
+counts as written when the stream's writer has taken it; one not taken
+within `Config::timeout` closes the transport, and the timer exists only
+while a write is pending. The end of the stream, or the session's close,
+makes the client reconnect with code 1 "transport closed" after the
+messages before it; `close()` closes the writer and then the session,
+within `Config::timeout`. The browser decides the session's cookies:
+`include_credentials` does not apply.
+
 **Credentials and CORS.** `include_credentials(true)` makes the
 http_stream and sse requests carry the page's cookies and HTTP
 authentication to a server on another origin, and store its `Set-Cookie`:
