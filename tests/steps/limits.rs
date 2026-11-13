@@ -121,7 +121,17 @@ async fn within_the_handshake_timeout_an_error(
     seconds: u64,
     ending: String,
 ) {
-    let limit = secs(seconds) + TOLERANCE;
+    // The tolerance is half the gap to the configured `timeout`: a client
+    // still bounding the open with `timeout` fails, and a runner stall of
+    // a second inside the step does not (it was 1 s; the step starts after
+    // the attempt's timer did).
+    let handshake = secs(seconds);
+    let timeout = world.client_config().timeout;
+    assert!(
+        handshake < timeout,
+        "the scenario's handshake timeout is shorter"
+    );
+    let limit = handshake + timeout.saturating_sub(handshake) / 2;
     tokio::time::timeout(limit, failed_attempt_ending_with(world, &ending))
         .await
         .unwrap_or_else(|_| panic!("no failed attempt within {limit:?}"));
