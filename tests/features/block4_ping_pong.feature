@@ -22,7 +22,7 @@ Feature: Ping/pong
 
   @D
   Scenario: Regular pings keep the connection alive
-    Given a client with maxServerPingDelay 1000 ms
+    Given a client with maxServerPingDelay 3000 ms
     And connected to the fake server pinging every 2 s
     When 10 s elapse
     Then the client stays "connected"

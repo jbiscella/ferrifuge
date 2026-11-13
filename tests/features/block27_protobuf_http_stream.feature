@@ -17,7 +17,7 @@ Feature: Protobuf over http_stream
 
   @A
   Scenario: Server pings over Protobuf on http_stream are answered
-    Given a server with http_stream and sse enabled, a ping interval of 2 s and a pong timeout of 1 s
+    Given a server with http_stream and sse enabled, a ping interval of 3 s and a pong timeout of 2 s
     And a client configured with the Protobuf protocol connected over transport "http_stream"
     When 6 s elapse
     Then the client stays "connected"

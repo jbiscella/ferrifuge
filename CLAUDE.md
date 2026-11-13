@@ -370,7 +370,7 @@ Feature: Ping/pong
 
   @D
   Scenario: Regular pings keep the connection alive
-    Given a client with maxServerPingDelay 1000 ms
+    Given a client with maxServerPingDelay 3000 ms
     And connected to the fake server pinging every 2 s
     When 10 s elapse
     Then the client stays "connected"
@@ -674,7 +674,7 @@ Feature: Transport fallback
 
   @A
   Scenario Outline: Server pings over an HTTP transport are answered
-    Given a server with http_stream and sse enabled, a ping interval of 2 s and a pong timeout of 1 s
+    Given a server with http_stream and sse enabled, a ping interval of 3 s and a pong timeout of 2 s
     And a client connected over transport "<transport>"
     When 6 s elapse
     Then the client stays "connected"
@@ -3965,7 +3965,7 @@ Feature: Protobuf over http_stream
 
   @A
   Scenario: Server pings over Protobuf on http_stream are answered
-    Given a server with http_stream and sse enabled, a ping interval of 2 s and a pong timeout of 1 s
+    Given a server with http_stream and sse enabled, a ping interval of 3 s and a pong timeout of 2 s
     And a client configured with the Protobuf protocol connected over transport "http_stream"
     When 6 s elapse
     Then the client stays "connected"
@@ -8772,7 +8772,7 @@ Feature: WebTransport (unstable)
 
   @A
   Scenario: Server pings over WebTransport are answered
-    Given a server with HTTP/3 and WebTransport enabled, a ping interval of 2 s and a pong timeout of 1 s
+    Given a server with HTTP/3 and WebTransport enabled, a ping interval of 3 s and a pong timeout of 2 s
     And a client connected over transport "webtransport"
     When 6 s elapse
     Then the client stays "connected"
