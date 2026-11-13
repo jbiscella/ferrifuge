@@ -218,6 +218,10 @@ ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", 
 # Native tests only: mio, which they pull in, does not build for wasm32
 # (Block 40, D3; Block 44, D18).
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+# The fake WebTransport server's crypto wrapper names quinn-proto's
+# `TransportError` and `TransportParameters`, which quinn does not
+# re-export: wtransport's own copy, no feature of its own (Block 48, D19).
+quinn-proto = { version = "0.11.19", default-features = false }
 # Reports the linked AWS-LC module in the fips build's unit test. Its
 # backend comes from rustls (fips) or reqwest (other test builds).
 aws-lc-rs = { version = "1.18.2", default-features = false }

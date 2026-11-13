@@ -18,6 +18,10 @@ use super::fake_server::{Announce, FakeServer};
 const ROLE: &str = "FERRIFUGE_PERF_FAKE_SERVER";
 /// The fake server's ping interval in seconds; no pings when unset.
 const PING: &str = "FERRIFUGE_PERF_FAKE_SERVER_PING";
+/// Set: the child also serves WebTransport, bridged to its fake server
+/// (Block 48, D19), and its first line is that endpoint.
+#[cfg(feature = "unstable-webtransport")]
+const WEBTRANSPORT: &str = "FERRIFUGE_PERF_FAKE_SERVER_WEBTRANSPORT";
 /// Payload of each publication, so that its JSON data is 1 KiB.
 const TEXT_LEN: usize = 1024 - r#"{"t":""}"#.len();
 
@@ -51,6 +55,17 @@ pub(crate) fn serve_if_child() -> bool {
         if ping > 0 {
             server.ping_every(Duration::from_secs(ping.into()));
         }
+        #[cfg(feature = "unstable-webtransport")]
+        let _webtransport = if env::var_os(WEBTRANSPORT).is_some() {
+            let webtransport =
+                super::fake_webtransport::FakeWebTransport::start(&server, false).await;
+            println!("{}", webtransport.url());
+            Some(webtransport)
+        } else {
+            println!("{}", server.address());
+            None
+        };
+        #[cfg(not(feature = "unstable-webtransport"))]
         println!("{}", server.address());
         io::stdout().flush().expect("stdout");
         let text = "x".repeat(TEXT_LEN);
@@ -113,9 +128,27 @@ impl ChildServer {
 
     /// A server that pings every `ping` seconds; none with 0.
     pub(crate) fn start_pinging(ping: u32) -> Self {
-        let mut child = Command::new(env::current_exe().expect("this binary"))
+        Self::spawn(
+            Command::new(env::current_exe().expect("this binary")).env(PING, ping.to_string()),
+        )
+    }
+
+    /// A server that also serves WebTransport with the test CA's
+    /// certificate (Block 48, D19): [`ChildServer::webtransport_url`] is
+    /// its endpoint. The caller creates the test CA first.
+    #[cfg(feature = "unstable-webtransport")]
+    pub(crate) fn start_webtransport() -> Self {
+        Self::spawn(Command::new(env::current_exe().expect("this binary")).env(WEBTRANSPORT, "1"))
+    }
+
+    #[cfg(feature = "unstable-webtransport")]
+    pub(crate) fn webtransport_url(&self) -> String {
+        self.address.clone()
+    }
+
+    fn spawn(command: &mut Command) -> Self {
+        let mut child = command
             .env(ROLE, "1")
-            .env(PING, ping.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
