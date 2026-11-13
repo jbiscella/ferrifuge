@@ -9421,9 +9421,17 @@ Feature: Bug-pattern catalogue
 - **D5 Cost.** A gungraun benchmark (Linux, Valgrind; Block 14) feeds one reply one byte per chunk at two sizes, 256 KiB and 1 MiB, and the `perf` job's gate reads the instruction counts from gungraun's JSON summary. The bound compares the two sizes because a linear decoder costs 4 times as much for 4 times the bytes and a rescanning one 16 times; comparing one byte per chunk with one whole chunk would not work, since a whole chunk is a single scan and one byte per chunk costs a call per byte, whatever the algorithm. Gating, since instruction counts are deterministic (Block 0).
 - **D6 CI.** @E and @D on every pull request (they are small). The @P gate on the job that runs gungraun.
 
+**Sub-increments** (reviewer, 2026-11-13, delegated by the owner; one branch and PR each, in this order):
+
+| Id | Value clause | Scenarios |
+|---|---|---|
+| 50a | As an app developer on a network that fragments everything, I want every stream body decoded exactly whatever its chunking, so that no message is lost or misread because of a chunk boundary | "A stream body split at every byte offset decodes the same", "A stream body delivered one byte per chunk decodes the same" |
+| 50b | As an app developer whose websocket crosses such a network, I want a connection relayed one byte per write to work, so that no frame is lost or misread because of a TCP boundary | "A websocket relayed one byte per write works" |
+| 50c | As an app developer receiving large replies in tiny chunks, I want decoding cost linear in size, so that fragmentation cannot make a large reply quadratic | "A large reply delivered one byte per chunk costs what its size predicts" |
+
 Value clause: As an app developer on a network that fragments everything, I want every reply decoded exactly however its bytes arrive, so that no message is lost or misread because of a chunk boundary.
 
-**Structural acceptance:** the offsets loop covers `0..body.len()` for each format; every scenario is seen failing once on a mutation recorded in the PR: the Lines buffer cleared on each push, the Varint prefix read only from whole chunks, an sse decoder fed chunk by chunk through lossy UTF-8, the relay dropping one byte of a frame, the Lines decoder scanning its whole buffer on each push; 2-byte prefix asserted by the Protobuf body's second byte; `P_NOT_YET_MEASURED` lists the @P scenario until benchmarked.
+**Structural acceptance:** the offsets loop covers `0..body.len()` for each format; every scenario is seen failing once on a mutation recorded in the PR: the Lines buffer cleared on each push, the Varint prefix read only from whole chunks, an sse decoder fed chunk by chunk through lossy UTF-8, the relay dropping one byte of a frame, the Lines decoder scanning its whole buffer on each push; the Protobuf publication's length prefix asserted to be 2 bytes, the first with the continuation bit set and the second without, encoding 300; `P_NOT_YET_MEASURED` lists the @P scenario until benchmarked.
 
 ```gherkin
 Feature: Byte-split matrix
