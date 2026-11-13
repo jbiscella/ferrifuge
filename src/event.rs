@@ -205,7 +205,9 @@ pub enum ErrorKind {
     /// The transport failed to open, or closed before it opened. As in
     /// centrifuge-js, a transport that opened and then closed before the
     /// connect reply is not reported as an error: the client, still
-    /// connecting, schedules the next attempt without an event.
+    /// connecting, schedules the next attempt without an event. A
+    /// WebTransport stream that ends before the server answered is reported
+    /// (Block 48, D9).
     Transport,
     /// The server answered the connect command with a temporary error.
     Connect,
