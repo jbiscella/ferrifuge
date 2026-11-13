@@ -14,13 +14,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
+#[path = "support/bug_catalogue.rs"]
+mod bug_catalogue;
+
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &[
-    "Byte-split matrix",
-    "Real-server chaos",
-    "Soak run",
-];
+const NOT_YET_IMPLEMENTED: &[&str] = &["Byte-split matrix", "Real-server chaos", "Soak run"];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
@@ -400,4 +400,174 @@ fn wtransport_configures_nothing_of_its_own() {
         !manifest.contains("dangerous-configuration"),
         "Cargo.toml enables wtransport's dangerous-configuration (Block 48, D4)"
     );
+}
+
+/// Block 49a: the bug-pattern catalogue as `CLAUDE.md` has it.
+fn catalogue_text() -> String {
+    read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("CLAUDE.md"))
+}
+
+/// The catalogue of `CLAUDE.md` with its one occurrence of `from` replaced
+/// by `to`: a planted fault.
+fn planted(from: &str, to: &str) -> bug_catalogue::Catalogue {
+    let text = catalogue_text();
+    assert_eq!(text.matches(from).count(), 1, "{from:?} is not unique");
+    bug_catalogue::Catalogue::parse(&text.replacen(from, to, 1))
+}
+
+/// Fails unless one of `problems` contains `expected`.
+fn reports(problems: &[String], expected: &str) {
+    assert!(
+        problems.iter().any(|problem| problem.contains(expected)),
+        "{expected:?} not reported: {problems:?}"
+    );
+}
+
+/// The probes table's row of the probe planted in.
+const PROBE_ROW: &str = "| Command ids skip 0 when they wrap | `.max(1)` removed | pending |";
+
+/// Each check of the catalogue finds nothing on `CLAUDE.md` as it is. The
+/// cucumber scenarios run the same checks; the tests below plant a fault
+/// for each and see it reported.
+#[test]
+fn the_catalogue_checks_pass_on_claude_md() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let catalogue = bug_catalogue::Catalogue::parse(&catalogue_text());
+    let none = Vec::<String>::new();
+    assert_eq!(
+        catalogue.numbers_not_in_one_row(&bug_catalogue::numbers()),
+        none
+    );
+    assert_eq!(catalogue.unknown_statuses(), none);
+    assert_eq!(catalogue.unknown_scenarios(), none);
+    assert_eq!(catalogue.missing_functions(root), none);
+    assert_eq!(catalogue.rows_without_reason(), none);
+    assert_eq!(catalogue.gaps_without_probe(), none);
+    assert_eq!(catalogue.probes_without_mutation(), none);
+    assert_eq!(catalogue.probes_without_record(), none);
+}
+
+#[test]
+fn the_catalogue_reports_a_number_not_in_one_row() {
+    let numbers = bug_catalogue::numbers();
+    let moved = planted(
+        "| 84 | R | A disconnect push during connecting",
+        "| 85 | R | A disconnect push during connecting",
+    )
+    .numbers_not_in_one_row(&numbers);
+    reports(&moved, "84 is in 0 rows");
+    reports(&moved, "\"85\", not a catalogue number");
+    let twice = planted(
+        "| 8 | R | A call made while",
+        "| 8, 9 | R | A call made while",
+    )
+    .numbers_not_in_one_row(&numbers);
+    reports(&twice, "9 is in 2 rows");
+}
+
+#[test]
+fn the_catalogue_reports_an_unknown_status() {
+    let unknown = planted(
+        "| §5.8 | covered | \"Every transport unreachable\"",
+        "| §5.8 | done | \"Every transport unreachable\"",
+    );
+    reports(&unknown.unknown_statuses(), "row 4 has status \"done\"");
+}
+
+#[test]
+fn the_catalogue_reports_a_scenario_that_does_not_exist() {
+    let in_a_row = planted(
+        "\"Every transport unreachable\"",
+        "\"Every transport unreachable now\"",
+    );
+    reports(
+        &in_a_row.unknown_scenarios(),
+        "\"Every transport unreachable now\", not a scenario",
+    );
+    let in_the_probes = planted(
+        PROBE_ROW,
+        "| Command ids skip 1 when they wrap | `.max(1)` removed | pending |",
+    );
+    reports(
+        &in_the_probes.unknown_scenarios(),
+        "\"Command ids skip 1 when they wrap\", not a scenario",
+    );
+}
+
+#[test]
+fn the_catalogue_reports_a_function_that_does_not_exist() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cited = "`src/machine.rs::token_fetched_after_disconnect_is_ignored`";
+    let renamed = planted(
+        cited,
+        "`src/machine.rs::token_fetched_after_disconnect_is_ignored_now`",
+    );
+    reports(
+        &renamed.missing_functions(root),
+        "src/machine.rs has no fn token_fetched_after_disconnect_is_ignored_now",
+    );
+    let moved = planted(
+        cited,
+        "`src/machine_now.rs::token_fetched_after_disconnect_is_ignored`",
+    );
+    reports(&moved.missing_functions(root), "src/machine_now.rs:");
+    let outside = planted(
+        cited,
+        "`machine.rs::token_fetched_after_disconnect_is_ignored`",
+    );
+    reports(
+        &outside.missing_functions(root),
+        "is not a function of src or tests",
+    );
+}
+
+#[test]
+fn the_catalogue_reports_a_row_without_its_reason() {
+    let reason = "| not applicable | callbacks return a typed result; there is no shared error type to confuse |";
+    let without = planted(reason, "| not applicable |  |");
+    reports(
+        &without.rows_without_reason(),
+        "row 54 is not applicable without a reason",
+    );
+}
+
+#[test]
+fn the_catalogue_reports_a_gap_without_a_probe_or_a_listed_finding() {
+    let no_probe = planted(
+        "probe \"Command ids skip 0 when they wrap\"",
+        "test \"Command ids skip 0 when they wrap\"",
+    );
+    reports(&no_probe.gaps_without_probe(), "row S2 is a gap");
+    let unlisted = planted("| gap | finding F1:", "| gap | finding F2:");
+    reports(&unlisted.gaps_without_probe(), "row 63 is a gap");
+}
+
+#[test]
+fn the_catalogue_reports_a_commit_that_is_not_an_ancestor() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let unknown = planted("| d86ddc9, 6d0addd,", "| 0123abc, 6d0addd,");
+    assert!(unknown.commits().contains("0123abc"));
+    reports(&unknown.commits_not_ancestors(root), "0123abc");
+}
+
+#[test]
+fn the_catalogue_reports_a_probe_without_its_record() {
+    let no_mutation = planted(
+        PROBE_ROW,
+        "| Command ids skip 0 when they wrap |  | pending |",
+    );
+    reports(
+        &no_mutation.probes_without_mutation(),
+        "\"Command ids skip 0 when they wrap\" names no mutation",
+    );
+    let nowhere = planted(
+        PROBE_ROW,
+        "| Command ids skip 0 when they wrap | `.max(1)` removed | soon |",
+    );
+    reports(&nowhere.probes_without_record(), "seen failing in \"soon\"");
+    let recorded = planted(
+        PROBE_ROW,
+        "| Command ids skip 0 when they wrap | `.max(1)` removed | #250 |",
+    );
+    assert_eq!(recorded.probes_without_record(), Vec::<String>::new());
 }
