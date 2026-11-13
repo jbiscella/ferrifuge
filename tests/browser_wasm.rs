@@ -1372,3 +1372,137 @@ async fn included_credentials_carry_the_cookies_over_sse() {
 async fn credentials_not_included_carry_no_cookie_over_sse() {
     credentials_carry_the_page_cookies(TransportKind::Sse, false).await;
 }
+
+/// The WebTransport relay's endpoint, `tests/support/webtransport_relay.rs`
+/// (Block 48, D19): none when the harness runs no WebTransport server, as
+/// with a Centrifugo binary on hosted macOS, and the WebTransport tests are
+/// skipped.
+#[cfg(feature = "unstable")]
+const WEBTRANSPORT: Option<&str> = option_env!("FERRIFUGE_W_WEBTRANSPORT");
+
+/// The relay's endpoint, or none after saying why the test is skipped.
+#[cfg(feature = "unstable")]
+fn webtransport_relay() -> Option<&'static str> {
+    if WEBTRANSPORT.is_none() {
+        wasm_bindgen_test::console_log!("no WebTransport relay in this run: skipped");
+    }
+    WEBTRANSPORT
+}
+
+#[cfg(feature = "unstable")]
+fn webtransport_then_websocket(relay: &str) -> Client {
+    Client::builder_with_transports([
+        (TransportKind::WebTransport, relay.to_owned()),
+        (TransportKind::WebSocket, endpoint()),
+    ])
+    .build()
+    .expect("a valid client")
+}
+
+/// Sessions the WebTransport relay accepted so far.
+#[cfg(feature = "unstable")]
+async fn webtransport_sessions() -> u32 {
+    relay("webtransport-sessions")
+        .await
+        .parse()
+        .expect("a count")
+}
+
+// @W scenario: A browser client connects over WebTransport and receives a publication
+#[cfg(feature = "unstable")]
+#[wasm_bindgen_test]
+async fn a_browser_client_connects_over_webtransport_and_receives_a_publication() {
+    let Some(endpoint) = webtransport_relay() else {
+        return;
+    };
+    for protocol in [Protocol::Json, Protocol::Protobuf] {
+        let channel = unique("news");
+        let client =
+            Client::builder_with_transports([(TransportKind::WebTransport, endpoint.to_owned())])
+                .config(Config::default().protocol(protocol))
+                .build()
+                .expect("a valid client");
+        let subscription = client.new_subscription(channel.clone()).unwrap();
+        let mut events = client.events();
+        let mut subscription_events = subscription.events();
+
+        client.connect();
+        subscription.subscribe();
+        let transport = connected_over(&mut events).await;
+        subscribed(&mut subscription_events).await;
+        let published = relay(&format!("webtransport-publish/{channel}")).await;
+        let received = publication(&mut subscription_events).await;
+
+        assert_eq!(transport, "webtransport", "{protocol:?}");
+        assert_eq!(published, "ok", "{protocol:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&received.data).expect("JSON data"),
+            serde_json::json!({"from": "api"}),
+            "{protocol:?}"
+        );
+        client.disconnect();
+    }
+}
+
+// @W scenario: A browser without WebTransport skips the transport
+#[cfg(feature = "unstable")]
+#[wasm_bindgen_test]
+async fn a_browser_without_webtransport_skips_the_transport() {
+    let Some(endpoint) = webtransport_relay() else {
+        return;
+    };
+    let global = js_sys::global();
+    let key = JsValue::from_str("WebTransport");
+    let saved = js_sys::Reflect::get(&global, &key).expect("the global");
+    js_sys::Reflect::delete_property(&global, &key).expect("removed");
+    let before = webtransport_sessions().await;
+    let client = webtransport_then_websocket(endpoint);
+    let mut events = client.events();
+
+    client.connect();
+    // Skipped, not tried (Block 44, D12): no error event names it.
+    let mut failed = None;
+    let transport = loop {
+        match next(&mut events).await {
+            ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
+            ClientEvent::Connected { transport, .. } => break transport,
+            ClientEvent::Connecting { .. } => {}
+            event => panic!("not connecting or connected: {event:?}"),
+        }
+    };
+    let after = webtransport_sessions().await;
+    client.disconnect();
+    js_sys::Reflect::set(&global, &key, &saved).expect("restored");
+
+    assert_eq!(transport, "websocket");
+    assert_eq!(after, before);
+    assert_eq!(failed, None);
+}
+
+// @W scenario: A browser client falls back from WebTransport to websocket when the session is refused
+#[cfg(feature = "unstable")]
+#[wasm_bindgen_test]
+async fn a_browser_client_falls_back_from_webtransport_when_the_session_is_refused() {
+    let Some(endpoint) = webtransport_relay() else {
+        return;
+    };
+    relay("webtransport-refuse/on").await;
+    let client = webtransport_then_websocket(endpoint);
+    let mut events = client.events();
+
+    client.connect();
+    let mut failed = None;
+    let transport = loop {
+        match next(&mut events).await {
+            ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
+            ClientEvent::Connected { transport, .. } => break transport,
+            ClientEvent::Connecting { .. } => {}
+            event => panic!("not connecting or connected: {event:?}"),
+        }
+    };
+    client.disconnect();
+    relay("webtransport-refuse/off").await;
+
+    assert_eq!(failed.as_deref(), Some("webtransport"));
+    assert_eq!(transport, "websocket");
+}
