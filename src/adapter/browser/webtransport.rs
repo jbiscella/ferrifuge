@@ -98,6 +98,9 @@ pub(in crate::adapter) struct WebTransport {
     written: VecDeque<FrameId>,
     /// The last report was of a frame written: a message comes first next.
     read_next: bool,
+    /// A write that failed or timed out: the end of the transport, reported
+    /// after the messages already in the inbox when reading (D9).
+    failed: Option<Inbound>,
 }
 
 impl WebTransport {
@@ -163,6 +166,7 @@ impl WebTransport {
             timeout,
             written: VecDeque::new(),
             read_next: false,
+            failed: None,
         })
     }
 
@@ -206,13 +210,16 @@ impl WebTransport {
             timeout,
             written,
             read_next,
+            failed,
             ..
         } = self;
         std::future::poll_fn(|cx| {
             if state.borrow().overflowed {
                 return Poll::Ready(Inbound::Overflow);
             }
-            while let Some((id, write, _)) = pending.front_mut() {
+            while failed.is_none()
+                && let Some((id, write, _)) = pending.front_mut()
+            {
                 match Pin::new(write).poll(cx) {
                     Poll::Ready(Ok(_)) => {
                         written.push_back(*id);
@@ -220,7 +227,7 @@ impl WebTransport {
                         *deadline = None;
                     }
                     Poll::Ready(Err(error)) => {
-                        return Poll::Ready(Inbound::Closed {
+                        *failed = Some(Inbound::Closed {
                             code: None,
                             reason: js_message(&error),
                         });
@@ -228,20 +235,31 @@ impl WebTransport {
                     Poll::Pending => break,
                 }
             }
-            if let Some((_, _, queued)) = pending.front() {
+            if failed.is_none()
+                && let Some((_, _, queued)) = pending.front()
+            {
                 let due = *queued + *timeout;
                 let timer = deadline.get_or_insert_with(|| Box::pin(platform::sleep(*timeout)));
                 if timer.deadline() != due {
                     timer.as_mut().reset(due);
                 }
                 if timer.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(Inbound::Closed {
+                    *failed = Some(Inbound::Closed {
                         code: None,
                         reason: "write timeout".to_owned(),
                     });
                 }
             }
             let mut shared = state.borrow_mut();
+            // A failed write ends the transport after the messages already
+            // decoded, a disconnect push among them (D9); without reading,
+            // at once (Block 15).
+            if failed.is_some() {
+                if reading && let Some(item) = shared.inbox.pop() {
+                    return Poll::Ready(item);
+                }
+                return Poll::Ready(failed.take().expect("checked"));
+            }
             // Written reports and messages take turns, as on a websocket.
             let frame_first = reading && !shared.inbox.is_empty() && *read_next;
             if !frame_first && let Some(id) = written.pop_front() {
@@ -347,6 +365,7 @@ mod tests {
                  const writable = new WritableStream({
                    write(chunk) {
                      state.chunks.push(Array.from(chunk));
+                     if (state.reject) return Promise.reject(new Error('stream error'));
                      return hold ? new Promise(() => {}) : undefined;
                    },
                  });
@@ -534,6 +553,75 @@ mod tests {
                 .expect("closeCalls")
                 .as_f64();
             assert!(calls.is_some_and(|calls| calls >= 1.0), "{calls:?}");
+        })
+        .await;
+    }
+
+    // D9 (Codex on #232): a write that fails, or is not taken within the
+    // timeout, ends the transport only after the messages already in the
+    // inbox, a disconnect push among them; without reading, at once.
+    #[wasm_bindgen_test]
+    async fn the_messages_decoded_before_a_failed_write_come_first() {
+        for (hold, timeout, reason) in [
+            (false, TIMEOUT, "stream error"),
+            (true, Duration::from_millis(200), "write timeout"),
+        ] {
+            with_fake(hold, false, |state| async move {
+                let mut transport = open(false, timeout).await.expect("opened");
+                push(
+                    &state,
+                    "{}\n{\"push\":{\"disconnect\":{\"code\":3500,\"reason\":\"bye\"}}}\n",
+                );
+                // The reader admits both to the inbox.
+                platform::sleep(Duration::from_millis(50)).await;
+                // A write that fails, or with `hold` one never taken.
+                if !hold {
+                    Reflect::set(&state, &JsValue::from_str("reject"), &JsValue::TRUE)
+                        .expect("set");
+                }
+
+                transport.send(FrameId::for_tests(1), b"{}".to_vec());
+                let mut seen = Vec::new();
+                for _ in 0..3 {
+                    seen.push(recv_within(&mut transport, 2000).await);
+                }
+
+                assert!(
+                    matches!(
+                        seen.as_slice(),
+                        [
+                            Some(Inbound::Frame(ping)),
+                            Some(Inbound::Frame(push)),
+                            Some(Inbound::Closed { code: None, reason: end }),
+                        ] if ping == b"{}" && push.starts_with(b"{\"push\"") && end.contains(reason)
+                    ),
+                    "{reason}: {seen:?}"
+                );
+            })
+            .await;
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn without_reading_a_failed_write_ends_the_transport_at_once() {
+        with_fake(false, false, |state| async move {
+            let mut transport = open(false, TIMEOUT).await.expect("opened");
+            push(&state, "{}\n");
+            platform::sleep(Duration::from_millis(50)).await;
+            Reflect::set(&state, &JsValue::from_str("reject"), &JsValue::TRUE).expect("set");
+
+            transport.send(FrameId::for_tests(1), b"{}".to_vec());
+            let timer = platform::sleep(Duration::from_millis(2000));
+            let inbound =
+                match select(std::pin::pin!(transport.recv(false)), std::pin::pin!(timer)).await {
+                    Either::Left((inbound, _)) => Some(inbound),
+                    Either::Right(_) => None,
+                };
+
+            assert!(
+                matches!(&inbound, Some(Inbound::Closed { code: None, reason }) if reason.contains("stream error")),
+                "{inbound:?}"
+            );
         })
         .await;
     }
