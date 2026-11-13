@@ -1570,6 +1570,15 @@ impl Run {
                 }
                 Inbound::Frame(data) => self.feed(Input::Frame { transport, data })?,
                 Inbound::Close(code, reason) => {
+                    // 3014 invalidates the token state whether or not the
+                    // client was connected, which emits no state event
+                    // while it connects (Codex, #247).
+                    if self.mode == Mode::Continuity
+                        && code == Some(3014)
+                        && self.continuity.transport == Some(transport)
+                    {
+                        self.end_token_fetches();
+                    }
                     self.checker.open.remove(&id(transport));
                     self.feed(Input::TransportClosed {
                         transport,
@@ -2183,6 +2192,17 @@ impl Run {
                     .insert(earlier, Abandoned::Ended);
             }
         }
+    }
+
+    /// Every connection token fetch not yet answered is abandoned for good,
+    /// D6's exception included (disconnect code 3014).
+    fn end_token_fetches(&mut self) {
+        for &(fetch, _) in &self.continuity.tokens {
+            self.continuity
+                .abandoned_tokens
+                .insert(fetch, Abandoned::Ended);
+        }
+        self.continuity.excepted = None;
     }
 
     /// `unsubscribe()` or a removal abandons the fetches of the
