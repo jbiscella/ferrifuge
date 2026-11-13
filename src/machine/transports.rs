@@ -42,6 +42,11 @@ impl Transports {
         self.chosen = true;
     }
 
+    /// Whether the server answered over the current transport once.
+    pub(super) fn is_chosen(&self) -> bool {
+        self.chosen
+    }
+
     /// An attempt over the current transport failed: unless it was chosen,
     /// the next attempt tries the next one.
     pub(super) fn attempt_failed(&mut self) {
