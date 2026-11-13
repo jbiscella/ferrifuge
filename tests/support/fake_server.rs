@@ -82,6 +82,13 @@ struct State {
     connections: usize,
     /// Connections whose end the server has seen.
     closed: usize,
+    /// When the server saw the last of them end.
+    last_closed_at: Option<std::time::Instant>,
+    /// Answers the next connect command with this text frame instead of a
+    /// connect reply (Block 49).
+    connect_frame: Option<String>,
+    /// When that frame went out.
+    connect_frame_sent_at: Option<std::time::Instant>,
     /// Answers every websocket upgrade with this HTTP status and a web
     /// page, as a captive portal does (Block 25, D8).
     portal_status: Option<u16>,
@@ -355,7 +362,9 @@ impl FakeServer {
                 let closed = Arc::clone(&shared);
                 tokio::spawn(async move {
                     connection.serve(commands).await;
-                    closed.lock().unwrap().closed += 1;
+                    let mut state = closed.lock().unwrap();
+                    state.closed += 1;
+                    state.last_closed_at = Some(std::time::Instant::now());
                 });
             }
         });
@@ -534,6 +543,18 @@ impl FakeServer {
         self.state.lock().unwrap().upgrade_cookies.clone()
     }
 
+    /// Answers the next JSON connect command with the text frame `frame`
+    /// instead of a connect reply, and nothing more (Block 49).
+    pub(crate) fn answer_next_connect_with_frame(&self, frame: &str) {
+        self.state.lock().unwrap().connect_frame = Some(frame.to_owned());
+    }
+
+    /// When the frame of [`FakeServer::answer_next_connect_with_frame`]
+    /// went out, if it did.
+    pub(crate) fn connect_frame_sent_at(&self) -> Option<std::time::Instant> {
+        self.state.lock().unwrap().connect_frame_sent_at
+    }
+
     /// When each JSON connect reply went out, in order.
     pub(crate) fn connects_answered_at(&self) -> Vec<std::time::Instant> {
         self.state.lock().unwrap().connects_answered_at.clone()
@@ -643,6 +664,11 @@ impl FakeServer {
     /// Connections whose end the server has seen so far.
     pub(crate) fn closed_connections(&self) -> usize {
         self.state.lock().unwrap().closed
+    }
+
+    /// When the server saw the last connection end, if one did.
+    pub(crate) fn last_closed_at(&self) -> Option<std::time::Instant> {
+        self.state.lock().unwrap().last_closed_at
     }
 
     /// Stops reading from the current connection; it sends a ping every
@@ -1095,6 +1121,16 @@ impl Connection {
             self.record(message.clone(), line, frame);
             if connect_failed {
                 continue;
+            }
+            if message["connect"].is_object() {
+                let mut state = self.state.lock().unwrap();
+                if let Some(frame) = state.connect_frame.take() {
+                    state.connect_frame_sent_at = Some(std::time::Instant::now());
+                    drop(state);
+                    let _ = self.out.send(Outgoing::Message(Message::text(frame)));
+                    connect_failed = true;
+                    continue;
+                }
             }
             let failing = message["connect"].is_object().then(|| {
                 let mut state = self.state.lock().unwrap();

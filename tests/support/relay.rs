@@ -34,6 +34,8 @@ type Lifetime = (std::time::Instant, Option<std::time::Instant>);
 pub(crate) struct CountingRelay {
     port: u16,
     accepted: Arc<AtomicUsize>,
+    /// When each connection was accepted, in order.
+    accepted_at: Arc<Mutex<Vec<std::time::Instant>>>,
     /// Bytes relayed from the target to clients so far.
     to_clients: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
@@ -118,6 +120,8 @@ impl CountingRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
         let port = listener.local_addr().expect("relay address").port();
         let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_at = Arc::new(Mutex::new(Vec::new()));
+        let accepting = Arc::clone(&accepted_at);
         let to_clients = Arc::new(AtomicUsize::new(0));
         let mode = Arc::new(AtomicU8::new(mode as u8));
         let held = Arc::new(Mutex::new(Vec::new()));
@@ -133,6 +137,7 @@ impl CountingRelay {
         );
         let server = tokio::spawn(async move {
             while let Ok((inbound, _)) = listener.accept().await {
+                accepting.lock().unwrap().push(std::time::Instant::now());
                 counter.fetch_add(1, Ordering::SeqCst);
                 match current.load(Ordering::SeqCst) {
                     m if m == Mode::Silent as u8 => {
@@ -171,6 +176,7 @@ impl CountingRelay {
         Self {
             port,
             accepted,
+            accepted_at,
             to_clients,
             mode,
             server,
@@ -189,6 +195,21 @@ impl CountingRelay {
             .iter()
             .map(|(accepted, closed)| closed.map(|closed| closed.duration_since(*accepted)))
             .collect()
+    }
+
+    /// When the first connection was accepted, if one was.
+    pub(crate) fn first_accepted_at(&self) -> Option<std::time::Instant> {
+        self.accepted_at.lock().unwrap().first().copied()
+    }
+
+    /// When the first connection held in [`Mode::Silent`] was closed by its
+    /// client, if it was.
+    pub(crate) fn first_silent_closed_at(&self) -> Option<std::time::Instant> {
+        self.silent
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|(_, closed)| *closed)
     }
 
     /// Bytes relayed from the target to clients so far.

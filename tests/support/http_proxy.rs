@@ -66,6 +66,11 @@ struct ProxyState {
     reject_carrying: Mutex<Option<&'static [u8]>>,
     /// Set once a programmed rejection was answered.
     rejected: AtomicBool,
+    /// Holds the next emulation request open without ever answering it
+    /// (Block 49).
+    never_answer_next: AtomicBool,
+    /// When the held request came, and when its client abandoned it.
+    held: Mutex<(Option<std::time::Instant>, Option<std::time::Instant>)>,
     /// Delay for the next emulation request carrying an unsubscribe command.
     delay_next_unsubscribe: Mutex<Option<Duration>>,
     /// Emulation requests carrying an unsubscribe command that the server
@@ -103,6 +108,8 @@ impl HttpProxy {
             target,
             http: reqwest::Client::new(),
             reject_next_emulation: AtomicBool::new(false),
+            never_answer_next: AtomicBool::new(false),
+            held: Mutex::new((None, None)),
             reject_carrying: Mutex::new(None),
             rejected: AtomicBool::new(false),
             delay_next_unsubscribe: Mutex::new(None),
@@ -238,6 +245,22 @@ impl HttpProxy {
     /// Whether a rejection is programmed and not yet answered.
     pub(crate) fn rejection_programmed(&self) -> bool {
         self.state.reject_next_emulation.load(Ordering::SeqCst)
+            || self.state.never_answer_next.load(Ordering::SeqCst)
+    }
+
+    /// Holds the next emulation request open, never answering it; it then
+    /// counts as the programmed rejection (Block 49).
+    pub(crate) fn never_answer_next_emulation(&self) {
+        self.state.rejected.store(false, Ordering::SeqCst);
+        self.state.never_answer_next.store(true, Ordering::SeqCst);
+    }
+
+    /// When the held emulation request came, and when its client abandoned
+    /// it, as the proxy saw them.
+    pub(crate) fn held_emulation(
+        &self,
+    ) -> (Option<std::time::Instant>, Option<std::time::Instant>) {
+        *self.state.held.lock().unwrap()
     }
 
     /// Whether the programmed rejection happened.
@@ -350,6 +373,28 @@ async fn shared_poll_publish(state: &ProxyState, channel: &str, key: &str, versi
     }
 }
 
+/// Records when the client abandoned the request the proxy holds.
+struct Abandoned(Arc<ProxyState>);
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        self.0.held.lock().unwrap().1 = Some(std::time::Instant::now());
+    }
+}
+
+/// Never answers the emulation request at `path` when one is programmed
+/// so, recording when it came and when its client abandoned it: the server
+/// drops the handler's future when its connection closes (Block 49).
+async fn hold_if_programmed(state: &Arc<ProxyState>, path: &str) {
+    if path != "/emulation" || !state.never_answer_next.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    state.held.lock().unwrap().0 = Some(std::time::Instant::now());
+    state.rejected.store(true, Ordering::SeqCst);
+    let _abandoned = Abandoned(Arc::clone(state));
+    std::future::pending::<()>().await;
+}
+
+#[allow(clippy::too_many_lines)] // One branch per programmed answer.
 async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Response<Body> {
     let (parts, body) = request.into_parts();
     if let Some(command) = parts.uri.path().strip_prefix(CONTROL) {
@@ -360,6 +405,7 @@ async fn forward(State(state): State<Arc<ProxyState>>, request: Request) -> Resp
         .lock()
         .unwrap()
         .push((parts.uri.path().to_owned(), parts.headers.clone()));
+    hold_if_programmed(&state, parts.uri.path()).await;
     if parts.uri.path() == "/emulation" && state.reject_next_emulation.swap(false, Ordering::SeqCst)
     {
         state.rejected.store(true, Ordering::SeqCst);

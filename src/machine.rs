@@ -1799,6 +1799,16 @@ impl Machine {
         self
     }
 
+    /// Makes the next command id the one after `id`, as if `id` had just
+    /// been given, so that a test reaches the wrap of the 32-bit ids
+    /// (Block 49, "Command ids skip 0 when they wrap"). Only with the
+    /// `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    pub fn set_last_command_id(&mut self, id: u32) {
+        self.next_command = id;
+    }
+
     /// Creates a disconnected machine whose owner answers
     /// [`Action::FetchToken`] from the application's token callback.
     ///
