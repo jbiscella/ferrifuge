@@ -397,14 +397,13 @@ mod tests {
         url
     }
 
-    /// As [`serve_once`] without a delay: answers once `before` fires, if
-    /// given, and fires `after`, if given, once it has answered, so that
-    /// tests order servers by events rather than by time.
-    async fn serve_in_turn(
+    /// As [`serve_once`] without a delay: answers once `release` fires, so
+    /// that a test orders the answer by an event it has observed rather
+    /// than by time.
+    async fn serve_on_release(
         response: &'static [u8],
         path: &str,
-        before: Option<tokio::sync::oneshot::Receiver<()>>,
-        after: Option<tokio::sync::oneshot::Sender<()>>,
+        release: tokio::sync::oneshot::Receiver<()>,
     ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -413,13 +412,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let _ = socket.read(&mut [0; 4096]).await;
-            if let Some(before) = before {
-                let _ = before.await;
-            }
+            let _ = release.await;
             let _ = socket.write_all(response).await;
-            if let Some(after) = after {
-                let _ = after.send(());
-            }
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
         url
@@ -1050,21 +1044,20 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        // The failing one answers once the successful one has: ordered by
-        // that event, not by a delay a slow connection setup outlasts.
-        let (answered, ok_answered) = tokio::sync::oneshot::channel();
-        let ok = serve_in_turn(
+        // The failing one answers only once the test has seen the
+        // successful one reported written: ordered by what the transport
+        // received, not by what a server sent or by a delay.
+        let ok = serve_once(
             b"HTTP/1.1 204 No Content\r\n\r\n",
             "/emulation",
-            None,
-            Some(answered),
+            Duration::ZERO,
         )
         .await;
-        let failing = serve_in_turn(
+        let (release, released) = tokio::sync::oneshot::channel();
+        let failing = serve_on_release(
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
             "/emulation",
-            Some(ok_answered),
-            None,
+            released,
         )
         .await;
         let mut transport = HttpTransport::open(
@@ -1086,8 +1079,10 @@ mod tests {
         transport.send(FrameId::for_tests(4), b"{}".to_vec());
 
         // The stream stays silent: the answered request is reported
-        // written, then only the failed one can end it.
+        // written, then only the failed one, answered after that, can end
+        // it.
         let written = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
+        let _ = release.send(());
         let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
         assert_eq!(written, Ok(Inbound::Written(FrameId::for_tests(3))));
