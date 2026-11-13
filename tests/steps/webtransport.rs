@@ -20,6 +20,7 @@ use super::subscriptions::{create, expect_subscription_event, publish, subscribe
 use super::transports::{configure, server};
 use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, expect_event};
 use crate::support::centrifugo::Centrifugo;
+use crate::support::fake_webtransport::FakeWebTransport;
 use crate::support::tls;
 use crate::{SERVER_A, SERVER_B};
 
@@ -29,6 +30,10 @@ pub(crate) struct WebTransportWorld {
     /// The local UDP socket of an untagged scenario: its port, and the
     /// datagrams it received.
     socket: Option<(u16, Arc<AtomicUsize>)>,
+    /// The fake WebTransport server of a @D scenario (48b).
+    pub(super) fake: Option<FakeWebTransport>,
+    /// The client of the @E scenario and how its connections end (48b).
+    pub(super) plan: super::webtransport_fake::NoCodePlan,
 }
 
 /// Starts the scenario's server over TLS with HTTP/3, WebTransport on or

@@ -78,6 +78,8 @@ mod token;
 mod transports;
 #[cfg(feature = "unstable-webtransport")]
 mod webtransport;
+#[cfg(feature = "unstable-webtransport")]
+mod webtransport_fake;
 
 /// How long a step waits for an event it expects.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);

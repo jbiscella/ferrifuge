@@ -48,6 +48,13 @@ fn secs(seconds: u64) -> Duration {
     Duration::from_secs(seconds)
 }
 
+/// Sets the clients' maximum message size and their protocol, `JSON` or
+/// `Protobuf`.
+pub(super) fn set_limit(world: &mut ClientWorld, bytes: usize, name: &str) {
+    world.limits.max_message_bytes = Some(bytes);
+    world.protocol = protocol(name);
+}
+
 fn protocol(name: &str) -> Protocol {
     match name {
         "JSON" => Protocol::Json,
@@ -245,8 +252,7 @@ fn then_http_stream_opens(world: &mut ClientWorld, seconds: f64) {
     regex = r"^a client with a maximum message size of (\d+) bytes and the (JSON|Protobuf) protocol, connected to the fake server$"
 )]
 async fn a_limited_client_connected(world: &mut ClientWorld, bytes: usize, name: String) {
-    world.limits.max_message_bytes = Some(bytes);
-    world.protocol = protocol(&name);
+    set_limit(world, bytes, &name);
     super::codes::a_client_connected_to_the_fake_server(world).await;
 }
 
@@ -254,8 +260,7 @@ async fn a_limited_client_connected(world: &mut ClientWorld, bytes: usize, name:
     regex = r#"^a client with a maximum message size of (\d+) bytes and the (JSON|Protobuf) protocol, subscribed to channel "news" on the fake server$"#
 )]
 async fn a_limited_client_subscribed(world: &mut ClientWorld, bytes: usize, name: String) {
-    world.limits.max_message_bytes = Some(bytes);
-    world.protocol = protocol(&name);
+    set_limit(world, bytes, &name);
     super::subscriptions::a_client_subscribed(world).await;
 }
 

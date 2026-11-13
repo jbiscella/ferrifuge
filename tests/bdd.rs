@@ -882,6 +882,16 @@ const WEBTRANSPORT: &[&str] = &[
     "A connector with a WebTransport endpoint is rejected",
     "A WebTransport attempt with a proxy fails without sending a datagram",
     "A WebTransport open that never completes is bounded by the handshake timeout",
+    "A server that selects no application protocol is reached on a second handshake",
+    "A server that requires h3 is reached on the first handshake",
+    "An endpoint remembered without ALPN that starts requiring h3 is reached again",
+    "A disconnect push right before the end of the WebTransport stream stops the client",
+    "A WebTransport stream that ends without a disconnect push makes the client reconnect",
+    "A WebTransport connection ended without a disconnect push before a server ping keeps the backoff growing",
+    "A chosen WebTransport that ends before answering the connect gives way to the next transport",
+    "A WebTransport write the server never reads closes the transport",
+    "A message over the limit ends a client connected over WebTransport",
+    "Closing a WebTransport client ends the session within the timeout",
 ];
 #[cfg(not(feature = "unstable-webtransport"))]
 const WEBTRANSPORT: &[&str] = &[];
