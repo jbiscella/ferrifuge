@@ -1,5 +1,15 @@
 //! Sans-IO core: the client connection state machine.
 //!
+//! Timers are named by kind, not by setting: [`Input::TimerFired`],
+//! [`Input::SubscriptionTimerFired`] and [`Input::CallTimerFired`] carry no
+//! number, so the machine cannot tell a stale firing from a current one.
+//! The owner feeds only the firing of a setting still running, and drops
+//! one taken before a later set or cancel of that timer was performed,
+//! including one the machine issues in answer to an input fed ahead of the
+//! firing, such as [`Input::Slept`]. A stale `Timer::ServerPing` firing
+//! would otherwise disconnect a healthy connection. The tokio and browser
+//! adapters do this (Block 25, D1).
+//!
 //! A [`Machine`] owns no sockets, timers or tasks. Its owner feeds it
 //! [`Input`]s and performs the returned [`Action`]s in order. The tokio
 //! adapter is one such owner; any other runtime can drive it the same way.
@@ -715,7 +725,8 @@ pub enum Input {
         /// The frame.
         frame: FrameId,
     },
-    /// A timer set by [`Action::SetTimer`] fired.
+    /// A timer set by [`Action::SetTimer`] fired, and was neither set again
+    /// nor cancelled since (see the module documentation).
     TimerFired(Timer),
     /// A timer set by [`Action::SetDebounceTimer`] fired (Block 46): the
     /// window sends the latest value it holds, if any, and opens anew, or
@@ -772,7 +783,8 @@ pub enum Input {
     Unsubscribe(SubscriptionId),
     /// The application removed a subscription from the registry.
     RemoveSubscription(SubscriptionId),
-    /// A timer set by [`Action::SetSubscriptionTimer`] fired.
+    /// A timer set by [`Action::SetSubscriptionTimer`] fired, and was
+    /// neither set again nor cancelled since (see the module documentation).
     SubscriptionTimerFired(SubscriptionId, SubscriptionTimer),
     /// The data callback answered a [`Action::FetchSubscriptionData`].
     SubscriptionDataFetched {
@@ -829,7 +841,8 @@ pub enum Input {
     /// sent when the client is connected, waiting for the connection
     /// until then.
     Call(CallId),
-    /// A timer set by [`Action::SetCallTimer`] fired.
+    /// A timer set by [`Action::SetCallTimer`] fired, and was neither set
+    /// again nor cancelled since (see the module documentation).
     CallTimerFired(CallId, CallTimer),
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting. A map

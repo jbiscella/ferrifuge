@@ -104,7 +104,7 @@ Feature: Bug-pattern catalogue
     Given the core runner with the chaos configuration and client-side and server-side subscriptions to recoverable channels
     When seeds 0 to 299 each run 60 random operations against the simulated server with faults
     Then no seed violates invariant I13
-    And the run counted late token answers, late data answers, late state answers, timers fired after cancellation and frames of an abandoned transport, none of them 0
+    And the run counted late token answers, late data answers, late state answers and frames of an abandoned transport, none of them 0
 
   @P
   Scenario Outline: The core runner reports a planted continuity fault
