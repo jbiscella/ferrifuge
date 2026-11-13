@@ -785,19 +785,25 @@ fn not_connecting_with(world: &mut ClientWorld, code: u32) {
 }
 
 #[then("the client has answered every ping")]
-fn answered_every_ping(world: &mut ClientWorld) {
+async fn answered_every_ping(world: &mut ClientWorld) {
     let fake = world.fake();
-    let pongs = fake
-        .received()
-        .iter()
-        .filter(|command| command.as_object().is_some_and(serde_json::Map::is_empty))
-        .count();
-    // The last ping may still be on its way back.
-    assert!(
-        pongs + 1 >= fake.pings(),
-        "{pongs} pongs to {} pings",
-        fake.pings()
-    );
+    let answers = || {
+        fake.received()
+            .iter()
+            .filter(|command| command.as_object().is_some_and(serde_json::Map::is_empty))
+            .count()
+    };
+    // Every ping sent so far, the last ones perhaps still on their way back
+    // (CI health, finding 12: counted at one instant, a stalled driver left
+    // two unanswered).
+    let pings = fake.pings();
+    let answered = tokio::time::timeout(EVENT_TIMEOUT, async {
+        while answers() < pings {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(answered.is_ok(), "{} pongs to {pings} pings", answers());
 }
 
 #[then(
