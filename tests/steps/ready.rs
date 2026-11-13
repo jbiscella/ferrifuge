@@ -98,6 +98,11 @@ fn ready_is_awaited(world: &mut ClientWorld, of: String) {
     } else {
         let future = world.subscription().ready();
         world.ready.subscription = Some(track(future, made_at));
+        // A subscribe answer held for this step goes out once ready()
+        // waits.
+        if let Some(fake) = world.fake.as_ref() {
+            fake.release_held_subscribes();
+        }
     }
 }
 

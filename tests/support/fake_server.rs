@@ -143,6 +143,9 @@ struct State {
     /// Subscribe commands are answered after this delay, with this error
     /// when one is given.
     subscribe_delay: Option<(std::time::Duration, Option<Value>)>,
+    /// When set, the delay of `subscribe_delay` starts only once a step
+    /// releases it ([`FakeServer::release_held_subscribes`]).
+    subscribe_gate: Option<Arc<tokio::sync::Notify>>,
     /// When each delayed subscribe answer was sent.
     subscribes_answered_at: Vec<std::time::Instant>,
     /// When each JSON connect reply went out (Block 36).
@@ -695,6 +698,30 @@ impl FakeServer {
         self.state.lock().unwrap().subscribe_delay = Some((delay, error));
     }
 
+    /// As [`FakeServer::answer_subscribes_after`], the delay counted from
+    /// [`FakeServer::release_held_subscribes`] rather than from the
+    /// command: until a step releases it, a subscribe stays unanswered
+    /// whatever the runner's speed (as #225 did for connect).
+    pub(crate) fn answer_subscribes_after_release(
+        &self,
+        delay: std::time::Duration,
+        error: Option<Value>,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state.subscribe_delay = Some((delay, error));
+        state.subscribe_gate = Some(Arc::new(tokio::sync::Notify::new()));
+    }
+
+    /// Starts the delay of the subscribe answer held by
+    /// [`FakeServer::answer_subscribes_after_release`], whether or not the
+    /// command came yet; later ones are not held. Nothing when none is.
+    pub(crate) fn release_held_subscribes(&self) {
+        if let Some(gate) = self.state.lock().unwrap().subscribe_gate.take() {
+            // Stores the permit when the answer is not waiting yet.
+            gate.notify_one();
+        }
+    }
+
     /// When each delayed subscribe answer was sent.
     pub(crate) fn subscribes_answered_at(&self) -> Vec<std::time::Instant> {
         self.state.lock().unwrap().subscribes_answered_at.clone()
@@ -1216,7 +1243,11 @@ impl Connection {
                 None => json!({"id": message["id"], "subscribe": {}}),
             };
             let shared = Arc::clone(&self.state);
+            let gate = state.subscribe_gate.clone();
             tokio::spawn(async move {
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
                 tokio::time::sleep(delay).await;
                 let mut state = shared.lock().unwrap();
                 state.subscribes_answered_at.push(std::time::Instant::now());

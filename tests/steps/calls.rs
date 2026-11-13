@@ -979,9 +979,12 @@ async fn a_fake_server_never_answering_subscribes(world: &mut ClientWorld) {
 )]
 async fn a_fake_server_answering_subscribes_late(world: &mut ClientWorld, error: String) {
     let error = (!error.is_empty()).then(|| json!({"code": 403, "message": "closed"}));
+    // Held until the step making the waiting call releases it (CI health,
+    // findings 13 and 14: from the command, a stall of 1 s answered it
+    // first, and the call never waited).
     world
         .fake()
-        .answer_subscribes_after(Duration::from_secs(1), error);
+        .answer_subscribes_after_release(Duration::from_secs(1), error);
     a_connected_client(world).await;
 }
 
@@ -1000,6 +1003,10 @@ fn its_history_is_requested(world: &mut ClientWorld) {
     track(world, "history", made_at, async move {
         call.await.map(Returned::History)
     });
+    // A subscribe answer held for this step goes out once the call waits.
+    if let Some(fake) = world.fake.as_ref() {
+        fake.release_held_subscribes();
+    }
 }
 
 #[then(r#"the call fails at once with a "subscription unsubscribed" error"#)]
