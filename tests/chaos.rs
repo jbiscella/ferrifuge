@@ -1680,7 +1680,15 @@ impl Run {
     fn record(&mut self, rendered: String) -> Step {
         if self.mode == Mode::Continuity {
             self.count("debug record");
-            if rendered.contains(&self.marker) {
+            // The marker as text, or as the decimal list a byte buffer's
+            // default `Debug` writes (Codex, #247).
+            let as_bytes = self
+                .marker
+                .bytes()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if rendered.contains(&self.marker) || rendered.contains(&as_bytes) {
                 self.trace.push(rendered.clone());
                 return Err(self.violation("I14", format!("a secret in {rendered}")));
             }
