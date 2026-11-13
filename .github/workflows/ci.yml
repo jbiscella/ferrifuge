@@ -523,8 +523,9 @@ jobs:
       - name: Pull Centrifugo image
         run: docker pull centrifugo/centrifugo:v6.10.1
 
+      # With the WebTransport server and its h3 relay (Block 48, D19).
       - name: The @W tests in Chrome and Firefox
-        run: timeout -k 10 2400 cargo test --test browser
+        run: timeout -k 10 2400 cargo test --test browser --features unstable-webtransport
         env:
           FERRIFUGE_BROWSERS: chrome,firefox
 

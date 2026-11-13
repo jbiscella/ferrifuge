@@ -15,3 +15,5 @@ pub(crate) mod proxy;
 pub(crate) mod relay;
 pub(crate) mod tls;
 pub(crate) mod token;
+#[cfg(feature = "unstable-webtransport")]
+pub(crate) mod webtransport_relay;
