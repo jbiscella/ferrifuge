@@ -369,6 +369,25 @@ impl Catalogue {
         problems
     }
 
+    /// `covered` rows naming no evidence: neither a scenario in double
+    /// quotes nor a `file::function`, nor, for our own classes, an
+    /// invariant `I<n>` (D2, D6).
+    pub(crate) fn covered_without_evidence(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|row| row.status == "covered")
+            .filter(|row| {
+                let scenario = !quoted(&row.place).is_empty();
+                let function = code_spans(&row.place).any(|span| function_of(span).is_some());
+                let invariant = row.table == Table::Own && words(&row.place).any(is_invariant);
+                !(scenario || function || invariant)
+            })
+            .map(|row| {
+                format!("{row} is covered without naming a scenario, a function or an invariant")
+            })
+            .collect()
+    }
+
     /// `not applicable` and `not reconstructible` rows without a reason.
     pub(crate) fn rows_without_reason(&self) -> Vec<String> {
         self.rows
@@ -418,7 +437,11 @@ impl Catalogue {
     /// class cell gives.
     fn cited(row: &Row) -> Vec<&str> {
         if row.commits == LISTED {
-            words(&row.class).filter(|word| is_commit(word)).collect()
+            // Every word that looks meant as one: 6 or more characters with
+            // a digit, so a malformed id is reported rather than skipped.
+            words(&row.class)
+                .filter(|word| word.len() >= 6 && word.chars().any(|c| c.is_ascii_digit()))
+                .collect()
         } else {
             row.commits.split(',').map(str::trim).collect()
         }
@@ -527,10 +550,10 @@ fn is_commit_id(entry: &str) -> bool {
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-/// A commit id in prose: one with a decimal digit, so an English word made
-/// of the letters a to f is never taken for one.
-fn is_commit(word: &str) -> bool {
-    is_commit_id(word) && word.chars().any(|c| c.is_ascii_digit())
+/// An invariant's name: `I` and its number.
+fn is_invariant(word: &str) -> bool {
+    word.strip_prefix('I')
+        .is_some_and(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// A cell holding nothing but spaces and dashes.
