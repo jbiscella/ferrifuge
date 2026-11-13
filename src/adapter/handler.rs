@@ -2483,8 +2483,16 @@ mod tests {
                 .unwrap();
             subscription.subscribe();
             client.connect();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Until three handler calls ran, on whichever thread: a fixed
+            // pause let a slow thread start fail the count.
+            let ran = tokio::time::timeout(Duration::from_secs(5), async {
+                while threads.lock().unwrap().len() < 3 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
             client.close().await;
+            ran.expect("three handler calls");
         });
 
         let threads = threads.lock().unwrap();
