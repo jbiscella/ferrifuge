@@ -232,6 +232,7 @@ Feature: WebTransport (unstable)
     And a browser client configured with the WebTransport relay's endpoint and the server's websocket endpoint
     When connect is called
     Then the client emits "connected" over transport "websocket"
+    And the client emits no "error" event for transport "webtransport"
     And the WebTransport relay accepted no session
 
   @W
