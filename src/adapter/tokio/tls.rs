@@ -395,7 +395,7 @@ impl<T: Clone> BuildOnce<T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::adapter) mod tests {
     use std::sync::Arc;
 
     use rcgen::{
@@ -411,7 +411,7 @@ mod tests {
     /// short while around now, with the extensions Apple's and Windows'
     /// verifiers want of a server certificate: the CA, the server's chain
     /// and its key.
-    fn private_chain() -> (
+    pub(in crate::adapter) fn private_chain() -> (
         CertificateDer<'static>,
         CertificateDer<'static>,
         PrivateKeyDer<'static>,
