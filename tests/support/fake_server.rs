@@ -474,8 +474,9 @@ impl FakeServer {
     }
 
     /// Starts the delay of the connect reply held by
-    /// [`FakeServer::delay_next_connect_after_release`], whether or not
-    /// the connect command came yet.
+    /// [`FakeServer::delay_next_connect_after_release`], or sends the error
+    /// held by [`FakeServer::fail_next_connect_after_release`], whether or
+    /// not the connect command came yet.
     pub(crate) fn release_held_connect(&self) {
         if let Some(gate) = &self.state.lock().unwrap().connect_gate {
             // Stores the permit when the reply is not waiting yet.
@@ -556,6 +557,17 @@ impl FakeServer {
             .unwrap()
             .connect_errors
             .push_back(json!({"code": code, "message": message}));
+    }
+
+    /// As [`FakeServer::fail_next_connect_with`], the error reply held
+    /// until [`FakeServer::release_held_connect`], so that a step is ready
+    /// for it whatever the runner's speed.
+    pub(crate) fn fail_next_connect_after_release(&self, code: u32, message: &str) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .connect_errors
+            .push_back(json!({"code": code, "message": message}));
+        state.connect_gate = Some(Arc::new(tokio::sync::Notify::new()));
     }
 
     /// Answers the next `count` connect commands with a temporary error.
@@ -1049,9 +1061,18 @@ impl Connection {
                 state.connect_errors.pop_front()
             });
             if let Some(Some(error)) = failing {
-                replies.push(Message::text(
-                    json!({"id": message["id"], "error": error}).to_string(),
-                ));
+                let reply = Message::text(json!({"id": message["id"], "error": error}).to_string());
+                // An error held for a step goes out once it releases it.
+                let held = self.state.lock().unwrap().connect_gate.clone();
+                if let Some(gate) = held {
+                    let out = self.out.clone();
+                    tokio::spawn(async move {
+                        gate.notified().await;
+                        let _ = out.send(Outgoing::Message(reply));
+                    });
+                } else {
+                    replies.push(reply);
+                }
                 connect_failed = true;
             } else if message["connect"].is_object() {
                 let mut state = self.state.lock().unwrap();
