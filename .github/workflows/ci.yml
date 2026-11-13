@@ -57,6 +57,11 @@ jobs:
       - name: clippy (cookies, unstable)
         run: cargo clippy --all-targets --features cookies,unstable -- -D warnings
 
+      # With the native WebTransport transport (Block 48, D1, D4): the root
+      # clippy.toml refuses wtransport's own TLS and certificate helpers.
+      - name: clippy (cookies, unstable-webtransport)
+        run: cargo clippy --all-targets --features cookies,unstable-webtransport -- -D warnings
+
       # The core must not depend on an async runtime.
       - name: clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
@@ -68,7 +73,32 @@ jobs:
 
       # The default build uses ring and must not link aws-lc (Block 6).
       - name: default build links only ring
-        run: test -z "$(cargo tree -e normal -i aws-lc-rs 2>/dev/null)"
+        run: |
+          test -z "$(cargo tree -e normal -i aws-lc-rs 2>/dev/null)"
+          test -z "$(cargo tree -e normal --features unstable-webtransport -i aws-lc-rs 2>/dev/null)"
+
+      # wtransport, quinn, sha2 and x509-parser come with
+      # `unstable-webtransport` only, sha2 and x509-parser through
+      # wtransport alone (Block 48, structural acceptance).
+      - name: WebTransport's crates come with its feature only
+        run: |
+          for features in "" "--features unstable"; do
+            for crate in wtransport quinn sha2 x509-parser; do
+              test -z "$(cargo tree -e normal $features -i $crate 2>/dev/null)"
+            done
+          done
+          for crate in sha2 x509-parser; do
+            test "$(cargo tree -e normal --features unstable-webtransport -i $crate --depth 1 --prefix none 2>/dev/null | tail -n +2 | sed 's/ (\*)//' | sort -u | cut -d' ' -f1)" = wtransport
+          done
+
+      # A release build calls none of sha2 and x509-parser, which wtransport
+      # links unconditionally (Block 48, D3).
+      - name: no sha2 or x509-parser symbol in a WebTransport build
+        run: |
+          cargo build --release --example webtransport --features unstable-webtransport
+          nm -C target/release/examples/webtransport > webtransport-symbols.txt
+          grep -q "wtransport::" webtransport-symbols.txt
+          ! grep -E "sha2::|x509_parser::" webtransport-symbols.txt
 
   # Builds with an aws-lc TLS provider (Block 6). The default ring build is
   # tested by the test job.
@@ -82,7 +112,9 @@ jobs:
       matrix:
         provider: [aws-lc-rs, fips]
     env:
-      WITHOUT_RING: --no-default-features --features tokio,${{ matrix.provider }}
+      # With the WebTransport transport, whose QUIC stack uses the same
+      # provider (Block 48, D15).
+      WITHOUT_RING: --no-default-features --features tokio,${{ matrix.provider }},unstable-webtransport
     steps:
       - uses: actions/checkout@v7
 
@@ -119,7 +151,7 @@ jobs:
 
       # Default features keep ring enabled: the stronger provider must win.
       - name: precedence over the default ring
-        run: cargo test --lib --features ${{ matrix.provider }} -- tls_config fips_build
+        run: cargo test --lib --features ${{ matrix.provider }},unstable-webtransport -- tls_config fips_build webtransport
 
   test:
     runs-on: ubuntu-latest
@@ -145,9 +177,10 @@ jobs:
       # One instrumented run executes every test target, including the
       # cucumber runner, so tests are not run twice for coverage.
       - name: cargo test (with coverage)
-        # With the opt-in cookie jar and the unstable APIs, so that their code
-        # is tested too (Block 43, D8; Block 45, D16).
-        run: cargo llvm-cov --all-targets --features cookies,unstable --lcov --output-path lcov.info
+        # With the opt-in cookie jar and the unstable APIs, WebTransport's
+        # included, so that their code is tested too (Block 43, D8; Block 45,
+        # D16; Block 48, D15).
+        run: cargo llvm-cov --all-targets --features cookies,unstable,unstable-webtransport --lcov --output-path lcov.info
 
       # --all-targets does not include doctests.
       - name: doctests
@@ -563,15 +596,16 @@ jobs:
         with:
           tool: cargo-ndk@4.1.2
 
+      # With WebTransport (Block 48, D16).
       - name: Default features (ring)
         run: |
-          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests -- -D warnings
-          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run
+          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests --features unstable-webtransport -- -D warnings
+          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run --features unstable-webtransport
 
       - name: aws-lc-rs
         run: |
-          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests --no-default-features --features tokio,aws-lc-rs -- -D warnings
-          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run --no-default-features --features tokio,aws-lc-rs
+          cargo ndk --target arm64-v8a --platform 22 clippy --lib --tests --no-default-features --features tokio,aws-lc-rs,unstable-webtransport -- -D warnings
+          cargo ndk --target arm64-v8a --platform 22 test --lib --no-run --no-default-features --features tokio,aws-lc-rs,unstable-webtransport
 
       # ferrifuge::android is documented for Android only: the host's
       # rustdoc never sees it (Block 24, D6).
@@ -598,15 +632,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # With WebTransport (Block 48, D16).
       - name: Default features (ring)
         run: |
-          cargo clippy --target aarch64-apple-ios --lib --tests -- -D warnings
-          cargo test --target aarch64-apple-ios --lib --no-run
+          cargo clippy --target aarch64-apple-ios --lib --tests --features unstable-webtransport -- -D warnings
+          cargo test --target aarch64-apple-ios --lib --no-run --features unstable-webtransport
 
       - name: aws-lc-rs
         run: |
-          cargo clippy --target aarch64-apple-ios --lib --tests --no-default-features --features tokio,aws-lc-rs -- -D warnings
-          cargo test --target aarch64-apple-ios --lib --no-run --no-default-features --features tokio,aws-lc-rs
+          cargo clippy --target aarch64-apple-ios --lib --tests --no-default-features --features tokio,aws-lc-rs,unstable-webtransport -- -D warnings
+          cargo test --target aarch64-apple-ios --lib --no-run --no-default-features --features tokio,aws-lc-rs,unstable-webtransport
 
   # The public API against the base branch (Block 14e): a breaking change
   # needs a version bump (0.x: the minor version).
@@ -740,6 +775,10 @@ jobs:
       - name: cargo check on MSRV (no default features)
         run: cargo check --all-targets --no-default-features
 
+      # wtransport's rust-version is Ferrifuge's (Block 48, D3).
+      - name: cargo check on MSRV (unstable-webtransport)
+        run: cargo check --all-targets --features unstable-webtransport
+
       # The aws-lc builds too (Block 20, D6): their build scripts run under
       # cargo check, so CMake and Go are installed as for the providers job.
       - name: Install CMake
@@ -786,7 +825,7 @@ jobs:
 
       - name: rustdoc as on docs.rs
         run: |
-          cargo doc --no-deps --features test-util,cookies,unstable
-          cargo doc --no-deps --features test-util,cookies,unstable --target wasm32-unknown-unknown
+          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport
+          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
