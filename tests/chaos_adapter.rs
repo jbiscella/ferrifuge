@@ -9,18 +9,20 @@
 // @P scenario: Seeded chaos with delta subscriptions on the tokio client keeps the invariants
 // @P scenario: Seeded chaos on the tokio client batches automatically and keeps the invariants
 // @P scenario: Seeded chaos with debounced publishes on the tokio client keeps the invariants
+// @P scenario: Seeded chaos with handlers on the tokio client keeps the invariants
 
 mod support;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ferrifuge::{
-    Client, ClientEvent, Config, DeltaFormat, HistoryOptions, State, Subscription,
-    SubscriptionEvent, SubscriptionState, codes,
+    Client, ClientEvent, Config, DeltaFormat, EventDelivery, HistoryOptions, State, Subscription,
+    SubscriptionEvent, SubscriptionState, WeakClient, codes,
 };
 use futures_util::{Stream, StreamExt};
 use support::fake_server::{Announce, FakeServer};
@@ -66,11 +68,19 @@ const CODES: [u16; 6] = [3001, 4000, 3008, 3014, 3500, 4500];
 /// Panics on any thread but the tests' own (I2), counted by a hook.
 static PANICS: AtomicUsize = AtomicUsize::new(0);
 
+/// The payload of a panic a handler raises on purpose (Block 49): the
+/// hook tells it apart from an unexpected panic, which breaks I2.
+struct PlantedPanic;
+
 fn count_panics() {
     static HOOK: std::sync::Once = std::sync::Once::new();
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // Planted: the run counts it itself, and it is no violation.
+            if info.payload().downcast_ref::<PlantedPanic>().is_some() {
+                return;
+            }
             let test_thread = std::thread::current()
                 .name()
                 .is_some_and(|name| name.starts_with("seeded_") || name.starts_with("the_"));
@@ -80,6 +90,110 @@ fn count_panics() {
             previous(info);
         }));
     });
+}
+
+/// What a seed's handlers do next, set by its operations, and what they
+/// did (Block 49): per run, so that tests running at once share nothing.
+#[derive(Default)]
+struct Plan {
+    /// The subscription's handler panics at its next publication, before
+    /// taking it.
+    panic: AtomicBool,
+    /// The client's handler closes the client at its next event.
+    close: AtomicBool,
+    /// The subscription's handler unsubscribes it at its next event.
+    unsubscribe: AtomicBool,
+    /// How long each handler call takes, in milliseconds.
+    slow: AtomicU64,
+    panics: AtomicUsize,
+    closes: AtomicUsize,
+    unsubscribes: AtomicUsize,
+    /// The client, for its handlers to reach without keeping it alive.
+    client: std::sync::Mutex<Option<WeakClient>>,
+}
+
+impl Plan {
+    fn upgrade(&self) -> Option<Client> {
+        self.client
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(WeakClient::upgrade)
+    }
+
+    /// The start of a handler call: it takes its time, and panics when
+    /// planted and `publication`.
+    fn turn(&self, publication: bool) {
+        let slow = self.slow.load(Ordering::SeqCst);
+        if slow > 0 {
+            std::thread::sleep(Duration::from_millis(slow));
+        }
+        if publication && self.panic.swap(false, Ordering::SeqCst) {
+            self.panics.fetch_add(1, Ordering::SeqCst);
+            std::panic::panic_any(PlantedPanic);
+        }
+    }
+}
+
+/// A stream of the events a handler forwards.
+fn forwarded<E: Send + 'static>() -> (tokio::sync::mpsc::UnboundedSender<E>, Events<E>) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    // Fused: the runner reads an ended stream again, as a stream of the
+    // client allows.
+    (sender, Box::new(Box::pin(events).fuse()))
+}
+
+/// The client's handler: forwards each event, and closes the client when
+/// planted.
+fn client_handler(
+    plan: &Arc<Plan>,
+) -> (
+    impl FnMut(ClientEvent) + Send + 'static,
+    Events<ClientEvent>,
+) {
+    let (sender, events) = forwarded();
+    let plan = Arc::clone(plan);
+    let handler = move |event: ClientEvent| {
+        plan.turn(false);
+        if plan.close.swap(false, Ordering::SeqCst)
+            && let Some(client) = plan.upgrade()
+        {
+            plan.closes.fetch_add(1, Ordering::SeqCst);
+            // Closing has started; its future waits for nothing here.
+            drop(client.close());
+        }
+        let _ = sender.send(event);
+    };
+    (handler, events)
+}
+
+/// The handler of the subscription to `channel`: forwards each event,
+/// panics at a publication and unsubscribes it when planted.
+fn subscription_handler(
+    plan: &Arc<Plan>,
+    channel: &'static str,
+) -> (
+    impl FnMut(SubscriptionEvent) + Send + 'static,
+    Events<SubscriptionEvent>,
+) {
+    let (sender, events) = forwarded();
+    let plan = Arc::clone(plan);
+    let handler = move |event: SubscriptionEvent| {
+        plan.turn(matches!(event, SubscriptionEvent::Publication(_)));
+        if plan.unsubscribe.swap(false, Ordering::SeqCst)
+            && let Some(subscription) = plan
+                .upgrade()
+                .and_then(|client| client.get_subscription(channel))
+        {
+            plan.unsubscribes.fetch_add(1, Ordering::SeqCst);
+            subscription.unsubscribe();
+        }
+        let _ = sender.send(event);
+    };
+    (handler, events)
 }
 
 /// Block 16, "Chaos configuration".
@@ -156,6 +270,16 @@ enum Op {
     /// The application publishes this many times on the subscription to
     /// `CHANNELS[n]`, each publish awaited in its own task (Block 46, D16).
     Burst(usize, u32),
+    /// A subscription's handler panics at its next publication (Block 49).
+    PlantPanic,
+    /// The client's handler closes the client at its next event.
+    HandlerClose,
+    /// A subscription's handler unsubscribes it at its next event.
+    HandlerUnsubscribe,
+    /// A handler takes over the stream of the subscription read so far.
+    TakeOver,
+    /// Each handler call takes this many milliseconds.
+    Slow(u64),
 }
 
 impl Op {
@@ -199,6 +323,79 @@ struct Sub {
     delivered: Option<u64>,
 }
 
+/// A client of `server` and its subscriptions to `CHANNELS`, with their
+/// streams; with `plan`, a `Thread` handler on the client and on the
+/// subscription to `CHANNELS[0]`, each forwarding its events (Block 49).
+fn build(
+    server: &FakeServer,
+    delta: bool,
+    plan: Option<&Arc<Plan>>,
+) -> (Client, Events<ClientEvent>, Vec<Sub>) {
+    let mut builder = Client::builder(format!("ws://{}/connection/websocket", server.address()))
+        .config(chaos_config());
+    let mut client_events = None;
+    if let Some(plan) = plan {
+        let (handler, events) = client_handler(plan);
+        builder = builder
+            .event_delivery(EventDelivery::Thread)
+            .handler(handler);
+        client_events = Some(events);
+    }
+    let client = builder.build().expect("a valid configuration");
+    if let Some(plan) = plan {
+        *plan.client.lock().unwrap() = Some(client.downgrade());
+    }
+    let events: Events<ClientEvent> = client_events.unwrap_or_else(|| Box::new(client.events()));
+    let subs = CHANNELS
+        .iter()
+        .enumerate()
+        .map(|(n, channel)| {
+            let builder = client
+                .subscription_builder(*channel)
+                .positioned(true)
+                .recoverable(true)
+                .min_resubscribe_delay(Duration::from_millis(50))
+                .max_resubscribe_delay(Duration::from_millis(500));
+            let mut builder = if delta {
+                builder.delta(DeltaFormat::Fossil)
+            } else {
+                builder
+            };
+            // Every second subscription has a handler.
+            let mut forwarded_events = None;
+            if let Some(plan) = plan.filter(|_| n % 2 == 0) {
+                let (handler, events) = subscription_handler(plan, channel);
+                builder = builder.handler(handler);
+                forwarded_events = Some(events);
+            }
+            let subscription = builder.build().expect("a new channel");
+            let events: Events<SubscriptionEvent> =
+                forwarded_events.unwrap_or_else(|| Box::new(subscription.events()));
+            Sub {
+                subscription,
+                events,
+                last_state: SubscriptionState::Unsubscribed,
+                delivered: None,
+            }
+        })
+        .collect();
+    (client, events, subs)
+}
+
+/// What a run exercises beyond the plain client.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)] // One switch per runner variant.
+struct Variant {
+    /// The server skips a recovered offset (the planted fault).
+    skip_recovered: bool,
+    /// Subscriptions ask for fossil delta (Block 19).
+    delta: bool,
+    /// Debounce intervals and publish bursts (Block 46).
+    debounce: bool,
+    /// Handlers on the client and on every second subscription (Block 49).
+    handlers: bool,
+}
+
 /// One seed's run.
 struct Run {
     seed: u64,
@@ -225,6 +422,10 @@ struct Run {
     bursts: Vec<u32>,
     /// Batches the application holds open.
     batches: Vec<ferrifuge::Batch>,
+    /// With handlers, what they do next (Block 49).
+    plan: Option<Arc<Plan>>,
+    /// A handler took over the stream of `CHANNELS[1]`.
+    taken_over: bool,
     ops: Vec<String>,
     counts: BTreeMap<&'static str, usize>,
 }
@@ -232,7 +433,13 @@ struct Run {
 type Step = Result<(), Violation>;
 
 impl Run {
-    async fn new(seed: u64, skip_recovered: bool, delta: bool, debounce: bool) -> Self {
+    async fn new(seed: u64, variant: Variant) -> Self {
+        let Variant {
+            skip_recovered,
+            delta,
+            debounce,
+            handlers,
+        } = variant;
         let server = FakeServer::start(Announce::default()).await;
         for channel in CHANNELS {
             server.recover_from_history(channel);
@@ -244,35 +451,8 @@ impl Run {
         if skip_recovered {
             server.skip_recovered_offset();
         }
-        let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
-            .config(chaos_config())
-            .build()
-            .expect("a valid configuration");
-        let events: Events<ClientEvent> = Box::new(client.events());
-        let subs = CHANNELS
-            .iter()
-            .map(|channel| {
-                let builder = client
-                    .subscription_builder(*channel)
-                    .positioned(true)
-                    .recoverable(true)
-                    .min_resubscribe_delay(Duration::from_millis(50))
-                    .max_resubscribe_delay(Duration::from_millis(500));
-                let builder = if delta {
-                    builder.delta(DeltaFormat::Fossil)
-                } else {
-                    builder
-                };
-                let subscription = builder.build().expect("a new channel");
-                let events: Events<SubscriptionEvent> = Box::new(subscription.events());
-                Sub {
-                    subscription,
-                    events,
-                    last_state: SubscriptionState::Unsubscribed,
-                    delivered: None,
-                }
-            })
-            .collect();
+        let plan = handlers.then(|| Arc::new(Plan::default()));
+        let (client, events, subs) = build(&server, delta, plan.as_ref());
         Self {
             seed,
             rng: fastrand::Rng::with_seed(seed ^ 0x5eed_ada9_7e40_0016),
@@ -288,6 +468,8 @@ impl Run {
             calls: Vec::new(),
             bursts: Vec::new(),
             batches: Vec::new(),
+            plan,
+            taken_over: false,
             ops: Vec::new(),
             counts: BTreeMap::new(),
         }
@@ -314,11 +496,20 @@ impl Run {
                 Op::CorruptDelta
             } else if self.debounce && self.rng.u32(0..100) < 20 {
                 Op::Burst(self.rng.usize(..CHANNELS.len()), self.rng.u32(2..=5))
+            } else if self.plan.is_some() && self.rng.u32(0..100) < 20 {
+                match self.rng.u32(0..100) {
+                    0..35 => Op::PlantPanic,
+                    35..47 => Op::HandlerClose,
+                    47..70 => Op::HandlerUnsubscribe,
+                    70..85 => Op::TakeOver,
+                    _ => Op::Slow(self.rng.u64(0..=20)),
+                }
             } else {
                 Op::pick(&mut self.rng)
             };
             self.ops.push(format!("op {n}: {op:?}"));
             self.apply(op).await?;
+            self.rebuild_if_closed();
             sleep(Duration::from_millis(self.rng.u64(0..=30))).await;
             self.check_panics()?;
         }
@@ -353,6 +544,10 @@ impl Run {
                     self.count("cancelled read");
                 }
             }
+            // A stream taking over from a handler would lose what the handler
+            // forwarded and the runner has not read: handlers taking over
+            // streams are what Block 49 runs.
+            Op::SecondEvents(target) if self.handled(target) => {}
             Op::SecondEvents(target) => {
                 match target {
                     Target::Client => self.events = Box::new(self.client.events()),
@@ -397,8 +592,61 @@ impl Run {
             }
             Op::CorruptDelta => self.server.corrupt_next_delta(),
             Op::Burst(n, count) => self.burst(n, count),
+            Op::PlantPanic
+            | Op::HandlerClose
+            | Op::HandlerUnsubscribe
+            | Op::TakeOver
+            | Op::Slow(_) => {
+                self.plan_handlers(op);
+            }
         }
         Ok(())
+    }
+
+    /// Whether a handler owns `target`'s events (Block 49).
+    fn handled(&self, target: Target) -> bool {
+        self.plan.is_some()
+            && match target {
+                Target::Client => true,
+                Target::Subscription(n) => n % 2 == 0 || (n == 1 && self.taken_over),
+            }
+    }
+
+    /// Plans what the handlers do next (Block 49).
+    fn plan_handlers(&mut self, op: Op) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        match op {
+            Op::PlantPanic => plan.panic.store(true, Ordering::SeqCst),
+            Op::HandlerClose => plan.close.store(true, Ordering::SeqCst),
+            Op::HandlerUnsubscribe => plan.unsubscribe.store(true, Ordering::SeqCst),
+            Op::Slow(ms) => plan.slow.store(ms, Ordering::SeqCst),
+            Op::TakeOver if !self.taken_over => {
+                let (handler, events) = subscription_handler(&plan, CHANNELS[1]);
+                self.subs[1].subscription.set_handler(handler);
+                self.subs[1].events = events;
+                self.taken_over = true;
+                self.count("handler take-over");
+            }
+            _ => {}
+        }
+    }
+
+    /// A handler closed the client: the application makes a new one, as
+    /// after its own `close()`.
+    fn rebuild_if_closed(&mut self) {
+        if !self.client.is_closed() {
+            return;
+        }
+        let (client, events, subs) = build(&self.server, self.delta, self.plan.as_ref());
+        self.client = client;
+        self.events = events;
+        self.subs = subs;
+        self.last_state = State::Disconnected;
+        self.taken_over = false;
+        self.batches.clear();
+        self.count("client made again");
     }
 
     /// With debouncing, the next subscribe replies advise an interval of 1
@@ -584,12 +832,21 @@ impl Run {
     /// one connection is open (I3).
     async fn heal(&mut self) -> Step {
         self.server.fail_connects(0);
+        // Healed: the handlers plan nothing more (Block 49).
+        if let Some(plan) = &self.plan {
+            plan.panic.store(false, Ordering::SeqCst);
+            plan.close.store(false, Ordering::SeqCst);
+            plan.unsubscribe.store(false, Ordering::SeqCst);
+            plan.slow.store(0, Ordering::SeqCst);
+        }
         // Healed: every batch is stopped (Block 18, D9).
         for batch in std::mem::take(&mut self.batches) {
             batch.stop();
         }
         let deadline = Instant::now() + QUIESCENCE;
         loop {
+            // A handler may have closed the client before it healed.
+            self.rebuild_if_closed();
             // A terminal close the server sent before healing may be
             // handled only now, once the events before it are taken.
             if self.client.state() == State::Disconnected {
@@ -712,15 +969,22 @@ fn seeds() -> Range<u64> {
 /// Runs `seeds`, stopping at the first violation; the counts of every run.
 async fn run_seeds(
     seeds: Range<u64>,
-    skip_recovered: bool,
-    delta: bool,
-    debounce: bool,
+    variant: Variant,
 ) -> Result<BTreeMap<&'static str, usize>, Violation> {
     count_panics();
     let mut counts = BTreeMap::new();
     for seed in seeds {
-        let mut run = Run::new(seed, skip_recovered, delta, debounce).await;
+        let mut run = Run::new(seed, variant).await;
         run.run(OPS).await?;
+        if let Some(plan) = &run.plan {
+            for (name, count) in [
+                ("handler panic", &plan.panics),
+                ("close from a handler", &plan.closes),
+                ("unsubscribe from a handler", &plan.unsubscribes),
+            ] {
+                *counts.entry(name).or_default() += count.load(Ordering::SeqCst);
+            }
+        }
         *counts.entry("corrupted delta").or_default() += run.server.corrupted_deltas();
         frames_of(&run, &mut counts);
         merged_of(&run, &mut counts);
@@ -788,7 +1052,7 @@ fn frames_of(run: &Run, counts: &mut BTreeMap<&'static str, usize>) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_chaos_on_the_tokio_client_batches_automatically() {
     let seeds = seeds();
-    let counts = run_seeds(seeds.clone(), false, false, false)
+    let counts = run_seeds(seeds.clone(), Variant::default())
         .await
         .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
@@ -810,7 +1074,7 @@ async fn seeded_chaos_on_the_tokio_client_batches_automatically() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_chaos_on_the_tokio_client_keeps_the_invariants() {
     let seeds = seeds();
-    let counts = run_seeds(seeds.clone(), false, false, false)
+    let counts = run_seeds(seeds.clone(), Variant::default())
         .await
         .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
@@ -835,9 +1099,15 @@ async fn seeded_chaos_on_the_tokio_client_keeps_the_invariants() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_adapter_runner_reports_a_planted_fault() {
-    let violation = run_seeds(SEEDS, true, false, false)
-        .await
-        .expect_err("a recovery skipping an offset went unreported");
+    let violation = run_seeds(
+        SEEDS,
+        Variant {
+            skip_recovered: true,
+            ..Variant::default()
+        },
+    )
+    .await
+    .expect_err("a recovery skipping an offset went unreported");
     assert_eq!(violation.invariant, "I8", "{violation}");
     assert!(
         violation
@@ -850,9 +1120,15 @@ async fn the_adapter_runner_reports_a_planted_fault() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_chaos_with_delta_subscriptions_on_the_tokio_client_keeps_the_invariants() {
     let seeds = seeds();
-    let counts = run_seeds(seeds.clone(), false, true, false)
-        .await
-        .unwrap_or_else(|violation| panic!("{violation}"));
+    let counts = run_seeds(
+        seeds.clone(),
+        Variant {
+            delta: true,
+            ..Variant::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
         return;
     }
@@ -869,9 +1145,15 @@ async fn seeded_chaos_with_delta_subscriptions_on_the_tokio_client_keeps_the_inv
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_chaos_with_debounced_publishes_on_the_tokio_client_keeps_the_invariants() {
     let seeds = seeds();
-    let counts = run_seeds(seeds.clone(), false, false, true)
-        .await
-        .unwrap_or_else(|violation| panic!("{violation}"));
+    let counts = run_seeds(
+        seeds.clone(),
+        Variant {
+            debounce: true,
+            ..Variant::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|violation| panic!("{violation}"));
     if seeds != SEEDS {
         return;
     }
@@ -908,7 +1190,41 @@ async fn seeded_chaos_adapter_long_run() {
         "chaos: adapter seeds {}..{}, delta {delta}, debounce {debounce}",
         seeds.start, seeds.end
     );
-    if let Err(violation) = run_seeds(seeds, false, delta, debounce).await {
+    if let Err(violation) = run_seeds(
+        seeds,
+        Variant {
+            delta,
+            debounce,
+            ..Variant::default()
+        },
+    )
+    .await
+    {
         panic!("{violation}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeded_chaos_with_handlers_on_the_tokio_client_keeps_the_invariants() {
+    let seeds = seeds();
+    let counts = run_seeds(
+        seeds.clone(),
+        Variant {
+            handlers: true,
+            ..Variant::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    let missing: Vec<_> = ["handler panic", "close from a handler", "handler take-over"]
+        .into_iter()
+        .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "counted 0 times: {missing:?}; counts {counts:?}"
+    );
 }
