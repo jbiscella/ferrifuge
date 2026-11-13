@@ -445,6 +445,7 @@ fn the_catalogue_checks_pass_on_claude_md() {
     assert_eq!(catalogue.gaps_without_probe(), none);
     assert_eq!(catalogue.probes_without_mutation(), none);
     assert_eq!(catalogue.probes_without_record(), none);
+    assert_eq!(catalogue.malformed_commits(), none);
 }
 
 #[test]
@@ -533,13 +534,34 @@ fn the_catalogue_reports_a_row_without_its_reason() {
 
 #[test]
 fn the_catalogue_reports_a_gap_without_a_probe_or_a_listed_finding() {
-    let no_probe = planted(
-        "probe \"Command ids skip 0 when they wrap\"",
-        "test \"Command ids skip 0 when they wrap\"",
+    let s2 = "probe \"Command ids skip 0 when they wrap\"";
+    // An implemented scenario, even after the word "scenario", is no probe.
+    let implemented = planted(
+        s2,
+        "scenario \"A message over the limit ends a connected client\"",
     );
-    reports(&no_probe.gaps_without_probe(), "row S2 is a gap");
+    reports(&implemented.gaps_without_probe(), "row S2 is a gap");
+    // A finding of another row does not close this one.
+    let another_rows = planted(s2, "finding F1");
+    reports(&another_rows.gaps_without_probe(), "row S2 is a gap");
     let unlisted = planted("| gap | finding F1:", "| gap | finding F2:");
     reports(&unlisted.gaps_without_probe(), "row 63 is a gap");
+}
+
+#[test]
+fn the_catalogue_reports_a_malformed_or_single_citation() {
+    let not_hex = planted("| d86ddc9, 6d0addd,", "| d86ddcg, 6d0addd,");
+    reports(
+        &not_hex.malformed_commits(),
+        "row C1 cites \"d86ddcg\", not a commit id",
+    );
+    let too_short = planted("| d86ddc9, 6d0addd,", "| d86ddc, 6d0addd,");
+    reports(
+        &too_short.malformed_commits(),
+        "row C1 cites \"d86ddc\", not a commit id",
+    );
+    let single = planted("| 9a6354e, b509a5f, d2742bf |", "| 9a6354e |");
+    reports(&single.malformed_commits(), "row C12 cites 1 commits");
 }
 
 #[test]
@@ -552,14 +574,16 @@ fn the_catalogue_reports_a_commit_that_is_not_an_ancestor() {
 
 #[test]
 fn the_catalogue_reports_a_probe_without_its_record() {
-    let no_mutation = planted(
-        PROBE_ROW,
-        "| Command ids skip 0 when they wrap |  | pending |",
-    );
-    reports(
-        &no_mutation.probes_without_mutation(),
-        "\"Command ids skip 0 when they wrap\" names no mutation",
-    );
+    for blank in ["", "–", "-"] {
+        let no_mutation = planted(
+            PROBE_ROW,
+            &format!("| Command ids skip 0 when they wrap | {blank} | pending |"),
+        );
+        reports(
+            &no_mutation.probes_without_mutation(),
+            "\"Command ids skip 0 when they wrap\" names no mutation",
+        );
+    }
     let nowhere = planted(
         PROBE_ROW,
         "| Command ids skip 0 when they wrap | `.max(1)` removed | soon |",

@@ -115,10 +115,7 @@ fn every_gap_named(world: &mut ClientWorld) {
 #[then("every commit an entry cites is an ancestor of HEAD")]
 fn every_commit_an_ancestor(world: &mut ClientWorld) {
     let catalogue = catalogue(world);
-    assert!(
-        !catalogue.commits().is_empty(),
-        "the catalogue cites no commit"
-    );
+    assert_none("malformed citations", catalogue.malformed_commits());
     assert_none(
         "commits not ancestors of HEAD",
         catalogue.commits_not_ancestors(repository()),
