@@ -116,7 +116,12 @@ jobs:
       # provider (Block 48, D15).
       WITHOUT_RING: --no-default-features --features tokio,${{ matrix.provider }},unstable-webtransport
     steps:
+      # The full history: the bug-pattern catalogue checks that every
+      # commit it cites is an ancestor of HEAD (Block 49, untagged
+      # scenarios run here).
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -158,7 +163,12 @@ jobs:
     # A hung test fails the job instead of running for GitHub's 6 hours.
     timeout-minutes: 30
     steps:
+      # The full history: the bug-pattern catalogue checks that every
+      # commit it cites is an ancestor of HEAD (Block 49, untagged
+      # scenarios run here).
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -400,7 +410,12 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
+      # The full history: the bug-pattern catalogue checks that every
+      # commit it cites is an ancestor of HEAD (Block 49, untagged
+      # scenarios run here).
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
