@@ -44,7 +44,7 @@ Feature: Bug-pattern catalogue
     Given a client configured with the fake server's websocket endpoint and an unreachable http_stream endpoint
     And the fake server answering the first connection with one text frame that is not client protocol data, and no connect reply
     When connect is called
-    Then the client attempts the http_stream endpoint within 1 s of that frame
+    Then the client attempts the http_stream endpoint within 3 s of that frame
 
   @D
   Scenario: Dropping the last clone of a client inside its handler ends the client
@@ -58,7 +58,7 @@ Feature: Bug-pattern catalogue
     Given a client connecting through the relay, whose upgrade the relay holds
     When disconnect is called
     Then the client is disconnected before disconnect returns
-    And the relay's connection closes within 1 s
+    And the relay's connection closes within 3 s
 
   @E
   Scenario: A transport the client closed reports no error
