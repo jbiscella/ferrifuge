@@ -77,6 +77,16 @@ pub enum TransportKind {
     /// Server-sent events with bidirectional emulation, as
     /// [`TransportKind::HttpStream`] but the replies come as an event stream.
     Sse,
+    /// WebTransport: one bidirectional stream of an HTTP/3 session over
+    /// QUIC, `https://` only, JSON or Protobuf.
+    ///
+    /// Unstable: requires the `unstable` feature (natively,
+    /// `unstable-webtransport`), follows centrifuge-js 63ed73e and
+    /// Centrifugo's experimental WebTransport (HTTP/3), and may change in any
+    /// minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    WebTransport,
 }
 
 impl TransportKind {
@@ -87,6 +97,8 @@ impl TransportKind {
             Self::WebSocket => "websocket",
             Self::HttpStream => "http_stream",
             Self::Sse => "sse",
+            #[cfg(feature = "unstable")]
+            Self::WebTransport => "webtransport",
         }
     }
 

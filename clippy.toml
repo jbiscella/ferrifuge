@@ -1,0 +1,21 @@
+# The crate's clippy configuration. The `wasm` CI job reads
+# ci/wasm-clippy/clippy.toml instead, through CLIPPY_CONF_DIR (Block 40, D2).
+#
+# wtransport's own TLS and certificate helpers (Block 48, D3, D4): Ferrifuge
+# builds the QUIC client from the client's TLS settings and finishes
+# wtransport's builder with `build_with_quic_config` only. A trait method is
+# no path clippy matches: `ClientConfig::default`, which reads the roots as
+# `with_native_certs` does, is refused by a source check instead
+# (`tests/spec_sync.rs`).
+disallowed-methods = [
+  { path = "wtransport::config::ClientConfigBuilder::build", reason = "expects on a configuration QUIC cannot use: build quinn's configuration and call build_with_quic_config (Block 48, D4)" },
+  { path = "wtransport::config::ClientConfigBuilder::with_native_certs", reason = "removes SSL_CERT_FILE and SSL_CERT_DIR from the process environment while it reads the roots, and ignores the client's TLS settings (Block 48, D4)" },
+  { path = "wtransport::config::ClientConfigBuilder::with_custom_transport", reason = "reads the platform's roots as with_native_certs does, removing SSL_CERT_FILE and SSL_CERT_DIR meanwhile (Block 48, D4)" },
+  { path = "wtransport::config::ClientConfigBuilder::with_server_certificate_hashes", reason = "verifies by certificate hash through sha2, outside the build's provider (Block 48, D3)" },
+  # Behind wtransport's `dangerous-configuration` feature, never enabled.
+  { path = "wtransport::config::ClientConfigBuilder::with_no_cert_validation", reason = "turns certificate verification off (Block 48, D4)", allow-invalid = true },
+  { path = "wtransport::tls::Certificate::hash", reason = "sha2, outside the build's provider (Block 48, D3)" },
+  { path = "wtransport::tls::Certificate::from_der", reason = "x509-parser, which Ferrifuge does not use (Block 48, D3)" },
+  { path = "wtransport::tls::Certificate::serial", reason = "x509-parser, which Ferrifuge does not use (Block 48, D3)" },
+  { path = "wtransport::Connection::peer_identity", reason = "parses the server's certificate with x509-parser, which expects (Block 48, D3)" },
+]

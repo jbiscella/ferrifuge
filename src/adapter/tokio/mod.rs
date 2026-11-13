@@ -96,8 +96,20 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                 .map(|http| Transport::Http(Box::new(http)))
             })
         }
+        // The transport comes with Block 48a.
+        #[cfg(feature = "unstable")]
+        TransportKind::WebTransport => Box::pin(async move {
+            let _ = (url, headers, network, max_message, timeout);
+            Err(NO_WEBTRANSPORT.to_owned())
+        }),
     }
 }
+
+/// The message of a WebTransport endpoint in a build without the native
+/// transport (Block 48, D1).
+#[cfg(feature = "unstable")]
+pub(in crate::adapter) const NO_WEBTRANSPORT: &str =
+    "the webtransport transport needs the `unstable-webtransport` feature";
 
 /// An open transport of any kind.
 pub(in crate::adapter) enum Transport {
