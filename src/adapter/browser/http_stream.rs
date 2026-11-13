@@ -248,7 +248,7 @@ pub(super) fn report(
 
 /// The listeners of a stream built with the application's `ReadableStream`
 /// (D12), alive while it is read.
-struct Through {
+pub(super) struct Through {
     _pull: Closure<dyn FnMut(JsValue) -> Promise>,
     _cancel: Closure<dyn FnMut(JsValue) -> Promise>,
 }
@@ -308,17 +308,20 @@ fn through(
     ))
 }
 
-/// What the task reading the body and the transport share (D7, D8).
+/// What the task reading the body and the transport share (D7, D8); also
+/// WebTransport's stream (Block 48, D17).
 #[derive(Default)]
-struct State {
-    inbox: Inbox,
+pub(super) struct State {
+    pub(super) inbox: Inbox,
     /// The inbox overflowed, reported in place of anything else.
-    overflowed: bool,
-    waker: Option<Waker>,
+    pub(super) overflowed: bool,
+    /// The end of the stream is in the inbox: nothing more is queued.
+    pub(super) ended: bool,
+    pub(super) waker: Option<Waker>,
 }
 
 impl State {
-    fn wake(state: &RefCell<Self>) {
+    pub(super) fn wake(state: &RefCell<Self>) {
         let waker = state.borrow_mut().waker.take();
         if let Some(waker) = waker {
             waker.wake();
@@ -328,7 +331,7 @@ impl State {
 
 /// Stops the task reading the body when dropped, also when a fetch shim's
 /// body ignores the abort (D8).
-struct Reading(AbortHandle);
+pub(super) struct Reading(pub(super) AbortHandle);
 
 impl Drop for Reading {
     fn drop(&mut self) {
@@ -376,7 +379,7 @@ async fn admit(state: &Rc<RefCell<State>>, mut message: Vec<u8>, bound: Bound) -
 ///
 /// `through` comes before `body`, so that `body`, which cancels it when
 /// dropped, is dropped first.
-async fn read_body(
+pub(super) async fn read_body(
     _through: Option<Through>,
     mut body: IntoStream<'static>,
     mut decoder: Decoder,
@@ -417,7 +420,13 @@ async fn read_body(
         }
         let ended = end.is_some();
         if let Some(end) = end {
-            state.borrow_mut().inbox.end(end);
+            let mut shared = state.borrow_mut();
+            // Once: another end, a WebTransport session's close, may have
+            // come first.
+            if !shared.ended {
+                shared.ended = true;
+                shared.inbox.end(end);
+            }
         }
         State::wake(&state);
         if ended {

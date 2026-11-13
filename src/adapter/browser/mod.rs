@@ -8,6 +8,8 @@ pub(super) mod http_stream;
 pub(super) mod shims;
 pub(super) mod sse;
 pub(super) mod websocket;
+#[cfg(feature = "unstable")]
+pub(super) mod webtransport;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -71,9 +73,19 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         )
     };
     match kind {
-        // Never usable before Block 48c, so never opened (D12).
+        // The page's own WebTransport, no shim (Block 48, D17).
         #[cfg(feature = "unstable")]
-        TransportKind::WebTransport => Box::pin(async move { Err(missing()) }),
+        TransportKind::WebTransport => {
+            let protobuf = subprotocol.is_some();
+            Box::pin(async move {
+                if !found.webtransport {
+                    return Err(missing());
+                }
+                webtransport::WebTransport::open(&url, protobuf, timeout, max_message, read_ahead)
+                    .await
+                    .map(|webtransport| Transport::WebTransport(Box::new(webtransport)))
+            })
+        }
         TransportKind::WebSocket => Box::pin(async move {
             let constructor = found.websocket.ok_or_else(missing)?;
             WebSocket::open(
@@ -130,6 +142,9 @@ pub(in crate::adapter) enum Transport {
     WebSocket(Box<WebSocket>),
     HttpStream(Box<HttpStream>),
     Sse(Box<Sse>),
+    #[cfg(feature = "unstable")]
+    #[allow(clippy::enum_variant_names)] // The transport's name.
+    WebTransport(Box<webtransport::WebTransport>),
 }
 
 impl Transport {
@@ -153,6 +168,11 @@ impl Transport {
                 sse.send(id, frame);
                 Ok(())
             }
+            #[cfg(feature = "unstable")]
+            Self::WebTransport(webtransport) => {
+                webtransport.send(id, frame);
+                Ok(())
+            }
         }
     }
 
@@ -163,6 +183,8 @@ impl Transport {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
             Self::HttpStream(http) => http.recv(reading).await,
             Self::Sse(sse) => sse.recv(reading).await,
+            #[cfg(feature = "unstable")]
+            Self::WebTransport(webtransport) => webtransport.recv(reading).await,
         }
     }
 
@@ -174,6 +196,10 @@ impl Transport {
             Self::WebSocket(websocket) => super::platform::spawn(runtime, websocket.close()),
             Self::HttpStream(http) => super::platform::spawn(runtime, async move { http.close() }),
             Self::Sse(sse) => super::platform::spawn(runtime, async move { sse.close() }),
+            #[cfg(feature = "unstable")]
+            Self::WebTransport(webtransport) => {
+                super::platform::spawn(runtime, webtransport.close())
+            }
         }
     }
 }

@@ -43,6 +43,10 @@ pub(in crate::adapter) struct Found {
     /// Whether the page has `AbortController`, which has no shim.
     has_abort_controller: bool,
     pub(in crate::adapter) event_source: Option<Function>,
+    /// Whether the page has `WebTransport`, which has no shim (Block 48,
+    /// D17).
+    #[cfg(feature = "unstable")]
+    pub(in crate::adapter) webtransport: bool,
 }
 
 /// The global `name` on `globalThis`, if a function.
@@ -63,6 +67,8 @@ impl Shims {
             readable_stream,
             has_abort_controller: global("AbortController").is_some(),
             event_source: self.event_source.clone().or_else(|| global("EventSource")),
+            #[cfg(feature = "unstable")]
+            webtransport: global("WebTransport").is_some(),
         }
     }
 }
@@ -80,10 +86,10 @@ impl Found {
                 self.fetch.is_some() && self.has_readable_stream && self.has_abort_controller
             }
             TransportKind::Sse => self.event_source.is_some() && self.fetch.is_some(),
-            // The browser's WebTransport comes with Block 48c; until then
-            // the transport is skipped in the round.
+            // centrifuge-js 63ed73e reads the global, with no shim option
+            // (`centrifuge.ts:1078`; Block 48, D17).
             #[cfg(feature = "unstable")]
-            TransportKind::WebTransport => false,
+            TransportKind::WebTransport => self.webtransport,
         }
     }
 }
