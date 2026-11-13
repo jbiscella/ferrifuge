@@ -280,6 +280,14 @@ fn sleep_gap(
 /// The smallest gap taken for a sleep, as the core ignores shorter ones.
 const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 
+/// Inputs the driver takes in a row from the branches above the timers
+/// before those branches sit out one turn: biased toward the transport, so
+/// that what arrived is handled before a timer that expired with it, the
+/// driver must not starve the timers under a server flood, also while the
+/// application takes events, each take waking the actions branch (Block
+/// 49, row 28/55).
+pub(super) const UPPER_STREAK: u32 = 32;
+
 /// A timer of the machine, of any kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TimerKey {
@@ -1698,6 +1706,7 @@ impl Client {
             transport: None,
             kind: TransportKind::WebSocket,
             reading: true,
+            upper_streak: 0,
             get_token,
             get_data,
             fetching: None,
@@ -2517,6 +2526,11 @@ struct Driver {
     /// Whether the transport was read on the last turn, for the records of
     /// the read-ahead filling and draining (Block 21).
     reading: bool,
+    /// Inputs taken in a row from the branches above the timers (the
+    /// actions wake, the inline handler, the open, the transport), with no
+    /// wait between them: after [`UPPER_STREAK`] of them, those branches sit
+    /// out one turn (Block 49, row 28/55).
+    upper_streak: u32,
     get_token: Option<GetToken>,
     get_data: Option<GetConnectData>,
     fetching: Option<(FetchId, Fetching)>,
@@ -2775,18 +2789,40 @@ impl Driver {
             }
             // The number of the setting of a timer that fired.
             let mut fired = None;
+            // The branches above the timers sit out one turn after a streak
+            // of inputs, so that they never starve a refresh, call or reply
+            // deadline; the flag clears after that turn, whatever wins
+            // (Block 49, row 28/55).
+            let yielding = self.upper_streak >= UPPER_STREAK;
+            if yielding {
+                self.upper_streak = 0;
+            }
+            // Set when the select! waited: every branch was pending once.
+            let waited = AtomicBool::new(false);
+            let mut from_upper = false;
+            // Biased, in this order: what reached the transport is handled
+            // before a timer that expired in the same turn, as after a
+            // suspension, where an unbiased choice could let the deadline
+            // win over the reply or the ping already readable (Block 49,
+            // row 28/55; centrifuge-rust §9.7).
             let input = tokio::select! {
+                biased;
                 // Queued by an API call; performed at the top of the loop.
-                () = self.shared.actions_queued.notified() => continue,
+                () = self.shared.actions_queued.notified(), if !yielding => {
+                    self.upper_input(waited.load(Ordering::Relaxed));
+                    continue;
+                }
                 // Under `Inline` the handler runs here: nothing else of the
                 // driver runs until it returns (Block 41, D3).
                 Some(handed) = std::future::poll_fn(|cx| super::handler::next(&self.shared, cx)),
-                    if self.delivery == super::EventDelivery::Inline =>
+                    if !yielding && self.delivery == super::EventDelivery::Inline =>
                 {
                     super::handler::deliver(&self.shared, handed);
+                    self.upper_input(waited.load(Ordering::Relaxed));
                     continue;
                 }
-                (id, result) = opened(&mut self.opening) => {
+                (id, result) = opened(&mut self.opening), if !yielding => {
+                    from_upper = true;
                     self.opening = None;
                     match result {
                         Ok(transport) => {
@@ -2800,7 +2836,9 @@ impl Driver {
                         }
                     }
                 }
-                (id, inbound) = received(&mut self.transport, reading) => match inbound {
+                (id, inbound) = received(&mut self.transport, reading), if !yielding => {
+                    from_upper = true;
+                    match inbound {
                     Inbound::Frame(data) => {
                         trace!(
                             transport = self.kind.name(),
@@ -2836,7 +2874,7 @@ impl Driver {
                         );
                         Input::InboxOverflow(id)
                     }
-                },
+                }},
                 (timer, set) = self.timers.fired() => {
                     fired = Some(set);
                     Input::TimerFired(timer)
@@ -2859,6 +2897,7 @@ impl Driver {
                     for timer in timers {
                         self.shared.apply(Input::DebounceTimerFired(timer));
                     }
+                    self.upper_streak = 0;
                     continue;
                 }
                 Some(fetched) = self.callback_fetches.next(),
@@ -2866,6 +2905,7 @@ impl Driver {
                 {
                     // Aborted: the machine no longer wants it.
                     let Some((fetch, input)) = fetched else {
+                        self.upper_streak = 0;
                         continue;
                     };
                     self.callback_aborts.remove(&fetch);
@@ -2879,7 +2919,20 @@ impl Driver {
                     self.stale_fetching = None;
                     Input::TokenFetched { fetch, result }
                 }
+                // The upper branches sat out and nothing else was due.
+                () = std::future::ready(()), if yielding => continue,
+                // Polled only when every branch above was pending: the
+                // select! waits, which restarts the streak.
+                () = std::future::poll_fn(|_| {
+                    waited.store(true, Ordering::Relaxed);
+                    Poll::<()>::Pending
+                }) => unreachable!("never ready"),
             };
+            if from_upper {
+                self.upper_input(waited.load(Ordering::Relaxed));
+            } else {
+                self.upper_streak = 0;
+            }
             #[cfg(feature = "__test-hooks")]
             assert!(
                 !self
@@ -2890,6 +2943,12 @@ impl Driver {
             );
             self.shared.apply_fired(input, fired);
         }
+    }
+
+    /// An input from a branch above the timers: the streak goes on, or
+    /// restarts at this input when the `select!` waited for it.
+    fn upper_input(&mut self, waited: bool) {
+        self.upper_streak = if waited { 1 } else { self.upper_streak + 1 };
     }
 
     /// Whether to read the transport: a full read-ahead stops the reading,

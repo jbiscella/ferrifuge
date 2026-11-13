@@ -18,14 +18,15 @@ use support::fake_server::{Announce, FakeServer, Rpc};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-/// Repetitions of each row: an unbiased `select!` passes one with
-/// probability 1/2, so all of them about once in 2^32.
+/// Repetitions of each row. An unbiased `select!` starts at a random one
+/// of its 13 branches, so the timer wins when the start falls after the
+/// transport branch and at or before the timer's: 1 in 13 for the no-ping
+/// timer, 3 in 13 for the call timer; 32 repetitions pass on main with
+/// probability about 0.08 (ping row) and 2·10⁻⁴ (rpc row).
 const REPETITIONS: usize = 32;
-/// How long the client's process is suspended in row 1: past the rpc's
-/// 200 ms deadline.
-const RPC_SUSPENSION: Duration = Duration::from_millis(600);
-/// How long it is suspended in row 2: past the no-ping deadline of 1.2 s.
-const PING_SUSPENSION: Duration = Duration::from_millis(1500);
+/// How far past a deadline the process stays held, once the frame was
+/// sent: the frame is written, and the timer has expired.
+const MARGIN: Duration = Duration::from_millis(200);
 /// A bound on anything the steps wait for.
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -59,17 +60,20 @@ impl Process {
         }
     }
 
-    /// Suspends the process for `suspension`: its only thread is held, so
-    /// neither its timers nor its sockets are served. Returns once the
-    /// suspension has begun.
-    async fn suspend(&self, suspension: Duration) {
+    /// Suspends the process until the returned sender is used or dropped:
+    /// its only thread is held, so neither its timers nor its sockets are
+    /// served. Returns once the suspension has begun.
+    async fn suspend(&self) -> std::sync::mpsc::Sender<()> {
         let (begun, begins) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
         self.handle.spawn(async move {
             let _ = begun.send(());
-            // The suspension itself, on a runtime nothing else shares.
-            std::thread::sleep(suspension);
+            // The suspension itself, on a runtime nothing else shares,
+            // until the test releases it.
+            let _ = released.recv();
         });
         begins.await.expect("the suspension begins");
+        release
     }
 }
 
@@ -141,10 +145,13 @@ async fn a_reply_that_arrived_during_a_suspension_beats_its_deadline() {
         })
         .await;
         let command = server.rpc_commands()[sent].clone();
-        process.suspend(RPC_SUSPENSION).await;
+        let sent_at = std::time::Instant::now();
+        let release = process.suspend().await;
         // While suspended: the reply reaches the socket, and the deadline
-        // passes.
+        // passes by a margin.
         server.send(&json!({"id": command["id"], "rpc": {"data": {}}}).to_string());
+        tokio::time::sleep_until((sent_at + Duration::from_millis(200) + MARGIN).into()).await;
+        let _ = release.send(());
         let outcome = tokio::time::timeout(WAIT, outcome)
             .await
             .expect("the rpc settles")
@@ -172,14 +179,17 @@ async fn a_ping_that_arrived_during_a_suspension_beats_the_no_ping_deadline() {
     for repetition in 0..REPETITIONS {
         // A ping read re-arms the deadline: 1.2 s from now.
         server.send("{}");
+        let armed = std::time::Instant::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        process.suspend(PING_SUSPENSION).await;
-        // While suspended, before the deadline passes: the next ping reaches
-        // the socket.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let release = process.suspend().await;
+        // While suspended, before the deadline passes: the next ping, sent
+        // on demand, reaches the socket; then the deadline passes by a
+        // margin.
         server.send("{}");
-        // Past the resume, with time for the client to act on both.
-        tokio::time::sleep(PING_SUSPENSION + Duration::from_millis(200)).await;
+        tokio::time::sleep_until((armed + Duration::from_millis(1200) + MARGIN).into()).await;
+        let _ = release.send(());
+        // Time for the client to act on both.
+        tokio::time::sleep(MARGIN).await;
         // Resumed by now; what it did with both is in its events.
         let mut reconnected = None;
         while let Some(Some(event)) = events.next().now_or_never() {
