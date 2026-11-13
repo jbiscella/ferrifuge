@@ -87,16 +87,21 @@ async fn connect(target: &str, buffers: Option<u32>) -> std::io::Result<TcpStrea
     let Some(bytes) = buffers else {
         return TcpStream::connect(target).await;
     };
-    let address = tokio::net::lookup_host(target)
-        .await?
-        .next()
-        .ok_or_else(|| std::io::Error::other("no address"))?;
-    let socket = if address.is_ipv4() {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
-    sized(socket, bytes).connect(address).await
+    // Each resolved address in turn, as `TcpStream::connect` does: `localhost`
+    // may resolve to `::1` first while the published port is IPv4 only.
+    let mut last = std::io::Error::other("no address");
+    for address in tokio::net::lookup_host(target).await? {
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+        match sized(socket, bytes).connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
 }
 
 /// Relays `inbound` to `outbound` both ways until either side ends, reading
