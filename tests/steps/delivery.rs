@@ -1076,15 +1076,13 @@ async fn a_client_subscribed_on_the_server(world: &mut ClientWorld, channel: Str
 async fn the_server_api_publishes(world: &mut ClientWorld, count: u64, kib: u64, channel: String) {
     let server = world.server.as_ref().expect("a Centrifugo server");
     let pad = "x".repeat(size(kib, "KiB"));
-    for n in 1..=count {
-        server
-            .api()
-            .call(
-                "publish",
-                json!({"channel": channel, "data": {"n": n, "pad": pad}}),
-            )
-            .await
-            .expect("publish");
+    // In batches, in order: one request per publication took minutes
+    // under load, past the run's watchdog (CI health).
+    let publications: Vec<_> = (1..=count)
+        .map(|n| json!({"channel": channel, "data": {"n": n, "pad": pad}}))
+        .collect();
+    for batch in publications.chunks(100) {
+        server.api().publish_batch(batch.iter().cloned()).await;
     }
 }
 
