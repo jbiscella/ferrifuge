@@ -475,12 +475,17 @@ mod tests {
     async fn a_message_read_comes_before_the_next_written_report() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        // Echoes each message.
+        // Echoes each message, telling when the first echo was sent.
+        let (echoed, first_echoed) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut echoed = Some(echoed);
             while let Some(Ok(message)) = ws.next().await {
                 ws.send(message).await.unwrap();
+                if let Some(echoed) = echoed.take() {
+                    let _ = echoed.send(());
+                }
             }
         });
         let mut ws = WebSocket::open(
@@ -496,8 +501,9 @@ mod tests {
         ws.send(FrameId::for_tests(1), b"1".to_vec(), FrameType::Text)
             .unwrap();
         let first = ws.recv(true).await;
-        // Its echo arrives; then a second frame is written at once.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Its echo is sent, so it has reached this end of the loopback
+        // connection: a second frame is written then, at once.
+        first_echoed.await.expect("the first echo");
         ws.send(FrameId::for_tests(2), b"2".to_vec(), FrameType::Text)
             .unwrap();
 
