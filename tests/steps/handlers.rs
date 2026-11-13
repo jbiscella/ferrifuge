@@ -4,7 +4,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
@@ -69,6 +69,10 @@ pub(crate) struct Handlers {
     shared: Arc<Shared>,
     /// Pings sent and pongs received when the handler started.
     pings_before: Option<(usize, usize)>,
+    /// Holds a blocking subscription handler past its time until the step
+    /// counting the pings answered while it runs has counted; dropping it
+    /// lets the handler return.
+    blocked_until_counted: Option<std::sync::mpsc::Sender<()>>,
     /// The second client of a scenario with two, and its fake server.
     second: Option<(Client, FakeServer)>,
     /// A handler blocks on a call that a full read-ahead holds up: its
@@ -542,9 +546,22 @@ async fn a_blocking_handler_while_pinged(
         })
         .await;
     world.fake().ping_every(Duration::from_secs(seconds.into()));
+    // The handler blocks for `blocks` seconds, and then on until the pings
+    // answered while it runs are counted: ending after its time alone, a
+    // runner stalled for a second let it return before the count, and an
+    // Inline client then answered the pings it had held (macOS, run
+    // 43353085844: "5 pongs to 5 pings").
+    let (counted, blocked) = std::sync::mpsc::channel::<()>();
+    world.handlers.blocked_until_counted = Some(counted);
+    let blocked = Mutex::new(blocked);
     subscribed_with_handler(world, &mode, &channel, false, move |_, event| {
         if matches!(event, SubscriptionEvent::Publication(_)) {
             std::thread::sleep(Duration::from_secs(blocks));
+            // Returns once the step counted, or the scenario ended.
+            let _ = blocked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
         }
     })
     .await;
@@ -571,6 +588,8 @@ fn answered_those_pings(world: &mut ClientWorld, which: String) {
     let (sent_before, answered_before) = world.handlers.pings_before.expect("a handler running");
     let sent = world.fake().pings() - sent_before;
     let answered = pongs(world) - answered_before;
+    // Counted while the handler still runs: it may return now.
+    world.handlers.blocked_until_counted = None;
     assert!(sent >= 3, "{sent} pings in the window");
     if which == "every" {
         // The last ping may still be on its way back.
