@@ -13,7 +13,7 @@ use crate::support::relay::CountingRelay;
 
 /// Ping interval announced when a scenario does not specify one: long enough
 /// that only the pings a step sends arrive.
-const QUIET_PING_INTERVAL: u32 = 25;
+pub(super) const QUIET_PING_INTERVAL: u32 = 25;
 /// Slack on timing assertions for scheduling on a loaded runner.
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// How long to watch for a pong that must not be sent.

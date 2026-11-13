@@ -23,7 +23,7 @@ use super::transports::{configure, connect_and_wait, server};
 use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, test_config};
 use crate::support::http_proxy::HttpProxy;
 
-const CHANNEL: &str = "news";
+pub(super) const CHANNEL: &str = "news";
 /// How long a step waits for a publication that must not arrive.
 const NO_PUBLICATION_PERIOD: Duration = Duration::from_millis(500);
 /// Slack on timing assertions for scheduling on a loaded runner.

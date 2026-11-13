@@ -26,6 +26,9 @@ pub(crate) enum Mode {
     /// Keeps new ones waiting, then relays them once the mode changes, so
     /// a step can act while a client reconnects, however slow the runner.
     Hold,
+    /// Relays them with `TCP_NODELAY`, one `write` per byte in each
+    /// direction, counting the writes (Block 50, D4).
+    OneBytePerWrite,
 }
 
 /// When a held connection was accepted, and when its client closed it.
@@ -48,6 +51,16 @@ pub(crate) struct CountingRelay {
     silent: Arc<Mutex<Vec<Lifetime>>>,
     /// Gates of the forwarded connections, to stop them reading.
     gates: Arc<Mutex<Vec<Weak<Gate>>>>,
+    /// Writes and bytes of the connections relayed in
+    /// [`Mode::OneBytePerWrite`], both directions together.
+    single: Arc<Singles>,
+}
+
+/// What the connections relayed one byte per write have written.
+#[derive(Default)]
+struct Singles {
+    writes: AtomicUsize,
+    bytes: AtomicUsize,
 }
 
 /// Stops the relay reading from clients, so that what they write stays in
@@ -109,6 +122,43 @@ async fn forward(
     }
 }
 
+/// Relays `inbound` to `outbound` both ways until either side ends, one
+/// byte per `write`, with Nagle's algorithm off on both sockets, so that
+/// every byte leaves in a write of its own (Block 50, D4).
+async fn forward_one_byte_per_write(inbound: TcpStream, outbound: TcpStream, single: Arc<Singles>) {
+    for stream in [&inbound, &outbound] {
+        stream.set_nodelay(true).expect("TCP_NODELAY");
+    }
+    let (from_client, to_client) = inbound.into_split();
+    let (from_server, to_server) = outbound.into_split();
+    let relay = |mut from: tokio::net::tcp::OwnedReadHalf,
+                 mut to: tokio::net::tcp::OwnedWriteHalf| {
+        let single = Arc::clone(&single);
+        async move {
+            let mut buffer = vec![0; 64 << 10];
+            loop {
+                let read = from.read(&mut buffer).await?;
+                if read == 0 {
+                    return to.shutdown().await;
+                }
+                single.bytes.fetch_add(read, Ordering::SeqCst);
+                for byte in &buffer[..read] {
+                    to.write_all(std::slice::from_ref(byte)).await?;
+                    single.writes.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    };
+    let up: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>> =
+        Box::pin(relay(from_client, to_server));
+    let down: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>> =
+        Box::pin(relay(from_server, to_client));
+    tokio::select! {
+        _ = up => {}
+        _ = down => {}
+    }
+}
+
 impl CountingRelay {
     /// Starts relaying a local port to `target` (`host:port`).
     pub(crate) async fn start(target: String) -> Self {
@@ -127,6 +177,8 @@ impl CountingRelay {
         let held = Arc::new(Mutex::new(Vec::new()));
         let silent = Arc::new(Mutex::new(Vec::new()));
         let gates = Arc::new(Mutex::new(Vec::new()));
+        let single = Arc::new(Singles::default());
+        let singles = Arc::clone(&single);
         let lifetimes = Arc::clone(&silent);
         let relayed = Arc::clone(&to_clients);
         let (counter, current, holding, gating) = (
@@ -155,6 +207,15 @@ impl CountingRelay {
                         }));
                     }
                     m if m == Mode::Down as u8 => drop(inbound),
+                    m if m == Mode::OneBytePerWrite as u8 => {
+                        let target = target.clone();
+                        let single = Arc::clone(&singles);
+                        tokio::spawn(async move {
+                            if let Ok(outbound) = TcpStream::connect(&target).await {
+                                forward_one_byte_per_write(inbound, outbound, single).await;
+                            }
+                        });
+                    }
                     _ => {
                         let gate = Arc::new(Gate::default());
                         gating.lock().unwrap().push(Arc::downgrade(&gate));
@@ -183,7 +244,17 @@ impl CountingRelay {
             held,
             silent,
             gates,
+            single,
         }
+    }
+
+    /// The writes and the bytes of the connections relayed in
+    /// [`Mode::OneBytePerWrite`], both directions together.
+    pub(crate) fn single_byte_writes(&self) -> (usize, usize) {
+        (
+            self.single.writes.load(Ordering::SeqCst),
+            self.single.bytes.load(Ordering::SeqCst),
+        )
     }
 
     /// How long each connection held in [`Mode::Silent`] stayed open until
