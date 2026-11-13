@@ -464,7 +464,7 @@ async fn the_fake_server_receives_no_rpc(world: &mut ClientWorld) {
 
 /// Its scenarios settle the call in a later step, so their clients have
 /// a call timeout no runner stall reaches ([`STALL_PROOF_TIMEOUT`], set
-/// before the scenario runs by `bdd.rs`, as the client is created by an
+/// before the scenario runs by `bdd.rs` from `STALL_PROOF_STEPS`, as the client is created by an
 /// earlier step that scenarios timing a call out share): at the 5 s
 /// default, a stall between this step and the settling one let the
 /// timeout settle the call first (Windows, #185: the disconnect ran

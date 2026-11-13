@@ -20,7 +20,11 @@ use crate::support::http_proxy::HttpProxy;
 use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
-pub(crate) use calls::PENDING_CALL_STEP;
+/// Steps whose scenarios run with [`STALL_PROOF_TIMEOUT`], set by
+/// `bdd.rs` before the scenario starts: each needs calls or commands still
+/// pending when it runs, which an earlier step, shared with scenarios that
+/// time out, made.
+pub(crate) const STALL_PROOF_STEPS: &[&str] = &[calls::PENDING_CALL_STEP, batching::HELD_STEP];
 
 mod auto_batching;
 mod backoff;
