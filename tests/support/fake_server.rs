@@ -241,6 +241,30 @@ pub(crate) struct FakeServer {
     pinger: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// Publishes as a [`FakeServer`]; see [`FakeServer::publisher`].
+pub(crate) struct Publisher(Arc<Mutex<State>>);
+
+impl Publisher {
+    /// As [`FakeServer::publish_sized`].
+    pub(crate) fn publish_sized(&self, channel: &str, offset: u64, size: usize) {
+        let publication = json!({"data": {"n": offset, "pad": "x".repeat(size)}, "offset": offset});
+        let mut state = self.0.lock().unwrap();
+        state
+            .history
+            .entry(channel.to_owned())
+            .or_default()
+            .push(publication.clone());
+        // With the state locked: a subscribe answered from history is
+        // queued before this push, or includes this publication.
+        if state.out.is_some() {
+            let publication = state.with_delta(channel, publication);
+            let out = state.out.as_ref().expect("checked above");
+            let push = json!({"push": {"channel": channel, "pub": publication}});
+            let _ = out.send(Outgoing::Message(Message::text(push.to_string())));
+        }
+    }
+}
+
 impl FakeServer {
     pub(crate) async fn start(announce: Announce) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -762,21 +786,14 @@ impl FakeServer {
 
     /// As [`FakeServer::publish`], its data padded by `size` bytes.
     pub(crate) fn publish_sized(&self, channel: &str, offset: u64, size: usize) {
-        let publication = json!({"data": {"n": offset, "pad": "x".repeat(size)}, "offset": offset});
-        let mut state = self.state.lock().unwrap();
-        state
-            .history
-            .entry(channel.to_owned())
-            .or_default()
-            .push(publication.clone());
-        // With the state locked: a subscribe answered from history is
-        // queued before this push, or includes this publication.
-        if state.out.is_some() {
-            let publication = state.with_delta(channel, publication);
-            let out = state.out.as_ref().expect("checked above");
-            let push = json!({"push": {"channel": channel, "pub": publication}});
-            let _ = out.send(Outgoing::Message(Message::text(push.to_string())));
-        }
+        self.publisher().publish_sized(channel, offset, size);
+    }
+
+    /// A handle that publishes as this server, from any thread: a step
+    /// building many or large publications does it off the scenarios'
+    /// runner thread.
+    pub(crate) fn publisher(&self) -> Publisher {
+        Publisher(Arc::clone(&self.state))
     }
 
     /// Turns fossil delta on for the subscribes to `channel` asking for it
