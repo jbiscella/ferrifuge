@@ -103,7 +103,8 @@ struct Plan {
     close: AtomicBool,
     /// The subscription's handler unsubscribes it at its next event.
     unsubscribe: AtomicBool,
-    /// How long each handler call takes, in milliseconds.
+    /// How long a handler takes with a publication, in milliseconds: long
+    /// enough for a reconnect to resubscribe meanwhile (Block 41, D3).
     slow: AtomicU64,
     panics: AtomicUsize,
     closes: AtomicUsize,
@@ -125,7 +126,7 @@ impl Plan {
     /// planted and `publication`.
     fn turn(&self, publication: bool) {
         let slow = self.slow.load(Ordering::SeqCst);
-        if slow > 0 {
+        if publication && slow > 0 {
             std::thread::sleep(Duration::from_millis(slow));
         }
         if publication && self.panic.swap(false, Ordering::SeqCst) {
@@ -455,7 +456,7 @@ impl Run {
         // meet events handed and not yet returned (Block 41, D3).
         let plan = handlers.then(|| {
             let plan = Plan::default();
-            plan.slow.store(30, Ordering::SeqCst);
+            plan.slow.store(0, Ordering::SeqCst);
             Arc::new(plan)
         });
         let (client, events, subs) = build(&server, delta, plan.as_ref());
@@ -508,7 +509,7 @@ impl Run {
                     35..47 => Op::HandlerClose,
                     47..70 => Op::HandlerUnsubscribe,
                     70..85 => Op::TakeOver,
-                    _ => Op::Slow(self.rng.u64(0..=150)),
+                    _ => Op::Slow(self.rng.u64(300..=1500)),
                 }
             } else {
                 Op::pick(&mut self.rng)
@@ -840,7 +841,7 @@ impl Run {
         self.server.fail_connects(0);
         // Healed: the handlers plan nothing more (Block 49).
         if let Some(plan) = &self.plan {
-            plan.panic.store(false, Ordering::SeqCst);
+            // A panic planted still comes: the client reconnects below.
             plan.close.store(false, Ordering::SeqCst);
             plan.unsubscribe.store(false, Ordering::SeqCst);
             plan.slow.store(0, Ordering::SeqCst);
