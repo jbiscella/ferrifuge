@@ -912,6 +912,22 @@ const SERIAL: &[&str] = &[
     "The quickstart example receives a publication",
 ];
 
+/// Scenarios run at once unless `--concurrency` says otherwise: the
+/// variable `FERRIFUGE_BDD_CONCURRENCY`, else 4 on macOS and Windows and 8
+/// elsewhere. cucumber's own default, 64, ran a whole feature's worth of
+/// scenarios on CI's 3- and 4-core runners, whose timers then missed their
+/// deadlines by seconds (PR first attempts failed 15-33% a day). Local runs
+/// pass `--concurrency 4`.
+fn concurrency() -> usize {
+    match env::var("FERRIFUGE_BDD_CONCURRENCY") {
+        Ok(value) => value
+            .parse()
+            .expect("FERRIFUGE_BDD_CONCURRENCY: a number of scenarios"),
+        Err(_) if cfg!(any(target_os = "macos", target_os = "windows")) => 4,
+        Err(_) => 8,
+    }
+}
+
 fn main() {
     // `cargo test <filter>` passes a libtest filter to every test target,
     // e.g. when cargo-bolero runs one fuzz target; cucumber takes options
@@ -964,6 +980,7 @@ async fn run_scenarios() {
             })
     };
     ClientWorld::cucumber()
+        .max_concurrent_scenarios(concurrency())
         .with_cli(cli)
         .which_scenario(|_, _, scenario| {
             if SERIAL.contains(&scenario.name.as_str()) {
