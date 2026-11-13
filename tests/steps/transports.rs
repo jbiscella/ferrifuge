@@ -46,6 +46,8 @@ pub(super) fn kind(name: &str) -> TransportKind {
         "websocket" => TransportKind::WebSocket,
         "http_stream" => TransportKind::HttpStream,
         "sse" => TransportKind::Sse,
+        #[cfg(feature = "unstable-webtransport")]
+        "webtransport" => TransportKind::WebTransport,
         other => panic!("unknown transport {other}"),
     }
 }
@@ -61,6 +63,8 @@ pub(super) fn server_url(server: &Centrifugo, kind: TransportKind) -> String {
     match kind {
         TransportKind::HttpStream => server.http_stream_url(),
         TransportKind::Sse => server.sse_url(),
+        #[cfg(feature = "unstable-webtransport")]
+        TransportKind::WebTransport => server.webtransport_url(),
         _ => server.websocket_url(),
     }
 }
@@ -254,6 +258,12 @@ pub(super) async fn a_client_connected_over(
         world.protocol = ferrifuge::Protocol::Protobuf;
     }
     let kind = kind(&transport);
+    // Over the scenario's HTTP/3 server, started at once when it has none
+    // (Block 48).
+    #[cfg(feature = "unstable-webtransport")]
+    if kind == TransportKind::WebTransport {
+        super::webtransport::webtransport_endpoint(world).await;
+    }
     let url = match &world.http_proxy {
         Some(proxy) if kind.is_emulated() => {
             format!("http://{}/connection/{}", proxy.address(), kind.name())

@@ -862,6 +862,30 @@ const SHARED_POLLS: &[&str] = &[
 #[cfg(not(feature = "unstable"))]
 const SHARED_POLLS: &[&str] = &[];
 
+/// Block 48: WebTransport, run only when the BDD binary is built with
+/// `unstable-webtransport` (Block 48, D19).
+#[cfg(feature = "unstable-webtransport")]
+const WEBTRANSPORT: &[&str] = &[
+    // 48a: the native transport, its TLS settings, fallback and refusals.
+    "A client connects over WebTransport and receives a publication",
+    "Binary publication delivered over Protobuf on WebTransport",
+    "Server pings over WebTransport are answered",
+    "A server disconnect over WebTransport reaches the client with its code",
+    "WebTransport falls back to websocket when UDP is unreachable",
+    "A server without WebTransport refuses the session and the client falls back",
+    "A connect refused over WebTransport is reported by the next transport",
+    "TLS settings apply to WebTransport",
+    "Real HTTP headers go with the WebTransport session request",
+    "Subscribes go with the connect command over WebTransport",
+    "A WebTransport endpoint that is not https is rejected",
+    "A raw TLS configuration unfit for QUIC is rejected for WebTransport",
+    "A connector with a WebTransport endpoint is rejected",
+    "A WebTransport attempt with a proxy fails without sending a datagram",
+    "A WebTransport open that never completes is bounded by the handshake timeout",
+];
+#[cfg(not(feature = "unstable-webtransport"))]
+const WEBTRANSPORT: &[&str] = &[];
+
 /// Tags of `Examples` tables whose sub-increment is not implemented yet
 /// (Block 41, D8): none since 41d ran `@thread`.
 const EXAMPLES_NOT_YET: &[&str] = &[];
@@ -997,7 +1021,8 @@ async fn run_scenarios() {
             (IMPLEMENTED.contains(&scenario.name.as_str())
                 || COOKIES.contains(&scenario.name.as_str())
                 || MAPS.contains(&scenario.name.as_str())
-                || SHARED_POLLS.contains(&scenario.name.as_str()))
+                || SHARED_POLLS.contains(&scenario.name.as_str())
+                || WEBTRANSPORT.contains(&scenario.name.as_str()))
                 && !outside
                 && !scenario
                     .tags
@@ -1102,6 +1127,7 @@ fn assert_implemented_scenarios_exist() {
         .chain(COOKIES)
         .chain(MAPS)
         .chain(SHARED_POLLS)
+        .chain(WEBTRANSPORT)
     {
         assert!(
             names.contains(*name),
