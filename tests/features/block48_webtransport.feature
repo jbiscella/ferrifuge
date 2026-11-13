@@ -48,12 +48,11 @@ Feature: WebTransport (unstable)
     And then the client emits "connected" over transport "websocket"
 
   @A
-  Scenario: A connect refused over WebTransport is reported by the next transport
+  Scenario: A connect refused over WebTransport stops the client, whichever transport carries the refusal
     Given a server serving TLS with a certificate from the test CA, with HTTP/3 and WebTransport enabled, that requires a connection token
     And a client with an invalid connection token, configured with the server's WebTransport and wss endpoints
     When connect is called
-    Then the client emits an "error" event for the failed transport attempt over transport "webtransport"
-    And then the client emits "disconnected" with code 3500 and reason "invalid token"
+    Then the client emits "disconnected" with code 3500 and reason "invalid token", either after one failed attempt and no "error" event, or after two failed attempts, the first reported by an "error" event for the failed transport attempt over transport "webtransport"
     And the client makes no new connection attempt
 
   @A

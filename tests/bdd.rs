@@ -873,7 +873,7 @@ const WEBTRANSPORT: &[&str] = &[
     "A server disconnect over WebTransport reaches the client with its code",
     "WebTransport falls back to websocket when UDP is unreachable",
     "A server without WebTransport refuses the session and the client falls back",
-    "A connect refused over WebTransport is reported by the next transport",
+    "A connect refused over WebTransport stops the client, whichever transport carries the refusal",
     "TLS settings apply to WebTransport",
     "Real HTTP headers go with the WebTransport session request",
     "Subscribes go with the connect command over WebTransport",

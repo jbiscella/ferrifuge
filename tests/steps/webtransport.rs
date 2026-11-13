@@ -191,6 +191,41 @@ async fn a_failed_attempt_over(world: &mut ClientWorld, transport: String) {
     world.put_back_events.push_front(event);
 }
 
+/// Centrifugo loses the refusal of a connect over WebTransport in nearly
+/// every run, ending the stream bare; the client then reports that attempt
+/// and the refusal reaches it over websocket. Now and then the refusal
+/// wins the race and reaches it over WebTransport, which stops it at once
+/// (Block 48, "Lost connect errors"; centrifugal/centrifugo#1322). The
+/// count of failed attempts tells the two apart, so a fallback that
+/// skipped its error event fails this step (reviewer, 2026-11-13).
+#[then(
+    r#"the client emits "disconnected" with code 3500 and reason "invalid token", either after one failed attempt and no "error" event, or after two failed attempts, the first reported by an "error" event for the failed transport attempt over transport "webtransport""#
+)]
+async fn refused_whichever_transport(world: &mut ClientWorld) {
+    let mut reported = false;
+    let (code, reason) = loop {
+        match world.next_event().await {
+            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Error(error)
+                if !reported
+                    && error.kind == ErrorKind::Transport
+                    && error.transport.as_deref() == Some("webtransport") =>
+            {
+                reported = true;
+            }
+            ClientEvent::Disconnected { code, reason } => break (code, reason),
+            event => panic!("expected \"disconnected\", got {event:?}"),
+        }
+    };
+    assert_eq!((code, reason.as_str()), (3500, "invalid token"));
+    let failed = world.client().statistics().failed_attempts;
+    let expected = if reported { 2 } else { 1 };
+    assert_eq!(
+        failed, expected,
+        "failed attempts, with an error event for the WebTransport attempt: {reported}"
+    );
+}
+
 #[when(
     regex = r#"^the client subscribes to channel "(\w+)" and the server API publishes (\{.*\}) to channel "(\w+)"$"#
 )]
