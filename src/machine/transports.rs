@@ -70,11 +70,17 @@ impl Transports {
     }
 
     /// The current transport ended before the server answered on it
-    /// (Block 48, D9): it is no longer chosen, and a new round starts from
-    /// the next transport, each tried at once, until the round comes back
-    /// to this one, which is tried after the backoff. Alone in the list,
-    /// it waits the backoff at once.
+    /// (Block 48, D9). If it was chosen, it no longer is, and a new round
+    /// starts from the next transport, each tried at once, until the round
+    /// comes back to this one, which is tried after the backoff; alone in
+    /// the list, it waits the backoff at once. If it was not, the attempt
+    /// is one more failure of the current round, whose end stays: a second
+    /// transport ending so (another WebTransport refusing the same token)
+    /// cannot start the round over, which would never reach the backoff.
     pub(super) fn give_way(&mut self) {
+        if !self.chosen {
+            return;
+        }
         self.chosen = false;
         self.tried_all = false;
         self.round_end = Some(self.index);
