@@ -30,6 +30,9 @@ pub(crate) struct ConnectData {
     raw: Option<String>,
     /// HTTP headers of the client (17b).
     pub(super) http_headers: Vec<(String, String)>,
+    /// `Config::name` of the scenario's clients, unique to the scenario,
+    /// when its connect proxy's requests are told apart by it.
+    client_name: Option<String>,
     /// Emulated headers of the client (17b).
     emulated_headers: Vec<(String, String)>,
     /// The debug output of client options a step formatted.
@@ -52,6 +55,9 @@ impl ConnectData {
     /// Applies the scenario's options to `config`.
     pub(crate) fn configure(&self, config: &mut Config) {
         config.data.clone_from(&self.data);
+        if let Some(name) = &self.client_name {
+            config.name.clone_from(name);
+        }
         if let Some(token) = &self.token {
             config.token.clone_from(token);
         }
@@ -406,9 +412,30 @@ fn the_connect_command_carries_token_and_data(world: &mut ClientWorld, which: St
 
 // @B: a real Centrifugo and the connect proxy.
 
+/// The scenario's clients get a name of their own, sent in their connect
+/// commands and passed on in the proxy's requests: the header steps look
+/// only at the requests of those clients. The proxy also gets requests of
+/// clients of other scenarios: "HTTP headers reach the connect proxy over
+/// each transport" saw `[None, Some("r1")]` (main, d6d5c01), and an
+/// `http_stream` scenario saw a websocket connect.
 #[given("a connect proxy recording requests")]
 fn a_recording_connect_proxy(world: &mut ClientWorld) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     proxy(world);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    world.connect_data.client_name = Some(format!("ferrifuge-bdd-{next}"));
+}
+
+/// The connect requests of the scenario's clients, as JSON bodies with
+/// the values of header `name`.
+fn own_requests(world: &ClientWorld, name: &str) -> Vec<(serde_json::Value, Option<String>)> {
+    let proxy = proxy(world);
+    let client_name = world.connect_data.client_name.as_deref();
+    (0..proxy.requests())
+        .map(|index| proxy.request(index))
+        .zip(proxy.request_headers(name))
+        .filter(|(request, _)| client_name.is_none_or(|client_name| request["name"] == client_name))
+        .collect()
 }
 
 fn proxy(world: &ClientWorld) -> &crate::support::proxy::ProxyBackend {
@@ -562,13 +589,16 @@ fn a_client_with_an_emulated_header(world: &mut ClientWorld, given: String) {
 async fn the_proxy_received_header(world: &mut ClientWorld, given: String) {
     let (name, value) = header(&given);
     let arrived = tokio::time::timeout(Duration::from_secs(10), async {
-        while proxy(world).requests() == 0 {
+        while own_requests(world, &name).is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
     assert!(arrived.is_ok(), "no connect request");
-    let received = proxy(world).request_headers(&name);
+    let received: Vec<_> = own_requests(world, &name)
+        .into_iter()
+        .map(|(_, header)| header)
+        .collect();
     assert!(!received.is_empty(), "no connect request");
     assert!(
         received
@@ -947,13 +977,10 @@ fn set_emulated_headers_is_called(world: &mut ClientWorld, given: String) {
 fn the_proxy_received_headers_in_turn(world: &mut ClientWorld, first: String, then: String) {
     let (name, first) = header(&first);
     let (_, then) = header(&then);
-    let proxy = proxy(world);
+    let (requests, received): (Vec<_>, Vec<_>) = own_requests(world, &name).into_iter().unzip();
     // The connect requests, to tell where an unexpected attempt came from.
-    let requests: Vec<_> = (0..proxy.requests())
-        .map(|index| proxy.request(index))
-        .collect();
     assert_eq!(
-        proxy.request_headers(&name),
+        received,
         [Some(first), Some(then)],
         "connect requests: {requests:?}"
     );
