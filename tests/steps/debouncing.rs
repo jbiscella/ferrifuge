@@ -871,12 +871,24 @@ async fn received_commands(world: &mut ClientWorld, count: usize, number: u64, u
     received_n_in_order(world, count, duration_of(number, &unit)).await;
 }
 
+/// How far apart the first and the last of `commands` reached the fake
+/// server.
+pub(super) fn arrival_span(commands: &[(Value, Instant)]) -> Duration {
+    match (commands.first(), commands.last()) {
+        (Some((_, first)), Some((_, last))) => last.saturating_duration_since(*first),
+        _ => Duration::ZERO,
+    }
+}
+
 async fn received_n_in_order(world: &mut ClientWorld, count: usize, within: Duration) {
-    let started = Instant::now();
     let fake = world.fake();
     let reached = || fake.commands_with_times("publish").len() >= count;
     wait_until("the publish commands", reached).await;
-    assert!(started.elapsed() <= within, "{:?}", started.elapsed());
+    // By the fake's arrival times, not from when this step began: a stall
+    // inside the step does not fail it, and one before it does not hide a
+    // debounced send (CI health, finding 15).
+    let span = arrival_span(&fake.commands_with_times("publish")[..count]);
+    assert!(span <= within, "{span:?} between the first and the last");
     // None was merged or sent in another order: the numbers ascend.
     let numbers: Vec<u64> = fake
         .commands_with_times("publish")
