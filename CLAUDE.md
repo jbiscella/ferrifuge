@@ -9256,7 +9256,7 @@ Feature: Bug-pattern catalogue
     Examples:
       | waiting                               | arrival          | outcome                                                     |
       | an rpc in flight and a timeout of 200 ms | the rpc's reply  | the rpc succeeds                                            |
-      | a server ping interval of 200 ms      | its next ping    | the client stays connected and no reconnect is counted      |
+      | a server ping interval of 1 s and a maxServerPingDelay of 200 ms | its next ping | the client stays connected and no reconnect is counted |
 
   @E
   Scenario: A stream decoder releases what a large reply grew
