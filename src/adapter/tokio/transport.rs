@@ -501,9 +501,17 @@ mod tests {
         ws.send(FrameId::for_tests(1), b"1".to_vec(), FrameType::Text)
             .unwrap();
         let first = ws.recv(true).await;
-        // Its echo is sent, so it has reached this end of the loopback
-        // connection: a second frame is written then, at once.
+        // Its echo is sent, and this end's reactor has seen it arrive: a
+        // second frame is written then, at once.
         first_echoed.await.expect("the first echo");
+        let MaybeTlsStream::Plain(stream) = ws.stream.get_ref() else {
+            unreachable!("a ws:// connection is plain");
+        };
+        let tcp = stream.tcp().expect("a direct connection");
+        tokio::time::timeout(TIMEOUT, tcp.readable())
+            .await
+            .expect("the first echo readable here")
+            .unwrap();
         ws.send(FrameId::for_tests(2), b"2".to_vec(), FrameType::Text)
             .unwrap();
 
