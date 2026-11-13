@@ -397,6 +397,34 @@ mod tests {
         url
     }
 
+    /// As [`serve_once`] without a delay: answers once `before` fires, if
+    /// given, and fires `after`, if given, once it has answered, so that
+    /// tests order servers by events rather than by time.
+    async fn serve_in_turn(
+        response: &'static [u8],
+        path: &str,
+        before: Option<tokio::sync::oneshot::Receiver<()>>,
+        after: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}{path}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0; 4096]).await;
+            if let Some(before) = before {
+                let _ = before.await;
+            }
+            let _ = socket.write_all(response).await;
+            if let Some(after) = after {
+                let _ = after.send(());
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        url
+    }
+
     /// Messages and outcome of decoding `body` split at `cuts`, with a
     /// small limit so that the error path is reached too.
     fn decode_chunked(sse: bool, body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), String>) {
@@ -1022,17 +1050,21 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let ok = serve_once(
+        // The failing one answers once the successful one has: ordered by
+        // that event, not by a delay a slow connection setup outlasts.
+        let (answered, ok_answered) = tokio::sync::oneshot::channel();
+        let ok = serve_in_turn(
             b"HTTP/1.1 204 No Content\r\n\r\n",
             "/emulation",
-            Duration::ZERO,
+            None,
+            Some(answered),
         )
         .await;
-        // Answers after the successful one.
-        let failing = serve_once(
+        let failing = serve_in_turn(
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
             "/emulation",
-            Duration::from_millis(500),
+            Some(ok_answered),
+            None,
         )
         .await;
         let mut transport = HttpTransport::open(
@@ -1152,7 +1184,6 @@ mod tests {
                 read = &mut request_read => break read.expect("the request read"),
             }
         }
-
 
         // How the driver closes an HTTP transport.
         drop(transport);
