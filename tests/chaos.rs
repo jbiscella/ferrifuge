@@ -16,6 +16,9 @@
 // @P scenario: The core runner reports a planted automatic-batching fault
 // @P scenario: Seeded chaos with debounced publishes on the core keeps every invariant
 // @P scenario: The core runner reports a planted debounce fault
+// @P scenario: Seeded chaos on the core applies no stale answer
+// @P scenario: The core runner reports a planted continuity fault
+// @P scenario: Seeded chaos on the core leaks no secret
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -28,7 +31,7 @@ use ferrifuge::machine::{
     SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
 };
 use ferrifuge::{
-    CallError, CallReply, CallRequest, ClientEvent, Config, DeltaFormat, HistoryOptions,
+    CallError, CallReply, CallRequest, ClientEvent, Config, DataError, DeltaFormat, HistoryOptions,
     ServerSubscriptionEvent, State, StateError, StreamPosition, SubscriptionEvent,
     SubscriptionState, TokenError, codes, write_fossil_delta,
 };
@@ -44,7 +47,8 @@ const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 const OPS_VARIABLE: &str = "FERRIFUGE_CHAOS_OPS";
 /// The long run's mode: `0` the connection alone, `1` with subscriptions,
 /// `2` (the default) with subscriptions and batches, `3` with delta, `4`
-/// with automatic batching, `5` with debounced publishes.
+/// with automatic batching, `5` with debounced publishes, `6` with every
+/// callback answered late and marked secrets (Block 49).
 const SUBSCRIPTIONS_VARIABLE: &str = "FERRIFUGE_CHAOS_SUBSCRIPTIONS";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
@@ -116,6 +120,11 @@ enum Mode {
     /// batching on even seeds, so that windows meet reconnects and batches
     /// (Block 46, D16).
     Debounce,
+    /// Subscriptions, every callback (connection token and data,
+    /// subscription token, data and state), answers sometimes fed after
+    /// their flow was abandoned, frames of abandoned transports, and tokens
+    /// and payloads marked as secrets (Block 49, D6: I13, I14).
+    Continuity,
 }
 
 impl Mode {
@@ -128,6 +137,7 @@ impl Mode {
             Self::Delta => 3,
             Self::AutoBatching => 4,
             Self::Debounce => 5,
+            Self::Continuity => 6,
         }
     }
 
@@ -189,6 +199,15 @@ enum Fault {
     /// The settle action of a publish that waited in a window dropped
     /// before the checker (I6, Block 46).
     DropWindowedOutcome,
+    /// A token answer of a torn-down flow passed on as current by the tap:
+    /// given the id of a fetch still current (I13, Block 49).
+    PassStaleTokenAsCurrent,
+    /// A frame of an abandoned transport passed on as current by the tap
+    /// (I13, Block 49).
+    PassStaleFrameAsCurrent,
+    /// A tap rendering a token into a Debug record of an action: the frame
+    /// of a send, beside its `Debug` (I14, Block 49).
+    RenderTokenInDebug,
 }
 
 /// An invariant a seed broke.
@@ -444,6 +463,12 @@ enum Due {
     Token(FetchId, Result<String, TokenError>),
     /// The application's getState callback answers for a subscription.
     State(FetchId, SubscriptionId, bool),
+    /// The connect data callback answers (Block 49).
+    ConnectData(FetchId, Result<Vec<u8>, DataError>),
+    /// A subscription's token callback answers (Block 49).
+    SubscriptionToken(FetchId, Result<String, TokenError>),
+    /// A subscription's data callback answers (Block 49).
+    SubscriptionData(FetchId, Result<Vec<u8>, DataError>),
     /// The server pings the connection, if it still pings it.
     Ping(TransportId),
     /// The server sends a reply it made earlier, if the connection is still
@@ -612,6 +637,50 @@ struct Owner {
     commands: usize,
 }
 
+/// Why the tap judges a fetch abandoned (Block 49, D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Abandoned {
+    /// The core cancelled it, or the application unsubscribed or removed
+    /// its subscription.
+    Cancelled,
+    /// `disconnect()`, or disconnect code 3014.
+    Ended,
+    /// A connection refresh's fetch whose connection a reconnect tore down:
+    /// a denial still counts (D6's exception), a token does not.
+    TornDown,
+    /// A later connection token fetch replaced it.
+    Superseded,
+}
+
+/// What the I13 and I14 taps know (Block 49, mode `Continuity`).
+#[derive(Default)]
+struct Continuity {
+    /// The connection token fetches the tap judges abandoned, and why: the
+    /// core numbers them apart from the others.
+    abandoned_tokens: std::collections::HashMap<FetchId, Abandoned>,
+    /// The other fetches the tap judges abandoned (connect data and the
+    /// subscriptions' callbacks, numbered together), and why.
+    abandoned: std::collections::HashMap<FetchId, Abandoned>,
+    /// Connection token fetches not yet answered, in order, with whether
+    /// each is a refresh, asked while connected.
+    tokens: Vec<(FetchId, bool)>,
+    /// Subscription fetches not yet answered, by subscription.
+    flows: std::collections::HashMap<FetchId, SubscriptionId>,
+    /// The transport the core opened last; frames of any other are of an
+    /// abandoned transport.
+    transport: Option<TransportId>,
+    /// The transport before it.
+    previous: Option<TransportId>,
+    /// Answers given so far, numbering the secrets.
+    answers: u64,
+}
+
+/// An input the tap judges stale: its step must change nothing (I13).
+#[derive(Debug)]
+struct Stale {
+    what: &'static str,
+}
+
 /// One seed's run.
 struct Run {
     seed: u64,
@@ -663,6 +732,12 @@ struct Run {
     trace: Vec<String>,
     /// How often each operation, server behaviour and outcome happened.
     counts: BTreeMap<String, usize>,
+    /// The run's secret marker, in every token and payload of mode
+    /// `Continuity` (I14).
+    marker: String,
+    /// The input being fed is judged stale (I13).
+    stale: Option<Stale>,
+    continuity: Continuity,
 }
 
 type Step = Result<(), Violation>;
@@ -692,10 +767,10 @@ impl Run {
                 } else {
                     machine
                 };
-                if mode == Mode::Debounce {
-                    machine.with_publish_debounce()
-                } else {
-                    machine
+                match mode {
+                    Mode::Debounce => machine.with_publish_debounce(),
+                    Mode::Continuity => machine.with_data_source(),
+                    _ => machine,
                 }
             },
             now: Duration::ZERO,
@@ -726,6 +801,9 @@ impl Run {
             of: 0,
             trace: Vec::new(),
             counts: BTreeMap::new(),
+            marker: format!("s3cr3t{:x}", seed ^ 0x0049_b000),
+            stale: None,
+            continuity: Continuity::default(),
         }
     }
 
@@ -884,6 +962,8 @@ impl Run {
         // fill a frame and batches split.
         let data = if self.mode.batching() {
             format!("\"{}\"", "x".repeat(self.rng.usize(0..=600))).into_bytes()
+        } else if self.mode == Mode::Continuity {
+            format!("\"{}\"", self.marker).into_bytes()
         } else {
             b"{}".to_vec()
         };
@@ -972,10 +1052,17 @@ impl Run {
                         .agenda
                         .values()
                         .filter_map(|due| match due {
-                            Due::State(fetch, ..) => Some(*fetch),
+                            Due::State(fetch, ..)
+                            | Due::SubscriptionToken(fetch, _)
+                            | Due::SubscriptionData(fetch, _) => Some(*fetch),
                             _ => None,
                         })
                         .collect();
+                }
+                for &(fetch, _) in &self.continuity.tokens {
+                    self.continuity
+                        .abandoned_tokens
+                        .insert(fetch, Abandoned::Ended);
                 }
                 self.checker.disconnected = true;
                 self.feed(Input::Disconnect)
@@ -1068,6 +1155,8 @@ impl Run {
                     .max_resubscribe_delay(MAX_DELAY);
                 if n == 1 {
                     options = options.state_source();
+                } else if self.mode == Mode::Continuity {
+                    options = options.token_source().data_source();
                 }
                 if self.mode == Mode::Delta {
                     options = options.delta(DeltaFormat::Fossil);
@@ -1087,11 +1176,17 @@ impl Run {
                 None => Ok(()),
             },
             Op::Unsubscribe(n) => match self.subs[n] {
-                Some(id) => self.feed(Input::Unsubscribe(id)),
+                Some(id) => {
+                    self.abandon_flows_of(id);
+                    self.feed(Input::Unsubscribe(id))
+                }
                 None => Ok(()),
             },
             Op::Remove(n) => match self.subs[n].take() {
-                Some(id) => self.feed(Input::RemoveSubscription(id)),
+                Some(id) => {
+                    self.abandon_flows_of(id);
+                    self.feed(Input::RemoveSubscription(id))
+                }
                 None => Ok(()),
             },
             Op::Publish(channel, count) => {
@@ -1166,7 +1261,12 @@ impl Run {
         if let Some(payload) = self.server.payloads.get(&(channel.to_owned(), offset)) {
             return payload.clone();
         }
-        let payload = json!({"n": offset, "pad": "x".repeat(self.rng.usize(0..=600))}).to_string();
+        let pad = "x".repeat(self.rng.usize(0..=600));
+        let payload = if self.mode == Mode::Continuity {
+            json!({"n": offset, "m": self.marker, "pad": pad}).to_string()
+        } else {
+            json!({"n": offset, "pad": pad}).to_string()
+        };
         self.server
             .payloads
             .insert((channel.to_owned(), offset), payload.clone());
@@ -1344,6 +1444,13 @@ impl Run {
                 Ok(())
             }
             Due::Opened(transport) => {
+                // A frame of the transport before arrives late (I13).
+                if self.mode == Mode::Continuity
+                    && let Some(previous) = self.continuity.previous
+                    && self.rng.u32(0..3) == 0
+                {
+                    self.arrive(previous, Inbound::Frame(b"{}".to_vec()));
+                }
                 self.server.current = Some(transport);
                 self.server.connected = false;
                 self.server.subscribed.clear();
@@ -1358,7 +1465,13 @@ impl Run {
                 })
             }
             Due::Written(transport, frame) => self.feed(Input::FrameWritten { transport, frame }),
-            Due::Token(fetch, result) => self.feed(Input::TokenFetched { fetch, result }),
+            due @ (Due::Token(..)
+            | Due::ConnectData(..)
+            | Due::SubscriptionToken(..)
+            | Due::SubscriptionData(..)) => self.callback_answered(due),
+            Due::State(fetch, id, loaded) if self.continuity.abandoned.contains_key(&fetch) => {
+                self.callback_answered(Due::State(fetch, id, loaded))
+            }
             Due::State(fetch, id, loaded) => {
                 let result = if loaded {
                     // The application loads its state as of the channel's
@@ -1431,6 +1544,23 @@ impl Run {
                 break;
             };
             match inbound {
+                Inbound::Frame(data)
+                    if self.mode == Mode::Continuity
+                        && self
+                            .continuity
+                            .transport
+                            .is_some_and(|current| current != transport) =>
+                {
+                    self.count("frame of an abandoned transport");
+                    let transport = match (self.fault, self.continuity.transport) {
+                        (Some(Fault::PassStaleFrameAsCurrent), Some(current)) => current,
+                        _ => transport,
+                    };
+                    self.stale = Some(Stale {
+                        what: "frame of an abandoned transport",
+                    });
+                    self.feed(Input::Frame { transport, data })?;
+                }
                 Inbound::Frame(data) => self.feed(Input::Frame { transport, data })?,
                 Inbound::Close(code, reason) => {
                     self.checker.open.remove(&id(transport));
@@ -1482,6 +1612,106 @@ impl Run {
         self.feed(Input::StreamClosed(of))
     }
 
+    /// A callback answers: through the tap, which judges whether its flow
+    /// was abandoned (I13).
+    fn callback_answered(&mut self, due: Due) -> Step {
+        match due {
+            Due::Token(fetch, result) => {
+                let denial = matches!(result, Err(TokenError::Unauthorized));
+                self.feed_answer(
+                    fetch,
+                    "late token answer",
+                    denial,
+                    Input::TokenFetched { fetch, result },
+                )
+            }
+            Due::ConnectData(fetch, result) => self.feed_answer(
+                fetch,
+                "late data answer",
+                false,
+                Input::ConnectDataFetched { fetch, result },
+            ),
+            Due::SubscriptionToken(fetch, result) => self.continuing_answer(fetch, |run| {
+                run.feed_answer(
+                    fetch,
+                    "late token answer",
+                    false,
+                    Input::SubscriptionTokenFetched { fetch, result },
+                )
+            }),
+            Due::SubscriptionData(fetch, result) => self.continuing_answer(fetch, |run| {
+                run.feed_answer(
+                    fetch,
+                    "late data answer",
+                    false,
+                    Input::SubscriptionDataFetched { fetch, result },
+                )
+            }),
+            Due::State(fetch, _, loaded) => {
+                // Not loaded for the application: its position is no
+                // delivery (I8).
+                let result = if loaded {
+                    Ok(StreamPosition {
+                        offset: 0,
+                        epoch: EPOCH.to_owned(),
+                    })
+                } else {
+                    Err(StateError("chaos".to_owned()))
+                };
+                self.continuing_answer(fetch, |run| {
+                    run.feed_answer(
+                        fetch,
+                        "late state answer",
+                        false,
+                        Input::SubscriptionStateFetched { fetch, result },
+                    )
+                })
+            }
+            other => unreachable!("not a callback's answer: {other:?}"),
+        }
+    }
+
+    /// Keeps `rendered`, the `Debug` record of an input or action, in the
+    /// trace; in mode `Continuity` it must not carry the run's secret
+    /// marker (I14).
+    fn record(&mut self, rendered: String) -> Step {
+        if self.mode == Mode::Continuity {
+            self.count("debug record");
+            if rendered.contains(&self.marker) {
+                self.trace.push(rendered.clone());
+                return Err(self.violation("I14", format!("a secret in {rendered}")));
+            }
+        }
+        self.trace.push(rendered);
+        Ok(())
+    }
+
+    /// The step of an input judged stale changed nothing: it returned no
+    /// action, which covers I13's "no state event, no send carrying the
+    /// answer, no call settled", and also, say, the transport a stale
+    /// token would open.
+    fn check_stale(&self, stale: &Stale, actions: &[Action]) -> Step {
+        match actions.first() {
+            Some(action) => {
+                Err(self.violation("I13", format!("a {} acted: {action:?}", stale.what)))
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Feeds the answer of a subscription flow's `fetch` with `feed`: one
+    /// running at `disconnect()` may go on with its flow (Block 42, D11).
+    fn continuing_answer(
+        &mut self,
+        fetch: FetchId,
+        answer: impl FnOnce(&mut Self) -> Step,
+    ) -> Step {
+        self.checker.continuing = self.checker.disconnected && self.checker.kept.remove(&fetch);
+        let outcome = answer(self);
+        self.checker.continuing = false;
+        outcome
+    }
+
     /// Feeds `input` to the machine, performs its actions, and checks the
     /// invariants.
     fn feed(&mut self, input: Input) -> Step {
@@ -1502,7 +1732,9 @@ impl Run {
     }
 
     fn feed_one(&mut self, input: Input, flush: bool) -> Step {
-        self.trace.push(format!("in {input:?}"));
+        let stale = self.stale.take();
+        let rendered = format!("in {input:?}");
+        self.record(rendered)?;
         let fired = match &input {
             Input::DebounceTimerFired(timer) => Some(*timer),
             _ => None,
@@ -1510,6 +1742,9 @@ impl Run {
         let machine = &mut self.machine;
         let actions = catch_unwind(AssertUnwindSafe(|| machine.handle(input)))
             .map_err(|panic| self.violation("I2", panic_message(&panic)))?;
+        if let Some(stale) = &stale {
+            self.check_stale(stale, &actions)?;
+        }
         self.handoffs = self.handoff_owners(fired, &actions);
         // The planted fault tells the checker the input before this one.
         let reported = if self.fault == Some(Fault::LateFlushReport) {
@@ -1520,7 +1755,18 @@ impl Run {
         self.owner.last_was_flush = flush;
         let outer = std::mem::replace(&mut self.owner.flushing, reported);
         for action in actions {
-            self.trace.push(format!("out {action:?}"));
+            let rendered = match &action {
+                // The planted fault renders the frame of a send, which may
+                // carry a token, beside its `Debug` (I14).
+                Action::Send { frame, .. } if self.fault == Some(Fault::RenderTokenInDebug) => {
+                    format!("out {action:?} {}", String::from_utf8_lossy(frame))
+                }
+                _ => format!("out {action:?}"),
+            };
+            if let Err(violation) = self.record(rendered) {
+                self.owner.flushing = outer;
+                return Err(violation);
+            }
             if let Err(violation) = self.act(action) {
                 self.owner.flushing = outer;
                 return Err(violation);
@@ -1649,6 +1895,9 @@ impl Run {
             Action::OpenTransport { transport, .. } => {
                 if self.checker.disconnected {
                     return Err(self.violation("I5", "a transport opened after disconnect()"));
+                }
+                if self.mode == Mode::Continuity {
+                    self.continuity.previous = self.continuity.transport.replace(transport);
                 }
                 if !self.checker.open.insert(id(transport)) {
                     return Err(self.violation("I3", "a transport opened twice"));
@@ -1799,8 +2048,9 @@ impl Run {
                 if self.checker.disconnected {
                     return Err(self.violation("I5", "a token fetch after disconnect()"));
                 }
+                let token = self.secret("token");
                 let result = if self.server.healed {
-                    Ok("token".to_owned())
+                    Ok(token)
                 } else {
                     match self.rng.u32(0..20) {
                         0 => {
@@ -1811,12 +2061,29 @@ impl Run {
                             self.count("token failed");
                             Err(TokenError::Failed("chaos".to_owned()))
                         }
-                        _ => Ok("token".to_owned()),
+                        _ => Ok(token),
                     }
                 };
-                let after = Duration::from_millis(self.rng.u64(0..=50));
+                if self.mode == Mode::Continuity {
+                    // A later fetch replaces those not answered yet.
+                    for (earlier, _) in &self.continuity.tokens {
+                        self.continuity
+                            .abandoned_tokens
+                            .entry(*earlier)
+                            .or_insert(Abandoned::Superseded);
+                    }
+                    let refresh = self.checker.last_state == Some(State::Connected);
+                    self.continuity.tokens.push((fetch, refresh));
+                }
+                let after = self.answer_delay();
                 self.schedule(after, Due::Token(fetch, result));
             }
+            action @ (Action::FetchConnectData(_)
+            | Action::CancelConnectData(_)
+            | Action::FetchSubscriptionToken { .. }
+            | Action::CancelSubscriptionToken(_)
+            | Action::FetchSubscriptionData { .. }
+            | Action::CancelSubscriptionData(_)) => self.act_callback(action),
             Action::FetchSubscriptionState {
                 subscription,
                 fetch,
@@ -1825,16 +2092,24 @@ impl Run {
                 if self.checker.disconnected {
                     return Err(self.violation("I5", "a state fetch after disconnect()"));
                 }
+                if self.mode == Mode::Continuity {
+                    self.continuity.flows.insert(fetch, subscription);
+                }
                 let loaded = self.server.healed || self.rng.u32(0..10) > 0;
                 if !loaded {
                     self.count("state failed");
                 }
-                let after = Duration::from_millis(self.rng.u64(0..=50));
+                let after = self.answer_delay();
                 self.schedule(after, Due::State(fetch, subscription, loaded));
             }
             Action::CancelSubscriptionState(fetch) => {
-                self.agenda
-                    .retain(|_, due| !matches!(due, Due::State(of, ..) if *of == fetch));
+                if self.mode == Mode::Continuity {
+                    // Answered all the same, late (I13).
+                    self.cancelled(fetch);
+                } else {
+                    self.agenda
+                        .retain(|_, due| !matches!(due, Due::State(of, ..) if *of == fetch));
+                }
             }
             // Only reported: the reconnect follows as its own actions.
             Action::Anomaly(_) => self.count("anomaly"),
@@ -1846,6 +2121,190 @@ impl Run {
     fn cancel(&mut self, key: Key) {
         self.agenda
             .retain(|_, due| !matches!(due, Due::Timer(of) if *of == key));
+    }
+
+    /// What a state event of the client abandons (D6): code 3014 and a
+    /// final disconnect end every connection token fetch; a reconnect tears
+    /// down the refreshes of the connection it ends.
+    fn tear_down_fetches(&mut self, event: &ClientEvent) {
+        let (ended, torn) = match event {
+            ClientEvent::Connecting { code, .. } if *code == 3014 => (true, false),
+            ClientEvent::Connecting { .. } => {
+                (false, self.checker.last_state == Some(State::Connected))
+            }
+            ClientEvent::Disconnected { .. } => (true, false),
+            _ => return,
+        };
+        for &(fetch, refresh) in &self.continuity.tokens {
+            if ended {
+                self.continuity
+                    .abandoned_tokens
+                    .insert(fetch, Abandoned::Ended);
+            } else if torn && refresh {
+                self.continuity
+                    .abandoned_tokens
+                    .entry(fetch)
+                    .or_insert(Abandoned::TornDown);
+            }
+        }
+    }
+
+    /// `unsubscribe()` or a removal abandons the fetches of the
+    /// subscription's flow (D6).
+    fn abandon_flows_of(&mut self, id: SubscriptionId) {
+        let fetches: Vec<FetchId> = self
+            .continuity
+            .flows
+            .iter()
+            .filter(|(_, of)| **of == id)
+            .map(|(fetch, _)| *fetch)
+            .collect();
+        for fetch in fetches {
+            self.cancelled(fetch);
+        }
+    }
+
+    /// The callbacks only mode `Continuity` uses: connect data, and a
+    /// subscription's token and data (Block 49).
+    fn act_callback(&mut self, action: Action) {
+        match action {
+            Action::FetchConnectData(fetch) => {
+                let result = self.data_result();
+                let after = self.answer_delay();
+                self.schedule(after, Due::ConnectData(fetch, result));
+            }
+            Action::CancelConnectData(fetch)
+            | Action::CancelSubscriptionToken(fetch)
+            | Action::CancelSubscriptionData(fetch) => self.cancelled(fetch),
+            Action::FetchSubscriptionToken {
+                subscription,
+                fetch,
+                ..
+            } => {
+                self.continuity.flows.insert(fetch, subscription);
+                let token = self.secret("subscription token");
+                let roll = self.rng.u32(0..20);
+                let result = match roll {
+                    0 if !self.server.healed => Err(TokenError::Unauthorized),
+                    1..3 if !self.server.healed => Err(TokenError::Failed("chaos".to_owned())),
+                    _ => Ok(token),
+                };
+                let after = self.answer_delay();
+                self.schedule(after, Due::SubscriptionToken(fetch, result));
+            }
+            Action::FetchSubscriptionData {
+                subscription,
+                fetch,
+                ..
+            } => {
+                self.continuity.flows.insert(fetch, subscription);
+                let result = self.data_result();
+                let after = self.answer_delay();
+                self.schedule(after, Due::SubscriptionData(fetch, result));
+            }
+            other => unreachable!("not a callback action: {other:?}"),
+        }
+    }
+
+    /// A token of `what`: in mode `Continuity` a secret carrying the run's
+    /// marker, numbered (I14); else the runner's plain token.
+    fn secret(&mut self, what: &str) -> String {
+        if self.mode != Mode::Continuity {
+            return "token".to_owned();
+        }
+        self.continuity.answers += 1;
+        format!("{}-{what}-{}", self.marker, self.continuity.answers)
+    }
+
+    /// How long a callback takes to answer: up to 50 ms, or in mode
+    /// `Continuity` sometimes up to 2 s, so that its flow may end meanwhile
+    /// and the answer come late (I13).
+    fn answer_delay(&mut self) -> Duration {
+        if self.mode == Mode::Continuity && !self.server.healed && self.rng.u32(0..10) < 3 {
+            return Duration::from_millis(self.rng.u64(200..=2000));
+        }
+        Duration::from_millis(self.rng.u64(0..=50))
+    }
+
+    /// A data callback's answer: marked data, sometimes a failure.
+    fn data_result(&mut self) -> Result<Vec<u8>, DataError> {
+        let roll = self.rng.u32(0..20);
+        if roll < 2 && !self.server.healed {
+            Err(DataError::Failed("chaos".to_owned()))
+        } else {
+            Ok(format!("\"{}\"", self.marker).into_bytes())
+        }
+    }
+
+    /// The core no longer wants `fetch`: its answer, still given, is late.
+    fn cancelled(&mut self, fetch: FetchId) {
+        self.continuity
+            .abandoned
+            .entry(fetch)
+            .or_insert(Abandoned::Cancelled);
+    }
+
+    /// Feeds the answer of `fetch`, judged by the tap (I13): one the tap
+    /// judges abandoned must change nothing.
+    fn feed_answer(
+        &mut self,
+        fetch: FetchId,
+        late: &'static str,
+        denial: bool,
+        input: Input,
+    ) -> Step {
+        // Connection tokens are numbered apart from the other fetches.
+        let token = matches!(input, Input::TokenFetched { .. });
+        let refresh = if token {
+            let at = self
+                .continuity
+                .tokens
+                .iter()
+                .position(|(of, _)| *of == fetch);
+            at.map(|at| self.continuity.tokens.remove(at).1)
+        } else {
+            self.continuity.flows.remove(&fetch);
+            None
+        };
+        let judged = if token {
+            &self.continuity.abandoned_tokens
+        } else {
+            &self.continuity.abandoned
+        };
+        let stale = match judged.get(&fetch) {
+            // D6's exception: a refresh's denial after a reconnect still
+            // disconnects.
+            Some(Abandoned::TornDown | Abandoned::Superseded)
+                if denial && refresh == Some(true) =>
+            {
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if self.mode != Mode::Continuity || !stale {
+            return self.feed(input);
+        }
+        self.count(late);
+        let input = match (self.fault, input) {
+            (Some(Fault::PassStaleTokenAsCurrent), Input::TokenFetched { result, .. }) => {
+                let current = self
+                    .continuity
+                    .tokens
+                    .iter()
+                    .position(|(of, _)| !self.continuity.abandoned_tokens.contains_key(of));
+                match current {
+                    Some(at) => Input::TokenFetched {
+                        fetch: self.continuity.tokens.remove(at).0,
+                        result,
+                    },
+                    None => Input::TokenFetched { fetch, result },
+                }
+            }
+            (_, input) => input,
+        };
+        self.stale = Some(Stale { what: late });
+        self.feed(input)
     }
 
     /// The owner's part of Block 25's D3: a running timer fires `by`
@@ -1894,6 +2353,9 @@ impl Run {
     /// I1 for the client, and for server-side subscriptions; their events
     /// go to the client's stream.
     fn emitted(&mut self, event: EventId, of: Of, client_event: &ClientEvent) -> Step {
+        if self.mode == Mode::Continuity {
+            self.tear_down_fetches(client_event);
+        }
         let state = match client_event {
             ClientEvent::Connecting { .. } => State::Connecting,
             ClientEvent::Connected { .. } => State::Connected,
@@ -2840,6 +3302,48 @@ fn the_core_runner_reports_a_planted_debounce_fault() {
     }
 }
 
+/// The answers and frames the runner judged stale, which must change
+/// nothing (Block 49, I13).
+fn continuity_counts() -> Vec<String> {
+    [
+        "late token answer",
+        "late data answer",
+        "late state answer",
+        "frame of an abandoned transport",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+#[test]
+fn seeded_chaos_on_the_core_applies_no_stale_answer() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Continuity)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    assert_counted(&counts, &continuity_counts());
+}
+
+#[test]
+fn the_core_runner_reports_a_planted_continuity_fault() {
+    assert_reported(Fault::PassStaleTokenAsCurrent, "I13", Mode::Continuity);
+    assert_reported(Fault::PassStaleFrameAsCurrent, "I13", Mode::Continuity);
+    assert_reported(Fault::RenderTokenInDebug, "I14", Mode::Continuity);
+}
+
+#[test]
+fn seeded_chaos_on_the_core_leaks_no_secret() {
+    let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), SEEDS);
+    let counts = run_seeds(seeds.clone(), OPS, None, Mode::Continuity)
+        .unwrap_or_else(|violation| panic!("{violation}"));
+    if seeds != SEEDS {
+        return;
+    }
+    assert_counted(&counts, &["debug record".to_owned()]);
+}
+
 /// Prints the whole trace of `FERRIFUGE_CHAOS_SEED` (seed 0 without it),
 /// of `FERRIFUGE_CHAOS_OPS` operations (60 without it), with
 /// subscriptions: `cargo test --test chaos trace -- --ignored --nocapture`.
@@ -2880,6 +3384,7 @@ fn seeded_chaos_long_run() {
         3 => Mode::Delta,
         4 => Mode::AutoBatching,
         5 => Mode::Debounce,
+        6 => Mode::Continuity,
         _ => Mode::Batching,
     };
     let seeds = seeds_from(std::env::var(SEED_VARIABLE).ok(), start..start + seeds);
