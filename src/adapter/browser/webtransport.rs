@@ -581,6 +581,12 @@ mod tests {
                 }
 
                 transport.send(FrameId::for_tests(1), b"{}".to_vec());
+                // The write has failed, or its timeout passed, before the
+                // core reads: the messages must still come first.
+                platform::sleep(
+                    timeout.min(Duration::from_millis(200)) + Duration::from_millis(100),
+                )
+                .await;
                 let mut seen = Vec::new();
                 for _ in 0..3 {
                     seen.push(recv_within(&mut transport, 2000).await);
