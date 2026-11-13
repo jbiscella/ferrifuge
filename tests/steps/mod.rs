@@ -93,6 +93,10 @@ pub(crate) const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/webso
 
 type Events = Pin<Box<dyn Stream<Item = ClientEvent> + Send>>;
 
+/// Run on each event of the scenario's client as it is taken, before any
+/// step reads it, until it returns `true` (see [`ClientWorld::event_hook`]).
+type EventHook = Arc<std::sync::Mutex<Option<Box<dyn FnMut(&ClientEvent) -> bool + Send>>>>;
+
 #[derive(Default, World)]
 pub(crate) struct ClientWorld {
     /// Started before @A and @B scenarios.
@@ -105,6 +109,9 @@ pub(crate) struct ClientWorld {
     pub(crate) relay: Option<CountingRelay>,
     pub(crate) client: Option<Client>,
     events: Option<Events>,
+    /// What a step must do the moment the client emits an event, rather
+    /// than when the step, perhaps stalled, reads it (Block 17c).
+    pub(crate) event_hook: EventHook,
     /// Events of the client a step looked at and put back, for the next
     /// step to see first.
     pub(crate) put_back_events: std::collections::VecDeque<ClientEvent>,
@@ -346,7 +353,16 @@ impl ClientWorld {
 
     pub(crate) fn build_client(&mut self, builder: ClientBuilder) {
         let client = builder.build().expect("a valid client configuration");
-        self.events = Some(recorded(client.events()));
+        let hook = Arc::clone(&self.event_hook);
+        let events = client.events().inspect(move |event| {
+            let mut hook = hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook.as_mut().is_some_and(|run| run(event)) {
+                *hook = None;
+            }
+        });
+        self.events = Some(recorded(events));
         self.client = Some(client);
     }
 

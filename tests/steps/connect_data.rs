@@ -731,6 +731,9 @@ fn it_contains_none_of(world: &mut ClientWorld, secrets: String) {
     regex = r#"^a client with token "(\w+)", no token callback and a minimum reconnect delay of (\d+) s, connected to the fake server$"#
 )]
 async fn a_client_with_a_fixed_token(world: &mut ClientWorld, token: String, delay: u64) {
+    // Its connect attempt waits for an error the fake server holds until
+    // the set_token step is ready.
+    world.timeout = Some(super::STALL_PROOF_TIMEOUT);
     world.connect_data.token = Some(token);
     world.connect_data.min_reconnect_delay = Some(Duration::from_secs(delay));
     super::connection::a_connected_client(world).await;
@@ -739,7 +742,9 @@ async fn a_client_with_a_fixed_token(world: &mut ClientWorld, token: String, del
 #[given(regex = r#"^the fake server will answer the next connect with error (\d+) "([^"]+)"$"#)]
 #[allow(clippy::needless_pass_by_value)] // cucumber passes captures by value
 fn the_fake_server_fails_the_next_connect(world: &mut ClientWorld, code: u32, message: String) {
-    world.fake().fail_next_connect_with(code, &message);
+    // Held until "set_token is called with … when the client emits the
+    // \"error\" event", the only step after it, is ready.
+    world.fake().fail_next_connect_after_release(code, &message);
 }
 
 #[when(
@@ -747,10 +752,26 @@ fn the_fake_server_fails_the_next_connect(world: &mut ClientWorld, code: u32, me
 )]
 /// `set_token` must land before the reconnect timer, at least the minimum
 /// reconnect delay after the 109: the core then finds the token expired
-/// with no callback and stops, before any transport opens. The scenario's
-/// 2 s keeps both attempts (2–4 s, then 2–6 s) under the 10 s step
-/// timeouts while doubling the time a loaded runner has to get here.
+/// with no callback and stops, before any transport opens. Called by this
+/// step once it read the event, a runner stalled for longer than that
+/// delay let the timer fire first (Windows, #106, #171: the next connect
+/// never came). It is called as the event is taken instead, and the fake
+/// server holds the 109 until that is set up.
 async fn set_token_on_the_error(world: &mut ClientWorld, token: String, code: u32) {
+    let client = world.client().downgrade();
+    let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let set = Arc::clone(&called);
+    *world.event_hook.lock().unwrap() = Some(Box::new(move |event: &ClientEvent| {
+        if !matches!(event, ClientEvent::Error(error) if error.code == code) {
+            return false;
+        }
+        if let Some(client) = client.upgrade() {
+            client.set_token(token.clone());
+            set.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        true
+    }));
+    world.fake().release_held_connect();
     loop {
         let event = world.next_event().await;
         let matched = matches!(&event, ClientEvent::Error(error) if error.code == code);
@@ -759,7 +780,10 @@ async fn set_token_on_the_error(world: &mut ClientWorld, token: String, code: u3
             break;
         }
     }
-    world.client().set_token(token);
+    assert!(
+        called.load(std::sync::atomic::Ordering::SeqCst),
+        "set_token was not called on the error"
+    );
 }
 
 /// The connect commands the fake server received, oldest first.
