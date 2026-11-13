@@ -81,7 +81,7 @@ pub(in crate::adapter) enum Decoder {
 pub(in crate::adapter) struct Sse {
     decoder: sse_core::SseDecoder,
     limit: NonZeroUsize,
-    #[cfg(feature = "__test-hooks")]
+    #[cfg(any(test, feature = "__test-hooks"))]
     kept: usize,
 }
 
@@ -104,7 +104,7 @@ impl Decoder {
             Self::Sse(Sse {
                 decoder: sse_core::SseDecoder::with_limit(limit),
                 limit,
-                #[cfg(feature = "__test-hooks")]
+                #[cfg(any(test, feature = "__test-hooks"))]
                 kept: 0,
             })
         } else {
@@ -145,25 +145,32 @@ impl Decoder {
                 while let Some(event) = sse.decoder.next(&mut rest) {
                     match event {
                         Ok(sse_core::SseEvent::Message(message)) => {
-                            #[cfg(feature = "__test-hooks")]
+                            #[cfg(any(test, feature = "__test-hooks"))]
                             {
                                 sse.kept = message.data.capacity();
                             }
-                            // sse-core would allocate as much again for the
-                            // next event: a decoder of its own, at this event
-                            // boundary, starts empty (row 71). By length, as
-                            // the capacity sse-core grows is not this one's.
-                            if message.data.len() > KEPT {
+                            // sse-core allocates as much again for the next
+                            // event's data (`Vec::with_capacity`): a decoder
+                            // of its own, at this event boundary, starts
+                            // empty (row 71).
+                            if message.data.capacity() > KEPT {
                                 released();
-                                sse.decoder = sse_core::SseDecoder::with_limit(sse.limit);
-                                #[cfg(feature = "__test-hooks")]
+                                sse.decoder = fresh_sse(sse.limit);
+                                #[cfg(any(test, feature = "__test-hooks"))]
                                 {
                                     sse.kept = 0;
                                 }
                             }
                             let default = message.event.is_empty() || message.event == "message";
                             if default && !message.data.is_empty() {
-                                messages.push_back(message.data.into_bytes());
+                                let mut data = message.data.into_bytes();
+                                // At its size, as lines and Protobuf replies
+                                // are: the buffer it came in may be as large
+                                // as an earlier event.
+                                if data.capacity() > 2 * data.len() {
+                                    data.shrink_to_fit();
+                                }
+                                messages.push_back(data);
                             }
                         }
                         // The client keeps its own reconnect delays.
@@ -304,6 +311,19 @@ impl StreamDecoder {
     }
 }
 
+/// A new sse-core decoder for a stream already past its start: fed one
+/// blank line, which dispatches nothing, it leaves its byte-order-mark
+/// state, so that a U+FEFF after the boundary stays part of a field name
+/// as mid-stream (row 71).
+#[cfg(adapter_tokio)]
+fn fresh_sse(limit: NonZeroUsize) -> sse_core::SseDecoder {
+    let mut decoder = sse_core::SseDecoder::with_limit(limit);
+    let mut blank: &[u8] = b"\n";
+    let dispatched = decoder.next(&mut blank);
+    debug_assert!(dispatched.is_none() && blank.is_empty());
+    decoder
+}
+
 #[cfg(test)]
 thread_local! {
     /// The buffers released on this thread (row 71's unit tests).
@@ -396,6 +416,56 @@ mod tests {
                 }
             });
             assert_eq!(released, 0, "{:?}", decoder.0);
+        }
+    }
+
+    /// The sse decoder, its data's capacity kept for the next event and the
+    /// messages it completed from `chunks`.
+    #[cfg(adapter_tokio)]
+    fn sse_after(chunks: &[&[u8]]) -> (usize, Vec<Vec<u8>>) {
+        let mut decoder = Decoder::new(true, 2 << 20);
+        let mut messages = VecDeque::new();
+        for chunk in chunks {
+            decoder.push(chunk, &mut messages).unwrap();
+        }
+        let Decoder::Sse(sse) = decoder else {
+            unreachable!("an sse decoder")
+        };
+        (sse.kept, messages.into())
+    }
+
+    // Row 71 (reviewer, #249): an event of 60 KiB in chunks of 50 and 10 KiB
+    // grows sse-core's buffer past 64 KiB; neither the decoder nor a later
+    // message keeps that.
+    #[cfg(adapter_tokio)]
+    #[test]
+    fn an_sse_message_after_a_60_kib_event_is_handed_over_at_its_size() {
+        let event = [&b"data: "[..], &vec![b'a'; 60 << 10], b"\n\n"].concat();
+        let (first, second) = event.split_at(6 + (50 << 10));
+        let (kept, messages) = sse_after(&[first, second, b"data: ok\n\n"]);
+        assert!(kept <= KEPT, "the decoder keeps {kept} bytes");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1], b"ok");
+        assert!(
+            messages[1].capacity() <= KEPT,
+            "a message of 2 bytes holds {} bytes",
+            messages[1].capacity()
+        );
+    }
+
+    // Row 71 (reviewer, #249): the decoder that replaces a released one is
+    // past its start, so a U+FEFF after the boundary begins an unknown field
+    // there as on any other line, and its data is not delivered.
+    #[cfg(adapter_tokio)]
+    #[test]
+    fn a_byte_order_mark_after_a_released_event_is_mid_stream() {
+        let large = [&b"data: "[..], &vec![b'a'; 100 << 10], b"\n\n"].concat();
+        let after = "\u{feff}data: hidden\n\ndata: shown\n\n".as_bytes();
+        let (_, released) = sse_after(&[&large, after]);
+        let (_, kept) = sse_after(&[b"data: small\n\n", after]);
+        for messages in [released, kept] {
+            assert_eq!(messages.last().map(Vec::as_slice), Some(&b"shown"[..]));
+            assert_eq!(messages.len(), 2, "{messages:?}");
         }
     }
 
