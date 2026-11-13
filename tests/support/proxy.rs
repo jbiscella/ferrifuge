@@ -69,6 +69,9 @@ struct SubscribeAnswer {
     body: Option<Value>,
     /// Delay before answering.
     delay: Duration,
+    /// When set, the delay starts only once a step releases it
+    /// ([`ProxyBackend::release_held_subscribe`]).
+    gate: Option<Arc<Notify>>,
 }
 
 enum Answer {
@@ -202,6 +205,34 @@ impl ProxyBackend {
     /// Answers subscribe requests for `channel` after `delay`.
     pub(crate) fn subscribe_delay(&self, channel: &str, delay: Duration) {
         self.program_subscribe(channel, |answer| answer.delay = delay);
+    }
+
+    /// Answers the subscribe requests for `channel` `delay` after
+    /// [`ProxyBackend::release_held_subscribe`] rather than after the
+    /// request: until a step releases it, a subscribe stays unanswered
+    /// whatever the runner's speed (as #225 did for connect).
+    pub(crate) fn subscribe_delay_after_release(&self, channel: &str, delay: Duration) {
+        self.program_subscribe(channel, |answer| {
+            answer.delay = delay;
+            answer.gate = Some(Arc::new(Notify::new()));
+        });
+    }
+
+    /// Starts the delay of the subscribe answers held by
+    /// [`ProxyBackend::subscribe_delay_after_release`] for `channel`,
+    /// whether or not the request came yet; later requests are not held.
+    pub(crate) fn release_held_subscribe(&self, channel: &str) {
+        let gate = self
+            .state
+            .lock()
+            .unwrap()
+            .subscribe
+            .get_mut(channel)
+            .and_then(|answer| answer.gate.take());
+        if let Some(gate) = gate {
+            // Stores the permit when the request is not waiting yet.
+            gate.notify_one();
+        }
     }
 
     /// Bodies of the subscribe requests received so far.
@@ -396,6 +427,9 @@ async fn subscribe(
         answers.subscribe_times.push(Instant::now());
         answers.subscribe.get(&channel).cloned().unwrap_or_default()
     };
+    if let Some(gate) = &answer.gate {
+        gate.notified().await;
+    }
     tokio::time::sleep(answer.delay).await;
     Json(answer.body.unwrap_or_else(|| json!({"result": {}})))
 }
