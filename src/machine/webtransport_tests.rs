@@ -388,3 +388,116 @@ fn a_webtransport_end_without_a_code_before_a_ping_keeps_the_backoff_growing() {
         "{webtransport:?}"
     );
 }
+
+/// Over `kinds`, where WebTransport is the last: every transport before it
+/// fails its first attempt, WebTransport is chosen, then its stream ends
+/// before the server answered. The next attempt's transport and delay.
+fn after_giving_way(kinds: &[TransportKind]) -> (TransportKind, Duration) {
+    let mut machine = Machine::with_rng(Config::default(), false, fastrand::Rng::with_seed(48))
+        .with_transports(kinds.to_vec())
+        .expect("transports");
+    let mut actions = machine.handle(Input::Connect);
+    for _ in 1..kinds.len() {
+        let transport = opened(&actions).expect("an attempt");
+        machine.handle(Input::TransportFailed {
+            transport,
+            message: "refused".to_owned(),
+        });
+        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+    }
+    let transport = opened(&actions).expect("the WebTransport attempt");
+    let sent = machine.handle(Input::TransportOpened(transport));
+    let connect = sent
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the connect command");
+    let id = serde_json::from_slice::<serde_json::Value>(&connect).expect("JSON")["id"].clone();
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#),
+    ));
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let transport =
+        opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    machine.handle(Input::TransportOpened(transport));
+    let actions = machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let delay = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            _ => None,
+        })
+        .expect("a reconnect scheduled");
+    let next = machine
+        .handle(Input::TimerFired(Timer::Reconnect))
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .expect("the next attempt");
+    (next, delay)
+}
+
+// D9: a WebTransport last in the list that gives way is followed by the
+// next transport of the list, the first, at once: the round ends when it
+// comes back to WebTransport, not where the list wraps (Block 8, "once
+// every transport has failed").
+#[test]
+fn a_webtransport_last_in_the_list_gives_way_to_the_first_at_once() {
+    let (next, delay) = after_giving_way(&[TransportKind::HttpStream, TransportKind::WebTransport]);
+
+    assert_eq!(next, TransportKind::HttpStream);
+    assert_eq!(delay, Duration::ZERO);
+}
+
+// D9: a WebTransport alone in the list that gives way comes back after the
+// backoff, never at once: no hot loop on a revoked token.
+#[test]
+fn a_webtransport_alone_that_gives_way_waits_the_backoff() {
+    let (next, delay) = after_giving_way(&[TransportKind::WebTransport]);
+
+    assert_eq!(next, TransportKind::WebTransport);
+    assert!(delay > Duration::ZERO);
+}
+
+// D9, the round after giving way: over [http_stream, websocket,
+// webtransport], http_stream and websocket are tried at once, then
+// WebTransport after the backoff.
+#[test]
+fn after_giving_way_the_round_ends_at_the_webtransport_that_gave_way() {
+    let mut transports = Transports::new(vec![
+        TransportKind::HttpStream,
+        TransportKind::WebSocket,
+        TransportKind::WebTransport,
+    ]);
+    transports.attempt_failed();
+    transports.attempt_failed();
+    transports.choose();
+    transports.give_way();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        transports.attempt_failed();
+        seen.push((transports.current(), transports.in_first_round()));
+    }
+
+    assert_eq!(
+        seen,
+        [
+            (TransportKind::HttpStream, true),
+            (TransportKind::WebSocket, true),
+            (TransportKind::WebTransport, false),
+        ]
+    );
+}

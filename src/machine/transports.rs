@@ -14,6 +14,11 @@ pub(super) struct Transports {
     chosen: bool,
     /// Every transport was tried once without one being chosen.
     tried_all: bool,
+    /// Where the round ends, when a transport gave way (Block 48, D9): the
+    /// index of that transport, which comes back only after the others,
+    /// and after the backoff. Otherwise the round ends where the list
+    /// wraps.
+    round_end: Option<usize>,
 }
 
 impl Transports {
@@ -25,6 +30,7 @@ impl Transports {
             index: 0,
             chosen: false,
             tried_all: false,
+            round_end: None,
         }
     }
 
@@ -40,6 +46,7 @@ impl Transports {
     /// A connection was established over the current transport.
     pub(super) fn choose(&mut self) {
         self.chosen = true;
+        self.round_end = None;
     }
 
     /// An attempt over the current transport failed: unless it was chosen,
@@ -48,19 +55,29 @@ impl Transports {
         if self.chosen {
             return;
         }
-        self.index += 1;
-        if self.index == self.kinds.len() {
-            self.index = 0;
+        self.advance();
+    }
+
+    /// The next transport of the list, wrapping; the round is over once it
+    /// comes back to where it ends.
+    fn advance(&mut self) {
+        self.index = (self.index + 1) % self.kinds.len();
+        let end = self.round_end.unwrap_or(0);
+        if self.index == end {
             self.tried_all = true;
+            self.round_end = None;
         }
     }
 
     /// The current transport ended before the server answered on it
-    /// (Block 48, D9): it is no longer chosen, and the next attempt starts
-    /// a new round from the next transport, at once.
+    /// (Block 48, D9): it is no longer chosen, and a new round starts from
+    /// the next transport, each tried at once, until the round comes back
+    /// to this one, which is tried after the backoff. Alone in the list,
+    /// it waits the backoff at once.
     pub(super) fn give_way(&mut self) {
         self.chosen = false;
         self.tried_all = false;
+        self.round_end = Some(self.index);
     }
 
     /// How many transports are configured.
@@ -72,11 +89,7 @@ impl Transports {
     /// one is tried, even after one was chosen, as centrifuge-js 63ed73e
     /// `_initializeTransport` advances past a transport not supported.
     pub(super) fn skip(&mut self) {
-        self.index += 1;
-        if self.index == self.kinds.len() {
-            self.index = 0;
-            self.tried_all = true;
-        }
+        self.advance();
     }
 
     /// The round starts again from the first transport, as on the first
@@ -85,6 +98,7 @@ impl Transports {
         self.index = 0;
         self.chosen = false;
         self.tried_all = false;
+        self.round_end = None;
     }
 
     /// Whether the client is still in its first round over the transports,
