@@ -1462,10 +1462,8 @@ async fn a_browser_without_webtransport_skips_the_transport() {
     let Some(endpoint) = webtransport_relay() else {
         return;
     };
-    let global = js_sys::global();
-    let key = JsValue::from_str("WebTransport");
-    let saved = js_sys::Reflect::get(&global, &key).expect("the global");
-    js_sys::Reflect::delete_property(&global, &key).expect("removed");
+    // Restored when the test ends, also when it fails (Block 44, D18).
+    let restore = without_global("WebTransport");
     let before = webtransport_sessions().await;
     let client = webtransport_then_websocket(endpoint);
     let mut events = client.events();
@@ -1483,11 +1481,12 @@ async fn a_browser_without_webtransport_skips_the_transport() {
     };
     let after = webtransport_sessions().await;
     client.disconnect();
-    js_sys::Reflect::set(&global, &key, &saved).expect("restored");
+    drop(restore);
 
     assert_eq!(transport, "websocket");
-    assert_eq!(after, before);
+    // And the client emits no "error" event for transport "webtransport".
     assert_eq!(failed, None);
+    assert_eq!(after, before);
 }
 
 // @W scenario: A browser client falls back from WebTransport to websocket when the session is refused
