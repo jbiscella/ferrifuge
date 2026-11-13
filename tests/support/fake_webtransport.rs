@@ -72,6 +72,8 @@ enum Control {
 struct State {
     /// QUIC connection attempts the endpoint was offered.
     handshakes: usize,
+    /// The address each of them came from, in order.
+    remotes: Vec<std::net::SocketAddr>,
     /// Instructions to the latest session, if one is open.
     current: Option<mpsc::UnboundedSender<Control>>,
     /// Every new stream is ended before the connect command is answered.
@@ -140,7 +142,11 @@ impl FakeWebTransport {
         let server = tokio::spawn(async move {
             loop {
                 let incoming = endpoint.accept().await;
-                lock(&shared).handshakes += 1;
+                {
+                    let mut state = lock(&shared);
+                    state.handshakes += 1;
+                    state.remotes.push(incoming.remote_address());
+                }
                 tokio::spawn(serve(incoming, Arc::clone(&shared), websocket.clone()));
             }
         });
@@ -160,6 +166,11 @@ impl FakeWebTransport {
     /// QUIC connection attempts counted so far.
     pub(crate) fn handshakes(&self) -> usize {
         lock(&self.state).handshakes
+    }
+
+    /// The address each QUIC connection attempt came from, in order.
+    pub(crate) fn remotes(&self) -> Vec<std::net::SocketAddr> {
+        lock(&self.state).remotes.clone()
     }
 
     /// From the next handshake on, selects `h3` or, with `no_alpn`, none.
