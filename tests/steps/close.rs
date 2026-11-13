@@ -4,14 +4,18 @@ use std::time::{Duration, Instant};
 
 use cucumber::{then, when};
 use ferrifuge::{ClientEvent, HistoryOptions, ServerSubscriptionEvent, SubscriptionEvent, codes};
-use futures_util::StreamExt;
+use futures_util::{FutureExt as _, StreamExt};
 
 use super::{ClientWorld, EVENT_TIMEOUT, test_config};
 
 /// Slack on timing assertions for scheduling on a loaded runner.
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// How soon "at once" settles: the outcome is decided when the call is made.
-const AT_ONCE: Duration = Duration::from_millis(500);
+/// "At once" for `close()`, which waits for the driver to end and so is
+/// never settled at its first poll: well within the configured timeout
+/// it must not wait out, with room for a loaded runner's scheduling (CI
+/// health, finding 7: 500 ms).
+const CLOSE_AT_ONCE: Duration = Duration::from_secs(2);
 
 /// How long the last `close()` took, once it resolved.
 #[derive(Debug, Default)]
@@ -38,7 +42,7 @@ fn close_resolves(world: &mut ClientWorld) {
 #[then("close resolves at once")]
 fn close_resolves_at_once(world: &mut ClientWorld) {
     let took = world.close.took.expect("close() awaited");
-    assert!(took < AT_ONCE, "close() took {took:?}");
+    assert!(took < CLOSE_AT_ONCE, "close() took {took:?}");
 }
 
 #[then("the client is closed")]
@@ -103,37 +107,30 @@ fn the_client_is_dropped(world: &mut ClientWorld) {
     drop(world.client.take().expect("a client"));
 }
 
-/// Checks that `outcome`, of a call made `after` ago, failed at once with
-/// "client closed".
-fn failed_at_once_closed(outcome: Result<(), ferrifuge::CallError>, after: Duration) {
+/// Checks that `call` fails at once with "client closed": decided when it
+/// is made, at its first poll, rather than within some wall time, which a
+/// loaded runner exceeds (CI health, finding 7).
+fn fails_at_once_closed<T: std::fmt::Debug>(
+    call: impl std::future::Future<Output = Result<T, ferrifuge::CallError>>,
+) {
+    let outcome = std::pin::pin!(call)
+        .now_or_never()
+        .expect("the call was not settled at its first poll");
     let error = outcome.expect_err("the call succeeded");
     assert_eq!(
         (error.code, error.message.as_str()),
         (codes::error::CLIENT_CLOSED, "client closed")
     );
-    assert!(after < AT_ONCE, "failed after {after:?}");
 }
 
 #[then(r#"the subscription's history call fails at once with a "client closed" error"#)]
-async fn the_history_fails_closed(world: &mut ClientWorld) {
-    let started = Instant::now();
-    let history = world.subscription().history(HistoryOptions::default());
-    let outcome = tokio::time::timeout(EVENT_TIMEOUT, history)
-        .await
-        .expect("settled")
-        .map(|_| ());
-    failed_at_once_closed(outcome, started.elapsed());
+fn the_history_fails_closed(world: &mut ClientWorld) {
+    fails_at_once_closed(world.subscription().history(HistoryOptions::default()));
 }
 
 #[then(r#"an RPC call fails at once with a "client closed" error"#)]
-async fn an_rpc_fails_closed(world: &mut ClientWorld) {
-    let started = Instant::now();
-    let rpc = world.client().rpc("echo", b"{}".to_vec());
-    let outcome = tokio::time::timeout(EVENT_TIMEOUT, rpc)
-        .await
-        .expect("settled")
-        .map(|_| ());
-    failed_at_once_closed(outcome, started.elapsed());
+fn an_rpc_fails_closed(world: &mut ClientWorld) {
+    fails_at_once_closed(world.client().rpc("echo", b"{}".to_vec()));
 }
 
 #[then(r#"the client's stream ends with no "disconnected" event"#)]

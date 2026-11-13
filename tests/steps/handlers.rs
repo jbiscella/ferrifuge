@@ -58,6 +58,9 @@ struct Shared {
     /// The outcome of the handler's call, `ready()` or `close()`, and how
     /// long it took.
     outcome: Mutex<Option<(Result<(), CallError>, Duration)>>,
+    /// How many polls the handler's call took to settle: 1 for one decided
+    /// when it was made.
+    polls: Mutex<Option<u32>>,
     /// The messages in the client's read-ahead when the handler's call
     /// ended.
     read_ahead_at_outcome: Mutex<Option<usize>>,
@@ -638,15 +641,17 @@ fn a_handler_waiting_at<F>(
                     .and_then(WeakClient::upgrade)
                     .expect("the client");
                 let started = Instant::now();
-                let outcome = block_on(wait(client));
+                let (outcome, polls) = block_on(wait(client));
+                *shared.polls.lock().unwrap() = Some(polls);
                 *shared.outcome.lock().unwrap() = Some((outcome, started.elapsed()));
             });
         })),
     );
 }
 
-/// Blocks this thread on `future`, as a handler that waits on a call does.
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+/// Blocks this thread on `future`, as a handler that waits on a call does:
+/// its output, and how many polls it took.
+fn block_on<F: std::future::Future>(future: F) -> (F::Output, u32) {
     struct Unpark(std::thread::Thread);
     impl std::task::Wake for Unpark {
         fn wake(self: Arc<Self>) {
@@ -656,9 +661,11 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
     let waker = Arc::new(Unpark(std::thread::current())).into();
     let mut cx = std::task::Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
+    let mut polls = 0;
     loop {
+        polls += 1;
         if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-            return output;
+            return (output, polls);
         }
         std::thread::park();
     }
@@ -698,14 +705,18 @@ async fn outcome(world: &ClientWorld) -> (Result<(), CallError>, Duration) {
 
 #[then(regex = r#"^the handler's (?:call|ready\(\)) fails at once with a "would deadlock" error$"#)]
 async fn fails_with_would_deadlock(world: &mut ClientWorld) {
-    let (result, took) = outcome(world).await;
+    let (result, _) = outcome(world).await;
     let error = result.expect_err("the call succeeded");
     assert_eq!(
         error.code,
         ferrifuge::codes::error::WOULD_DEADLOCK,
         "{error:?}"
     );
-    assert!(took < Duration::from_millis(100), "it took {took:?}");
+    // At once: decided when the call is made, at its first poll, not
+    // within some wall time, which a preempted handler thread exceeds
+    // (CI health, finding 6).
+    let polls = *world.handlers.shared.polls.lock().unwrap();
+    assert_eq!(polls, Some(1), "the call settled only at poll {polls:?}");
 }
 
 #[given(
@@ -783,7 +794,7 @@ async fn a_subscription_handler_blocking_on_a_call(
                 .and_then(WeakClient::upgrade)
                 .expect("the client");
             let started = Instant::now();
-            let outcome = block_on(client.rpc("m", b"{}".to_vec())).map(drop);
+            let outcome = block_on(client.rpc("m", b"{}".to_vec())).0.map(drop);
             *shared.read_ahead_at_outcome.lock().unwrap() = Some(client.read_ahead().0);
             *shared.outcome.lock().unwrap() = Some((outcome, started.elapsed()));
         }

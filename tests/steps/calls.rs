@@ -35,6 +35,12 @@ const TOLERANCE: Duration = Duration::from_secs(1);
 /// scenarios calling while the client connects: 500 ms was too short on a
 /// loaded CI runner (the client was connected when the step called).
 const CONNECTING_FOR: Duration = Duration::from_secs(2);
+/// "At once" for a subscription-level call on an unsubscribed
+/// subscription: it fails without waiting for the subscription, which
+/// would end only at the 5 s call timeout, but in the client's driver, so
+/// not at its first poll; measured through a spawned task, with room for a
+/// loaded runner's scheduling (CI health, finding 7: 500 ms).
+const CALL_AT_ONCE: Duration = Duration::from_secs(2);
 
 /// Calls of the scenario, in the order they were made, and what the steps
 /// around them set up.
@@ -1020,7 +1026,7 @@ async fn the_call_fails_at_once_unsubscribed(world: &mut ClientWorld) {
             "subscription unsubscribed"
         )
     );
-    assert!(after < Duration::from_millis(500), "failed after {after:?}");
+    assert!(after < CALL_AT_ONCE, "failed after {after:?}");
 }
 
 #[then("the fake server receives no history command")]
