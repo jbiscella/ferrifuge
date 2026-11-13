@@ -140,6 +140,10 @@ pub(super) struct Shared {
     /// first; `None` while it arms them (Block 46).
     #[cfg(feature = "__test-hooks")]
     held_debounce_timers: Mutex<Option<Vec<DebounceTimer>>>,
+    /// The driver panics before handling its next input, for a test
+    /// (Block 49).
+    #[cfg(feature = "__test-hooks")]
+    driver_panic_planted: AtomicBool,
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
@@ -1648,6 +1652,8 @@ impl Client {
                 actions_queued: Notify::new(),
                 #[cfg(feature = "__test-hooks")]
                 held_debounce_timers: Mutex::new(None),
+                #[cfg(feature = "__test-hooks")]
+                driver_panic_planted: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
                 log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
                 #[cfg(adapter_tokio)]
@@ -1899,6 +1905,18 @@ impl Client {
     #[must_use]
     pub fn held_events(&self) -> usize {
         lock(&self.shared.outboxes).client.held()
+    }
+
+    /// Makes the driver panic before it handles its next input, outside
+    /// the lock of the core, as a bug in its own code would (Block 49, "A
+    /// panic in the client's driver ends the client visibly"). Only with
+    /// the `__test-hooks` feature.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    pub fn plant_driver_panic(&self) {
+        self.shared
+            .driver_panic_planted
+            .store(true, Ordering::SeqCst);
     }
 
     /// Leaves the debounce timers set from now on unarmed, until
@@ -2862,6 +2880,14 @@ impl Driver {
                     Input::TokenFetched { fetch, result }
                 }
             };
+            #[cfg(feature = "__test-hooks")]
+            assert!(
+                !self
+                    .shared
+                    .driver_panic_planted
+                    .swap(false, Ordering::SeqCst),
+                "a panic planted in the driver (Block 49)"
+            );
             self.shared.apply_fired(input, fired);
         }
     }
