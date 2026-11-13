@@ -249,6 +249,10 @@ fn the_client_calls_rpc(world: &mut ClientWorld, method: String, data: String, w
         proxy.reject_next_emulation_carrying(b"rpc");
     }
     call(world, &method, data.into_bytes());
+    // A connect answer held for this step goes out once the call is made.
+    if let Some(proxy) = world.proxy.as_ref() {
+        proxy.release_held_connect();
+    }
 }
 
 // Block 45a: map_publish and map_remove on the client. The key may be
@@ -492,13 +496,20 @@ async fn the_fake_server_has_received_the_rpc(world: &mut ClientWorld) {
     }
 }
 
+/// The delay counts from the step that acts while the client connects
+/// ("the client calls RPC … before it is connected", "ready is awaited on
+/// the client"), which releases it: counted from the request, a runner
+/// stalled for longer than the delay found the client disconnected
+/// already (providers fips, #125). Until then the client waits for the
+/// answer, under a connect timeout no stall reaches.
 #[given(regex = r"^the connect proxy answers after (\d+) s with disconnect code (\d+)$")]
 fn the_connect_proxy_answers_after(world: &mut ClientWorld, seconds: u64, code: u32) {
     world
         .proxy
         .as_ref()
         .expect("this step needs a connect proxy: tag the scenario @B")
-        .disconnect_next_after(Duration::from_secs(seconds), code, "go away");
+        .disconnect_next_after_release(Duration::from_secs(seconds), code, "go away");
+    world.timeout = Some(super::STALL_PROOF_TIMEOUT);
 }
 
 #[then(regex = r#"^the client emits "disconnected" with code (\d+)$"#)]
