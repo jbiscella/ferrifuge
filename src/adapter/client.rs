@@ -2800,18 +2800,15 @@ impl Driver {
             // Set when the select! waited: every branch was pending once.
             let waited = AtomicBool::new(false);
             let mut from_upper = false;
-            // Biased, in this order: what reached the transport is handled
-            // before a timer that expired in the same turn, as after a
-            // suspension, where an unbiased choice could let the deadline
-            // win over the reply or the ping already readable (Block 49,
-            // row 28/55; centrifuge-rust §9.7).
+            // Biased, in this order: the inline handler, the open, the
+            // transport, the actions wake, then the timers and the rest.
+            // What reached the transport is handled before a timer that
+            // expired in the same turn, as after a suspension, where an
+            // unbiased choice could let the deadline win over the reply or
+            // the ping already readable (Block 49, row 28/55;
+            // centrifuge-rust §9.7).
             let input = tokio::select! {
                 biased;
-                // Queued by an API call; performed at the top of the loop.
-                () = self.shared.actions_queued.notified(), if !yielding => {
-                    self.upper_input(waited.load(Ordering::Relaxed));
-                    continue;
-                }
                 // Under `Inline` the handler runs here: nothing else of the
                 // driver runs until it returns (Block 41, D3).
                 Some(handed) = std::future::poll_fn(|cx| super::handler::next(&self.shared, cx)),
@@ -2875,6 +2872,14 @@ impl Driver {
                         Input::InboxOverflow(id)
                     }
                 }},
+                // Queued by an API call: performed at the top of every turn,
+                // whichever branch woke it, so this branch only wakes the
+                // loop, after the transport, which sustained API calls must
+                // not starve (Codex, #248).
+                () = self.shared.actions_queued.notified(), if !yielding => {
+                    self.upper_input(waited.load(Ordering::Relaxed));
+                    continue;
+                }
                 (timer, set) = self.timers.fired() => {
                     fired = Some(set);
                     Input::TimerFired(timer)
