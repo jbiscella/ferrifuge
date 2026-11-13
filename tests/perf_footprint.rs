@@ -13,6 +13,10 @@
 // @P scenario: Marginal cost of a subscription
 // @P scenario: Memory stays flat across reconnects
 // @P scenario: A closed window frees its memory
+//
+// Block 48 (structural acceptance, @P): with `unstable-webtransport`, the
+// live heap of an idle client connected to the fake WebTransport server is
+// reported, not gated while WebTransport is unstable.
 
 mod support;
 
@@ -64,6 +68,8 @@ fn main() {
             bytes_per_tracked_key().await;
         }
         memory_stays_flat_across_reconnects().await;
+        #[cfg(feature = "unstable-webtransport")]
+        idle_footprint_over_webtransport().await;
     });
     a_closed_window_frees_its_memory();
     #[cfg(feature = "unstable")]
@@ -131,6 +137,38 @@ async fn idle_footprint_with_ten_subscriptions() {
         IDLE_FOOTPRINT_LIMIT / KIB
     );
     assert!(footprint <= IDLE_FOOTPRINT_LIMIT, "{footprint} bytes");
+    drop((subscriptions, client));
+}
+
+/// Reported only (Block 48): QUIC's buffers are bounded by D12, and the
+/// transport is unstable.
+#[cfg(feature = "unstable-webtransport")]
+async fn idle_footprint_over_webtransport() {
+    support::tls::create();
+    let server = ChildServer::start_webtransport();
+    let before = live_bytes();
+    let client = Client::builder_with_transports([(
+        ferrifuge::machine::TransportKind::WebTransport,
+        server.webtransport_url(),
+    )])
+    .config(Config::default())
+    .root_certificates([support::tls::ca_der()])
+    .proxy(ferrifuge::Proxy::none())
+    .build()
+    .expect("a valid client");
+    let mut events = client.events();
+    client.connect();
+    wait_connected(&mut events).await;
+    let subscriptions = subscribe(&client, 0..10);
+    wait_subscribed(&subscriptions).await;
+    tokio::time::sleep(IDLE).await;
+
+    let footprint = live_bytes() - before;
+
+    println!(
+        "@P report: idle footprint over WebTransport with 10 subscriptions: {:.1} KiB (not a gate while unstable)",
+        footprint as f64 / KIB as f64
+    );
     drop((subscriptions, client));
 }
 
