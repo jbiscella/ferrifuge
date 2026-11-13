@@ -21,7 +21,8 @@ use tokio::task::JoinHandle;
 use super::connection::a_connected_client;
 use super::subscriptions::{create, expect_subscription_event, has_json_data, subscribe};
 use super::{
-    ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, next_event_after_transport_errors, test_config,
+    ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD, STALL_PROOF_TIMEOUT,
+    next_event_after_transport_errors, test_config,
 };
 use crate::support::fake_server::{Rpc, protobuf_results};
 use crate::support::protobuf;
@@ -378,7 +379,7 @@ async fn the_call_times_out(world: &mut ClientWorld) {
     regex = r#"^the call fails with a "(disconnected|connection closed|subscription unsubscribed|client closed)" error( before the configured timeout)?$"#
 )]
 async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: String) {
-    let timeout = test_config().timeout;
+    let timeout = world.configured_timeout();
     let made_at = world.calls.made.last().map(|call| call.made_at);
     let (result, after) = outcome(world, None, EVENT_TIMEOUT).await;
     // When the fake server read each RPC command, after the call: tells a
@@ -401,21 +402,6 @@ async fn the_call_fails_with(world: &mut ClientWorld, message: String, early: St
         "client closed" => codes::error::CLIENT_CLOSED,
         _ => codes::error::SUBSCRIPTION_UNSUBSCRIBED,
     };
-    // A runner that stalls between steps can run the settling step after
-    // the call's timeout, which then settles it first, as it must: the
-    // scenario's premise did not hold, and that is not the client's fault
-    // (Windows, #185: the disconnect ran 6.02 s after a call with a 5 s
-    // timeout). Any other outcome is checked.
-    if let Some(step_after) = settling_step_after
-        && step_after >= timeout
-        && after <= step_after
-        && error.code == codes::error::TIMEOUT
-    {
-        eprintln!(
-            "runner stall: the settling step ran {step_after:?} after the call, past its {timeout:?} timeout, so the call timed out first ({after:?})"
-        );
-        return;
-    }
     // The time tells a slow runner (a call made more than the timeout
     // before the step that settles it) from a client failing to settle it.
     assert_eq!(
@@ -472,8 +458,22 @@ async fn the_fake_server_receives_no_rpc(world: &mut ClientWorld) {
     assert_eq!(world.fake().rpc_commands(), Vec::<Value>::new());
 }
 
+/// Its scenarios settle the call in a later step, so their clients have
+/// a call timeout no runner stall reaches ([`STALL_PROOF_TIMEOUT`], set
+/// before the scenario runs by `bdd.rs`, as the client is created by an
+/// earlier step that scenarios timing a call out share): at the 5 s
+/// default, a stall between this step and the settling one let the
+/// timeout settle the call first (Windows, #185: the disconnect ran
+/// 6.02 s after the call).
+pub(crate) const PENDING_CALL_STEP: &str = "the fake server has received the RPC command";
+
 #[given("the fake server has received the RPC command")]
 async fn the_fake_server_has_received_the_rpc(world: &mut ClientWorld) {
+    assert_eq!(
+        world.configured_timeout(),
+        STALL_PROOF_TIMEOUT,
+        "a scenario with this step runs with a call timeout no stall reaches"
+    );
     let received = tokio::time::timeout(EVENT_TIMEOUT, async {
         while world.fake().rpc_commands().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -486,7 +486,7 @@ async fn the_fake_server_has_received_the_rpc(world: &mut ClientWorld) {
     if let Some(call) = world.calls.made.last() {
         let elapsed = call.made_at.elapsed();
         assert!(
-            elapsed < test_config().timeout,
+            elapsed < STALL_PROOF_TIMEOUT,
             "the RPC command reached the fake server {elapsed:?} after the call"
         );
     }
