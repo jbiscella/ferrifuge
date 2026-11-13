@@ -934,6 +934,72 @@ carries JSON or Protobuf; sse carries JSON only, as in Centrifugo, so
 building a client with the Protobuf protocol and an sse endpoint fails with
 a configuration error.
 
+### WebTransport (unstable)
+
+With the `unstable-webtransport` feature, a client can connect over
+WebTransport: one bidirectional stream of an HTTP/3 session over QUIC, with
+JSON or Protobuf, the client's own TLS settings and the build's crypto
+provider, `fips` included. It follows centrifuge-js 63ed73e and Centrifugo's
+experimental WebTransport, and may change in any minor release. It is one
+more transport of the list, best first with websocket after it:
+
+```rust
+use ferrifuge::Client;
+use ferrifuge::machine::TransportKind;
+
+let client = Client::builder_with_transports([
+    (TransportKind::WebTransport, "https://example.com:8443/connection/webtransport".to_owned()),
+    (TransportKind::WebSocket, "wss://example.com:8443/connection/websocket".to_owned()),
+])
+.build()?;
+```
+
+**The server.** Centrifugo serves WebTransport over TLS only, without
+autocert, with `http_server.http3.enabled` and `webtransport.enabled`, at
+`/connection/webtransport` on the TLS port over UDP: open that port for UDP
+as well as TCP. Its documentation marks the feature experimental. The
+endpoint must be `https://`; building fails on any other.
+
+**Fallback.** WebTransport is tried in the list's order (see Transport
+fallback). A network that drops UDP silently costs one handshake timeout
+(`Config::handshake_timeout`, 5 s by default) in each first round, so set
+it to what your users' networks need. The host's first address is used,
+with no Happy Eyeballs: a first address that cannot be reached fails within
+the handshake timeout, and the next transport is tried. A refused session
+(a server with HTTP/3 but no WebTransport) fails the attempt at once.
+
+**ALPN.** Centrifugo up to v6.10.3 selects no application protocol on its
+WebTransport listener, and a QUIC client offering `h3` fails its handshake
+there. The client offers `h3` first and, when the server selected none,
+handshakes once more without ALPN, within the same handshake timeout.
+ALPN travels in TLS 1.3's encrypted extensions, so no one on the network can
+strip it to force that second handshake.
+
+**A session that ends.** The server ends a session for an invalid token, a
+bad or oversized command without a disconnect push: the client reports code
+1 "transport closed" and reconnects. A stream that ends before the server
+answered the connect is a failed attempt, reported by an `Error` event, and
+the next transport shows the server's real answer, e.g. websocket's 3500
+"invalid token".
+
+**What it does not do.** No proxy: a WebTransport endpoint for which a proxy
+is decided, `Proxy::system()` finding an HTTPS proxy in the environment
+included, fails the attempt without sending a datagram, and the next
+transport is tried. No connector: building fails. Cookies of a jar are sent,
+but `Set-Cookie` of the session's response is not read: wtransport 0.7.2
+keeps only its status. A raw `tls_config` must offer TLS 1.3 with
+`TLS13_AES_128_GCM_SHA256`, or building fails. `Origin` is sent only when
+`http_headers` sets it.
+
+**Memory.** A WebTransport client holds at most the read-ahead, plus the
+largest message (`max_message_bytes`), plus about 4 MiB of QUIC buffers: a
+1 MiB stream window, a 2 MiB connection window and a 1 MiB send window. A
+client that stops reading is dropped by the server about 1 s after QUIC flow
+control stops it, as over websocket.
+
+**Mobile.** A backgrounded app loses its UDP flows as it loses its TCP
+ones (see Mobile).
+
 ### Connection tokens
 
 Set the initial token in `Config::token`, and give the builder a callback
@@ -1224,6 +1290,7 @@ let config = Config::default()
 | `cookies` | no | a cookie jar for the client: `CookieJar`, `MemoryJar` and `ClientBuilder::cookie_jar`; implies `tokio` (see Cookies) |
 | `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket, fetch (http_stream) and EventSource (sse); nothing on other targets (see Browser) |
 | `unstable` | no | experimental APIs following centrifuge-js 63ed73e and Centrifugo's experimental features, outside the semver promise: they may change in any minor release (see Map subscriptions and Shared poll subscriptions) |
+| `unstable-webtransport` | no | the native WebTransport transport, through wtransport and quinn; implies `unstable` and `tokio`, and is as unstable (see WebTransport) |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
@@ -1234,6 +1301,16 @@ ferrifuge = { version = "0.21", default-features = false, features = ["tokio", "
 
 When several providers are enabled, the strongest one is used: `fips`, then
 `aws-lc-rs`, then `ring`.
+
+With `unstable-webtransport`, QUIC uses the same provider: its packet
+protection, handshake and certificate checks go through the client's TLS
+settings, and the endpoint's stateless-reset key comes from the provider's
+random source and HMAC. quinn checks a Retry packet's integrity, whose key is
+public, with its own backend: ring in a mixed build, AWS-LC in the `fips`
+build. wtransport links sha2 and x509-parser in every build, for helpers
+Ferrifuge never calls (certificate hashes, parsing a peer's certificate);
+a release build contains neither, and the root `clippy.toml` refuses the
+calls that would reach them.
 
 `fips` builds the AWS-LC-FIPS 4.x module. That module has been submitted to
 NIST for FIPS 140-3 validation but is not certified yet. The certified 3.x
@@ -1278,6 +1355,8 @@ let client = Client::builder("wss://example.com/connection/websocket")
   left out.
 - The jar sees `ws://` and `wss://` URLs as `http://` and `https://`, so
   `HttpOnly` and `Secure` cookies work, and never sees the URL's query.
+- Over WebTransport (unstable) the jar's cookies are sent, but the
+  session response's `Set-Cookie` is not read.
 - `MemoryJar` keeps cookies for the life of the process, takes at most 3000
   cookies of at most 4096 bytes each, and does no public-suffix check. An
   application that needs one, or cookies that outlive the process,
@@ -1433,6 +1512,9 @@ let client = Client::builder("wss://centrifugo.example/connection/websocket")
     })
     .build()?;
 ```
+
+WebTransport (unstable) goes through no proxy: an attempt for which one is
+decided fails without sending a datagram (see WebTransport).
 
 Not supported: PAC files and WPAD, NTLM, Negotiate and Kerberos proxy
 authentication (a local helper such as Px or Cntlm can bridge them), SOCKS4,
@@ -1697,7 +1779,7 @@ sans-IO core logs nothing and reports the protocol breaches only it sees as
 | Level | What |
 |---|---|
 | WARN | Server anomalies: a frame that is not client protocol data, a reply without its command's result, a delta that cannot be applied, a message over the size limit, a websocket closed with 1009 |
-| DEBUG | Each state change of the client and of its subscriptions, with its code and reason; each transport attempt, its opening, failure and close; the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback started and how it ended; the read-ahead filling and draining; each call that fails; a system sleep detected, with its gap |
+| DEBUG | Each state change of the client and of its subscriptions, with its code and reason; each transport attempt, its opening (with `alpn` for WebTransport), failure and close; the next transport of a fallback; each reconnect and resubscribe scheduled, with its delay; each callback started and how it ended; the read-ahead filling and draining; each call that fails; a system sleep detected, with its gap |
 | TRACE | Every input given to the core and every action it returns; each frame sent or received, by length |
 
 Each client logs in a `client` span whose `client` field is a number unique
@@ -1728,7 +1810,14 @@ sent and received, the connect frame with its token. reqwest's own `Jar`,
 if an application uses one, logs cookie values at DEBUG; `MemoryJar` logs
 none.
 rustls-platform-verifier logs each failed verification at ERROR, with no
-secret. A `tracing` application sees those dependency records only through
+secret. With `unstable-webtransport`, wtransport and quinn log through
+`tracing`, at DEBUG and TRACE, connection and stream events; a client's
+records hold no header value (a test checks it at TRACE), but wtransport's
+server side logs the headers of each session request at DEBUG. An
+application that calls wtransport's `with_native_certs` or
+`with_custom_transport` itself races with every TLS setup of the process:
+they remove `SSL_CERT_FILE` and `SSL_CERT_DIR` from the environment while
+they read the roots. A `tracing` application sees those dependency records only through
 `tracing-log`.
 
 ## Development

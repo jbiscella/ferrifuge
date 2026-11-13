@@ -35,7 +35,10 @@ use url::Url;
 /// The client gives it the `Set-Cookie` values of each response and asks
 /// it for the cookies of each request, with the request's URL as `http://`
 /// or `https://` (a websocket's `ws://` and `wss://` mapped to them) and
-/// without its query and fragment (Block 43, D4).
+/// without its query and fragment (Block 43, D4). Over WebTransport
+/// (unstable) the request carries the jar's cookies, but the response's
+/// `Set-Cookie` is not read: wtransport 0.7.2 keeps only its status (Block
+/// 48, D14).
 pub trait CookieJar: Send + Sync {
     /// Stores the cookies of `cookie_headers`, the `Set-Cookie` values of a
     /// response to a request for `url`.
