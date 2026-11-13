@@ -40,6 +40,7 @@ default = ["tokio", "ring", "browser"]
 tokio = [
     "dep:tokio",
     "dep:tokio-tungstenite",
+    "dep:tokio-rustls",
     "dep:futures-util",
     "dep:futures-core",
     "dep:rustls",
@@ -162,6 +163,9 @@ sse-core = { version = "0.2.3", default-features = false, features = ["std"], op
 cookie_store = { version = "0.22.1", default-features = false, optional = true }
 url = { version = "2.5.8", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
+# TLS of wss://, made here so that the head of the upgrade's answer is read
+# above it (Block 50b's finding); tokio-tungstenite's own, already locked.
+tokio-rustls = { version = "0.26.6", default-features = false, optional = true }
 # WebTransport (Block 48, D3): HTTP/3 and QUIC through wtransport, with no
 # provider and no root store of its own: the client's TLS settings and the
 # build's provider apply (D4, D15). quinn is reached through it.

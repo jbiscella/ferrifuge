@@ -7,6 +7,7 @@ pub mod android;
 pub(super) mod connector;
 #[cfg(feature = "cookies")]
 pub(super) mod cookies;
+mod head;
 pub(super) mod http;
 pub(super) mod net;
 pub(super) mod proxy;
