@@ -944,7 +944,7 @@ async fn run_scenarios() {
                 if scenario
                     .steps
                     .iter()
-                    .any(|step| step.value == steps::PENDING_CALL_STEP)
+                    .any(|step| steps::STALL_PROOF_STEPS.contains(&step.value.as_str()))
                 {
                     world.timeout = Some(steps::STALL_PROOF_TIMEOUT);
                 }

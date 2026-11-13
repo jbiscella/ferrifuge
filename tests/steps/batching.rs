@@ -744,8 +744,22 @@ async fn milliseconds_elapse(_world: &mut ClientWorld, millis: u64) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
+/// Its scenarios hold calls and subscribe commands in a batch across a
+/// 200 ms wait, then send them: held, they keep their deadlines (Block 18,
+/// D3), so at the 5 s default a runner stalled during the wait let the
+/// subscribes time out and the client reconnect (5 commands seen, not 1),
+/// or the held calls time out unsent (Windows, #106, #171). Their clients
+/// get [`super::STALL_PROOF_TIMEOUT`] (`bdd.rs`, by this step's text).
+pub(crate) const HELD_STEP: &str =
+    "the fake server has received no command since the batch started";
+
 #[then("the fake server has received no command since the batch started")]
 fn no_command_since(world: &mut ClientWorld) {
+    assert_eq!(
+        world.configured_timeout(),
+        super::STALL_PROOF_TIMEOUT,
+        "a scenario with this step runs with a timeout no stall reaches"
+    );
     let now = world.fake().received().len() + world.fake().received_protobuf_with_frames().len();
     assert_eq!(now, world.batching.received_at_start);
 }
