@@ -91,6 +91,9 @@ mod wire;
 /// it went through (Block 14, "Memory stays flat across reconnects").
 pub(crate) const RESTING_SLOTS: usize = 4;
 
+#[cfg(all(any(adapter_tokio, adapter_browser), feature = "__test-hooks"))]
+#[doc(hidden)]
+pub use adapter::StreamDecoder;
 #[cfg(all(adapter_tokio, target_os = "android"))]
 pub use adapter::android;
 #[cfg(all(adapter_tokio, feature = "__test-hooks"))]

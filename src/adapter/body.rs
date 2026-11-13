@@ -58,13 +58,23 @@ pub(in crate::adapter) enum Decoder {
     /// sse-core: events with data, of the default type, reach the client
     /// (centrifuge-js `onmessage`, WHATWG "dispatch the event").
     #[cfg(adapter_tokio)]
-    Sse(sse_core::SseDecoder),
+    Sse(Sse),
     /// tokio-util's lines, bounded, and the bytes not yet split.
     Lines(AnyDelimiterCodec, BytesMut),
     /// Protobuf replies, each after its uvarint length (Block 27, D3): the
     /// bytes not yet split, and the largest reply. In-house, as no
     /// maintained component splits uvarint-delimited streams (Block 0).
     Varint(Vec<u8>, usize),
+}
+
+/// sse-core's decoder and, for tests, the capacity it keeps for the next
+/// event's data: that of the last event's, as its `dispatch_message` hands
+/// the data over and allocates as much again.
+#[cfg(adapter_tokio)]
+pub(in crate::adapter) struct Sse {
+    decoder: sse_core::SseDecoder,
+    #[cfg(feature = "__test-hooks")]
+    kept: usize,
 }
 
 impl std::fmt::Debug for Decoder {
@@ -82,9 +92,12 @@ impl Decoder {
     #[cfg(adapter_tokio)]
     pub(in crate::adapter) fn new(sse: bool, limit: usize) -> Self {
         if sse {
-            Self::Sse(sse_core::SseDecoder::with_limit(
-                NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN),
-            ))
+            let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
+            Self::Sse(Sse {
+                decoder: sse_core::SseDecoder::with_limit(limit),
+                #[cfg(feature = "__test-hooks")]
+                kept: 0,
+            })
         } else {
             Self::lines(limit)
         }
@@ -118,11 +131,15 @@ impl Decoder {
     ) -> Result<(), String> {
         match self {
             #[cfg(adapter_tokio)]
-            Self::Sse(decoder) => {
+            Self::Sse(sse) => {
                 let mut rest = chunk;
-                while let Some(event) = decoder.next(&mut rest) {
+                while let Some(event) = sse.decoder.next(&mut rest) {
                     match event {
                         Ok(sse_core::SseEvent::Message(message)) => {
+                            #[cfg(feature = "__test-hooks")]
+                            {
+                                sse.kept = message.data.capacity();
+                            }
                             let default = message.event.is_empty() || message.event == "message";
                             if default && !message.data.is_empty() {
                                 messages.push_back(message.data.into_bytes());
@@ -163,6 +180,92 @@ impl Decoder {
             }
         }
         Ok(())
+    }
+
+    /// The capacity the buffer of the decoder keeps between messages.
+    #[cfg(feature = "__test-hooks")]
+    fn capacity(&self) -> usize {
+        match self {
+            #[cfg(adapter_tokio)]
+            Self::Sse(sse) => sse.kept,
+            Self::Lines(_, buffer) => buffer.capacity(),
+            Self::Varint(buffer, _) => buffer.capacity(),
+        }
+    }
+}
+
+/// A stream decoder of the HTTP-streaming and WebTransport transports, for
+/// tests only (Block 49d, row 71): the decoders of both adapters are these.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct StreamDecoder {
+    name: &'static str,
+    decoder: Decoder,
+    messages: VecDeque<Vec<u8>>,
+}
+
+#[cfg(feature = "__test-hooks")]
+impl StreamDecoder {
+    /// Every kind of stream decoder, each splitting messages of at most
+    /// `limit` bytes: JSON lines, Protobuf replies after their uvarint
+    /// length and, natively, sse events.
+    #[must_use]
+    pub fn every_kind(limit: usize) -> Vec<Self> {
+        let decoders = [
+            ("JSON lines", Decoder::lines(limit)),
+            ("Protobuf", Decoder::protobuf(limit)),
+            #[cfg(adapter_tokio)]
+            ("sse", Decoder::new(true, limit)),
+        ];
+        decoders
+            .into_iter()
+            .map(|(name, decoder)| Self {
+                name,
+                decoder,
+                messages: VecDeque::new(),
+            })
+            .collect()
+    }
+
+    /// Which kind of stream decoder this is.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// `message` as this kind of stream frames it: a line, after its
+    /// uvarint length, or the data of an event.
+    #[must_use]
+    pub fn frame(&self, message: &[u8]) -> Vec<u8> {
+        match &self.decoder {
+            #[cfg(adapter_tokio)]
+            Decoder::Sse(_) => [b"data: ", message, b"\n\n"].concat(),
+            Decoder::Lines(..) => [message, b"\n"].concat(),
+            Decoder::Varint(..) => {
+                let mut framed = Vec::new();
+                prost::encoding::encode_varint(message.len() as u64, &mut framed);
+                framed.extend_from_slice(message);
+                framed
+            }
+        }
+    }
+
+    /// Adds `chunk`, returning the messages it completed.
+    ///
+    /// # Errors
+    ///
+    /// As the transports' decoder: a message over the limit.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        self.decoder.push(chunk, &mut self.messages)?;
+        Ok(self.messages.drain(..).collect())
+    }
+
+    /// The capacity its buffer keeps between messages: the bytes not yet
+    /// split, or for sse, sse-core's buffer of the next event's data.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.decoder.capacity()
     }
 }
 
