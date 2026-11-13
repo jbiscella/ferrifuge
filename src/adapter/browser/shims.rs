@@ -80,6 +80,10 @@ impl Found {
                 self.fetch.is_some() && self.has_readable_stream && self.has_abort_controller
             }
             TransportKind::Sse => self.event_source.is_some() && self.fetch.is_some(),
+            // The browser's WebTransport comes with Block 48c; until then
+            // the transport is skipped in the round.
+            #[cfg(feature = "unstable")]
+            TransportKind::WebTransport => false,
         }
     }
 }
@@ -93,6 +97,8 @@ fn needs(kind: TransportKind) -> &'static str {
              readable_stream shims)"
         }
         TransportKind::Sse => "sse needs EventSource and fetch (the event_source and fetch shims)",
+        #[cfg(feature = "unstable")]
+        TransportKind::WebTransport => "webtransport needs WebTransport (no shim)",
     }
 }
 

@@ -61,10 +61,12 @@ tokio = [
 # TLS crypto provider of the tokio adapter, chosen at build time (Block 6).
 # A build without ring disables default features. When several are enabled
 # the strongest wins: fips > aws-lc-rs > ring.
-ring = ["rustls?/ring"]
-aws-lc-rs = ["rustls?/aws-lc-rs"]
+# Each also forwards to wtransport, when `unstable-webtransport` brings it
+# (Block 48, D1, D15).
+ring = ["rustls?/ring", "wtransport?/ring"]
+aws-lc-rs = ["rustls?/aws-lc-rs", "wtransport?/aws-lc-rs"]
 # aws-lc-rs in FIPS mode; building it needs CMake and Go.
-fips = ["aws-lc-rs", "rustls?/fips"]
+fips = ["aws-lc-rs", "rustls?/fips", "wtransport?/fips"]
 # An opt-in cookie jar of the tokio adapter (Block 43): CookieJar,
 # MemoryJar and ClientBuilder::cookie_jar. Not a default.
 cookies = ["tokio", "dep:cookie_store", "dep:url"]
@@ -99,6 +101,11 @@ test-util = ["tokio?/io-util"]
 # outside the semver promise: what it enables may change in any minor
 # release.
 unstable = []
+# The native WebTransport transport (Block 48, D1): unstable, as its name
+# tells cargo-semver-checks, and apart from `unstable` so that the core-only
+# `unstable` build and the users of Blocks 45 and 47 get no QUIC stack. In
+# the browser `unstable` is enough: the browser's WebTransport needs no crate.
+unstable-webtransport = ["unstable", "tokio", "dep:wtransport"]
 # Hooks for the crate's own tests and benchmarks, e.g. Machine::with_seed.
 # Private (the leading underscores): not part of the public API, enabled
 # only by the dev-dependency on itself below, never by applications.
@@ -154,6 +161,10 @@ sse-core = { version = "0.2.3", default-features = false, features = ["std"], op
 cookie_store = { version = "0.22.1", default-features = false, optional = true }
 url = { version = "2.5.8", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"], optional = true }
+# WebTransport (Block 48, D3): HTTP/3 and QUIC through wtransport, with no
+# provider and no root store of its own: the client's TLS settings and the
+# build's provider apply (D4, D15). quinn is reached through it.
+wtransport = { version = "0.7.2", default-features = false, features = ["quinn"], optional = true }
 # `rt-multi-thread` for `block_in_place` around a handler call (Block 41b):
 # a handler that blocks must not hold the tasks its worker woke.
 tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "time"], optional = true }

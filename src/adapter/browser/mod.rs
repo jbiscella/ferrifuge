@@ -71,6 +71,9 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         )
     };
     match kind {
+        // Never usable before Block 48c, so never opened (D12).
+        #[cfg(feature = "unstable")]
+        TransportKind::WebTransport => Box::pin(async move { Err(missing()) }),
         TransportKind::WebSocket => Box::pin(async move {
             let constructor = found.websocket.ok_or_else(missing)?;
             WebSocket::open(

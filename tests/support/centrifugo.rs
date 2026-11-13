@@ -65,30 +65,65 @@ pub(crate) struct Centrifugo {
     /// `host:port` of the client endpoints.
     address: String,
     tls: bool,
+    /// `host:port` of the WebTransport endpoint, over UDP: Docker may map
+    /// the UDP port apart from the TCP one (Block 48, D19).
+    webtransport: Option<String>,
     api: ServerApi,
+}
+
+/// What a server started over TLS serves besides its TCP endpoints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Http3 {
+    /// No HTTP/3.
+    Off,
+    /// HTTP/3 with WebTransport, or without it (Block 48).
+    On { webtransport: bool },
 }
 
 impl Centrifugo {
     /// Starts a server with the HTTP API and health endpoint enabled, plus
     /// `env`: extra `CENTRIFUGO_*` variables for this config variant.
     pub(crate) async fn start(env: &[(&str, &str)]) -> Self {
-        Self::launch(env, None, None).await
+        Self::launch(env, None, None, Http3::Off).await
     }
 
     /// Like [`Self::start`], configured by the JSON file `config` instead
     /// of variables, e.g. the examples' (Block 20).
     pub(crate) async fn start_with_config(config: &str) -> Self {
-        Self::launch(&[], None, Some(config)).await
+        Self::launch(&[], None, Some(config), Http3::Off).await
     }
 
     /// Like [`Self::start`], with the client endpoints served over TLS with
     /// `cert_pem` and `key_pem`. The API and health endpoints stay plain
     /// HTTP on an internal port, so the test drives the server as usual.
     pub(crate) async fn start_tls(env: &[(&str, &str)], cert_pem: &str, key_pem: &str) -> Self {
-        Self::launch(env, Some((cert_pem, key_pem)), None).await
+        Self::launch(env, Some((cert_pem, key_pem)), None, Http3::Off).await
     }
 
-    async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>, config: Option<&str>) -> Self {
+    /// Like [`Self::start_tls`], also serving HTTP/3 on the TLS port over
+    /// UDP, with WebTransport at `/connection/webtransport` when
+    /// `webtransport` (Block 48, D19).
+    pub(crate) async fn start_http3(
+        env: &[(&str, &str)],
+        cert_pem: &str,
+        key_pem: &str,
+        webtransport: bool,
+    ) -> Self {
+        Self::launch(
+            env,
+            Some((cert_pem, key_pem)),
+            None,
+            Http3::On { webtransport },
+        )
+        .await
+    }
+
+    async fn launch(
+        env: &[(&str, &str)],
+        tls: Option<(&str, &str)>,
+        config: Option<&str>,
+        http3: Http3,
+    ) -> Self {
         let api_port = if tls.is_some() { INTERNAL_PORT } else { PORT };
         let logs = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         // Set when the start is requested; the log lines are timed from it.
@@ -96,6 +131,9 @@ impl Centrifugo {
         let mut image = GenericImage::new(IMAGE, TAG).with_exposed_port(ContainerPort::Tcp(PORT));
         if tls.is_some() {
             image = image.with_exposed_port(ContainerPort::Tcp(INTERNAL_PORT));
+        }
+        if http3 != Http3::Off {
+            image = image.with_exposed_port(ContainerPort::Udp(PORT));
         }
         // The health endpoint is probed below rather than by testcontainers,
         // so that a failed start says which phase took the time: Docker
@@ -131,6 +169,11 @@ impl Centrifugo {
                     INTERNAL_PORT.to_string(),
                 );
         }
+        if let Http3::On { webtransport } = http3 {
+            request = request
+                .with_env_var("CENTRIFUGO_HTTP_SERVER_HTTP3_ENABLED", "true")
+                .with_env_var("CENTRIFUGO_WEBTRANSPORT_ENABLED", webtransport.to_string());
+        }
         for (name, value) in env {
             request = request.with_env_var(*name, *value);
         }
@@ -146,10 +189,15 @@ impl Centrifugo {
             .await
             .expect("container API port");
         let api = ServerApi::new(&format!("http://{host}:{api_port}"));
+        let webtransport = match http3 {
+            Http3::Off => None,
+            Http3::On { .. } => Some(webtransport_address(&container, &host.to_string()).await),
+        };
         Self {
             container: Some(container),
             address: format!("{host}:{port}"),
             tls: tls.is_some(),
+            webtransport,
             api,
         }
     }
@@ -180,6 +228,28 @@ impl Centrifugo {
     fn http_base(&self) -> String {
         let scheme = if self.tls { "https" } else { "http" };
         format!("{scheme}://{}", self.address)
+    }
+
+    /// The WebTransport endpoint of a server started with
+    /// [`Self::start_http3`], at the UDP port Docker mapped (Block 48, D19).
+    pub(crate) fn webtransport_url(&self) -> String {
+        let address = self
+            .webtransport
+            .as_ref()
+            .expect("a server started with HTTP/3");
+        format!("https://{address}/connection/webtransport")
+    }
+
+    /// `host:port` of the WebTransport endpoint, over UDP (Block 48).
+    pub(crate) fn webtransport_address(&self) -> &str {
+        self.webtransport
+            .as_deref()
+            .expect("a server started with HTTP/3")
+    }
+
+    /// Whether the server serves HTTP/3 (Block 48).
+    pub(crate) fn serves_http3(&self) -> bool {
+        self.webtransport.is_some()
     }
 
     pub(crate) fn websocket_url(&self) -> String {
@@ -214,6 +284,22 @@ impl Centrifugo {
             })
             .map_or(0, |count| count.trim().parse().expect("a count"))
     }
+}
+
+/// `host:port` of the WebTransport endpoint of `container`, on IPv4:
+/// `localhost` may resolve to `::1` first, which the client would dial alone
+/// (Block 48, D6). The test certificate names 127.0.0.1 too.
+async fn webtransport_address(container: &ContainerAsync<GenericImage>, host: &str) -> String {
+    let udp = container
+        .get_host_port_ipv4(ContainerPort::Udp(PORT))
+        .await
+        .expect("container UDP port");
+    let host = if host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    format!("{host}:{udp}")
 }
 
 /// `error` with its sources, so that a failed request says why (a refused
