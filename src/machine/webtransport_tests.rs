@@ -501,3 +501,62 @@ fn after_giving_way_the_round_ends_at_the_webtransport_that_gave_way() {
         ]
     );
 }
+
+/// The delay scheduled when the stream over `transport` ends before the
+/// server answered, the transport opened first.
+fn ends_before_an_answer(machine: &mut Machine, transport: TransportId) -> Duration {
+    machine.handle(Input::TransportOpened(transport));
+    machine
+        .handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        })
+        .iter()
+        .find_map(|action| match action {
+            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            _ => None,
+        })
+        .expect("a reconnect scheduled")
+}
+
+// D9, the round after giving way (Codex on #230): over two WebTransport
+// endpoints whose streams both end before an answer, as for a revoked
+// token, the first, chosen, gives way to the second at once; the second's
+// end is one more failure of that round, which then waits the backoff
+// instead of starting over.
+#[test]
+fn a_second_webtransport_ending_before_an_answer_ends_the_round() {
+    let mut machine = Machine::with_rng(Config::default(), false, fastrand::Rng::with_seed(48))
+        .with_transports(vec![
+            TransportKind::WebTransport,
+            TransportKind::WebTransport,
+        ])
+        .expect("two transports");
+    let transport = opened(&machine.handle(Input::Connect)).expect("an attempt");
+    let sent = machine.handle(Input::TransportOpened(transport));
+    let connect = sent
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the connect command");
+    let id = serde_json::from_slice::<serde_json::Value>(&connect).expect("JSON")["id"].clone();
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#),
+    ));
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let first = opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    let gave_way = ends_before_an_answer(&mut machine, first);
+    let second = opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("the second");
+    let round_over = ends_before_an_answer(&mut machine, second);
+
+    assert_eq!(gave_way, Duration::ZERO);
+    assert!(round_over > Duration::ZERO);
+}
