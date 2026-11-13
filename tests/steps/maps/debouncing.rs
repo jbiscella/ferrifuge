@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 
 use super::super::ClientWorld;
 use super::super::connection::a_connected_client;
-use super::super::debouncing::{is_finished, outcome_of, received_at, received_of, wait_until};
+use super::super::debouncing::{
+    arrival_span, is_finished, outcome_of, received_at, received_of, wait_until,
+};
 use super::{a_scripted_map_subscription, nth_subscribe};
 
 const MAP: &str = "map:m";
@@ -275,10 +277,11 @@ fn the_client_map_publishes(world: &mut ClientWorld, key: String, first: String,
 
 #[then(regex = r"^the fake server has received (\d+) map publish commands within (\d+) s$")]
 async fn received_map_publishes(world: &mut ClientWorld, count: usize, seconds: u64) {
-    let started = std::time::Instant::now();
     let received = || map_commands(world);
     wait_until("the map publish commands", || received().len() >= count).await;
-    assert!(started.elapsed() <= Duration::from_secs(seconds));
+    // By the fake's arrival times (CI health, finding 15).
+    let span = arrival_span(&received()[..count]);
+    assert!(span <= Duration::from_secs(seconds), "{span:?}");
     let numbers: Vec<u64> = received()
         .iter()
         .map(|(command, _)| command["publish"]["data"]["x"].as_u64().unwrap_or(0))
