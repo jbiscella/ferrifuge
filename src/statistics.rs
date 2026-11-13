@@ -136,13 +136,16 @@ pub(crate) struct Counters {
     /// The attempt in flight ends by the application's or the client's
     /// doing, not as a failure.
     pub(crate) cancelling: bool,
+    /// Bytes the transport adds to each frame it writes: the `\n` after a
+    /// JSON frame over WebTransport (Block 48, D7, D18), none elsewhere.
+    pub(crate) trailer: u64,
 }
 
 impl Counters {
     /// A frame of `bytes` holding `commands` was handed to the transport.
     pub(crate) fn sent(&mut self, frame: FrameId, bytes: usize, commands: usize) {
         self.unwritten
-            .insert(frame, (bytes as u64, commands as u64));
+            .insert(frame, (bytes as u64 + self.trailer, commands as u64));
     }
 
     /// The transport wrote `frame`.
