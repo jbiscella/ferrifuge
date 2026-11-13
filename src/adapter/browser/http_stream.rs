@@ -315,8 +315,6 @@ pub(super) struct State {
     pub(super) inbox: Inbox,
     /// The inbox overflowed, reported in place of anything else.
     pub(super) overflowed: bool,
-    /// The end of the stream is in the inbox: nothing more is queued.
-    pub(super) ended: bool,
     pub(super) waker: Option<Waker>,
 }
 
@@ -377,6 +375,9 @@ async fn admit(state: &Rc<RefCell<State>>, mut message: Vec<u8>, bound: Bound) -
 /// behind the messages before it; an overflow ends the reading, holding
 /// nothing, since recovery brings those messages back (D7).
 ///
+/// With `closed`, its settling ends the reading too, queued behind the
+/// messages decoded before it (WebTransport's session, Block 48 D17).
+///
 /// `through` comes before `body`, so that `body`, which cancels it when
 /// dropped, is dropped first.
 pub(super) async fn read_body(
@@ -385,10 +386,33 @@ pub(super) async fn read_body(
     mut decoder: Decoder,
     bound: Bound,
     state: Rc<RefCell<State>>,
+    mut closed: Option<JsFuture>,
 ) {
     let mut messages = VecDeque::new();
     loop {
-        let end = match body.next().await {
+        let next = match closed.as_mut() {
+            None => Either::Left(body.next().await),
+            Some(closed) => match select(body.next(), closed).await {
+                Either::Left((next, _)) => Either::Left(next),
+                Either::Right((settled, _)) => Either::Right(settled),
+            },
+        };
+        let next = match next {
+            Either::Left(next) => next,
+            Either::Right(settled) => {
+                let reason = match settled {
+                    Ok(_) => "session closed".to_owned(),
+                    Err(error) => js_message(&error),
+                };
+                state
+                    .borrow_mut()
+                    .inbox
+                    .end(Inbound::Closed { code: None, reason });
+                State::wake(&state);
+                return;
+            }
+        };
+        let end = match next {
             Some(Ok(chunk)) => match chunk.dyn_ref::<Uint8Array>() {
                 Some(chunk) => decoder
                     .push(&chunk.to_vec(), &mut messages)
@@ -420,13 +444,7 @@ pub(super) async fn read_body(
         }
         let ended = end.is_some();
         if let Some(end) = end {
-            let mut shared = state.borrow_mut();
-            // Once: another end, a WebTransport session's close, may have
-            // come first.
-            if !shared.ended {
-                shared.ended = true;
-                shared.inbox.end(end);
-            }
+            state.borrow_mut().inbox.end(end);
         }
         State::wake(&state);
         if ended {
@@ -538,8 +556,14 @@ impl HttpStream {
         };
         let state = Rc::new(RefCell::new(State::default()));
         let body = wasm_streams::ReadableStream::from_raw(body).into_stream();
-        let (reading, handle) =
-            abortable(read_body(through, body, decoder, bound, Rc::clone(&state)));
+        let (reading, handle) = abortable(read_body(
+            through,
+            body,
+            decoder,
+            bound,
+            Rc::clone(&state),
+            None,
+        ));
         spawn_local(async move {
             let _ = reading.await;
         });

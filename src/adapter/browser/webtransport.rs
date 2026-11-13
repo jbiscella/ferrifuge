@@ -135,27 +135,20 @@ impl WebTransport {
         };
         let state = Rc::new(RefCell::new(State::default()));
         let readable = wasm_streams::ReadableStream::from_raw(stream.readable()).into_stream();
-        let (reading, handle) =
-            abortable(read_body(None, readable, decoder, bound, Rc::clone(&state)));
+        // A session that closes ends the transport even if its stream has
+        // not ended, after the messages decoded before (D17, D9): the reader
+        // waits for both.
+        let closed = JsFuture::from(session.closed());
+        let (reading, handle) = abortable(read_body(
+            None,
+            readable,
+            decoder,
+            bound,
+            Rc::clone(&state),
+            Some(closed),
+        ));
         spawn_local(async move {
             let _ = reading.await;
-        });
-        // A session that closes ends the transport, after the messages
-        // before it, even if its stream has not ended (D17).
-        let closed = JsFuture::from(session.closed());
-        let watched = Rc::clone(&state);
-        spawn_local(async move {
-            let reason = match closed.await {
-                Ok(_) => "session closed".to_owned(),
-                Err(error) => js_message(&error),
-            };
-            let mut state = watched.borrow_mut();
-            if !state.ended {
-                state.ended = true;
-                state.inbox.end(Inbound::Closed { code: None, reason });
-                drop(state);
-                State::wake(&watched);
-            }
         });
         let mut guard = guard;
         guard.0 = None;
@@ -266,6 +259,15 @@ impl WebTransport {
     }
 }
 
+/// The driver drops a transport that ended (a write timeout, an overflow,
+/// a message over the limit) without closing it: its session is closed
+/// here, as natively the endpoint goes with the transport (D11).
+impl Drop for WebTransport {
+    fn drop(&mut self) {
+        let _ = self.session.close();
+    }
+}
+
 /// Closes a session whose attempt was dropped before it opened.
 struct CloseOnDrop(Option<Session>);
 
@@ -332,12 +334,13 @@ mod tests {
         let make = Function::new_with_args(
             "state, hold, throws",
             "state.chunks = [];
+             state.closeCalls = 0;
              return class {
                constructor(url) {
                  if (throws) throw new Error('refused');
                  state.url = url;
                  this.ready = Promise.resolve();
-                 this.closed = new Promise(() => {});
+                 this.closed = new Promise((resolve) => { state.closeSession = resolve; });
                }
                createBidirectionalStream() {
                  const readable = new ReadableStream({ start(c) { state.controller = c; } });
@@ -349,7 +352,7 @@ mod tests {
                  });
                  return Promise.resolve({ readable, writable });
                }
-               close() {}
+               close() { state.closeCalls += 1; }
              };",
         );
         let fake = make
@@ -478,6 +481,59 @@ mod tests {
                 ),
                 "{seen:?}"
             );
+        })
+        .await;
+    }
+
+    // D17, D9 (Codex on #232): a session that closes while the reader
+    // still holds messages it decoded, waiting for room in the inbox, ends
+    // the transport only after all of them.
+    #[wasm_bindgen_test]
+    async fn a_closed_session_ends_the_transport_after_every_message_decoded() {
+        with_fake(false, false, |state| async move {
+            let small = Bound {
+                messages: 2,
+                bytes: 1 << 20,
+            };
+            let mut transport = WebTransport::open(URL, false, TIMEOUT, LIMIT, small)
+                .await
+                .expect("opened");
+
+            push(
+                &state,
+                "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n{\"n\":5}\n",
+            );
+            call(&state, "state.closeSession()", "");
+            let mut frames = 0;
+            let end = loop {
+                match recv_within(&mut transport, 2000).await {
+                    Some(Inbound::Frame(_)) => frames += 1,
+                    other => break other,
+                }
+            };
+
+            assert_eq!(frames, 5);
+            assert!(
+                matches!(&end, Some(Inbound::Closed { code: None, .. })),
+                "{end:?}"
+            );
+        })
+        .await;
+    }
+
+    // D11 (Codex on #232): the driver drops a transport that ended without
+    // closing it; its session is closed then.
+    #[wasm_bindgen_test]
+    async fn a_dropped_transport_closes_its_session() {
+        with_fake(false, false, |state| async move {
+            let transport = open(false, TIMEOUT).await.expect("opened");
+
+            drop(transport);
+
+            let calls = Reflect::get(&state, &JsValue::from_str("closeCalls"))
+                .expect("closeCalls")
+                .as_f64();
+            assert!(calls.is_some_and(|calls| calls >= 1.0), "{calls:?}");
         })
         .await;
     }
