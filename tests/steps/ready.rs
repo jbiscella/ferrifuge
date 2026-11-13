@@ -8,7 +8,7 @@ use ferrifuge::{CallError, SubscriptionEvent, codes};
 use futures_util::{Stream, StreamExt};
 use tokio::task::JoinHandle;
 
-use super::{ClientWorld, EVENT_TIMEOUT, test_config};
+use super::{ClientWorld, EVENT_TIMEOUT};
 
 /// How soon "at once" settles: the future is settled when it is made.
 const AT_ONCE: Duration = Duration::from_millis(500);
@@ -91,6 +91,10 @@ fn ready_is_awaited(world: &mut ClientWorld, of: String) {
     if of == "client" {
         let future = world.client().ready();
         world.ready.client = Some(track(future, made_at));
+        // A connect answer held for this step goes out once ready() waits.
+        if let Some(proxy) = world.proxy.as_ref() {
+            proxy.release_held_connect();
+        }
     } else {
         let future = world.subscription().ready();
         world.ready.subscription = Some(track(future, made_at));
@@ -140,7 +144,7 @@ async fn ready_fails(
         assert!(after < AT_ONCE, "failed after {after:?}");
     }
     if !early.is_empty() {
-        let timeout = test_config().timeout;
+        let timeout = world.configured_timeout();
         assert!(
             after < timeout,
             "failed after {after:?}, not before {timeout:?}"

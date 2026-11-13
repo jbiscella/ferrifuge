@@ -13,6 +13,7 @@ use axum::extract::State;
 use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::centrifugo::HOST_GATEWAY;
@@ -46,6 +47,8 @@ struct Answers {
     /// Channels an accepted connection is subscribed to on the server side,
     /// each with whether it is recoverable.
     granted: Vec<(String, bool)>,
+    /// The gate of the last answer held until a step releases it.
+    gate: Option<Arc<Notify>>,
     /// Delay before accepting a connection, when no answer is programmed.
     accept_delay: Duration,
     /// The `data` of an accepted connection's result, if any (Block 17).
@@ -70,8 +73,9 @@ struct SubscribeAnswer {
 
 enum Answer {
     Respond(Value),
-    /// Answer after a delay.
-    RespondAfter(Duration, Value),
+    /// Answer after a delay, counted from the gate's release when there is
+    /// one.
+    RespondAfter(Duration, Value, Option<Arc<Notify>>),
     /// Leave the request unanswered for as long as the scenario runs.
     Hold,
 }
@@ -242,16 +246,30 @@ impl ProxyBackend {
         self.state.lock().unwrap().accept_delay = delay;
     }
 
-    /// Answers the next connection attempt with a disconnect after `delay`.
-    pub(crate) fn disconnect_next_after(&self, delay: Duration, code: u32, reason: &str) {
-        self.state
-            .lock()
-            .unwrap()
-            .programmed
-            .push_back(Answer::RespondAfter(
-                delay,
-                json!({"disconnect": {"code": code, "reason": reason}}),
-            ));
+    /// Answers the next connection attempt with a disconnect, `delay` after
+    /// [`ProxyBackend::release_held_connect`] rather than after the request:
+    /// until a step releases it, the attempt stays unanswered whatever the
+    /// runner's speed, so a step acting while the client connects always
+    /// does.
+    pub(crate) fn disconnect_next_after_release(&self, delay: Duration, code: u32, reason: &str) {
+        let gate = Arc::new(Notify::new());
+        let mut state = self.state.lock().unwrap();
+        state.gate = Some(Arc::clone(&gate));
+        state.programmed.push_back(Answer::RespondAfter(
+            delay,
+            json!({"disconnect": {"code": code, "reason": reason}}),
+            Some(gate),
+        ));
+    }
+
+    /// Starts the delay of the answer held by
+    /// [`ProxyBackend::disconnect_next_after_release`], whether or not its
+    /// request came yet; nothing when none is held.
+    pub(crate) fn release_held_connect(&self) {
+        if let Some(gate) = &self.state.lock().unwrap().gate {
+            // Stores the permit when the answer is not waiting yet.
+            gate.notify_one();
+        }
     }
 
     /// Subscribes the connections accepted from now on to `channels` on
@@ -332,7 +350,10 @@ async fn connect(
     };
     match answer {
         Some(Answer::Respond(answer)) => Json(answer),
-        Some(Answer::RespondAfter(delay, answer)) => {
+        Some(Answer::RespondAfter(delay, answer, gate)) => {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             tokio::time::sleep(delay).await;
             Json(answer)
         }
