@@ -550,6 +550,18 @@ async fn expect_event(world: &mut ClientWorld, expected: &str) -> ClientEvent {
 }
 
 /// Short reconnect delays keep scenarios fast.
+/// Runs `work` on a blocking thread and awaits it. The scenarios run as one
+/// future on one thread, cucumber's runner, which polls synchronous steps
+/// too: work that takes seconds of CPU in a debug build, done in a step,
+/// would stall every scenario running at once.
+pub(crate) async fn off_the_runner<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    tokio::task::spawn_blocking(work)
+        .await
+        .expect("the blocking task")
+}
+
 pub(crate) fn test_config() -> Config {
     Config::default()
         .min_reconnect_delay(Duration::from_millis(50))
