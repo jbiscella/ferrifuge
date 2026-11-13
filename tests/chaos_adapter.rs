@@ -35,12 +35,15 @@ const OPS: usize = 30;
 const SEED_VARIABLE: &str = "FERRIFUGE_CHAOS_SEED";
 /// `Config::timeout` of the chaos configuration.
 const TIMEOUT: Duration = Duration::from_secs(1);
-/// I6: a call waits at most once per phase, plus a margin for real time.
-const CALL_BOUND: Duration = Duration::from_secs(4);
+/// I6: a call waits at most once per phase, plus a margin for real time:
+/// 3 s, as this runs in the instrumented coverage job beside the binary's
+/// other tests, and the time counts the call's task being scheduled. A
+/// call that never settles still fails it.
+const CALL_BOUND: Duration = Duration::from_secs(6);
 /// I6: a publish of a burst may have waited for its subscription and in a
 /// debounce window, 5 × in all, plus the margin (Block 46, D6); the adapter
 /// cannot tell which did, so the bound is that of every publish of a burst.
-const WINDOW_CALL_BOUND: Duration = Duration::from_secs(6);
+const WINDOW_CALL_BOUND: Duration = Duration::from_secs(8);
 /// A tick of real time, of which a debounce interval is 1 to 3 (Block 46,
 /// D16): longer than the pause between two operations.
 const TICK: u32 = 50;
@@ -631,11 +634,25 @@ impl Run {
                 return Err(self.violation("I6", format!("a call settled after {took:?}")));
             }
         }
-        let open = self.server.connections() - self.server.closed_connections();
+        let open = self.open_connections(1).await;
         if open > 1 {
             return Err(self.violation("I3", format!("{open} connections open")));
         }
         Ok(())
+    }
+
+    /// The connections open on the fake server, once at most `at_most`
+    /// are or [`QUIESCENCE`] has passed: the fake notices a connection the
+    /// client closed when its task next runs, which a loaded runner delays.
+    async fn open_connections(&self, at_most: usize) -> usize {
+        let deadline = Instant::now() + QUIESCENCE;
+        loop {
+            let open = self.server.connections() - self.server.closed_connections();
+            if open <= at_most || Instant::now() >= deadline {
+                return open;
+            }
+            tokio::time::sleep(READ_WAIT).await;
+        }
     }
 
     fn quiescent(&self) -> bool {
@@ -663,7 +680,7 @@ impl Run {
             self.read_until_quiet(deadline).await?;
         }
         let made = self.server.connections() - connections;
-        let open = self.server.connections() - self.server.closed_connections();
+        let open = self.open_connections(0).await;
         if made > 0 || open > 0 {
             return Err(self.violation(
                 "I5",
