@@ -660,14 +660,6 @@ async fn receives_a_signed_item(
 
 #[when("the transport closes and the client reconnects and subscribes again")]
 async fn the_transport_closes(world: &mut ClientWorld) {
-    let channel = world.shared_poll().channel().to_owned();
-    // The track requests made before are answered once read.
-    let made = track_requests(world, &channel).len();
-    wait_until("the track requests", || {
-        track_requests(world, &channel).len() >= made
-    })
-    .await;
-    world.shared_polls.sub_refreshes_before = made;
     assert!(world.fake().close_current(3001, "reconnect"));
     loop {
         match world.next_shared_poll_event().await {
@@ -681,7 +673,33 @@ async fn the_transport_closes(world: &mut ClientWorld) {
 #[then(regex = r#"^the replay's track request carries key "(\w+)" at version (\d+)$"#)]
 async fn the_replay_carries(world: &mut ClientWorld, key: String, version: u64) {
     let channel = world.shared_poll().channel().to_owned();
-    let replay = nth_track(world, &channel, world.shared_polls.sub_refreshes_before + 1).await;
+    // The replay is the first track request read after the second connect
+    // command. Counting the track requests read when the transport closed
+    // missed one still on its way, and took it for the replay (run
+    // 131784445440: the second track_with_signature's request, at
+    // version 2 with "sig2").
+    let replay = tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let received = world.fake().received();
+            let reconnected = received
+                .iter()
+                .enumerate()
+                .filter(|(_, command)| command["connect"].is_object())
+                .nth(1)
+                .map(|(index, _)| index);
+            if let Some(track) = reconnected.and_then(|index| {
+                received[index..].iter().find(|command| {
+                    command["sub_refresh"]["channel"] == channel.as_str()
+                        && command["sub_refresh"]["type"] == 1
+                })
+            }) {
+                return track["sub_refresh"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a track request after the reconnect");
     assert_eq!(items_of(&replay), [(key, Some(version))], "{replay}");
 }
 
