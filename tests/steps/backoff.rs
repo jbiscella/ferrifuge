@@ -14,7 +14,7 @@ use ferrifuge::machine::{
     TransportId,
 };
 
-use super::ClientWorld;
+use super::{ClientWorld, off_the_runner};
 
 /// Samples taken to estimate the upper bound of an attempt's delay. Once an
 /// attempt is capped, a delay lands exactly on the maximum with probability
@@ -334,32 +334,39 @@ fn consecutive_subscribe_attempts_fail(world: &mut ClientWorld, attempts: usize)
 #[when(
     regex = r"^consecutive (?:reconnect attempts fail|subscribe attempts fail with a temporary error)$"
 )]
-fn attempts_keep_failing(world: &mut ClientWorld) {
+async fn attempts_keep_failing(world: &mut ClientWorld) {
     let under_test = under_test(world).clone();
-    world.upper_bounds = (0..ATTEMPTS)
-        .map(|attempt| {
-            under_test
-                .attempt_delays(attempt, SAMPLES)
-                .into_iter()
-                .max()
-                .expect("samples")
-        })
-        .collect();
+    world.upper_bounds = off_the_runner(move || {
+        (0..ATTEMPTS)
+            .map(|attempt| {
+                under_test
+                    .attempt_delays(attempt, SAMPLES)
+                    .into_iter()
+                    .max()
+                    .expect("samples")
+            })
+            .collect()
+    })
+    .await;
 }
 
 #[when(regex = r"^the delay for attempt (\d+) is computed (\d+) times$")]
-fn delay_for_attempt_computed(world: &mut ClientWorld, attempt: usize, times: usize) {
-    world.computed_delays = under_test(world).attempt_delays(attempt, times);
+async fn delay_for_attempt_computed(world: &mut ClientWorld, attempt: usize, times: usize) {
+    let under_test = under_test(world).clone();
+    world.computed_delays = off_the_runner(move || under_test.attempt_delays(attempt, times)).await;
     world.delays_by_attempt = false;
 }
 
 #[when(regex = r"^the (?:resubscribe )?delay for the same attempt number is computed (\d+) times$")]
-fn delay_for_same_attempt_computed(world: &mut ClientWorld, times: usize) {
+async fn delay_for_same_attempt_computed(world: &mut ClientWorld, times: usize) {
     let under_test = under_test(world).clone();
-    world.jitter_samples = JITTER_ATTEMPTS
-        .iter()
-        .map(|attempt| (*attempt, under_test.attempt_delays(*attempt, times)))
-        .collect();
+    world.jitter_samples = off_the_runner(move || {
+        JITTER_ATTEMPTS
+            .iter()
+            .map(|attempt| (*attempt, under_test.attempt_delays(*attempt, times)))
+            .collect()
+    })
+    .await;
 }
 
 #[when("the next subscribe attempt succeeds")]
@@ -533,9 +540,8 @@ async fn subscribes_followed_by_broken_deltas(world: &mut ClientWorld, subscribe
     let UnderTest::Resubscribe(options) = under_test(world).clone() else {
         panic!("this step needs a subscription with resubscribe options");
     };
-    // Each run gives one sample of every attempt's delay. Off the async
-    // runtime, so that the scenarios running alongside keep their timing.
-    world.upper_bounds = tokio::task::spawn_blocking(move || {
+    // Each run gives one sample of every attempt's delay.
+    world.upper_bounds = off_the_runner(move || {
         let mut bounds = vec![Duration::ZERO; subscribes];
         for _ in 0..SAMPLES {
             let mut run = ResubscribeRun::new(options.clone());
@@ -545,8 +551,7 @@ async fn subscribes_followed_by_broken_deltas(world: &mut ClientWorld, subscribe
         }
         bounds
     })
-    .await
-    .expect("the sampling task");
+    .await;
 }
 
 #[then(

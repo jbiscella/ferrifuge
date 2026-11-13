@@ -229,9 +229,10 @@ fn another_code(world: &mut ClientWorld) {
 #[when(
     regex = r"^the reconnect delay after (?:the last of them|that close) is computed (\d+) times$"
 )]
-fn delay_after_last_computed(world: &mut ClientWorld, times: usize) {
+async fn delay_after_last_computed(world: &mut ClientWorld, times: usize) {
     let plan = plan(world).clone();
-    world.computed_delays = (0..times).map(|_| plan.last_delay()).collect();
+    world.computed_delays =
+        super::off_the_runner(move || (0..times).map(|_| plan.last_delay()).collect()).await;
     world.delays_by_attempt = false;
 }
 
