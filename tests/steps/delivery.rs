@@ -730,18 +730,33 @@ async fn sent_until_the_client_stopped_reading(
 #[when(
     regex = r#"^the fake server (?:starts sending|sends) (\d+) publications? of (\d+) (bytes|KiB|MiB) to "(\w+)"$"#
 )]
-fn starts_sending(world: &mut ClientWorld, count: u64, amount: u64, unit: String, channel: String) {
-    for offset in 1..=count {
-        world
-            .fake()
-            .publish_sized(&channel, offset, size(amount, &unit));
-        world.delivery.sent.push(offset);
-    }
+async fn starts_sending(
+    world: &mut ClientWorld,
+    count: u64,
+    amount: u64,
+    unit: String,
+    channel: String,
+) {
+    let publisher = world.fake().publisher();
+    let size = size(amount, &unit);
+    // Up to 20 MiB of frames to build: off the runner.
+    super::off_the_runner(move || {
+        for offset in 1..=count {
+            publisher.publish_sized(&channel, offset, size);
+        }
+    })
+    .await;
+    world.delivery.sent.extend(1..=count);
 }
 
 #[when(regex = r#"^the fake server sends a publication of (\d+) (bytes|KiB|MiB) to "(\w+)"$"#)]
-fn sends_one_publication(world: &mut ClientWorld, amount: u64, unit: String, channel: String) {
-    starts_sending(world, 1, amount, unit, channel);
+async fn sends_one_publication(
+    world: &mut ClientWorld,
+    amount: u64,
+    unit: String,
+    channel: String,
+) {
+    starts_sending(world, 1, amount, unit, channel).await;
 }
 
 #[when(regex = r#"^the application subscribes to channel "(\w+)"$"#)]
