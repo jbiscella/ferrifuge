@@ -12,6 +12,8 @@ pub(super) mod net;
 pub(super) mod proxy;
 pub(super) mod tls;
 pub(super) mod transport;
+#[cfg(feature = "unstable-webtransport")]
+pub(super) mod webtransport;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,6 +27,8 @@ use self::http::{HeaderSet, HttpTransport};
 use self::net::Network;
 pub(in crate::adapter) use self::transport::Inbound;
 use self::transport::WebSocket;
+#[cfg(feature = "unstable-webtransport")]
+use self::webtransport::WebTransport;
 use super::log::Log;
 use crate::machine::{FrameId, FrameType, TransportKind};
 
@@ -70,7 +74,17 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
     let decision = reqwest::Url::parse(&url)
         .map_err(|e| e.to_string())
         .and_then(|parsed| network.decide(&parsed));
-    log.attempt(kind, endpoint, &decision, network.connector().is_some());
+    #[cfg(feature = "unstable-webtransport")]
+    let alpn = (kind == TransportKind::WebTransport).then_some(webtransport::Alpn::H3.name());
+    #[cfg(not(feature = "unstable-webtransport"))]
+    let alpn = None;
+    log.attempt(
+        kind,
+        endpoint,
+        &decision,
+        network.connector().is_some(),
+        alpn,
+    );
     match kind {
         TransportKind::WebSocket => Box::pin(async move {
             let headers = headers.current();
@@ -96,8 +110,23 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
                 .map(|http| Transport::Http(Box::new(http)))
             })
         }
-        // The transport comes with Block 48a.
-        #[cfg(feature = "unstable")]
+        #[cfg(feature = "unstable-webtransport")]
+        TransportKind::WebTransport => Box::pin(async move {
+            let headers = headers.current();
+            let target = webtransport::Target {
+                url: &url,
+                protobuf: subprotocol.is_some(),
+                timeout,
+                headers: &headers,
+                max_message,
+            };
+            WebTransport::open(target, &network)
+                .await
+                .map(|webtransport| Transport::WebTransport(Box::new(webtransport)))
+        }),
+        // Refused by `ClientBuilder::build` without the native transport
+        // (Block 48, D1).
+        #[cfg(all(feature = "unstable", not(feature = "unstable-webtransport")))]
         TransportKind::WebTransport => Box::pin(async move {
             let _ = (url, headers, network, max_message, timeout);
             Err(NO_WEBTRANSPORT.to_owned())
@@ -107,7 +136,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
 
 /// The message of a WebTransport endpoint in a build without the native
 /// transport (Block 48, D1).
-#[cfg(feature = "unstable")]
+#[cfg(all(feature = "unstable", not(feature = "unstable-webtransport")))]
 pub(in crate::adapter) const NO_WEBTRANSPORT: &str =
     "the webtransport transport needs the `unstable-webtransport` feature";
 
@@ -116,6 +145,9 @@ pub(in crate::adapter) enum Transport {
     // Boxed: the transports differ much in size, and one is held at a time.
     WebSocket(Box<WebSocket>),
     Http(Box<HttpTransport>),
+    #[cfg(feature = "unstable-webtransport")]
+    #[allow(clippy::enum_variant_names)] // The transport's name.
+    WebTransport(Box<WebTransport>),
 }
 
 impl Transport {
@@ -133,6 +165,11 @@ impl Transport {
                 http.send(id, frame);
                 Ok(())
             }
+            #[cfg(feature = "unstable-webtransport")]
+            Self::WebTransport(webtransport) => {
+                webtransport.send(id, frame);
+                Ok(())
+            }
         }
     }
 
@@ -142,6 +179,8 @@ impl Transport {
         match self {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
             Self::Http(http) => http.recv(reading).await,
+            #[cfg(feature = "unstable-webtransport")]
+            Self::WebTransport(webtransport) => webtransport.recv(reading).await,
         }
     }
 
@@ -152,6 +191,8 @@ impl Transport {
         match self {
             Self::WebSocket(websocket) => runtime.spawn(websocket.close()),
             Self::Http(http) => runtime.spawn(http.close()),
+            #[cfg(feature = "unstable-webtransport")]
+            Self::WebTransport(webtransport) => runtime.spawn(webtransport.close()),
         }
     }
 }

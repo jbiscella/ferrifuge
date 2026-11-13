@@ -191,6 +191,7 @@ impl Log {
         endpoint: usize,
         proxy: &Result<Option<ProxyTarget>, String>,
         connector: bool,
+        alpn: Option<&'static str>,
     ) {
         let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
         let proxy = match proxy {
@@ -199,6 +200,14 @@ impl Log {
             Ok(None) => "direct".to_owned(),
             Err(_) => "unusable".to_owned(),
         };
+        // WebTransport's first handshake offers `h3` (Block 48, D5).
+        if let Some(alpn) = alpn {
+            debug!(
+                transport = kind.name(),
+                endpoint, proxy, alpn, "opening transport"
+            );
+            return;
+        }
         debug!(
             transport = kind.name(),
             endpoint, proxy, "opening transport"
