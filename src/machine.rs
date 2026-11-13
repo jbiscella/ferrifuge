@@ -1698,6 +1698,14 @@ pub struct Machine {
     /// A server ping was read on the current connection: a 3008 close then
     /// keeps the backoff reset (Block 15, "Backoff after 3008").
     pinged: bool,
+    /// The server answered on the transport of this attempt (a connect
+    /// reply, an error reply to the connect, a disconnect push): a
+    /// WebTransport stream ending before it gives way (Block 48, D9).
+    answered: bool,
+    /// The connection over WebTransport ended with no code: before a server
+    /// ping, the backoff keeps growing, as after a 3008 close (Block 48,
+    /// D9, "Backoff after 3008" extended).
+    ended_without_code: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
     /// The connect data callback's state (Block 17).
@@ -1863,6 +1871,8 @@ impl Machine {
             server_subscriptions: ServerSubscriptions::default(),
             calls: calls::Calls::default(),
             backoff_reset_pending: false,
+            answered: false,
+            ended_without_code: false,
             reconnecting_after_loss: false,
             pinged: false,
             pings: None,
@@ -2171,6 +2181,7 @@ impl Machine {
         self.next_transport += 1;
         self.transport = Some(id);
         self.transport_open = false;
+        self.answered = false;
         let kind = self.transport_kind();
         self.counters.trailer = u64::from(trailer(kind, self.codec.frame_type()));
         // An emulated stream is opened by a request carrying the connect
@@ -2334,12 +2345,18 @@ impl Machine {
                 self.transport_failed("transport closed".to_owned());
             }
             // A WebTransport stream that ends before the server answered on
-            // it is a failed attempt, reported (Block 48, D9: an invalid
-            // token ends the stream without a reply).
+            // it is a failed attempt, reported, and gives way to the next
+            // transport at once even when it was chosen (Block 48, D9: an
+            // invalid token ends the stream without a reply).
             _ if self.state == State::Connecting && self.ended_before_an_answer() => {
+                self.transports.give_way();
                 self.transport_failed("transport closed".to_owned());
             }
-            _ => self.reconnect_after_transport_closed(),
+            _ => {
+                self.ended_without_code =
+                    is_webtransport(self.transport_kind()) && self.state == State::Connected;
+                self.reconnect_after_transport_closed();
+            }
         }
     }
 
@@ -2618,6 +2635,7 @@ impl Machine {
         self.actions
             .push(Action::CancelTimer(Timer::ConnectTimeout));
         self.transports.choose();
+        self.answered = true;
         if self.transport_kind().is_emulated() {
             self.emulation = Some((result.session.clone(), result.node.clone()));
         }
@@ -2664,12 +2682,13 @@ impl Machine {
     /// centrifuge-js 63ed73e `_transportWasOpen`).
     fn server_answered(&mut self) {
         self.transports.choose();
+        self.answered = true;
     }
 
     /// Whether the open transport is a WebTransport the server has not
-    /// answered on yet, in the first round (Block 48, D9).
+    /// answered on in this attempt, chosen before or not (Block 48, D9).
     fn ended_before_an_answer(&self) -> bool {
-        is_webtransport(self.transport_kind()) && !self.transports.is_chosen()
+        is_webtransport(self.transport_kind()) && !self.answered
     }
 
     /// centrifuge-js `_connectError`: temporary errors are retried.
@@ -2888,8 +2907,12 @@ impl Machine {
         self.backoff_reset_pending = false;
         let pinged = std::mem::take(&mut self.pinged);
         // A server-side subscription's broken delta keeps it growing too
-        // (Block 19, D8).
-        let slow = code == SLOW || code == codes::connecting::READ_AHEAD_OVERFLOW;
+        // (Block 19, D8), and so does a WebTransport connection ended with
+        // no code (Block 48, D9): a command over the server's limit ends
+        // the session without a reply or a push.
+        let slow = code == SLOW
+            || code == codes::connecting::READ_AHEAD_OVERFLOW
+            || std::mem::take(&mut self.ended_without_code);
         if (slow && !pinged) || code == codes::connecting::DELTA_ERROR {
             self.backoff.undo_reset();
         } else {

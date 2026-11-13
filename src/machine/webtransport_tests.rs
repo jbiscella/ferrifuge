@@ -222,3 +222,169 @@ fn bytes_out_counts_the_newline_of_a_json_frame_over_webtransport() {
 
     assert_eq!(counted, [0, 1, 0]);
 }
+
+/// Over `[kind, HttpStream]`: a connection over `kind`, lost with no code,
+/// then the next attempt's stream over `kind` ending with no code before
+/// the server answered. The events of that end, and the next attempt's
+/// transport and delay.
+fn chosen_then_ended_before_an_answer(
+    kind: TransportKind,
+) -> (Vec<ClientEvent>, TransportKind, Duration) {
+    let mut machine = Machine::with_rng(Config::default(), false, fastrand::Rng::with_seed(48))
+        .with_transports(vec![kind, TransportKind::HttpStream])
+        .expect("two transports");
+    let transport = opened(&machine.handle(Input::Connect)).expect("an attempt");
+    let actions = machine.handle(Input::TransportOpened(transport));
+    let connect = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the connect command");
+    let id = serde_json::from_slice::<serde_json::Value>(&connect).expect("JSON")["id"].clone();
+    machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#),
+    ));
+    machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let transport =
+        opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    machine.handle(Input::TransportOpened(transport));
+    let actions = machine.handle(Input::TransportClosed {
+        transport,
+        code: None,
+        reason: String::new(),
+    });
+    let events = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Emit(_, ClientEvent::Connecting { .. }) => None,
+            Action::Emit(_, event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect();
+    let delay = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            _ => None,
+        })
+        .expect("a reconnect scheduled");
+    let next = machine
+        .handle(Input::TimerFired(Timer::Reconnect))
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .expect("the next attempt");
+    (events, next, delay)
+}
+
+// D9, the second rule: a chosen WebTransport whose stream ends before the
+// server answered gives way, with its error event, to the next transport at
+// once; a chosen websocket is kept, after the backoff (Block 8).
+#[test]
+fn a_chosen_webtransport_ending_before_an_answer_gives_way_at_once() {
+    let (websocket, after_websocket, websocket_delay) =
+        chosen_then_ended_before_an_answer(TransportKind::WebSocket);
+    let (webtransport, after_webtransport, webtransport_delay) =
+        chosen_then_ended_before_an_answer(TransportKind::WebTransport);
+
+    assert_eq!(websocket, []);
+    assert_eq!(after_websocket, TransportKind::WebSocket);
+    assert!(websocket_delay > Duration::ZERO);
+    assert!(
+        matches!(
+            webtransport.as_slice(),
+            [ClientEvent::Error(ClientError { kind: ErrorKind::Transport, transport: Some(name), .. })]
+                if name == "webtransport"
+        ),
+        "{webtransport:?}"
+    );
+    assert_eq!(after_webtransport, TransportKind::HttpStream);
+    assert_eq!(webtransport_delay, Duration::ZERO);
+}
+
+/// The reconnect delay after the third connection over `kind` that got its
+/// connect reply and ended with no code before a server ping, with the
+/// backoff of 1 s to 1000 s and the machine's seed `seed`.
+fn third_delay_without_a_ping(kind: TransportKind, seed: u64) -> Duration {
+    let config = Config::default()
+        .min_reconnect_delay(Duration::from_secs(1))
+        .max_reconnect_delay(Duration::from_secs(1000));
+    let mut machine = Machine::with_rng(config, false, fastrand::Rng::with_seed(seed))
+        .with_transports(vec![kind])
+        .expect("one transport");
+    let mut actions = machine.handle(Input::Connect);
+    let mut delay = Duration::ZERO;
+    for _ in 0..3 {
+        let transport = opened(&actions).expect("an attempt");
+        let sent = machine.handle(Input::TransportOpened(transport));
+        let connect = sent
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { frame, .. } => Some(frame.clone()),
+                _ => None,
+            })
+            .expect("the connect command");
+        let id = serde_json::from_slice::<serde_json::Value>(&connect).expect("JSON")["id"].clone();
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{id},"connect":{{"client":"c","ping":25,"pong":true}}}}"#),
+        ));
+        let ended = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        delay = ended
+            .iter()
+            .find_map(|action| match action {
+                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                _ => None,
+            })
+            .expect("a reconnect scheduled");
+        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+    }
+    delay
+}
+
+// D9, "Backoff after 3008" extended: over WebTransport, the third such end
+// waits as attempt 3 (up to 1 s + 4 s); over websocket each connect reply
+// resets the backoff, so attempt 1 (up to 1 s + 1 s).
+#[test]
+fn a_webtransport_end_without_a_code_before_a_ping_keeps_the_backoff_growing() {
+    let seeds = 0..100;
+    let websocket: Vec<_> = seeds
+        .clone()
+        .map(|seed| third_delay_without_a_ping(TransportKind::WebSocket, seed))
+        .collect();
+    let webtransport: Vec<_> = seeds
+        .map(|seed| third_delay_without_a_ping(TransportKind::WebTransport, seed))
+        .collect();
+
+    assert!(
+        websocket
+            .iter()
+            .all(|delay| *delay <= Duration::from_secs(2)),
+        "{websocket:?}"
+    );
+    assert!(
+        webtransport
+            .iter()
+            .all(|delay| *delay <= Duration::from_secs(5)),
+        "{webtransport:?}"
+    );
+    assert!(
+        webtransport
+            .iter()
+            .any(|delay| *delay > Duration::from_secs(3)),
+        "{webtransport:?}"
+    );
+}

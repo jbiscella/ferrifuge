@@ -42,11 +42,6 @@ impl Transports {
         self.chosen = true;
     }
 
-    /// Whether the server answered over the current transport once.
-    pub(super) fn is_chosen(&self) -> bool {
-        self.chosen
-    }
-
     /// An attempt over the current transport failed: unless it was chosen,
     /// the next attempt tries the next one.
     pub(super) fn attempt_failed(&mut self) {
@@ -58,6 +53,14 @@ impl Transports {
             self.index = 0;
             self.tried_all = true;
         }
+    }
+
+    /// The current transport ended before the server answered on it
+    /// (Block 48, D9): it is no longer chosen, and the next attempt starts
+    /// a new round from the next transport, at once.
+    pub(super) fn give_way(&mut self) {
+        self.chosen = false;
+        self.tried_all = false;
     }
 
     /// How many transports are configured.
