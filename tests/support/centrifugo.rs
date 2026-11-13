@@ -320,6 +320,8 @@ fn chain(error: &dyn std::error::Error) -> String {
 /// twice could act on a newer connection.
 const RETRIED: &[&str] = &[
     "publish",
+    // Its publishes carry idempotency keys (`publish_batch`).
+    "batch",
     "history",
     "history_remove",
     "channels",
@@ -397,7 +399,35 @@ impl ServerApi {
                 code: error["code"].as_u64().unwrap_or_default(),
                 message: error["message"].as_str().unwrap_or_default().to_owned(),
             }),
-            None => Ok(body.get_mut("result").map(Value::take).unwrap_or_default()),
+            // A batch answers with its `replies`.
+            None => Ok(match body.get_mut("result") {
+                Some(result) => result.take(),
+                None => body.get_mut("replies").map(Value::take).unwrap_or_default(),
+            }),
+        }
+    }
+
+    /// Publishes each of `publications`, the params of a `publish`, in one
+    /// `batch` call, in order: one HTTP request instead of one per
+    /// publication. Each carries its idempotency key, so a retried batch
+    /// publishes nothing twice. Panics on a publication refused.
+    pub(crate) async fn publish_batch(&self, publications: impl IntoIterator<Item = Value>) {
+        let commands: Vec<Value> = publications
+            .into_iter()
+            .map(|mut publish| {
+                publish["idempotency_key"] = Value::from(idempotency_key());
+                serde_json::json!({ "publish": publish })
+            })
+            .collect();
+        let count = commands.len();
+        let replies = self
+            .call("batch", serde_json::json!({ "commands": commands }))
+            .await
+            .unwrap_or_else(|e| panic!("server API batch: {e:?}"));
+        let replies = replies.as_array().expect("the batch's replies");
+        assert_eq!(replies.len(), count, "{replies:?}");
+        if let Some(refused) = replies.iter().find(|reply| reply.get("error").is_some()) {
+            panic!("a publication of the batch was refused: {refused}");
         }
     }
 
