@@ -19,7 +19,7 @@ Feature: WebTransport (unstable)
 
   @A
   Scenario: Server pings over WebTransport are answered
-    Given a server with HTTP/3 and WebTransport enabled, a ping interval of 2 s and a pong timeout of 1 s
+    Given a server with HTTP/3 and WebTransport enabled, a ping interval of 3 s and a pong timeout of 2 s
     And a client connected over transport "webtransport"
     When 6 s elapse
     Then the client stays "connected"

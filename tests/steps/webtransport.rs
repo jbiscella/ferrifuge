@@ -74,14 +74,14 @@ async fn an_http3_server_without_webtransport(world: &mut ClientWorld) {
 }
 
 #[given(
-    "a server with HTTP/3 and WebTransport enabled, a ping interval of 2 s and a pong timeout of 1 s"
+    "a server with HTTP/3 and WebTransport enabled, a ping interval of 3 s and a pong timeout of 2 s"
 )]
 async fn a_pinging_webtransport_server(world: &mut ClientWorld) {
     http3_server(
         world,
         &[
-            ("CENTRIFUGO_CLIENT_PING_INTERVAL", "2s"),
-            ("CENTRIFUGO_CLIENT_PONG_TIMEOUT", "1s"),
+            ("CENTRIFUGO_CLIENT_PING_INTERVAL", "3s"),
+            ("CENTRIFUGO_CLIENT_PONG_TIMEOUT", "2s"),
         ],
         true,
     )
