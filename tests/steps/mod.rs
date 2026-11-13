@@ -55,6 +55,7 @@ mod maps;
 mod network_events;
 mod optimistic;
 mod ping;
+mod probes;
 mod protobuf;
 mod proxies;
 mod publication_channel;
@@ -226,6 +227,8 @@ pub(crate) struct ClientWorld {
     pub(crate) release: release::Release,
     /// What a Block 49a scenario read.
     pub(crate) bug_catalogue: bug_catalogue::BugCatalogue,
+    /// What a Block 49b probe holds.
+    pub(crate) probes: probes::Probes,
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,

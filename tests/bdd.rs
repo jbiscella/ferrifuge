@@ -574,6 +574,15 @@ const IMPLEMENTED: &[&str] = &[
     "Every covered entry and every gap names a scenario or test that exists",
     "Every fix commit an entry cites exists",
     "Every probe records its mutation and where it was seen failing",
+    // Block 49b: the probes that pass today.
+    "Command ids skip 0 when they wrap",
+    "Disconnect during a websocket handshake that never finishes ends it at once",
+    "A transport the client closed reports no error",
+    "Dropping the last clone of a client inside its handler ends the client",
+    "A websocket that answers with data that is not client protocol advances the fallback at once",
+    "A panic in the client's driver ends the client visibly",
+    "A terminal disconnect push right before the end of an HTTP stream stops the client",
+    "An emulation request that never answers ends the transport within the timeout",
 ];
 
 /// Server configuration of @A scenarios.

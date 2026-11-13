@@ -27,7 +27,7 @@ const UNREACHABLE_SSE: &str = "http://127.0.0.1:1/connection/sse";
 /// Slack on timing assertions for scheduling on a loaded runner.
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
-const PING_INTERVAL: Duration = Duration::from_secs(3);
+pub(super) const PING_INTERVAL: Duration = Duration::from_secs(3);
 /// Size of the subscription tokens that fill the stalled connection: more
 /// than the client's socket and the relay's receive window take once the
 /// relay stops reading (about 2.6 MiB measured on Linux loopback), and
