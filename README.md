@@ -971,16 +971,30 @@ the handshake timeout, and the next transport is tried. A refused session
 **ALPN.** Centrifugo up to v6.10.3 selects no application protocol on its
 WebTransport listener, and a QUIC client offering `h3` fails its handshake
 there. The client offers `h3` first and, when the server selected none,
-handshakes once more without ALPN, within the same handshake timeout.
+handshakes once more without ALPN, within the same handshake timeout. It
+then remembers that endpoint, by its place in the transport list, and starts
+there without ALPN on later attempts, after `reconnect()` and a network
+change too, so each reconnect saves a failed handshake. The day the server
+requires `h3`, its refusal of a handshake without ALPN drops the memory and
+the attempt handshakes once more with `h3`: an attempt makes at most two.
 ALPN travels in TLS 1.3's encrypted extensions, so no one on the network can
 strip it to force that second handshake.
 
 **A session that ends.** The server ends a session for an invalid token, a
 bad or oversized command without a disconnect push: the client reports code
-1 "transport closed" and reconnects. A stream that ends before the server
-answered the connect is a failed attempt, reported by an `Error` event, and
-the next transport shows the server's real answer, e.g. websocket's 3500
-"invalid token".
+1 "transport closed" and reconnects. Such an end before the client has read
+a server ping does not reset the reconnect backoff, as a 3008 close does
+not: a subscribe over the server's command limit, sent on every reconnect,
+would otherwise reconnect at the minimum delay forever. The cost is that a
+real network drop in the first ping interval keeps the backoff growing too.
+A disconnect push the server writes right before ending the stream is
+handled, with its code. A stream that ends before the server answered the
+connect is a failed attempt, reported by an `Error` event, and the next
+transport is tried at once, even when WebTransport worked before: the next
+transport shows the server's real answer, e.g. websocket's 3500 "invalid
+token", or calls the token callback for websocket's 109. WebTransport is
+tried again once the whole list has failed, at `reconnect()` and at a
+network change.
 
 **What it does not do.** No proxy: a WebTransport endpoint for which a proxy
 is decided, `Proxy::system()` finding an HTTPS proxy in the environment

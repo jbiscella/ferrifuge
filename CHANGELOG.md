@@ -13,6 +13,15 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Unstable (`unstable` feature): WebTransport's recovery (Block 48b). An
+  endpoint whose server selected no ALPN is remembered and started without
+  it, until its server requires `h3` again; at most two handshakes an
+  attempt. A WebTransport stream that ends before the server answered gives
+  way to the next transport at once, with its `Error` event, even when
+  WebTransport was chosen before. A WebTransport connection that ends with
+  no code before a server ping keeps the reconnect backoff growing, as a
+  3008 close does.
+
 - Unstable (`unstable` feature): the native WebTransport transport (Block
   48a). `TransportKind::WebTransport` (`"webtransport"`) and the
   `unstable-webtransport` cargo feature, which brings wtransport and quinn
