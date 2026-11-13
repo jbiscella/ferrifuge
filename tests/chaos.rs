@@ -2226,8 +2226,14 @@ impl Run {
     }
 
     /// A fetch of the series connect data and subscriptions share: its id
-    /// must be new (I13: the tap judges answers by these ids).
+    /// must be new (I13: the tap judges answers by these ids). One asked
+    /// for while a kept answer goes on with its flow is kept too: a token
+    /// answered after `disconnect()` may ask for the data next (Block 42,
+    /// D11; Codex, #247).
     fn fetch_used(&mut self, fetch: FetchId) -> Step {
+        if self.checker.continuing {
+            self.checker.kept.insert(fetch);
+        }
         if self.continuity.used.insert(fetch) {
             Ok(())
         } else {
@@ -2846,10 +2852,15 @@ impl Run {
                 let result = self.recovery(channel, &connect["subs"][channel], skip);
                 subs.insert(channel.to_owned(), result);
             }
-            return json!({"id": id, "connect": {
+            let mut result = json!({
                 "client": "c", "ping": PING, "pong": true, "expires": true, "ttl": ttl,
                 "subs": subs,
-            }});
+            });
+            // The server's connect data is marked too (I14; Codex, #247).
+            if self.mode == Mode::Continuity {
+                result["data"] = json!({"m": self.marker});
+            }
+            return json!({"id": id, "connect": result});
         }
         if let Some(subscribe) = command.get("subscribe") {
             let channel = CHANNELS
@@ -2874,6 +2885,9 @@ impl Run {
             if delta {
                 result["delta"] = json!(true);
             }
+            if self.mode == Mode::Continuity {
+                result["data"] = json!({"m": self.marker});
+            }
             // Drawn only with debouncing, so the other modes' seeds keep
             // their operations (Block 46, D16).
             if self.mode == Mode::Debounce {
@@ -2891,6 +2905,8 @@ impl Run {
             json!({"refresh": {"expires": true, "ttl": ttl}})
         } else if command.get("unsubscribe").is_some() {
             json!({"unsubscribe": {}})
+        } else if command.get("rpc").is_some() && self.mode == Mode::Continuity {
+            json!({"rpc": {"data": {"m": self.marker}}})
         } else if command.get("rpc").is_some() {
             json!({"rpc": {"data": {}}})
         } else if command.get("publish").is_some() {
