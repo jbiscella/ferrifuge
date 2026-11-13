@@ -611,11 +611,18 @@ fn the_first_connect_fails(world: &mut ClientWorld) {
     world.fake().fail_connects(1);
 }
 
+/// The delay counts from the step that must act before the reply
+/// ("unsubscribe is called on the subscription before the connect reply"),
+/// which releases it: counted from the connect command, a runner stalled
+/// for longer than the delay let the reply out first (providers, #218).
+/// Until then the client waits for the reply, under a connect timeout no
+/// stall reaches.
 #[given(regex = r"^the fake server delays its connect reply by (\d+) ms$")]
 fn a_late_connect_reply(world: &mut ClientWorld, millis: u64) {
     world
         .fake()
-        .delay_next_connect(Duration::from_millis(millis));
+        .delay_next_connect_after_release(Duration::from_millis(millis));
+    world.timeout = Some(super::STALL_PROOF_TIMEOUT);
 }
 
 #[given(
@@ -712,6 +719,7 @@ fn unsubscribe_before_the_reply(world: &mut ClientWorld) {
         "the connect reply went out already"
     );
     world.subscription().unsubscribe();
+    world.fake().release_held_connect();
 }
 
 #[then(

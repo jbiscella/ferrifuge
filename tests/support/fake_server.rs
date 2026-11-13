@@ -169,6 +169,9 @@ struct State {
     /// The next JSON connect command is answered after this delay, the
     /// commands after it in its frame once it is (Block 36, D10).
     connect_delay: Option<std::time::Duration>,
+    /// When set, the delay of `connect_delay` starts only once a step
+    /// releases it ([`FakeServer::release_held_connect`]).
+    connect_gate: Option<Arc<tokio::sync::Notify>>,
     /// Bytes and JSON messages written to clients, and bytes and JSON
     /// commands read from them (Block 31).
     sent_traffic: (u64, u64),
@@ -458,6 +461,26 @@ impl FakeServer {
     /// subscribes answered from history, which go out at once.
     pub(crate) fn delay_next_connect(&self, delay: std::time::Duration) {
         self.state.lock().unwrap().connect_delay = Some(delay);
+    }
+
+    /// As [`FakeServer::delay_next_connect`], the delay counted from
+    /// [`FakeServer::release_held_connect`] rather than from the connect
+    /// command: until a step releases it, the reply stays held whatever
+    /// the runner's speed, so a step acting before the reply always does.
+    pub(crate) fn delay_next_connect_after_release(&self, delay: std::time::Duration) {
+        let mut state = self.state.lock().unwrap();
+        state.connect_delay = Some(delay);
+        state.connect_gate = Some(Arc::new(tokio::sync::Notify::new()));
+    }
+
+    /// Starts the delay of the connect reply held by
+    /// [`FakeServer::delay_next_connect_after_release`], whether or not
+    /// the connect command came yet.
+    pub(crate) fn release_held_connect(&self) {
+        if let Some(gate) = &self.state.lock().unwrap().connect_gate {
+            // Stores the permit when the reply is not waiting yet.
+            gate.notify_one();
+        }
     }
 
     /// Whether each upgrade asked for the Protobuf subprotocol, in order
@@ -998,6 +1021,7 @@ impl Connection {
         let mut replies = Vec::new();
         // The replies of a connect answered late and of what follows it.
         let mut deferred: Option<(std::time::Duration, Vec<Message>)> = None;
+        let mut gate: Option<Arc<tokio::sync::Notify>> = None;
         let mut connect_failed = false;
         let frame = {
             let mut state = self.state.lock().unwrap();
@@ -1030,11 +1054,14 @@ impl Connection {
                 ));
                 connect_failed = true;
             } else if message["connect"].is_object() {
-                if let Some(delay) = self.state.lock().unwrap().connect_delay.take() {
+                let mut state = self.state.lock().unwrap();
+                if let Some(delay) = state.connect_delay.take() {
+                    gate.clone_from(&state.connect_gate);
+                    drop(state);
                     deferred = Some((delay, Vec::new()));
                 } else {
-                    let mut state = self.state.lock().unwrap();
                     state.connects_answered_at.push(std::time::Instant::now());
+                    drop(state);
                 }
                 replies.push(self.connect_reply(&message));
             } else if message["subscribe"].is_object() {
@@ -1055,6 +1082,9 @@ impl Connection {
             let out = self.out.clone();
             let shared = Arc::clone(&self.state);
             tokio::spawn(async move {
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
                 tokio::time::sleep(delay).await;
                 let answered = std::time::Instant::now();
                 shared.lock().unwrap().connects_answered_at.push(answered);
