@@ -527,9 +527,29 @@ async fn a_connected_client(world: &mut ClientWorld, min: u64, max: u64) {
     regex = r"^after 1 s the connector has been called (\d+) times and the double has (\d+) connection open$"
 )]
 async fn after_a_second(world: &mut ClientWorld, calls: usize, open: usize) {
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(world.doubles.calls.load(Ordering::SeqCst), calls);
-    assert_eq!(server(world).connections(), open);
+    // Reached however late the runner is (CI health, finding 11: a fixed
+    // 1 s sleep failed when the reconnect came later), then unchanged
+    // until 1 s after the step started.
+    let started = std::time::Instant::now();
+    let counts = |world: &ClientWorld| {
+        (
+            world.doubles.calls.load(Ordering::SeqCst),
+            server(world).connections(),
+        )
+    };
+    let reached = tokio::time::timeout(super::EVENT_TIMEOUT, async {
+        while counts(world) != (calls, open) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "connector calls and open connections: {:?}",
+        counts(world)
+    );
+    tokio::time::sleep(Duration::from_secs(1).saturating_sub(started.elapsed())).await;
+    assert_eq!(counts(world), (calls, open));
 }
 
 #[given(
