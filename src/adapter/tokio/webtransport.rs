@@ -212,17 +212,18 @@ impl WebTransport {
     }
 
     fn poll_recv(&mut self, cx: &mut Context<'_>, reading: bool) -> Poll<Inbound> {
-        if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
-            return Poll::Ready(lost());
-        }
-        if let Some(queued) = self.oldest_unwritten() {
-            let deadline = queued + self.timeout;
-            if self.deadline.deadline() != deadline {
-                self.deadline.as_mut().reset(deadline);
-            }
-            if self.deadline.as_mut().poll(cx).is_ready() {
+        if self.poll_write_failed(cx) {
+            // D9: the messages already decoded, a disconnect push among
+            // them, reach the core before the end the failure is. Without
+            // `reading`, the end is reported at once (Block 15).
+            if !reading {
                 return Poll::Ready(lost());
             }
+            if self.end.is_none() {
+                self.end = Some(lost());
+            }
+            // Ready at once: with an end recorded, the stream is not read.
+            return self.poll_read(cx);
         }
         // Written reports and messages take turns, as on a websocket.
         if !self.read_next
@@ -240,6 +241,23 @@ impl WebTransport {
             return Poll::Ready(Inbound::Written(id));
         }
         Poll::Pending
+    }
+
+    /// Whether a write failed or a frame waited past the timeout (D8).
+    fn poll_write_failed(&mut self, cx: &mut Context<'_>) -> bool {
+        if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
+            return true;
+        }
+        if let Some(queued) = self.oldest_unwritten() {
+            let deadline = queued + self.timeout;
+            if self.deadline.deadline() != deadline {
+                self.deadline.as_mut().reset(deadline);
+            }
+            if self.deadline.as_mut().poll(cx).is_ready() {
+                return true;
+            }
+        }
+        false
     }
 
     /// The next message, then, once every message before it was reported,
@@ -1010,6 +1028,87 @@ mod tests {
         assert_eq!(first, Inbound::Frame(b"{\"a\":1}".to_vec()));
         assert_eq!(second, Inbound::Frame(b"{\"b\":2}".to_vec()));
         assert_eq!(end, lost());
+    }
+
+    /// A transport to the echo server holding two decoded messages, a ping
+    /// and a disconnect push, as one read can leave them.
+    async fn holding_a_ping_and_a_disconnect() -> WebTransport {
+        let (ca, chain, key) = private_chain();
+        let network = Network::new(Tls::new(Trust::ExtraRoots(vec![ca].into())), Proxy::none());
+        let (url, _, _) = server(chain, key, &[b"h3"]).await;
+        let headers = http::HeaderMap::new();
+        let mut transport = WebTransport::open(
+            Target {
+                url: &url,
+                protobuf: false,
+                timeout: TIMEOUT,
+                headers: &headers,
+                max_message: 1024,
+            },
+            &network,
+        )
+        .await
+        .expect("opened");
+        transport.messages.push_back(b"{}".to_vec());
+        transport
+            .messages
+            .push_back(br#"{"disconnect":{"code":3501,"reason":"bye"}}"#.to_vec());
+        transport
+    }
+
+    // D8, D9: a write that fails (the stream reset) or a frame left past
+    // the timeout ends the transport only after the messages decoded before
+    // it; the disconnect push is not lost to a reconnect.
+    #[tokio::test]
+    async fn the_messages_decoded_before_a_failed_write_come_first() {
+        for failure in ["reset", "deadline"] {
+            let mut transport = holding_a_ping_and_a_disconnect().await;
+            match failure {
+                "reset" => {
+                    transport.send.reset(VarInt::from_u32(0)).expect("reset");
+                    transport.send(FrameId::for_tests(1), b"{}".to_vec());
+                }
+                _ => transport.queue.push_back((
+                    FrameId::for_tests(1),
+                    b"{}\n".to_vec(),
+                    Instant::now() - TIMEOUT * 2,
+                )),
+            }
+
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                seen.push(
+                    tokio::time::timeout(TIMEOUT, transport.recv(true))
+                        .await
+                        .expect("an inbound"),
+                );
+            }
+
+            assert_eq!(
+                seen,
+                [
+                    Inbound::Frame(b"{}".to_vec()),
+                    Inbound::Frame(br#"{"disconnect":{"code":3501,"reason":"bye"}}"#.to_vec()),
+                    lost(),
+                ],
+                "{failure}"
+            );
+        }
+    }
+
+    // Block 15: without reading, a failed write ends the transport at once.
+    #[tokio::test]
+    async fn without_reading_a_failed_write_ends_the_transport_at_once() {
+        let mut transport = holding_a_ping_and_a_disconnect().await;
+        transport.send.reset(VarInt::from_u32(0)).expect("reset");
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
+
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(false))
+            .await
+            .expect("an inbound");
+
+        assert_eq!(inbound, lost());
+        assert_eq!(transport.messages.len(), 2);
     }
 
     // D9, Block 29 D3: a message decoded in the same read as one over the
