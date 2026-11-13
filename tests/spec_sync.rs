@@ -446,6 +446,7 @@ fn the_catalogue_checks_pass_on_claude_md() {
     assert_eq!(catalogue.probes_without_mutation(), none);
     assert_eq!(catalogue.probes_without_record(), none);
     assert_eq!(catalogue.malformed_commits(), none);
+    assert_eq!(catalogue.covered_without_evidence(), none);
 }
 
 #[test]
@@ -549,6 +550,35 @@ fn the_catalogue_reports_a_gap_without_a_probe_or_a_listed_finding() {
 }
 
 #[test]
+fn the_catalogue_reports_a_covered_row_without_evidence() {
+    let cleared = planted(
+        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |",
+        "reported to the app | §6.5 | covered |  |",
+    );
+    reports(
+        &cleared.covered_without_evidence(),
+        "row 11 is covered without naming",
+    );
+    let unnamed = planted(
+        ", ae491ad | covered | `src/adapter/tokio/http.rs::each_decoder_takes_a_message_at_the_limit_and_refuses_one_over`, `src/adapter/tokio/http.rs::colonless_sse_fields_have_an_empty_value`, `src/adapter/tokio/http.rs::sse_lines_may_end_with_cr_lf_or_crlf_across_chunks`, `src/adapter/tokio/http.rs::a_leading_byte_order_mark_is_ignored_once`, `src/adapter/tokio/http.rs::an_sse_response_that_is_not_an_event_stream_fails_the_attempt`, `src/adapter/tokio/http.rs::media_types_are_parsed_as_rfc_9110_writes_them`, one per commit;",
+        ", ae491ad | covered | Block 27's fuzz targets check chunk invariance only;",
+    );
+    reports(
+        &unnamed.covered_without_evidence(),
+        "row C11 is covered without naming",
+    );
+    // An invariant is evidence for our own classes only.
+    let invariant_only = planted(
+        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |",
+        "reported to the app | §6.5 | covered | I13 |",
+    );
+    reports(
+        &invariant_only.covered_without_evidence(),
+        "row 11 is covered without naming",
+    );
+}
+
+#[test]
 fn the_catalogue_reports_a_malformed_or_single_citation() {
     let not_hex = planted("| d86ddc9, 6d0addd,", "| d86ddcg, 6d0addd,");
     reports(
@@ -559,6 +589,11 @@ fn the_catalogue_reports_a_malformed_or_single_citation() {
     reports(
         &too_short.malformed_commits(),
         "row C1 cites \"d86ddc\", not a commit id",
+    );
+    let listed = planted("such as 18e64fc,", "such as 18e64fg,");
+    reports(
+        &listed.malformed_commits(),
+        "row C14 cites \"18e64fg\", not a commit id",
     );
     let single = planted("| 9a6354e, b509a5f, d2742bf |", "| 9a6354e |");
     reports(&single.malformed_commits(), "row C12 cites 1 commits");

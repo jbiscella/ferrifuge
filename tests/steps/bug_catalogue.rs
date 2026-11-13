@@ -85,6 +85,10 @@ fn every_status_is_known(world: &mut ClientWorld) {
 
 #[then("every scenario a covered or gap row names is the name of a scenario in CLAUDE.md")]
 fn every_scenario_exists(world: &mut ClientWorld) {
+    assert_none(
+        "covered rows without evidence",
+        catalogue(world).covered_without_evidence(),
+    );
     assert_none("unknown scenarios", catalogue(world).unknown_scenarios());
 }
 
