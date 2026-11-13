@@ -605,3 +605,51 @@ async fn fake_server_answers_subscribe_and_unsubscribe() {
     assert_eq!(replies[3], r#"{"id":4,"unsubscribe":{}}"#);
     assert_eq!(ignored[1], "no reply");
 }
+
+/// Block 48, D5's canary: the pinned Centrifugo selects no application
+/// protocol on its WebTransport listener, so a QUIC client offering `h3`
+/// fails its handshake locally with `no_application_protocol` (0x178).
+/// Ferrifuge retries without ALPN for that server; the day a release
+/// negotiates `h3`, this fails.
+#[cfg(feature = "unstable-webtransport")]
+#[tokio::test]
+async fn the_pinned_centrifugo_selects_no_alpn_for_webtransport() {
+    use std::sync::Arc;
+    use wtransport::quinn;
+
+    tls::create();
+    let (cert, key) = tls::server_pem();
+    let server = Centrifugo::start_http3(&[], &cert, &key, true).await;
+    let mut roots = ferrifuge::rustls::RootCertStore::empty();
+    roots.add(tls::ca_der()).expect("the test CA");
+    let mut config =
+        ferrifuge::rustls::ClientConfig::builder_with_provider(Arc::new(tls::provider()))
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.alpn_protocols = vec![b"h3".to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(config))
+        .expect("a QUIC configuration");
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("a socket");
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let address = server.webtransport_address().parse().expect("an address");
+
+    let handshake = tokio::time::timeout(
+        Duration::from_secs(10),
+        endpoint.connect(address, "localhost").expect("a handshake"),
+    )
+    .await
+    .expect("an answer within 10 s");
+
+    match handshake {
+        Err(quinn::ConnectionError::TransportError(error))
+            if error.code == quinn::TransportErrorCode::crypto(120) => {}
+        Ok(_) => panic!(
+            "Centrifugo {TAG} negotiates h3 on WebTransport: revisit Block 48 D5 (the retry without \
+             ALPN and its endpoint memory) and D17 (the browser limitation), and the README's \
+             \"WebTransport (unstable)\" section on ALPN and the browser"
+        ),
+        Err(other) => panic!("an unexpected handshake failure: {other:?}"),
+    }
+}

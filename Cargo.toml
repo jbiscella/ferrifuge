@@ -25,13 +25,14 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features, test-util, cookies and unstable,
-# natively and for the browser target, where cookies builds nothing: never
-# fips, whose build needs Go and CMake (Block 20, D7; Block 37, D7; Block
-# 43, D8; Block 44, D19; Block 45, D17).
+# docs.rs builds the default features, test-util, cookies, unstable and
+# unstable-webtransport (a ring build), natively and for the browser target,
+# where cookies and unstable-webtransport build nothing: never fips, whose
+# build needs Go and CMake (Block 20, D7; Block 37, D7; Block 43, D8; Block
+# 44, D19; Block 45, D17; Block 48, D21).
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
-features = ["test-util", "cookies", "unstable"]
+features = ["test-util", "cookies", "unstable", "unstable-webtransport"]
 
 [features]
 default = ["tokio", "ring", "browser"]
@@ -372,3 +373,9 @@ required-features = ["tokio"]
 [[example]]
 name = "delta"
 required-features = ["tokio"]
+
+# WebTransport first, websocket after it (Block 48); its release build is
+# checked for sha2 and x509-parser symbols (D3).
+[[example]]
+name = "webtransport"
+required-features = ["unstable-webtransport"]
