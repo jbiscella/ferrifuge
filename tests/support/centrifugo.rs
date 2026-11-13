@@ -4,6 +4,7 @@
 //! scenario can start its own config variant.
 
 use serde_json::Value;
+use testcontainers::core::logs::LogFrame;
 use testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers::core::{ContainerPort, Host, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -29,6 +30,13 @@ const INTERNAL_PORT: u16 = 9000;
 /// and on a CI runner that many Centrifugo containers starting at the same
 /// time miss testcontainers' 60 s wait for their health endpoint.
 static STARTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+/// How long one health probe may take. testcontainers' probe has no
+/// timeout of its own: a probe that hangs, e.g. on a connection the Docker
+/// proxy accepted before the container could take it, waits through the
+/// whole startup timeout instead of being sent again.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The container's last log lines kept for a start that fails.
+const KEPT_LOG_LINES: usize = 50;
 
 pub(crate) struct Centrifugo {
     /// Removed asynchronously by [`Centrifugo::stop`] or on drop: dropping
@@ -64,6 +72,7 @@ impl Centrifugo {
 
     async fn launch(env: &[(&str, &str)], tls: Option<(&str, &str)>, config: Option<&str>) -> Self {
         let api_port = if tls.is_some() { INTERNAL_PORT } else { PORT };
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let mut image = GenericImage::new(IMAGE, TAG).with_exposed_port(ContainerPort::Tcp(PORT));
         if tls.is_some() {
             image = image.with_exposed_port(ContainerPort::Tcp(INTERNAL_PORT));
@@ -72,8 +81,26 @@ impl Centrifugo {
             .with_wait_for(WaitFor::http(
                 HttpWaitStrategy::new("/health")
                     .with_port(ContainerPort::Tcp(api_port))
-                    .with_expected_status_code(200u16),
+                    .with_expected_status_code(200u16)
+                    .with_client(
+                        reqwest::Client::builder()
+                            .timeout(PROBE_TIMEOUT)
+                            .build()
+                            .expect("a probe client"),
+                    ),
             ))
+            .with_log_consumer({
+                let logs = std::sync::Arc::clone(&logs);
+                move |frame: &LogFrame| {
+                    let mut logs = logs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if logs.len() == KEPT_LOG_LINES {
+                        logs.pop_front();
+                    }
+                    logs.push_back(String::from_utf8_lossy(frame.bytes()).trim_end().to_owned());
+                }
+            })
             .with_cmd(match config {
                 Some(_) => vec!["centrifugo", "--config", CONFIG_PATH],
                 None => vec!["centrifugo"],
@@ -101,7 +128,18 @@ impl Centrifugo {
         }
         let container = {
             let _starting = STARTING.acquire().await.expect("never closed");
-            request.start().await.expect("start Centrifugo container")
+            let started = std::time::Instant::now();
+            request.start().await.unwrap_or_else(|error| {
+                // What the server printed tells a slow start from one that
+                // failed (StartupTimeout, providers #43230880500).
+                let logs = logs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                panic!(
+                    "start Centrifugo container: {error:?} after {:?}, {} other starts in flight; its last log lines:\n{}",
+                    started.elapsed(),
+                    8 - STARTING.available_permits() - 1,
+                    logs.iter().cloned().collect::<Vec<_>>().join("\n")
+                )
+            })
         };
 
         let host = container.get_host().await.expect("container host");
