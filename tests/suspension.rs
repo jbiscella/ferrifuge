@@ -208,7 +208,8 @@ async fn a_ping_that_arrived_during_a_suspension_beats_the_no_ping_deadline() {
 
 /// The fairness of the driver's bias (Block 49, row 28/55): with the
 /// transport ready on every turn, a refresh timer that is due fires as the
-/// 33rd input, after 32 from the transport. While the client is held its refresh comes due and the fake
+/// 33rd input of the branches above the timers, after 16 pings (each a
+/// frame and an actions wake). While the client is held its refresh comes due and the fake
 /// server queues a flood of pings, all readable at once on resume; the
 /// token callback reads how many messages the client had read by then.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -276,10 +277,12 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
     let _ = release.send(());
     until("the refresh", || read_at_refresh.lock().unwrap().is_some()).await;
     let taken = read_at_refresh.lock().unwrap().expect("checked above") - before;
-    // The resumed select! had waited, so the streak runs 1 to 32 and the
-    // turn the transport sits out fires the refresh: the 33rd input.
+    // Each ping read is two inputs of the branches above the timers: its
+    // frame, then the actions wake its handling queues. The streak of 32
+    // is reached after 16 pings, and the turn the transport sits out fires
+    // the refresh: the 33rd input. An off-by-one in the yield reads 17.
     assert!(
-        taken <= 32,
-        "the refresh fired after {taken} inputs of the flood"
+        taken <= 16,
+        "the refresh fired after {taken} pings of the flood"
     );
 }
