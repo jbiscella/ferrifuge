@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
 const NOT_YET_IMPLEMENTED: &[&str] = &[
-    "Bug-pattern catalogue",
     "Byte-split matrix",
     "Real-server chaos",
     "Soak run",

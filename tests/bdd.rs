@@ -569,6 +569,11 @@ const IMPLEMENTED: &[&str] = &[
     "Going offline does nothing to a disconnected client",
     "A page entering the back/forward cache reconnects with its own reason",
     "Coming online after going offline keeps the jitter window",
+    // Block 49a: the bug-pattern catalogue.
+    "Every pattern of centrifuge-rust's catalogue has a status",
+    "Every covered entry and every gap names a scenario or test that exists",
+    "Every fix commit an entry cites exists",
+    "Every probe records its mutation and where it was seen failing",
 ];
 
 /// Server configuration of @A scenarios.
