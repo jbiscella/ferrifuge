@@ -21,7 +21,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &[
     "Byte-split matrix",
     "Real-server chaos",
     "Soak run",
-    "WebTransport (unstable)",
 ];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
@@ -378,4 +377,32 @@ Feature: G
         )
     );
     assert_eq!(inherited, BTreeSet::from(["Under a P feature".to_owned()]));
+}
+
+/// Block 48, D4: wtransport's `ClientConfig::default` reads the platform's
+/// roots as `with_native_certs` does, but a trait method is no path the
+/// root `clippy.toml` can refuse, so the sources are checked instead; and
+/// wtransport's `dangerous-configuration` feature is never enabled.
+#[test]
+fn wtransport_configures_nothing_of_its_own() {
+    let mut files = Vec::new();
+    rust_files(Path::new("src"), &mut files);
+    for file in files {
+        let text = read(&file);
+        for banned in [
+            "ClientConfig::default",
+            "wtransport::ClientConfig as Default",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "{} names {banned} (Block 48, D4)",
+                file.display()
+            );
+        }
+    }
+    let manifest = read(Path::new("Cargo.toml"));
+    assert!(
+        !manifest.contains("dangerous-configuration"),
+        "Cargo.toml enables wtransport's dangerous-configuration (Block 48, D4)"
+    );
 }
