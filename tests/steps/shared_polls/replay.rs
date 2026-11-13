@@ -496,10 +496,7 @@ async fn an_error(world: &mut ClientWorld, code: u32) {
 #[then("get_signature is called for the tracked keys")]
 async fn signed_again(world: &mut ClientWorld) {
     let calls = world.shared_polls.signature_calls.clone();
-    wait_until("a second get_signature call", || {
-        calls.len() >= 2
-    })
-    .await;
+    wait_until("a second get_signature call", || calls.len() >= 2).await;
     assert_eq!(signature_calls(world)[1], ["a", "b"]);
 }
 

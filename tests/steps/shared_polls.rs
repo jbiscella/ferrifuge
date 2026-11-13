@@ -657,12 +657,7 @@ fn track_before_subscribe(world: &mut ClientWorld, key: String) {
 
 #[then("get_signature has not been called")]
 fn not_called(world: &mut ClientWorld) {
-    assert!(
-        world
-            .shared_polls
-            .signature_calls
-            .is_empty()
-    );
+    assert!(world.shared_polls.signature_calls.is_empty());
 }
 
 #[then(
@@ -745,12 +740,7 @@ async fn nothing_within_a_second(world: &mut ClientWorld) {
     tokio::time::sleep(QUIET_PERIOD).await;
     let channel = world.shared_poll().channel().to_owned();
     assert_eq!(sub_refreshes(world, &channel), Vec::<Value>::new());
-    assert!(
-        world
-            .shared_polls
-            .signature_calls
-            .is_empty()
-    );
+    assert!(world.shared_polls.signature_calls.is_empty());
 }
 
 #[when("untrack is called with those keys")]
@@ -1553,7 +1543,10 @@ async fn called_a_second_time(world: &mut ClientWorld, key: String, seconds: u64
     let calls = &world.shared_polls.signature_calls;
     let (first, second) = (calls.at(1).expect("a call"), calls.at(2).expect("a call"));
     let gap = second.duration_since(first);
-    assert!(gap <= window, "called a second time {gap:?} after the first");
+    assert!(
+        gap <= window,
+        "called a second time {gap:?} after the first"
+    );
     assert_eq!(signature_calls(world)[1], [key]);
 }
 
