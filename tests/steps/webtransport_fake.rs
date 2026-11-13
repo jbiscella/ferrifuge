@@ -21,6 +21,9 @@ use crate::support::fake_webtransport::{
 
 /// Margin over the configured timeout of a step that waits for it.
 const TOLERANCE: Duration = Duration::from_secs(1);
+/// The handshake timeout of the clients of the scenarios counting QUIC
+/// handshakes (see [`configure_fake`]).
+const STALL_PROOF_HANDSHAKE: Duration = Duration::from_secs(60);
 /// The reconnect-advised code the fake server ends a session with.
 const RECONNECT: (u32, &str) = (3001, "shutdown");
 /// Runs of the @E scenario's plan, whose delays are compared with the
@@ -49,10 +52,20 @@ fn fake_webtransport(world: &ClientWorld) -> &FakeWebTransport {
 /// Configures the scenario's client with only the fake server's
 /// WebTransport endpoint, starting a fake server selecting `h3` if the
 /// scenario has none.
+///
+/// The client gets a handshake timeout no runner stall reaches: these
+/// scenarios count the QUIC handshakes the fake server is offered, and at
+/// the 5 s default a slow first handshake timed out, the client tried
+/// again, and the fake counted 2 where 1 was expected (providers fips, job
+/// 131763180478). The handshake timeout is not what they test.
 async fn configure_fake(world: &mut ClientWorld) {
     if world.webtransport.fake.is_none() {
         start(world, false).await;
     }
+    world
+        .limits
+        .handshake_timeout
+        .get_or_insert(STALL_PROOF_HANDSHAKE);
     let url = fake_webtransport(world).url();
     configure(world, vec![(TransportKind::WebTransport, url)]);
 }
@@ -83,7 +96,17 @@ async fn a_client_with_the_fake_endpoint(world: &mut ClientWorld) {
 async fn the_fake_server_counted(world: &mut ClientWorld, handshakes: usize) {
     // A handshake more, which the step must not miss, would come at once.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(fake_webtransport(world).handshakes(), handshakes);
+    let fake = fake_webtransport(world);
+    // A count off by one is either this client's own attempt failing and
+    // being made again (its failed attempts tell) or a connection from
+    // elsewhere (its address tells).
+    assert_eq!(
+        fake.handshakes(),
+        handshakes,
+        "QUIC connections from {:?}; the client's failed attempts: {}",
+        fake.remotes(),
+        world.client().statistics().failed_attempts
+    );
 }
 
 #[when("the fake server ends the session after a disconnect push with a reconnect-advised code")]
