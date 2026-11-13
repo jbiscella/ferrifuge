@@ -12,6 +12,15 @@
 //! (`CHROMEWEBDRIVER`, `GECKOWEBDRIVER`), else on the `PATH`.
 //! `FERRIFUGE_CENTRIFUGO` names a Centrifugo binary to run instead of the
 //! container, for runners without Docker (macOS).
+//!
+//! Built with `unstable-webtransport`, it also starts a Centrifugo serving
+//! TLS with HTTP/3 and WebTransport, in a container, and the WebTransport
+//! relay in front of it, which offers `h3` as browsers require (Block 48,
+//! D19). Its endpoint goes in `FERRIFUGE_W_WEBTRANSPORT`, its commands on
+//! the HTTP relay's control path; each browser gets the capabilities that
+//! make it trust the relay's certificate: Chrome the SPKI flag with QUIC
+//! forced on the relay's origin, Firefox `acceptInsecureCerts`. Safari's
+//! driver takes no capability from the runner.
 
 mod support;
 
@@ -170,8 +179,89 @@ impl Server {
     }
 }
 
+/// The WebTransport server and the relay in front of it (Block 48, D19).
+#[cfg(feature = "unstable-webtransport")]
+struct WebTransport {
+    server: Centrifugo,
+    relay: support::webtransport_relay::WebTransportRelay,
+}
+
+#[cfg(feature = "unstable-webtransport")]
+impl WebTransport {
+    /// Started with the container only: hosted macOS has no Docker, and a
+    /// Centrifugo binary run here serves no TLS.
+    async fn start(http_relay: &HttpProxy) -> Option<Self> {
+        if env::var_os("FERRIFUGE_CENTRIFUGO").is_some() {
+            return None;
+        }
+        support::tls::create();
+        let (cert, key) = support::tls::server_pem();
+        let server = Centrifugo::start_http3(SERVER, &cert, &key, true).await;
+        let relay = support::webtransport_relay::WebTransportRelay::start(
+            server.webtransport_address().to_owned(),
+        )
+        .await;
+        let state = relay.state();
+        // A handle of the API only: the harness keeps the server, to stop
+        // it before the runtime ends.
+        let api = server.api().clone();
+        http_relay.set_extra_control(std::sync::Arc::new(move |command: String| {
+            let state = std::sync::Arc::clone(&state);
+            let api = api.clone();
+            Box::pin(async move {
+                if let Some(answer) = state.control(&command) {
+                    return Some(answer);
+                }
+                // The server API, out of a page's reach (no CORS).
+                let channel = command.strip_prefix("webtransport-publish/")?;
+                let published = api
+                    .call(
+                        "publish",
+                        serde_json::json!({"channel": channel, "data": {"from": "api"}}),
+                    )
+                    .await;
+                Some(match published {
+                    Ok(_) => "ok".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                })
+            })
+        }));
+        Some(Self { server, relay })
+    }
+
+    /// The capabilities that make `browser` trust the relay, in a file the
+    /// runner reads (`WASM_BINDGEN_TEST_WEBDRIVER_JSON`).
+    fn capabilities(&self, browser: &Browser) -> Option<PathBuf> {
+        let capabilities = match browser.name {
+            "chrome" => serde_json::json!({"goog:chromeOptions": {"args": [
+                format!("--ignore-certificate-errors-spki-list={}", self.relay.spki_sha256()),
+                format!("--origin-to-force-quic-on={}", self.relay.origin()),
+            ]}}),
+            "firefox" => serde_json::json!({"acceptInsecureCerts": true}),
+            _ => return None,
+        };
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("webdriver-{}.json", browser.name));
+        std::fs::write(&path, capabilities.to_string()).expect("write the capabilities");
+        Some(path)
+    }
+
+    async fn stop(self) {
+        drop(self.relay);
+        self.server.stop().await;
+    }
+}
+
+/// What a run in a browser gets about WebTransport: the relay's endpoint
+/// and the browser's capabilities file.
+#[derive(Default)]
+struct WebTransportRun {
+    endpoint: Option<String>,
+    capabilities: Option<PathBuf>,
+}
+
 /// Runs the wasm tests in `browser`; whether they passed.
-fn run_in(browser: &Browser, server: &str, relay: &str) -> bool {
+fn run_in(browser: &Browser, server: &str, relay: &str, webtransport: &WebTransportRun) -> bool {
     let root = env!("CARGO_MANIFEST_DIR");
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -195,6 +285,12 @@ fn run_in(browser: &Browser, server: &str, relay: &str) -> bool {
         )
         .env("FERRIFUGE_W_SERVER", server)
         .env("FERRIFUGE_W_RELAY", relay);
+    if let Some(endpoint) = &webtransport.endpoint {
+        command.env("FERRIFUGE_W_WEBTRANSPORT", endpoint);
+    }
+    if let Some(capabilities) = &webtransport.capabilities {
+        command.env("WASM_BINDGEN_TEST_WEBDRIVER_JSON", capabilities);
+    }
     // The runner gives the whole run in a browser 20 s by default, not each
     // test; the run takes longer than that since 44e's sse tests.
     if env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
@@ -242,14 +338,30 @@ fn main() -> ExitCode {
         let relay = HttpProxy::start(server.address().to_owned()).await;
         (server, relay)
     });
+    #[cfg(feature = "unstable-webtransport")]
+    let webtransport = runtime.block_on(WebTransport::start(&relay));
     let mut failed = Vec::new();
     for browser in browsers {
         eprintln!("== {}", browser.name);
-        if !run_in(browser, server.address(), &relay.address()) {
+        #[cfg(feature = "unstable-webtransport")]
+        let run = webtransport
+            .as_ref()
+            .map(|webtransport| WebTransportRun {
+                endpoint: Some(webtransport.relay.url()),
+                capabilities: webtransport.capabilities(browser),
+            })
+            .unwrap_or_default();
+        #[cfg(not(feature = "unstable-webtransport"))]
+        let run = WebTransportRun::default();
+        if !run_in(browser, server.address(), &relay.address(), &run) {
             failed.push(browser.name);
         }
     }
     drop(relay);
+    #[cfg(feature = "unstable-webtransport")]
+    if let Some(webtransport) = webtransport {
+        runtime.block_on(webtransport.stop());
+    }
     runtime.block_on(server.stop());
     if failed.is_empty() {
         ExitCode::SUCCESS

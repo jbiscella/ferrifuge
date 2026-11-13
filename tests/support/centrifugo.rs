@@ -336,6 +336,7 @@ fn idempotency_key() -> String {
 }
 
 /// Client for the server HTTP API (<https://centrifugal.dev/docs/server/server_api>).
+#[derive(Clone)]
 pub(crate) struct ServerApi {
     http: reqwest::Client,
     base_url: String,

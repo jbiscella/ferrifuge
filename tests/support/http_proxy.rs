@@ -42,6 +42,15 @@ const MAX_BODY: usize = 1 << 20;
 /// cannot call (no CORS), answering `ok` or the error (Block 47, D17).
 const CONTROL: &str = "/_relay/";
 
+/// The answer to a control command the proxy does not know itself, from
+/// another test server it fronts (Block 48: the WebTransport relay's), or
+/// none.
+pub(crate) type ExtraControl = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub(crate) struct HttpProxy {
     port: u16,
     state: Arc<ProxyState>,
@@ -80,6 +89,8 @@ struct ProxyState {
     emulation_answered: AtomicUsize,
     /// Bumped to end every stream response open (Block 44, D18).
     end_streams: watch::Sender<u64>,
+    /// The commands of another test server (Block 48).
+    extra: Mutex<Option<ExtraControl>>,
 }
 
 impl HttpProxy {
@@ -104,6 +115,7 @@ impl HttpProxy {
             emulation_cookie: Mutex::new(None),
             emulation_answered: AtomicUsize::new(0),
             end_streams: watch::Sender::new(0),
+            extra: Mutex::new(None),
         });
         let app = axum::Router::new()
             .fallback(forward)
@@ -116,6 +128,11 @@ impl HttpProxy {
             state,
             server,
         }
+    }
+
+    /// Answers the control commands it does not know with `extra`.
+    pub(crate) fn set_extra_control(&self, extra: ExtraControl) {
+        *self.state.extra.lock().unwrap() = Some(extra);
     }
 
     /// Answers the next emulation request with 503 instead of relaying it.
@@ -290,7 +307,15 @@ async fn control(state: &ProxyState, command: &str) -> Response<Body> {
         };
         shared_poll_publish(state, channel, key, version).await
     } else {
-        return StatusCode::NOT_FOUND.into_response();
+        let extra = state.extra.lock().unwrap().clone();
+        let answer = match extra {
+            Some(extra) => extra(command.to_owned()).await,
+            None => None,
+        };
+        let Some(answer) = answer else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        answer
     };
     Response::builder()
         .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
