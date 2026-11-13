@@ -17,8 +17,19 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, 
 /// a test proxy can reach (Block 23).
 const SERVER_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "centrifugo.invalid"];
 
+/// One directory per test binary, so that two binaries run at once (a
+/// coverage run beside another) never share the files; a child process
+/// of the same binary, as the @P harness's fake server, finds them too.
 fn dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-ca")
+    let exe = std::env::current_exe().expect("the test binary");
+    let binary = exe
+        .file_stem()
+        .expect("a file name")
+        .to_string_lossy()
+        .into_owned();
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("test-ca")
+        .join(binary)
 }
 
 /// The CA certificate, in PEM.
@@ -35,8 +46,15 @@ fn server_key_path() -> PathBuf {
 }
 
 /// Creates a new CA and a server certificate signed by it, replacing those
-/// of an earlier run.
+/// of an earlier run, once per process: tests of one binary running at
+/// once share them (CI health, finding 2: a second `create` replaced the
+/// CA a running test had just read its certificate for).
 pub(crate) fn create() {
+    static CREATED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CREATED.get_or_init(create_once);
+}
+
+fn create_once() {
     let ca_key = KeyPair::generate().expect("CA key");
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
     ca_params
@@ -54,9 +72,17 @@ pub(crate) fn create() {
         .expect("server certificate");
 
     fs::create_dir_all(dir()).expect("test CA directory");
-    fs::write(ca_path(), ca_cert.pem()).expect("write CA certificate");
-    fs::write(server_cert_path(), server_cert.pem()).expect("write server certificate");
-    fs::write(server_key_path(), server_key.serialize_pem()).expect("write server key");
+    write_atomically(&ca_path(), &ca_cert.pem());
+    write_atomically(&server_cert_path(), &server_cert.pem());
+    write_atomically(&server_key_path(), &server_key.serialize_pem());
+}
+
+/// Writes `contents` to a file beside `path`, then renames it there: a
+/// reader never sees part of it.
+fn write_atomically(path: &std::path::Path, contents: &str) {
+    let partial = path.with_extension(format!("partial-{}", std::process::id()));
+    fs::write(&partial, contents).expect("write a test CA file");
+    fs::rename(&partial, path).expect("move a test CA file into place");
 }
 
 /// The server certificate and its private key, in PEM.
