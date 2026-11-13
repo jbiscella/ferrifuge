@@ -673,6 +673,9 @@ struct Continuity {
     previous: Option<TransportId>,
     /// Answers given so far, numbering the secrets.
     answers: u64,
+    /// Every fetch id the core used, per series: none may come twice.
+    used_tokens: std::collections::HashSet<FetchId>,
+    used: std::collections::HashSet<FetchId>,
 }
 
 /// An input the tap judges stale: its step must change nothing (I13).
@@ -2065,6 +2068,9 @@ impl Run {
                     }
                 };
                 if self.mode == Mode::Continuity {
+                    if !self.continuity.used_tokens.insert(fetch) {
+                        return Err(self.violation("I13", format!("token fetch {fetch:?} reused")));
+                    }
                     // A later fetch replaces those not answered yet.
                     for (earlier, _) in &self.continuity.tokens {
                         self.continuity
@@ -2083,7 +2089,7 @@ impl Run {
             | Action::FetchSubscriptionToken { .. }
             | Action::CancelSubscriptionToken(_)
             | Action::FetchSubscriptionData { .. }
-            | Action::CancelSubscriptionData(_)) => self.act_callback(action),
+            | Action::CancelSubscriptionData(_)) => self.act_callback(action)?,
             Action::FetchSubscriptionState {
                 subscription,
                 fetch,
@@ -2093,6 +2099,7 @@ impl Run {
                     return Err(self.violation("I5", "a state fetch after disconnect()"));
                 }
                 if self.mode == Mode::Continuity {
+                    self.fetch_used(fetch)?;
                     self.continuity.flows.insert(fetch, subscription);
                 }
                 let loaded = self.server.healed || self.rng.u32(0..10) > 0;
@@ -2166,9 +2173,10 @@ impl Run {
 
     /// The callbacks only mode `Continuity` uses: connect data, and a
     /// subscription's token and data (Block 49).
-    fn act_callback(&mut self, action: Action) {
+    fn act_callback(&mut self, action: Action) -> Step {
         match action {
             Action::FetchConnectData(fetch) => {
+                self.fetch_used(fetch)?;
                 let result = self.data_result();
                 let after = self.answer_delay();
                 self.schedule(after, Due::ConnectData(fetch, result));
@@ -2181,6 +2189,7 @@ impl Run {
                 fetch,
                 ..
             } => {
+                self.fetch_used(fetch)?;
                 self.continuity.flows.insert(fetch, subscription);
                 let token = self.secret("subscription token");
                 let roll = self.rng.u32(0..20);
@@ -2197,12 +2206,24 @@ impl Run {
                 fetch,
                 ..
             } => {
+                self.fetch_used(fetch)?;
                 self.continuity.flows.insert(fetch, subscription);
                 let result = self.data_result();
                 let after = self.answer_delay();
                 self.schedule(after, Due::SubscriptionData(fetch, result));
             }
             other => unreachable!("not a callback action: {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// A fetch of the series connect data and subscriptions share: its id
+    /// must be new (I13: the tap judges answers by these ids).
+    fn fetch_used(&mut self, fetch: FetchId) -> Step {
+        if self.continuity.used.insert(fetch) {
+            Ok(())
+        } else {
+            Err(self.violation("I13", format!("fetch {fetch:?} reused")))
         }
     }
 
