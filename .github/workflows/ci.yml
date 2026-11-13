@@ -569,11 +569,15 @@ jobs:
 
       # macOS has no GNU timeout: the job's timeout-minutes and the
       # harness's own run limit bound the run instead.
+      # The WebTransport scenarios too (Block 48, D19): the harness runs the
+      # binary with TLS and HTTP/3 as well, and trusts the test CA in the
+      # System keychain, as Safari's driver takes no capability.
       - name: The @W tests in Safari
-        run: cargo test --test browser
+        run: cargo test --test browser --features unstable-webtransport
         env:
           FERRIFUGE_BROWSERS: safari
           SAFARIDRIVER: /usr/bin/safaridriver
+          FERRIFUGE_TRUST_TEST_CA: "1"
 
   # Mobile builds (Block 24, D1): the library and its unit tests build for
   # Android and iOS, with ring and with aws-lc-rs; nothing runs on a device.

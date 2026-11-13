@@ -349,7 +349,7 @@ pub(crate) struct ApiError {
 }
 
 impl ServerApi {
-    fn new(base_url: &str) -> Self {
+    pub(crate) fn new(base_url: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.to_owned(),
