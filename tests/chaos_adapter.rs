@@ -108,6 +108,10 @@ struct Plan {
     slow: AtomicU64,
     /// A subscription's handler is inside a publication.
     in_publication: AtomicBool,
+    /// Events the subscriptions' handlers forwarded so far, counted after
+    /// each is sent and before the flag above is cleared: a quiescence
+    /// check that saw it unchanged read everything they forwarded.
+    forwarded: AtomicU64,
     panics: AtomicUsize,
     closes: AtomicUsize,
     unsubscribes: AtomicUsize,
@@ -200,6 +204,7 @@ fn subscription_handler(
             subscription.unsubscribe();
         }
         let _ = sender.send(event);
+        plan.forwarded.fetch_add(1, Ordering::SeqCst);
         plan.in_publication.store(false, Ordering::SeqCst);
     };
     (handler, events)
@@ -914,18 +919,24 @@ impl Run {
             if self.client.state() == State::Disconnected {
                 self.client.connect();
             }
+            // Taken before the reads: a handler that forwards after the
+            // last read changes it (Block 49).
+            let forwarded = self.forwarded();
             self.read_until_quiet(deadline).await?;
-            if self.quiescent() {
+            if self.quiescent() && self.forwarded() == forwarded {
                 break;
             }
             if Instant::now() > deadline {
                 return Err(self.violation(
                     "I4",
                     format!(
-                        "no quiescence {QUIESCENCE:?} after healing: client {:?}, subscriptions {:?}, {} calls unsettled",
+                        "no quiescence {QUIESCENCE:?} after healing: client {:?}, subscriptions {:?}, {} calls unsettled, a handler inside a publication: {}",
                         self.last_state,
                         self.subs.iter().map(|sub| sub.last_state).collect::<Vec<_>>(),
-                        self.calls.iter().filter(|(call, _)| !call.is_finished()).count()
+                        self.calls.iter().filter(|(call, _)| !call.is_finished()).count(),
+                        self.plan
+                            .as_ref()
+                            .is_some_and(|plan| plan.in_publication.load(Ordering::SeqCst))
                     ),
                 ));
             }
@@ -972,6 +983,13 @@ impl Run {
             }
             tokio::time::sleep(READ_WAIT).await;
         }
+    }
+
+    /// Events the handlers forwarded so far; 0 without handlers.
+    fn forwarded(&self) -> u64 {
+        self.plan
+            .as_ref()
+            .map_or(0, |plan| plan.forwarded.load(Ordering::SeqCst))
     }
 
     fn quiescent(&self) -> bool {
