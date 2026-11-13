@@ -5170,6 +5170,13 @@ mod tests {
         let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
         let records = Records::default();
         let subscriber = tracing_subscriber::registry().with(records.clone());
+        // While a single dispatcher is registered, tracing-core caches the
+        // interest of a callsite first reached on another thread from that
+        // thread's default subscriber: a test thread with none caches
+        // "never", and this test's subscriber then misses the record
+        // (macOS, run 43392682353). With a second dispatcher alive, every
+        // registered one is asked, this test's included.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
 
         tracing::subscriber::with_default(subscriber, || {
             slept(&mut core, Duration::from_secs(30));
