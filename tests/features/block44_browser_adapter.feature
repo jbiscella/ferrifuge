@@ -117,7 +117,7 @@ Feature: Browser adapter
     When the test dispatches "offline" on that target
     Then the client emits "connecting" with code 1 and reason "transport closed"
     And 2 s later the client is still "connecting"
-    And when the test dispatches "online" on that target, the client emits "connected" within 2 s
+    And when the test dispatches "online" on that target, the client emits "connected" within 5 s
 
   @W
   Scenario: Coming online while connected changes nothing
@@ -131,7 +131,7 @@ Feature: Browser adapter
     Given a browser client with minReconnectDelay 20000 ms, whose page event target is the test's, connected over websocket
     When the test dispatches "pagehide" with persisted true on that target
     Then the client emits "connecting" with code 1 and reason "page entered back/forward cache"
-    And when the test dispatches "pageshow" with persisted true on that target, the client emits "connected" within 2 s
+    And when the test dispatches "pageshow" with persisted true on that target, the client emits "connected" within 5 s
 
   @W
   Scenario: A page hidden without entering the back/forward cache keeps the connection

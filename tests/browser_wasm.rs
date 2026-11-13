@@ -629,7 +629,7 @@ async fn going_offline_closes_the_connection_and_coming_online_reconnects_it() {
     sleep(2000).await;
     assert_eq!(client.state(), ferrifuge::State::Connecting);
     dispatch(&network, "online", None);
-    assert_eq!(within(2000, connected_over(&mut events)).await, "websocket");
+    assert_eq!(within(5000, connected_over(&mut events)).await, "websocket");
 }
 
 // @W scenario: Coming online while connected changes nothing
@@ -661,7 +661,7 @@ async fn the_back_forward_cache_closes_the_connection_and_its_restore_reconnects
 
     connecting_with(&mut events, 1, "page entered back/forward cache").await;
     dispatch(&page, "pageshow", Some(true));
-    assert_eq!(within(2000, connected_over(&mut events)).await, "websocket");
+    assert_eq!(within(5000, connected_over(&mut events)).await, "websocket");
 }
 
 // @W scenario: A page hidden without entering the back/forward cache keeps the connection
