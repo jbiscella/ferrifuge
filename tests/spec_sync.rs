@@ -26,9 +26,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &["Byte-split matrix", "Real-server chaos",
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
     "What arrived during a process suspension beats a deadline that fired meanwhile",
-    "Seeded chaos on the core applies no stale answer",
-    "The core runner reports a planted continuity fault",
-    "Seeded chaos on the core leaks no secret",
     "Seeded chaos with handlers on the tokio client keeps the invariants",
     "A large reply delivered one byte per chunk costs what its size predicts",
     "Seeded real-server chaos keeps the invariants",
