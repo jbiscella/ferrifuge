@@ -14,13 +14,13 @@ use ferrifuge::{
 };
 use serde_json::{Value, json};
 
-use super::ClientWorld;
 use super::connection::a_connected_client;
 use super::delivery::wait_until;
 use super::recovery::{FAKE_EPOCH, next_subscribed, note_commands_before_disconnect};
 use super::server_subs::assert_next_connect_recovers;
 use super::subscriptions::{expect_subscription_event, next_publication, subscribe};
 use super::transports::server;
+use super::{ClientWorld, EVENT_TIMEOUT};
 
 /// The fake server's channel.
 const CHANNEL: &str = "news";
@@ -587,7 +587,28 @@ fn a_server_side_delta(world: &mut ClientWorld) {
 #[then(regex = r#"^the client emits an "error" event of kind "delta" with code (\d+)$"#)]
 async fn client_emits_a_delta_error(world: &mut ClientWorld, code: u32) {
     loop {
-        match world.next_event().await {
+        // Seen once on providers fips (run 43321598408): no event at all
+        // within 10 s, not reproduced in 180 local runs, under CPU load
+        // too. Where the delta stopped tells a push not written, one held
+        // unread, and an event not handed over apart.
+        // Just under `next_event`'s own limit, so that this report wins.
+        let limit = EVENT_TIMEOUT.saturating_sub(Duration::from_millis(500));
+        let event = tokio::time::timeout(limit, world.next_event()).await;
+        let Ok(event) = event else {
+            let client = world.client();
+            let fake = world.fake();
+            panic!(
+                "no event within {limit:?}: client {:?}, read-ahead (messages, bytes) {:?}, events held {}, statistics {:?}; fake server connections {}, sent (bytes, messages) {:?}, commands received {}",
+                client.state(),
+                client.read_ahead(),
+                client.held_events(),
+                client.statistics(),
+                fake.connections(),
+                fake.sent_traffic(),
+                fake.received().len(),
+            );
+        };
+        match event {
             ClientEvent::Error(error) => {
                 assert_eq!(
                     (error.kind, error.code),
