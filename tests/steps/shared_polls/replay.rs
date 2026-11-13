@@ -1,7 +1,6 @@
 //! Block 47c: keys kept across reconnects, replayed with the signatures
 //! and versions held, epochs, and the retries of a failing track.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
@@ -26,7 +25,7 @@ pub(super) async fn a_replaying_subscription(
     channel: &str,
     how: &str,
 ) -> bool {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     match how {
         r#" subscribed, tracking "a" with signature "sig1" from get_signature"# => {
             a_shared_poll_subscription(world, channel, |builder| {
@@ -254,8 +253,8 @@ async fn first_replay_request(world: &mut ClientWorld, key: String, signature: S
 
 #[then(regex = r#"^get_signature is called with key "(\w+)" only$"#)]
 async fn signed_only(world: &mut ClientWorld, key: String) {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
-    wait_until("a get_signature call", || !calls.lock().unwrap().is_empty()).await;
+    let calls = world.shared_polls.signature_calls.clone();
+    wait_until("a get_signature call", || !calls.is_empty()).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(signature_calls(world), [vec![key]]);
 }
@@ -496,9 +495,9 @@ async fn an_error(world: &mut ClientWorld, code: u32) {
 
 #[then("get_signature is called for the tracked keys")]
 async fn signed_again(world: &mut ClientWorld) {
-    let calls = Arc::clone(&world.shared_polls.signature_calls);
+    let calls = world.shared_polls.signature_calls.clone();
     wait_until("a second get_signature call", || {
-        calls.lock().unwrap().len() >= 2
+        calls.len() >= 2
     })
     .await;
     assert_eq!(signature_calls(world)[1], ["a", "b"]);
