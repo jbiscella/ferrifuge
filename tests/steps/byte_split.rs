@@ -7,8 +7,11 @@
 
 use cucumber::{given, then, when};
 use ferrifuge::{StreamFormat, decode_stream};
+use prost::Message as _;
+use serde_json::json;
 
 use super::ClientWorld;
+use crate::support::protobuf;
 
 /// The JSON connect reply of every body.
 const CONNECT_JSON: &str =
@@ -25,7 +28,7 @@ const CONNECT_PROTOBUF: &[u8] = b"\x13\x08\x01\x2a\x0f\x0a\x02c1\x12\x050.0.0\x3
 /// data: `Reply { push: { channel: "news", pub: { data } } }`, the data of
 /// 285 bytes being [`publication_data`].
 const PUBLICATION_PROTOBUF_HEAD: &[u8] =
-    b"\xac\x02\x22\xa9\x02\x12\x04news\x22\xa0\x02\x22\xa0\x02";
+    b"\xac\x02\x22\xa9\x02\x12\x04news\x22\xa0\x02\x22\x9d\x02";
 /// The Protobuf ping: an empty reply, length 0.
 const PING_PROTOBUF: &[u8] = b"\x00";
 
@@ -124,6 +127,7 @@ fn a_body(world: &mut ClientWorld, format: String) {
         );
         assert_eq!(expected[1].len() - 2, 300);
     }
+    real_replies(format, &expected);
     split.ends = framed
         .iter()
         .scan(0, |end, frame| {
@@ -134,6 +138,49 @@ fn a_body(world: &mut ClientWorld, format: String) {
     split.body = framed.concat();
     split.format = Some(format);
     split.expected = expected;
+}
+
+/// Checks that the literals are the replies they stand for, decoded as the
+/// server's (reviewer, #250): Protobuf with the `client.proto` types the
+/// fake server uses, each message exactly one length-delimited reply; JSON
+/// with serde. A malformed literal fails here rather than passing unseen,
+/// as the decoder splits messages without reading them. In the Given step,
+/// as the bdd binary runs no `#[test]`.
+fn real_replies(format: StreamFormat, messages: &[Vec<u8>]) {
+    if format == StreamFormat::HttpStreamProtobuf {
+        let replies: Vec<protobuf::Reply> = messages
+            .iter()
+            .map(|framed| {
+                let mut bytes = framed.as_slice();
+                let reply = protobuf::Reply::decode_length_delimited(&mut bytes)
+                    .unwrap_or_else(|error| panic!("{framed:02x?}: {error}"));
+                assert!(bytes.is_empty(), "{} bytes after the reply", bytes.len());
+                reply
+            })
+            .collect();
+        let connect = replies[0].connect.as_ref().expect("a connect reply");
+        assert_eq!(replies[0].id, 1);
+        assert_eq!(
+            (connect.client.as_str(), connect.version.as_str()),
+            ("c1", "0.0.0")
+        );
+        assert_eq!((connect.ping, connect.pong), (25, true));
+        let push = replies[1].push.as_ref().expect("a push");
+        assert_eq!(push.channel, "news");
+        let publication = push.r#pub.as_ref().expect("a publication");
+        assert_eq!(publication.data, publication_data().as_bytes());
+        assert_eq!(replies[2], protobuf::Reply::default());
+    } else {
+        let replies: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|message| serde_json::from_slice(message).expect("a JSON reply"))
+            .collect();
+        assert_eq!(replies[0]["id"], 1);
+        assert_eq!(replies[0]["connect"]["client"], "c1");
+        assert_eq!(replies[1]["push"]["channel"], "news");
+        assert_eq!(replies[1]["push"]["pub"]["data"]["text"], "€ and 𝄞");
+        assert_eq!(replies[2], json!({}));
+    }
 }
 
 #[when("it is delivered in two chunks, split at each byte offset in turn")]
