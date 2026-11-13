@@ -13,6 +13,21 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Unstable (`unstable` feature): the native WebTransport transport (Block
+  48a). `TransportKind::WebTransport` (`"webtransport"`) and the
+  `unstable-webtransport` cargo feature, which brings wtransport and quinn
+  and implies `unstable` and `tokio`. One bidirectional stream of an HTTP/3
+  session over QUIC, JSON or Protobuf, with the client's TLS settings, the
+  build's provider (`fips` included) and the real HTTP headers; `h3`
+  offered first, then no ALPN when the server selected none; fallback to
+  the next transport when UDP does not pass or the session is refused.
+  `build()` refuses a WebTransport endpoint that is not `https://`, one
+  without the native feature, with a connector, or with a raw TLS
+  configuration QUIC cannot use; a proxied attempt fails without a datagram.
+  A WebTransport stream that ends before the server answered, in the first
+  round, is a failed attempt with its `Error` event. In the browser the
+  transport is skipped until Block 48c.
+
 - Unstable (`unstable` feature): shared poll subscriptions track keys
   under signatures (Block 47a). `SharedPollSubscription`,
   `SharedPollSubscriptionBuilder`, `SharedPollSubscriptionEvent`,
