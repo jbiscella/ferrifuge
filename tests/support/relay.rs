@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -71,6 +71,34 @@ impl Gate {
     }
 }
 
+/// `socket` with send and receive buffers of `bytes`.
+fn sized(socket: TcpSocket, bytes: u32) -> TcpSocket {
+    socket
+        .set_recv_buffer_size(bytes)
+        .expect("a receive buffer size");
+    socket
+        .set_send_buffer_size(bytes)
+        .expect("a send buffer size");
+    socket
+}
+
+/// A connection to `target`, with buffers of `buffers` bytes if given.
+async fn connect(target: &str, buffers: Option<u32>) -> std::io::Result<TcpStream> {
+    let Some(bytes) = buffers else {
+        return TcpStream::connect(target).await;
+    };
+    let address = tokio::net::lookup_host(target)
+        .await?
+        .next()
+        .ok_or_else(|| std::io::Error::other("no address"))?;
+    let socket = if address.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    sized(socket, bytes).connect(address).await
+}
+
 /// Relays `inbound` to `outbound` both ways until either side ends, reading
 /// from `inbound` only while `gate` is open.
 async fn forward(
@@ -117,7 +145,27 @@ impl CountingRelay {
 
     /// Starts a relay to `target` treating connections as `mode` says.
     pub(crate) async fn start_in(target: String, mode: Mode) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+        Self::start_with(target, mode, None).await
+    }
+
+    /// Starts a forwarding relay to `target` whose sockets, both ways, have
+    /// send and receive buffers of `bytes` instead of the system's,
+    /// which grow to megabytes: what a client does not read then backs up
+    /// to the server sooner, whatever the runner's settings.
+    pub(crate) async fn start_with_buffers(target: String, bytes: u32) -> Self {
+        Self::start_with(target, Mode::Forward, Some(bytes)).await
+    }
+
+    async fn start_with(target: String, mode: Mode, buffers: Option<u32>) -> Self {
+        let listener = match buffers {
+            None => TcpListener::bind("127.0.0.1:0").await.expect("bind relay"),
+            // Accepted connections take the listener's buffer sizes.
+            Some(bytes) => {
+                let socket = sized(TcpSocket::new_v4().expect("a relay socket"), bytes);
+                socket.bind(([127, 0, 0, 1], 0).into()).expect("bind relay");
+                socket.listen(1024).expect("listen")
+            }
+        };
         let port = listener.local_addr().expect("relay address").port();
         let accepted = Arc::new(AtomicUsize::new(0));
         let accepted_at = Arc::new(Mutex::new(Vec::new()));
@@ -165,7 +213,7 @@ impl CountingRelay {
                             while waiting.load(Ordering::SeqCst) == Mode::Hold as u8 {
                                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                             }
-                            if let Ok(outbound) = TcpStream::connect(&target).await {
+                            if let Ok(outbound) = connect(&target, buffers).await {
                                 forward(inbound, outbound, gate, relayed).await;
                             }
                         });

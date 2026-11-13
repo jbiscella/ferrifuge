@@ -1042,6 +1042,9 @@ fn client_new_returns_an_error(world: &mut ClientWorld) {
     assert_eq!(error.kind, ferrifuge::ErrorKind::Configuration, "{error:?}");
 }
 
+/// Send and receive buffers of the slow consumer's relay sockets.
+const RELAY_BUFFER: u32 = 64 << 10;
+
 #[given(
     regex = r#"^a server whose channel "\w+" keeps a history of (\d+) publications and recovers up to (\d+), with a client queue of (\d+) MiB$"#
 )]
@@ -1078,10 +1081,19 @@ async fn a_server_with_a_long_history(
                 recovers.as_str(),
             ),
             ("CENTRIFUGO_CLIENT_QUEUE_MAX_SIZE", queue.as_str()),
+            // The queue never overflows (the recovery reply must fit it),
+            // so a write blocked this long is what cuts the client off
+            // (default 1 s).
+            ("CENTRIFUGO_WEBSOCKET_WRITE_TIMEOUT", "500ms"),
         ])
         .collect();
     let server = Centrifugo::start(&env).await;
-    world.relay = Some(CountingRelay::start(server.address().to_owned()).await);
+    // The publications that the client does not read must back up to the
+    // server: through a relay of autotuned sockets, megabytes of them sat
+    // in its buffers, and the server, never blocked long enough, kept the
+    // client (CI, run 43511075914).
+    world.relay =
+        Some(CountingRelay::start_with_buffers(server.address().to_owned(), RELAY_BUFFER).await);
     world.server = Some(server);
 }
 
