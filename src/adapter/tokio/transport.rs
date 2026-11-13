@@ -6,17 +6,21 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, Sleep};
 
+use super::head::HeadReader;
 use super::net::Network;
 use super::proxy::{Stream, dial};
 use crate::machine::{FrameId, FrameType};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::{TlsError, UrlError};
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::tungstenite::stream::Mode;
 use tokio_tungstenite::tungstenite::{Error, Message};
-use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// An open websocket connection to the server.
 ///
@@ -24,7 +28,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 /// and written while [`WebSocket::recv`] waits for the server, so a server
 /// that stops reading cannot freeze the client (Block 8).
 pub(crate) struct WebSocket {
-    stream: WebSocketStream<MaybeTlsStream<Stream>>,
+    stream: WebSocketStream<HeadReader<MaybeTlsStream<Stream>>>,
     /// Frames not yet handed to the stream, with their id and the time each
     /// was queued.
     queue: VecDeque<(FrameId, Message, Instant)>,
@@ -85,6 +89,67 @@ fn handshake_error(
     super::super::body::with_portal(error.to_string(), portal)
 }
 
+/// `stream` with TLS to the server for a `wss://` `request`, as
+/// tokio-tungstenite's `client_async_tls_with_config` would make it, with
+/// `tls`, the client's settings (Blocks 6 and 22); as it is for `ws://`.
+async fn secure(
+    stream: Stream,
+    request: &tokio_tungstenite::tungstenite::handshake::client::Request,
+    tls: Option<std::sync::Arc<rustls::ClientConfig>>,
+    network: &Network,
+) -> Result<MaybeTlsStream<Stream>, Error> {
+    match tokio_tungstenite::tungstenite::client::uri_mode(request.uri())? {
+        Mode::Plain => Ok(MaybeTlsStream::Plain(stream)),
+        Mode::Tls => {
+            let config = match tls {
+                Some(config) => config,
+                None => network
+                    .tls
+                    .config()
+                    .map_err(|error| Error::Io(std::io::Error::other(error)))?,
+            };
+            let host = request
+                .uri()
+                .host()
+                .ok_or(Error::Url(UrlError::NoHostName))?;
+            // rustls takes an IPv6 address without its brackets.
+            let host = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
+            let name = rustls::pki_types::ServerName::try_from(host)
+                .map_err(|_| Error::Tls(TlsError::InvalidDnsName))?
+                .to_owned();
+            tokio_rustls::TlsConnector::from(config)
+                .connect(name, stream)
+                .await
+                .map(MaybeTlsStream::Rustls)
+                .map_err(Error::Io)
+        }
+    }
+}
+
+/// The websocket handshake of `request` over `stream`, the head of the
+/// server's answer read whole first (Block 50b's finding: see `head`).
+async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    stream: S,
+    max_message: usize,
+) -> Result<
+    (
+        WebSocketStream<HeadReader<S>>,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    Error,
+> {
+    tokio_tungstenite::client_async_with_config(
+        request,
+        HeadReader::new(stream),
+        Some(websocket_config(max_message)),
+    )
+    .await
+}
+
 impl WebSocket {
     /// Opens a connection to `url` (`ws://` or `wss://`), asking for
     /// `subprotocol` if any. A frame not written within `timeout` of being
@@ -100,13 +165,13 @@ impl WebSocket {
         max_message: usize,
     ) -> Result<Self, String> {
         // Plain ws:// must work on hosts without platform certificates.
-        let secure = url
+        let secure_url = url
             .get(..6)
             .is_some_and(|s| s.eq_ignore_ascii_case("wss://"));
-        let connector = if secure {
-            Connector::Rustls(network.tls.config()?)
+        let tls = if secure_url {
+            Some(network.tls.config()?)
         } else {
-            Connector::Plain
+            None
         };
         let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
         // The stream to the server's host: the application's connector's
@@ -129,16 +194,14 @@ impl WebSocket {
         }
         // With the application's Cookie, in one header (Block 43, D3).
         network.add_cookies(url, request.headers_mut());
+        let stream = secure(stream, &request, tls, network)
+            .await
+            .map_err(|error| handshake_error(&error, url, network))?;
         // tungstenite fails the handshake unless the server accepts the
         // subprotocol asked for.
-        let (stream, response) = tokio_tungstenite::client_async_tls_with_config(
-            request,
-            stream,
-            Some(websocket_config(max_message)),
-            Some(connector),
-        )
-        .await
-        .map_err(|error| handshake_error(&error, url, network))?;
+        let (stream, response) = upgrade(request, stream, max_message)
+            .await
+            .map_err(|error| handshake_error(&error, url, network))?;
         network.store_cookies(url, response.status().as_u16(), response.headers());
         Ok(Self {
             stream,
@@ -297,7 +360,7 @@ impl WebSocket {
     /// Drops the connection with a TCP reset, discarding the data the server
     /// never read, rather than leaving the system to keep trying to send it.
     fn abort(self) {
-        let tcp = match self.stream.get_ref() {
+        let tcp = match self.stream.get_ref().get_ref() {
             MaybeTlsStream::Plain(stream) => stream.tcp(),
             MaybeTlsStream::Rustls(tls) => tls.get_ref().0.tcp(),
             _ => None,
@@ -504,7 +567,7 @@ mod tests {
         // Its echo is sent, and this end's reactor has seen it arrive: a
         // second frame is written then, at once.
         first_echoed.await.expect("the first echo");
-        let MaybeTlsStream::Plain(stream) = ws.stream.get_ref() else {
+        let MaybeTlsStream::Plain(stream) = ws.stream.get_ref().get_ref() else {
             unreachable!("a ws:// connection is plain");
         };
         let tcp = stream.tcp().expect("a direct connection");
@@ -761,6 +824,168 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    /// A stream that reads at most one byte at a time, as from a network
+    /// that delivers every byte in a segment of its own.
+    struct OneByteReads(tokio::io::DuplexStream);
+
+    impl AsyncRead for OneByteReads {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let mut one = [0; 1];
+            let mut byte = tokio::io::ReadBuf::new(&mut one);
+            ready!(Pin::new(&mut self.0).poll_read(cx, &mut byte))?;
+            buf.put_slice(byte.filled());
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for OneByteReads {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    /// Answers the upgrade request read from `server` with a 101 carrying
+    /// `extra` header bytes, and in the same write a text frame "hello".
+    async fn answer_with_a_frame(mut server: tokio::io::DuplexStream, extra: usize) {
+        use tokio::io::AsyncWriteExt;
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0; 1];
+            if server.read(&mut byte).await.unwrap() == 0 {
+                return;
+            }
+            request.extend_from_slice(&byte);
+        }
+        let request = String::from_utf8(request).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Sec-WebSocket-Key: ")
+                    .or_else(|| line.strip_prefix("sec-websocket-key: "))
+            })
+            .expect("a key");
+        let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+        let padding = "x".repeat(extra);
+        let answer = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nX-Padding: {padding}\r\n\r\n"
+        );
+        // An unmasked text frame "hello", sent with the head.
+        let frame = [&[0x81, 0x05][..], b"hello"].concat();
+        let _ = server
+            .write_all(&[answer.as_bytes(), &frame].concat())
+            .await;
+        let _ = server.flush().await;
+        // Kept open while the client reads.
+        tokio::time::sleep(TIMEOUT).await;
+    }
+
+    // Block 50b's finding: tungstenite fails a handshake whose head takes
+    // more than 64 small reads ("Attack attempt detected"); read whole
+    // first, it completes, and a frame sent with the head arrives.
+    #[tokio::test]
+    async fn a_head_read_one_byte_at_a_time_completes_the_upgrade_and_keeps_the_frame_after_it() {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(answer_with_a_frame(server, 0));
+        let request = "ws://localhost/connection/websocket"
+            .into_client_request()
+            .unwrap();
+
+        let (mut ws, response) =
+            tokio::time::timeout(TIMEOUT, upgrade(request, OneByteReads(client), LIMIT))
+                .await
+                .expect("the upgrade within the timeout")
+                .expect("the upgrade");
+
+        assert_eq!(response.status(), 101);
+        let message = tokio::time::timeout(TIMEOUT, ws.next())
+            .await
+            .expect("the frame within the timeout");
+        assert_eq!(message.unwrap().unwrap(), Message::text("hello"));
+    }
+
+    // Block 50b's finding (reviewer, (c)): a head over 64 KiB is handed to
+    // tungstenite, which still refuses it.
+    #[tokio::test]
+    async fn a_head_over_64_kib_still_fails_the_upgrade() {
+        for one_byte in [false, true] {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            tokio::spawn(answer_with_a_frame(server, 70 << 10));
+            let request = "ws://localhost/connection/websocket"
+                .into_client_request()
+                .unwrap();
+
+            let upgraded = if one_byte {
+                tokio::time::timeout(TIMEOUT, upgrade(request, OneByteReads(client), LIMIT))
+                    .await
+                    .map(|result| result.map(drop))
+            } else {
+                tokio::time::timeout(TIMEOUT, upgrade(request, client, LIMIT))
+                    .await
+                    .map(|result| result.map(drop))
+            };
+
+            let error = upgraded
+                .expect("an answer within the timeout")
+                .expect_err("a head over 64 KiB refused");
+            assert!(
+                matches!(error, Error::AttackAttempt),
+                "one byte at a time {one_byte}: {error}"
+            );
+        }
+    }
+
+    // Block 50b's finding (reviewer, (c)): a head the end of the stream
+    // cuts is handed over, and tungstenite reports the end.
+    #[tokio::test]
+    async fn a_head_cut_by_the_end_of_the_stream_fails_the_upgrade() {
+        use tokio::io::AsyncWriteExt;
+        let (client, mut server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            let mut request = [0; 4096];
+            let _ = server.read(&mut request).await;
+            let _ = server.write_all(b"HTTP/1.1 101 Switching").await;
+            drop(server);
+        });
+        let request = "ws://localhost/connection/websocket"
+            .into_client_request()
+            .unwrap();
+
+        let error = tokio::time::timeout(TIMEOUT, upgrade(request, client, LIMIT))
+            .await
+            .expect("an answer within the timeout")
+            .map(drop)
+            .expect_err("a head cut short refused");
+
+        assert!(
+            matches!(
+                error,
+                Error::Protocol(
+                    tokio_tungstenite::tungstenite::error::ProtocolError::HandshakeIncomplete
+                )
+            ),
+            "{error}"
+        );
     }
 
     #[tokio::test]
