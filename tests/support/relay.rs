@@ -28,6 +28,9 @@ pub(crate) enum Mode {
     Hold,
 }
 
+/// When a held connection was accepted, and when its client closed it.
+type Lifetime = (std::time::Instant, Option<std::time::Instant>);
+
 pub(crate) struct CountingRelay {
     port: u16,
     accepted: Arc<AtomicUsize>,
@@ -35,8 +38,12 @@ pub(crate) struct CountingRelay {
     to_clients: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
     server: JoinHandle<()>,
-    /// Connections held open in [`Mode::Silent`].
-    held: Arc<Mutex<Vec<TcpStream>>>,
+    /// Connections held open in [`Mode::Silent`]: what they send is read
+    /// and dropped, so that the relay sees when the client closes them.
+    held: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// When each connection held in [`Mode::Silent`] was accepted, and when
+    /// its client closed it, if it has.
+    silent: Arc<Mutex<Vec<Lifetime>>>,
     /// Gates of the forwarded connections, to stop them reading.
     gates: Arc<Mutex<Vec<Weak<Gate>>>>,
 }
@@ -114,7 +121,9 @@ impl CountingRelay {
         let to_clients = Arc::new(AtomicUsize::new(0));
         let mode = Arc::new(AtomicU8::new(mode as u8));
         let held = Arc::new(Mutex::new(Vec::new()));
+        let silent = Arc::new(Mutex::new(Vec::new()));
         let gates = Arc::new(Mutex::new(Vec::new()));
+        let lifetimes = Arc::clone(&silent);
         let relayed = Arc::clone(&to_clients);
         let (counter, current, holding, gating) = (
             Arc::clone(&accepted),
@@ -126,7 +135,20 @@ impl CountingRelay {
             while let Ok((inbound, _)) = listener.accept().await {
                 counter.fetch_add(1, Ordering::SeqCst);
                 match current.load(Ordering::SeqCst) {
-                    m if m == Mode::Silent as u8 => holding.lock().unwrap().push(inbound),
+                    m if m == Mode::Silent as u8 => {
+                        let index = {
+                            let mut lifetimes = lifetimes.lock().unwrap();
+                            lifetimes.push((std::time::Instant::now(), None));
+                            lifetimes.len() - 1
+                        };
+                        let lifetimes = Arc::clone(&lifetimes);
+                        holding.lock().unwrap().push(tokio::spawn(async move {
+                            let mut inbound = inbound;
+                            let mut buffer = [0; 4096];
+                            while matches!(inbound.read(&mut buffer).await, Ok(n) if n > 0) {}
+                            lifetimes.lock().unwrap()[index].1 = Some(std::time::Instant::now());
+                        }));
+                    }
                     m if m == Mode::Down as u8 => drop(inbound),
                     _ => {
                         let gate = Arc::new(Gate::default());
@@ -153,8 +175,20 @@ impl CountingRelay {
             mode,
             server,
             held,
+            silent,
             gates,
         }
+    }
+
+    /// How long each connection held in [`Mode::Silent`] stayed open until
+    /// its client closed it, in order; `None` while it is open.
+    pub(crate) fn silent_lifetimes(&self) -> Vec<Option<std::time::Duration>> {
+        self.silent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(accepted, closed)| closed.map(|closed| closed.duration_since(*accepted)))
+            .collect()
     }
 
     /// Bytes relayed from the target to clients so far.
@@ -209,6 +243,8 @@ impl CountingRelay {
 impl Drop for CountingRelay {
     fn drop(&mut self) {
         self.server.abort();
-        self.held.lock().unwrap().clear();
+        for held in self.held.lock().unwrap().drain(..) {
+            held.abort();
+        }
     }
 }

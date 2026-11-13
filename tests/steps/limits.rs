@@ -16,6 +16,11 @@ use crate::support::relay::{CountingRelay, Mode};
 
 /// Slack on timing assertions for scheduling on a loaded runner.
 const TOLERANCE: Duration = Duration::from_secs(1);
+/// Slack on the life of an attempt that never answers, past the handshake
+/// timeout: half the 3 s between the scenarios' 2 s handshake timeout and
+/// the default 5 s `timeout`, so that a client bounding the open with
+/// `timeout` still fails.
+const OPEN_TOLERANCE: Duration = Duration::from_millis(2500);
 /// The channel of the sized publications.
 const CHANNEL: &str = "news";
 
@@ -79,9 +84,40 @@ fn a_client_with_a_handshake_timeout_and_a_relayed_http_stream(
 )]
 async fn within_the_handshake_timeout_connected_over(world: &mut ClientWorld, transport: String) {
     let handshake = world.limits.handshake_timeout.expect("a handshake timeout");
-    // Shorter than `timeout`: a client bounding the open with it fails.
-    assert!(handshake + TOLERANCE < test_config().timeout);
-    connected_over_within(world, &transport, handshake + TOLERANCE).await;
+    let held = world
+        .relay
+        .as_ref()
+        .is_some_and(|relay| relay.is(Mode::Silent));
+    if !held {
+        // Shorter than `timeout`: a client bounding the open with it fails.
+        assert!(handshake + TOLERANCE < test_config().timeout);
+        connected_over_within(world, &transport, handshake + TOLERANCE).await;
+        return;
+    }
+    // A relay holds the attempt that never answers: what is bounded is that
+    // attempt's own life, from the relay accepting its connection to the
+    // client closing it, not the time to "connected", which also counts the
+    // next transport's open and connect reply on a real server ("not
+    // connected within 3s" with the sse attempt still under way, concurrency
+    // 8). Still shorter than `timeout`, so a client bounding the open with
+    // it fails.
+    assert!(handshake + OPEN_TOLERANCE < test_config().timeout);
+    connected_over_within(world, &transport, super::EVENT_TIMEOUT).await;
+    let relay = world.relay.as_ref().expect("checked above");
+    let lifetime = tokio::time::timeout(super::EVENT_TIMEOUT, async {
+        loop {
+            if let Some(Some(lifetime)) = relay.silent_lifetimes().first() {
+                return *lifetime;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the held attempt closed by the client");
+    assert!(
+        lifetime < handshake + OPEN_TOLERANCE,
+        "the attempt the relay held lasted {lifetime:?}, past the {handshake:?} handshake timeout"
+    );
 }
 
 #[given(
