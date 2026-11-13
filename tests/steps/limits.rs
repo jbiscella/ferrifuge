@@ -22,8 +22,8 @@ const CHANNEL: &str = "news";
 /// The options a Block 29 scenario sets before its client is created.
 #[derive(Debug, Default)]
 pub(crate) struct Limits {
-    handshake_timeout: Option<Duration>,
-    timeout: Option<Duration>,
+    pub(super) handshake_timeout: Option<Duration>,
+    pub(super) timeout: Option<Duration>,
     max_message_bytes: Option<usize>,
     /// The sans-IO core of the @E scenario.
     run: Option<OpenRun>,
@@ -92,7 +92,7 @@ async fn a_client_behind_a_silent_relay(world: &mut ClientWorld, handshake: u64,
 
 /// The next event past the "connecting" of `connect()`, which must be the
 /// error of the failed attempt, with a message ending with `ending`.
-async fn failed_attempt_ending_with(world: &mut ClientWorld, ending: &str) {
+pub(super) async fn failed_attempt_ending_with(world: &mut ClientWorld, ending: &str) {
     let event = loop {
         match world.next_event().await {
             ClientEvent::Connecting { .. } => {}

@@ -217,6 +217,10 @@ async fn a_client_over_a_transport_subscribed(
         world.protocol = Protocol::Protobuf;
     }
     let kind = super::transports::kind(&transport);
+    #[cfg(feature = "unstable-webtransport")]
+    if kind == ferrifuge::machine::TransportKind::WebTransport {
+        super::webtransport::webtransport_endpoint(world).await;
+    }
     let url = super::transports::server_url(server(world), kind);
     configure(world, vec![(kind, url)]);
     connect_and_wait(world).await;

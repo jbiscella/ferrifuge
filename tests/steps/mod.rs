@@ -76,6 +76,8 @@ mod test_support;
 mod tls;
 mod token;
 mod transports;
+#[cfg(feature = "unstable-webtransport")]
+mod webtransport;
 
 /// How long a step waits for an event it expects.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -270,6 +272,9 @@ pub(crate) struct ClientWorld {
     /// What a Block 47 scenario holds.
     #[cfg(feature = "unstable")]
     pub(crate) shared_polls: shared_polls::SharedPolls,
+    /// What a Block 48 scenario holds.
+    #[cfg(feature = "unstable-webtransport")]
+    pub(crate) webtransport: webtransport::WebTransportWorld,
 }
 
 type SubscriptionEvents = Pin<Box<dyn Stream<Item = SubscriptionEvent> + Send>>;

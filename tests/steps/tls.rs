@@ -133,6 +133,8 @@ fn a_client_with_a_raw_configuration(world: &mut ClientWorld, transport: String)
     let endpoint = match transport.as_str() {
         "websocket" => (TransportKind::WebSocket, server.websocket_url()),
         "http_stream" => (TransportKind::HttpStream, server.http_stream_url()),
+        #[cfg(feature = "unstable-webtransport")]
+        "WebTransport" => (TransportKind::WebTransport, server.webtransport_url()),
         other => panic!("a transport of the scenario, not {other}"),
     };
     let raw = raw_config(&[private_ca()], &["h2", "http/1.1"]);

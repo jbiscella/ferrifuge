@@ -115,7 +115,9 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
     }
 }
 
-#[then(regex = r#"^the client emits "disconnected" with code (\d+) and reason "([^"]*)"$"#)]
+#[then(
+    regex = r#"^(?:then )?the client emits "disconnected" with code (\d+) and reason "([^"]*)"$"#
+)]
 async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
     if super::connect_data::drives_a_machine(world) {
         super::connect_data::emitted_disconnected(world, code, &reason);
@@ -142,7 +144,21 @@ async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
 
 #[then("the client makes no new connection attempt")]
 async fn no_new_connection_attempt(world: &mut ClientWorld) {
-    let relay = world.relay.as_ref().expect("the relay");
+    // A client connected directly, e.g. over WebTransport, which no TCP
+    // relay can count (Block 48): an attempt would show in its events or
+    // its statistics.
+    let Some(relay) = world.relay.as_ref() else {
+        let attempts = |world: &ClientWorld| {
+            let statistics = world.client().statistics();
+            statistics.connects + statistics.failed_attempts
+        };
+        let before = attempts(world);
+        let events = world.events_during(QUIET_PERIOD).await;
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(attempts(world), before);
+        assert_eq!(world.client().state(), ferrifuge::State::Disconnected);
+        return;
+    };
     let before = relay.connections();
     tokio::time::sleep(QUIET_PERIOD).await;
     assert_eq!(relay.connections(), before);
