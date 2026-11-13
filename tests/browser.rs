@@ -19,7 +19,9 @@
 //! D19). Its endpoint goes in `FERRIFUGE_W_WEBTRANSPORT`, its commands on
 //! the HTTP relay's control path; each browser gets the capabilities that
 //! make it trust the relay's certificate: Chrome the SPKI flag with QUIC
-//! forced on the relay's origin, Firefox `acceptInsecureCerts`. Safari's
+//! forced on the relay's origin, Firefox `acceptInsecureCerts` with HTTP/3
+//! allowed under a root it does not ship
+//! (`network.http.http3.disable_when_third_party_roots_found`). Safari's
 //! driver takes no capability from the runner.
 
 mod support;
@@ -199,8 +201,7 @@ impl WebTransport {
         let server = Centrifugo::start_http3(SERVER, &cert, &key, true).await;
         let relay = support::webtransport_relay::WebTransportRelay::start(
             server.webtransport_address().to_owned(),
-        )
-        .await;
+        );
         let state = relay.state();
         // A handle of the API only: the harness keeps the server, to stop
         // it before the runtime ends.
@@ -237,7 +238,12 @@ impl WebTransport {
                 format!("--ignore-certificate-errors-spki-list={}", self.relay.spki_sha256()),
                 format!("--origin-to-force-quic-on={}", self.relay.origin()),
             ]}}),
-            "firefox" => serde_json::json!({"acceptInsecureCerts": true}),
+            "firefox" => serde_json::json!({
+                "acceptInsecureCerts": true,
+                "moz:firefoxOptions": {"prefs": {
+                    "network.http.http3.disable_when_third_party_roots_found": false,
+                }},
+            }),
             _ => return None,
         };
         let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

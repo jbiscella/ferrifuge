@@ -1428,7 +1428,18 @@ async fn a_browser_client_connects_over_webtransport_and_receives_a_publication(
 
         client.connect();
         subscription.subscribe();
-        let transport = connected_over(&mut events).await;
+        // Each failed attempt is logged: a browser's reason for refusing
+        // the session shows only there.
+        let transport = loop {
+            match next(&mut events).await {
+                ClientEvent::Error(error) => {
+                    wasm_bindgen_test::console_log!("{protocol:?}: {error:?}");
+                }
+                ClientEvent::Connected { transport, .. } => break transport,
+                ClientEvent::Connecting { .. } => {}
+                event => panic!("not connecting or connected: {event:?}"),
+            }
+        };
         subscribed(&mut subscription_events).await;
         let published = relay(&format!("webtransport-publish/{channel}")).await;
         let received = publication(&mut subscription_events).await;
