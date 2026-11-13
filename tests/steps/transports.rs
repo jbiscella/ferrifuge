@@ -27,7 +27,7 @@ const UNREACHABLE_SSE: &str = "http://127.0.0.1:1/connection/sse";
 /// Slack on timing assertions for scheduling on a loaded runner.
 const TOLERANCE: Duration = Duration::from_secs(1);
 /// Server ping interval of the scenario making the client send a pong.
-const PING_INTERVAL: Duration = Duration::from_secs(2);
+const PING_INTERVAL: Duration = Duration::from_secs(3);
 /// Size of the subscription tokens that fill the stalled connection: more
 /// than the client's socket and the relay's receive window take once the
 /// relay stops reading (about 2.6 MiB measured on Linux loopback), and
@@ -314,7 +314,9 @@ pub(super) async fn pinging_server_behind_an_http_proxy(world: &mut ClientWorld)
         .chain(SERVER_B.iter().copied())
         .chain([
             ("CENTRIFUGO_CLIENT_PING_INTERVAL", ping.as_str()),
-            ("CENTRIFUGO_CLIENT_PONG_TIMEOUT", "1s"),
+            // 2 s for a pong through the HTTP proxy, as the scenarios'
+            // "a pong timeout of 2 s" (CI health, finding 5).
+            ("CENTRIFUGO_CLIENT_PONG_TIMEOUT", "2s"),
         ])
         .collect();
     world.relay = None;
@@ -328,7 +330,10 @@ pub(super) async fn pinging_server_behind_an_http_proxy(world: &mut ClientWorld)
 async fn the_client_sends_a_command(world: &mut ClientWorld) {
     let proxy = world.http_proxy.as_ref().expect("an HTTP proxy");
     let rejecting = proxy.rejection_programmed();
-    let sent = tokio::time::timeout(PING_INTERVAL + TOLERANCE, async {
+    // The first ping comes within an interval; the pong's request then
+    // goes through the proxy, which a loaded runner may delay (CI health,
+    // finding 5).
+    let sent = tokio::time::timeout(PING_INTERVAL + EVENT_TIMEOUT, async {
         loop {
             let relayed = proxy
                 .requests_with_header("")
