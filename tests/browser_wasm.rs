@@ -1374,19 +1374,43 @@ async fn credentials_not_included_carry_no_cookie_over_sse() {
 }
 
 /// The WebTransport relay's endpoint, `tests/support/webtransport_relay.rs`
-/// (Block 48, D19): none when the harness runs no WebTransport server, as
-/// with a Centrifugo binary on hosted macOS, and the WebTransport tests are
-/// skipped.
+/// (Block 48, D19), which `tests/browser.rs` always starts.
 #[cfg(feature = "unstable")]
 const WEBTRANSPORT: Option<&str> = option_env!("FERRIFUGE_W_WEBTRANSPORT");
 
-/// The relay's endpoint, or none after saying why the test is skipped.
+/// The version of the page's Safari, as its user agent's `Version/x.y`
+/// gives it; none in another browser.
+#[cfg(feature = "unstable")]
+fn safari_version() -> Option<(u32, u32)> {
+    let navigator =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("navigator")).ok()?;
+    let agent = js_sys::Reflect::get(&navigator, &JsValue::from_str("userAgent"))
+        .ok()?
+        .as_string()?;
+    if !agent.contains("Safari/")
+        || ["Chrome/", "Chromium/", "Firefox/", "Edg/"]
+            .iter()
+            .any(|other| agent.contains(other))
+    {
+        return None;
+    }
+    let version = agent.split("Version/").nth(1)?.split(' ').next()?;
+    let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
+    Some((parts.next()??, parts.next().flatten().unwrap_or(0)))
+}
+
+/// The relay's endpoint. The tests are skipped only in a Safari older
+/// than 26.4, which has no `WebTransport` (D19); anywhere else a run
+/// without the relay fails.
 #[cfg(feature = "unstable")]
 fn webtransport_relay() -> Option<&'static str> {
-    if WEBTRANSPORT.is_none() {
-        wasm_bindgen_test::console_log!("no WebTransport relay in this run: skipped");
+    if let Some(version) = safari_version()
+        && version < (26, 4)
+    {
+        wasm_bindgen_test::console_log!("Safari {version:?} is older than 26.4: skipped");
+        return None;
     }
-    WEBTRANSPORT
+    Some(WEBTRANSPORT.expect("the WebTransport relay's endpoint (FERRIFUGE_W_WEBTRANSPORT)"))
 }
 
 #[cfg(feature = "unstable")]

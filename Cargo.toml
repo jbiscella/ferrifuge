@@ -292,7 +292,8 @@ required-features = ["tokio"]
 [[test]]
 name = "browser"
 harness = false
-required-features = ["tokio"]
+# With the WebTransport server and its relay (Block 48, D19).
+required-features = ["tokio", "unstable-webtransport"]
 
 # The @W tests, built for wasm32-unknown-unknown only (Block 44, D18).
 [[test]]

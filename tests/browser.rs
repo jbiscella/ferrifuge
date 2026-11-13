@@ -13,16 +13,19 @@
 //! `FERRIFUGE_CENTRIFUGO` names a Centrifugo binary to run instead of the
 //! container, for runners without Docker (macOS).
 //!
-//! Built with `unstable-webtransport`, it also starts a Centrifugo serving
-//! TLS with HTTP/3 and WebTransport, in a container, and the WebTransport
-//! relay in front of it, which offers `h3` as browsers require (Block 48,
-//! D19). Its endpoint goes in `FERRIFUGE_W_WEBTRANSPORT`, its commands on
-//! the HTTP relay's control path; each browser gets the capabilities that
-//! make it trust the relay's certificate: Chrome the SPKI flag with QUIC
+//! It also starts a Centrifugo serving TLS with HTTP/3 and WebTransport, a
+//! container or the binary, and the WebTransport relay in front of it,
+//! which offers `h3` as browsers require (Block 48, D19; the target needs
+//! `unstable-webtransport`). Its endpoint goes in
+//! `FERRIFUGE_W_WEBTRANSPORT`, its commands on the HTTP relay's control
+//! path; each browser gets the capabilities that make it trust the relay's
+//! certificate: Chrome the SPKI flag with QUIC
 //! forced on the relay's origin, Firefox `acceptInsecureCerts` with HTTP/3
 //! allowed under a root it does not ship
 //! (`network.http.http3.disable_when_third_party_roots_found`). Safari's
-//! driver takes no capability from the runner.
+//! driver takes no capability from the runner: with
+//! `FERRIFUGE_TRUST_TEST_CA` set, the harness trusts the test CA in the
+//! System keychain first (`sudo security add-trusted-cert`).
 
 mod support;
 
@@ -135,31 +138,14 @@ impl Server {
         let Some(binary) = env::var_os("FERRIFUGE_CENTRIFUGO") else {
             return Self::Container(Box::new(Centrifugo::start(SERVER).await));
         };
-        let port = TcpListener::bind("127.0.0.1:0")
-            .and_then(|listener| listener.local_addr())
-            .expect("a free port")
-            .port();
-        let child = Command::new(binary)
-            .envs(SERVER.iter().copied())
-            .env("CENTRIFUGO_HTTP_SERVER_ADDRESS", "127.0.0.1")
-            .env("CENTRIFUGO_HTTP_SERVER_PORT", port.to_string())
-            .env("CENTRIFUGO_HEALTH_ENABLED", "true")
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("start Centrifugo");
+        let port = free_port();
         let address = format!("127.0.0.1:{port}");
-        let health = format!("http://{address}/health");
-        let started = Instant::now();
-        while !reqwest::get(&health)
-            .await
-            .is_ok_and(|response| response.status().is_success())
-        {
-            assert!(
-                started.elapsed() < Duration::from_secs(30),
-                "Centrifugo did not start"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let child = spawn_binary(
+            &binary,
+            &[("CENTRIFUGO_HTTP_SERVER_PORT", port.to_string())],
+            &format!("http://{address}/health"),
+        )
+        .await;
         Self::Process(child, address)
     }
 
@@ -181,31 +167,91 @@ impl Server {
     }
 }
 
+/// A port nothing listens on, for a Centrifugo binary.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port()
+}
+
+/// Runs the Centrifugo `binary` on 127.0.0.1 with the browser server's
+/// configuration and `extra`, and waits for its `health` endpoint.
+async fn spawn_binary(binary: &std::ffi::OsStr, extra: &[(&str, String)], health: &str) -> Child {
+    let child = Command::new(binary)
+        .envs(SERVER.iter().copied())
+        .env("CENTRIFUGO_HTTP_SERVER_ADDRESS", "127.0.0.1")
+        .env("CENTRIFUGO_HEALTH_ENABLED", "true")
+        .envs(extra.iter().map(|(name, value)| (*name, value.as_str())))
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("start Centrifugo");
+    let started = Instant::now();
+    while !reqwest::get(health)
+        .await
+        .is_ok_and(|response| response.status().is_success())
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "Centrifugo did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    child
+}
+
 /// The WebTransport server and the relay in front of it (Block 48, D19).
-#[cfg(feature = "unstable-webtransport")]
 struct WebTransport {
-    server: Centrifugo,
+    server: Server,
     relay: support::webtransport_relay::WebTransportRelay,
 }
 
-#[cfg(feature = "unstable-webtransport")]
 impl WebTransport {
-    /// Started with the container only: hosted macOS has no Docker, and a
-    /// Centrifugo binary run here serves no TLS.
-    async fn start(http_relay: &HttpProxy) -> Option<Self> {
-        if env::var_os("FERRIFUGE_CENTRIFUGO").is_some() {
-            return None;
-        }
+    /// A Centrifugo serving TLS with HTTP/3 and WebTransport, as a
+    /// container, or as the binary `FERRIFUGE_CENTRIFUGO` names (hosted
+    /// macOS), and the relay in front of it. With
+    /// `FERRIFUGE_TRUST_TEST_CA` set, the test CA is first trusted in the
+    /// System keychain, for Safari, whose driver takes no capability.
+    async fn start(http_relay: &HttpProxy) -> Self {
         support::tls::create();
+        if env::var_os("FERRIFUGE_TRUST_TEST_CA").is_some() {
+            trust_test_ca();
+        }
         let (cert, key) = support::tls::server_pem();
-        let server = Centrifugo::start_http3(SERVER, &cert, &key, true).await;
-        let relay = support::webtransport_relay::WebTransportRelay::start(
-            server.webtransport_address().to_owned(),
-        );
+        let (server, upstream, api) = match env::var_os("FERRIFUGE_CENTRIFUGO") {
+            None => {
+                let server = Centrifugo::start_http3(SERVER, &cert, &key, true).await;
+                let upstream = server.webtransport_address().to_owned();
+                let api = server.api().clone();
+                (Server::Container(Box::new(server)), upstream, api)
+            }
+            Some(binary) => {
+                // TLS with HTTP/3 on one port, over TCP and UDP; the API and
+                // the health endpoint on the internal port, without TLS.
+                let (port, internal) = (free_port(), free_port());
+                let child = spawn_binary(
+                    &binary,
+                    &[
+                        ("CENTRIFUGO_HTTP_SERVER_PORT", port.to_string()),
+                        ("CENTRIFUGO_HTTP_SERVER_INTERNAL_PORT", internal.to_string()),
+                        ("CENTRIFUGO_HTTP_SERVER_TLS_ENABLED", "true".to_owned()),
+                        ("CENTRIFUGO_HTTP_SERVER_TLS_CERT_PEM", cert.clone()),
+                        ("CENTRIFUGO_HTTP_SERVER_TLS_KEY_PEM", key.clone()),
+                        ("CENTRIFUGO_HTTP_SERVER_TLS_EXTERNAL", "true".to_owned()),
+                        ("CENTRIFUGO_HTTP_SERVER_HTTP3_ENABLED", "true".to_owned()),
+                        ("CENTRIFUGO_WEBTRANSPORT_ENABLED", "true".to_owned()),
+                    ],
+                    &format!("http://127.0.0.1:{internal}/health"),
+                )
+                .await;
+                let upstream = format!("127.0.0.1:{port}");
+                let api =
+                    support::centrifugo::ServerApi::new(&format!("http://127.0.0.1:{internal}"));
+                (Server::Process(child, upstream.clone()), upstream, api)
+            }
+        };
+        let relay = support::webtransport_relay::WebTransportRelay::start(upstream);
         let state = relay.state();
-        // A handle of the API only: the harness keeps the server, to stop
-        // it before the runtime ends.
-        let api = server.api().clone();
         http_relay.set_extra_control(std::sync::Arc::new(move |command: String| {
             let state = std::sync::Arc::clone(&state);
             let api = api.clone();
@@ -227,7 +273,7 @@ impl WebTransport {
                 })
             })
         }));
-        Some(Self { server, relay })
+        Self { server, relay }
     }
 
     /// The capabilities that make `browser` trust the relay, in a file the
@@ -256,6 +302,24 @@ impl WebTransport {
         drop(self.relay);
         self.server.stop().await;
     }
+}
+
+/// Trusts the test CA in the System keychain (macOS), where Safari looks.
+fn trust_test_ca() {
+    let status = Command::new("sudo")
+        .args([
+            "security",
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+        ])
+        .arg(support::tls::ca_path())
+        .status()
+        .expect("run security add-trusted-cert");
+    assert!(status.success(), "the test CA is not trusted: {status}");
 }
 
 /// What a run in a browser gets about WebTransport: the relay's endpoint
@@ -344,30 +408,20 @@ fn main() -> ExitCode {
         let relay = HttpProxy::start(server.address().to_owned()).await;
         (server, relay)
     });
-    #[cfg(feature = "unstable-webtransport")]
     let webtransport = runtime.block_on(WebTransport::start(&relay));
     let mut failed = Vec::new();
     for browser in browsers {
         eprintln!("== {}", browser.name);
-        #[cfg(feature = "unstable-webtransport")]
-        let run = webtransport
-            .as_ref()
-            .map(|webtransport| WebTransportRun {
-                endpoint: Some(webtransport.relay.url()),
-                capabilities: webtransport.capabilities(browser),
-            })
-            .unwrap_or_default();
-        #[cfg(not(feature = "unstable-webtransport"))]
-        let run = WebTransportRun::default();
+        let run = WebTransportRun {
+            endpoint: Some(webtransport.relay.url()),
+            capabilities: webtransport.capabilities(browser),
+        };
         if !run_in(browser, server.address(), &relay.address(), &run) {
             failed.push(browser.name);
         }
     }
     drop(relay);
-    #[cfg(feature = "unstable-webtransport")]
-    if let Some(webtransport) = webtransport {
-        runtime.block_on(webtransport.stop());
-    }
+    runtime.block_on(webtransport.stop());
     runtime.block_on(server.stop());
     if failed.is_empty() {
         ExitCode::SUCCESS
