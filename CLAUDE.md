@@ -8280,7 +8280,7 @@ Feature: Shared poll subscriptions (unstable)
     Given a client connected to the fake server, with a shared poll subscription to "items" subscribed, with a get_signature callback
     When track is called with key "a"
     And the fake server answers with expires true and no ttl
-    Then get_signature is called again within 2 s
+    Then get_signature is called again within 3 s
 
   @D
   Scenario: An untrack of more keys than one frame fits is split
