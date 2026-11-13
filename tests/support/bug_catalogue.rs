@@ -37,6 +37,9 @@ pub(crate) const STATUSES: [&str; 4] = ["covered", "gap", "not applicable", "not
 /// What a probe's `Seen failing` says before its record is made (D7).
 pub(crate) const PENDING: &str = "pending";
 
+/// An own class's `Commits` cell when its class cell gives the commits.
+const LISTED: &str = "listed";
+
 const NUMBERED_HEADER: [&str; 6] = [
     "Id",
     "R",
@@ -101,14 +104,23 @@ pub(crate) struct Probe {
     pub(crate) seen_failing: String,
 }
 
+/// A row of "Findings for later pull requests".
+#[derive(Clone, Debug)]
+pub(crate) struct Finding {
+    pub(crate) id: String,
+    /// The `Row` cell: the id of the catalogue row the finding belongs to.
+    pub(crate) row: String,
+}
+
 /// The catalogue's tables, and the names of every scenario of `CLAUDE.md`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Catalogue {
     pub(crate) rows: Vec<Row>,
     pub(crate) probes: Vec<Probe>,
-    /// The ids of "Findings for later pull requests".
-    pub(crate) findings: BTreeSet<String>,
+    pub(crate) findings: Vec<Finding>,
     pub(crate) scenarios: BTreeSet<String>,
+    /// The scenarios of Blocks 50 and 51, which close some gaps (D2).
+    pub(crate) closing: BTreeSet<String>,
 }
 
 /// The cells of a table row, or `None` for a line that is not one. Only
@@ -163,11 +175,13 @@ fn tables(text: &str) -> Vec<(Vec<String>, Vec<Vec<String>>)> {
     tables
 }
 
-/// Block 49's section of `CLAUDE.md`: from its heading to the next block's.
-fn block_49(claude_md: &str) -> &str {
+/// Block `number`'s section of `CLAUDE.md`: from its heading to the next
+/// level-2 heading.
+fn block(claude_md: &str, number: u32) -> &str {
+    let heading = format!("\n## Block {number} ");
     let start = claude_md
-        .find("\n## Block 49 ")
-        .expect("no Block 49 in CLAUDE.md");
+        .find(&heading)
+        .unwrap_or_else(|| panic!("no Block {number} in CLAUDE.md"));
     let rest = &claude_md[start + 1..];
     let end = rest[1..].find("\n## ").map_or(rest.len(), |end| end + 1);
     &rest[..end]
@@ -205,11 +219,15 @@ impl Catalogue {
     pub(crate) fn parse(claude_md: &str) -> Self {
         let mut catalogue = Catalogue {
             scenarios: scenario_names(claude_md),
+            closing: [50, 51]
+                .into_iter()
+                .flat_map(|number| scenario_names(block(claude_md, number)))
+                .collect(),
             ..Catalogue::default()
         };
         let (mut numbered, mut sdk, mut own, mut probes, mut findings) =
             (false, false, false, false, false);
-        for (header, rows) in tables(block_49(claude_md)) {
+        for (header, rows) in tables(block(claude_md, 49)) {
             let header: Vec<&str> = header.iter().map(String::as_str).collect();
             if header == NUMBERED_HEADER || header == SDK_HEADER {
                 let table = if header == NUMBERED_HEADER {
@@ -248,7 +266,10 @@ impl Catalogue {
                 findings = true;
                 catalogue
                     .findings
-                    .extend(rows.into_iter().map(|row| row[0].clone()));
+                    .extend(rows.into_iter().map(|row| Finding {
+                        id: row[0].clone(),
+                        row: row[1].clone(),
+                    }));
             }
         }
         assert!(
@@ -358,42 +379,80 @@ impl Catalogue {
                     "not applicable" | "not reconstructible"
                 )
             })
-            .filter(|row| {
-                row.place
-                    .trim_matches(|c: char| c.is_whitespace() || c == '-')
-                    .is_empty()
-            })
+            .filter(|row| is_blank(&row.place))
             .map(|row| format!("{row} is {} without a reason", row.status))
             .collect()
     }
 
-    /// `gap` rows naming neither a probe, a scenario after the word
-    /// "probe", "probes" or "scenario", nor a finding of "Findings for
-    /// later pull requests".
+    /// `gap` rows that name none of: a probe of "Probes and their
+    /// mutations", a scenario of Block 50 or 51 (both in double quotes), or
+    /// a finding of "Findings for later pull requests" whose `Row` cell
+    /// names that row (D2).
     pub(crate) fn gaps_without_probe(&self) -> Vec<String> {
         self.rows
             .iter()
             .filter(|row| row.status == "gap")
             .filter(|row| {
-                let probe = introduced_names(&row.place)
-                    .iter()
-                    .any(|name| self.scenarios.contains(name));
-                let finding = words(&row.place).any(|word| self.findings.contains(word));
+                let probe = quoted(&row.place).iter().any(|name| {
+                    self.closing.contains(name)
+                        || self.probes.iter().any(|probe| probe.name == *name)
+                });
+                let finding = words(&row.place).any(|word| {
+                    self.findings
+                        .iter()
+                        .any(|finding| finding.id == word && finding.row == row.id)
+                });
                 !(probe || finding)
             })
-            .map(|row| format!("{row} is a gap naming no probe and no listed finding"))
+            .map(|row| {
+                format!(
+                    "{row} is a gap naming no probe, no Block 50 or 51 scenario and no finding \
+                     of its own"
+                )
+            })
             .collect()
     }
 
-    /// The commits our own classes cite, in their class and commit cells.
+    /// The commits each of our own classes cites: the entries of its
+    /// `Commits` cell, or, when that cell is `listed`, the commit ids its
+    /// class cell gives.
+    fn cited(row: &Row) -> Vec<&str> {
+        if row.commits == LISTED {
+            words(&row.class).filter(|word| is_commit(word)).collect()
+        } else {
+            row.commits.split(',').map(str::trim).collect()
+        }
+    }
+
+    /// The commits our own classes cite.
     pub(crate) fn commits(&self) -> BTreeSet<String> {
         self.rows
             .iter()
             .filter(|row| row.table == Table::Own)
-            .flat_map(|row| words(&row.class).chain(words(&row.commits)))
-            .filter(|word| is_commit(word))
+            .flat_map(Self::cited)
+            .filter(|commit| is_commit_id(commit))
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Each entry of an own class's `Commits` cell that is not a commit id,
+    /// and each class citing fewer than two commits: a class is a row when
+    /// fixed more than once (D6).
+    pub(crate) fn malformed_commits(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        for row in self.rows.iter().filter(|row| row.table == Table::Own) {
+            let cited = Self::cited(row);
+            for entry in cited.iter().filter(|entry| !is_commit_id(entry)) {
+                problems.push(format!("{row} cites {entry:?}, not a commit id"));
+            }
+            if cited.len() < 2 {
+                problems.push(format!(
+                    "{row} cites {} commits: a class is fixed more than once (D6)",
+                    cited.len()
+                ));
+            }
+        }
+        problems
     }
 
     /// Each commit of [`Catalogue::commits`] that is not an ancestor of
@@ -424,7 +483,7 @@ impl Catalogue {
     pub(crate) fn probes_without_mutation(&self) -> Vec<String> {
         self.probes
             .iter()
-            .filter(|probe| probe.mutation.is_empty())
+            .filter(|probe| is_blank(&probe.mutation))
             .map(|probe| format!("probe {:?} names no mutation", probe.name))
             .collect()
     }
@@ -454,35 +513,30 @@ pub(crate) fn quoted(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The quoted names that follow the word "probe", "probes" or "scenario"
-/// in `text`: the next quoted name after each.
-fn introduced_names(text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let pieces: Vec<&str> = text.split('"').collect();
-    // Even pieces are outside quotes; the piece after each is quoted.
-    for (index, outside) in pieces.iter().enumerate().step_by(2) {
-        let introduces = words(outside).any(|word| matches!(word, "probe" | "probes" | "scenario"));
-        if introduces && let Some(name) = pieces.get(index + 1) {
-            names.push((*name).to_owned());
-        }
-    }
-    names
-}
-
 /// The words of `text`: runs of letters, digits and underscores.
 fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|word| !word.is_empty())
 }
 
-/// A commit id as the catalogue cites one: 7 to 40 hexadecimal digits, at
-/// least one a decimal digit, so an English word is never taken for one.
-fn is_commit(word: &str) -> bool {
-    (7..=40).contains(&word.len())
-        && word
+/// A commit id: 7 to 40 lowercase hexadecimal digits.
+fn is_commit_id(entry: &str) -> bool {
+    (7..=40).contains(&entry.len())
+        && entry
             .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        && word.chars().any(|c| c.is_ascii_digit())
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// A commit id in prose: one with a decimal digit, so an English word made
+/// of the letters a to f is never taken for one.
+fn is_commit(word: &str) -> bool {
+    is_commit_id(word) && word.chars().any(|c| c.is_ascii_digit())
+}
+
+/// A cell holding nothing but spaces and dashes.
+fn is_blank(cell: &str) -> bool {
+    cell.chars()
+        .all(|c| c.is_whitespace() || matches!(c, '-' | '–' | '—'))
 }
 
 fn is_pull_request(text: &str) -> bool {
