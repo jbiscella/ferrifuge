@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- Unstable (`unstable` feature): WebTransport in the browser (Block 48c),
+  with the page's `WebTransport` (Chrome 97, Firefox 114, Safari 26.4),
+  through bindings of its own: one bidirectional stream, read into the
+  bounded inbox, frames written through its writer within
+  `Config::timeout`. A page without `WebTransport` skips the transport.
+  Against Centrifugo up to v6.10.3 it fails its handshake (no ALPN) and
+  the client falls back.
+
 - Unstable (`unstable` feature): WebTransport's recovery (Block 48b). An
   endpoint whose server selected no ALPN is remembered and started without
   it, until its server requires `h3` again; at most two handshakes an

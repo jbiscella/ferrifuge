@@ -1230,7 +1230,9 @@ impl ClientBuilder {
     /// origin, as Centrifugo's `allowed_origins` does.
     ///
     /// The websocket upgrade is unaffected: the browser sends its cookies by
-    /// their `SameSite` rules whatever this says.
+    /// their `SameSite` rules whatever this says, and so is a WebTransport
+    /// session (unstable), whose cookies the browser decides (Block 48,
+    /// D17).
     #[must_use]
     pub fn include_credentials(mut self, include: bool) -> Self {
         self.include_credentials = include;
