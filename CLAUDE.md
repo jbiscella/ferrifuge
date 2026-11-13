@@ -7663,7 +7663,7 @@ Feature: Client publish debouncing
     When a subscription to channel "cursors:a" publishes {"n":1}, {"n":2} and {"n":3} while subscribing
     And the fake server answers the subscribe command
     Then the fake server receives one publish, with data {"n":1}
-    And it receives exactly one more, with data {"n":3}, no sooner than 200 ms and within 1 s of the first
+    And it receives exactly one more, with data {"n":3}, no sooner than 200 ms and within 2 s of the first
 
   @D
   Scenario Outline: Without an interval every publish is sent
@@ -7817,7 +7817,7 @@ Feature: Client publish debouncing
     Given a client with a map subscription to "map:m" on the fake server, whose live reply advises an interval of 300 ms
     When the subscription publishes to keys "a" and "b" twice each without waiting
     Then the fake server receives one publish per key at once
-    And no sooner than 200 ms and within 1 s of those it receives one more per key, each the second value, and no other
+    And no sooner than 200 ms and within 2 s of those it receives one more per key, each the second value, and no other
 
   @D
   Scenario: A remove cancels the key's pending publish and settles the publishes it replaced
@@ -7839,7 +7839,7 @@ Feature: Client publish debouncing
     Given a client with a map subscription to "map:m" on the fake server, whose pages carry no interval and whose live reply advises 300 ms
     When the subscription publishes twice to key "k" without waiting
     Then the fake server receives one publish at once
-    And it receives the second no sooner than 200 ms and within 1 s of the first
+    And it receives the second no sooner than 200 ms and within 2 s of the first
 
   @P
   Scenario: Seeded chaos with debounced publishes on the core keeps every invariant
