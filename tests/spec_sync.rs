@@ -25,7 +25,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &["Real-server chaos", "Soak run"];
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
-    "A large reply delivered one byte per chunk costs what its size predicts",
     "Seeded real-server chaos keeps the invariants",
     "A server restart with the memory engine reports recovered false",
     "A server restart with the Redis engine loses nothing",

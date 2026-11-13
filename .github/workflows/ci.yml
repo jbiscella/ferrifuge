@@ -364,10 +364,17 @@ jobs:
       - name: Benchmarks
         run: cargo bench --bench dispatch -- --save-summary=json
 
+      # Block 50 (D5): one large reply decoded one byte per chunk.
+      - name: Decode benchmarks
+        run: cargo bench --bench decode -- --save-summary=json
+
       # Release, as the benchmark: the debug build would compile every
       # dependency again (about 2 min).
       - name: Gates on the benchmark counts
-        run: cargo test --release --test perf_gates -- --ignored
+        run: |
+          set -o pipefail
+          cargo test --release --test perf_gates -- --ignored --nocapture | tee perf_gates.txt
+          { echo '### Decoding one byte per chunk'; grep '^@P report' perf_gates.txt; } >> "$GITHUB_STEP_SUMMARY"
 
       # Gates, and reports the measured values in the job summary.
       - name: Allocations per publication

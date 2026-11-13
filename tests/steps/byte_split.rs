@@ -200,7 +200,7 @@ fn split_at_each_offset(world: &mut ClientWorld) {
     split.outcomes = (0..split.body.len())
         .map(|offset| {
             let (first, second) = split.body.split_at(offset);
-            (offset, decode_stream(format, &[first, second]))
+            (offset, decode_stream(format, [first, second]))
         })
         .collect();
 }

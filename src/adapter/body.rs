@@ -260,7 +260,10 @@ pub enum StreamFormat {
 /// The decoder's first error, as the transport would end with it.
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
-pub fn decode_stream(format: StreamFormat, chunks: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+pub fn decode_stream<C: AsRef<[u8]>>(
+    format: StreamFormat,
+    chunks: impl IntoIterator<Item = C>,
+) -> Result<Vec<Vec<u8>>, String> {
     let limit = crate::Config::default().max_message_bytes;
     let mut decoder = match format {
         StreamFormat::HttpStreamJson => Decoder::lines(limit),
@@ -270,7 +273,7 @@ pub fn decode_stream(format: StreamFormat, chunks: &[&[u8]]) -> Result<Vec<Vec<u
     };
     let mut messages = VecDeque::new();
     for chunk in chunks {
-        decoder.push(chunk, &mut messages)?;
+        decoder.push(chunk.as_ref(), &mut messages)?;
     }
     Ok(messages.into())
 }
