@@ -174,6 +174,12 @@ repository held while it carried that version, from the blocks of
 
 ### Fixed
 
+- A stream decoder no longer keeps what one large reply grew: after a
+  reply or a chunk over 64 KiB, the http_stream and WebTransport decoders
+  of both adapters, and the native sse decoder, keep at most 64 KiB, and
+  sse no longer hands every later message a buffer as large as an earlier
+  reply (Block 49d).
+
 - A reply or server ping that reached the socket while the process was
   suspended is handled before a deadline that expired meanwhile: the
   driver takes what the transport read first, with a turn for the timers
