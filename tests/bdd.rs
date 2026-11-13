@@ -579,8 +579,12 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
     ),
     ("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY", HMAC_SECRET),
     // An expired, unrefreshed connection is closed within a scenario
-    // (default 25 s).
-    ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "1s"),
+    // (default 25 s). 2 s, not 1: the client refreshes a 3 s token at 2.4
+    // to 2.7 s, and with 1 s a refresh stalled 1.7 s was closed as expired
+    // (3005) in 4 runs of 4, where 1.2 s passed; with 2 s the 1.7 s stall
+    // passes too. An unrefreshed 3 s token is still closed by 5 s, inside
+    // the 6 s windows (CI health, finding 1).
+    ("CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY", "2s"),
     ("CENTRIFUGO_HTTP_STREAM_ENABLED", "true"),
     ("CENTRIFUGO_SSE_ENABLED", "true"),
     // Anonymous clients subscribe to channels without namespace, whose
@@ -655,7 +659,8 @@ pub(crate) const SERVER_A: &[(&str, &str)] = &[
         "CENTRIFUGO_CHANNEL_NAMESPACES",
         r#"[{"name":"private"},{"name":"rec","history_size":10,"history_ttl":"300s","force_recovery":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"delta","history_size":10,"history_ttl":"300s","force_recovery":true,"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map","subscription_type":"map","map":{"mode":"persistent","stream_size":100,"stream_ttl":"300s","min_page_size":1,"default_page_size":2,"allow_publish_for_client":true,"allow_publish_for_anonymous":true,"allow_remove_for_client":true,"allow_remove_for_anonymous":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_private","subscription_type":"map","map":{"mode":"persistent"}},{"name":"map_rec","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s","stream_size":5,"min_page_size":1},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_eph","subscription_type":"map","map":{"mode":"ephemeral","key_ttl":"300s","min_page_size":1,"max_page_size":5},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_delta","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allowed_delta_types":["fossil"],"delta_publish":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"map_tag","subscription_type":"map","map":{"mode":"recoverable","key_ttl":"300s"},"allow_tags_filter":true,"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"game","map_clients_presence_channel_prefix":"clients:","map_users_presence_channel_prefix":"users:","allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"clients","subscription_type":"map_clients","map":{"mode":"recoverable","key_ttl":"60s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"users","subscription_type":"map_users","map":{"mode":"recoverable","key_ttl":"2s"},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_v","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_l","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true,"max_keys_per_connection":2},"allow_subscribe_for_client":true,"allow_subscribe_for_anonymous":true},{"name":"poll_private","subscription_type":"shared_poll","shared_poll":{"mode":"versioned","refresh_interval":"1s","publish_enabled":true}}]"#,
     ),
-    ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "1s"),
+    // As `CLIENT_EXPIRED_CLOSE_DELAY`, for subscription tokens.
+    ("CENTRIFUGO_CLIENT_EXPIRED_SUB_CLOSE_DELAY", "2s"),
     // Shared poll namespaces need a signature key and a refresh endpoint:
     // nothing listens on this one, as `poll_v` is written by the server API
     // (Block 47, D18).
