@@ -1095,7 +1095,7 @@ mod tests {
         .unwrap();
         transport.send(FrameId::for_tests(5), br#"{"id":2}"#.to_vec());
 
-        let inbound = tokio::time::timeout(Duration::from_secs(1), transport.recv(true)).await;
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
 
         // Reported with its frame, not as the end of the transport.
         assert_eq!(inbound, Ok(Inbound::Rejected(br#"{"id":2}"#.to_vec())));
