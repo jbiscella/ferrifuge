@@ -320,6 +320,12 @@ pedantic = { level = "warn", priority = -1 }
 name = "dispatch"
 harness = false
 
+# Block 50 (D5): decoding one large reply one byte per chunk.
+[[bench]]
+name = "decode"
+harness = false
+required-features = ["tokio"]
+
 [[test]]
 name = "perf_alloc"
 harness = false
