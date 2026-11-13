@@ -29,6 +29,7 @@ pub(crate) const STALL_PROOF_STEPS: &[&str] = &[calls::PENDING_CALL_STEP, batchi
 mod auto_batching;
 mod backoff;
 mod batching;
+mod bug_catalogue;
 mod calls;
 mod clones;
 mod close;
@@ -223,6 +224,8 @@ pub(crate) struct ClientWorld {
     pub(crate) batching: batching::Batching,
     pub(crate) delta: delta::Delta,
     pub(crate) release: release::Release,
+    /// What a Block 49a scenario read.
+    pub(crate) bug_catalogue: bug_catalogue::BugCatalogue,
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,

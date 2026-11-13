@@ -2,6 +2,7 @@
 
 #![allow(dead_code)] // Each test target uses a different subset.
 
+pub(crate) mod bug_catalogue;
 pub(crate) mod centrifugo;
 pub(crate) mod fake_server;
 #[cfg(feature = "unstable-webtransport")]
