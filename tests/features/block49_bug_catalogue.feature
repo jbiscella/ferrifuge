@@ -60,11 +60,11 @@ Feature: Bug-pattern catalogue
     Then the client is disconnected before disconnect returns
     And the relay's connection closes within 1 s
 
-  @D
+  @E
   Scenario: A transport the client closed reports no error
-    Given a client connected to the fake server, with its events read
-    When disconnect is called
-    Then no error event was emitted between the call and "disconnected"
+    Given a machine that closed its transport on a connect timeout and is opening the next one
+    When the closed transport reports a read error as its close
+    Then the machine returns no action
 
   @A
   Scenario Outline: A terminal disconnect push right before the end of an HTTP stream stops the client

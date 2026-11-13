@@ -9095,10 +9095,10 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 7, 46 | R | An app callback re-enters the client mid-step and the step continues on stale state (the emit-then-re-check pattern of §1.1) | §1.1, §7.2 | not applicable | the core takes one input to completion and hands events out only after the step (Block 0, sans-IO); the failure needs nested execution, which it does not have. 46's half about dropping a result of an abandoned attempt is row 6 |
 | 8 | R | A call made while `disconnected` either hangs or fails, depending on the path | §9.3 | covered | "A call on a client never connected fails after the timeout"; "A call made while connecting waits for the connection" (Block 13 keeps the same rule) |
 | 9, 42 | R | A refresh of an ended session acts on the current one, or doubles the refresh chain | §6.6, §7.6 | covered | `src/machine.rs::late_refresh_token_after_reconnect_is_discarded`; `tests/adapter_tokens.rs::a_late_refresh_denial_disconnects_after_the_new_connection_refreshed` |
-| 11 | R | The failure of a superseded connect attempt is reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |
+| 11 | R | The failure of a superseded connect attempt is reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); "A transport the client closed reports no error" (its close) |
 | 12 | R (part) | Each failed transport advances the fallback exactly once; a transport-specific sse half is unknown | §5.8, §12 | covered | generic half: "The fallback sequence is retried until a transport succeeds"; "WebTransport falls back to websocket when UDP is unreachable". sse-specific half: not reconstructible (§12 names it, no rule states it) |
 | 13, 66 | F, R | A transport that hangs or was never proven pins the client; a temporary error must not loop at zero delay | §5.8 | covered | "An HTTP stream that never answers the handshake falls back", "An emulated transport the server answered is kept", "A failed fallback sequence is retried after the reconnect backoff" |
-| 14 | R | The close or read error of a transport the client itself closed is reported as an error event | §6.5 | gap | probe "A transport the client closed reports no error" |
+| 14 | R | The close or read error of a transport the client itself closed is reported as an error event | §6.5 | gap | probe "A transport the client closed reports no error"; the adapters stop reading a transport the core closes (they drop it at `Action::CloseTransport`), so a regression shows in the core, which other owners drive too |
 | 15, 81 | R | A live publication overtakes recovered ones; items after a teardown in the same frame are dispatched | §9.2, §5.3 | covered | I8 ("Seeded chaos with subscriptions on the core keeps every invariant"); "Messages after a disconnect in the same frame are discarded"; `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects` |
 | 16, 68 | R | The stored position moves for a publication the app never received | §7.4 | covered | "Publications not taken before disconnect are recovered on the next connect"; "Only publications taken count as delivered" |
 | 18 | R | A final disconnect push written just before the transport ends is lost; a disconnect of a stale transport acts | §5.7, §6.5 | gap | stale half covered by `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored`; end-of-stream half: probe "A terminal disconnect push right before the end of an HTTP stream stops the client" |
@@ -9285,11 +9285,11 @@ Feature: Bug-pattern catalogue
     Then the client is disconnected before disconnect returns
     And the relay's connection closes within 1 s
 
-  @D
+  @E
   Scenario: A transport the client closed reports no error
-    Given a client connected to the fake server, with its events read
-    When disconnect is called
-    Then no error event was emitted between the call and "disconnected"
+    Given a machine that closed its transport on a connect timeout and is opening the next one
+    When the closed transport reports a read error as its close
+    Then the machine returns no action
 
   @A
   Scenario Outline: A terminal disconnect push right before the end of an HTTP stream stops the client
@@ -9365,10 +9365,10 @@ Feature: Bug-pattern catalogue
 | What arrived during a process suspension beats a deadline that fired meanwhile | driver loop `biased` with the timer branch first (D8: the unbiased order may already fail) | pending |
 | A stream decoder releases what a large reply grew | today's code: capacity never released (D8) | pending |
 | A websocket that answers with data that is not client protocol advances the fallback at once | undecodable data before the first message handled as "transport still silent" | pending |
-| Dropping the last clone of a client inside its handler ends the client | `Owner::drop` joining the delivery thread from inside it | pending |
+| Dropping the last clone of a client inside its handler ends the client | `Owner::drop` waiting until the events thread has exited, a join by hand (std's `JoinHandle::join` from that thread panics with EDEADLK on Linux instead of hanging) | pending |
 | Disconnect during a websocket handshake that never finishes ends it at once | `opening` kept when the core closes the attempt | pending |
-| A transport the client closed reports no error | an error event emitted on every `Inbound::Closed` | pending |
-| A terminal disconnect push right before the end of an HTTP stream stops the client | the end of the body handled before the frames decoded from it | pending |
+| A transport the client closed reports no error | the `self.is_current(transport)` guard removed from the `Input::TransportClosed` arm of `Machine::handle` | pending |
+| A terminal disconnect push right before the end of an HTTP stream stops the client | the end of the body handled before the frames decoded from it: after a chunk, the body's next item awaited for up to 50 ms, and an end then returned as the close with the chunk's frames dropped | pending |
 | A panic in the client's driver ends the client visibly | the drop guard not feeding `Input::DriverDropped` while panicking | pending |
 | An emulation request that never answers ends the transport within the timeout | `tokio::time::timeout` removed from the emulation request | pending |
 | Command ids skip 0 when they wrap | `.max(1)` removed | pending |

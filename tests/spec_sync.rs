@@ -552,7 +552,7 @@ fn the_catalogue_reports_a_gap_without_a_probe_or_a_listed_finding() {
 #[test]
 fn the_catalogue_reports_a_covered_row_without_evidence() {
     let cleared = planted(
-        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |",
+        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
         "reported to the app | §6.5 | covered |  |",
     );
     reports(
@@ -569,7 +569,7 @@ fn the_catalogue_reports_a_covered_row_without_evidence() {
     );
     // An invariant is evidence for our own classes only.
     let invariant_only = planted(
-        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` |",
+        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
         "reported to the app | §6.5 | covered | I13 |",
     );
     reports(

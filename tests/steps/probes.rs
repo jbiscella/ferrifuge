@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
-use ferrifuge::machine::TransportKind;
+use ferrifuge::machine::{Action, Input, Machine, Timer, TransportId, TransportKind};
 use ferrifuge::{
     CallError, Client, ClientEvent, Config, EventDelivery, ServerSubscriptionEvent, State,
     Subscription,
@@ -20,13 +20,13 @@ use ferrifuge::{
 use futures_util::FutureExt as _;
 use serde_json::json;
 
-use super::batching::{connected_run, run};
+use super::batching::{BatchRun, connected_run, run};
 use super::connection::a_connected_client;
 use super::delivery::wait_until;
 use super::transports::{
     PING_INTERVAL, configure, connect_and_wait, pinging_server_behind_an_http_proxy,
 };
-use super::{ClientWorld, EVENT_TIMEOUT, QUIET_PERIOD};
+use super::{ClientWorld, EVENT_TIMEOUT};
 use crate::support::fake_server::Rpc;
 use crate::support::relay::{CountingRelay, Mode};
 
@@ -103,31 +103,39 @@ async fn the_relays_connection_closes(world: &mut ClientWorld, seconds: u64) {
 
 // --- A transport the client closed reports no error (14) -----------------
 
-#[given("a client connected to the fake server, with its events read")]
-async fn a_client_whose_events_are_read(world: &mut ClientWorld) {
-    a_connected_client(world).await;
-    // Whatever came with the connection is read: what follows is the
-    // disconnect's.
-    let _ = world.events_during(QUIET_PERIOD).await;
+#[given("a machine that closed its transport on a connect timeout and is opening the next one")]
+fn a_machine_opening_the_next_transport(world: &mut ClientWorld) {
+    let machine = Machine::new(Config::default())
+        .with_transports(vec![TransportKind::WebSocket, TransportKind::HttpStream])
+        .expect("two transports");
+    let mut run = BatchRun::of(machine);
+    run.handle(Input::Connect);
+    let closed = run.transport.expect("the first transport opening");
+    run.handle(Input::TransportOpened(closed));
+    // No connect reply: the connect timeout closes it and opens the next,
+    // at once within the first sequence (a timer of no delay).
+    run.handle(Input::TimerFired(Timer::ConnectTimeout));
+    run.advance(Duration::ZERO);
+    assert!(
+        run.actions.contains(&Action::CloseTransport(closed)),
+        "{:?}",
+        run.actions
+    );
+    let next = run.transport.expect("the next transport opening");
+    assert_ne!(next, closed);
+    run.mark = run.actions.len();
+    world.probes.closed_transport = Some(closed);
+    world.batching.run = Some(run);
 }
 
-#[then(r#"no error event was emitted between the call and "disconnected""#)]
-async fn no_error_before_disconnected(world: &mut ClientWorld) {
-    let mut seen = Vec::new();
-    loop {
-        let event = world.next_event().await;
-        let disconnected = matches!(event, ClientEvent::Disconnected { .. });
-        seen.push(event);
-        if disconnected {
-            break;
-        }
-    }
-    assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, ClientEvent::Error(_))),
-        "{seen:?}"
-    );
+#[when("the closed transport reports a read error as its close")]
+fn the_closed_transport_reports_a_read_error(world: &mut ClientWorld) {
+    let closed = world.probes.closed_transport.expect("a closed transport");
+    run(world).handle(Input::TransportClosed {
+        transport: closed,
+        code: None,
+        reason: "read error".to_owned(),
+    });
 }
 
 // --- Dropping the last clone of a client inside its handler (1) ----------
@@ -152,6 +160,8 @@ pub(crate) struct Probes {
     call: Option<Held>,
     ready: Option<Held>,
     subscription: Option<Subscription>,
+    /// The transport a machine closed (Block 49, row 14).
+    closed_transport: Option<TransportId>,
 }
 
 impl std::fmt::Debug for Probes {

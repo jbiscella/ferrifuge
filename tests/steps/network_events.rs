@@ -120,6 +120,12 @@ fn the_client_emits_no_event(world: &mut ClientWorld) {
 
 #[then("the machine returns no action")]
 fn the_machine_returns_no_action(world: &mut ClientWorld) {
+    // A Block 49 probe drives its core through the batching harness.
+    if super::batching::drives_a_machine(world) {
+        let run = super::batching::run(world);
+        assert_eq!(run.actions[run.mark..], [], "actions since the step");
+        return;
+    }
     let actions = since(world);
     assert!(actions.is_empty(), "{actions:?}");
 }
