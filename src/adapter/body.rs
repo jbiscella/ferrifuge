@@ -10,6 +10,12 @@ use bytes::BytesMut;
 use mediatype::{MediaType, Name, names};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
+/// What a decoder keeps between messages once a large reply, or a large
+/// chunk, grew its buffer (Block 49d, row 71). It releases the rest only
+/// when it holds no more than this, so a stream of messages below it never
+/// pays for a release.
+const KEPT: usize = 64 * 1024;
+
 /// The error of an HTTP transport's decoder when the server sent a message
 /// larger than the size limit, reported as `Inbound::TooLarge`.
 pub(in crate::adapter) const TOO_LARGE: &str = "message larger than the size limit";
@@ -67,12 +73,14 @@ pub(in crate::adapter) enum Decoder {
     Varint(Vec<u8>, usize),
 }
 
-/// sse-core's decoder and, for tests, the capacity it keeps for the next
-/// event's data: that of the last event's, as its `dispatch_message` hands
-/// the data over and allocates as much again.
+/// sse-core's decoder, the limit it was made with and, for tests, the
+/// capacity it keeps for the next event's data: that of the last event's,
+/// as its `dispatch_message` hands the data over and allocates as much
+/// again.
 #[cfg(adapter_tokio)]
 pub(in crate::adapter) struct Sse {
     decoder: sse_core::SseDecoder,
+    limit: NonZeroUsize,
     #[cfg(feature = "__test-hooks")]
     kept: usize,
 }
@@ -95,6 +103,7 @@ impl Decoder {
             let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
             Self::Sse(Sse {
                 decoder: sse_core::SseDecoder::with_limit(limit),
+                limit,
                 #[cfg(feature = "__test-hooks")]
                 kept: 0,
             })
@@ -140,6 +149,18 @@ impl Decoder {
                             {
                                 sse.kept = message.data.capacity();
                             }
+                            // sse-core would allocate as much again for the
+                            // next event: a decoder of its own, at this event
+                            // boundary, starts empty (row 71). By length, as
+                            // the capacity sse-core grows is not this one's.
+                            if message.data.len() > KEPT {
+                                released();
+                                sse.decoder = sse_core::SseDecoder::with_limit(sse.limit);
+                                #[cfg(feature = "__test-hooks")]
+                                {
+                                    sse.kept = 0;
+                                }
+                            }
                             let default = message.event.is_empty() || message.event == "message";
                             if default && !message.data.is_empty() {
                                 messages.push_back(message.data.into_bytes());
@@ -153,6 +174,7 @@ impl Decoder {
             }
             Self::Lines(codec, buffer) => {
                 buffer.extend_from_slice(chunk);
+                let held = buffer.len();
                 loop {
                     match codec.decode(buffer) {
                         Ok(Some(line)) => {
@@ -167,6 +189,15 @@ impl Decoder {
                         Err(_) => return Err(TOO_LARGE.to_owned()),
                     }
                 }
+                // The lines split off share the allocation, which `reserve`
+                // later reclaims whole: the bytes not yet split move to a
+                // buffer of their own (row 71).
+                if buffer.len() <= KEPT && (held > KEPT || buffer.capacity() > KEPT) {
+                    released();
+                    let mut kept = BytesMut::with_capacity(KEPT);
+                    kept.extend_from_slice(buffer);
+                    *buffer = kept;
+                }
             }
             Self::Varint(buffer, limit) => {
                 buffer.extend_from_slice(chunk);
@@ -177,6 +208,10 @@ impl Decoder {
                     start += end;
                 }
                 buffer.drain(..start);
+                if buffer.len() <= KEPT && buffer.capacity() > KEPT {
+                    released();
+                    buffer.shrink_to(KEPT);
+                }
             }
         }
         Ok(())
@@ -269,6 +304,18 @@ impl StreamDecoder {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The buffers released on this thread (row 71's unit tests).
+    static RELEASED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a release of a decoder's buffer, for the unit tests.
+fn released() {
+    #[cfg(test)]
+    RELEASED.with(|released| released.set(released.get() + 1));
+}
+
 /// Where the first reply of `bytes`, a Protobuf stream, ends, its uvarint
 /// length prefix included; `None` while more bytes are needed (Block 27,
 /// D3). A zero length is an empty reply, the server's ping.
@@ -293,4 +340,76 @@ fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, String> {
     }
     let end = prefix.len() + length;
     Ok((bytes.len() >= end).then_some(end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One decoder of each kind, with a limit above the largest reply.
+    fn decoders() -> Vec<StreamDecoderUnderTest> {
+        let limit = 2 << 20;
+        let mut decoders = vec![Decoder::lines(limit), Decoder::protobuf(limit)];
+        #[cfg(adapter_tokio)]
+        decoders.push(Decoder::new(true, limit));
+        decoders.into_iter().map(StreamDecoderUnderTest).collect()
+    }
+
+    struct StreamDecoderUnderTest(Decoder);
+
+    impl StreamDecoderUnderTest {
+        /// Pushes `size` bytes as one reply, in chunks of 16 KiB.
+        fn reply(&mut self, size: usize) {
+            let message = vec![b'a'; size];
+            let framed = match &self.0 {
+                #[cfg(adapter_tokio)]
+                Decoder::Sse(_) => [b"data: ", &message[..], b"\n\n"].concat(),
+                Decoder::Lines(..) => [&message[..], b"\n"].concat(),
+                Decoder::Varint(..) => {
+                    let mut framed = Vec::new();
+                    prost::encoding::encode_varint(size as u64, &mut framed);
+                    [framed, message].concat()
+                }
+            };
+            let mut messages = VecDeque::new();
+            for chunk in framed.chunks(16 << 10) {
+                self.0.push(chunk, &mut messages).unwrap();
+            }
+            assert_eq!(messages.len(), 1, "{:?}", self.0);
+        }
+    }
+
+    fn released_while(run: impl FnOnce()) -> usize {
+        let before = RELEASED.with(std::cell::Cell::get);
+        run();
+        RELEASED.with(std::cell::Cell::get) - before
+    }
+
+    // Row 71: replies below what a decoder keeps never pay for a release.
+    #[test]
+    fn replies_below_what_a_decoder_keeps_release_nothing() {
+        for mut decoder in decoders() {
+            let released = released_while(|| {
+                for _ in 0..100 {
+                    decoder.reply(40 << 10);
+                    decoder.reply(64);
+                }
+            });
+            assert_eq!(released, 0, "{:?}", decoder.0);
+        }
+    }
+
+    // Row 71: a large reply is released once, after it is split.
+    #[test]
+    fn a_large_reply_is_released_once() {
+        for mut decoder in decoders() {
+            let released = released_while(|| {
+                decoder.reply(1 << 20);
+                for _ in 0..10 {
+                    decoder.reply(64);
+                }
+            });
+            assert_eq!(released, 1, "{:?}", decoder.0);
+        }
+    }
 }
