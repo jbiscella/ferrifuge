@@ -27,10 +27,19 @@ const PORT: u16 = 8000;
 const CONFIG_PATH: &str = "/centrifugo/config.json";
 /// Port of the API and health endpoints when the client endpoints use TLS.
 const INTERNAL_PORT: u16 = 9000;
-/// Containers starting at once. Cucumber runs up to 64 scenarios together,
-/// and on a CI runner that many Centrifugo containers starting at the same
-/// time miss testcontainers' 60 s wait for their health endpoint.
-static STARTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+/// Containers Docker is asked to create and start at once. Docker works
+/// through concurrent starts and removals largely one after another, so
+/// each start's budget also paid for the others in flight: with 64 live
+/// containers and 8 starts at once, `docker run` took up to 27 s on an
+/// 8-core machine, and on CI's 4-core runners it passed testcontainers'
+/// 60 s (`StartupTimeout`, providers and test jobs, 13 jobs from 2026-11-06
+/// to 2026-11-12). At 8 live scenarios (`concurrency` in `bdd.rs`), 2 starts
+/// at once instead of 8 halved the p95 of a start (2.4 s, from 4.9-6.0 s)
+/// and ran the @A and @B scenarios in 232-240 s instead of 340-343 s. The
+/// health wait runs after the permit is released: it waits on Centrifugo,
+/// not on Docker.
+const STARTS_AT_ONCE: usize = 2;
+static STARTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(STARTS_AT_ONCE);
 /// How long one health probe may take. testcontainers' own probe has no
 /// timeout: a probe that hangs, e.g. on a connection the Docker proxy
 /// accepted before the container could take it, would wait through the
@@ -458,9 +467,9 @@ async fn start_and_wait(
     logs: &std::sync::Mutex<std::collections::VecDeque<String>>,
     requested: &std::sync::OnceLock<std::time::Instant>,
 ) -> ContainerAsync<GenericImage> {
-    let _starting = STARTING.acquire().await.expect("never closed");
+    let starting = STARTING.acquire().await.expect("never closed");
     let requested_at = *requested.get_or_init(std::time::Instant::now);
-    let others = 8 - STARTING.available_permits() - 1;
+    let others = STARTS_AT_ONCE - STARTING.available_permits() - 1;
     // Which phase took the time, and what the server printed
     // (StartupTimeout, providers, run 43230880500).
     let report = |what: String| {
@@ -482,6 +491,7 @@ async fn start_and_wait(
         )
     });
     let started_in = requested_at.elapsed();
+    drop(starting);
     let host = container.get_host().await.expect("container host");
     let health_port = container
         .get_host_port_ipv4(api_port)
