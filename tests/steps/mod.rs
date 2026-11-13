@@ -30,6 +30,7 @@ mod auto_batching;
 mod backoff;
 mod batching;
 mod bug_catalogue;
+mod byte_split;
 mod calls;
 mod clones;
 mod close;
@@ -229,6 +230,8 @@ pub(crate) struct ClientWorld {
     pub(crate) bug_catalogue: bug_catalogue::BugCatalogue,
     /// What a Block 49b probe holds.
     pub(crate) probes: probes::Probes,
+    /// The body and outcomes of a Block 50 @E scenario.
+    pub(crate) byte_split: byte_split::ByteSplit,
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,

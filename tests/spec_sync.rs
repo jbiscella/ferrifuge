@@ -20,7 +20,7 @@ mod bug_catalogue;
 
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &["Byte-split matrix", "Real-server chaos", "Soak run"];
+const NOT_YET_IMPLEMENTED: &[&str] = &["Real-server chaos", "Soak run"];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.

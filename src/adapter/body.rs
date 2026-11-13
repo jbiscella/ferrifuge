@@ -236,6 +236,45 @@ impl Decoder {
     }
 }
 
+/// The formats of a stream body, for tests only (Block 50, D3).
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamFormat {
+    /// `http_stream` with the JSON codec: one reply per line.
+    HttpStreamJson,
+    /// `sse` with the JSON codec: the data of each event. Native only.
+    #[cfg(adapter_tokio)]
+    SseJson,
+    /// `http_stream` with the Protobuf codec: each reply after its uvarint
+    /// length.
+    HttpStreamProtobuf,
+}
+
+/// Feeds `chunks` in turn to a new decoder of `format` at the default
+/// size limit, returning the messages it yielded, as the transport takes
+/// them: a Protobuf reply with its length prefix (Block 50, D3).
+///
+/// # Errors
+///
+/// The decoder's first error, as the transport would end with it.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn decode_stream(format: StreamFormat, chunks: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
+    let limit = crate::Config::default().max_message_bytes;
+    let mut decoder = match format {
+        StreamFormat::HttpStreamJson => Decoder::lines(limit),
+        #[cfg(adapter_tokio)]
+        StreamFormat::SseJson => Decoder::new(true, limit),
+        StreamFormat::HttpStreamProtobuf => Decoder::protobuf(limit),
+    };
+    let mut messages = VecDeque::new();
+    for chunk in chunks {
+        decoder.push(chunk, &mut messages)?;
+    }
+    Ok(messages.into())
+}
+
 /// A stream decoder of the HTTP-streaming and WebTransport transports, for
 /// tests only (Block 49d, row 71): the decoders of both adapters are these.
 #[cfg(feature = "__test-hooks")]

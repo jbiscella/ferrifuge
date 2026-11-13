@@ -585,6 +585,9 @@ const IMPLEMENTED: &[&str] = &[
     "An emulation request that never answers ends the transport within the timeout",
     // Block 49d: a decoder releases what a large reply grew.
     "A stream decoder releases what a large reply grew",
+    // Block 50a: the byte-split matrix of the stream decoders.
+    "A stream body split at every byte offset decodes the same",
+    "A stream body delivered one byte per chunk decodes the same",
 ];
 
 /// Server configuration of @A scenarios.

@@ -29,7 +29,7 @@ use self::browser as backend;
 use self::tokio as backend;
 
 #[cfg(feature = "__test-hooks")]
-pub use self::body::StreamDecoder;
+pub use self::body::{StreamDecoder, StreamFormat, decode_stream};
 #[cfg(all(adapter_tokio, target_os = "android"))]
 pub use self::tokio::android;
 #[cfg(adapter_tokio)]
