@@ -5,13 +5,10 @@ use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
 use ferrifuge::{CallError, SubscriptionEvent, codes};
-use futures_util::{Stream, StreamExt};
+use futures_util::{FutureExt as _, Stream, StreamExt};
 use tokio::task::JoinHandle;
 
 use super::{ClientWorld, EVENT_TIMEOUT};
-
-/// How soon "at once" settles: the future is settled when it is made.
-const AT_ONCE: Duration = Duration::from_millis(500);
 
 type Outcome = (Result<(), CallError>, Instant);
 
@@ -22,6 +19,9 @@ struct Waiting {
     made_at: Instant,
     task: Option<JoinHandle<Outcome>>,
     settled: Option<Outcome>,
+    /// Settled at its first poll, when it was made: what "at once" means
+    /// (CI health, finding 7).
+    at_first_poll: bool,
 }
 
 /// The `ready()` futures of a Block 30 scenario, and the subscription
@@ -46,6 +46,15 @@ fn track(
     future: impl std::future::Future<Output = Result<(), CallError>> + Send + 'static,
     made_at: Instant,
 ) -> Waiting {
+    let mut future = Box::pin(future);
+    if let Some(result) = (&mut future).now_or_never() {
+        return Waiting {
+            made_at,
+            task: None,
+            settled: Some((result, made_at)),
+            at_first_poll: true,
+        };
+    }
     Waiting {
         made_at,
         task: Some(tokio::spawn(async move {
@@ -53,6 +62,7 @@ fn track(
             (result, Instant::now())
         })),
         settled: None,
+        at_first_poll: false,
     }
 }
 
@@ -146,7 +156,10 @@ async fn ready_fails(
         "{error:?}"
     );
     if !at_once.is_empty() {
-        assert!(after < AT_ONCE, "failed after {after:?}");
+        assert!(
+            waiting(world, &of).at_first_poll,
+            "not settled at its first poll: failed after {after:?}"
+        );
     }
     if !early.is_empty() {
         let timeout = world.configured_timeout();
