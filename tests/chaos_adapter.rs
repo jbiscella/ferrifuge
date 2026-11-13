@@ -106,6 +106,8 @@ struct Plan {
     /// How long a handler takes with a publication, in milliseconds: long
     /// enough for a reconnect to resubscribe meanwhile (Block 41, D3).
     slow: AtomicU64,
+    /// A subscription's handler is inside a publication.
+    in_publication: AtomicBool,
     panics: AtomicUsize,
     closes: AtomicUsize,
     unsubscribes: AtomicUsize,
@@ -125,12 +127,17 @@ impl Plan {
     /// The start of a handler call: it takes its time, and panics when
     /// planted and `publication`.
     fn turn(&self, publication: bool) {
+        if !publication {
+            return;
+        }
+        self.in_publication.store(true, Ordering::SeqCst);
         let slow = self.slow.load(Ordering::SeqCst);
-        if publication && slow > 0 {
+        if slow > 0 {
             std::thread::sleep(Duration::from_millis(slow));
         }
-        if publication && self.panic.swap(false, Ordering::SeqCst) {
+        if self.panic.swap(false, Ordering::SeqCst) {
             self.panics.fetch_add(1, Ordering::SeqCst);
+            self.in_publication.store(false, Ordering::SeqCst);
             std::panic::panic_any(PlantedPanic);
         }
     }
@@ -193,6 +200,7 @@ fn subscription_handler(
             subscription.unsubscribe();
         }
         let _ = sender.send(event);
+        plan.in_publication.store(false, Ordering::SeqCst);
     };
     (handler, events)
 }
@@ -281,6 +289,10 @@ enum Op {
     TakeOver,
     /// Each handler call takes this many milliseconds.
     Slow(u64),
+    /// While the subscription's handler holds a publication, the
+    /// application calls `reconnect()` (`true`), or `disconnect()` then
+    /// `connect()` (Block 41, D3).
+    ReconnectInPublication(bool),
 }
 
 impl Op {
@@ -456,7 +468,7 @@ impl Run {
         // meet events handed and not yet returned (Block 41, D3).
         let plan = handlers.then(|| {
             let plan = Plan::default();
-            plan.slow.store(0, Ordering::SeqCst);
+            plan.slow.store(100, Ordering::SeqCst);
             Arc::new(plan)
         });
         let (client, events, subs) = build(&server, delta, plan.as_ref());
@@ -503,13 +515,14 @@ impl Run {
                 Op::CorruptDelta
             } else if self.debounce && self.rng.u32(0..100) < 20 {
                 Op::Burst(self.rng.usize(..CHANNELS.len()), self.rng.u32(2..=5))
-            } else if self.plan.is_some() && self.rng.u32(0..100) < 20 {
+            } else if self.plan.is_some() && self.rng.u32(0..100) < 30 {
                 match self.rng.u32(0..100) {
-                    0..35 => Op::PlantPanic,
-                    35..47 => Op::HandlerClose,
-                    47..70 => Op::HandlerUnsubscribe,
-                    70..85 => Op::TakeOver,
-                    _ => Op::Slow(self.rng.u64(300..=1500)),
+                    0..25 => Op::PlantPanic,
+                    25..30 => Op::HandlerClose,
+                    30..40 => Op::HandlerUnsubscribe,
+                    40..50 => Op::TakeOver,
+                    50..55 => Op::Slow(self.rng.u64(300..=1500)),
+                    _ => Op::ReconnectInPublication(self.rng.bool()),
                 }
             } else {
                 Op::pick(&mut self.rng)
@@ -568,12 +581,11 @@ impl Run {
             Op::Pause(by) => sleep(by).await,
             Op::Publish(n, count) => {
                 for _ in 0..count {
-                    self.published[n] += 1;
-                    let pad = self.rng.usize(0..=600);
-                    self.pads.insert((n, self.published[n]), pad);
-                    self.server
-                        .publish_sized(CHANNELS[n], self.published[n], pad);
+                    self.publish(n);
                 }
+            }
+            Op::ReconnectInPublication(reconnect) => {
+                self.reconnect_in_publication(reconnect).await;
             }
             Op::Expire(n) => self.server.expire_history(CHANNELS[n]),
             Op::Close(code) => {
@@ -608,6 +620,49 @@ impl Run {
             }
         }
         Ok(())
+    }
+
+    /// The server publishes the next publication of `CHANNELS[n]`.
+    fn publish(&mut self, n: usize) {
+        self.published[n] += 1;
+        let pad = self.rng.usize(0..=600);
+        self.pads.insert((n, self.published[n]), pad);
+        self.server
+            .publish_sized(CHANNELS[n], self.published[n], pad);
+    }
+
+    /// Publishes to the handled subscription and, once its handler holds
+    /// the publication, reconnects from the application's side: the
+    /// handed event must move the position the resubscribe recovers from
+    /// (Block 41, D3). Nothing when the handler gets no publication soon.
+    async fn reconnect_in_publication(&mut self, reconnect: bool) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        if plan.slow.load(Ordering::SeqCst) == 0 {
+            plan.slow.store(100, Ordering::SeqCst);
+        }
+        // On a subscription not subscribed, the publication would not reach
+        // the handler: it subscribes, for a later turn.
+        if self.subs[0].subscription.state() != SubscriptionState::Subscribed {
+            self.subs[0].subscription.subscribe();
+            return;
+        }
+        self.publish(0);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !plan.in_publication.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        if reconnect {
+            self.client.reconnect();
+        } else {
+            self.client.disconnect();
+            self.client.connect();
+        }
+        self.count("reconnect while a handler holds a publication");
     }
 
     /// Whether a handler owns `target`'s events (Block 49).
@@ -920,7 +975,13 @@ impl Run {
     }
 
     fn quiescent(&self) -> bool {
-        self.last_state == State::Connected
+        // A handler still inside a publication has events to forward yet.
+        let handlers_idle = self
+            .plan
+            .as_ref()
+            .is_none_or(|plan| !plan.in_publication.load(Ordering::SeqCst));
+        handlers_idle
+            && self.last_state == State::Connected
             && self.client.state() == State::Connected
             && self.subs.iter().all(|sub| {
                 matches!(
@@ -1226,10 +1287,15 @@ async fn seeded_chaos_with_handlers_on_the_tokio_client_keeps_the_invariants() {
     if seeds != SEEDS {
         return;
     }
-    let missing: Vec<_> = ["handler panic", "close from a handler", "handler take-over"]
-        .into_iter()
-        .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
-        .collect();
+    let missing: Vec<_> = [
+        "handler panic",
+        "close from a handler",
+        "handler take-over",
+        "reconnect while a handler holds a publication",
+    ]
+    .into_iter()
+    .filter(|name| counts.get(name).copied().unwrap_or(0) == 0)
+    .collect();
     assert!(
         missing.is_empty(),
         "counted 0 times: {missing:?}; counts {counts:?}"
