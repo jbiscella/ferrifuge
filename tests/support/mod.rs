@@ -4,6 +4,8 @@
 
 pub(crate) mod centrifugo;
 pub(crate) mod fake_server;
+#[cfg(feature = "unstable-webtransport")]
+pub(crate) mod fake_webtransport;
 pub(crate) mod forward_proxy;
 pub(crate) mod http_proxy;
 pub(crate) mod logs;
