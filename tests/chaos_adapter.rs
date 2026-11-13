@@ -451,7 +451,13 @@ impl Run {
         if skip_recovered {
             server.skip_recovered_offset();
         }
-        let plan = handlers.then(|| Arc::new(Plan::default()));
+        // Handlers take their time from the start, so that reconnects
+        // meet events handed and not yet returned (Block 41, D3).
+        let plan = handlers.then(|| {
+            let plan = Plan::default();
+            plan.slow.store(30, Ordering::SeqCst);
+            Arc::new(plan)
+        });
         let (client, events, subs) = build(&server, delta, plan.as_ref());
         Self {
             seed,
@@ -502,7 +508,7 @@ impl Run {
                     35..47 => Op::HandlerClose,
                     47..70 => Op::HandlerUnsubscribe,
                     70..85 => Op::TakeOver,
-                    _ => Op::Slow(self.rng.u64(0..=20)),
+                    _ => Op::Slow(self.rng.u64(0..=150)),
                 }
             } else {
                 Op::pick(&mut self.rng)
