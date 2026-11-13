@@ -1116,10 +1116,16 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let hung = format!("http://{}/emulation", listener.local_addr().unwrap());
         let (aborted, request_aborted) = tokio::sync::oneshot::channel();
+        let (read, request_read) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buffer = [0; 4096];
-            while socket.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+            let mut read = Some(read);
+            while socket.read(&mut buffer).await.is_ok_and(|bytes| bytes > 0) {
+                if let Some(read) = read.take() {
+                    let _ = read.send(());
+                }
+            }
             let _ = aborted.send(());
         });
         // Longer than the test: only the close can end the request.
@@ -1137,8 +1143,16 @@ mod tests {
         .await
         .unwrap();
         transport.send(FrameId::for_tests(6), b"{}".to_vec());
-        // Lets the request reach the server.
-        let _ = tokio::time::timeout(Duration::from_millis(300), transport.recv(true)).await;
+        // Until the server has read the request: the transport sends it
+        // while it waits for its next message.
+        let mut request_read = request_read;
+        loop {
+            tokio::select! {
+                _ = transport.recv(true) => {}
+                read = &mut request_read => break read.expect("the request read"),
+            }
+        }
+
 
         // How the driver closes an HTTP transport.
         drop(transport);
