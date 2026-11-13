@@ -267,6 +267,10 @@ name = "adapter_tokens"
 required-features = ["tokio"]
 
 [[test]]
+name = "suspension"
+required-features = ["tokio"]
+
+[[test]]
 name = "debounce_driver"
 required-features = ["tokio"]
 

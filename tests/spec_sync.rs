@@ -25,7 +25,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &["Byte-split matrix", "Real-server chaos",
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
-    "What arrived during a process suspension beats a deadline that fired meanwhile",
     "A large reply delivered one byte per chunk costs what its size predicts",
     "Seeded real-server chaos keeps the invariants",
     "A server restart with the memory engine reports recovered false",
