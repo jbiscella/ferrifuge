@@ -1762,6 +1762,16 @@ impl Client {
         self.shared.log.number
     }
 
+    /// The protocol of the codec the client's core actually uses, for
+    /// tests: Block 51's runner checks it against its row (D10), as the
+    /// server does not report a connection's encoding.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn codec_protocol(&self) -> crate::Protocol {
+        lock(&self.shared.core).machine.codec_protocol()
+    }
+
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> State {

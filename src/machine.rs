@@ -1907,6 +1907,18 @@ impl Machine {
         }
     }
 
+    /// The protocol of the codec the core encodes and decodes with, as
+    /// built from `Config::protocol`, for tests (Block 51 D10).
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn codec_protocol(&self) -> Protocol {
+        match self.codec {
+            Codec::Json => Protocol::Json,
+            Codec::Protobuf => Protocol::Protobuf,
+        }
+    }
+
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> State {
