@@ -463,6 +463,9 @@ enum Record {
         code: u32,
         /// The transport a `connected` names (D10).
         transport: Option<String>,
+        /// The protocol of the codec the client's core uses, beside a
+        /// `connected`'s transport (D10, reviewer 51d).
+        protocol: Option<String>,
     },
     Sub {
         channel: String,
@@ -798,6 +801,7 @@ fn watch_off(client: &ferrifuge::Client, off: &Off, writer: &Writer) {
 /// Forwards the client's state events to `writer`.
 fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
     let mut events = client.events();
+    let coded = client.clone();
     let client_writer = writer.clone();
     tokio::spawn(async move {
         use futures_util::StreamExt;
@@ -816,10 +820,20 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
                 }
                 _ => continue,
             };
+            // The server does not report a connection's encoding, so the
+            // core's own codec is recorded (reviewer, 51d).
+            let protocol = transport.is_some().then(|| {
+                match coded.codec_protocol() {
+                    ferrifuge::Protocol::Protobuf => "protobuf",
+                    ferrifuge::Protocol::Json => "json",
+                }
+                .to_owned()
+            });
             client_writer.write(Record::Client {
                 state: state.to_owned(),
                 code,
                 transport,
+                protocol,
             });
         }
     });
@@ -1171,11 +1185,15 @@ impl SeedRun<'_> {
     fn take(&mut self, record: Record) -> Result<(), Violation> {
         match record {
             Record::Client {
-                state, transport, ..
+                state,
+                transport,
+                protocol,
+                ..
             } => {
-                // Every connected names the row's transport: one that does
-                // not is the environment's failure, not a finding (D10,
-                // reviewer 51d).
+                // Every connected names the row's transport, and its
+                // client's codec is the row's protocol: either one wrong is
+                // the environment's failure, not a finding (D10, reviewer
+                // 51d).
                 if let Some(transport) = &transport
                     && transport != row().transport.name()
                 {
@@ -1183,6 +1201,15 @@ impl SeedRun<'_> {
                         "the environment: seed {} connected over {transport}, the row's transport is {}",
                         self.seed,
                         row().transport.name()
+                    );
+                }
+                let wanted = if row().protobuf { "protobuf" } else { "json" };
+                if let Some(protocol) = &protocol
+                    && protocol != wanted
+                {
+                    panic!(
+                        "the environment: seed {} connected with the {protocol} codec, the row's protocol is {wanted}",
+                        self.seed
                     );
                 }
                 let next = lifecycle(&state);
