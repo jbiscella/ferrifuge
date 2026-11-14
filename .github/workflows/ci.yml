@@ -832,9 +832,12 @@ jobs:
       - name: Build
         run: |
           cargo ndk --target x86_64 --platform 22 test --lib --test mobile_device --no-run --message-format json > "$RUNNER_TEMP/build.json"
+          wc -l "$RUNNER_TEMP/build.json"
+          jq -cR 'fromjson? | select(.executable != null) | {name: .target.name, test: .profile.test, executable}' "$RUNNER_TEMP/build.json"
           program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
           tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
-          test -x "$program" && test -x "$tests"
+          test -x "$program"
+          test -x "$tests"
           {
             echo "MOBILE_DEVICE_PROGRAM=$program"
             echo "MOBILE_LIB_TESTS=$tests"
@@ -893,7 +896,8 @@ jobs:
           cargo test --target aarch64-apple-ios-sim --lib --test mobile_device --no-run --message-format json > "$RUNNER_TEMP/build.json"
           program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
           tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
-          test -x "$program" && test -x "$tests"
+          test -x "$program"
+          test -x "$tests"
           {
             echo "MOBILE_DEVICE_PROGRAM=$program"
             echo "MOBILE_LIB_TESTS=$tests"
