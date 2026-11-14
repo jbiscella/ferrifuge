@@ -144,6 +144,11 @@ pub(super) struct Shared {
     /// (Block 49).
     #[cfg(feature = "__test-hooks")]
     driver_panic_planted: AtomicBool,
+    /// Notified when the driver's end is about to await the close of an
+    /// earlier transport than the last one closed (Codex, #141), for a
+    /// test.
+    #[cfg(feature = "__test-hooks")]
+    awaiting_earlier_close: Notify,
     /// The driver's timers and the calls' ages, for the soak (Block 52).
     #[cfg(feature = "__test-hooks")]
     pub(super) records: super::hooks::Records,
@@ -1723,6 +1728,8 @@ impl Client {
                 #[cfg(feature = "__test-hooks")]
                 driver_panic_planted: AtomicBool::new(false),
                 #[cfg(feature = "__test-hooks")]
+                awaiting_earlier_close: Notify::new(),
+                #[cfg(feature = "__test-hooks")]
                 records: super::hooks::Records::default(),
                 closed: AtomicBool::new(false),
                 log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
@@ -2924,7 +2931,17 @@ impl Driver {
             super::handler::deliver_remaining(&self.shared);
             self.perform_all_queued();
         }
-        for closing in std::mem::take(&mut self.closing) {
+        let closing = std::mem::take(&mut self.closing);
+        // Kept in the order the transports were closed: all but the last
+        // are earlier transports'.
+        #[cfg(feature = "__test-hooks")]
+        let mut earlier = closing.len().saturating_sub(1);
+        for closing in closing {
+            #[cfg(feature = "__test-hooks")]
+            if earlier > 0 {
+                earlier -= 1;
+                self.shared.awaiting_earlier_close.notify_one();
+            }
             let _ = closing.await;
         }
     }
@@ -4775,15 +4792,37 @@ mod tests {
         drop(batch);
     }
 
+    /// What a test learns from and tells a [`stalling_http_stream_with`]
+    /// server: `emulation` is notified when an emulation request has been
+    /// read, and `release` closes the held emulation requests, unanswered.
+    #[derive(Clone, Default)]
+    struct Stall {
+        emulation: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
     /// An `http_stream` server on `listener`: the stream request gets a
     /// connect reply and stays open; an emulation request is read and never
     /// answered, so closing the transport waits for it.
     async fn stalling_http_stream(listener: tokio::net::TcpListener) {
+        stalling_http_stream_with(listener, Stall::default()).await;
+    }
+
+    /// [`stalling_http_stream`], whose emulation requests `stall` reports
+    /// and releases.
+    async fn stalling_http_stream_with(listener: tokio::net::TcpListener, stall: Stall) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let mut held = Vec::new();
+        let mut emulations = Vec::new();
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio::select! {
+                accepted = listener.accept() => accepted.unwrap().0,
+                () = stall.release.notified() => {
+                    emulations.clear();
+                    continue;
+                }
+            };
             // The whole request: its headers, then a body of Content-Length.
             let mut request = Vec::new();
             let mut buffer = [0; 8192];
@@ -4816,8 +4855,11 @@ mod tests {
                 let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n";
                 let chunk = format!("{response}{:x}\r\n{reply}\r\n", reply.len());
                 let _ = socket.write_all(chunk.as_bytes()).await;
+                held.push(socket);
+            } else {
+                emulations.push(socket);
+                stall.emulation.notify_one();
             }
-            held.push(socket);
         }
     }
 
@@ -4878,7 +4920,19 @@ mod tests {
         server.shutdown_background();
     }
 
+    /// `future`'s output, within 5 s on `runtime`; else a panic naming
+    /// `what` was awaited.
+    fn within<F: Future>(runtime: &tokio::runtime::Runtime, what: &str, future: F) -> F::Output {
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), future).await })
+            .unwrap_or_else(|_| panic!("not within 5 s: {what}"))
+    }
+
     // Codex, #141: every transport's close is awaited, not only the last.
+    // Event-driven, with no wall-clock floor: the first transport's close
+    // waits for an emulation request the server holds until the test
+    // releases it, under a timeout longer than the test.
+    #[cfg(feature = "__test-hooks")]
     #[test]
     fn close_awaits_the_close_of_an_earlier_transport_too() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -4894,38 +4948,43 @@ mod tests {
             "http://{}/connection/http_stream",
             listener.local_addr().unwrap()
         );
-        server.spawn(stalling_http_stream(listener));
-        let timeout = Duration::from_millis(400);
+        let stall = Stall::default();
+        server.spawn(stalling_http_stream_with(listener, stall.clone()));
         let client = Client::builder_with_transports([(TransportKind::HttpStream, url)])
-            .config(Config::default().timeout(timeout))
+            .config(Config::default().timeout(Duration::from_secs(10)))
             .runtime(runtime.handle().clone())
             .build()
             .unwrap();
-        let wait_ready = |client: &Client| {
-            let ready = client.ready();
-            runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), ready).await })
-        };
         client.connect();
-        assert_eq!(wait_ready(&client).ok(), Some(Ok(())));
-        // An emulation request the server never answers keeps the first
-        // transport's close running for the timeout.
+        assert_eq!(within(&runtime, "connected", client.ready()), Ok(()));
+        // An emulation request the server holds keeps the first
+        // transport's close running.
         let call = client.rpc("slow", b"{}".to_vec());
-        std::thread::sleep(Duration::from_millis(100));
+        within(
+            &runtime,
+            "the call's emulation request",
+            stall.emulation.notified(),
+        );
         client.reconnect();
-        assert_eq!(wait_ready(&client).ok(), Some(Ok(())));
+        assert_eq!(within(&runtime, "connected again", client.ready()), Ok(()));
 
-        let started = std::time::Instant::now();
-        runtime.block_on(client.close());
-        let took = started.elapsed();
-        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        let mut close = Box::pin(client.close());
+        within(
+            &runtime,
+            "the driver's end awaits the first transport's close",
+            client.shared().awaiting_earlier_close.notified(),
+        );
+        assert!(
+            close.as_mut().now_or_never().is_none(),
+            "close() resolved before the first transport's close ended"
+        );
+        stall.release.notify_one();
+        within(&runtime, "close() resolves once it is released", close);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while runtime.metrics().num_alive_tasks() > 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        assert!(
-            took >= Duration::from_millis(100),
-            "the first close was not awaited: {took:?}"
-        );
         assert_eq!(runtime.metrics().num_alive_tasks(), 0);
         drop(call);
         runtime.shutdown_background();
