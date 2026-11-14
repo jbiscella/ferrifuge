@@ -284,9 +284,9 @@ impl TimerRecord {
     }
 
     /// The core's list: the client, subscription and call timers `armed`
-    /// names, which `Armed` keeps, and the debounce and shared-poll timers,
-    /// which only this record does; each aged from this record, or from
-    /// now when first seen here.
+    /// names, whose settings the core keeps running (Block 53, D2), and
+    /// the debounce and shared-poll timers, which only this record keeps;
+    /// each aged from this record, or from now when first seen here.
     pub(super) fn report_armed(
         &mut self,
         armed: impl IntoIterator<Item = String>,

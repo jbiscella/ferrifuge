@@ -110,7 +110,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.21"
+ferrifuge = "0.22"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -1325,7 +1325,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.21", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.22", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1399,7 +1399,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.21", features = ["test-util"] }
+ferrifuge = { version = "0.22", features = ["test-util"] }
 ```
 
 ```rust
