@@ -9377,7 +9377,7 @@ Feature: Bug-pattern catalogue
 | An emulation request that never answers ends the transport within the timeout | `tokio::time::timeout` removed from the emulation request | #247 |
 | Command ids skip 0 when they wrap | `.max(1)` removed | #247 |
 | Seeded chaos on the core applies no stale answer | a token callback answer not checked against the flow | #247 |
-| The core runner reports a planted continuity fault | the planted faults above | #247 |
+| The core runner reports a planted continuity fault | the planted faults above | #280 |
 | Seeded chaos on the core leaks no secret | a redaction removed from one `Debug` impl | #247 |
 | Seeded chaos with handlers on the tokio client keeps the invariants | `Input::EventHanded` not sent for one handler path | #247 |
 
