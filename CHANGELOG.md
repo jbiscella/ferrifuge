@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- `machine::TimerSetting` (Block 53): the opaque number the machine gives
+  each setting of a client, subscription or call timer, never given twice.
+
+- `SubscriptionError::ZeroDelay` (Block 53): what the `build()` of a
+  subscription, map subscription or shared poll subscription builder
+  returns for a `min_resubscribe_delay` or `max_resubscribe_delay` of 0,
+  naming the option.
+
 - A protocol and resilience guide (Block 59): `docs/protocol.md` draws the
   client's flows (connect and heartbeat, disconnect and reconnect,
   subscription and recovery, token lifecycle, calls and timeouts,
@@ -171,6 +179,25 @@ repository held while it carried that version, from the blocks of
   fields; map subscriptions work in the browser (Block 45e).
 
 ### Changed
+
+- `Action::SetTimer`, `Action::SetSubscriptionTimer` and
+  `Action::SetCallTimer` carry a `TimerSetting` as their last field, and
+  `Input::TimerFired`, `Input::SubscriptionTimerFired` and
+  `Input::CallTimerFired` return it (Block 53). An owner of the machine
+  gives each firing the setting its timer was set with.
+
+- The core ignores a timer firing whose setting it has since cancelled,
+  set again or already taken a firing of: the step returns no action
+  (Block 53). An owner no longer tracks settings itself, and a late firing
+  never acts.
+
+- A `Config::timeout`, `handshake_timeout`, `min_reconnect_delay` or
+  `max_reconnect_delay` of 0 is refused when the client is built, with a
+  configuration error (code 12) naming the field; a `min_resubscribe_delay`
+  or `max_resubscribe_delay` of 0 is refused when a subscription is built
+  (Block 53). Before, a zero timeout failed every attempt at once and a
+  zero delay retried with no wait. `max_server_ping_delay` 0 still
+  disables the no-ping check.
 
 - Disconnect code 3014 "state invalidated" drops the connection token,
   and each client-side subscription's, only where a token callback can

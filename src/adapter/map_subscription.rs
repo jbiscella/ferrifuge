@@ -368,6 +368,8 @@ impl MapSubscriptionBuilder {
     }
 
     /// Sets the lower bound of the resubscribe delay. Default 500 ms.
+    /// More than 0, or `build()` fails with
+    /// [`SubscriptionError::ZeroDelay`](crate::SubscriptionError::ZeroDelay).
     #[must_use]
     pub fn min_resubscribe_delay(mut self, delay: Duration) -> Self {
         self.options.common = self.options.common.min_resubscribe_delay(delay);
@@ -375,6 +377,8 @@ impl MapSubscriptionBuilder {
     }
 
     /// Sets the upper bound of the resubscribe delay. Default 20 s.
+    /// More than 0, or `build()` fails with
+    /// [`SubscriptionError::ZeroDelay`](crate::SubscriptionError::ZeroDelay).
     #[must_use]
     pub fn max_resubscribe_delay(mut self, delay: Duration) -> Self {
         self.options.common = self.options.common.max_resubscribe_delay(delay);
