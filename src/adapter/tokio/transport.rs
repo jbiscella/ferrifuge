@@ -96,18 +96,13 @@ async fn secure(
     stream: Stream,
     request: &tokio_tungstenite::tungstenite::handshake::client::Request,
     tls: Option<std::sync::Arc<rustls::ClientConfig>>,
-    network: &Network,
 ) -> Result<MaybeTlsStream<Stream>, Error> {
     match tokio_tungstenite::tungstenite::client::uri_mode(request.uri())? {
         Mode::Plain => Ok(MaybeTlsStream::Plain(stream)),
         Mode::Tls => {
-            let config = match tls {
-                Some(config) => config,
-                None => network
-                    .tls
-                    .config()
-                    .map_err(|error| Error::Io(std::io::Error::other(error)))?,
-            };
+            // Built before dialing for every wss:// endpoint; without it,
+            // as tokio-tungstenite without a TLS connector (reviewer, #253).
+            let config = tls.ok_or(Error::Url(UrlError::TlsFeatureNotEnabled))?;
             let host = request
                 .uri()
                 .host()
@@ -194,7 +189,7 @@ impl WebSocket {
         }
         // With the application's Cookie, in one header (Block 43, D3).
         network.add_cookies(url, request.headers_mut());
-        let stream = secure(stream, &request, tls, network)
+        let stream = secure(stream, &request, tls)
             .await
             .map_err(|error| handshake_error(&error, url, network))?;
         // tungstenite fails the handshake unless the server accepts the
@@ -826,25 +821,25 @@ mod tests {
         }
     }
 
-    /// A stream that reads at most one byte at a time, as from a network
-    /// that delivers every byte in a segment of its own.
-    struct OneByteReads(tokio::io::DuplexStream);
+    /// A stream that reads at most `.1` bytes at a time, as from a network
+    /// that delivers the bytes in segments that small.
+    struct SmallReads(tokio::io::DuplexStream, usize);
 
-    impl AsyncRead for OneByteReads {
+    impl AsyncRead for SmallReads {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &mut tokio::io::ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            let mut one = [0; 1];
-            let mut byte = tokio::io::ReadBuf::new(&mut one);
-            ready!(Pin::new(&mut self.0).poll_read(cx, &mut byte))?;
-            buf.put_slice(byte.filled());
+            let mut small = vec![0; self.1.min(buf.remaining())];
+            let mut read = tokio::io::ReadBuf::new(&mut small);
+            ready!(Pin::new(&mut self.0).poll_read(cx, &mut read))?;
+            buf.put_slice(read.filled());
             Poll::Ready(Ok(()))
         }
     }
 
-    impl AsyncWrite for OneByteReads {
+    impl AsyncWrite for SmallReads {
         fn poll_write(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -865,19 +860,12 @@ mod tests {
         }
     }
 
-    /// Answers the upgrade request read from `server` with a 101 carrying
-    /// `extra` header bytes, and in the same write a text frame "hello".
-    async fn answer_with_a_frame(mut server: tokio::io::DuplexStream, extra: usize) {
-        use tokio::io::AsyncWriteExt;
-        let mut request = Vec::new();
-        while !request.ends_with(b"\r\n\r\n") {
-            let mut byte = [0; 1];
-            if server.read(&mut byte).await.unwrap() == 0 {
-                return;
-            }
-            request.extend_from_slice(&byte);
-        }
-        let request = String::from_utf8(request).unwrap();
+    /// An unmasked text frame "hello", as a server sends it.
+    const HELLO: [u8; 7] = [0x81, 0x05, b'h', b'e', b'l', b'l', b'o'];
+
+    /// The 101 answer to the upgrade `request` with `extra` bytes of
+    /// padding in a header.
+    fn switching(request: &str, extra: usize) -> String {
         let key = request
             .lines()
             .find_map(|line| {
@@ -887,13 +875,38 @@ mod tests {
             .expect("a key");
         let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
         let padding = "x".repeat(extra);
-        let answer = format!(
+        format!(
             "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nX-Padding: {padding}\r\n\r\n"
-        );
-        // An unmasked text frame "hello", sent with the head.
-        let frame = [&[0x81, 0x05][..], b"hello"].concat();
+        )
+    }
+
+    /// Reads the upgrade request from `server`, up to the end of its head.
+    async fn read_request(server: &mut tokio::io::DuplexStream) -> Option<String> {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0; 1];
+            if server.read(&mut byte).await.unwrap() == 0 {
+                return None;
+            }
+            request.extend_from_slice(&byte);
+        }
+        Some(String::from_utf8(request).unwrap())
+    }
+
+    /// Answers the upgrade request read from `server` with a 101 carrying
+    /// `extra` header bytes, and in the same write a text frame "hello".
+    async fn answer_with_a_frame(mut server: tokio::io::DuplexStream, extra: usize) {
+        use tokio::io::AsyncWriteExt;
+        let Some(request) = read_request(&mut server).await else {
+            return;
+        };
+        // With reads of 7 bytes, the padding puts the end of the head 3
+        // bytes into a read, so that read carries bytes of the frame too.
+        let base = switching(&request, 0).len();
+        let extra = extra + (3 + 7 - (base + extra) % 7) % 7;
+        let answer = switching(&request, extra);
         let _ = server
-            .write_all(&[answer.as_bytes(), &frame].concat())
+            .write_all(&[answer.as_bytes(), &HELLO].concat())
             .await;
         let _ = server.flush().await;
         // Kept open while the client reads.
@@ -902,26 +915,65 @@ mod tests {
 
     // Block 50b's finding: tungstenite fails a handshake whose head takes
     // more than 64 small reads ("Attack attempt detected"); read whole
-    // first, it completes, and a frame sent with the head arrives.
+    // first, it completes, and a frame sent with the head arrives, also
+    // when the read that ends the head carries bytes of the frame, which
+    // tungstenite then hands to the connection (reviewer, #253, (a)).
     #[tokio::test]
-    async fn a_head_read_one_byte_at_a_time_completes_the_upgrade_and_keeps_the_frame_after_it() {
-        let (client, server) = tokio::io::duplex(1 << 20);
-        tokio::spawn(answer_with_a_frame(server, 0));
+    async fn a_head_read_in_small_reads_completes_the_upgrade_and_keeps_the_frame_after_it() {
+        // One byte; 7 bytes with 1 KiB of padding; whole reads.
+        for (size, extra) in [(1, 0), (7, 1 << 10), (usize::MAX, 1 << 10)] {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            tokio::spawn(answer_with_a_frame(server, extra));
+            let request = "ws://localhost/connection/websocket"
+                .into_client_request()
+                .unwrap();
+
+            let (mut ws, response) =
+                tokio::time::timeout(TIMEOUT, upgrade(request, SmallReads(client, size), LIMIT))
+                    .await
+                    .expect("the upgrade within the timeout")
+                    .unwrap_or_else(|error| panic!("reads of {size}: the upgrade: {error:?}"));
+
+            assert_eq!(response.status(), 101);
+            let message = tokio::time::timeout(TIMEOUT, ws.next())
+                .await
+                .expect("the frame within the timeout");
+            assert_eq!(
+                message.unwrap().unwrap(),
+                Message::text("hello"),
+                "reads of {size}"
+            );
+        }
+    }
+
+    // Block 50b's finding (reviewer, #253, (b)): a head that does not end
+    // is handed over at 64 KiB, and tungstenite refuses it; without the
+    // bound the reader would wait for its end until the timeout.
+    #[tokio::test]
+    async fn a_head_that_does_not_end_is_refused_at_64_kib() {
+        use tokio::io::AsyncWriteExt;
+        let (client, mut server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            if read_request(&mut server).await.is_none() {
+                return;
+            }
+            let start = b"HTTP/1.1 101 Switching Protocols\r\nX-Padding: ";
+            let _ = server.write_all(start).await;
+            let _ = server.write_all(&vec![b'x'; 70 << 10]).await;
+            // Open, and no blank line ever.
+            tokio::time::sleep(TIMEOUT * 2).await;
+        });
         let request = "ws://localhost/connection/websocket"
             .into_client_request()
             .unwrap();
 
-        let (mut ws, response) =
-            tokio::time::timeout(TIMEOUT, upgrade(request, OneByteReads(client), LIMIT))
-                .await
-                .expect("the upgrade within the timeout")
-                .expect("the upgrade");
-
-        assert_eq!(response.status(), 101);
-        let message = tokio::time::timeout(TIMEOUT, ws.next())
+        let error = tokio::time::timeout(TIMEOUT, upgrade(request, client, LIMIT))
             .await
-            .expect("the frame within the timeout");
-        assert_eq!(message.unwrap().unwrap(), Message::text("hello"));
+            .expect("refused within the timeout")
+            .map(drop)
+            .expect_err("a head over 64 KiB refused");
+
+        assert!(matches!(error, Error::AttackAttempt), "{error}");
     }
 
     // Block 50b's finding (reviewer, (c)): a head over 64 KiB is handed to
@@ -936,7 +988,7 @@ mod tests {
                 .unwrap();
 
             let upgraded = if one_byte {
-                tokio::time::timeout(TIMEOUT, upgrade(request, OneByteReads(client), LIMIT))
+                tokio::time::timeout(TIMEOUT, upgrade(request, SmallReads(client, 1), LIMIT))
                     .await
                     .map(|result| result.map(drop))
             } else {
