@@ -13,6 +13,14 @@ repository held while it carried that version, from the blocks of
 
 ### Added
 
+- A protocol and resilience guide (Block 59): `docs/protocol.md` draws the
+  client's flows (connect and heartbeat, disconnect and reconnect,
+  subscription and recovery, token lifecycle, calls and timeouts,
+  backpressure) as sequence diagrams, and `docs/resilience.md` covers its
+  strategies, delivery guarantees, transports, observability and
+  troubleshooting. The README links both from "How it works", and a test
+  checks every block, scenario, function, code, default and link they cite.
+
 - Unstable (`unstable` feature): WebTransport in the browser (Block 48c),
   with the page's `WebTransport` (Chrome 97, Firefox 114, Safari 26.4),
   through bindings of its own: one bidirectional stream, read into the

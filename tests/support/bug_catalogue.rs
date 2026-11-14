@@ -177,7 +177,7 @@ fn tables(text: &str) -> Vec<(Vec<String>, Vec<Vec<String>>)> {
 
 /// Block `number`'s section of `CLAUDE.md`: from its heading to the next
 /// level-2 heading.
-fn block(claude_md: &str, number: u32) -> &str {
+pub(crate) fn block(claude_md: &str, number: u32) -> &str {
     let heading = format!("\n## Block {number} ");
     let start = claude_md
         .find(&heading)
@@ -568,13 +568,13 @@ fn is_pull_request(text: &str) -> bool {
 }
 
 /// The spans of `text` in backticks.
-fn code_spans(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn code_spans(text: &str) -> impl Iterator<Item = &str> {
     text.split('`').skip(1).step_by(2)
 }
 
 /// The file and function of a `path.rs::function` span, for a path under
 /// `src` or `tests`.
-fn function_of(span: &str) -> Option<(&str, &str)> {
+pub(crate) fn function_of(span: &str) -> Option<(&str, &str)> {
     let (file, function) = span.rsplit_once("::")?;
     let path_like = (file.starts_with("src/") || file.starts_with("tests/"))
         && Path::new(file).extension().is_some_and(|ext| ext == "rs");
@@ -583,7 +583,7 @@ fn function_of(span: &str) -> Option<(&str, &str)> {
 }
 
 /// Whether `source` defines `fn function`.
-fn defines(source: &str, function: &str) -> bool {
+pub(crate) fn defines(source: &str, function: &str) -> bool {
     let needle = format!("fn {function}");
     source.match_indices(&needle).any(|(at, _)| {
         let after = source[at + needle.len()..].chars().next();
