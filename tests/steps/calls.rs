@@ -1468,7 +1468,13 @@ impl QueueRun {
 
     /// Fires the timer `timer` of `call`, which the machine must have set.
     fn fire(&mut self, call: ferrifuge::machine::CallId, timer: ferrifuge::machine::CallTimer) {
-        self.handle(ferrifuge::machine::Input::CallTimerFired(call, timer));
+        let setting = self
+            .machine
+            .call_timer_setting(call, timer)
+            .expect("call timer set");
+        self.handle(ferrifuge::machine::Input::CallTimerFired(
+            call, timer, setting,
+        ));
     }
 }
 
@@ -1642,7 +1648,11 @@ fn the_publish_times_out(world: &mut ClientWorld, size: usize) {
 fn the_client_is_connected_again(world: &mut ClientWorld) {
     use ferrifuge::machine::{Action, Input, Timer};
     let run = queue(world);
-    run.handle(Input::TimerFired(Timer::Reconnect));
+    let setting = run
+        .machine
+        .timer_setting(Timer::Reconnect)
+        .expect("reconnect set");
+    run.handle(Input::TimerFired(Timer::Reconnect, setting));
     let transport = run
         .last
         .iter()

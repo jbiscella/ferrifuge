@@ -291,10 +291,10 @@ fn each_request_has_the_reply_deadline_of_a_subscribe() {
     ));
 
     assert!(
-        actions.contains(&Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-            Config::default().timeout
+        actions.iter().any(|action| matches!(
+            action,
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::SubscribeReply, after, _)
+                if *of == id && *after == Config::default().timeout
         )),
         "{actions:?}"
     );
@@ -364,7 +364,7 @@ fn a_reply_without_the_map_type_ends_the_subscription_with_code_6() {
     );
     assert!(!actions.iter().any(|action| matches!(
         action,
-        Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+        Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
     )));
 }
 
@@ -830,8 +830,7 @@ fn a_lost_connection_ends_the_load_and_the_next_one_starts_from_scratch() {
         code: None,
         reason: String::new(),
     });
-    let transport =
-        opened(&machine.handle(Input::TimerFired(crate::machine::Timer::Reconnect))).unwrap();
+    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
 
     let opened_again = machine.handle(Input::TransportOpened(transport));
 
@@ -862,8 +861,7 @@ fn reconnect_after(
         code,
         reason: String::new(),
     });
-    let transport =
-        opened(&machine.handle(Input::TimerFired(crate::machine::Timer::Reconnect))).unwrap();
+    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
     let mut actions = machine.handle(Input::TransportOpened(transport));
     let connect = sent(&actions)
         .into_iter()
@@ -1075,14 +1073,11 @@ fn error_112_from_scratch_drops_the_position_and_loads_after_the_backoff() {
     assert!(
         failed.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, _) if *of == id
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, ..) if *of == id
         )),
         "{failed:?}"
     );
-    let again = machine.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
-    ));
+    let again = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
     let request = &subscribe_sent(&again)["subscribe"];
     assert_eq!(request["phase"], 2);
     assert!(request.get("epoch").is_none(), "{request}");
@@ -1121,7 +1116,7 @@ fn error_112_with_the_fatal_strategy_unsubscribes_with_its_code() {
     assert!(
         !failed.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
         )),
         "{failed:?}"
     );
@@ -1311,10 +1306,7 @@ fn a_temporary_error_after_a_page_unsubscribes_then_recovers_after_the_backoff()
     for (event, _) in events(&failed) {
         machine.handle(Input::EventTaken(event));
     }
-    let waiting = machine.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
-    ));
+    let waiting = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
     assert!(sent(&waiting).is_empty(), "{waiting:?}");
     let answered = machine.handle(frame(
         transport,
@@ -1645,10 +1637,7 @@ fn a_corrupt_delta_drops_only_its_keys_base_and_resubscribes_recovering() {
         transport,
         &format!(r#"{{"id":{},"unsubscribe":{{}}}}"#, id_of(&unsubscribe)),
     ));
-    let again = machine.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
-    ));
+    let again = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
     let request = &subscribe_sent(&again)["subscribe"];
     assert_eq!(request["phase"], 1, "{request}");
     assert_eq!(request["recover"], true, "{request}");
@@ -1726,10 +1715,7 @@ fn error_112_drops_the_bases_and_the_next_load_starts_none() {
     ));
 
     assert_eq!(bases(&machine, id), None);
-    let again = machine.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
-    ));
+    let again = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
     assert_no_base_after_a_load_from_scratch(&mut machine, transport, id, &subscribe_sent(&again));
 }
 
@@ -1811,8 +1797,7 @@ fn disconnect_3014_makes_the_next_load_start_with_no_base() {
         code: Some(3014),
         reason: "state invalidated".into(),
     });
-    let transport =
-        opened(&machine.handle(Input::TimerFired(crate::machine::Timer::Reconnect))).unwrap();
+    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
     let mut actions = machine.handle(Input::TransportOpened(transport));
     let connect = sent(&actions)
         .into_iter()

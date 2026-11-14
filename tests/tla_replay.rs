@@ -20,8 +20,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ferrifuge::machine::{
-    Action, FetchId, Input, Machine, SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer,
-    TransportId, TransportKind,
+    Action, CallId, FetchId, Input, Machine, SubscriptionId, SubscriptionOptions,
+    SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use ferrifuge::{
     CallRequest, ClientEvent, Config, DeltaFormat, ServerSubscriptionEvent, State, StateError,
@@ -948,6 +948,30 @@ impl<'a> Replay<'a> {
 
     fn feed(&mut self, input: Input) {
         let actions = self.machine.handle(input);
+        self.performed(actions);
+    }
+
+    /// The firing of `timer`'s running setting, as the driver gives it
+    /// (Block 53 D2).
+    fn fire(&mut self, timer: Timer) {
+        let actions = self.machine.fire(timer);
+        self.performed(actions);
+    }
+
+    /// The firing of a subscription timer's running setting.
+    fn fire_subscription(&mut self, id: SubscriptionId, timer: SubscriptionTimer) {
+        let actions = self.machine.fire_subscription(id, timer);
+        self.performed(actions);
+    }
+
+    /// The firing of a call timer's running setting.
+    fn fire_call(&mut self, id: CallId, timer: ferrifuge::machine::CallTimer) {
+        let actions = self.machine.fire_call(id, timer);
+        self.performed(actions);
+    }
+
+    /// Performs a step's actions, then a flush's.
+    fn performed(&mut self, actions: Vec<Action>) {
         self.perform(actions);
         let flushed = self.machine.handle(Input::Flush);
         self.perform(flushed);
@@ -976,9 +1000,9 @@ impl<'a> Replay<'a> {
                         self.sent.push(Sent::of_core(&command));
                     }
                 }
-                Action::SetTimer(Timer::Reconnect, _) => self.reconnect_armed = true,
+                Action::SetTimer(Timer::Reconnect, ..) => self.reconnect_armed = true,
                 Action::CancelTimer(Timer::Reconnect) => self.reconnect_armed = false,
-                Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, _) => {
+                Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, ..) => {
                     self.resubscribe_armed.insert(id);
                 }
                 Action::CancelSubscriptionTimer(id, SubscriptionTimer::Resubscribe) => {
@@ -1163,10 +1187,7 @@ impl<'a> Replay<'a> {
         match act {
             "Env_CallTimeout" => {
                 let call = self.calls.remove(0);
-                self.feed(Input::CallTimerFired(
-                    call,
-                    ferrifuge::machine::CallTimer::Connection,
-                ));
+                self.fire_call(call, ferrifuge::machine::CallTimer::Connection);
             }
             "Env_Open" => {
                 let transport = self.transport_of(step)?;
@@ -1197,19 +1218,13 @@ impl<'a> Replay<'a> {
                     .cloned()
                     .unwrap_or(Value::Null);
                 if head["k"] == "connect" {
-                    self.feed(Input::TimerFired(Timer::ConnectTimeout));
+                    self.fire(Timer::ConnectTimeout);
                 } else if head["k"] == "sub" {
                     let id = self.id(step, head["ch"].as_str().unwrap_or_default())?;
-                    self.feed(Input::SubscriptionTimerFired(
-                        id,
-                        SubscriptionTimer::SubscribeReply,
-                    ));
+                    self.fire_subscription(id, SubscriptionTimer::SubscribeReply);
                 } else if head["k"] == "unsub" {
                     let id = self.id(step, head["ch"].as_str().unwrap_or_default())?;
-                    self.feed(Input::SubscriptionTimerFired(
-                        id,
-                        SubscriptionTimer::UnsubscribeReply,
-                    ));
+                    self.fire_subscription(id, SubscriptionTimer::UnsubscribeReply);
                 } else {
                     return Err(self.mismatch(step, None, &format!("a timeout of {head}")));
                 }
@@ -1324,15 +1339,12 @@ impl<'a> Replay<'a> {
             "Sdk_ReconnectTimer" => {
                 // A timer that fires is no longer armed.
                 self.reconnect_armed = false;
-                self.feed(Input::TimerFired(Timer::Reconnect));
+                self.fire(Timer::Reconnect);
             }
             "Sdk_ResubscribeTimer" => {
                 let id = self.id(step, &self.changed_channel(step, "sub")?)?;
                 self.resubscribe_armed.remove(&id);
-                self.feed(Input::SubscriptionTimerFired(
-                    id,
-                    SubscriptionTimer::Resubscribe,
-                ));
+                self.fire_subscription(id, SubscriptionTimer::Resubscribe);
             }
             "Sdk_ConnectReply"
             | "Sdk_SubscribeReply"

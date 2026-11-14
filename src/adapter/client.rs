@@ -41,7 +41,7 @@ use super::tokio::proxy::Proxy;
 use super::tokio::tls::{self, Tls, Trust, unparsable_root};
 use crate::machine::{
     Action, CallId, CallTimer, DebounceTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
-    SubscriptionTimer, Timer, TransportId, TransportKind,
+    SubscriptionTimer, Timer, TimerKey, TimerSetting, TransportId, TransportKind,
 };
 use crate::{
     CallError, CallReply, CallRequest, ClientError, ClientEvent, Config, DataError, ErrorKind,
@@ -216,7 +216,6 @@ impl Core {
             actions: VecDeque::new(),
             clock: Clock::default(),
             refreshes: Refreshes::default(),
-            armed: Armed::default(),
             connected_since: None,
             #[cfg(feature = "__test-hooks")]
             timer_record: super::hooks::TimerRecord::default(),
@@ -239,8 +238,6 @@ pub(super) struct Core {
     /// sleep's refreshes are given before the input revealing it (Block
     /// 25, D1).
     pub(super) refreshes: Refreshes,
-    /// The timers set and not cancelled, to drop a stale firing.
-    pub(super) armed: Armed,
     /// When the client was seen to become connected, while it is (Block
     /// 31, D2).
     pub(super) connected_since: Option<SystemTime>,
@@ -248,20 +245,6 @@ pub(super) struct Core {
     /// D8), kept once the records are started.
     #[cfg(feature = "__test-hooks")]
     pub(super) timer_record: super::hooks::TimerRecord,
-}
-
-impl Core {
-    /// `input`, unless it is the firing of a timer set again or cancelled
-    /// since the setting `set`, by any task (see [`Armed`]); a timer whose
-    /// firing is accepted no longer runs.
-    fn accepted(&mut self, input: Input, set: Option<u64>) -> Option<Input> {
-        if self.armed.superseded(&input, set) {
-            return None;
-        }
-        self.armed.fired(&input);
-        self.refreshes.fired(&input);
-        Some(input)
-    }
 }
 
 /// The wall-clock and monotonic times of the last input given the machine.
@@ -302,103 +285,20 @@ const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 /// 49, row 28/55).
 pub(super) const UPPER_STREAK: u32 = 32;
 
-/// A timer of the machine, of any kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TimerKey {
-    Client(Timer),
-    Subscription(SubscriptionId, SubscriptionTimer),
-    Call(CallId, CallTimer),
-}
-
-impl TimerKey {
-    /// Its name in the soak's records (Block 52, D8).
-    #[cfg(feature = "__test-hooks")]
-    fn hook_name(self) -> String {
-        match self {
-            Self::Client(timer) => super::hooks::client(timer),
-            Self::Subscription(id, timer) => super::hooks::subscription(id, timer),
-            Self::Call(id, timer) => super::hooks::call(id, timer),
-        }
-    }
-
-    /// The timer whose firing `input` is.
-    fn of(input: &Input) -> Option<Self> {
-        match input {
-            Input::TimerFired(timer) => Some(Self::Client(*timer)),
-            Input::SubscriptionTimerFired(id, timer) => Some(Self::Subscription(*id, *timer)),
-            Input::CallTimerFired(id, timer) => Some(Self::Call(*id, *timer)),
-            _ => None,
-        }
-    }
-}
-
-/// The timers the machine has set and not cancelled, each with the number
-/// of the setting: the driver numbers them the same way as it performs
-/// the actions in order, so a firing whose timer was set again or
-/// cancelled since is told apart, whichever task got the core first
-/// (Block 25, D1).
-#[derive(Debug, Default)]
-pub(super) struct Armed {
-    sets: u64,
-    running: HashMap<TimerKey, u64>,
-}
-
-impl Armed {
-    /// Follows `action`, which the driver will perform.
-    fn note(&mut self, action: &Action) {
-        let (key, set) = match action {
-            Action::SetTimer(timer, _) => (TimerKey::Client(*timer), true),
-            Action::CancelTimer(timer) => (TimerKey::Client(*timer), false),
-            Action::SetSubscriptionTimer(id, timer, _) => {
-                (TimerKey::Subscription(*id, *timer), true)
-            }
-            Action::CancelSubscriptionTimer(id, timer) => {
-                (TimerKey::Subscription(*id, *timer), false)
-            }
-            Action::SetCallTimer(id, timer, _) => (TimerKey::Call(*id, *timer), true),
-            Action::CancelCallTimer(id, timer) => (TimerKey::Call(*id, *timer), false),
-            _ => return,
-        };
-        if set {
-            self.sets += 1;
-            self.running.insert(key, self.sets);
-        } else {
-            self.running.remove(&key);
-        }
-    }
-
-    /// Whether `input`, the firing of the setting numbered `set`, belongs
-    /// to a timer set again or cancelled since; an owner giving no number
-    /// is trusted.
-    fn superseded(&self, input: &Input, set: Option<u64>) -> bool {
-        match (TimerKey::of(input), set) {
-            (Some(key), Some(set)) => self.running.get(&key) != Some(&set),
-            _ => false,
-        }
-    }
-
-    /// `input` is the firing of a timer: it no longer runs.
-    fn fired(&mut self, input: &Input) {
-        if let Some(key) = TimerKey::of(input) {
-            self.running.remove(&key);
-        }
-    }
-}
-
 /// The deadlines of the token refresh timers the driver runs, by
-/// subscription (`None` for the connection's), kept beside the core: an
-/// application task that reveals a sleep cannot reach the driver's
-/// timers (Block 25, D1, D3).
+/// subscription (`None` for the connection's), each with its setting, kept
+/// beside the core: an application task that reveals a sleep cannot reach
+/// the driver's timers (Block 25, D1, D3; Block 53 D4).
 #[derive(Debug, Default)]
-pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, platform::Instant>);
+pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, (platform::Instant, TimerSetting)>);
 
 impl Refreshes {
     /// Follows `action`, which the driver will perform.
     fn note(&mut self, action: &Action) {
         match action {
-            Action::SetTimer(Timer::Refresh, delay) => self.set(None, *delay),
-            Action::SetSubscriptionTimer(id, SubscriptionTimer::Refresh, delay) => {
-                self.set(Some(*id), *delay);
+            Action::SetTimer(Timer::Refresh, delay, setting) => self.set(None, *delay, *setting),
+            Action::SetSubscriptionTimer(id, SubscriptionTimer::Refresh, delay, setting) => {
+                self.set(Some(*id), *delay, *setting);
             }
             Action::CancelTimer(Timer::Refresh) => {
                 self.0.remove(&None);
@@ -410,44 +310,52 @@ impl Refreshes {
         }
     }
 
-    fn set(&mut self, key: Option<SubscriptionId>, delay: Duration) {
-        self.0.insert(key, platform::Instant::now() + delay);
+    fn set(&mut self, key: Option<SubscriptionId>, delay: Duration, setting: TimerSetting) {
+        self.0
+            .insert(key, (platform::Instant::now() + delay, setting));
     }
 
     /// Every refresh comes due `by` earlier, as the core's shortening of
     /// all of them on a sleep will make the driver's timers do.
     fn shorten_all(&mut self, by: Duration) {
-        for deadline in self.0.values_mut() {
+        for (deadline, _) in self.0.values_mut() {
             *deadline = deadline
                 .checked_sub(by)
                 .unwrap_or_else(platform::Instant::now);
         }
     }
 
-    /// `input` is the firing of a refresh timer: it no longer runs.
+    /// `input` is the firing of a refresh timer: the entry of its setting
+    /// no longer runs, so that each refresh is given once (Block 53 D4).
     fn fired(&mut self, input: &Input) {
-        match input {
-            Input::TimerFired(Timer::Refresh) => {
-                self.0.remove(&None);
+        let (key, setting) = match input {
+            Input::TimerFired(Timer::Refresh, setting) => (None, *setting),
+            Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh, setting) => {
+                (Some(*id), *setting)
             }
-            Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh) => {
-                self.0.remove(&Some(*id));
-            }
-            _ => {}
+            _ => return,
+        };
+        if self
+            .0
+            .get(&key)
+            .is_some_and(|(_, running)| *running == setting)
+        {
+            self.0.remove(&key);
         }
     }
 
-    /// Removes the refresh timers due now, and names them.
-    fn due(&mut self) -> Vec<Option<SubscriptionId>> {
+    /// Removes the refresh timers due now, and names them with their
+    /// settings.
+    fn due(&mut self) -> Vec<(Option<SubscriptionId>, TimerSetting)> {
         let now = platform::Instant::now();
         let mut due: Vec<_> = self
             .0
             .iter()
-            .filter(|(_, deadline)| **deadline <= now)
-            .map(|(key, _)| *key)
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(key, (_, setting))| (*key, *setting))
             .collect();
-        due.sort_unstable();
-        for key in &due {
+        due.sort_unstable_by_key(|(key, _)| *key);
+        for (key, _) in &due {
             self.0.remove(key);
         }
         due
@@ -497,12 +405,6 @@ impl std::fmt::Debug for SubscriptionCallbacks {
 
 impl Shared {
     pub(super) fn apply(&self, input: Input) {
-        self.apply_fired(input, None);
-    }
-
-    /// As [`Shared::apply`], for the firing of the driver's timer of the
-    /// setting `set` (see [`Armed`]).
-    fn apply_fired(&self, input: Input, set: Option<u64>) {
         let mut core = lock(&self.core);
         // The driver has stopped (the client was dropped, after its final
         // disconnect, or its runtime shut down): actions would pile up with nothing to perform them,
@@ -510,7 +412,7 @@ impl Shared {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        self.handle_fired(&mut core, input, set);
+        self.handle(&mut core, input);
         drop(core);
         self.actions_queued.notify_one();
     }
@@ -582,19 +484,13 @@ impl Shared {
     /// Feeds `input` to the machine: events go to their outboxes, taken at
     /// once where no stream takes them, other actions to the driver.
     pub(super) fn handle(&self, core: &mut Core, input: Input) {
-        self.handle_fired(core, input, None);
-    }
-
-    /// As [`Shared::handle`], `input` being, when `set` is given, the
-    /// firing of the driver's timer of that setting (see [`Armed`]).
-    pub(super) fn handle_fired(&self, core: &mut Core, input: Input, set: Option<u64>) {
         // Application calls and stream reads feed the machine too, on the
         // application's tasks.
         let _entered = self.log.span.enter();
         // A sleep since the last input is the machine's first news of the
         // wake (Block 25, D1).
         let Some(gap) = core.clock.tick() else {
-            self.give(core, input, set);
+            self.give(core, input);
             return;
         };
         debug!(gap = ?gap, "system sleep detected");
@@ -634,12 +530,11 @@ impl Shared {
             input => {
                 self.feed(core, Input::Slept { gap });
                 // A firing whose timer the answer to the sleep set again is
-                // stale; a refresh firing is given once.
-                let input = core.accepted(input, set);
+                // ignored by the core (Block 53 D2); a refresh firing is
+                // given once.
+                core.refreshes.fired(&input);
                 self.fire_due_refreshes(core);
-                if let Some(input) = input {
-                    self.feed(core, input);
-                }
+                self.feed(core, input);
             }
         }
         // A stream created or polled may be what revealed the sleep, with
@@ -651,14 +546,21 @@ impl Shared {
     /// timers `input` set lost no time to the sleep: the sleep does not
     /// shorten them (Codex, #120).
     fn feed_before_sleep(&self, core: &mut Core, input: Input, gap: Duration) {
-        let sets = core.armed.sets;
+        // The timers `input` set are those of the set actions it returned
+        // (Block 53 D4).
+        let before = core.actions.len();
         self.feed(core, input);
         let fresh: HashSet<TimerKey> = core
-            .armed
-            .running
-            .iter()
-            .filter(|(_, set)| **set > sets)
-            .map(|(key, _)| *key)
+            .actions
+            .range(before..)
+            .filter_map(|action| match action {
+                Action::SetTimer(timer, ..) => Some(TimerKey::Client(*timer)),
+                Action::SetSubscriptionTimer(id, timer, ..) => {
+                    Some(TimerKey::Subscription(*id, *timer))
+                }
+                Action::SetCallTimer(id, timer, ..) => Some(TimerKey::Call(*id, *timer)),
+                _ => None,
+            })
             .collect();
         let from = core.actions.len();
         // The soak's record of the fresh timers, whose shortening is
@@ -667,7 +569,7 @@ impl Shared {
         let kept: Vec<_> = fresh
             .iter()
             .map(|key| {
-                let name = key.hook_name();
+                let name = super::hooks::name(*key);
                 let entry = core.timer_record.get(&name);
                 (name, entry)
             })
@@ -695,11 +597,10 @@ impl Shared {
         }));
     }
 
-    /// Gives the machine `input` unless it is a stale firing.
-    fn give(&self, core: &mut Core, input: Input, set: Option<u64>) {
-        if let Some(input) = core.accepted(input, set) {
-            self.feed(core, input);
-        }
+    /// Gives the machine `input`; a refresh firing is given once.
+    fn give(&self, core: &mut Core, input: Input) {
+        core.refreshes.fired(&input);
+        self.feed(core, input);
     }
 
     /// Gives the machine the firings of the refreshes a sleep made due,
@@ -707,18 +608,17 @@ impl Shared {
     /// it starts fetches a new token first (Block 25, D3); the driver's
     /// timers for them are cancelled.
     fn fire_due_refreshes(&self, core: &mut Core) {
-        for of in core.refreshes.due() {
+        for (of, setting) in core.refreshes.due() {
             let (cancel, fired) = match of {
                 None => (
                     Action::CancelTimer(Timer::Refresh),
-                    Input::TimerFired(Timer::Refresh),
+                    Input::TimerFired(Timer::Refresh, setting),
                 ),
                 Some(id) => (
                     Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh),
-                    Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh),
+                    Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh, setting),
                 ),
             };
-            core.armed.note(&cancel);
             #[cfg(feature = "__test-hooks")]
             if self.records.on() {
                 core.timer_record.action(&cancel);
@@ -739,7 +639,6 @@ impl Shared {
             }
             for action in core.machine.handle(input) {
                 self.log.action(&action);
-                core.armed.note(&action);
                 #[cfg(feature = "__test-hooks")]
                 if self.records.on() {
                     core.timer_record.action(&action);
@@ -1786,7 +1685,6 @@ impl Client {
             debounce_timers: KeyedTimers::default(),
             shared_poll_timers: SharedPollTimers::default(),
             shared_poll_refreshes: SharedPollRefreshes::default(),
-            timer_sets: 0,
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
             taken: VecDeque::new(),
@@ -1842,11 +1740,11 @@ impl Client {
     pub fn record_timers(&self) {
         let mut core = lock(&self.shared.core);
         // Timers set before, aged from now (reviewer, 52a).
-        let running: Vec<String> = core
-            .armed
-            .running
-            .keys()
-            .map(|key| key.hook_name())
+        let running: Vec<(String, TimerSetting)> = core
+            .machine
+            .running_settings()
+            .into_iter()
+            .map(|(key, setting)| (super::hooks::name(key), setting))
             .collect();
         core.timer_record.seed(running);
         self.shared.records.start();
@@ -1871,11 +1769,12 @@ impl Client {
         );
         let mut guard = lock(&self.shared.core);
         let core = &mut *guard;
+        // The core's running settings, read from the machine (Block 53 D4).
         let names: Vec<String> = core
-            .armed
-            .running
-            .keys()
-            .map(|key| key.hook_name())
+            .machine
+            .running_settings()
+            .into_iter()
+            .map(|(key, _)| super::hooks::name(key))
             .collect();
         let core_list = core.timer_record.report_armed(names);
         drop(guard);
@@ -2702,8 +2601,8 @@ struct Driver {
     /// the machine, which ignores any other answer of it.
     stale_fetching: Option<(FetchId, Fetching)>,
     timers: Timers,
-    subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer)>,
-    call_timers: KeyedTimers<(CallId, CallTimer)>,
+    subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer), TimerSetting>,
+    call_timers: KeyedTimers<(CallId, CallTimer), TimerSetting>,
     /// One timer per open debounce window (Block 46, D5).
     debounce_timers: KeyedTimers<DebounceTimer>,
     /// The reply deadlines of shared poll requests (Block 47, D12).
@@ -2711,9 +2610,6 @@ struct Driver {
     /// The signature refresh of each shared poll subscription, at the
     /// earliest deadline reported (Block 47, D7).
     shared_poll_refreshes: SharedPollRefreshes,
-    /// How many timers were set, numbering each setting as the core's
-    /// [`Armed`] does.
-    timer_sets: u64,
     /// Subscription callbacks and the connect data callback running, each yielding the
     /// input answering it; an aborted one yields `None`.
     callback_fetches: FuturesUnordered<CallbackFetching>,
@@ -2731,19 +2627,21 @@ struct Driver {
 type CallbackFetching = platform::BoxFuture<'static, Option<(FetchId, Input)>>;
 
 /// The machine's subscription timers, by subscription and kind, or its
-/// call timers, by call.
-struct KeyedTimers<K>(HashMap<K, (Pin<Box<Sleep>>, u64)>);
+/// call timers, by call, each with its setting (Block 53 D4); debounce and
+/// shared poll timers, numbered by their own key, keep `()`.
+struct KeyedTimers<K, V = ()>(HashMap<K, (Pin<Box<Sleep>>, V)>);
 
-impl<K> Default for KeyedTimers<K> {
+impl<K, V> Default for KeyedTimers<K, V> {
     fn default() -> Self {
         Self(HashMap::new())
     }
 }
 
-impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
-    /// Sets `key`'s timer, of the setting numbered `set` (see [`Armed`]).
-    fn set(&mut self, key: K, delay: Duration, set: u64) {
-        self.0.insert(key, (Box::pin(platform::sleep(delay)), set));
+impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
+    /// Sets `key`'s timer, of `setting`.
+    fn set(&mut self, key: K, delay: Duration, setting: V) {
+        self.0
+            .insert(key, (Box::pin(platform::sleep(delay)), setting));
     }
 
     fn cancel(&mut self, key: K) {
@@ -2759,7 +2657,10 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
     /// Arms `key`'s timer to fire `delay` from now, unless it runs and
     /// fires sooner: one timer at the earliest deadline asked for.
     #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
-    fn set_earliest(&mut self, key: K, delay: Duration) {
+    fn set_earliest(&mut self, key: K, delay: Duration)
+    where
+        V: Default,
+    {
         match self.0.get_mut(&key) {
             Some((sleep, _)) => {
                 let deadline = platform::Instant::now() + delay;
@@ -2767,7 +2668,7 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
                     sleep.as_mut().reset(deadline);
                 }
             }
-            None => self.set(key, delay, 0),
+            None => self.set(key, delay, V::default()),
         }
     }
 
@@ -2804,15 +2705,19 @@ impl<K: Copy + Eq + std::hash::Hash> KeyedTimers<K> {
 
     /// Resolves with the first timer to fire, which is removed, and the
     /// number of its setting; never while none is set. Cancel-safe.
-    async fn fired(&mut self) -> (K, u64) {
+    async fn fired(&mut self) -> (K, V) {
         std::future::poll_fn(|cx| {
-            let fired = self.0.iter_mut().find_map(|(key, (sleep, set))| {
-                sleep.as_mut().poll(cx).is_ready().then_some((*key, *set))
+            let fired = self.0.iter_mut().find_map(|(key, (sleep, setting))| {
+                sleep
+                    .as_mut()
+                    .poll(cx)
+                    .is_ready()
+                    .then_some((*key, *setting))
             });
             match fired {
-                Some((key, set)) => {
+                Some((key, setting)) => {
                     self.0.remove(&key);
-                    Poll::Ready((key, set))
+                    Poll::Ready((key, setting))
                 }
                 None => Poll::Pending,
             }
@@ -2834,13 +2739,13 @@ fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
 /// The machine's timers: one slot per [`Timer`] kind, so a new kind needs
 /// no change here.
 #[derive(Default)]
-struct Timers([Option<(Pin<Box<Sleep>>, u64)>; Timer::COUNT]);
+struct Timers([Option<(Pin<Box<Sleep>>, TimerSetting)>; Timer::COUNT]);
 
 impl Timers {
-    /// Sets `timer`, of the setting numbered `set` (see [`Armed`]).
-    fn set(&mut self, timer: Timer, delay: Duration, set: u64) {
+    /// Sets `timer`, of `setting` (Block 53 D4).
+    fn set(&mut self, timer: Timer, delay: Duration, setting: TimerSetting) {
         // sleep() clamps delays too large for an Instant instead of panicking.
-        self.0[timer.index()] = Some((Box::pin(platform::sleep(delay)), set));
+        self.0[timer.index()] = Some((Box::pin(platform::sleep(delay)), setting));
     }
 
     fn cancel(&mut self, timer: Timer) {
@@ -2853,19 +2758,19 @@ impl Timers {
         }
     }
 
-    /// Resolves with the first timer to fire, which is cleared, and the
-    /// number of its setting; never while none is set. Cancel-safe:
-    /// unfired timers keep running.
-    async fn fired(&mut self) -> (Timer, u64) {
+    /// Resolves with the first timer to fire, which is cleared, and its
+    /// setting; never while none is set. Cancel-safe: unfired timers keep
+    /// running.
+    async fn fired(&mut self) -> (Timer, TimerSetting) {
         std::future::poll_fn(|cx| {
             for timer in Timer::ALL {
                 let slot = &mut self.0[timer.index()];
-                if let Some((sleep, set)) = slot
+                if let Some((sleep, setting)) = slot
                     && sleep.as_mut().poll(cx).is_ready()
                 {
-                    let set = *set;
+                    let setting = *setting;
                     *slot = None;
-                    return Poll::Ready((timer, set));
+                    return Poll::Ready((timer, setting));
                 }
             }
             Poll::Pending
@@ -3028,8 +2933,6 @@ impl Driver {
             if self.delivery.is_thread() {
                 super::handler::check_thread_waits(&self.shared);
             }
-            // The number of the setting of a timer that fired.
-            let mut fired = None;
             // The branches above the timers sit out one turn after a streak
             // of inputs, so that they never starve a refresh, call or reply
             // deadline; the flag clears after that turn, whatever wins
@@ -3120,17 +3023,14 @@ impl Driver {
                     self.upper_input(waited.load(Ordering::Relaxed));
                     continue;
                 }
-                (timer, set) = self.timers.fired() => {
-                    fired = Some(set);
-                    Input::TimerFired(timer)
+                // Each with the setting its sleep was armed with: the core
+                // ignores one no longer running (Block 53 D2, D4).
+                (timer, setting) = self.timers.fired() => Input::TimerFired(timer, setting),
+                ((id, timer), setting) = self.subscription_timers.fired() => {
+                    Input::SubscriptionTimerFired(id, timer, setting)
                 }
-                ((id, timer), set) = self.subscription_timers.fired() => {
-                    fired = Some(set);
-                    Input::SubscriptionTimerFired(id, timer)
-                }
-                ((id, timer), set) = self.call_timers.fired() => {
-                    fired = Some(set);
-                    Input::CallTimerFired(id, timer)
+                ((id, timer), setting) = self.call_timers.fired() => {
+                    Input::CallTimerFired(id, timer, setting)
                 }
                 // Not numbered, as debounce timers: the core ignores one it
                 // no longer knows (Block 47, D3).
@@ -3186,7 +3086,7 @@ impl Driver {
                     .swap(false, Ordering::SeqCst),
                 "a panic planted in the driver (Block 49)"
             );
-            self.shared.apply_fired(input, fired);
+            self.shared.apply(input);
         }
     }
 
@@ -3229,25 +3129,19 @@ impl Driver {
         for ((id, timer), (sleep, _)) in &self.call_timers.0 {
             running.push((hooks::call(*id, *timer), sleep.deadline()));
         }
-        for (timer, (sleep, _)) in &self.debounce_timers.0 {
+        for (timer, (sleep, ())) in &self.debounce_timers.0 {
             running.push((hooks::debounce(*timer), sleep.deadline()));
         }
         #[cfg(feature = "unstable")]
         {
-            for (timer, (sleep, _)) in &self.shared_poll_timers.0 {
+            for (timer, (sleep, ())) in &self.shared_poll_timers.0 {
                 running.push((hooks::shared_poll(*timer), sleep.deadline()));
             }
-            for (id, (sleep, _)) in &self.shared_poll_refreshes.0 {
+            for (id, (sleep, ())) in &self.shared_poll_refreshes.0 {
                 running.push((hooks::shared_poll_refresh(*id), sleep.deadline()));
             }
         }
         lock(&self.shared.records.driver).observe(running);
-    }
-
-    /// Numbers the next setting of a timer (see [`Armed`]).
-    fn next_set(&mut self) -> u64 {
-        self.timer_sets += 1;
-        self.timer_sets
     }
 
     #[allow(clippy::too_many_lines)] // One arm per action.
@@ -3296,10 +3190,7 @@ impl Driver {
                     });
                 }
             }
-            Action::SetTimer(timer, delay) => {
-                let set = self.next_set();
-                self.timers.set(timer, delay, set);
-            }
+            Action::SetTimer(timer, delay, setting) => self.timers.set(timer, delay, setting),
             Action::CancelTimer(timer) => self.timers.cancel(timer),
             Action::ShortenTimer(timer, by) => self.timers.shorten(timer, by),
             Action::ShortenSubscriptionTimer(id, timer, by) => {
@@ -3317,7 +3208,7 @@ impl Driver {
             }
             #[cfg(feature = "unstable")]
             Action::SetSharedPollTimer(timer, delay) => {
-                self.shared_poll_timers.set(timer, delay, 0);
+                self.shared_poll_timers.set(timer, delay, ());
             }
             #[cfg(feature = "unstable")]
             Action::CancelSharedPollTimer(timer) => self.shared_poll_timers.cancel(timer),
@@ -3342,21 +3233,18 @@ impl Driver {
                     let _ = sender.send(result);
                 }
             }
-            Action::SetSubscriptionTimer(id, timer, delay) => {
-                let set = self.next_set();
-                self.subscription_timers.set((id, timer), delay, set);
+            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
+                self.subscription_timers.set((id, timer), delay, setting);
             }
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.subscription_timers.cancel((id, timer));
             }
-            // Not numbered: a window's timer is never set twice and the
-            // core ignores one it no longer knows (Block 46, D5). Numbering
-            // it here would skew the settings the core's `Armed` counts.
+            // Numbered by its own key: a window's timer is never set twice
+            // and the core ignores one it no longer knows (Block 46, D5).
             Action::SetDebounceTimer(timer, delay) => self.set_debounce_timer(timer, delay),
             Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),
-            Action::SetCallTimer(id, timer, delay) => {
-                let set = self.next_set();
-                self.call_timers.set((id, timer), delay, set);
+            Action::SetCallTimer(id, timer, delay, setting) => {
+                self.call_timers.set((id, timer), delay, setting);
             }
             Action::CancelCallTimer(id, timer) => self.call_timers.cancel((id, timer)),
             action @ (Action::FetchSubscriptionData { .. }
@@ -3444,7 +3332,7 @@ impl Driver {
             held.push(timer);
             return;
         }
-        self.debounce_timers.set(timer, delay, 0);
+        self.debounce_timers.set(timer, delay, ());
     }
 
     /// How frames travel with the configured encoding.
@@ -4120,6 +4008,16 @@ fn check_limits(config: &Config) -> Result<(), ClientError> {
         "the batch frame limit must be at least 1"
     } else if config.max_message_bytes == 0 {
         "the maximum message size (max_message_bytes) must be at least 1"
+    } else if config.timeout.is_zero() {
+        // A zero duration has no working meaning: every attempt would fail
+        // at once, or retry with no wait (Block 53 D6).
+        "Config::timeout must be more than 0"
+    } else if config.handshake_timeout.is_zero() {
+        "Config::handshake_timeout must be more than 0"
+    } else if config.min_reconnect_delay.is_zero() {
+        "Config::min_reconnect_delay must be more than 0"
+    } else if config.max_reconnect_delay.is_zero() {
+        "Config::max_reconnect_delay must be more than 0"
     } else {
         return Ok(());
     };
@@ -5419,13 +5317,9 @@ mod tests {
         (core, transport)
     }
 
-    /// The number of the setting of `timer` the driver would fire.
-    fn setting(core: &Core, timer: Timer) -> u64 {
-        *core
-            .armed
-            .running
-            .get(&TimerKey::Client(timer))
-            .expect("a running timer")
+    /// The setting of `timer` the driver would fire.
+    fn setting(core: &Core, timer: Timer) -> TimerSetting {
+        core.machine.timer_setting(timer).expect("a running timer")
     }
 
     /// The frames among the core's queued actions, as text.
@@ -5625,7 +5519,7 @@ mod tests {
     // got the core and handled a short sleep, which set that timer again.
     // Single-threaded runtime: the driver task cannot run in between.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_firing_superseded_by_another_tasks_sleep_handling_is_dropped() {
+    async fn a_firing_superseded_by_another_tasks_sleep_handling_is_ignored() {
         let client =
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
@@ -5637,7 +5531,7 @@ mod tests {
             .handle(&mut core, Input::SetData(b"{}".to_vec()));
         client
             .shared()
-            .handle_fired(&mut core, Input::TimerFired(Timer::ServerPing), Some(set));
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
 
         assert_eq!(core.machine.state(), State::Connected);
     }
@@ -5652,7 +5546,7 @@ mod tests {
 
         client
             .shared()
-            .handle_fired(&mut core, Input::TimerFired(Timer::ServerPing), Some(set));
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
 
         assert_eq!(core.machine.state(), State::Connecting);
     }
@@ -5713,13 +5607,13 @@ mod tests {
         slept(&mut core, Duration::from_secs(30));
         client
             .shared()
-            .handle_fired(&mut core, Input::TimerFired(Timer::ServerPing), Some(set));
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
             core.actions
                 .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::ServerPing, _))),
+                .any(|action| matches!(action, Action::SetTimer(Timer::ServerPing, ..))),
             "{:?}",
             core.actions
         );
@@ -5750,9 +5644,10 @@ mod tests {
         );
 
         slept(&mut core, Duration::from_secs(30));
+        let fired = setting(&core, Timer::Refresh);
         client
             .shared()
-            .handle(&mut core, Input::TimerFired(Timer::Refresh));
+            .handle(&mut core, Input::TimerFired(Timer::Refresh, fired));
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
@@ -5813,9 +5708,10 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             slept(&mut core, Duration::from_secs(30));
+            let fired = setting(&core, Timer::ServerPing);
             client
                 .shared()
-                .handle(&mut core, Input::TimerFired(Timer::ServerPing));
+                .handle(&mut core, Input::TimerFired(Timer::ServerPing, fired));
         });
 
         let records = lock(&records.0);
@@ -5859,9 +5755,10 @@ mod tests {
         core.actions.clear();
 
         slept(&mut core, Duration::from_secs(70));
+        let fired = setting(&core, Timer::Reconnect);
         client
             .shared()
-            .handle(&mut core, Input::TimerFired(Timer::Reconnect));
+            .handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
 
         let fetch = core
             .actions
@@ -5940,7 +5837,8 @@ mod tests {
         let mut core = lock(&client.shared().core);
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
-        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect));
+        let fired = setting(&core, Timer::Reconnect);
+        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
         let again = core
             .actions
             .iter()
@@ -6035,7 +5933,8 @@ mod tests {
         let mut core = lock(&client.shared().core);
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
-        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect));
+        let fired = setting(&core, Timer::Reconnect);
+        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
         let again = core
             .actions
             .iter()
@@ -6167,7 +6066,7 @@ mod tests {
         assert!(
             core.actions.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Refresh, _)
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Refresh, ..)
             )),
             "{:?}",
             core.actions
@@ -6423,7 +6322,7 @@ mod tests {
         assert_eq!(
             core.actions
                 .iter()
-                .filter(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _)))
+                .filter(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..)))
                 .count(),
             1,
             "{:?}",
@@ -6459,9 +6358,10 @@ mod tests {
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
 
+        let fired = setting(&core, Timer::ServerPing);
         client
             .shared()
-            .handle(&mut core, Input::TimerFired(Timer::ServerPing));
+            .handle(&mut core, Input::TimerFired(Timer::ServerPing, fired));
 
         assert_eq!(core.machine.state(), State::Connecting);
     }
@@ -6968,19 +6868,20 @@ mod tests {
     #[tokio::test]
     async fn timers_fire_in_deadline_order_and_cancelled_ones_never() {
         let mut timers = Timers::default();
-        timers.set(Timer::ServerPing, Duration::from_millis(60), 1);
-        timers.set(Timer::Refresh, Duration::from_millis(20), 2);
-        timers.set(Timer::Reconnect, Duration::from_millis(40), 3);
+        let n = TimerSetting::for_tests;
+        timers.set(Timer::ServerPing, Duration::from_millis(60), n(1));
+        timers.set(Timer::Refresh, Duration::from_millis(20), n(2));
+        timers.set(Timer::Reconnect, Duration::from_millis(40), n(3));
         timers.cancel(Timer::Reconnect);
 
         let first = timers.fired().await;
         let second = timers.fired().await;
         let none_left = tokio::time::timeout(Duration::from_millis(100), timers.fired()).await;
 
-        // Each with the number of its setting.
+        // Each with its setting.
         assert_eq!(
             (first, second),
-            ((Timer::Refresh, 2), (Timer::ServerPing, 1))
+            ((Timer::Refresh, n(2)), (Timer::ServerPing, n(1)))
         );
         assert!(none_left.is_err(), "{none_left:?}");
     }
@@ -6989,7 +6890,7 @@ mod tests {
     // was cancelled, on a paused clock that only advances past timers.
     #[tokio::test(start_paused = true)]
     async fn fired_all_returns_every_timer_due_and_none_not_due() {
-        let mut timers = KeyedTimers::<u32>::default();
+        let mut timers = KeyedTimers::<u32, u64>::default();
         timers.set(1, Duration::from_millis(20), 1);
         timers.set(2, Duration::from_millis(20), 2);
         timers.set(3, Duration::from_millis(50), 3);

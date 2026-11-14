@@ -358,6 +358,30 @@ pub enum SubscriptionError {
     /// A tag filter cannot go with delta compression (Block 35a;
     /// `client.proto`: a filter "disables delta compression").
     TagFilterWithDelta,
+    /// A resubscribe delay of 0, which would resubscribe with no wait for
+    /// as long as a failure lasts (Block 53 D6).
+    ZeroDelay {
+        /// The option: `min_resubscribe_delay` or `max_resubscribe_delay`.
+        option: &'static str,
+    },
+}
+
+/// The resubscribe delays of `options`, each more than 0 (Block 53 D6).
+#[cfg(any(adapter_tokio, adapter_browser))]
+pub(crate) fn check_resubscribe_delays(
+    options: &crate::machine::SubscriptionOptions,
+) -> Result<(), SubscriptionError> {
+    if options.min_resubscribe_delay.is_zero() {
+        return Err(SubscriptionError::ZeroDelay {
+            option: "min_resubscribe_delay",
+        });
+    }
+    if options.max_resubscribe_delay.is_zero() {
+        return Err(SubscriptionError::ZeroDelay {
+            option: "max_resubscribe_delay",
+        });
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for SubscriptionError {
@@ -371,6 +395,7 @@ impl std::fmt::Display for SubscriptionError {
             Self::TagFilterWithDelta => {
                 f.write_str("a tag filter cannot be combined with delta compression")
             }
+            Self::ZeroDelay { option } => write!(f, "{option} must be more than 0"),
         }
     }
 }

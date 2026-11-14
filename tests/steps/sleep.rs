@@ -317,7 +317,7 @@ fn its_next_attempt_is_delayed(world: &mut ClientWorld, least: u64, most: u64) {
     let delay = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .unwrap_or_else(|| panic!("a reconnect delay in {actions:?}"));
@@ -416,7 +416,7 @@ fn its_reconnect_timer_is_unchanged(world: &mut ClientWorld) {
     assert!(
         !actions.iter().any(|action| matches!(
             action,
-            Action::SetTimer(Timer::Reconnect, _)
+            Action::SetTimer(Timer::Reconnect, ..)
                 | Action::CancelTimer(Timer::Reconnect)
                 | Action::ShortenTimer(Timer::Reconnect, _)
         )),
@@ -567,7 +567,7 @@ fn fleet_delays(world: &ClientWorld) -> Vec<Duration> {
             run.actions[*mark..]
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                    Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
                     _ => None,
                 })
                 .expect("a next attempt")
@@ -607,7 +607,7 @@ fn it_starts_an_attempt_at_once(world: &mut ClientWorld) {
     assert!(
         !actions
             .iter()
-            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
         "{actions:?}"
     );
 }

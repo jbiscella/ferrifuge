@@ -114,7 +114,11 @@ fn a_machine_opening_the_next_transport(world: &mut ClientWorld) {
     run.handle(Input::TransportOpened(closed));
     // No connect reply: the connect timeout closes it and opens the next,
     // at once within the first sequence (a timer of no delay).
-    run.handle(Input::TimerFired(Timer::ConnectTimeout));
+    let setting = run
+        .machine
+        .timer_setting(Timer::ConnectTimeout)
+        .expect("timeout set");
+    run.handle(Input::TimerFired(Timer::ConnectTimeout, setting));
     run.advance(Duration::ZERO);
     assert!(
         run.actions.contains(&Action::CloseTransport(closed)),

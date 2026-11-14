@@ -530,7 +530,7 @@ mod tests {
         let mut actions = machine.handle(Input::Connect);
         for attempt in 0..attempts {
             if attempt > 0 {
-                actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+                actions = machine.fire(Timer::Reconnect);
             }
             let transport = actions
                 .iter()

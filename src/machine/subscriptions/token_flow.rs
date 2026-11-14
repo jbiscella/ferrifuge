@@ -146,20 +146,12 @@ impl Machine {
     /// Schedules the refresh of a token expiring in `ttl` seconds.
     pub(super) fn schedule_subscription_refresh(&mut self, id: SubscriptionId, ttl: u32) {
         let delay = refresh_delay(ttl, &mut self.rng);
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::Refresh,
-            delay,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::Refresh, delay);
     }
 
     fn retry_subscription_refresh(&mut self, id: SubscriptionId) {
         let delay = backoff::delay(0, REFRESH_RETRY_MIN, REFRESH_RETRY_MAX, &mut self.rng);
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::Refresh,
-            delay,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::Refresh, delay);
     }
 
     /// The refresh timer fired: a new token from the callback, or, without
@@ -212,11 +204,7 @@ impl Machine {
                 }),
             },
         );
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::RefreshReply,
-            self.config.timeout,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::RefreshReply, self.config.timeout);
     }
 
     /// The `sub_refresh` got no reply in time: a timeout error (code 1),

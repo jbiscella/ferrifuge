@@ -55,12 +55,12 @@ fn reconnect_delays(config: &Config, attempts: usize) -> Vec<Duration> {
             actions
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                    Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
                     _ => None,
                 })
                 .expect("a failed attempt schedules a reconnect"),
         );
-        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        actions = machine.fire(Timer::Reconnect);
     }
     delays
 }
@@ -176,16 +176,15 @@ impl ResubscribeRun {
         let delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => {
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
                     Some(*delay)
                 }
                 _ => None,
             })
             .expect("a failed subscribe schedules a resubscribe");
-        let actions = self.machine.handle(Input::SubscriptionTimerFired(
-            self.id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        let actions = self
+            .machine
+            .fire_subscription(self.id, SubscriptionTimer::Resubscribe);
         self.note_subscribe(&actions);
         delay
     }
@@ -203,7 +202,7 @@ impl ResubscribeRun {
         let delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => {
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
                     Some(*delay)
                 }
                 _ => None,
@@ -213,10 +212,9 @@ impl ResubscribeRun {
             .pop()
             .expect("an unsubscribe command");
         self.reply(&format!(r#"{{"id":{unsubscribe},"unsubscribe":{{}}}}"#));
-        let actions = self.machine.handle(Input::SubscriptionTimerFired(
-            self.id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        let actions = self
+            .machine
+            .fire_subscription(self.id, SubscriptionTimer::Resubscribe);
         self.note_subscribe(&actions);
         delay
     }
@@ -235,7 +233,7 @@ impl ResubscribeRun {
             code: None,
             reason: "lost".to_owned(),
         });
-        let actions = self.machine.handle(Input::TimerFired(Timer::Reconnect));
+        let actions = self.machine.fire(Timer::Reconnect);
         self.transport = opened(&actions);
         self.connect();
     }

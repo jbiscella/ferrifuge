@@ -543,6 +543,7 @@ impl SubscriptionBuilder {
     ///
     /// When the registry holds a subscription to the channel already.
     pub fn build(self) -> Result<Subscription, SubscriptionError> {
+        crate::subscription::check_resubscribe_delays(&self.options)?;
         // Registered with its callback under the core lock: no other thread
         // can find and subscribe it before the callback is there.
         let mut core = lock(&self.shared.core);

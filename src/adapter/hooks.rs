@@ -12,6 +12,7 @@ use std::time::Duration;
 use super::platform;
 use crate::machine::{
     Action, CallId, CallTimer, DebounceTimer, Input, SubscriptionId, SubscriptionTimer, Timer,
+    TimerKey, TimerSetting,
 };
 
 /// A timer as [`super::Client::armed_timers`] reports it.
@@ -89,6 +90,15 @@ pub(super) fn call(id: CallId, timer: CallTimer) -> String {
     format!("call {id:?} {timer:?}")
 }
 
+/// The name of one of the core's timers, by its key.
+pub(super) fn name(key: TimerKey) -> String {
+    match key {
+        TimerKey::Client(timer) => client(timer),
+        TimerKey::Subscription(id, timer) => subscription(id, timer),
+        TimerKey::Call(id, timer) => call(id, timer),
+    }
+}
+
 pub(super) fn debounce(timer: DebounceTimer) -> String {
     format!("debounce {timer:?}")
 }
@@ -104,29 +114,36 @@ pub(super) fn shared_poll_refresh(id: SubscriptionId) -> String {
 }
 
 /// Timers by name, each with its deadline, when known, and since when it
-/// runs. For the core's client, subscription and call timers it gives only
-/// the ages and deadlines: their names come from `Armed`, which the core
-/// keeps anyway (reviewer, 52a); it alone tracks the debounce and
+/// runs, and the setting of each client, subscription and call timer. For
+/// those it gives only the ages and deadlines: their names come from the
+/// core's running settings (Block 53 D4); it alone tracks the debounce and
 /// shared-poll timers.
 #[derive(Debug, Default)]
-pub(super) struct TimerRecord(BTreeMap<String, (Option<platform::Instant>, platform::Instant)>);
+pub(super) struct TimerRecord(
+    BTreeMap<String, (Option<platform::Instant>, platform::Instant)>,
+    BTreeMap<String, TimerSetting>,
+);
 
 impl TimerRecord {
     /// Follows a timer action of the core.
     pub(super) fn action(&mut self, action: &Action) {
         let now = platform::Instant::now();
         match action {
-            Action::SetTimer(timer, delay) => self.set(client(*timer), now, *delay),
+            Action::SetTimer(timer, delay, setting) => {
+                self.set_numbered(client(*timer), now, *delay, *setting);
+            }
             Action::CancelTimer(timer) => self.cancel(&client(*timer)),
             Action::ShortenTimer(timer, by) => self.shorten(&client(*timer), *by, now),
-            Action::SetSubscriptionTimer(id, timer, delay) => {
-                self.set(subscription(*id, *timer), now, *delay);
+            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
+                self.set_numbered(subscription(*id, *timer), now, *delay, *setting);
             }
             Action::CancelSubscriptionTimer(id, timer) => self.cancel(&subscription(*id, *timer)),
             Action::ShortenSubscriptionTimer(id, timer, by) => {
                 self.shorten(&subscription(*id, *timer), *by, now);
             }
-            Action::SetCallTimer(id, timer, delay) => self.set(call(*id, *timer), now, *delay),
+            Action::SetCallTimer(id, timer, delay, setting) => {
+                self.set_numbered(call(*id, *timer), now, *delay, *setting);
+            }
             Action::CancelCallTimer(id, timer) => self.cancel(&call(*id, *timer)),
             Action::SetDebounceTimer(timer, delay) => self.set(debounce(*timer), now, *delay),
             Action::CancelDebounceTimer(timer) => self.cancel(&debounce(*timer)),
@@ -155,12 +172,26 @@ impl TimerRecord {
         }
     }
 
-    /// Follows an input the core takes: a firing ends its timer.
+    /// Follows an input the core takes: a firing ends its timer, one of a
+    /// client, subscription or call timer only when it carries the setting
+    /// recorded (Block 53 D4).
     pub(super) fn input(&mut self, input: &Input) {
+        let numbered = match input {
+            Input::TimerFired(timer, setting) => Some((client(*timer), *setting)),
+            Input::SubscriptionTimerFired(id, timer, setting) => {
+                Some((subscription(*id, *timer), *setting))
+            }
+            Input::CallTimerFired(id, timer, setting) => Some((call(*id, *timer), *setting)),
+            _ => None,
+        };
+        if let Some((name, setting)) = numbered {
+            if self.1.get(&name) == Some(&setting) {
+                self.0.remove(&name);
+                self.1.remove(&name);
+            }
+            return;
+        }
         let name = match input {
-            Input::TimerFired(timer) => client(*timer),
-            Input::SubscriptionTimerFired(id, timer) => subscription(*id, *timer),
-            Input::CallTimerFired(id, timer) => call(*id, *timer),
             Input::DebounceTimerFired(timer) => debounce(*timer),
             #[cfg(feature = "unstable")]
             Input::SharedPollTimerFired(timer) => shared_poll(*timer),
@@ -175,8 +206,20 @@ impl TimerRecord {
         self.0.insert(name, (Some(now + delay), now));
     }
 
+    fn set_numbered(
+        &mut self,
+        name: String,
+        now: platform::Instant,
+        delay: Duration,
+        setting: TimerSetting,
+    ) {
+        self.1.insert(name.clone(), setting);
+        self.set(name, now, delay);
+    }
+
     fn cancel(&mut self, name: &str) {
         self.0.remove(name);
+        self.1.remove(name);
     }
 
     fn shorten(&mut self, name: &str, by: Duration, now: platform::Instant) {
@@ -223,9 +266,10 @@ impl TimerRecord {
 
     /// Ages from now the timers `running` names that are not recorded yet:
     /// those set before the records started (reviewer, 52a).
-    pub(super) fn seed(&mut self, running: impl IntoIterator<Item = String>) {
+    pub(super) fn seed(&mut self, running: impl IntoIterator<Item = (String, TimerSetting)>) {
         let now = platform::Instant::now();
-        for name in running {
+        for (name, setting) in running {
+            self.1.insert(name.clone(), setting);
             self.0.entry(name).or_insert((None, now));
         }
     }
