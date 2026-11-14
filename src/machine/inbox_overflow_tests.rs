@@ -88,7 +88,7 @@ fn reconnect_delay(actions: &[Action]) -> Duration {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect timer")
@@ -116,7 +116,7 @@ fn an_overflow_reconnects_with_code_7_and_withdraws_the_events_not_taken() {
     );
     assert_eq!(machine.state(), State::Connecting);
     // The position did not move: the next subscribe recovers from offset 0.
-    let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+    let reconnecting = machine.fire(Timer::Reconnect);
     let (_, commands) = connect(&mut machine, &reconnecting);
     let subscribe = commands
         .into_iter()
@@ -184,7 +184,7 @@ fn last_delay(seed: u64, connections: usize, ping: bool) -> Duration {
         }
         let overflowed = machine.handle(Input::InboxOverflow(transport));
         delay = Some(reconnect_delay(&overflowed));
-        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        actions = machine.fire(Timer::Reconnect);
     }
     delay.expect("a connection")
 }

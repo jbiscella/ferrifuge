@@ -100,7 +100,10 @@ fn connect_and_websocket_fails(world: &mut ClientWorld) {
 fn http_stream_connects(world: &mut ClientWorld) {
     let machine = core(world);
     // The next transport of the first sequence goes at once.
-    let actions = handle_taking(machine, Input::TimerFired(Timer::Reconnect));
+    let setting = machine
+        .timer_setting(Timer::Reconnect)
+        .expect("reconnect set");
+    let actions = handle_taking(machine, Input::TimerFired(Timer::Reconnect, setting));
     let transport = opened(&actions, TransportKind::HttpStream);
     handle_taking(machine, Input::TransportOpened(transport));
     handle_taking(

@@ -446,7 +446,7 @@ mod tests {
                 machine.handle(Input::EventTaken(*event));
             }
         }
-        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let reconnecting = machine.fire(Timer::Reconnect);
         let next = reconnecting
             .iter()
             .find_map(|action| match action {
@@ -579,7 +579,7 @@ mod tests {
             reason: "reconnect".into(),
         });
         let transport = machine
-            .handle(Input::TimerFired(Timer::Reconnect))
+            .fire(Timer::Reconnect)
             .iter()
             .find_map(|action| match action {
                 Action::OpenTransport { transport, .. } => Some(*transport),

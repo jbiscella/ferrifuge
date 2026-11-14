@@ -308,11 +308,7 @@ impl Machine {
                 if let Some(call) = self.calls.by_id.get_mut(&id) {
                     call.phase = Phase::Subscribing;
                 }
-                self.actions.push(Action::SetCallTimer(
-                    id,
-                    CallTimer::Subscription,
-                    self.config.timeout,
-                ));
+                self.set_call_timer(id, CallTimer::Subscription, self.config.timeout);
             }
             // Unsubscribed, or removed from the registry.
             Some(_) => self.settle_call(id, Err(subscription_unsubscribed())),
@@ -344,11 +340,7 @@ impl Machine {
         }
         if !connected {
             call.phase = Phase::Queued;
-            self.actions.push(Action::SetCallTimer(
-                id,
-                CallTimer::Connection,
-                self.config.timeout,
-            ));
+            self.set_call_timer(id, CallTimer::Connection, self.config.timeout);
         } else if self.holds(id) {
             self.hold_call(id);
         } else if self.waits_for_room() || !self.fits(id) {
@@ -380,11 +372,7 @@ impl Machine {
                 .push(Action::CancelCallTimer(id, CallTimer::Connection));
         }
         call.phase = Phase::Held;
-        self.actions.push(Action::SetCallTimer(
-            id,
-            CallTimer::Room,
-            self.config.timeout,
-        ));
+        self.set_call_timer(id, CallTimer::Room, self.config.timeout);
         self.hold_in_batch(super::batching::HeldCommand::Call(id));
     }
 
@@ -432,11 +420,7 @@ impl Machine {
         call.phase = Phase::Sent(command_id);
         let method = method_of(&call.request);
         self.calls.by_command.insert(command_id, id);
-        self.actions.push(Action::SetCallTimer(
-            id,
-            CallTimer::Reply,
-            self.config.timeout,
-        ));
+        self.set_call_timer(id, CallTimer::Reply, self.config.timeout);
         Some(Command {
             id: command_id,
             method,
@@ -526,11 +510,7 @@ impl Machine {
         }
         call.phase = Phase::Room;
         self.calls.room.insert(id);
-        self.actions.push(Action::SetCallTimer(
-            id,
-            CallTimer::Room,
-            self.config.timeout,
-        ));
+        self.set_call_timer(id, CallTimer::Room, self.config.timeout);
     }
 
     /// Sends the calls waiting for room, in order, while they fit: each
@@ -607,11 +587,7 @@ impl Machine {
             }
         }
         if !send {
-            self.actions.push(Action::SetCallTimer(
-                id,
-                CallTimer::Reply,
-                self.config.timeout,
-            ));
+            self.set_call_timer(id, CallTimer::Reply, self.config.timeout);
         }
     }
 
@@ -1035,7 +1011,7 @@ mod tests {
             sent_text(&actions),
             [r#"{"id":2,"rpc":{"method":"echo","data":{"n":1}}}"#]
         );
-        assert!(actions.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
+        assert!(actions.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Reply, a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
     #[test]
@@ -1047,12 +1023,12 @@ mod tests {
         let connected = connect_reply(&mut machine, transport);
 
         assert_eq!(sent_text(&queued), Vec::<String>::new());
-        assert!(queued.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
+        assert!(queued.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Connection, a2, _) if *a0 == id && *a2 == TIMEOUT)));
         // Each phase gets the whole timeout (centrifuge-js `_methodCall`,
         // then `_registerCall`).
         assert_eq!(sent_text(&connected).len(), 1, "{connected:?}");
         assert!(connected.contains(&Action::CancelCallTimer(id, CallTimer::Connection)));
-        assert!(connected.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
+        assert!(connected.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Reply, a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
     #[test]
@@ -1064,7 +1040,7 @@ mod tests {
 
         // It fired before the connect reply was handled; its input comes
         // after (review of PR #74).
-        let stale = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
+        let stale = machine.fire_call(id, CallTimer::Connection);
         let replied = machine.handle(frame(transport, r#"{"id":2,"rpc":{}}"#));
 
         assert_eq!(stale, []);
@@ -1088,7 +1064,7 @@ mod tests {
 
         assert_eq!(machine.state(), State::Connected);
         assert_eq!(sent_text(&actions), Vec::<String>::new());
-        assert!(actions.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
+        assert!(actions.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Connection, a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
     #[test]
@@ -1134,7 +1110,7 @@ mod tests {
         let transport = opened(&mut machine);
         let (id, _) = rpc(&mut machine, "echo");
 
-        let timed_out = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
+        let timed_out = machine.fire_call(id, CallTimer::Connection);
         let connected = connect_reply(&mut machine, transport);
 
         assert_eq!(error_code(&timed_out), Some(codes::error::TIMEOUT));
@@ -1219,7 +1195,7 @@ mod tests {
         let (id, _) = rpc(&mut machine, "echo");
 
         let replied = machine.handle(frame(transport, r#"{"id":2,"rpc":{}}"#));
-        let fired = machine.handle(Input::CallTimerFired(id, CallTimer::Reply));
+        let fired = machine.fire_call(id, CallTimer::Reply);
 
         assert!(replied.contains(&Action::CancelCallTimer(id, CallTimer::Reply)));
         assert_eq!(settled(&replied), [(id, Ok(CallReply::Rpc(Vec::new())))]);
@@ -1397,13 +1373,13 @@ mod tests {
         let subscribed = machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
 
         assert_eq!(sent_text(&waiting), Vec::<String>::new());
-        assert!(waiting.contains(&Action::SetCallTimer(id, CallTimer::Subscription, TIMEOUT)));
+        assert!(waiting.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Subscription, a2, _) if *a0 == id && *a2 == TIMEOUT)));
         assert_eq!(
             sent_text(&subscribed),
             [r#"{"id":3,"history":{"channel":"news","limit":2}}"#]
         );
         assert!(subscribed.contains(&Action::CancelCallTimer(id, CallTimer::Subscription)));
-        assert!(subscribed.contains(&Action::SetCallTimer(id, CallTimer::Reply, TIMEOUT)));
+        assert!(subscribed.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Reply, a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
     #[test]
@@ -1495,7 +1471,7 @@ mod tests {
             reason: String::new(),
         });
         let (id, queued) = history(&mut machine, subscription);
-        assert!(queued.contains(&Action::SetCallTimer(id, CallTimer::Connection, TIMEOUT)));
+        assert!(queued.iter().any(|action| matches!(action, Action::SetCallTimer(a0, CallTimer::Connection, a2, _) if *a0 == id && *a2 == TIMEOUT)));
 
         let unsubscribed = machine.handle(Input::Unsubscribe(subscription));
 
@@ -1535,8 +1511,8 @@ mod tests {
         let (mut machine, _, subscription) = subscribing();
         let (id, _) = history(&mut machine, subscription);
 
-        let stale = machine.handle(Input::CallTimerFired(id, CallTimer::Connection));
-        let fired = machine.handle(Input::CallTimerFired(id, CallTimer::Subscription));
+        let stale = machine.fire_call(id, CallTimer::Connection);
+        let fired = machine.fire_call(id, CallTimer::Subscription);
 
         assert_eq!(stale, []);
         assert_eq!(error_code(&fired), Some(codes::error::TIMEOUT));

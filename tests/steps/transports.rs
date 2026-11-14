@@ -450,13 +450,13 @@ fn websocket_opens_without_reply(world: &mut ClientWorld) {
             world.opened.push((kind, Duration::ZERO));
             if world.opened.len() == 1 {
                 machine.handle(Input::TransportOpened(transport));
-                actions = machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+                actions = machine.fire(Timer::ConnectTimeout);
             }
         } else if actions
             .iter()
-            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _)))
+            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..)))
         {
-            actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+            actions = machine.fire(Timer::Reconnect);
         } else {
             panic!("no further attempt after {:?}: {actions:?}", world.opened);
         }
@@ -501,7 +501,7 @@ fn every_attempt_fails(world: &mut ClientWorld) {
             _ => None,
         });
         let reconnect = actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         });
         if let Some((transport, kind)) = open {
@@ -513,7 +513,7 @@ fn every_attempt_fails(world: &mut ClientWorld) {
             });
         } else if let Some(reconnect) = reconnect {
             delay = reconnect;
-            actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+            actions = machine.fire(Timer::Reconnect);
         } else {
             panic!("no further attempt after {:?}: {actions:?}", world.opened);
         }
@@ -588,11 +588,11 @@ fn the_server_answers_with_a_temporary_error(world: &mut ClientWorld) {
         delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no further attempt: {actions:?}"));
-        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        actions = machine.fire(Timer::Reconnect);
     }
 }
 

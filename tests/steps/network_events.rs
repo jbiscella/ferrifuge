@@ -143,7 +143,7 @@ fn next_delay(world: &mut ClientWorld) -> Duration {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .unwrap_or_else(|| panic!("a reconnect delay: {actions:?}"))

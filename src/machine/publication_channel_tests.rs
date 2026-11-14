@@ -103,7 +103,7 @@ fn a_publication_of_another_channel_moves_no_position() {
         code: Some(3001),
         reason: "closed by the test".into(),
     });
-    let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    let transport = opened(&machine.fire(Timer::Reconnect));
     let resubscribe = with_connect(&machine.handle(Input::TransportOpened(transport)));
 
     assert_eq!(
@@ -163,7 +163,7 @@ fn a_last_reply_publication_of_another_channel_does_not_reach_the_reply_position
         code: Some(3001),
         reason: "closed by the test".into(),
     });
-    let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    let transport = opened(&machine.fire(Timer::Reconnect));
     let resubscribe = with_connect(&machine.handle(Input::TransportOpened(transport)));
 
     assert_eq!(

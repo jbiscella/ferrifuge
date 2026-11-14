@@ -430,6 +430,7 @@ impl SharedPollSubscriptionBuilder {
     /// When the registry holds a subscription to the channel already, of
     /// any kind.
     pub fn build(self) -> Result<SharedPollSubscription, SubscriptionError> {
+        crate::subscription::check_resubscribe_delays(&self.options.common)?;
         let mut core = lock(&self.shared.core);
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(SubscriptionError::ClientClosed);

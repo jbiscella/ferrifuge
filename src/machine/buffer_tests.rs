@@ -191,7 +191,7 @@ fn a_call_timed_out_before_the_flush_leaves_the_buffer() {
     let (timed_out, _) = call(&mut machine, rpc("a"));
     call(&mut machine, rpc("b"));
 
-    let settled = machine.handle(Input::CallTimerFired(timed_out, CallTimer::Reply));
+    let settled = machine.fire_call(timed_out, CallTimer::Reply);
     let flushed = sent(&machine.handle(Input::Flush));
 
     assert!(

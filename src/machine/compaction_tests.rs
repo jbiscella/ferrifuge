@@ -245,7 +245,14 @@ fn ids_are_forgotten_when_the_connection_ends() {
         code: Some(3001),
         reason: "closed by the test".into(),
     });
-    let transport = connect(&mut machine, Input::TimerFired(Timer::Reconnect), 3);
+    let setting = machine
+        .timer_setting(Timer::Reconnect)
+        .expect("a reconnect timer");
+    let transport = connect(
+        &mut machine,
+        Input::TimerFired(Timer::Reconnect, setting),
+        3,
+    );
     // The resubscribe, answered without an id.
     machine.handle(frame(transport, r#"{"id":4,"subscribe":{}}"#));
 

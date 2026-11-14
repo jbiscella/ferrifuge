@@ -81,7 +81,7 @@ fn plain(channels: &[&str]) -> (Machine, Vec<SubscriptionId>) {
 
 fn subscribe_deadline(actions: &[Action], id: SubscriptionId) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, delay)
+        Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, delay, ..)
             if *sub == id =>
         {
             Some(*delay)
@@ -186,7 +186,7 @@ fn a_pending_resubscribe_backoff_keeps_a_subscription_out_of_the_connect_frame()
         code: Some(3001),
         reason: "closed by the test".into(),
     });
-    let again = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    let again = opened(&machine.fire(Timer::Reconnect));
 
     let opened = machine.handle(Input::TransportOpened(again));
 
@@ -276,7 +276,7 @@ fn a_subscribe_reply_read_with_the_connect_reply_arms_no_deadline() {
     let set = replied
         .iter()
         .position(|action| {
-            matches!(action, Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, _) if *sub == ids[0])
+            matches!(action, Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, ..) if *sub == ids[0])
         })
         .expect("the deadline starts");
     let cancelled = replied.iter().position(|action| {
@@ -320,7 +320,7 @@ fn a_subscribe_reply_before_the_connect_reply_breaks_the_protocol() {
     assert!(
         replied
             .iter()
-            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
         "{replied:?}"
     );
     assert!(
@@ -349,7 +349,7 @@ fn a_failed_connect_loses_the_optimistic_subscribes() {
         transport,
         r#"{"id":1,"error":{"code":100,"message":"internal","temporary":true}}"#,
     ));
-    let again = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    let again = opened(&machine.fire(Timer::Reconnect));
     let reopened = machine.handle(Input::TransportOpened(again));
 
     assert!(

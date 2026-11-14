@@ -136,10 +136,10 @@ impl Log {
                     debug!(transport = kind.name(), "trying the next transport");
                 }
             }
-            Action::SetTimer(Timer::Reconnect, delay) => {
+            Action::SetTimer(Timer::Reconnect, delay, _) => {
                 debug!(delay = ?delay, "reconnect scheduled");
             }
-            Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay) => {
+            Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay, _) => {
                 debug!(parent: &self.span_of(*id), delay = ?delay, "resubscribe scheduled");
             }
             Action::FetchToken(fetch) => self.callback_started(*fetch, "token", None),

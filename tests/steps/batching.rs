@@ -7,7 +7,7 @@ use std::time::Duration;
 use cucumber::{given, then, when};
 use ferrifuge::machine::{
     Action, CallId, CallTimer, Input, Machine, SubscriptionId, SubscriptionOptions,
-    SubscriptionTimer, Timer, TransportId, TransportKind,
+    SubscriptionTimer, Timer, TimerSetting, TransportId, TransportKind,
 };
 use ferrifuge::{
     Batch, CallError, CallReply, CallRequest, ClientEvent, Config, HistoryOptions, Protocol,
@@ -45,7 +45,7 @@ pub(crate) struct BatchRun {
     pub(super) machine: Machine,
     pub(super) transport: Option<TransportId>,
     now: Duration,
-    timers: Vec<(Duration, Key)>,
+    timers: Vec<(Duration, Key, TimerSetting)>,
     /// Every action, in order.
     pub(super) actions: Vec<Action>,
     /// Where the actions of the current batch start.
@@ -88,18 +88,20 @@ impl BatchRun {
         for action in self.machine.handle(input) {
             match &action {
                 Action::OpenTransport { transport, .. } => self.transport = Some(*transport),
-                Action::SetTimer(timer, delay) => self.set(Key::Client(*timer), *delay),
+                Action::SetTimer(timer, delay, setting) => {
+                    self.set(Key::Client(*timer), *delay, *setting);
+                }
                 Action::CancelTimer(timer) => self.cancel(Key::Client(*timer)),
                 Action::ShortenTimer(timer, by) => self.shorten(Key::Client(*timer), *by),
                 Action::ShortenSubscriptionTimer(id, timer, by) => {
                     self.shorten(Key::Subscription(*id, *timer), *by);
                 }
-                Action::SetCallTimer(call, timer, delay) => {
-                    self.set(Key::Call(*call, *timer), *delay);
+                Action::SetCallTimer(call, timer, delay, setting) => {
+                    self.set(Key::Call(*call, *timer), *delay, *setting);
                 }
                 Action::CancelCallTimer(call, timer) => self.cancel(Key::Call(*call, *timer)),
-                Action::SetSubscriptionTimer(id, timer, delay) => {
-                    self.set(Key::Subscription(*id, *timer), *delay);
+                Action::SetSubscriptionTimer(id, timer, delay, setting) => {
+                    self.set(Key::Subscription(*id, *timer), *delay, *setting);
                 }
                 Action::CancelSubscriptionTimer(id, timer) => {
                     self.cancel(Key::Subscription(*id, *timer));
@@ -113,20 +115,20 @@ impl BatchRun {
         }
     }
 
-    fn set(&mut self, key: Key, delay: Duration) {
+    fn set(&mut self, key: Key, delay: Duration, setting: TimerSetting) {
         self.cancel(key);
-        self.timers.push((self.now + delay, key));
+        self.timers.push((self.now + delay, key, setting));
     }
 
     fn cancel(&mut self, key: Key) {
-        self.timers.retain(|(_, of)| *of != key);
+        self.timers.retain(|(_, of, _)| *of != key);
     }
 
     /// A running timer fires `by` earlier, but not before now; one not
     /// running is ignored (Block 25, D3).
     fn shorten(&mut self, key: Key, by: Duration) {
         let now = self.now;
-        for (at, _) in self.timers.iter_mut().filter(|(_, of)| *of == key) {
+        for (at, _, _) in self.timers.iter_mut().filter(|(_, of, _)| *of == key) {
             *at = at.saturating_sub(by).max(now);
         }
     }
@@ -135,26 +137,26 @@ impl BatchRun {
     pub(super) fn due(&self, key: Key) -> Option<Duration> {
         self.timers
             .iter()
-            .find(|(_, of)| *of == key)
-            .map(|(at, _)| at.saturating_sub(self.now))
+            .find(|(_, of, _)| *of == key)
+            .map(|(at, _, _)| at.saturating_sub(self.now))
     }
 
     /// Lets `by` of simulated time pass, firing the timers due.
     pub(super) fn advance(&mut self, by: Duration) {
         let until = self.now + by;
-        while let Some((index, &(at, key))) = self
+        while let Some((index, &(at, key, setting))) = self
             .timers
             .iter()
             .enumerate()
-            .filter(|(_, (at, _))| *at <= until)
-            .min_by_key(|(_, (at, _))| *at)
+            .filter(|(_, (at, _, _))| *at <= until)
+            .min_by_key(|(_, (at, _, _))| *at)
         {
             self.timers.remove(index);
             self.now = at;
             self.handle(match key {
-                Key::Client(timer) => Input::TimerFired(timer),
-                Key::Call(call, timer) => Input::CallTimerFired(call, timer),
-                Key::Subscription(id, timer) => Input::SubscriptionTimerFired(id, timer),
+                Key::Client(timer) => Input::TimerFired(timer, setting),
+                Key::Call(call, timer) => Input::CallTimerFired(call, timer, setting),
+                Key::Subscription(id, timer) => Input::SubscriptionTimerFired(id, timer, setting),
             });
         }
         self.now = until;
@@ -1242,7 +1244,11 @@ fn the_server_closes_the_transport(world: &mut ClientWorld) {
         code: Some(3001),
         reason: "closed by the test".to_owned(),
     });
-    run.handle(Input::TimerFired(Timer::Reconnect));
+    let setting = run
+        .machine
+        .timer_setting(Timer::Reconnect)
+        .expect("reconnect set");
+    run.handle(Input::TimerFired(Timer::Reconnect, setting));
 }
 
 #[then(

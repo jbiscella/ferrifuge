@@ -515,7 +515,7 @@ fn a_trailing_send_never_settles_under_its_own_id() {
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, _) => Some(*id),
+            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
@@ -536,12 +536,12 @@ fn a_trailing_deadline_fails_its_followers() {
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, _) => Some(*id),
+            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
 
-    let timed_out = machine.handle(Input::CallTimerFired(trailing, super::CallTimer::Reply));
+    let timed_out = machine.fire_call(trailing, super::CallTimer::Reply);
 
     assert_eq!(
         settled(&timed_out),
@@ -612,7 +612,7 @@ fn a_dropped_publish_is_not_resent_after_the_reconnect() {
     });
 
     let new_transport = machine
-        .handle(Input::TimerFired(super::Timer::Reconnect))
+        .fire(super::Timer::Reconnect)
         .iter()
         .find_map(|action| match action {
             Action::OpenTransport { transport, .. } => Some(*transport),
@@ -736,7 +736,7 @@ fn handed_over() -> (
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, _) => Some(*id),
+            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
@@ -1227,7 +1227,7 @@ mod maps {
             code: None,
             reason: String::new(),
         });
-        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let reconnecting = machine.fire(Timer::Reconnect);
         let transport = reconnecting
             .iter()
             .find_map(|action| match action {
