@@ -1046,23 +1046,167 @@ impl ChildProcess {
 #[derive(Default)]
 struct ChannelState {
     last: Option<Lifecycle>,
-    /// Where its segment started: the offset of the first `subscribed`
-    /// (D7); `None` before it.
-    start: Option<u64>,
-    epoch: Option<String>,
-    /// The offsets and data delivered in the segment, in order.
-    delivered: Vec<(u64, String)>,
     /// Whether the application wants it subscribed.
     wanted: bool,
-    /// Set by a restart on the memory engine while the channel has a
-    /// segment: the history's offsets and ids after the segment's start
-    /// then, which the segment delivered a prefix of, until the next
-    /// `subscribed` starts a new segment (D6, reviewer 51c).
-    restarted: Option<Vec<(u64, String)>>,
+    segment: Segment,
+}
+
+/// A channel's segment (D7) across restarts (D6), apart from the runner so
+/// that its rules are checked without a server (reviewer, seed 41).
+#[derive(Debug, Default)]
+struct Segment {
+    /// Where it started: the offset of its `subscribed`; `None` before the
+    /// first.
+    start: Option<u64>,
+    epoch: Option<String>,
+    /// The offsets and data delivered in it, in order.
+    delivered: Vec<(u64, String)>,
+    /// On the memory engine, each restart's history by its epoch, taken
+    /// before the restart: the `subscribed` with `recovered` false that
+    /// ends the segment of an epoch takes that epoch's history. Keyed by
+    /// epoch, so that restarts back to back, with or without a
+    /// `subscribed` between them, each keep their own (reviewer, seed 41).
+    ended: BTreeMap<String, BTreeMap<u64, String>>,
     /// A restart on an engine that keeps the stream (Redis) came after the
     /// segment's start: its next recovery counts as one across a restart
     /// (D6, D10).
     restart_since: bool,
+}
+
+/// What a `subscribed` did to a segment, for D10's counts.
+#[derive(Debug, PartialEq, Eq)]
+enum Subscribed {
+    Started,
+    /// A recovery; `true` when the first after a restart on Redis.
+    Recovered(bool),
+    /// A new segment after a restart on the memory engine.
+    Restarted,
+}
+
+impl Segment {
+    fn delivered_ids(&self) -> Vec<(u64, String)> {
+        self.delivered
+            .iter()
+            .map(|(offset, data)| (*offset, id_of(data)))
+            .collect()
+    }
+
+    /// A publication delivered: in the segment's epoch when it names one.
+    fn deliver(&mut self, offset: u64, epoch: Option<&str>, data: String) -> Result<(), String> {
+        if self.epoch.is_some() && epoch.is_some() && self.epoch.as_deref() != epoch {
+            return Err(format!(
+                "offset {offset} of epoch {epoch:?}, the segment's {:?}",
+                self.epoch
+            ));
+        }
+        self.delivered.push((offset, data));
+        Ok(())
+    }
+
+    /// Before a restart, with the history of the channel then, `epoch` and
+    /// its offsets. Unless an earlier restart's history of the segment's
+    /// epoch is still kept, the segment is in that epoch and delivered a
+    /// prefix of it. On the memory engine the history is kept by its epoch,
+    /// always, whatever is already kept.
+    fn before_restart(
+        &mut self,
+        epoch: &str,
+        offsets: &BTreeMap<u64, String>,
+        memory: bool,
+    ) -> Result<(), String> {
+        if let Some(start) = self.start {
+            let kept = self
+                .epoch
+                .as_ref()
+                .is_some_and(|epoch| self.ended.contains_key(epoch));
+            if !kept {
+                if self.epoch.as_deref() != Some(epoch) {
+                    return Err(format!(
+                        "the history's epoch {epoch}, the segment's {:?}, before a restart",
+                        self.epoch
+                    ));
+                }
+                let history: Vec<(u64, String)> = offsets
+                    .range(start + 1..)
+                    .map(|(offset, id)| (*offset, id.clone()))
+                    .collect();
+                let delivered = self.delivered_ids();
+                if !history.starts_with(&delivered) {
+                    return Err(format!(
+                        "before a restart, delivered {delivered:?} of the history {history:?}"
+                    ));
+                }
+            }
+            if !memory {
+                self.restart_since = true;
+            }
+        }
+        if memory {
+            self.ended.insert(epoch.to_owned(), offsets.clone());
+        }
+        Ok(())
+    }
+
+    /// A `subscribed`. The first starts the segment; a recovery continues
+    /// it, in its epoch; one with `recovered` false is allowed only after a
+    /// restart on the memory engine, whose history of the segment's epoch
+    /// it takes: the segment delivered a prefix of that history after its
+    /// start, and a new segment starts.
+    fn subscribed(
+        &mut self,
+        was_recovering: bool,
+        recovered: bool,
+        epoch: Option<String>,
+        offset: Option<u64>,
+    ) -> Result<Subscribed, String> {
+        let Some(start) = self.start else {
+            self.start = offset;
+            self.epoch = epoch;
+            return Ok(Subscribed::Started);
+        };
+        if recovered {
+            if epoch != self.epoch {
+                return Err(format!(
+                    "recovered in epoch {epoch:?}, the segment's {:?}",
+                    self.epoch
+                ));
+            }
+            return Ok(Subscribed::Recovered(std::mem::take(
+                &mut self.restart_since,
+            )));
+        }
+        let Some(history) = self
+            .epoch
+            .as_ref()
+            .and_then(|epoch| self.ended.remove(epoch))
+        else {
+            return Err(format!(
+                "subscribed with was_recovering {was_recovering} and recovered false, no server restart"
+            ));
+        };
+        if !was_recovering {
+            return Err("subscribed after a restart with was_recovering false".to_owned());
+        }
+        if epoch == self.epoch {
+            return Err(format!(
+                "subscribed after a restart with recovered false in the segment's epoch {epoch:?}"
+            ));
+        }
+        let expected: Vec<(u64, String)> = history
+            .range(start + 1..)
+            .map(|(offset, id)| (*offset, id.clone()))
+            .collect();
+        let delivered = self.delivered_ids();
+        if !expected.starts_with(&delivered) {
+            return Err(format!(
+                "before the restart, delivered {delivered:?} of the history {expected:?}"
+            ));
+        }
+        self.start = offset;
+        self.epoch = epoch;
+        self.delivered.clear();
+        Ok(Subscribed::Restarted)
+    }
 }
 
 /// One run of one seed.
@@ -1277,68 +1421,24 @@ impl SeedRun<'_> {
             ));
         }
         let counted = channel != self.canary;
-        let entry = self.states.get_mut(channel).expect("its state");
-        let failure = match entry.start {
-            // The first subscribed starts the channel's segment (D7).
-            None => {
-                entry.start = offset;
-                entry.epoch = epoch;
-                None
+        let segment = &mut self.states.get_mut(channel).expect("its state").segment;
+        match segment.subscribed(was_recovering, recovered, epoch, offset) {
+            Ok(Subscribed::Recovered(true)) if counted => {
+                COUNTERS
+                    .lock()
+                    .unwrap()
+                    .add("recovered true after a restart");
             }
-            // A recovery continues it, in its epoch.
-            Some(_) if recovered => {
-                if std::mem::take(&mut entry.restart_since) && counted {
-                    COUNTERS
-                        .lock()
-                        .unwrap()
-                        .add("recovered true after a restart");
-                }
-                (epoch != entry.epoch).then(|| {
-                    format!(
-                        "{channel} recovered in epoch {epoch:?}, the segment's {:?}",
-                        entry.epoch
-                    )
-                })
+            Ok(Subscribed::Restarted) if counted => {
+                COUNTERS
+                    .lock()
+                    .unwrap()
+                    .add("recovered false after a restart");
             }
-            // A failed recovery is allowed only after a restart on the
-            // memory engine (D6): the segment delivered a prefix of the
-            // history at the restart, and a new segment starts.
-            Some(_) => match entry.restarted.take() {
-                None => Some(format!(
-                    "{channel} subscribed with was_recovering {was_recovering} and recovered false, no server restart"
-                )),
-                Some(_) if !was_recovering => Some(format!(
-                    "{channel} subscribed after a restart with was_recovering false"
-                )),
-                Some(_) if epoch == entry.epoch => Some(format!(
-                    "{channel} subscribed after a restart with recovered false in the segment's epoch {epoch:?}"
-                )),
-                Some(history) => {
-                    let delivered: Vec<(u64, String)> = entry
-                        .delivered
-                        .iter()
-                        .map(|(offset, data)| (*offset, id_of(data)))
-                        .collect();
-                    if history.starts_with(&delivered) {
-                        entry.start = offset;
-                        entry.epoch = epoch;
-                        entry.delivered.clear();
-                        if counted {
-                            COUNTERS
-                                .lock()
-                                .unwrap()
-                                .add("recovered false after a restart");
-                        }
-                        None
-                    } else {
-                        Some(format!(
-                            "{channel}: before the restart, delivered {delivered:?} of the history {history:?}"
-                        ))
-                    }
-                }
-            },
-        };
-        failure.map_or(Ok(()), |detail| Err(self.violation("I8", detail)))
+            Ok(_) => {}
+            Err(detail) => return Err(self.violation("I8", format!("{channel}: {detail}"))),
+        }
+        Ok(())
     }
 
     /// The time the child was stopped between `from` and `to`, by the wall
@@ -1367,24 +1467,10 @@ impl SeedRun<'_> {
             self.dropped = true;
             return Ok(());
         }
-        let segment = self
-            .states
-            .entry(channel.to_owned())
-            .or_default()
-            .epoch
-            .clone();
-        if segment.is_some() && epoch.is_some() && segment.as_deref() != epoch {
-            return Err(self.violation(
-                "I8",
-                format!("{channel}: offset {offset} of epoch {epoch:?}, the segment's {segment:?}"),
-            ));
-        }
-        self.states
-            .get_mut(channel)
-            .expect("its state")
-            .delivered
-            .push((offset, data));
-        Ok(())
+        let segment = &mut self.states.entry(channel.to_owned()).or_default().segment;
+        segment
+            .deliver(offset, epoch, data)
+            .map_err(|detail| self.violation("I8", format!("{channel}: {detail}")))
     }
 
     /// Sends `command` to the child.
@@ -1646,44 +1732,11 @@ impl SeedRun<'_> {
         // happens to run: a Redis row against the memory engine must fail.
         let memory = row().engine == Engine::Memory;
         for (channel, (epoch, offsets)) in histories {
-            let Some(state) = self.states.get(&channel) else {
+            let Some(state) = self.states.get_mut(&channel) else {
                 continue;
             };
-            // An earlier restart's history stands until its subscribed.
-            let (Some(start), None) = (state.start, &state.restarted) else {
-                continue;
-            };
-            if state.epoch.as_deref() != Some(epoch.as_str()) {
-                return Err(self.violation(
-                    "I8",
-                    format!(
-                        "{channel}: the history's epoch {epoch}, the segment's {:?}, before a restart",
-                        state.epoch
-                    ),
-                ));
-            }
-            let history: Vec<(u64, String)> = offsets
-                .range(start + 1..)
-                .map(|(offset, id)| (*offset, id.clone()))
-                .collect();
-            let delivered: Vec<(u64, String)> = state
-                .delivered
-                .iter()
-                .map(|(offset, data)| (*offset, id_of(data)))
-                .collect();
-            if !history.starts_with(&delivered) {
-                return Err(self.violation(
-                    "I8",
-                    format!(
-                        "{channel}: before a restart, delivered {delivered:?} of the history {history:?}"
-                    ),
-                ));
-            }
-            let state = self.states.get_mut(&channel).expect("its state");
-            if memory {
-                state.restarted = Some(history);
-            } else {
-                state.restart_since = true;
+            if let Err(detail) = state.segment.before_restart(&epoch, &offsets, memory) {
+                return Err(self.violation("I8", format!("{channel}: {detail}")));
             }
         }
         Ok(())
@@ -2026,14 +2079,14 @@ impl SeedRun<'_> {
         for (channel, (epoch, offsets)) in histories {
             // By (epoch, offset): the segment is in the history's epoch.
             if let Some(state) = self.states.get(&channel)
-                && state.start.is_some()
-                && state.epoch.as_deref() != Some(epoch.as_str())
+                && state.segment.start.is_some()
+                && state.segment.epoch.as_deref() != Some(epoch.as_str())
             {
                 return Err(self.violation(
                     "I8",
                     format!(
                         "{channel}: the history's epoch {epoch}, the segment's {:?}",
-                        state.epoch
+                        state.segment.epoch
                     ),
                 ));
             }
@@ -2054,18 +2107,14 @@ impl SeedRun<'_> {
             let Some(state) = self.states.get(&channel) else {
                 continue;
             };
-            let Some(start) = state.start else {
+            let Some(start) = state.segment.start else {
                 continue;
             };
             let expected: Vec<(u64, String)> = offsets
                 .range(start + 1..)
                 .map(|(offset, id)| (*offset, id.clone()))
                 .collect();
-            let delivered: Vec<(u64, String)> = state
-                .delivered
-                .iter()
-                .map(|(offset, data)| (*offset, id_of(data)))
-                .collect();
+            let delivered = state.segment.delivered_ids();
             self.expected.insert(channel.clone(), expected.clone());
             let whole = if subscribed {
                 delivered == expected
@@ -2096,8 +2145,12 @@ impl SeedRun<'_> {
     fn delivered_up_to(&self, channel: &str) -> u64 {
         self.states
             .get(channel)
-            .and_then(|state| state.delivered.last().map(|(offset, _)| *offset))
-            .or_else(|| self.states.get(channel).and_then(|state| state.start))
+            .and_then(|state| state.segment.delivered.last().map(|(offset, _)| *offset))
+            .or_else(|| {
+                self.states
+                    .get(channel)
+                    .and_then(|state| state.segment.start)
+            })
             .unwrap_or(0)
     }
 
@@ -2169,11 +2222,7 @@ impl SeedRun<'_> {
         // Every record taken: a delivery that came after its channel was
         // compared, a late duplicate say, is seen too (Codex, #259).
         for (channel, expected) in &self.expected {
-            let delivered: Vec<(u64, String)> = self.states[channel]
-                .delivered
-                .iter()
-                .map(|(offset, data)| (*offset, id_of(data)))
-                .collect();
+            let delivered = self.states[channel].segment.delivered_ids();
             if &delivered != expected {
                 return Err(self.violation(
                     "I8",
@@ -2727,6 +2776,82 @@ fn suspensions_overlap_calls() {
     log("a call's I6 bound adds its overlap with the suspensions");
 }
 
+/// Restarts back to back on the memory engine (reviewer, seed 41): each
+/// keeps its own history, a `subscribed` between them or not, and the
+/// deliveries between them are checked against the second's.
+fn back_to_back_restarts() {
+    let history = |epoch: &str, offsets: &[u64]| -> BTreeMap<u64, String> {
+        offsets
+            .iter()
+            .map(|o| (*o, format!("{epoch}-{o}")))
+            .collect()
+    };
+    let data = |epoch: &str, offset: u64| json!({"id": format!("{epoch}-{offset}")}).to_string();
+    // The segment of e0 from offset 1, with 2 and 3 delivered.
+    let started = || {
+        let mut segment = Segment::default();
+        let started = segment.subscribed(false, false, Some("e0".to_owned()), Some(1));
+        assert_eq!(started, Ok(Subscribed::Started));
+        for offset in [2, 3] {
+            segment
+                .deliver(offset, None, data("e0", offset))
+                .expect("a delivery");
+        }
+        segment
+    };
+    // (a) Seed 41's order: both snapshots, then the first restart's
+    // subscribed, then the second's.
+    let mut a = started();
+    a.before_restart("e0", &history("e0", &[1, 2, 3]), true)
+        .expect("the first snapshot");
+    a.before_restart("e1", &history("e1", &[]), true)
+        .expect("the second snapshot, the first still kept");
+    assert_eq!(
+        a.subscribed(true, false, Some("e1".to_owned()), Some(0)),
+        Ok(Subscribed::Restarted),
+        "(a) the first restart's subscribed"
+    );
+    assert_eq!(
+        a.subscribed(true, false, Some("e2".to_owned()), Some(0)),
+        Ok(Subscribed::Restarted),
+        "(a) the second restart's subscribed"
+    );
+    // (b) No subscribed between the restarts.
+    let mut b = started();
+    b.before_restart("e0", &history("e0", &[1, 2, 3]), true)
+        .expect("the first snapshot");
+    b.before_restart("e1", &history("e1", &[1]), true)
+        .expect("the second snapshot");
+    assert_eq!(
+        b.subscribed(true, false, Some("e2".to_owned()), Some(0)),
+        Ok(Subscribed::Restarted),
+        "(b) one subscribed after both restarts"
+    );
+    // (c) The (a) order, the segment of e1 delivering 1 and 3 of its 1, 2, 3
+    // before the second restart's subscribed: I8.
+    let mut c = started();
+    c.before_restart("e0", &history("e0", &[1, 2, 3]), true)
+        .expect("the first snapshot");
+    c.before_restart("e1", &history("e1", &[1, 2, 3]), true)
+        .expect("the second snapshot");
+    assert_eq!(
+        c.subscribed(true, false, Some("e1".to_owned()), Some(0)),
+        Ok(Subscribed::Restarted)
+    );
+    for offset in [1, 3] {
+        c.deliver(offset, None, data("e1", offset))
+            .expect("a delivery");
+    }
+    let dropped = c.subscribed(true, false, Some("e2".to_owned()), Some(0));
+    assert!(
+        dropped
+            .as_ref()
+            .is_err_and(|detail| detail.contains("delivered")),
+        "(c) a delivery dropped between the restarts: {dropped:?}"
+    );
+    log("restarts back to back keep each its own history, and its deliveries are checked");
+}
+
 /// An operation that holds the others fits the window only with the
 /// fault in place held out first (reviewer, 51c, item 1).
 fn holds_fit_the_window() {
@@ -2862,6 +2987,7 @@ fn main() {
     seeds_fix_their_operations();
     suspensions_overlap_calls();
     holds_fit_the_window();
+    back_to_back_restarts();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
