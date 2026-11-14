@@ -4979,10 +4979,15 @@ mod tests {
 
         let started = std::time::Instant::now();
         subscription.subscribe();
+        // The callback closes the client, not this test: only then do the
+        // close's actions come after the turn's take.
+        let closing = std::time::Instant::now() + Duration::from_secs(5);
+        while !client.is_closed() && std::time::Instant::now() < closing {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(client.is_closed(), "the callback did not close the client");
         runtime.block_on(client.close());
         let took = started.elapsed();
-
-        assert!(client.is_closed());
         assert!(
             took >= Duration::from_millis(100),
             "the transport was dropped, not closed: {took:?}"
