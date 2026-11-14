@@ -103,7 +103,7 @@ fn fixtures(runs: &[Run]) -> tempfile_dir::Dir {
         })
         .collect();
     std::fs::write(
-        dir.path().join("runs.json"),
+        dir.path().join("runs-1.json"),
         json!({"total_count": listed.len(), "workflow_runs": listed}).to_string(),
     )
     .expect("a runs fixture");
