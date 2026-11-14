@@ -1908,8 +1908,9 @@ impl Machine {
     }
 
     /// Every call any registry of the core holds, with the registries
-    /// holding it, for the soak (Block 52, D8).
-    #[cfg(feature = "__test-hooks")]
+    /// holding it, for the soak (Block 52, D8): the adapter's hook reads
+    /// it, so only a build with an adapter has it.
+    #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     #[must_use]
     pub(crate) fn call_registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
         self.calls.registries()
