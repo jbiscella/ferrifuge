@@ -9824,6 +9824,84 @@ Feature: Numbered timer settings
 
 ---
 
+## Block 54 — Public API review before 1.0
+
+**Goal:** the API that 1.0 promises is the one a fleet application uses, and it can grow in minor releases without breaking. Every public type that may gain a field or a variant is `#[non_exhaustive]` or opaque, event payloads are named structs, transports are typed, and the sans-IO core is public behind an opt-in unstable feature instead of frozen (findings F1–F20 of the Block 54 inventory, 2026-11-14).
+
+**Dependencies:** Blocks 0 (sans-IO core, crate layout, lints), 11 (`getState`, `StreamPosition`), 13 (calls, `HistoryOptions`), 15 (events), 20 (semver job, docs.rs, changelog), 24 (`ferrifuge::android`), 34 (codes), 37 (test-util constructors, `__test-hooks`), 41 (handlers), 44 (browser target), 45 and 47 (`unstable`), 53 (0.22.0).
+
+**Out of scope:**
+- the stability statement, the README's stability section and the 1.0.0 pre-release: Block 55, which takes F7, F8, F17, F18's README note and F20 from here;
+- stabilising the `machine` API (additive when it comes), or splitting it into its own crate (Block 0 keeps one crate);
+- `Machine::with_token_source` (F15), the exhaustive `machine::Timer`, `SubscriptionTimer` and `Timer::COUNT`/`ALL` (F5), the hidden `Client::read_ahead` (F9), zero checks in `Machine::new` (F19): outside semver with D1;
+- a `source()` on `ClientError` (D3).
+
+This block amends Block 0's "Core design" row: the core is public under `unstable-machine`. It reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 The core behind `unstable-machine`.**
+  - `Cargo.toml` gains `unstable-machine = []`, not in `default`, documented as outside the semver promise. `machine` is `pub` only with it; otherwise it is `pub(crate)`, and only that build allows the lints a crate-private module trips. Its items carry `doc(cfg(feature = "unstable-machine"))`.
+  - The module documentation opens with: "Unstable: requires the `unstable-machine` feature. The API by which another runtime drives the core may change in any minor release; the `Client` of the `tokio` and `browser` features is the stable API."
+  - The root re-exports `TransportKind`. `CallRequest` and `CallReply` move from the root to `machine` (F10).
+  - Stable documentation links to builder methods instead of `machine::SubscriptionOptions`. README lines 919, 948 and 1696, `examples/webtransport.rs` and `test_util` use `ferrifuge::TransportKind`. README lines 22–24 and 1336–1338 name the feature and say the core is outside semver.
+  - The self dev-dependency and the docs.rs metadata add `unstable-machine`. The semver jobs keep default features with `test-util` and `cookies`, so the core is outside them by construction (quinn-proto, `tokio_unstable` and `reqwest_unstable` keep theirs out the same way).
+- **D2 `#[non_exhaustive]` by default.**
+  - Every public enum, and every public struct whose fields are all public, is `#[non_exhaustive]`. The one exception is `SubscriptionState`, the spec's closed set, whose use is an exhaustive match. Newly marked: `ClientError` (F2), `StreamPosition`, with `StreamPosition::new(offset, epoch)` (F3), `TokenError` and `DataError` (F4), `State` (the spec's optional `closed` would be a fourth variant), and `Protocol`.
+  - `StateError` gets a private field, `StateError::new(impl Into<String>)` and `message(&self) -> &str`.
+  - `[lints.clippy]` sets `exhaustive_enums` and `exhaustive_structs` to `warn`. The exception is `#[expect(..., reason = "...")]` on `SubscriptionState`. The lints are allowed at module level in `machine` (D1) and in the `__test-hooks` modules.
+- **D3 Errors.**
+  - `TokenError::Failed` displays "token callback failed: {message}", as `DataError` and `StateError` name their callbacks.
+  - test-util gains `ClientError::new(kind, code, message)` with a `transport` setter (Block 37 D2).
+  - A `source()` on `ClientError` may come in a minor release: a private field `Option<Arc<dyn Error + Send + Sync>>`, which `PartialEq` ignores.
+- **D4 Event contexts.** Named-field variants become tuple variants of `#[non_exhaustive]` structs, as `Subscribed` already is, and as centrifuge-js's contexts and centrifuge-go's event structs are:
+  - `ClientEvent::Connecting(ConnectingContext { code, reason })`, `Connected(ConnectedContext { client_id, transport: TransportKind, data })` and `Disconnected(DisconnectedContext { code, reason })`;
+  - `SubscriptionEvent::Subscribing(SubscribingContext { code, reason })`, and `Unsubscribed(UnsubscribedContext { code, reason })` for `SubscriptionEvent` and `ServerSubscriptionEvent`; the map and shared poll events use the same two;
+  - `Subscribed` is renamed `SubscribedContext`;
+  - each handler method takes its context, for example `on_connected(&mut self, ctx: ConnectedContext)`;
+  - `ClientEvent::ServerSubscription` and the named-field variants of `SubscriptionError` keep their fields and get variant-level `#[non_exhaustive]`;
+  - `ClientError.transport` becomes `Option<TransportKind>` (F14);
+  - `ConnectedContext`'s `Debug` shows data as its length (Block 21);
+  - test-util gains `new` constructors for each context, and `ClientEvent::connected` takes a `TransportKind`.
+- **D5 Names.**
+  - `get_token`, `get_data`, `get_state` and `get_signature` stay: they are the spec's and centrifuge-js's names (F11).
+  - `TransportKind::name` becomes `as_str`, without a deprecation; `State` and `SubscriptionState` keep `as_str`, and events keep `name()` (F12).
+  - `ErrorKind::SubscriptionData` becomes `SubscribeData`, after centrifuge-js's `subscribeData`, so that it mirrors `ConnectData`. `SubscriptionRefresh` and `SubscriptionRefreshToken` stay (F13).
+  - The README and the codes table follow.
+- **D6 Value types.**
+  - `HistoryOptions::limit` becomes `Option<u32>`, where `None` means all. The hand-written `Default` gives `Some(0)`: none, the stream position only, as today and as centrifuge-js. The builder gets `limit(u32)` and `all()`.
+  - On the wire, `None` is -1, and a count above `i32::MAX` is sent as `i32::MAX`, since the server caps it anyway.
+  - `test_util::Server::disconnect` takes `code: u32`, and panics naming the code above `u16::MAX`, the bound of a websocket close code.
+- **D7 Traits applications implement.** `Connector` and `CookieJar` stay unsealed. The handler traits keep only provided methods. A method added to any of them has a default; a required one is a major release.
+- **D8 Android.** `ferrifuge::android` gets `cfg_attr(docsrs, doc(cfg(target_os = "android")))`. It stays exempt from semver (Block 24 D4).
+- **D9 Version.** 54a is 0.23.0 (D1), 54b is 0.24.0 (D2, D3, D6–D8) and 54c is 0.25.0 (D4, D5). Each gets a changelog section and its preamble update, as in Block 53 D7.
+
+Value clause: As a team shipping Ferrifuge to a large fleet, I want the 1.0 API to gain fields, variants, events and transports in minor releases, with the experimental core opt-in, so that no 1.x upgrade breaks a build or silently drops a case.
+
+**Structural acceptance:**
+- `cargo clippy --all-features` passes with D2's lints. A unit test reads `src/` and finds:
+  - `#[expect(clippy::exhaustive_*` exactly on `SubscriptionState`;
+  - the module-level allows exactly in D2's modules;
+  - in every `pub enum` outside those modules, each variant opening `{` preceded by `#[non_exhaustive]`.
+- `cargo doc` with default features writes no `ferrifuge/machine/` page, and with `unstable-machine` it writes one (the `lint` job).
+- Unit tests:
+  - `HistoryOptions::default().limit == Some(0)`;
+  - `None` encodes as -1;
+  - `limit(u32::MAX)` encodes as `i32::MAX`;
+  - `Server::disconnect(70_000, ..)` panics.
+- Each PR's semver job flags its break, and the version matches D9.
+- Each of these mutations is seen failing once, recorded in the PR:
+  - `#[non_exhaustive]` removed from `ClientError`, or from `Protocol` (clippy);
+  - removed from `SubscriptionError::AlreadyExists` (the source test);
+  - `machine` made `pub` without the feature (the doc check);
+  - the default limit set to `None`;
+  - the `i32::MAX` clamp dropped.
+
+No new scenarios: the existing ones pass, rewritten to the new types.
+
+**Exceptions introduced:** the block's rules are structural, so lints, a source test, the doc check and the semver job check them, not scenarios.
+
+---
+
 ## Block 56 — Committed Protobuf code
 
 **Goal:** a dependent's build runs no code generator and no vendored binary: the Rust code generated from `proto/client.proto` is committed, and a test fails when it drifts from what the pinned generator writes (reviewer, 2026-11-14, delegated by the owner; state of the art: opentelemetry-proto, tonic-health, prost-types, qdrant-client).
