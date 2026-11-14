@@ -354,6 +354,9 @@ fn run_in(browser: &Browser, server: &str, relay: &str, webtransport: &WebTransp
             "wasm-bindgen-test-runner",
         )
         .env("FERRIFUGE_W_SERVER", server)
+        // The browser this build runs in, for the one test Safari skips
+        // (#268): set for every browser, so a build names its own.
+        .env("FERRIFUGE_W_BROWSER", browser.name)
         .env("FERRIFUGE_W_RELAY", relay);
     if let Some(endpoint) = &webtransport.endpoint {
         command.env("FERRIFUGE_W_WEBTRANSPORT", endpoint);

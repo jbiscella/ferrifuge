@@ -32,6 +32,17 @@ const SERVER: &str = match option_env!("FERRIFUGE_W_SERVER") {
     None => "127.0.0.1:8000",
 };
 
+/// The browser the harness built this for (`tests/browser.rs`): `chrome`,
+/// `firefox` or `safari`; none when the tests are only built.
+const BROWSER: Option<&str> = option_env!("FERRIFUGE_W_BROWSER");
+
+/// Whether this build runs in Safari: only then does a test skip what
+/// Safari holds back (#268). Compared whole, so `chrome`, `firefox` and an
+/// unnamed build never match.
+fn in_safari() -> bool {
+    matches!(BROWSER, Some("safari"))
+}
+
 /// `host:port` of the relay in front of the server, `tests/support/http_proxy.rs`.
 const RELAY: &str = match option_env!("FERRIFUGE_W_RELAY") {
     Some(relay) => relay,
@@ -930,6 +941,16 @@ async fn a_browser_client_syncs_a_map_and_receives_its_updates() {
 // @W scenario: A browser client whose stream is not read reconnects once its inbox overflows over http_stream, losing no publication
 #[wasm_bindgen_test]
 async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publication() {
+    // Safari sometimes withholds the tail of the recovery reply on the
+    // stream after the overflowed one, until the server sends more data
+    // (WebKit; #268, https://github.com/jbiscella/ferrifuge/issues/268).
+    // Chrome and Firefox still run it.
+    if in_safari() {
+        wasm_bindgen_test::console_log!(
+            "skipped in Safari: WebKit withholds the stream's tail (#268)"
+        );
+        return;
+    }
     let channel = unique("history:news");
     let client = over_http_stream(Config::default().read_ahead_messages(16));
     let subscription = client.new_subscription(&channel).unwrap();
@@ -1539,4 +1560,36 @@ async fn a_browser_client_falls_back_from_webtransport_when_the_session_is_refus
 
     assert_eq!(failed.as_deref(), Some("webtransport"));
     assert_eq!(transport, "websocket");
+}
+
+/// The build's browser is the one it runs in, so that the test Safari skips
+/// (#268) runs in Chrome and Firefox: Chrome's user agent names Safari too,
+/// so only a Safari agent without Chrome's or Firefox's token counts.
+#[wasm_bindgen_test]
+fn the_build_names_the_browser_it_runs_in() {
+    let navigator =
+        js_sys::Reflect::get(&js_sys::global(), &"navigator".into()).expect("a navigator");
+    let agent = js_sys::Reflect::get(&navigator, &"userAgent".into())
+        .ok()
+        .and_then(|agent| agent.as_string())
+        .expect("a user agent");
+    let safari =
+        agent.contains("Safari/") && !agent.contains("Chrome") && !agent.contains("Firefox");
+    match BROWSER {
+        Some("safari") => assert!(safari, "built for safari, running in {agent}"),
+        Some("chrome") => assert!(
+            agent.contains("Chrome") && !safari,
+            "built for chrome, running in {agent}"
+        ),
+        Some("firefox") => assert!(
+            agent.contains("Firefox") && !safari,
+            "built for firefox, running in {agent}"
+        ),
+        Some(other) => panic!("built for an unknown browser {other:?}"),
+        None => {}
+    }
+    // The skip follows the agent: never in Chrome or Firefox.
+    if BROWSER.is_some() {
+        assert_eq!(in_safari(), safari, "{BROWSER:?} in {agent}");
+    }
 }
