@@ -153,6 +153,8 @@ fn build(
         builder = builder.handler(move |event: ClientEvent| handler(event));
     }
     let client = builder.build().expect("a valid client configuration");
+    // Its records, for a failure to show what the client went through.
+    crate::support::logs::register(client.log_number());
     if recorded_stream {
         world.events = Some(recorded(client.events()));
     }
@@ -282,6 +284,10 @@ async fn subscribed_with_handler(
     subscription.subscribe();
     world.subscription = Some(subscription);
     subscribed(world).await;
+    // The client's stream is read up to now: a connection lost during the
+    // setup and made again, which the subscription lived through, is not
+    // what the scenario's steps look at (CI, run 43542297432).
+    let _ = world.ready_events();
 }
 
 #[given(
