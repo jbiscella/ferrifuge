@@ -222,6 +222,7 @@ enum Command_ {
     Presence { channel: String },
     Status,
     Close,
+    Exit,
 }
 
 /// What the child writes, one JSON line each, with its sequence number.
@@ -389,6 +390,11 @@ async fn child_run() {
             Command_::Close => {
                 client.close().await;
                 writer.write(Record::Closed);
+            }
+            // Only once the parent has seen the server list none of the
+            // client's channels: the exit would close a socket close()
+            // left open (Codex, #259).
+            Command_::Exit => {
                 // The writer thread flushes before the exit.
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 std::process::exit(0);
@@ -511,6 +517,8 @@ enum Plant {
 #[derive(Debug, Clone)]
 struct Violation {
     seed: u64,
+    /// D8's attempt: 0, or 1 for the rerun.
+    attempt: u32,
     invariant: &'static str,
     detail: String,
     /// The operations done before the violation was seen.
@@ -666,6 +674,7 @@ impl SeedRun<'_> {
     fn violation(&self, invariant: &'static str, detail: impl Into<String>) -> Violation {
         Violation {
             seed: self.seed,
+            attempt: self.attempt,
             invariant,
             detail: detail.into(),
             ops: self.ops[..self.done.min(self.ops.len())].to_vec(),
@@ -1057,17 +1066,6 @@ impl SeedRun<'_> {
         let _ = self.environment.toxics().set_enabled(PROXY, true).await;
         self.wanted_connected = true;
         self.command(Command_::Connect).await;
-        // Every channel is subscribed again, so that each segment's end is
-        // the history's end: a delivery lost before an unsubscribe shows
-        // as a gap, while one the client had not yet taken is recovered
-        // (Codex, #259).
-        for channel in self.channels.clone() {
-            let state = self.states.entry(channel.clone()).or_default();
-            if !state.wanted {
-                state.wanted = true;
-                self.command(Command_::Subscribe { channel }).await;
-            }
-        }
         let deadline = Instant::now() + QUIESCENCE;
         loop {
             self.pump(Instant::now() + Duration::from_millis(300))
@@ -1094,6 +1092,40 @@ impl SeedRun<'_> {
                 return Err(self.violation(
                     "I4",
                     format!("no quiescence {QUIESCENCE:?} after healing: {status:?}"),
+                ));
+            }
+        }
+    }
+
+    /// Once the application's final states are checked (quiescence and
+    /// the channels listing), every channel it left unsubscribed is
+    /// subscribed again, so that each segment's end is the history's end:
+    /// a delivery lost before an unsubscribe shows as a gap, while one the
+    /// client had not yet taken is recovered (Codex, #259).
+    async fn resubscribe_all(&mut self) -> Result<(), Violation> {
+        for channel in self.channels.clone() {
+            let state = self.states.entry(channel.clone()).or_default();
+            if !state.wanted {
+                state.wanted = true;
+                self.command(Command_::Subscribe { channel }).await;
+            }
+        }
+        let deadline = Instant::now() + QUIESCENCE;
+        loop {
+            self.pump(Instant::now() + Duration::from_millis(200))
+                .await?;
+            let all = self.channels.iter().all(|channel| {
+                self.states
+                    .get(channel)
+                    .is_some_and(|s| s.last == Some(Lifecycle::On))
+            });
+            if all {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(self.violation(
+                    "I4",
+                    format!("not every channel subscribed again within {QUIESCENCE:?}"),
                 ));
             }
         }
@@ -1272,19 +1304,24 @@ impl SeedRun<'_> {
     /// its channels (D10); a panic recorded or an exit that fails is I2.
     async fn close(&mut self) -> Result<(), Violation> {
         self.command(Command_::Close).await;
-        let exited = tokio::time::timeout(CHILD_WITHIN, self.child.process.wait()).await;
-        self.drain()?;
-        invariants::no_panic(self.panics.len())
-            .map_err(|detail| self.violation("I2", format!("{detail}: {:?}", self.panics)))?;
-        match exited {
-            Ok(Ok(status)) if status.success() && self.closed => {}
-            other => return Err(self.violation("I2", format!("the child ended with {other:?}"))),
+        let deadline = Instant::now() + CHILD_WITHIN;
+        while !self.closed && Instant::now() < deadline {
+            self.pump(Instant::now() + Duration::from_millis(50))
+                .await?;
         }
+        if !self.closed {
+            return Err(self.violation(
+                "close",
+                format!("close() did not return within {CHILD_WITHIN:?}"),
+            ));
+        }
+        // With the child alive, so that its exit cannot close what close()
+        // left open.
         let deadline = Instant::now() + CHANNELS_WITHIN;
         loop {
             let listed = self.listed().await;
             if listed.is_empty() {
-                return Ok(());
+                break;
             }
             if Instant::now() >= deadline {
                 return Err(self.violation(
@@ -1292,7 +1329,17 @@ impl SeedRun<'_> {
                     format!("after close the channels API lists {listed:?}"),
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.pump(Instant::now() + Duration::from_millis(200))
+                .await?;
+        }
+        self.command(Command_::Exit).await;
+        let exited = tokio::time::timeout(CHILD_WITHIN, self.child.process.wait()).await;
+        self.drain()?;
+        invariants::no_panic(self.panics.len())
+            .map_err(|detail| self.violation("I2", format!("{detail}: {:?}", self.panics)))?;
+        match exited {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            other => Err(self.violation("I2", format!("the child ended with {other:?}"))),
         }
     }
 }
@@ -1431,6 +1478,7 @@ async fn run_seed(
             second = Some(second_connection(environment, &user, &run.canary).await);
         }
         run.check_connections().await?;
+        run.resubscribe_all().await?;
         run.check_deliveries().await?;
         run.close().await
     })
@@ -1529,8 +1577,8 @@ async fn log_violation(violation: &Violation, child_log: &[String], environment:
     text.push_str(&environment.logs().await);
     let _ = std::fs::write(
         dir.join(format!(
-            "seed-{}-{}.log",
-            violation.seed, violation.invariant
+            "seed-{}-attempt-{}-{}.log",
+            violation.seed, violation.attempt, violation.invariant
         )),
         text,
     );
