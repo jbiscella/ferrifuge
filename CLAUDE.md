@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–52 and 56 of N; 53–55 reserved for blocks in progress. Further blocks to be appended.
+Status: DRAFT — blocks 0–52 and 56–57 of N; 53–55 reserved for blocks in progress. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -35,6 +35,7 @@ Markers used below:
 | Events API | `client.events()` returns a `futures::Stream` of a `ClientEvent` enum, one active stream per client, delivered by hand-off with a bounded read-ahead (Block 15); `client.state()` returns the current state | Idiomatic async Rust, runtime-neutral |
 | Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only; the OpenSSL license is allowed globally (owner decision: needed by aws-lc, no on/off variant to maintain) | New dependencies must pass it; an exception needs a reason in `deny.toml` |
+| Workflow security | Every action pinned by commit SHA with its release tag as a comment; checkouts without persisted credentials; no `${{ }}` inside `run:`; zizmor and actionlint in the `workflow-lint` job (Block 57) | zizmor's default policy and GitHub's hardening guide; the release path is only as safe as the CI that gates it |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
 | TLS crypto provider | Chosen at build time by cargo features: `ring` (a default feature), `aws-lc-rs`, or `fips` (aws-lc-rs in FIPS mode). A non-ring build disables default features, so ring is not linked; when several are enabled the strongest wins (`fips` > `aws-lc-rs` > `ring`) | FedRAMP requires FIPS 140-validated cryptography (aws-lc-rs has a FIPS mode, ring has none); ring builds with a C compiler alone, the FIPS build also needs CMake and Go |
 | HTTP client (http_stream, sse) | reqwest without default features, `rustls-no-provider`, `stream` and `socks` (`socks` from Block 23), given the client's own TLS configuration; in the browser, the browser's fetch (Block 44 D8) | Less code than hyper; no SDK precedent (only centrifuge-js has these transports); keeps the crypto provider ours |
@@ -3171,7 +3172,7 @@ Order of the blocks:
 - publishing a version: this block makes it possible, the owner decides when;
 - committing the generated Protobuf code instead of generating it at build time (opentelemetry-proto does): a later decision (reversed by Block 56: the code is committed, with a drift test);
 - conventional-commit tooling (git-cliff, release-plz): the commit style is the project's `[block][phase]` one;
-- workflow linters (zizmor, actionlint) as CI jobs: a later block.
+- workflow linters (zizmor, actionlint) as CI jobs: a later block (Block 57).
 
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Release workflow.** `.github/workflows/release.yml`, triggered by a pushed tag `v*`, in three jobs, so that every check comes before the publish, which cannot be undone (a version can only be yanked):
@@ -9766,3 +9767,45 @@ Each of these mutations is seen failing once, recorded in the PR:
 The rerun line of D2 is a stated property, with no test.
 
 **Exceptions introduced:** no scenario: a build and packaging change, verified by the drift test and the CI jobs above, as Block 20's jobs are.
+
+---
+
+## Block 57 — Workflow linters
+
+**Goal:** every workflow is checked on every change for the known GitHub Actions weaknesses (unpinned actions, template injection, persisted credentials, excessive permissions, cache poisoning) and for shell and syntax errors, so that the release path and the CI that gates it cannot be subverted through a workflow (reviewer, 2026-11-14, delegated by the owner; Block 20's "a later block").
+
+**Dependencies:** Blocks 20 (release.yml's rules, D1), 51 and 52 (chaos-real.yml, soak.yml), 56 (the final workflows it lints).
+
+**Out of scope:**
+- making `workflow-lint` a required check, SARIF upload to code scanning (it needs `security-events: write` and the repository's code-scanning settings): the owner's;
+- OpenSSF Scorecard, egress control of runners, container images by digest (`docker pull` by tag);
+- Renovate: Dependabot stays.
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 The job.** `workflow-lint` in `ci.yml`, on `ci`'s triggers with no path filter: it takes seconds, and a job filtered by path reports nothing, which a required check cannot use. Every tool is at an exact version:
+  - `actionlint`, a release binary whose SHA-256 is checked as the `browser-safari` job checks Centrifugo's, with shellcheck at an exact version through `taiki-e/install-action`, which actionlint runs on every `run:` block;
+  - `zizmor` through `taiki-e/install-action`, run as `zizmor --min-severity low .` with the default persona. It collects the six workflows and `.github/dependabot.yml`. On pull requests and pushes it runs with `--offline`, deterministic and free of the API's rate limit. On the nightly schedule it runs online with `GH_TOKEN` from the read-only `github.token`, adding impostor-commit and known-vulnerable-actions.
+- **D2 Pinning.** Every `uses:` is pinned by its full commit SHA with the exact release tag as a comment, as release.yml does; zizmor's default `unpinned-uses` policy (hash-pin for every action, `actions/*` included), no override. One SHA per action across workflows, the ones already pinned kept. `dtolnay/rust-toolchain` is pinned to the master commit the other workflows use, with a `# master` comment and its `toolchain:` input (`stable`, `nightly`, `"1.88"` quoted), as its README requires for a SHA.
+- **D3 Dependabot.** Its github-actions entry already updates SHA pins with their comments. The `dtolnay/rust-toolchain` ignore stays, its reason now that the pin follows a branch with no releases and is bumped by hand. Both entries gain `cooldown: default-days: 7`. That is zizmor's `dependabot-cooldown` threshold, above GitHub's default of 3. Cooldown does not delay security updates.
+- **D4 Expressions.** No `${{ }}` inside a `run:` block. Each expansion moves to the step's or job's `env:` and is used quoted, or uses the runner's own variable where one exists (`$GITHUB_EVENT_NAME`). The `semver` job's base revision becomes one job-level `BASE` for both steps. This covers ci.yml 159, 330, 529, 560, 596 and 710, fuzz.yml 47, soak.yml 42 and 102, and chaos-real.yml 43 and 128, including the ones the regular persona does not report.
+- **D5 Credentials.** `persist-credentials: false` on every checkout: the 25 without it today. No job pushes or uses the token in git: `semver` and `verify` read history from `fetch-depth: 0`.
+- **D6 Permissions.** Every workflow keeps its top-level block: `contents: read`, and release.yml's `{}`. Job grants stay those of Block 20 D1 and of the guards (`actions: read`). A finding is fixed by narrowing, never ignored.
+- **D7 Cache.** No cache in a workflow zizmor treats as publishing. Only release.yml is one, and it has none (Block 20 D1). An ignore in release.yml is never accepted.
+- **D8 Shell.** Each actionlint and shellcheck finding is fixed. An intentional word split (`$features`, `$WITHOUT_RING`) carries `# shellcheck disable=SC2086` on the line before it, with its reason. No `.github/actionlint.yaml` unless a finding cannot be fixed inline.
+- **D9 Accepted findings.** None expected. An accepted one is ignored inline, `# zizmor: ignore[<audit>] <reason>` on its line, never by line number in a config file. `.github/zizmor.yml` exists only if a rule needs configuration.
+
+Value clause: As a team adopting Ferrifuge in production, I want its workflows linted for supply-chain and injection weaknesses on every change, so that the CI and release that vouch for each version cannot be subverted through a workflow.
+
+**Structural acceptance:**
+- `workflow-lint` is green on main after the fixes;
+- every `uses:` is SHA-pinned;
+- Dependabot's cooldown is set.
+
+Each of these mutations is seen red once, recorded in the PR:
+- `${{ github.event.pull_request.title }}` inside a `run:` (template-injection);
+- one `uses:` by tag (unpinned-uses);
+- a checkout without `persist-credentials: false` (artipacked);
+- an unquoted `$VAR` (shellcheck);
+- the cooldown removed (dependabot-cooldown).
+
+**Exceptions introduced:** no scenario: a CI job, verified by the mutations above.
