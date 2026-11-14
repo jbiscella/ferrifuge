@@ -391,6 +391,13 @@ harness = false
 test = false
 required-features = ["tokio"]
 
+# Block 52: needs Docker and hours, so only `FERRIFUGE_SOAK=1` runs it.
+[[test]]
+name = "soak"
+harness = false
+test = false
+required-features = ["tokio"]
+
 # Examples need a server; they build with the tokio adapter (Block 20, D8).
 [[example]]
 name = "quickstart"

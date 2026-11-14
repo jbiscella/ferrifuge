@@ -125,7 +125,9 @@ pub(crate) struct Environment {
     run: String,
     network: String,
     centrifugo: String,
-    toxiproxy: String,
+    /// Toxiproxy's container, when the client goes through it (Block 51;
+    /// the soak connects directly, Block 52 D1).
+    toxiproxy: Option<String>,
     redis: Option<String>,
     /// Centrifugo's published port, for the server API and the publisher.
     centrifugo_port: u16,
@@ -142,6 +144,21 @@ impl Environment {
     /// to this process) with `config`, Centrifugo's configuration, and
     /// waits until Centrifugo and Toxiproxy answer.
     pub(crate) async fn start(run: &str, engine: Engine, config: &Value) -> Result<Self, String> {
+        Self::start_with(run, engine, config, true).await
+    }
+
+    /// As [`Environment::start`], with the memory engine and no Toxiproxy:
+    /// the client connects to Centrifugo directly (Block 52, D1).
+    pub(crate) async fn start_direct(run: &str, config: &Value) -> Result<Self, String> {
+        Self::start_with(run, Engine::Memory, config, false).await
+    }
+
+    async fn start_with(
+        run: &str,
+        engine: Engine,
+        config: &Value,
+        proxied: bool,
+    ) -> Result<Self, String> {
         let name = |role: &str| format!("ferrifuge-chaos-{run}-{role}");
         let network = name("net");
         let config_dir = std::env::temp_dir().join(name("config"));
@@ -155,7 +172,7 @@ impl Environment {
             run: run.to_owned(),
             network: network.clone(),
             centrifugo: name("centrifugo"),
-            toxiproxy: name("toxiproxy"),
+            toxiproxy: proxied.then(|| name("toxiproxy")),
             redis: (engine == Engine::Redis).then(|| name("redis")),
             centrifugo_port: free_port(),
             proxy_port: free_port(),
@@ -168,14 +185,16 @@ impl Environment {
         environment.toxics = Toxiproxy::new(environment.toxiproxy_api_port);
         environment.run_containers(&network).await?;
         environment.wait_ready(READY_WITHIN).await?;
-        environment
-            .toxics
-            .create(
-                PROXY,
-                &format!("0.0.0.0:{PROXY_PORT}"),
-                &format!("centrifugo:{CENTRIFUGO_PORT}"),
-            )
-            .await?;
+        if proxied {
+            environment
+                .toxics
+                .create(
+                    PROXY,
+                    &format!("0.0.0.0:{PROXY_PORT}"),
+                    &format!("centrifugo:{CENTRIFUGO_PORT}"),
+                )
+                .await?;
+        }
         Ok(environment)
     }
 
@@ -223,13 +242,16 @@ impl Environment {
             "/centrifugo/config.json",
         ])
         .await?;
+        let Some(toxiproxy) = &self.toxiproxy else {
+            return Ok(());
+        };
         let proxy_publish = format!("127.0.0.1:{}:{PROXY_PORT}", self.proxy_port);
         let api_publish = format!("127.0.0.1:{}:{TOXIPROXY_API_PORT}", self.toxiproxy_api_port);
         docker(&[
             "run",
             "-d",
             "--name",
-            &self.toxiproxy,
+            toxiproxy,
             "--network",
             network,
             "--label",
@@ -252,9 +274,12 @@ impl Environment {
             .build()
             .map_err(|e| e.to_string())?;
         let health = format!("{}/health", self.api_url());
-        let version = format!("{}/version", self.toxics.base);
+        let version = self
+            .toxiproxy
+            .is_some()
+            .then(|| format!("{}/version", self.toxics.base));
         let deadline = tokio::time::Instant::now() + within;
-        for url in [health, version] {
+        for url in std::iter::once(health).chain(version) {
             loop {
                 match http.get(&url).send().await {
                     Ok(response) if response.status().is_success() => break,
@@ -330,6 +355,15 @@ impl Environment {
     }
 
     /// The client's websocket endpoint, through Toxiproxy.
+    /// Centrifugo's websocket endpoint itself, with no proxy (Block 52,
+    /// D1).
+    pub(crate) fn direct_websocket_url(&self) -> String {
+        format!(
+            "ws://127.0.0.1:{}/connection/websocket",
+            self.centrifugo_port
+        )
+    }
+
     pub(crate) fn websocket_url(&self) -> String {
         format!("ws://127.0.0.1:{}/connection/websocket", self.proxy_port)
     }
@@ -353,7 +387,7 @@ impl Environment {
         let mut logs = String::new();
         for container in [
             Some(&self.centrifugo),
-            Some(&self.toxiproxy),
+            self.toxiproxy.as_ref(),
             self.redis.as_ref(),
         ]
         .into_iter()
@@ -384,7 +418,7 @@ impl Drop for Environment {
         // and the network takes about a second.
         let containers: Vec<&str> = [
             Some(&self.centrifugo),
-            Some(&self.toxiproxy),
+            self.toxiproxy.as_ref(),
             self.redis.as_ref(),
         ]
         .into_iter()
