@@ -838,6 +838,9 @@ jobs:
           if ! (
             # shellcheck disable=SC1090 # cargo-ndk's exports, generated
             source <(cargo ndk-env --target x86_64 --platform 22)
+            # ndk-env names the cargo-ndk wrapper as the linker, without the
+            # keys that switch its wrapper mode on: the NDK's clang instead.
+            export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android22-clang"
             cargo test --target x86_64-linux-android --lib --test mobile_device --no-run --message-format json
           ) > "$RUNNER_TEMP/build.json"; then
             # The compiler's messages are in the JSON.
