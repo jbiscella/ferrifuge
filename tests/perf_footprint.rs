@@ -23,11 +23,12 @@ mod support;
 use std::env;
 use std::time::Duration;
 
+use ferrifuge::machine::CallRequest;
 use ferrifuge::machine::{
     Action, DebounceTimer, FrameId, Input, Machine, SubscriptionId, SubscriptionOptions,
     TransportId,
 };
-use ferrifuge::{CallRequest, Client, ClientEvent, Config, Subscription, SubscriptionState};
+use ferrifuge::{Client, ClientEvent, Config, Subscription, SubscriptionState};
 use futures_util::{Stream, StreamExt};
 use support::perf_server::{self, ChildServer};
 

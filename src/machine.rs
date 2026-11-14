@@ -1,3 +1,7 @@
+//! Unstable: requires the `unstable-machine` feature. The API by which
+//! another runtime drives the core may change in any minor release; the
+//! `Client` of the `tokio` and `browser` features is the stable API.
+//!
 //! Sans-IO core: the client connection state machine.
 //!
 //! Timers are numbered by setting: each [`Action::SetTimer`],
@@ -27,6 +31,9 @@ mod buffer_tests;
 mod calls;
 #[cfg(any(adapter_tokio, adapter_browser))]
 pub(crate) use calls::CallWait;
+// The calls an owner adds and the replies they settle with (Block 54, D1).
+#[cfg_attr(not(feature = "unstable-machine"), allow(unused_imports))]
+pub use crate::call::{CallReply, CallRequest};
 #[cfg(test)]
 mod close_tests;
 #[cfg(test)]
@@ -71,8 +78,8 @@ use crate::wire::{
     RefreshResult, Reply, ReplyResult,
 };
 use crate::{
-    CallError, CallReply, ClientError, ClientEvent, Config, DataError, ErrorKind, State,
-    StateError, StreamPosition, SubscriptionEvent, TokenError, codes,
+    CallError, ClientError, ClientEvent, Config, DataError, ErrorKind, State, StateError,
+    StreamPosition, SubscriptionEvent, TokenError, codes,
 };
 use server_subscriptions::ServerSubscriptions;
 use subscriptions::Subscriptions;

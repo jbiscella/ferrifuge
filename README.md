@@ -21,7 +21,9 @@ implementation reference.
 
 The core is a sans-IO state machine with no async runtime of its own. The
 default `tokio` feature adds a ready-to-use `Client` that runs the machine on
-tokio. Any other runtime can drive the core through `ferrifuge::machine`.
+tokio. Any other runtime can drive the core through `ferrifuge::machine`,
+with the `unstable-machine` feature: that API is outside the semver promise
+and may change in any minor release, while `Client` is the stable API.
 
 ## How it works
 
@@ -110,7 +112,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.22"
+ferrifuge = "0.23"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -930,7 +932,7 @@ only, until one works; reconnects keep that one.
 
 ```rust
 use ferrifuge::Client;
-use ferrifuge::machine::TransportKind;
+use ferrifuge::TransportKind;
 
 let client = Client::builder_with_transports([
     (TransportKind::WebSocket, "wss://example.com/connection/websocket".to_owned()),
@@ -959,7 +961,7 @@ more transport of the list, best first with websocket after it:
 
 ```rust
 use ferrifuge::Client;
-use ferrifuge::machine::TransportKind;
+use ferrifuge::TransportKind;
 
 let client = Client::builder_with_transports([
     (TransportKind::WebTransport, "https://example.com:8443/connection/webtransport".to_owned()),
@@ -1320,12 +1322,13 @@ let config = Config::default()
 | `browser` | yes | on `wasm32-unknown-unknown`, the same `Client` over the browser's WebSocket, fetch (http_stream) and EventSource (sse); nothing on other targets (see Browser) |
 | `unstable` | no | experimental APIs following centrifuge-js 63ed73e and Centrifugo's experimental features, outside the semver promise: they may change in any minor release (see Map subscriptions and Shared poll subscriptions) |
 | `unstable-webtransport` | no | the native WebTransport transport, through wtransport and quinn; implies `unstable` and `tokio`, and is as unstable (see WebTransport) |
+| `unstable-machine` | no | the sans-IO core, `ferrifuge::machine`, for driving the client from another runtime; outside the semver promise: it may change in any minor release |
 
 `tokio` needs one of the provider features. Cargo features are additive, so
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.22", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.23", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1348,8 +1351,9 @@ vulnerabilities (RUSTSEC-2026-0285, RUSTSEC-2026-0346) accept. Check the
 module's status on the NIST CMVP list before relying on it for compliance.
 
 Without default features, ferrifuge has no runtime or network dependency.
-`ferrifuge::machine::Machine` then takes inputs (API calls, transport
-activity, timers) and returns the actions to perform.
+With `unstable-machine`, `ferrifuge::machine::Machine` then takes inputs (API
+calls, transport activity, timers) and returns the actions to perform; that
+core API is outside the semver promise.
 
 The core alone builds for `wasm32-unknown-unknown`, and CI checks it on every
 pull request. There `tokio`, `ring`, `aws-lc-rs`, `fips` and `cookies` build
@@ -1399,7 +1403,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.22", features = ["test-util"] }
+ferrifuge = { version = "0.23", features = ["test-util"] }
 ```
 
 ```rust
@@ -1714,7 +1718,7 @@ built with it, one chunk per `pull` with `highWaterMark` 0.
 ```rust,ignore
 // http_stream through the application's fetch, cookies included.
 let client = ferrifuge::Client::builder_with_transports([(
-    ferrifuge::machine::TransportKind::HttpStream,
+    ferrifuge::TransportKind::HttpStream,
     "https://realtime.example.com/connection/http_stream".to_owned(),
 )])
 .fetch(my_fetch)

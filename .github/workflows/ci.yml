@@ -69,8 +69,29 @@ jobs:
       - name: clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
 
+      # The tests' dev-dependency turns `unstable-machine` on, so only the
+      # library alone builds the core crate-private (Block 54, D1).
+      - name: clippy (the library without unstable-machine)
+        run: |
+          cargo clippy --lib -- -D warnings
+          cargo clippy --lib --features cookies,unstable-webtransport -- -D warnings
+          cargo clippy --lib --no-default-features -- -D warnings
+
       - name: rustdoc
         run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # The sans-IO core is public only with `unstable-machine` (Block 54,
+      # D1): the default documentation has no page for it, and the
+      # feature's has one.
+      - name: The core's documentation needs unstable-machine
+        run: |
+          rm -rf target/doc/ferrifuge
+          cargo doc --no-deps
+          test ! -e target/doc/ferrifuge/machine/index.html
+          cargo doc --no-deps --features unstable-machine
+          test -e target/doc/ferrifuge/machine/index.html
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -1169,7 +1190,7 @@ jobs:
 
       - name: rustdoc as on docs.rs
         run: |
-          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport
-          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport --target wasm32-unknown-unknown
+          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport,unstable-machine
+          cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport,unstable-machine --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
