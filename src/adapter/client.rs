@@ -5319,7 +5319,15 @@ mod tests {
         ])
         .build();
 
-        assert!(built.is_ok(), "{built:?}");
+        // On Android the https:// endpoint first needs the app's setup of
+        // the platform verifier, which the unit tests run without (Block
+        // 24, D5; Block 58, D4).
+        if cfg!(all(target_os = "android", not(feature = "fips"))) {
+            let error = built.expect_err("refused without the Android setup");
+            assert_eq!(error.message, tls::ANDROID_SETUP_MISSING);
+        } else {
+            assert!(built.is_ok(), "{built:?}");
+        }
     }
 
     #[tokio::test]
