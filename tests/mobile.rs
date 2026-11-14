@@ -290,7 +290,8 @@ fn watch(
                 } else if line == "ready" {
                     let published = runtime.block_on(server.api().call(
                         "publish",
-                        serde_json::json!({"channel": channel, "data": {"nonce": nonce}}),
+                        // TEMPORARY mutation B: another nonce.
+                        serde_json::json!({"channel": channel, "data": {"nonce": "another"}}),
                     ));
                     if let Err(error) = published {
                         reported.failed.get_or_insert(format!("publish: {error:?}"));
@@ -452,17 +453,7 @@ fn ios(runtime: &tokio::runtime::Runtime) -> bool {
         Some((&chain.server_pem, &chain.key_pem)),
     ));
     let url = format!("wss://127.0.0.1:{}/connection/websocket", tls.port());
-    // Refused before the CA is trusted, then trusted by the device alone.
-    passed &= run(
-        runtime,
-        Platform::Ios,
-        &tls,
-        &Run {
-            name: "ios-wss-untrusted",
-            url: url.clone(),
-            untrusted: true,
-        },
-    );
+    // TEMPORARY mutation B: the untrusted run after add-root-cert.
     passed &= add_root_cert(&chain.ca_path);
     passed &= run(
         runtime,
@@ -470,8 +461,18 @@ fn ios(runtime: &tokio::runtime::Runtime) -> bool {
         &tls,
         &Run {
             name: "ios-wss",
-            url,
+            url: url.clone(),
             untrusted: false,
+        },
+    );
+    passed &= run(
+        runtime,
+        Platform::Ios,
+        &tls,
+        &Run {
+            name: "ios-wss-untrusted",
+            url,
+            untrusted: true,
         },
     );
     runtime.block_on(tls.stop("centrifugo-tls"));
