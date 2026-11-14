@@ -301,6 +301,20 @@ harness = false
 required-features = ["tokio"]
 
 # Runs tests/browser_wasm.rs in browsers against Centrifugo (Block 44, D18).
+# The program a mobile device runs, and the host harness that runs it there
+# (Block 58, D1): `cargo test` alone builds only the harness, which skips
+# without FERRIFUGE_MOBILE.
+[[test]]
+name = "mobile_device"
+harness = false
+test = false
+required-features = ["tokio"]
+
+[[test]]
+name = "mobile"
+harness = false
+required-features = ["tokio"]
+
 [[test]]
 name = "browser"
 harness = false

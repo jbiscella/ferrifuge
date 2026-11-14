@@ -1554,9 +1554,16 @@ environment applies).
 ### Mobile
 
 Ferrifuge builds for Android (`aarch64-linux-android`, API level 22 and up)
-and iOS (`aarch64-apple-ios`, iOS 13 and up); CI builds both, without
-running on a device. For iOS, set `IPHONEOS_DEPLOYMENT_TARGET` to the app's
-deployment target, so that rustc and the C builds of ring or aws-lc agree.
+and iOS (`aarch64-apple-ios`, iOS 13 and up); CI builds both. On `main` and
+nightly it also runs a client on an Android emulator (x86_64, API level 34)
+and an iOS simulator against a real Centrifugo: it connects over `ws://`,
+subscribes, receives a publication and disconnects, and the library's unit
+tests run there. On iOS it also connects over `wss://`, verified by the
+simulator's own trust: refused until the server's CA is added to its
+keychain, then trusted. Android `wss://` does not run there: the
+verifier's setup below needs an app. For iOS, set
+`IPHONEOS_DEPLOYMENT_TARGET` to the app's deployment target, so that rustc
+and the C builds of ring or aws-lc agree.
 
 **Backgrounding.** Mobile systems suspend an app's sockets in the
 background. Disconnect when the app goes to the background and connect when
@@ -1984,7 +1991,9 @@ providers, and runs the performance tests above, writing their measurements
 to the job summary; the wall-clock ones run in a job that never fails the
 build. It runs the unit tests, the scenarios that need no server and the
 chaos seeds on Windows and macOS, builds the library and its unit tests for
-Android and iOS, the core alone and the browser adapter for
+Android and iOS (and runs a client and the unit tests on an Android
+emulator and an iOS simulator: `mobile-android` and `mobile-ios`, on
+`main` and nightly), the core alone and the browser adapter for
 `wasm32-unknown-unknown` (their clippy also refusing the std clock and
 thread calls that panic there), with a check that a module linking them
 imports nothing but wasm-bindgen's glue, and runs the `@W` tests in headless

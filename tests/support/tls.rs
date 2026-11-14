@@ -172,3 +172,55 @@ pub(crate) fn provider() -> rustls::crypto::CryptoProvider {
 pub(crate) fn provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
+
+/// A chain created for one run, as Apple requires of a TLS server
+/// certificate (Block 58, D3): a CA, and a server certificate for
+/// `127.0.0.1` with the serverAuth extended key usage and 30 days'
+/// validity. Block 6's test CA has neither. In PEM; `ca_path` holds the CA,
+/// for `simctl keychain add-root-cert`.
+pub(crate) struct RunChain {
+    pub(crate) ca_path: PathBuf,
+    pub(crate) server_pem: String,
+    pub(crate) key_pem: String,
+}
+
+pub(crate) fn run_chain() -> RunChain {
+    let now = time::OffsetDateTime::now_utc();
+    let validity = |params: &mut CertificateParams| {
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::days(29);
+    };
+    let ca_key = KeyPair::generate().expect("CA key");
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "ferrifuge mobile run CA");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    validity(&mut ca_params);
+    let ca_cert = ca_params.self_signed(&ca_key).expect("CA certificate");
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let server_key = KeyPair::generate().expect("server key");
+    let mut server = CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .expect("server certificate parameters");
+    server
+        .distinguished_name
+        .push(DnType::CommonName, "127.0.0.1");
+    server.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    server.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    validity(&mut server);
+    let server_cert = server
+        .signed_by(&server_key, &issuer)
+        .expect("server certificate");
+
+    let dir = dir().join("run-chain");
+    fs::create_dir_all(&dir).expect("run chain directory");
+    let ca_path = dir.join("ca.pem");
+    write_atomically(&ca_path, &ca_cert.pem());
+    RunChain {
+        ca_path,
+        server_pem: server_cert.pem(),
+        key_pem: server_key.serialize_pem(),
+    }
+}
