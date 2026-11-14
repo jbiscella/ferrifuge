@@ -205,7 +205,7 @@ Defaults (from centrifuge-js README): `minReconnectDelay` 500 ms, `maxReconnectD
 
 Verified (centrifuge-js `163dcba`, `src/utils.ts` `backoff`, `src/centrifuge.ts` `_getReconnectDelay`, `_startConnecting`, `_connectResponse`):
 - delay for attempt `n` (0-based, `n` capped at 31) = `min(max, min + rand(0, min(max, min * 2^n)))`, so a delay is never below `min`;
-- the attempt counter increments each time a delay is computed and resets to 0 when a connect reply arrives over websocket; Ferrifuge undoes that reset for a connection the server closes with 3008 "slow" before a server ping is read on it (Block 15, "Backoff after 3008"; diverges from centrifuge-js on purpose);
+- the attempt counter increments each time a delay is computed and resets to 0 when a connect reply arrives over websocket or WebTransport, and over http_stream and sse at the first reply to a command or server ping read after the connect reply, which proves only the stream (centrifuge-js 63ed73e `_connectResponse`, `_resetReconnectAttemptsIfPending`, `centrifuge.ts:927-933`, `:2310-2320`; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff`); Ferrifuge undoes that reset for a connection the server closes with 3008 "slow" before a server ping is read on it (Block 15, "Backoff after 3008"; diverges from centrifuge-js on purpose);
 - `connect()` resets the attempt counter to 0 (centrifuge-js 63ed73e, `centrifuge.ts:479`);
 - the first attempt after `connect()` is immediate; delays apply to reconnects.
 
@@ -9906,3 +9906,68 @@ Each of these mutations is seen red once, recorded in the PR:
 - the cooldown removed (dependabot-cooldown).
 
 **Exceptions introduced:** no scenario: a CI job, verified by the mutations above.
+
+---
+
+## Block 59 — Protocol and resilience guide
+
+**Goal:** an app developer or operator sees, in diagrams and one guide, how the client connects, keeps a connection alive, reconnects, recovers, refreshes tokens, times out calls and holds a slow application back, and what the application must do at each step; every statement cites the block, decision, scenario or test that fixes it, and a test fails when a citation, a code or a default it states no longer holds (owner request, 2026-11-14, before 1.0.0-alpha; plan approved by the owner after a comparison with a third-party proposal, whose codes are not used where they differ from this file).
+
+**Dependencies:** Blocks 1–5, 8–15, 19, 21, 25, 27, 29, 31, 34, 41, 44 and 48 (the behaviour documented), 20 (package contents), 49 (the catalogue's citation helpers).
+
+**Out of scope:**
+- changing any behaviour, code or option: a statement found wrong against the code is fixed in the guide, a behaviour found wrong goes to its block (as Block 34); a block silent on a behaviour the code has is amended here (Amendments);
+- a codes table in the guide: Block 34's table, in the README and the `codes` documentation, is linked, never copied. The guide is not Block 34's excluded `docs/codes.md` (design B): it holds no table of codes, and every code it names is checked against `src/codes.rs` (D6);
+- map and shared poll subscriptions, batching, delta compression, debouncing (Blocks 18, 19, 36, 45–47): named where they change a diagram, not drawn;
+- Mermaid in the README or the crate documentation: crates.io and docs.rs do not render it;
+- a docs site, rendered images, a Mermaid or link-checking tool in CI.
+
+This block reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 Files.** `docs/protocol.md` holds the diagrams (D2), `docs/resilience.md` the guide (D3). Neither ships in the crate: `Cargo.toml`'s `include` stays as Block 20 D3 set it, and the README links them by relative path, as it links `CLAUDE.md`, which crates.io resolves against `repository` (the default branch's version).
+- **D2 Diagrams.** Mermaid `sequenceDiagram`s, each with `alt` branches for its failure paths, `Note`s naming each timer and its default, and the application's calls and events as messages, not only frames. In this order:
+  1. "Connect and heartbeat" (App, Client, Server): `connect()`, `Connecting` 0, the open bounded by `handshake_timeout` and the connect reply by `timeout`; `Connected`; pings every `ConnectResult.ping` (Centrifugo default 25 s), a pong only when `ConnectResult.pong`; the no-ping deadline, ping interval plus `max_server_ping_delay`, re-armed by every message read, none when either is 0; alt missing ping: `Connecting` 2 "no ping", reconnect after the backoff and the jitter window (Blocks 1, 2, 4, 14, 15, 29).
+  2. "Disconnect and reconnect" (App, Client, Server): a lost transport gives `Connecting` 1 "transport closed"; a server code is classified, disconnect 3500–3999 and 4500–4999 terminal (`Disconnected` with the code), every other reconnecting; websocket close 1009 gives `Disconnected` 3 "message size limit exceeded"; the delay `min(max, min + rand(0, min(max, min·2ⁿ)))`, plus the jitter window on the first reconnect after a connection; the counter reset by the connect reply over websocket and WebTransport, and over http_stream and sse by the first reply to a command or server ping after it; a disconnect 3008, `Connecting` 7 or a WebTransport end without a code before a server ping is read, and `Connecting` 5 at any time, keeping the backoff growing; `connect()` and `reconnect()` restarting the counter (Blocks 1, 2, 3, 8, 14, 15, 19 D8, 25 D5, 44 D7, 48 D9).
+  3. "Subscription and recovery" (App, Subscription, Client, Server): subscribe, publications with epoch and offset, a disconnect, `Subscribing` 1, a resubscribe asking to recover; alt recovered true, missed publications in order; alt recovered false, the app reloads; alt with getState, the "reject unrecovered" flag, subscribe error 112 without an `Error` event, the position dropped, then after the resubscribe backoff getState and the subscribe (Blocks 9, 10, 11, 15).
+  4. "Token lifecycle" (App, Client, Server): connection and subscription tokens refreshed at a random point between 80% and 90% of the ttl; a failed refresh retried after 5 to 10 s (connection) or 10 to 20 s (subscription); a failed token fetch for a connect retried after the reconnect backoff, for a subscribe after the resubscribe backoff; "unauthorized" giving `Disconnected` 1 or `Unsubscribed` 1; connect error and subscribe error 109 dropping the token, a new one fetched, and without a token callback `error` 12, then `Disconnected` 1 or `Unsubscribed` 1; a refresh due during a sleep fetched before the next connect or subscribe (Blocks 1, 5, 10, 14, 25 D3).
+  5. "Calls and timeouts" (App, Client, Server): a call waiting for the connection, sent, answered; alt no reply within `timeout`: `error` 1 "timeout"; alt transport lost: a call sent fails with `error` 11 "connection closed", a call not sent keeps waiting; alt `disconnect()` or a terminal condition: `error` 3 "disconnected"; a call timed out before it was sent is never sent; the client never retries a call (Blocks 13, 34).
+  6. "Backpressure" (App, Client, Server): a stream not read; while the read-ahead fills (`read_ahead_messages`, `read_ahead_bytes`), pings are read and answered; once it is full, reading stops, no ping is read and the no-ping deadline pauses; alt the server's disconnect 3008 "slow": reconnect, recovery within `client.recovery_max_publication_limit` (Centrifugo default 300); alt browser: reading never stops, the inbox fills, `Connecting` 7 "read-ahead overflow" (Blocks 4, 15, 44 D7).
+- **D3 Guide.** `docs/resilience.md` has, in this order:
+  - **Strategies:** backoff and jitter; fleet jitter; recovery and getState; publish idempotency; token refresh timing; backpressure; sleep and resume. Each says what it is for, what the client does, what the application must do, and one failure example. Publish idempotency says that a call that timed out or failed with `error` 11 or `error` 3 after it was sent may have been applied, that the client protocol carries no idempotency key (`client.proto`, `PublishRequest`), and that the application decides whether to retry; it says that it is guidance.
+  - **Delivery guarantees:** a call's `Ok` is the server's reply; events in the order the server sent them, across connections (Block 15), call replies not ordered with them (Block 13); an event delivered when taken from its stream or when its handler returns (Blocks 15, 41 D3); exactly once on recoverable channels within the recovery limit, for an application that takes its streams, or sets its handlers, before `connect()` and `subscribe()` (Block 15); what a reconnect does to pending calls (Block 13) and subscriptions (Blocks 9, 12).
+  - **Transport matrix:** websocket, http_stream, sse and WebTransport (unstable), by JSON and Protobuf, native and browser, with sse refusing Protobuf at build (Block 8), Protobuf over http_stream (Block 27), the README's Safari http_stream note (issue #268) and the browser WebTransport handshake against Centrifugo v6.6.1 through v6.10.3 (centrifugal/centrifugo#1323; Block 48).
+  - **Observability:** the events and codes to log, the client's records (Block 21), `statistics()` (Block 31).
+  - **Troubleshooting:** a symptom-first table, one row per symptom, giving its likely cause, the check and the fix; no column of codes.
+  - **Codes:** a link to the README's "Codes" section.
+- **D4 Sources and values.** On the first non-blank line after each diagram's closing fence, and in each `##` and `###` section of the guide, a line starting `Sources:` lists its sources, separated by `;`. An item is `Block N`, optionally followed by ` D<k>`, by double-quoted names, or both; a function in backticks, `` `src/….rs::name` `` or `` `tests/….rs::name` ``; or a relative link to a heading. A quoted name is a scenario of that block's `gherkin` blocks or the label of one of its bold decisions (`**<label>.**` or `**<label>:**`). A statement no block decides (the publish idempotency advice) says that it is guidance. In the text and the diagrams:
+  - a client-side code is written as its kind, `connecting`, `disconnected`, `subscribing`, `unsubscribed` or `error` (any case, in backticks outside diagrams), its number and, when its row gives a fixed reason, that reason in double quotes;
+  - a server code is written after the lead of its row in the "Server codes" table (`src/codes.rs`, mirrored in the README): disconnect, websocket close, unsubscribe, connect error, refresh error, subscribe error, `sub_refresh` error;
+  - a client option's default is written `` `<option>` (default <value>) ``; a server option's as "(Centrifugo default <value>)".
+- **D5 README.** A section `## How it works`, between "Overview" and "Status", in a few sentences without Mermaid, linking both files and the "Codes" section. `tests/readme.rs` passes unchanged.
+- **D6 Drift test.** `tests/docs_sources.rs`, which includes `tests/support/bug_catalogue.rs` by `#[path]` as `spec_sync` does. The catalogue's `block`, `code_spans`, `function_of` and `defines` become `pub(crate)`, unchanged otherwise. For every file under `docs/` it checks:
+  - every `Block N`, and each number of `Blocks N, M and K` or `Blocks N–M`, anywhere in the text has a heading `## Block N — ` in `CLAUDE.md`, checked before `block` is called, and every `Block N D<k>` a bold `**D<k> ` in that block;
+  - every quoted name of a `Sources:` item is a scenario or a bold decision label of the block the item names;
+  - every function a `Sources:` item names is defined in its file (`defines`);
+  - every `mermaid` block, and every `##` and `###` section, has a `Sources:` line with at least one item;
+  - every `mermaid` block starts with `sequenceDiagram`, and its `alt`, `opt`, `loop`, `par`, `rect` and `critical` lines balance with its `end` lines;
+  - every client-side code of D4 is a row of its kind's table in `src/codes.rs`'s module documentation, and its quoted reason, when given, one of that row's string literals; the word "code" followed by a number, outside a client-side code, is reported;
+  - every server code of D4 is covered by a row of the "Server codes" table in `src/codes.rs` with the same lead: listed, inside a range, or on the side of a "below" or "from" bound the row names;
+  - every `(default <value>)` follows a field of `Config` or `machine::SubscriptionOptions` whose value in `Default::default()`, rendered by the test (a duration as `N s` when whole seconds, else `N ms`, zero as `0`; a byte count as `N MiB`, `N KiB` or `N bytes`; a count as a number), is `<value>`;
+  - every relative link, of these files and of `README.md`, names a file of the repository and, with a `#fragment`, a heading of that file by GitHub's anchor rule (lower case, punctuation but `-` and `_` removed, spaces as `-`, a repeated heading suffixed `-1`, `-2`);
+  - every file under `docs/` is linked from `README.md`.
+  Planted tests, in the way of `spec_sync`'s catalogue tests, each change one citation or value in the text the test read and expect its report: a scenario name that is not one; a block without a heading; a D-item the block lacks; a renamed function; a diagram without `Sources:`; an `alt` without its `end`; a code's number changed; a code's reason changed; a bare "code" and a number; a server code outside its rows; a default changed; a link to a heading that does not exist; a file under `docs/` the README does not link.
+- **D7 Version and changelog.** No bump: documentation and a test. An `Unreleased` entry under "Added": the protocol diagrams and the resilience guide.
+
+**Amendments:**
+- **Block 2, second Verified bullet:** "resets to 0 when a connect reply arrives over websocket" reads "resets to 0 when a connect reply arrives over websocket or WebTransport, and over http_stream and sse at the first reply to a command or server ping read after the connect reply, which proves only the stream (centrifuge-js 63ed73e `_connectResponse`, `_resetReconnectAttemptsIfPending`, `centrifuge.ts:927-933`, `:2310-2320`; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff`)".
+
+Value clause: As an app developer or operator adopting Ferrifuge, I want diagrams of the client's protocol flows and a guide to its resilience strategies, guarantees and failure modes, each traced to the rule behind it, so that I can build on its behaviour and diagnose a failure without reading the source.
+
+**Structural acceptance:**
+- the diagrams render on GitHub (checked on the pull request's rich diff);
+- `cargo test --test docs_sources`, `--test readme` and `--test spec_sync` pass;
+- `cargo package --list` lists no file under `docs/`;
+- each planted test of D6 is seen failing once with its check removed, recorded in the PR.
+
+**Exceptions introduced:** no scenario: documentation, verified by the drift test and its planted tests, as Block 34's tables are by their test.
