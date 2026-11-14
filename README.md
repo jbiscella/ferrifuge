@@ -968,7 +968,8 @@ with no Happy Eyeballs: a first address that cannot be reached fails within
 the handshake timeout, and the next transport is tried. A refused session
 (a server with HTTP/3 but no WebTransport) fails the attempt at once.
 
-**ALPN.** Centrifugo up to v6.10.3 selects no application protocol on its
+**ALPN.** Centrifugo v6.6.1 through v6.10.3, until a release with
+centrifugal/centrifugo#1323, selects no application protocol on its
 WebTransport listener, and a QUIC client offering `h3` fails its handshake
 there. The client offers `h3` first and, when the server selected none,
 handshakes once more without ALPN, within the same handshake timeout. It
@@ -1640,8 +1641,9 @@ the client emits `connecting` with code 1 "transport closed" and
 reconnects by its backoff. `EventSource` shows neither status nor
 headers, so a failed attempt names no captive portal.
 
-**WebTransport (unstable).** Against Centrifugo up to v6.10.3 the browser
-transport fails its handshake: the server selects no application protocol,
+**WebTransport (unstable).** Against Centrifugo v6.6.1 through v6.10.3,
+until a release with centrifugal/centrifugo#1323, the browser transport
+fails its handshake: the server selects no application protocol,
 and a browser offers `h3` and cannot retry without it (Chrome:
 "NO_APPLICATION_PROTOCOL"), so the client falls back to the next transport,
 at the cost of one failed handshake per first round. It works unchanged
