@@ -89,6 +89,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 0 and Block 8, out of scope | the webtransport transport | owner, 2026-11-06, late (item 33) | 48 |
 | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |
 | Block 20, out of scope | committing the generated Protobuf code instead of generating it at build time | reviewer, 2026-11-14, delegated by the owner | 56 |
+| Block 24, out of scope | emulator and simulator CI running a client against Centrifugo (design C) | reviewer, 2026-11-14, delegated by the owner | 58 |
 
 ### Test layers
 
@@ -3613,18 +3614,18 @@ Feature: Proxies
 **Dependencies:** Blocks 6 (providers, the one-place TLS build), 8 (failed attempts), 11 (recovery), 15 (delivery), 16 (CI layout), 20 (MSRV, docs.rs, examples, changelog), 22 (the platform verifier, Android left to this block), 23 (proxies: on mobile the environment applies).
 
 **Out of scope:**
-- emulator and simulator CI running a client against Centrifugo (the analysis's design C, deferred);
+- emulator and simulator CI running a client against Centrifugo (the analysis's design C): Block 58 runs `ws://` on an Android emulator and `ws://` and `wss://` on an iOS simulator, on main and nightly; Android `wss://`, which needs an app making D4's setup, stays deferred;
 - the fips build on Android and iOS (AWS-LC-FIPS's supported operating environments): not built in CI; the README says it is unsupported there;
 - extra roots on Android (D3);
 - sleep, network changes and captive portals (Block 25, item 4), which the lifecycle guide only points to;
 - Android and iOS proxy settings (Block 23: the environment applies; hyper-util 0.1.21 reads system settings on macOS and Windows only);
-- other Android ABIs, the iOS simulator and Mac Catalyst: the same code paths as the two targets built;
+- other Android ABIs, the iOS simulator and Mac Catalyst: the same code paths as the two targets built (Block 58 runs x86_64 Android and the arm64 iOS simulator, on main and nightly);
 - packaging for app stores, Gradle or Xcode project templates.
 
 This block amends Block 22: D1's platform verifier also covers Android, and D2's extra roots apply everywhere but Android (D3). Today Android verifies with webpki over `rustls-native-certs`, which finds no system certificate there (openssl-probe 0.2.1 probes `/etc/ssl/certs` and a Termux path, not `/system/etc/security/cacerts`), so a `wss://` client on Android works only with extra roots or `SSL_CERT_FILE`.
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
-- **D1 CI builds.** The `portability` set, on pull requests, gains two jobs. Each runs `cargo clippy --lib --tests -- -D warnings` and `cargo test --lib --no-run` with the default features (ring) and with `--no-default-features --features tokio,aws-lc-rs`. Nothing runs on a device (out of scope above).
+- **D1 CI builds.** The `portability` set, on pull requests, gains two jobs. Each runs `cargo clippy --lib --tests -- -D warnings` and `cargo test --lib --no-run` with the default features (ring) and with `--no-default-features --features tokio,aws-lc-rs`. Nothing runs on a device in these jobs; Block 58's do, on main and nightly.
   - `android` on `ubuntu-latest`: target `aarch64-linux-android` through cargo-ndk at a pinned version, API level 22 (`--platform 22`), which takes the compiler, archiver and linker from the runner's NDK (`ANDROID_NDK_HOME`, NDK 27.3 on the 2026-11 image), as rustls-platform-verifier's own CI does. API 22 is the floor of the stack: the verifier's Kotlin component has `minSdk 22` (v/0.7.1).
   - `ios` on `macos-latest`: target `aarch64-apple-ios`, with Xcode's SDK.
   - The examples are not built for mobile: they are command-line programs, and Block 20 D8's "every OS" means the host systems.
@@ -3657,7 +3658,7 @@ Value clause: As an app developer shipping Ferrifuge in Android and iOS apps, I 
   - on Android, extra roots fail `build()`, naming `tls_config`;
   - Ferrifuge's verifier, around a stub verifier, fails the handshake naming the call without the setup, delegates with it, and turns the stub's panic into an error.
 
-**Exceptions introduced:** no Gherkin scenario: the behaviour exists only on Android devices, and nothing runs on a device or emulator in CI (design C deferred). The host unit tests above cover the gate; the mobile jobs only build.
+**Exceptions introduced:** no Gherkin scenario: the behaviour exists only on Android devices, and nothing runs Android's TLS on a device or emulator in CI (Block 58 runs `ws://` only there). The host unit tests above cover the gate; the mobile jobs only build.
 
 ---
 
@@ -9906,6 +9907,100 @@ Each of these mutations is seen red once, recorded in the PR:
 - the cooldown removed (dependabot-cooldown).
 
 **Exceptions introduced:** no scenario: a CI job, verified by the mutations above.
+
+---
+
+## Block 58 — Mobile device runs
+
+**Goal:** CI runs a client on an Android emulator and an iOS simulator against a real Centrifugo: it connects, subscribes, receives a publication and disconnects, and on iOS it also verifies `wss://` with the device's own trust. This shows the mobile builds of Block 24 work, not only that they compile (Block 24's deferred design C, ruled feasible and free on this public repository by the reviewer, 2026-11-14, delegated by the owner).
+
+**Dependencies:** Blocks 0 (test layers), 6 (test CA), 16 (CI layout), 22 (the platform verifier), 24 (mobile builds, the Android gate), 44 (the `browser-safari` pattern: a native Centrifugo on hosted macOS, main and nightly only), 51 D13 (`TAG`).
+
+**Out of scope:**
+- Android `wss://` and `https://`: the platform verifier there needs the app's JNI setup, from an app holding the verifier's Kotlin component (Block 24 D2, D4), so it needs an APK; deferred. Block 24's host unit tests keep covering the gate;
+- real suspension on an Android emulator (deferred by the owner, Blocks 49 and 51), backgrounding and network changes (Block 25);
+- the aws-lc-rs and fips builds on a device: the `android` and `ios` jobs build aws-lc-rs, and fips is unsupported there (Block 24);
+- arm64 Android images, which get no hardware acceleration on x86_64 runners; other API levels; physical devices and device farms;
+- http_stream, sse and WebTransport on a device;
+- pull requests: nothing here runs on one, and neither job is a required check.
+
+This block amends Block 24 (see "Amendments to earlier blocks"). Block 0's "Reversed exclusions" gains the row | Block 24, out of scope | emulator and simulator CI running a client against Centrifugo (design C) | reviewer, 2026-11-14, delegated by the owner | 58 |.
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 Layout.** Two targets, both `harness = false`, `required-features = ["tokio"]`. Neither carries a `// @P scenario:` or `// @W scenario:` line.
+  - `tests/mobile_device.rs`, `test = false`, is the program that runs on the device. It holds one `Client` with default options apart from its endpoint, `FERRIFUGE_MOBILE_URL`, and reads its channel from `FERRIFUGE_MOBILE_CHANNEL` and its nonce from `FERRIFUGE_MOBILE_NONCE`. Each step is bounded at 30 s and prints one line, `step <name> ok` or `step <name> failed: <reason>`. The program exits 1 at the first failure. The steps:
+    - `connect`: the client emits `connected`;
+    - `subscribe`: the subscription emits `subscribed`, after which the program prints `ready`;
+    - `receive`: a publication on the channel whose data carries the nonce; any other publication fails the step;
+    - `disconnect`: `disconnect()` is called, the client emits `disconnected`, and its state is `disconnected`.
+
+    Then it prints `done` and exits 0. With `FERRIFUGE_MOBILE_EXPECT=untrusted` it runs only `connect`. That step passes only on an `error` event naming rustls's invalid peer certificate, with the state still `connecting`. The program uses no server API and holds no API key.
+  - `tests/mobile.rs` is the host harness, built as `tests/browser.rs` is (Block 44 D18).
+    - `FERRIFUGE_MOBILE` is `android` or `ios`; when it is unset, the run is skipped. `FERRIFUGE_MOBILE_BINARY` is the device program. On iOS, `FERRIFUGE_MOBILE_DEVICE` is the simulator's UDID.
+    - It starts Centrifugo at `TAG`, allowing anonymous connect and subscribe: a container on Linux, and on macOS the binary `FERRIFUGE_CENTRIFUGO` names.
+    - It runs the program and reads its lines. On `ready` it publishes, through the server API, a publication carrying a nonce new to the run.
+    - It passes only when every step reported `ok`, `done` arrived, the exit status is 0, and the server's `channels` then lists no client on the channel within 10 s.
+    - A run is bounded at 180 s. At the bound the harness kills the device process and fails, naming the last step reported.
+- **D2 Android (`mobile-android`, `ubuntu-latest`, `timeout-minutes: 45`).**
+  - KVM is granted with android-emulator-runner's udev rule: `KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"`, then `udevadm control --reload-rules` and `udevadm trigger --name-match=kvm`.
+  - `ReactiveCircus/android-emulator-runner` is pinned by commit SHA, with `api-level: 34`, `target: google_apis`, `arch: x86_64` and `disable-animations: true`; the other inputs keep their defaults. The image is x86_64 because only an image of the host's architecture runs under KVM.
+  - Before the emulator starts, the job builds:
+    - the device program and the library's unit-test binary, with default features, by cargo-ndk at Block 24 D1's pinned version: `cargo ndk --target x86_64 --platform 22 test --lib --test mobile_device --no-run`, with the paths read from `--message-format json`;
+    - the harness, with `cargo test --test mobile --no-run`.
+  - The action's `script` runs one committed script, `ci/mobile-android.sh`. It:
+    - prints the program's `NEEDED` entries (`llvm-readelf -d`);
+    - copies both binaries to `/data/local/tmp` with `adb push`;
+    - runs the unit tests there (D4);
+    - runs `timeout -k 10 600 cargo test --test mobile` with `FERRIFUGE_MOBILE=android`.
+
+    The harness runs the program through `adb shell`, with the variables on its command line and the URL `ws://10.0.2.2:<the container's host port>/connection/websocket`. 10.0.2.2 is the emulator's alias for the host's loopback, where Docker publishes the port.
+- **D3 iOS (`mobile-ios`, `macos-latest`, `timeout-minutes: 45`).**
+  - Centrifugo is v6.10.3's `darwin_arm64` release asset with its SHA-256 pinned, as in `browser-safari` (`FERRIFUGE_CENTRIFUGO`), listening on 127.0.0.1, which a simulator's processes share with the host.
+  - The binaries are built with `cargo test --target aarch64-apple-ios-sim --lib --test mobile_device --no-run`, with `IPHONEOS_DEPLOYMENT_TARGET` set as the `ios` job sets it.
+  - The simulator is one available iPhone of the image's default runtime, chosen by UDID from `xcrun simctl list devices available --json`, booted with `xcrun simctl boot`, and awaited with `xcrun simctl bootstatus <udid> -b`.
+  - Programs run through `xcrun simctl spawn <udid> <path>`, without `--standalone`, so that they run under the device's launchd and reach its trust daemon. Their variables carry the `SIMCTL_CHILD_` prefix.
+  - For `wss://`, a second Centrifugo process serves TLS with a chain created for the run in `tests/support/tls.rs`: a CA, and a server certificate for `127.0.0.1` with the serverAuth extended key usage and 30 days' validity. Apple requires both of a TLS server certificate. Block 6's test CA has neither: no EKU, and rcgen's default validity to 4096. Against that server, in this order:
+    1. the program runs in `untrusted` mode;
+    2. the harness runs `xcrun simctl keychain <udid> add-root-cert <the CA>`;
+    3. the program runs all four steps, the publication made through that server's API.
+
+    The client trusts the platform alone, with no extra root and no raw configuration, so it verifies through Security.framework (Block 22 D1). The job does not set `FERRIFUGE_TRUST_TEST_CA` and does not touch the host's keychains.
+  - macOS has no GNU timeout, so the harness's bound and `timeout-minutes` bound the run, as in `browser-safari`.
+- **D4 Unit tests on the device.** The `cargo test --lib` binary runs on the emulator (`adb shell`) and on the simulator (`simctl spawn`).
+  - On Android only, it runs with `--skip the_adapter_spawns_only_through_its_runtime_handle --skip the_machine_reaches_the_encodings_only_through_the_codec --skip test_util_gates_this_module_only_and_no_hook`. These source checks read the checkout, which the emulator lacks, and they run on the host. The simulator shares the host's file system, so iOS skips nothing.
+  - A unit test whose expectation is false on a target gains that target's row, as `VERIFIER` has an Android row. On Android, `an_extra_root_is_trusted_and_an_unknown_issuer_refused` expects both handshakes to be refused, naming the missing setup (Block 24 D3, D5).
+  - Any other failure is a finding, fixed in the pull request or, if it is a flake, fixed at its root. It is never skipped.
+- **D5 Where it runs.** Both jobs are in `ci.yml` with `if: github.event_name != 'pull_request'`, so they run on main, nightly and dispatch, as `browser-safari` does. Neither is a required check. They take about 15 minutes each on runners that are free on this public repository. When several macOS jobs run at once, GitHub's concurrency limit queues the iOS job, which delays it and costs nothing.
+- **D6 Docs.** The README's "Mobile" section says what runs on a device and that Android `wss://` does not; its "Continuous integration" section names both jobs. No library change, so no version, unless D4 finds one.
+
+`VERIFY:` the first runs on the pull request's head settle these, through a temporary push trigger removed before merge:
+- that a process spawned without `--standalone` reaches trustd, and that `add-root-cert` alone, with no Certificate Trust Settings toggle, makes Security.framework trust the CA outside an app bundle;
+- that trustd does not cache the refusal from before `add-root-cert`;
+- that the Android program's `NEEDED` entries are system libraries only. If `libc++_shared.so` appears, it is pushed beside the program and `LD_LIBRARY_PATH` is set;
+- that `adb shell` and `simctl spawn` return the program's exit status (the harness also requires `done`);
+- which unit tests fail on each target (D4);
+- each job's duration.
+
+**Structural acceptance:**
+- Both jobs pass on the pull request's head and on main after the merge.
+- Each job is seen failing once on each of these mutations, recorded in the pull request, with the red naming the step:
+  - the host set to 127.0.0.1 on Android (the emulator's own loopback, which also shows the program runs inside it), and a port nothing listens on on iOS: `connect`;
+  - another nonce published: `receive`;
+  - `disconnect()` not called: the harness's `channels` check;
+  - on iOS, `add-root-cert` removed: the trusted `connect`, naming the invalid peer certificate;
+  - on iOS, the `untrusted` run moved after `add-root-cert`: that run fails.
+- The action is pinned by SHA, the asset by checksum, and the image by `TAG`.
+- On failure, the program's lines and the harness's and Centrifugo's output are uploaded as an artifact.
+
+**Exceptions introduced:** no Gherkin scenario. The program runs on a device, outside cucumber and the @A runner, and no Block 0 layer covers a device. With no scenario, `spec_sync` has nothing to claim, and neither file claims one (D1). The mutations stand in for a scenario's failing run. The Android unit-test run skips the three source checks, which run on the host (D4).
+
+**Amendments to earlier blocks:**
+- **Block 24, "Out of scope":**
+  - "- emulator and simulator CI running a client against Centrifugo (the analysis's design C, deferred);" becomes "- emulator and simulator CI running a client against Centrifugo (the analysis's design C): Block 58 runs `ws://` on an Android emulator and `ws://` and `wss://` on an iOS simulator, on main and nightly; Android `wss://`, which needs an app making D4's setup, stays deferred;".
+  - "- other Android ABIs, the iOS simulator and Mac Catalyst: the same code paths as the two targets built;" becomes "- other Android ABIs, the iOS simulator and Mac Catalyst: the same code paths as the two targets built (Block 58 runs x86_64 Android and the arm64 iOS simulator, on main and nightly);".
+- **Block 24 D1:** "Nothing runs on a device (out of scope above)." becomes "Nothing runs on a device in these jobs; Block 58's do, on main and nightly."
+- **Block 24, "Exceptions introduced":** "and nothing runs on a device or emulator in CI (design C deferred)." becomes "and nothing runs Android's TLS on a device or emulator in CI (Block 58 runs `ws://` only there)."
+- **Block 24's Goal:** "emulator CI deferred" stays, since it records the decision of 2026-11-07.
 
 ---
 
