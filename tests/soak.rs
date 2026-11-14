@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use support::ndjson::{Line, Writer, connection_established, subscription_established};
+use support::proxy::ProxyBackend;
 use support::real_server::{Engine, Environment, configuration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -66,6 +67,8 @@ const SUBSCRIPTION_TTL: Duration = Duration::from_secs(30 * 60);
 /// the client reconnects on (Block 3).
 const PERIOD: Duration = Duration::from_secs(5 * 60);
 const RECONNECT_CODE: u32 = 4000;
+/// A call whose transport closed before its reply (Block 13).
+const CONNECTION_CLOSED: u32 = 11;
 /// D5, D6: the checkpoints, offset from the reconnects.
 const CHECKPOINT_OFFSET: Duration = Duration::from_secs(150);
 /// D7: the warm-up, and the tolerance.
@@ -96,8 +99,14 @@ const HISTORY_TTL: &str = "3600s";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
 enum Command_ {
-    History { channel: String },
-    Presence { channel: String },
+    History {
+        channel: String,
+    },
+    Presence {
+        channel: String,
+    },
+    /// An RPC whose reply the proxy backend holds (D8).
+    Held,
     Checkpoint,
     Close,
     Exit,
@@ -143,6 +152,8 @@ enum Record {
     Call {
         call: String,
         ok: bool,
+        /// The error's code, when it failed.
+        code: Option<u32>,
         took_ms: u64,
     },
     /// A token fetched: a refresh when the connection or subscription was
@@ -307,15 +318,27 @@ async fn child_run() {
         match command {
             Command_::History { channel } => {
                 let call = client.history(channel, ferrifuge::HistoryOptions::default().limit(1));
-                spawn_call(&writer, &pending, "history", async move {
-                    call.await.map(drop).map_err(|e| e.to_string())
-                });
+                spawn_call(
+                    &writer,
+                    &pending,
+                    "history",
+                    async move { call.await.map(drop) },
+                );
             }
             Command_::Presence { channel } => {
                 let call = client.presence(channel);
                 spawn_call(&writer, &pending, "presence", async move {
-                    call.await.map(drop).map_err(|e| e.to_string())
+                    call.await.map(drop)
                 });
+            }
+            Command_::Held => {
+                let call = client.rpc("held", b"{}".to_vec());
+                spawn_call(
+                    &writer,
+                    &pending,
+                    "held",
+                    async move { call.await.map(drop) },
+                );
             }
             Command_::Checkpoint => {
                 let (client, subscriptions, writer) =
@@ -435,16 +458,17 @@ fn spawn_call(
     writer: &Writer<Record>,
     pending: &Arc<AtomicU64>,
     call: &'static str,
-    settled: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+    settled: impl std::future::Future<Output = Result<(), ferrifuge::CallError>> + Send + 'static,
 ) {
     let (writer, pending) = (writer.clone(), Arc::clone(pending));
     pending.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
         let start = Instant::now();
-        let ok = settled.await.is_ok();
+        let settled = settled.await;
         writer.write(Record::Call {
             call: call.to_owned(),
-            ok,
+            ok: settled.is_ok(),
+            code: settled.err().map(|error| error.code),
             took_ms: millis(start.elapsed()),
         });
         pending.fetch_sub(1, Ordering::SeqCst);
@@ -697,6 +721,10 @@ struct Counts {
     deliveries: u64,
     /// The publications acknowledged (D3).
     publications: u64,
+    /// The RPCs held at a disconnect, and those that failed with the
+    /// connection's loss (D8).
+    held: u64,
+    held_failed: u64,
 }
 
 /// A checkpoint as the checker keeps it.
@@ -709,6 +737,8 @@ struct Kept {
 
 struct Soak<'a> {
     environment: &'a Environment,
+    /// The RPC proxy backend, which holds D8's RPC.
+    backend: &'a ProxyBackend,
     timeline: Timeline,
     child: ChildProcess,
     channels: BTreeMap<String, Channel>,
@@ -797,11 +827,26 @@ impl Soak<'_> {
                     .delivered
                     .push(offset);
             }
-            Record::Call { ok, took_ms, call } => {
+            Record::Call {
+                ok,
+                code,
+                took_ms,
+                call,
+            } => {
                 if ok {
                     self.counts.calls_ok += 1;
                 } else {
                     self.counts.calls_failed += 1;
+                }
+                // D8: a held RPC, in flight when the connection closed,
+                // fails with its loss, "connection closed".
+                if call == "held" {
+                    if code != Some(CONNECTION_CLOSED) {
+                        return fail(format!(
+                            "an RPC in flight at a disconnect settled with {code:?}, not connection closed (D8)"
+                        ));
+                    }
+                    self.counts.held_failed += 1;
                 }
                 if Duration::from_millis(took_ms) > CALL_TIMEOUT + Duration::from_secs(1) {
                     return fail(format!("{call} took {took_ms} ms"));
@@ -1036,6 +1081,26 @@ impl Soak<'_> {
         }
     }
 
+    /// D5 with D8's RPC: the child makes it, the backend holds it, the
+    /// disconnect goes out, then the backend answers to no one; the RPC was
+    /// in flight when the connection closed.
+    async fn held_disconnect(&mut self, user: &str) -> Checked {
+        let held = self.backend.held_rpcs();
+        self.child.send(&Command_::Held).await;
+        let deadline = Instant::now() + WITHIN;
+        while self.backend.held_rpcs() <= held {
+            if Instant::now() >= deadline {
+                return fail("the backend received no held RPC (D8)");
+            }
+            self.pump(Instant::now() + Duration::from_millis(10))
+                .await?;
+        }
+        self.counts.held += 1;
+        let disconnected = self.disconnect(user).await;
+        self.backend.release_held_rpcs();
+        disconnected
+    }
+
     /// D9 at the end: every channel delivered the accumulated history from
     /// its first `subscribed`, each offset once; every acknowledged
     /// publication is in it.
@@ -1159,6 +1224,12 @@ impl Soak<'_> {
 
     fn check_counts(&self) -> Checked {
         let counts = &self.counts;
+        if counts.held_failed != counts.held {
+            return fail(format!(
+                "{} RPCs held at a disconnect, {} failed with the connection's loss (D8)",
+                counts.held, counts.held_failed
+            ));
+        }
         if counts.connection_refreshes < MIN_CONNECTION_REFRESHES
             || counts.subscription_refreshes < MIN_SUBSCRIPTION_REFRESHES
             || counts.reconnects < MIN_RECONNECTS
@@ -1196,9 +1267,16 @@ fn log(line: &str) {
 }
 
 /// D1's configuration: Block 51 D5's, with D3's history, D4's default
-/// close delays and Centrifugo's default ping and pong.
-fn soak_configuration() -> Value {
+/// close delays, Centrifugo's default ping and pong, and an RPC proxy to
+/// the runner's backend.
+fn soak_configuration(backend: &ProxyBackend) -> Value {
     let mut config = configuration(Engine::Memory);
+    // D8's RPC goes to the runner's backend, which holds it, under a timeout
+    // above that hold.
+    config["rpc"] = json!({
+        "proxy": {"endpoint": format!("{}/rpc", backend.url()), "timeout": "10s"},
+        "without_namespace": {"proxy_enabled": true}
+    });
     let client = config["client"].as_object_mut().expect("a client section");
     for default in [
         "ping_interval",
@@ -1288,7 +1366,11 @@ fn check_volume(published: u64, duration: Duration) -> Checked {
 
 /// The run: its timeline, then the checks at the end; the run's state is
 /// returned with the outcome, for the artifact.
-async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checked) {
+async fn run<'a>(
+    environment: &'a Environment,
+    backend: &'a ProxyBackend,
+    timeline: Timeline,
+) -> (Soak<'a>, Checked) {
     let user = format!("soak-{}", environment.run());
     let channels: Vec<String> = (0..CHANNELS)
         .map(|n| format!("{NAMESPACE}:soak-{}-c{n}", environment.run()))
@@ -1309,6 +1391,7 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
     );
     let mut soak = Soak {
         environment,
+        backend,
         timeline,
         child,
         channels: channels
@@ -1347,11 +1430,7 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
                 next_checkpoint += timeline.period;
             }
             if now >= next_disconnect {
-                // D8: one call just before each disconnect.
-                soak.call(calls).await;
-                calls += 1;
-                soak.pump(Instant::now() + Duration::from_millis(5)).await?;
-                soak.disconnect(&user).await?;
+                soak.held_disconnect(&user).await?;
                 next_disconnect += timeline.period;
             }
             if now >= next_call {
@@ -1419,10 +1498,11 @@ fn main() {
         .expect("a runtime");
     let outcome = runtime.block_on(async {
         let run_name = format!("s{}", std::process::id());
-        let environment = Environment::start_direct(&run_name, &soak_configuration())
+        let backend = ProxyBackend::start().await;
+        let environment = Environment::start_direct(&run_name, &soak_configuration(&backend))
             .await
             .unwrap_or_else(|error| panic!("the environment: {error}"));
-        let (soak, checked) = run(&environment, timeline).await;
+        let (soak, checked) = run(&environment, &backend, timeline).await;
         write_artifact(&soak, checked.as_ref().err());
         println!("@P report counts: {:?}", soak.counts);
         checked

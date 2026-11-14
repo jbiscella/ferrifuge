@@ -232,6 +232,9 @@ impl Environment {
             "centrifugo",
             "--label",
             &label,
+            // A proxy backend of the runner's, on the host (Block 52, D1).
+            "--add-host",
+            "host.docker.internal:host-gateway",
             "-p",
             &centrifugo_publish,
             "-v",
