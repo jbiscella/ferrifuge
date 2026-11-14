@@ -927,8 +927,8 @@ fn a_scenario_name_that_is_not_one_is_reported() {
 
 #[test]
 fn a_block_without_a_heading_is_reported() {
-    let texts = Texts::load().planted(RESILIENCE, "Block 31 D1", "Block 54 D1");
-    reports(&texts.problems(), "Block 54 has no heading in CLAUDE.md");
+    let texts = Texts::load().planted(RESILIENCE, "Block 31 D1", "Block 999 D1");
+    reports(&texts.problems(), "Block 999 has no heading in CLAUDE.md");
 }
 
 #[test]
