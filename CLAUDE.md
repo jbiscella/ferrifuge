@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–52 and 56 of N; 53–55 reserved for blocks in progress. Further blocks to be appended.
+Status: DRAFT — blocks 0–53 and 56 of N; 54–55 reserved for blocks in progress. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3683,8 +3683,8 @@ This block reverses Block 14's exclusion of sleep/resume behaviour; Block 0's "R
   - A wall clock set forward by 2 s or more counts as a sleep, with D2 and D3's safe consequences; one set backward is ignored.
   - The core ignores a gap under 2 s, so another owner may report every gap it measures.
   - The check reads two clocks and allocates nothing; the Block 14 @P gates pass unchanged.
-  - When the input that revealed the sleep is the firing of a timer that the core's answer to `Slept` re-arms (`Action::SetTimer` or `Action::SetSubscriptionTimer` for that timer), the adapter drops that firing: it belongs to the deadline the core just replaced, so a sleep first seen at the no-ping deadline does not reconnect when D2 keeps the transport. Otherwise it delivers that input after `Slept`, so a refresh whose firing revealed the sleep still runs although `ShortenTimer` finds that timer no longer running (Codex, #119).
-  - The same holds when another task handled the core between the driver taking a firing and giving it: the core and the driver number each setting of a timer alike, the driver performing the actions in order, and a firing whose timer was set again or cancelled since its setting is dropped (Codex, #120).
+  - The adapter gives the input that revealed the sleep after `Slept`. When it is the firing of a timer that the core's answer to `Slept` re-arms (`Action::SetTimer` or `Action::SetSubscriptionTimer` for that timer), the core ignores it, its setting no longer running (Block 53 D2): it belongs to the deadline the core just replaced, so a sleep first seen at the no-ping deadline does not reconnect when D2 keeps the transport. Otherwise it acts, so a refresh whose firing revealed the sleep still runs although `ShortenTimer` finds that timer no longer running, a shortened setting keeping its number (Codex, #119).
+  - The same holds when another task handled the core between the driver taking a firing and giving it: the driver gives the firing with the setting its timer was armed with, and the core ignores it when that timer was set again or cancelled since (Block 53 D2; Codex, #120).
   - Between `Slept` and that input, the adapter gives the core the firing of every token refresh timer the sleep made due, and stops its own timer for it, so that an attempt or subscribe the input starts fetches a new token first (D3). It keeps each refresh timer's deadline beside the core, under the same lock, since an application call that reveals a sleep cannot reach the driver's timers. Every input still takes effect before its call returns (Codex, #120).
   - While the client is connected, an event taken from a stream (`Input::EventTaken`), a frame read and the transport's close (`Input::Frame`, `Input::TransportClosed`) go before `Slept`: the event is already the application's, so its position moves even when the sleep drops the connection and recovery does not deliver it again; what the server did before the wake stands, so a terminal close or disconnect push still ends the client. The refreshes the sleep made due go before them, also before the held messages that taking an event releases, so that a connect or subscribe they start fetches a new token, and one they tear down makes the next attempt fetch one (D3). While the client is connecting, `Slept` changes only the refresh timers and goes first, so that a connect reply is not judged by a sleep it did not live through (Codex, #120). A `reconnect()` call (`Input::Reconnect`) while connected also goes before `Slept`, so that it keeps its code 6 and the jitter window rather than finding the client already reconnecting for the sleep (Codex, #122).
   - A timer that an input given before `Slept` sets (a refresh, or its retry, set by a reply) lost no time to the sleep: the sleep does not shorten it (Codex, #120).
@@ -3734,8 +3734,8 @@ Value clause: As an app developer whose clients run on laptops and phones that s
 
 **Structural acceptance:**
 - a unit test of the adapter's comparison: a wall clock ahead by 2 s gives a gap; ahead by 1999 ms, or behind, gives none;
-- an adapter unit test: a sleep revealed by the no-ping timer's firing, shorter than the no-ping window, drops that firing and keeps the transport;
-- an adapter unit test: a no-ping firing the driver took before another task handled a short sleep is dropped, and one of the running setting is delivered;
+- an adapter unit test: a sleep revealed by the no-ping timer's firing, shorter than the no-ping window, has that firing ignored by the core and keeps the transport;
+- an adapter unit test: a no-ping firing the driver took before another task handled a short sleep is ignored by the core, and one of the running setting acts;
 - an adapter unit test: a sleep first seen at a refresh timer's firing still refreshes the token;
 - an adapter unit test: a sleep first seen at the reconnect timer's firing, the transport lost before it, fetches a new token before the attempt opens a transport;
 - an adapter unit test: a publication taken from its stream as a sleep longer than the no-ping window is noticed moves its position, so the next subscribe recovers from it;
@@ -4051,7 +4051,7 @@ Feature: Tokio runtime handle
 - `#[non_exhaustive]` on other public structs.
 
 **Decisions** (reviewer, 2026-11-07, delegated by the owner, after a three-amigos round table on the draft):
-- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), an application's connector (Block 37 D4), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers, or, for WebTransport, DNS, the UDP bind, the QUIC handshakes (Block 48 D5's retry included), the HTTP/3 SETTINGS, the extended CONNECT and the stream's opening. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the tokio adapter drops a firing of the replaced one (Block 25 D1). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
+- **D1 Handshake timeout.** `Config::handshake_timeout`, default 5 s, bounds opening a transport: from `Action::OpenTransport` to `Input::TransportOpened`, which covers DNS, TCP, the proxy handshake (Block 23), an application's connector (Block 37 D4), TLS and the websocket upgrade, or, for http_stream and sse, the stream request until its response headers, or, for WebTransport, DNS, the UDP bind, the QUIC handshakes (Block 48 D5's retry included), the HTTP/3 SETTINGS, the extended CONNECT and the stream's opening. The core arms `Timer::ConnectTimeout` with `handshake_timeout` at `OpenTransport` and sets it again with `timeout` at `TransportOpened`, for every transport kind, emulated ones included; so the connect reply, and a token fetched after the open (Block 25 D3), keep `timeout`. Setting a timer again replaces the running one (`Timer`: at most one of each kind runs at a time), and the core ignores a firing of the replaced one (Block 53 D2). One timer kind, so no new variant of the exhaustive `Timer` (analysis item 11, design A; centrifuge-rust `docs/spec.md` §4.2, §5.1, §6.2, commit 88d6edf). An open that times out fails the attempt as a refused one (Block 8: error event, the next transport, the backoff after a full sequence); its error event's message is "handshake timeout", while a missing connect reply keeps "connect timeout". The worst case of one attempt goes from 5 s to 10 s, and of a first sequence over three transports from 15 s to 30 s. The documentation says so, says that setting both to 2.5 s keeps today's bound, and says that a call made while connecting still waits for the connection for at most `timeout` (Block 13), so on a slow open it can fail before the attempt does. `Config::timeout`'s and `Timer::ConnectTimeout`'s documentation no longer name the open as `timeout`'s.
 - **D2 Maximum incoming message size.** `Config::max_message_bytes`, default 64 MiB (today's fixed `MAX_MESSAGE_BYTES`, which it replaces), is at least 1, or `build()` and `Client::new` return a configuration error naming it, as the read-ahead limits do (Block 15). It bounds what a transport delivers as one message: a websocket message whole, even when it holds several JSON or Protobuf replies (Block 7), and each of its frames (tungstenite's `max_message_size` and `max_frame_size`); an http_stream JSON line; an http_stream Protobuf reply, by its length prefix (Block 27 D3); an sse event's data; a WebTransport JSON line and Protobuf reply (Block 48 D7). It is also the core's bound of Block 19 D6 (a delta target, and the decoded publications of one subscribe reply), which keeps its outcome. The read-ahead keeps admitting one message larger than `read_ahead_bytes` alone (Block 15), so this field is the per-message memory bound; the documentation says so for devices with little memory. `Config`'s `Debug` shows both new fields.
 - **D3 An oversized message.** The adapter refuses a message once it is known to exceed `max_message_bytes`, holding at most the limit and one read (tungstenite checks a frame from its header and a message as its frames arrive; the line and sse decoders once the part buffered exceeds the limit; the Protobuf splitter from the length prefix). It ends the transport and reports it with a new `Input::MessageTooLarge(TransportId)` instead of `Input::TransportClosed` (additive: `Input` is `#[non_exhaustive]`, Block 17).
   - Before the connect reply on that transport, the attempt fails as a refused one (Block 8), with an error event whose message is "message larger than the size limit": before the server has answered, the bytes may not be Centrifugo's (centrifuge-rust `docs/spec.md` §5.3, "an HTML page read as a varint").
@@ -9058,7 +9058,7 @@ Feature: WebTransport (unstable)
 - **D4 Ids.** centrifuge-rust's numbers are kept for rows derived from them. Other rows use `S<n>` (official SDK changelogs and issue trackers), `R<n>` (centrifuge-rust CHANGELOG "Fixed") and `C<n>` (our own fix commits).
 - **D5 Mitigations are mapped, not copied.** Their rules assume handlers, a dispatcher thread and per-object generation counters. Ferrifuge's core is a sans-IO step (Block 0), so a row may be `covered` by that architecture only if a named test exercises the failure; otherwise it is `not applicable` when the failure cannot occur, with the reason.
 - **D6 Own defect classes.** A class fixed more than once becomes a `C` row naming an invariant that covers every path. Existing invariants are reused where they fit (I5, I6, I8, I9, I11). Two classes have none, so two are added, numbered next:
-  - **I13 no stale continuation** (core, after every step; timers at the owner's boundary). An input answering something the core has abandoned changes nothing: a token, data or state callback's answer after its flow was abandoned (abandoned as Block 42 D10 and D11 define it: `unsubscribe()`, removal, `close()`, disconnect code 3014 and a token refresh's fetch abandon it, while a subscribe flow's callback outlives a lost transport or `disconnect()` and its answer is used), a reply or frame of a transport no longer current. A timer fired after it was cancelled or re-armed never reaches the core: the timer inputs name a kind, not a setting, so the core cannot tell such a firing from a current one, and its owner drops it, as the `src/machine.rs` module documentation requires; the adapters do so through `Armed` (Block 25 D1), seen by `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_dropped`, and the core runner's clock removes a firing when the core cancels or re-arms its timer. Numbered settings checked by the core are finding F2. The step returns no action: no state event, no `Action::Send` carrying the answer, no call settled by it, no transport opened for it. One exception, by decision: a connection refresh's fetch still pending when a reconnect tore its connection down, answered with a denial (`Unauthorized` or an empty token), still disconnects the client, whether or not the next connection is up yet (Block 25 D3; `src/machine.rs::stale_token_fetched`, `tests/adapter_tokens.rs::a_late_refresh_denial_disconnects_after_the_new_connection_refreshed`), and the tap counts that answer as current. `disconnect()`, `close()`, a terminal condition, code 3014, or a later teardown abandoning another refresh's fetch ends the exception for it (`src/machine/tokens.rs::teardown` keeps only the latest). A subscription's abandoned fetch and every non-denial answer stay covered by I13. The core runner already feeds late answers (`late answer` counter); the tap classifies each as current or abandoned from the ids it handed out, connection token fetches apart from the others, as the core numbers them in two series.
+  - **I13 no stale continuation** (core, after every step). An input answering something the core has abandoned changes nothing: a token, data or state callback's answer after its flow was abandoned (abandoned as Block 42 D10 and D11 define it: `unsubscribe()`, removal, `close()`, disconnect code 3014 and a token refresh's fetch abandon it, while a subscribe flow's callback outlives a lost transport or `disconnect()` and its answer is used), a reply or frame of a transport no longer current. A timer firing of a setting no longer running changes nothing too: one the core cancelled, set again or already took a firing of, each set action numbering its setting and each firing returning the number (Block 53 D1, D2); the core runner feeds one such firing of every setting the core cancels or sets again, at a seeded time, judged stale by the tap because the runner took it from such a setting (Block 53 D5). The step returns no action: no state event, no `Action::Send` carrying the answer, no call settled by it, no transport opened for it. One exception, by decision: a connection refresh's fetch still pending when a reconnect tore its connection down, answered with a denial (`Unauthorized` or an empty token), still disconnects the client, whether or not the next connection is up yet (Block 25 D3; `src/machine.rs::stale_token_fetched`, `tests/adapter_tokens.rs::a_late_refresh_denial_disconnects_after_the_new_connection_refreshed`), and the tap counts that answer as current. `disconnect()`, `close()`, a terminal condition, code 3014, or a later teardown abandoning another refresh's fetch ends the exception for it (`src/machine/tokens.rs::teardown` keeps only the latest). A subscription's abandoned fetch and every non-denial answer stay covered by I13. The core runner already feeds late answers (`late answer` counter); the tap classifies each as current or abandoned from the ids it handed out, connection token fetches apart from the others, as the core numbers them in two series.
   - **I14 no secret in a record** (core and adapter runners). Every token and every connect, subscription, publication and RPC payload in a runner is a value containing a run-specific marker. The tap renders the `Debug` of each `Input` and `Action` (core) and captures every log record through `log` at Trace (adapter, as `tests/log_facade.rs`); none contains the marker. Block 21 D5's redaction rule, checked on every path.
 - **D7 The mutation rule.** Each probe is seen failing once on the mutation recorded with it, from a clean state, recorded in its pull request, as Blocks 34, 35, 36 and 37 require. A catalogue row records the pull request in `Seen failing` as `#` and its number (`pending` until then). A mutation cannot run inside the scenario it checks, so the owner's "Every probe fails on its mutation" scenario is refined to check that the record is complete. Mutations are not replayed nightly: the rule of Blocks 34 to 37 stands.
 - **D8 Probes that fail today.** The probes for 28/55 and 71 are expected to fail on `main`: each is a bug against the rule the row cites, fixed in its own pull request. A probe that fails today stays out of `IMPLEMENTED` (`tests/bdd.rs`) or stays in `P_NOT_YET_MEASURED` (`tests/spec_sync.rs`) until its fix merges, and `Seen failing` then records the fix's pull request, the regression being its own mutation. Rows 19/70 and every other probe are expected to pass today, and are seen failing on the mutation recorded with them.
@@ -9135,7 +9135,7 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 61 | R | A listing of subscriptions is live and changes under the iterator | §4.3 | covered | "Subscriptions are found by channel and listed" |
 | 62, 75 | R | A waiter survives its timeout or drop, or a `ready()` in a final state waits | §4.3 | covered | `src/adapter/ready.rs::a_dropped_ready_future_leaves_no_waiter`; "Client ready on a disconnected client fails at once" |
 | 76 | F | A waiter is released before its event's handler returned | §9.4 | not applicable | Block 30 resolves `ready()` on the state, before the event is taken, by decision |
-| 63 | R | A zero duration means something surprising | §4.1, §4.2 | gap | finding F1: today nothing rejects a `Config::timeout` of 0, and whether it should is a behaviour decision for a later pull request |
+| 63 | R | A zero duration means something surprising | §4.1, §4.2 | covered | "A duration of 0 is rejected" (Block 53 D6); `max_server_ping_delay` 0 keeps its meaning, the no-ping check disabled (Block 4) |
 | 64 | R | Stream adapters violate the `Stream` contract, or a cancelled `next()` loses an item | §9.4 | covered | "A cancelled read loses no publication"; "A second events() call takes over the client's stream" |
 | 65 | R | A server-side publication is lost to an unsubscribed client-side subscription of the channel | §8 | covered | "Client-side and server-side subscriptions to one channel stay separate" |
 | 67 | R | The backoff resets on the connect reply, so a failure that follows every connect loops at minimum delay | §6.2, §6.3 | covered | "Reconnect delays keep growing while the server closes each connection with 3008"; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff` |
@@ -9143,10 +9143,10 @@ Reference for all numbered rows: centrifuge-rust `docs/spec.md` at `cbeac19`, se
 | 71 | R | A decoder rescans its buffer, or keeps forever what one large reply grew | §5.7 | gap | probe "A stream decoder releases what a large reply grew" (D8): every stream decoder is `src/adapter/body.rs`'s, which keeps at most 64 KiB once a large reply or chunk grew it, and hands each sse message over at its size (Block 49d); the websocket's frame buffer is tungstenite 0.30's, which keeps its largest frame's allocation: not ours. The rescan half: Block 50's @P |
 | 72 | R | A body without newlines or a bogus length buffers without limit; undecodable data re-arms the no-ping timer; garbage before the first message is not treated as a transport failure | §5.3, §5.7 | gap | limits: "A message over the limit ends a connected client", `src/adapter/tokio/http.rs::a_protobuf_reply_over_the_limit_fails_before_its_bytes`; timer: `src/machine.rs::blank_frames_do_not_rearm_the_ping_deadline`; garbage: probe "A websocket that answers with data that is not client protocol advances the fallback at once" |
 | 73 | R | Teardown after a decode error is asynchronous, so later items of the frame run | §5.3 | covered | `src/machine.rs::undecodable_frame_closes_the_transport_and_reconnects`; "Malformed Protobuf frame forces a reconnect" |
-| 74 | R | Configuration is validated only when used | §4.1 | covered | "A read-ahead limit of 0 is rejected"; "A maximum message size of 0 is rejected"; "A write queue limit of 0 is rejected" |
+| 74 | R | Configuration is validated only when used | §4.1 | covered | "A read-ahead limit of 0 is rejected"; "A maximum message size of 0 is rejected"; "A write queue limit of 0 is rejected"; "A duration of 0 is rejected" |
 | 77, 78 | R | Recovery position rules; the difference between the two is unknown | §7.4 | covered | "The first subscribe reply's position is used for recovery"; "Recovered publications advance the stored position"; "A publication of another channel does not move the stream position" |
 | 79 | R | A failed unsubscribe leaves a stale subscription on the server | §7.3 | covered | `src/machine/subscriptions.rs::an_unanswered_or_failed_unsubscribe_reconnects` |
-| 80 | R | A timer that fires late after being replaced still acts | §9.7 | covered | `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_dropped` |
+| 80 | R | A timer that fires late after being replaced still acts | §9.7 | covered | "A firing of a replaced setting changes nothing"; `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_dropped` |
 | 82 | R | 109 on a subscribe without a callback loops | §7.1, §7.2 | covered | "A subscribe rejected for an expired token without a callback unsubscribes" |
 | 83 | R | A hung emulation request blocks commands and pongs behind it | §5.7 | gap | see 23; probe "An emulation request that never answers ends the transport within the timeout" |
 | 84 | R | A disconnect push during connecting is ignored, or does not prove the transport | §15 row 23 | covered | "Disconnect returned by the connect proxy"; "An emulated transport the server answered is kept" |
@@ -9211,7 +9211,7 @@ Source: `git log origin/main --grep='\]\[fix\]'` (182 commits at 09444ac) and `-
 | C3 | A call or batch settles wrongly or twice, or hangs across a close | 946364e, b365e14, ae61961, 10a4ae9, c72d6f1, 458acb5, 1814ac5, 6a3c7d4, 4048b65 | covered | I6, I10 ("Seeded chaos with batching on the core keeps every invariant") |
 | C4 | The stored position moves wrongly | 614f2ad, 432f978, e35b39b, 9afc3fc, 23aef22, 81fc66c, e1cb7c4, d2742bf | covered | I8; its planted faults in "The core runner reports a planted delivery fault" |
 | C5 | Close or drop leaves work, callbacks or a stuck waiter behind | 20ebe81, fb31336, 98a1d05, 884561d, e2a712b, 2b8c455, 564fb10, afe1e3f, 67f8f9a, 1f91304 | gap | I5 and Block 33's scenarios; `close()` is not an operation of Block 16's runners (`Op::Close` is a server close): Block 51 ends every seed with `close()`; probe "Seeded chaos with handlers on the tokio client keeps the invariants" adds it to the adapter runner |
-| C6 | A timer fires when it should not, or is lost | 4279ee1, 946364e, 552dddb, 8de3d04, 13e2492 | covered | I5; `src/adapter/client.rs::timers_fire_in_deadline_order_and_cancelled_ones_never`; I13 |
+| C6 | A timer fires when it should not, or is lost | 4279ee1, 946364e, 552dddb, 8de3d04, 13e2492 | covered | I5; `src/adapter/client.rs::timers_fire_in_deadline_order_and_cancelled_ones_never`; I13; "A firing of a replaced setting changes nothing"; "A firing of a cancelled setting changes nothing" |
 | C7 | A full read-ahead stalls what must not stall | 88f472d, e64c8bf, 552dddb, 56ee1ce | covered | I9; "Pings are answered while a stream is not read" |
 | C8 | The emulated path is handled differently from websocket (timeouts, statuses, redirects, close) | 5d2df14, 9ec4a2f, 8099c6d, d3a2e60, 6bb0efa, b05b699, 95a2b29, 1dcc98c | covered | "Seeded real-server chaos keeps the invariants" (Block 51), over http_stream in both protocols and sse; Block 16's runners exclude emulated transports |
 | C9 | A sleep or wake changes the wrong timer or token | b6f25df, b53e1b1, 8de3d04, 7c77351, 1dc3e0c, 13e2492, 0099b96, d518e72, 38d12c5 | covered | core runner sleep operation (Block 25: I1–I11) |
@@ -9221,7 +9221,7 @@ Source: `git log origin/main --grep='\]\[fix\]'` (182 commits at 09444ac) and `-
 | C13 | The fake server or double disagrees with the real server | 1718ad7, 4fc71b6, 9a8711a, c9bf63a, 339a616, e1cb7c4 | covered | "The server double and Centrifugo answer alike" |
 | C14 | A test oracle is too weak, or the harness itself races (test code only, 40-odd commits such as 18e64fc, 75d7ef8, a83b456, f5f14bb, 3b29eed) | listed | not applicable | not defects of the client: the mutation rule (D7) is the mitigation |
 
-**Size and coverage.** 84 numbered patterns in 62 rows, 25 SDK rows, 3 CHANGELOG rows and 14 own classes: 104 rows. Numbers by status: 55 covered, 16 gap (15 with a probe, 63 with finding F1), 8 not applicable, 5 not reconstructible (2, 3, 10, 17, 20; also the sse-specific half of 12, Ferrifuge having the sse transport centrifuge-rust has not). Reconstruction: 66 numbers graded R (12 only partly), 13 graded F (6, 13, 23, 31, 35, 39, 40, 45, 48, 49, 50, 70, 76), 5 graded N. SDK and CHANGELOG rows: 23 covered, 3 gap, 2 not applicable. Own classes: 8 covered, 5 gap, 1 not applicable. Every gap but row 63 names a probe.
+**Size and coverage.** 84 numbered patterns in 62 rows, 25 SDK rows, 3 CHANGELOG rows and 14 own classes: 104 rows. Numbers by status: 56 covered, 15 gap, each with a probe, 8 not applicable, 5 not reconstructible (2, 3, 10, 17, 20; also the sse-specific half of 12, Ferrifuge having the sse transport centrifuge-rust has not). Reconstruction: 66 numbers graded R (12 only partly), 13 graded F (6, 13, 23, 31, 35, 39, 40, 45, 48, 49, 50, 70, 76), 5 graded N. SDK and CHANGELOG rows: 23 covered, 3 gap, 2 not applicable. Own classes: 8 covered, 5 gap, 1 not applicable. Every gap names a probe.
 
 ```gherkin
 Feature: Bug-pattern catalogue
@@ -9330,7 +9330,7 @@ Feature: Bug-pattern catalogue
     Given the core runner with the chaos configuration and client-side and server-side subscriptions to recoverable channels
     When seeds 0 to 299 each run 60 random operations against the simulated server with faults
     Then no seed violates invariant I13
-    And the run counted late token answers, late data answers, late state answers and frames of an abandoned transport, none of them 0
+    And the run counted late token answers, late data answers, late state answers, frames of an abandoned transport and late timer firings, none of them 0
 
   @P
   Scenario Outline: The core runner reports a planted continuity fault
@@ -9343,6 +9343,7 @@ Feature: Bug-pattern catalogue
       | a token answer of a torn-down flow passed on as current by the tap          | I13       |
       | a frame of an abandoned transport passed on as current by the tap           | I13       |
       | a tap rendering a token into a Debug record of an Action                    | I14       |
+      | a timer firing of a replaced setting passed on as current by the tap        | I13       |
 
   @P
   Scenario: Seeded chaos on the core leaks no secret
@@ -9378,12 +9379,10 @@ Feature: Bug-pattern catalogue
 | Seeded chaos on the core leaks no secret | a redaction removed from one `Debug` impl | #247 |
 | Seeded chaos with handlers on the tokio client keeps the invariants | `Input::EventHanded` not sent for one handler path | #247 |
 
-**Findings for later pull requests** (a gap whose closing needs a behaviour decision; the pull request that decides it adds the rule, the scenario and the row's new status):
+**Findings for later pull requests** (a gap whose closing needs a behaviour decision; the pull request that decides it adds the rule, the scenario and the row's new status). None is open: Block 53 closed F1 and F2.
 
 | Id | Row | Finding | Proposed probe, not part of this block | Mutation |
 |---|---|---|---|---|
-| F1 | 63 | `Config::timeout` of 0 is accepted today; centrifuge-rust and centrifuge-csharp reject zero durations, centrifuge-dart treats 0 as no timeout, and Ferrifuge already rejects a read-ahead, maximum message size and write queue limit of 0 | building a client with a timeout of 0 fails with a configuration error naming the timeout (@E) | today's code |
-| F2 | C6 | `Input::TimerFired`, `SubscriptionTimerFired` and `CallTimerFired` name a timer kind, not a setting, so the core cannot tell a firing of a cancelled or re-armed timer from a current one: a stale `ServerPing` firing disconnects a healthy connection, a stale `ConnectTimeout` fails the attempt. The adapters drop it through `Armed` (Block 25 D1); every other owner must too. Proposal: the three set actions carry a setting number the machine never reuses, the three inputs return it and the core ignores one not current, as `DebounceTimer` and `SharedPollTimer` do, so that `Armed` can go; breaking (variant shapes change), a minor version | the core runner feeds a firing of every cancelled or re-armed timer and no step acts on it (I13, @P) | a firing's number not checked against the current setting |
 
 **Exceptions introduced:** `tests/support/bug_catalogue.rs` reads `CLAUDE.md` tables as code would, as `tests/spec_sync.rs` reads scenarios; the table's format is therefore part of the contract.
 
@@ -9723,6 +9722,104 @@ Feature: Soak run
 ```
 
 **Exceptions introduced:** the single gating duration is outside what the Block 14 @P gates' CI budget allows; a scheduled or dispatched job is the only place it can run.
+
+---
+
+## Block 53 — Numbered timer settings, zero durations refused
+
+**Goal:** the core itself ignores a timer firing of a setting it has since cancelled, replaced or already taken, so that no owner of the machine has to track settings and a late firing never acts; and a client or subscription built with a zero duration that has no working meaning fails when it is built instead of on every attempt (findings F1 and F2 of Block 49).
+
+**Dependencies:** Blocks 2 (reconnect delays), 4 (the no-ping deadline; `max_server_ping_delay` 0), 10 (resubscribe delays), 13 (call timers; a limit of 0 rejected), 15 (paused deadlines), 16 (the core runner, planted faults), 25 (D1: `Armed`, Codex #119 and #120), 29 (the connect deadline set twice), 44 (the browser adapter, which shares the driver), 49 (I13, rows 63, 74, 80 and C6, findings F1 and F2), 52 (`Client::armed_timers`).
+
+**Out of scope:** debounce and shared poll timers, which already carry a number of their own (`DebounceTimer`, `SharedPollTimer`) that the core ignores once unknown (Blocks 46, 47); the token, data, state and signature callbacks, already numbered by `FetchId` (Block 42); a `Machine` built directly with zero durations, which its owner validates, as for Block 13's limits; `max_server_ping_delay` 0, which keeps its meaning (Block 4).
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 Settings.** A new public type `machine::TimerSetting`, an opaque number (`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `Hash`; no public constructor) that the machine gives each setting of a timer. One `u64` counter, shared by the three timer families, counts up by one for the machine's lifetime, so no number is given twice; as for `TransportId` and `FetchId`, a wrap is not handled, since no client reaches 2^64 settings (584 000 years at a million a second). `Action::SetTimer(Timer, Duration, TimerSetting)`, `Action::SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration, TimerSetting)` and `Action::SetCallTimer(CallId, CallTimer, Duration, TimerSetting)` carry it; `Input::TimerFired(Timer, TimerSetting)`, `Input::SubscriptionTimerFired(SubscriptionId, SubscriptionTimer, TimerSetting)` and `Input::CallTimerFired(CallId, CallTimer, TimerSetting)` return it. Tuple variants with the number last, as `Action::SetDebounceTimer(DebounceTimer, Duration)`: each field has its own type, so none can be swapped, and the timer actions keep one form. The cancel and shorten actions are unchanged and act on the setting running. A shortened setting keeps its number: it is the same deadline moved earlier, and a refresh firing the driver took before the shortening must still act (Block 25 D1, Codex #119).
+- **D2 The core ignores a stale firing.** The machine keeps the setting running for each timer. A setting stops running when the machine cancels that timer, sets it again, or takes the setting's firing. A firing whose setting is not the one running for its timer (cancelled, set again, already taken, or a number given to another timer) changes nothing: the step returns no action, no state changes, and there is no `Action::Anomaly`, which is for a server's breach of the protocol; the adapter's record of every input (Block 21) is its only trace. This holds whatever input came between the setting and its firing, `Input::Slept` included. The state guards of the timer handlers stay.
+- **D3 Owners.** The `src/machine.rs` module documentation, in place of its first paragraph, says:
+  ```rust
+  //! Timers are numbered by setting: each [`Action::SetTimer`],
+  //! [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] carries a
+  //! [`TimerSetting`] the machine never gives again. The owner returns it
+  //! unchanged in the [`Input::TimerFired`], [`Input::SubscriptionTimerFired`]
+  //! or [`Input::CallTimerFired`] of that setting; a timer shortened by
+  //! [`Action::ShortenTimer`] or [`Action::ShortenSubscriptionTimer`] keeps
+  //! its setting. The machine ignores a firing whose setting no longer runs,
+  //! because it cancelled that timer, set it again or already took its
+  //! firing: the step returns no action. The owner need not drop a late
+  //! firing, whatever it fed in between, [`Input::Slept`] included.
+  ```
+  Each of the three inputs says: "The timer of this setting, set by [`Action::SetTimer`], fired; a firing of a setting no longer running is ignored (see the module documentation)." The other two name [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] in its place.
+- **D4 `Armed` goes.** In `src/adapter/client.rs`, which the tokio and browser adapters share (Block 44), the adapter's `Armed`, the driver's `timer_sets` and `next_set` go; `Timers` and `KeyedTimers` keep each sleep's `TimerSetting` in place of their own number, and the driver gives a firing with the setting its sleep was armed with. What `Armed` gave now comes from the core:
+  - a firing taken before another task's input set its timer again or cancelled it (Block 25 D1, Codex #120) is ignored by the core;
+  - a firing that revealed a sleep whose answer sets that timer again (Block 25 D1, Codex #119) is ignored by the core;
+  - the timers an input set before `Slept`, whose shortening the adapter filters (Codex #120), are those of the set actions that input returned;
+  - `Refreshes` keeps each refresh timer's setting beside its deadline: a refresh the sleep made due is given with that setting, and a refresh firing removes its entry only when it carries the entry's setting, so each refresh is given once;
+  - `Client::armed_timers`' core list (Block 52 D8) names the core's running settings, read through a crate-private accessor of `Machine`; the soak's `TimerRecord` removes an entry on a firing only when it carries the setting the entry recorded.
+- **D5 The core runner (Block 16).** Its clock no longer drops the firing of a setting the core cancelled or set again. It keeps one late firing of each, apart from the timers it runs, so that neither I5's checks nor `cancel` see it. It feeds that firing at a seeded time between the cancel or new setting and the old deadline, counted as a "late timer firing". The tap judges it stale because the runner took it from such a setting, not by a model of the core's settings, and I13 requires that its step returns no action. The planted fault is in the tap, as Block 16 requires: a late firing passed on with the number of its timer's running setting, which the runner must report as I13. The core not checking a firing's setting is the mutation, seen failing by "Seeded chaos on the core applies no stale answer" and by this block's @E scenarios.
+- **D6 Zero durations.** `ClientBuilder::build()` and `Client::new` return a configuration error (`ErrorKind::Configuration`, code 12 "bad configuration") for a `Config::timeout`, `handshake_timeout`, `min_reconnect_delay` or `max_reconnect_delay` of 0, its message naming the field, as they do for a limit of 0 (Blocks 13, 15, 29). The `build()` of the subscription, map subscription and shared poll subscription builders returns the new `SubscriptionError::ZeroDelay { option: &'static str }` for a `min_resubscribe_delay` or `max_resubscribe_delay` of 0, naming it; `SubscriptionError` is `#[non_exhaustive]`. A zero timeout fails every attempt at once, and a zero delay retries with no wait for as long as the failure lasts, from every client of a fleet. centrifuge-rust rejects zero durations as a configuration error (`docs/spec.md` §4.1), and Rust clients spell "disabled" as `Option<Duration>`, not 0 (hyper, reqwest). `max_server_ping_delay` 0 keeps its meaning, the no-ping check disabled (Block 4, centrifuge-js).
+- **D7 Public API and version.** Six variants change shape, `TimerSetting` and `SubscriptionError::ZeroDelay` are added, and zero durations accepted until now are refused: breaking, 0.21.0 → 0.22.0, since the semver job compares each pull request with its base (as 0.6.0 and 0.7.0, Block 15); the 1.0.0 pre-release is Block 55's. The CHANGELOG's `Unreleased` "Changed" names the six variants, the core ignoring stale firings, and each zero refused; "Added" names `TimerSetting` and `SubscriptionError::ZeroDelay`.
+
+Value clause: As an app developer driving the machine on a runtime of my own, I want the core to ignore a timer firing it has replaced, and a client or subscription with a zero timeout or delay refused when it is built, so that a late firing never ends a healthy connection and a misconfiguration fails at once instead of on every attempt.
+
+**Structural acceptance:**
+- every @E scenario of this block is seen failing once on the mutation "the core not checking a firing's setting", recorded in the PR; the planted-fault row of "The core runner reports a planted continuity fault" is seen failing without the tap's fault reverted, and the "late timer firings" counter is above 0;
+- a unit test of the core: once a setting's firing is taken, a second firing of it returns no action; a firing of each family carrying a number given to another timer returns no action while its own timer runs;
+- the adapter tests of Block 25's structural acceptance and `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_ignored` (renamed from `…_is_dropped`) pass with `Armed` gone, and `src/` names no `Armed` or `timer_sets`.
+
+```gherkin
+Feature: Numbered timer settings
+
+  @E
+  Scenario Outline: A firing of a replaced setting changes nothing
+    Given a machine whose <timer> was set and then set again
+    When the firing of the first setting is fed
+    Then the step returns no action
+    When the firing of the second setting is fed
+    Then the machine acts on it
+
+    Examples:
+      | timer                    |
+      | no-ping deadline         |
+      | connect deadline         |
+      | subscribe reply deadline |
+
+  @E
+  Scenario: A firing of a cancelled setting changes nothing
+    Given a connected machine whose server pings, with a message held unread while the application holds its events
+    When the transport's close is read behind it, cancelling the no-ping deadline
+    And the firing of the no-ping deadline set before the close is fed
+    Then the step returns no action
+
+  @E
+  Scenario: A firing of a deadline a sleep's answer replaced changes nothing
+    Given a connected machine whose server pings
+    When a sleep shorter than the no-ping window is fed, setting the no-ping deadline again
+    And the firing of the no-ping deadline set before the sleep is fed
+    Then the step returns no action and the client stays connected
+
+  @E
+  Scenario: No two timer settings share a number
+    Given a machine driven through connects, subscribes, calls, refreshes and reconnects
+    Then every timer setting it gave carries a number no other setting carried
+
+  @E
+  Scenario Outline: A duration of 0 is rejected
+    Given a <builder> whose <duration> is 0
+    When it is built
+    Then building fails with an error naming <duration>
+
+    Examples:
+      | builder              | duration              |
+      | client               | timeout               |
+      | client               | handshake_timeout     |
+      | client               | min_reconnect_delay   |
+      | client               | max_reconnect_delay   |
+      | subscription builder | min_resubscribe_delay |
+      | subscription builder | max_resubscribe_delay |
+```
+
+**Exceptions introduced:** none.
 
 ---
 

@@ -104,7 +104,7 @@ Feature: Bug-pattern catalogue
     Given the core runner with the chaos configuration and client-side and server-side subscriptions to recoverable channels
     When seeds 0 to 299 each run 60 random operations against the simulated server with faults
     Then no seed violates invariant I13
-    And the run counted late token answers, late data answers, late state answers and frames of an abandoned transport, none of them 0
+    And the run counted late token answers, late data answers, late state answers, frames of an abandoned transport and late timer firings, none of them 0
 
   @P
   Scenario Outline: The core runner reports a planted continuity fault
@@ -117,6 +117,7 @@ Feature: Bug-pattern catalogue
       | a token answer of a torn-down flow passed on as current by the tap          | I13       |
       | a frame of an abandoned transport passed on as current by the tap           | I13       |
       | a tap rendering a token into a Debug record of an Action                    | I14       |
+      | a timer firing of a replaced setting passed on as current by the tap        | I13       |
 
   @P
   Scenario: Seeded chaos on the core leaks no secret
