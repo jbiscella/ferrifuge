@@ -1627,7 +1627,7 @@ redirect is not followed: the browser hides it, and the failed attempt
 says "HTTP redirect; a captive portal may be answering"; a 511 or an HTML
 page answered with a success says so too.
 
-**Safari and http_stream.** After the client closes an http_stream connection, for example on an inbox overflow, Safari 27 sometimes holds back the end of a message larger than 2 KiB on the next stream until the server sends more data (issue #268; about 2% of such reconnects in CI). The message then arrives with the server's next message, at most 25 s later with Centrifugo's default ping interval, or `timeout` (5 s by default) expires first and the client reconnects, which can stall again.
+**Safari and http_stream.** After the client closes an http_stream connection, for example on an inbox overflow, Safari 27 sometimes holds back the end of a message larger than 2 KiB on the next stream until the server sends more data (issue #268, [WebKit bug 331662](https://bugs.webkit.org/show_bug.cgi?id=331662); about 2% of such reconnects in CI). The message then arrives with the server's next message, at most 25 s later with Centrifugo's default ping interval, or `timeout` (5 s by default) expires first and the client reconnects, which can stall again.
 
 **sse.** An sse endpoint is opened with the page's `EventSource`, the
 connect command in the URL's `cf_connect` as natively, without
