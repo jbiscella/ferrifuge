@@ -1907,6 +1907,14 @@ impl Machine {
         }
     }
 
+    /// Every call any registry of the core holds, with the registries
+    /// holding it, for the soak (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    #[must_use]
+    pub(crate) fn call_registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
+        self.calls.registries()
+    }
+
     /// The protocol of the codec the core encodes and decodes with, as
     /// built from `Config::protocol`, for tests (Block 51 D10).
     #[cfg(feature = "__test-hooks")]

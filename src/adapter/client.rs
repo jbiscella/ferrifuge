@@ -144,6 +144,9 @@ pub(super) struct Shared {
     /// (Block 49).
     #[cfg(feature = "__test-hooks")]
     driver_panic_planted: AtomicBool,
+    /// The driver's timers and the calls' ages, for the soak (Block 52).
+    #[cfg(feature = "__test-hooks")]
+    pub(super) records: super::hooks::Records,
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
@@ -210,6 +213,8 @@ impl Core {
             refreshes: Refreshes::default(),
             armed: Armed::default(),
             connected_since: None,
+            #[cfg(feature = "__test-hooks")]
+            timer_record: super::hooks::TimerRecord::default(),
         }
     }
 }
@@ -234,6 +239,10 @@ pub(super) struct Core {
     /// When the client was seen to become connected, while it is (Block
     /// 31, D2).
     pub(super) connected_since: Option<SystemTime>,
+    /// The timers the core set and did not cancel, for the soak (Block 52,
+    /// D8), kept once the records are started.
+    #[cfg(feature = "__test-hooks")]
+    pub(super) timer_record: super::hooks::TimerRecord,
 }
 
 impl Core {
@@ -678,6 +687,10 @@ impl Shared {
                 ),
             };
             core.armed.note(&cancel);
+            #[cfg(feature = "__test-hooks")]
+            if self.records.on() {
+                core.timer_record.action(&cancel);
+            }
             core.actions.push_back(cancel);
             self.feed(core, fired);
         }
@@ -688,9 +701,17 @@ impl Shared {
         let mut inputs = VecDeque::from([input]);
         while let Some(input) = inputs.pop_front() {
             self.log.input(&input);
+            #[cfg(feature = "__test-hooks")]
+            if self.records.on() {
+                core.timer_record.input(&input);
+            }
             for action in core.machine.handle(input) {
                 self.log.action(&action);
                 core.armed.note(&action);
+                #[cfg(feature = "__test-hooks")]
+                if self.records.on() {
+                    core.timer_record.action(&action);
+                }
                 core.refreshes.note(&action);
                 let mut outboxes = lock(&self.outboxes);
                 let taken = match action {
@@ -781,6 +802,10 @@ impl Shared {
                     None => core.machine.add_call(request),
                 };
                 self.log.call(id, kind);
+                #[cfg(feature = "__test-hooks")]
+                if self.records.on() {
+                    lock(&self.records.calls).made(id);
+                }
                 lock(&self.calls).insert(id, sender);
                 self.handle(&mut core, Input::Call(id));
                 Some(PendingCall {
@@ -1662,6 +1687,8 @@ impl Client {
                 held_debounce_timers: Mutex::new(None),
                 #[cfg(feature = "__test-hooks")]
                 driver_panic_planted: AtomicBool::new(false),
+                #[cfg(feature = "__test-hooks")]
+                records: super::hooks::Records::default(),
                 closed: AtomicBool::new(false),
                 log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
                 #[cfg(adapter_tokio)]
@@ -1760,6 +1787,44 @@ impl Client {
     #[must_use]
     pub fn log_number(&self) -> u64 {
         self.shared.log.number
+    }
+
+    /// Starts keeping what [`Client::armed_timers`] and
+    /// [`Client::pending_calls`] report, for the soak (Block 52, D6): off
+    /// until then, so that no other test pays for it. Call it before
+    /// `connect()`.
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    pub fn record_timers(&self) {
+        self.shared.records.start();
+        self.shared.actions_queued.notify_one();
+    }
+
+    /// The timers the driver's own maps run, as it last published them, and
+    /// those the core set and did not cancel, each with its age and
+    /// deadline (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn armed_timers(&self) -> super::hooks::ArmedTimers {
+        let core = lock(&self.shared.core).timer_record.report();
+        let driver = lock(&self.shared.records.driver).report();
+        super::hooks::ArmedTimers { driver, core }
+    }
+
+    /// Every call any registry of the core or the adapter holds, with its
+    /// age and the registries holding it (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_calls(&self) -> Vec<super::hooks::CallRecord> {
+        let core = lock(&self.shared.core);
+        let mut held = core.machine.call_registries();
+        for id in lock(&self.shared.calls).keys() {
+            held.entry(*id).or_default().push("adapter");
+        }
+        drop(core);
+        lock(&self.shared.records.calls).report(held)
     }
 
     /// The protocol of the codec the client's core actually uses, for
@@ -2790,6 +2855,10 @@ impl Driver {
             while let Some(action) = self.shared.next_action() {
                 self.perform(action);
             }
+            #[cfg(feature = "__test-hooks")]
+            if self.shared.records.on() {
+                self.publish_timers();
+            }
             if self.shared.closed.load(Ordering::Acquire) {
                 return self.finish().await;
             }
@@ -2980,6 +3049,38 @@ impl Driver {
             }
         }
         reading
+    }
+
+    /// Publishes the timers the driver's own maps run, for the soak
+    /// (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    fn publish_timers(&self) {
+        use super::hooks;
+        let mut running = Vec::new();
+        for timer in Timer::ALL {
+            if let Some((sleep, _)) = &self.timers.0[timer.index()] {
+                running.push((hooks::client(timer), sleep.deadline()));
+            }
+        }
+        for ((id, timer), (sleep, _)) in &self.subscription_timers.0 {
+            running.push((hooks::subscription(*id, *timer), sleep.deadline()));
+        }
+        for ((id, timer), (sleep, _)) in &self.call_timers.0 {
+            running.push((hooks::call(*id, *timer), sleep.deadline()));
+        }
+        for (timer, (sleep, _)) in &self.debounce_timers.0 {
+            running.push((hooks::debounce(*timer), sleep.deadline()));
+        }
+        #[cfg(feature = "unstable")]
+        {
+            for (timer, (sleep, _)) in &self.shared_poll_timers.0 {
+                running.push((hooks::shared_poll(*timer), sleep.deadline()));
+            }
+            for (id, (sleep, _)) in &self.shared_poll_refreshes.0 {
+                running.push((hooks::shared_poll_refresh(*id), sleep.deadline()));
+            }
+        }
+        lock(&self.shared.records.driver).observe(running);
     }
 
     /// Numbers the next setting of a timer (see [`Armed`]).
