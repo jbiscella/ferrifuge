@@ -261,6 +261,11 @@ enum Record {
     Panic {
         message: String,
     },
+    /// The client's state left disconnected after `disconnect()`, before
+    /// the next `connect()` (I5).
+    LeftOff {
+        state: String,
+    },
     Closed,
 }
 
@@ -361,12 +366,24 @@ async fn child_run() {
         }
     });
     let pending = Arc::new(AtomicU64::new(0));
+    // I5 (Block 16), watched where it is exact: from disconnect()'s
+    // return until the next connect(), the client's own state stays
+    // disconnected; the event stream, forwarded by another task, gives no
+    // such boundary (Codex, #259).
+    let off_wanted = Arc::new(AtomicBool::new(false));
+    watch_off(&client, &off_wanted, &writer);
     while let Some(command) = commanded.recv().await {
         match command {
             Command_::Subscribe { channel } => subscriptions[&channel].subscribe(),
             Command_::Unsubscribe { channel } => subscriptions[&channel].unsubscribe(),
-            Command_::Disconnect => client.disconnect(),
-            Command_::Connect => client.connect(),
+            Command_::Disconnect => {
+                client.disconnect();
+                off_wanted.store(true, Ordering::SeqCst);
+            }
+            Command_::Connect => {
+                off_wanted.store(false, Ordering::SeqCst);
+                client.connect();
+            }
             Command_::History { channel } => {
                 let call = client.history(channel, ferrifuge::HistoryOptions::default().limit(10));
                 spawn_call(&writer, &pending, "history", async move {
@@ -401,6 +418,26 @@ async fn child_run() {
             }
         }
     }
+}
+
+/// Writes [`Record::LeftOff`] when the client's own state leaves
+/// disconnected while `off_wanted` (I5).
+fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<AtomicBool>, writer: &Writer) {
+    let (client, off_wanted, writer) = (client.clone(), Arc::clone(off_wanted), writer.clone());
+    tokio::spawn(async move {
+        let mut reported = false;
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let state = client.state();
+            let left = off_wanted.load(Ordering::SeqCst) && state != ferrifuge::State::Disconnected;
+            if left && !reported {
+                writer.write(Record::LeftOff {
+                    state: state_name(state),
+                });
+            }
+            reported = left;
+        }
+    });
 }
 
 /// Forwards the client's state events to `writer`.
@@ -668,6 +705,9 @@ struct SeedRun<'a> {
     fault: Option<(Fault, Instant)>,
     /// Whether the application wants the client connected.
     wanted_connected: bool,
+    /// Each channel's expected deliveries, as compared: compared again
+    /// once every record is taken (Codex, #259).
+    expected: BTreeMap<String, Vec<(u64, String)>>,
 }
 
 impl SeedRun<'_> {
@@ -707,17 +747,6 @@ impl SeedRun<'_> {
         match record {
             Record::Client { state, .. } => {
                 let next = lifecycle(&state);
-                // I5 until the next connect(): after disconnect() took the
-                // client off, it makes no connection (Block 16).
-                if !self.wanted_connected
-                    && self.client == Some(Lifecycle::Off)
-                    && next != Lifecycle::Off
-                {
-                    return Err(self.violation(
-                        "I5",
-                        format!("the client went {state} after disconnect(), before connect()"),
-                    ));
-                }
                 // The client starts disconnected (Codex, #259).
                 let last = self.client.unwrap_or(Lifecycle::Off);
                 invariants::state_chain(last, next)
@@ -761,6 +790,12 @@ impl SeedRun<'_> {
             record @ Record::Status { .. } => self.status = Some(record),
             Record::Panic { message } => self.panics.push(message),
             Record::Closed => self.closed = true,
+            Record::LeftOff { state } => {
+                return Err(self.violation(
+                    "I5",
+                    format!("the client went {state} after disconnect(), before connect()"),
+                ));
+            }
         }
         Ok(())
     }
@@ -793,6 +828,15 @@ impl SeedRun<'_> {
         if recovered {
             COUNTERS.lock().unwrap().add("recovered true");
         }
+        // Every channel is positioned and recoverable (D5): a subscribed
+        // without its position leaves no segment to check (Codex, #259).
+        if offset.is_none() {
+            return Err(self.violation(
+                "I8",
+                format!("{channel} subscribed without a stream position"),
+            ));
+        }
+        let entry = self.states.get_mut(channel).expect("its state");
         match entry.start {
             // The first subscribed starts the channel's segment (D7).
             None => {
@@ -1012,21 +1056,24 @@ impl SeedRun<'_> {
     /// server lists none of it on the canary.
     async fn disconnect(&mut self) -> Result<(), Violation> {
         self.command(Command_::Disconnect).await;
+        // disconnect() takes the client off, whatever it was doing, by the
+        // client's own state, not a record that may be stale (Codex, #259).
         let deadline = Instant::now() + CHILD_WITHIN;
-        while self.client != Some(Lifecycle::Off) && Instant::now() < deadline {
+        loop {
+            let status = self.status().await?;
+            if let Some(Record::Status { client, .. }) = &status
+                && client == "disconnected"
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(self.violation(
+                    "I5",
+                    format!("disconnect() left the client as {status:?} after {CHILD_WITHIN:?}"),
+                ));
+            }
             self.pump(Instant::now() + Duration::from_millis(50))
                 .await?;
-        }
-        // disconnect() takes the client off, whatever it was doing (Codex,
-        // #259).
-        if self.client != Some(Lifecycle::Off) {
-            return Err(self.violation(
-                "I5",
-                format!(
-                    "disconnect() left the client {:?} after {CHILD_WITHIN:?}",
-                    self.client
-                ),
-            ));
         }
         // Until the next connect(), a client record leaving off is I5's
         // connection made ([`SeedRun::take`]); here, none stays open.
@@ -1282,6 +1329,7 @@ impl SeedRun<'_> {
                 .iter()
                 .map(|(offset, data)| (*offset, id_of(data)))
                 .collect();
+            self.expected.insert(channel.clone(), expected.clone());
             let whole = if subscribed {
                 delivered == expected
             } else {
@@ -1353,10 +1401,32 @@ impl SeedRun<'_> {
         self.drain()?;
         invariants::no_panic(self.panics.len())
             .map_err(|detail| self.violation("I2", format!("{detail}: {:?}", self.panics)))?;
-        match exited {
+        if let Err(error) = match exited {
             Ok(Ok(status)) if status.success() => Ok(()),
-            other => Err(self.violation("I2", format!("the child ended with {other:?}"))),
+            other => Err(other),
+        } {
+            return Err(self.violation("I2", format!("the child ended with {error:?}")));
         }
+        // Every record taken: a delivery that came after its channel was
+        // compared, a late duplicate say, is seen too (Codex, #259).
+        for (channel, expected) in &self.expected {
+            let delivered: Vec<(u64, String)> = self.states[channel]
+                .delivered
+                .iter()
+                .map(|(offset, data)| (*offset, id_of(data)))
+                .collect();
+            if &delivered != expected {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{channel}: {} deliveries once every record was taken, {} when compared",
+                        delivered.len(),
+                        expected.len()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1484,6 +1554,7 @@ async fn run_seed(
         gate,
         fault: None,
         wanted_connected: true,
+        expected: BTreeMap::new(),
     };
     let mut second = None;
     let checked = tokio::time::timeout(SEED_BOUND, async {
