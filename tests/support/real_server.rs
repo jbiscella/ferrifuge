@@ -101,7 +101,11 @@ pub(crate) fn configuration(engine: Engine) -> Value {
                 "force_positioning": true,
                 "presence": true,
                 "join_leave": true,
-                "allow_subscribe_for_client": true
+                // The runner's client subscribes and calls history and
+                // presence itself.
+                "allow_subscribe_for_client": true,
+                "allow_history_for_client": true,
+                "allow_presence_for_client": true
             }]
         }
     });
