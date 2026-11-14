@@ -28,6 +28,7 @@ pub(in crate::adapter) struct Network {
     /// The application's cookie jar (Block 43).
     cookie_jar: Jar,
     /// The WebTransport endpoints found to take no ALPN (Block 48, D5).
+    /// Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>.
     #[cfg(feature = "unstable-webtransport")]
     pub(in crate::adapter) alpn: super::webtransport::AlpnMemory,
 }

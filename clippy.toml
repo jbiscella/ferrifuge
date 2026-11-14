@@ -7,6 +7,7 @@
 # no path clippy matches: `ClientConfig::default`, which reads the roots as
 # `with_native_certs` does, is refused by a source check instead
 # (`tests/spec_sync.rs`).
+# Upstream reports: BiagioFesta/wtransport#335 (SSL_CERT_FILE) and BiagioFesta/wtransport#336 (build's panic).
 disallowed-methods = [
   { path = "wtransport::config::ClientConfigBuilder::build", reason = "expects on a configuration QUIC cannot use: build quinn's configuration and call build_with_quic_config (Block 48, D4)" },
   { path = "wtransport::config::ClientConfigBuilder::with_native_certs", reason = "removes SSL_CERT_FILE and SSL_CERT_DIR from the process environment while it reads the roots, and ignores the client's TLS settings (Block 48, D4)" },

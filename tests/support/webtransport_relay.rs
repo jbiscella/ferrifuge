@@ -6,6 +6,7 @@
 //! opened again at Centrifugo's WebTransport endpoint, on the same path and
 //! query, with D5's rule (`h3`, then none), and its bidirectional stream is
 //! copied both ways. On a switch it refuses every session.
+//! Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
