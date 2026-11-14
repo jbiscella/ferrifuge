@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–52 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–52 and 56 of N; 53–55 reserved for blocks in progress. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -29,8 +29,8 @@ Markers used below:
 | Async runtime | Runtime-agnostic core; tokio adapter behind the `tokio` cargo feature (default) on native targets, browser adapter behind the `browser` cargo feature (default) on wasm32-unknown-unknown (Block 44) | Owner's choice |
 | Scenario execution | cucumber-rs; `.feature` files under `tests/features/` are verbatim copies of the Gherkin in this file | Scenario text is the test; drift is checked mechanically |
 | Real server for @A/@B | testcontainers-rs, image `centrifugo/centrifugo:v6.10.3` (Block 51 D13) | `cargo test` needs only Docker |
-| Protobuf codegen | prost, `client.proto` vendored at a pinned upstream commit, protoc from `protoc-bin-vendored` | No system protoc needed |
-| Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD; the crate's license expression is `0BSD AND MIT`, as it ships the MIT `proto/client.proto`. Every file not under 0BSD is listed under "Exceptions" in `LICENSE` and in `REUSE.toml` (owner request, 2026-11-07) | Split only when a second crate is justified |
+| Protobuf codegen | prost; `client.proto` vendored at a pinned upstream commit; the generated code committed under `src/protocol/`, checked by a drift test; prost-build and protoc from `protoc-bin-vendored` as native dev-dependencies only (Block 56) | No system protoc needed; no generator or vendored binary runs in a dependent's build (opentelemetry-proto, tonic-health, prost-types and qdrant-client commit theirs too) |
+| Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD; the crate's license expression is `0BSD AND MIT`, as it ships the MIT `proto/client.proto` and the code generated from it (Block 56). Every file not under 0BSD is listed under "Exceptions" in `LICENSE` and in `REUSE.toml` (owner request, 2026-11-07) | Split only when a second crate is justified |
 | Core design | Sans-IO: the core is a state machine turning inputs (API calls, frames, transport open/close, timer fired) into actions (open/close transport, send, set timer, emit event); the `tokio` adapter performs the actions | Runtime-agnostic without async traits; @E tests drive the clock directly |
 | Events API | `client.events()` returns a `futures::Stream` of a `ClientEvent` enum, one active stream per client, delivered by hand-off with a bounded read-ahead (Block 15); `client.state()` returns the current state | Idiomatic async Rust, runtime-neutral |
 | Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
@@ -87,6 +87,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 0, Block 9, Block 11 and Block 19, out of scope | shared poll subscriptions | owner, 2026-11-06, late (item 30) | 47 |
 | Block 0 and Block 8, out of scope | the webtransport transport | owner, 2026-11-06, late (item 33) | 48 |
 | Block 16, out of scope | a chaos TCP proxy against a real Centrifugo | owner, 2026-11-09 | 51 |
+| Block 20, out of scope | committing the generated Protobuf code instead of generating it at build time | reviewer, 2026-11-14, delegated by the owner | 56 |
 
 ### Test layers
 
@@ -3168,7 +3169,7 @@ Order of the blocks:
 **Out of scope:**
 - the owner's actions outside the repository: the crates.io account and ownership of the name, the first publish (crates.io requires an API token for it), the trusted-publisher entry naming `release.yml` and the environment `release`, the GitHub `release` environment with a required reviewer and deployments limited to `v*` tags, a tag ruleset for `v*`, private vulnerability reporting (to be on before `SECURITY.md` is relied on), immutable releases;
 - publishing a version: this block makes it possible, the owner decides when;
-- committing the generated Protobuf code instead of generating it at build time (opentelemetry-proto does): a later decision;
+- committing the generated Protobuf code instead of generating it at build time (opentelemetry-proto does): a later decision (reversed by Block 56: the code is committed, with a drift test);
 - conventional-commit tooling (git-cliff, release-plz): the commit style is the project's `[block][phase]` one;
 - workflow linters (zizmor, actionlint) as CI jobs: a later block.
 
@@ -3179,7 +3180,7 @@ Order of the blocks:
   - `github-release` (`needs: publish`; `contents: write`): the GitHub release with that version's changelog section as its notes; re-running it never publishes again.
   Every action is pinned by commit SHA; checkouts use `persist-credentials: false`; no build cache is used; the toolchain action names its toolchain.
 - **D2 Release check.** `scripts/check-release-tag` (bash and cargo only, so it runs on every CI OS) takes a tag and succeeds only when the tag is exactly `v` followed by the `Cargo.toml` version, without a suffix, and `CHANGELOG.md` has a section for that version; otherwise it fails naming the version the tag must be, or the missing section. The workflow and a test run it.
-- **D3 Package contents.** `Cargo.toml` lists what is published (`include`): `src`, `proto`, `build.rs`, `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; Cargo adds `Cargo.toml.orig`, `Cargo.lock` and `.cargo_vcs_info.json`. Tests, benches, fixtures, workflows, `.claude`, `CLAUDE.md`, `deny.toml` and the logo stay out (today 155 files are packaged). The published crate's own unit tests do not build, as `src/fossil.rs` includes fixtures that are not shipped; that is accepted (they run in this repository). A `package` CI job on pull requests runs `cargo publish --dry-run`, which builds the crate as published (verified: `build.rs`, `proto/` and `protoc-bin-vendored` work; the path-only dev-dependency on itself is dropped).
+- **D3 Package contents.** `Cargo.toml` lists what is published (`include`): `src`, `proto`, `build.rs`, `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; Cargo adds `Cargo.toml.orig`, `Cargo.lock` and `.cargo_vcs_info.json`. Tests, benches, fixtures, workflows, `.claude`, `CLAUDE.md`, `deny.toml` and the logo stay out (today 155 files are packaged). The published crate's own unit tests do not build, as `src/fossil.rs` includes fixtures that are not shipped; that is accepted (they run in this repository). A `package` CI job on pull requests runs `cargo publish --dry-run`, which builds the crate as published (verified: `build.rs`, `proto/` and `protoc-bin-vendored` work; the path-only dev-dependency on itself is dropped). Amended by Block 56: `build.rs` sets only the adapter cfgs and the generated code ships under `src/protocol/`, so the packaged build runs no generator.
 - **D4 Changelog.** `CHANGELOG.md` in Keep a Changelog form, written by hand: `## [Unreleased]` on top, then `## [x.y.z] - YYYY-MM-DD` for each version from 0.1.0, newest first, with Added, Changed, Deprecated, Removed, Fixed and Security subsections, backfilled from the history (the version each block reached, `git log -G'^version'` on `Cargo.toml`, and the block table of this file); no compare links for versions never tagged. A pull request that changes the public API or behaviour adds an `Unreleased` entry; the release moves them under the new version.
 - **D5 Security policy.** `SECURITY.md`: reports go through GitHub private vulnerability reporting (the repository's "Report a vulnerability" button), never public issues; the supported versions are the latest minor release; fixes are released as a patch of it and announced as a GitHub security advisory, with a RustSec advisory requested for crates.io users. No response-time commitment.
 - **D6 MSRV policy.** `rust-version` in `Cargo.toml` is the floor; it is raised only when a dependency or a language feature needs it, never in a patch release, and the changelog says so. The `msrv` CI job checks it for every feature set CI builds: the default (ring), the core alone, `aws-lc-rs` and `fips`, installing CMake and Go for the last two as the `providers` job does (closing the analysis's finding F4).
@@ -9722,3 +9723,46 @@ Feature: Soak run
 ```
 
 **Exceptions introduced:** the single gating duration is outside what the Block 14 @P gates' CI budget allows; a scheduled or dispatched job is the only place it can run.
+
+---
+
+## Block 56 — Committed Protobuf code
+
+**Goal:** a dependent's build runs no code generator and no vendored binary: the Rust code generated from `proto/client.proto` is committed, and a test fails when it drifts from what the pinned generator writes (reviewer, 2026-11-14, delegated by the owner; state of the art: opentelemetry-proto, tonic-health, prost-types, qdrant-client).
+
+**Dependencies:** Blocks 0 (codegen, crate layout, licenses), 7 (Protobuf types), 20 (package contents, `package` job), 40 and 44 (wasm builds, `ci/wasm-imports`).
+
+**Out of scope:**
+- updating `proto/client.proto` to a newer upstream commit, or prost to a newer version: each is its own PR, regenerating the file;
+- a separate codegen crate or xtask (tonic's layout): the drift test is the regenerator;
+- the adapter cfgs of `build.rs` (Block 44 D1), which stay.
+
+This block reverses Block 20's deferral of committing the generated code; Block 0's "Reversed exclusions" gains the row | Block 20, out of scope | committing the generated Protobuf code instead of generating it at build time | reviewer, 2026-11-14, delegated by the owner | 56 |, and Block 20's out-of-scope line says so.
+
+**Decisions** (reviewer, 2026-11-14, delegated by the owner):
+- **D1 The committed file.** `src/protocol/centrifugal.centrifuge.protocol.rs`, the name prost-build gives it, byte for byte what the locked prost-build writes from `proto/client.proto` with the locked `protoc-bin-vendored`, its first line prost's own `// This file is @generated by prost-build.`; nothing is added to it. `src/protocol.rs` includes it with `include!("protocol/centrifugal.centrifuge.protocol.rs")` and keeps its `#![allow(...)]`; `include!` keeps it out of rustfmt's traversal, so `cargo fmt` never rewrites it. Its doc comment names the source, the upstream commit (`proto/README.md`) and the command of D4 that rewrites the file. `.gitattributes` gains `src/protocol/centrifugal.centrifuge.protocol.rs text eol=lf linguist-generated`, so that a Windows checkout compares the same bytes and a pull request collapses a regeneration.
+- **D2 `build.rs`.** It sets only the adapter cfgs (Block 44 D1) and prints `cargo::rerun-if-changed=build.rs`: without any rerun line, cargo reruns a build script whenever any package file changes. It no longer reads `proto/`.
+- **D3 Generators as dev-dependencies.** `prost-build` and `protoc-bin-vendored` move from `[build-dependencies]` to the native-only dev-dependency table (`cfg(not(all(target_arch = "wasm32", target_os = "unknown")))`, Block 40 D3), at the same versions: the browser jobs, which build dev-dependencies for `--test browser_wasm`, never build them. `[build-dependencies]` goes. `ci/wasm-imports/Cargo.lock` loses the generators' entries in the same PR (a plain `cargo build` there prunes them), or its `--locked` builds fail.
+- **D4 Drift test.** `tests/protocol_codegen.rs`, native only:
+  - regenerates with `prost_build::Config::out_dir` into a fresh directory under `CARGO_TARGET_TMPDIR`, with `protoc_bin_vendored::protoc_bin_path()` as protoc, and fails on any byte of difference from the committed file, naming the command that rewrites it: `FERRIFUGE_REGENERATE_PROTOCOL=1 cargo test --test protocol_codegen`, which writes the file instead of comparing;
+  - also fails unless `REUSE.toml` has an `override` annotation for the file's path with `SPDX-License-Identifier = "MIT"`, and `LICENSE` lists the path under "Shipped in the crates.io package" (D5): the `**` 0BSD annotation would otherwise let `reuse lint` pass without them;
+  - runs in the `test` and `providers` jobs like any integration test. A prost-build, prettyplease or protoc bump that changes the output fails it until the file is regenerated in the same PR. It does not run in the `package` job: tests are not packaged, and `cargo publish --dry-run` compiles the committed file as published.
+- **D5 Licensing.** The generated code is derived from the MIT `client.proto`. `REUSE.toml` gains an override for the file, `SPDX-FileCopyrightText = "2023 Centrifugal Labs LTD"`, `SPDX-License-Identifier = "MIT"`. `LICENSE`'s "Shipped in the crates.io package" gains the file. The `proto/client.proto` entry's last sentence becomes "The Rust code in src/protocol/centrifugal.centrifuge.protocol.rs is generated from it." The expression sentence names both, and the crate's expression stays `0BSD AND MIT`. `proto/` keeps shipping, as the generated code's source and for `proto/LICENSE`. `reuse lint` (the `lint` job) and cargo-deny, whose graph includes dev-dependencies, cover the new layout unchanged.
+- **D6 Spec amendments.** Block 0's "Protobuf codegen" and "Crate layout" rows, Block 20's out-of-scope line and D3, and the "Reversed exclusions" row, as stated in the PR's amendment list.
+
+Value clause: As an app developer depending on Ferrifuge, I want its Protobuf code to be part of the published source, so that my build runs no code generator or downloaded binary and what I compile is what was reviewed.
+
+**Structural acceptance:**
+- `cargo build` succeeds with `PROTOC` unset; a `lint` step `test -z "$(cargo tree -e normal,build -i prost-build 2>/dev/null)"` and the same for `protoc-bin-vendored`;
+- the `package`, `wasm`, `browser`, `docs-rs` and `msrv` jobs green (the MSRV job builds the dev-dependencies, as it built the build-dependencies);
+- clippy and `cargo fmt --check` clean.
+
+Each of these mutations is seen failing once, recorded in the PR:
+- one byte of the committed file changed: the drift test is red;
+- the `REUSE.toml` override removed: the drift test is red;
+- the `LICENSE` entry removed: the drift test is red;
+- `prost-build` back in `[build-dependencies]`: the `lint` step is red.
+
+The rerun line of D2 is a stated property, with no test.
+
+**Exceptions introduced:** no scenario: a build and packaging change, verified by the drift test and the CI jobs above, as Block 20's jobs are.
