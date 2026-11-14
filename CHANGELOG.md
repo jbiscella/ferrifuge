@@ -5,7 +5,7 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-Versions up to 0.16.0 were never published: each section records what the
+No version up to 0.22.0 was published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 

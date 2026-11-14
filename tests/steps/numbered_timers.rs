@@ -5,6 +5,9 @@
 //! owner of the machine does; the zero-duration rows build a client or a
 //! subscription.
 
+// Cucumber hands each capture over as an owned `String`.
+#![allow(clippy::needless_pass_by_value)]
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -108,14 +111,14 @@ fn last_command(run: &BatchRun, field: &str) -> u64 {
     run.frames_since(0)
         .iter()
         .flat_map(|(_, commands)| commands.clone())
-        .filter(|command| command.get(field).is_some())
-        .last()
+        .rev()
+        .find(|command| command.get(field).is_some())
         .and_then(|command| command["id"].as_u64())
         .unwrap_or_else(|| panic!("no {field} command in {:?}", run.actions))
 }
 
 /// Answers the last command with the field `field` with `reply`.
-fn answer(run: &mut BatchRun, field: &str, reply: Value) {
+fn answer(run: &mut BatchRun, field: &str, reply: &Value) {
     let id = last_command(run, field);
     run.frame(&json!({"id": id, field: reply}));
 }
@@ -310,10 +313,10 @@ fn a_machine_driven_through_everything(world: &mut ClientWorld) {
             run.handle(Input::Subscribe(id));
         }
         run.handle(Input::Flush);
-        answer(&mut run, "subscribe", json!({}));
+        answer(&mut run, "subscribe", &json!({}));
         run.rpc(&format!("rpc{round}"));
         run.handle(Input::Flush);
-        answer(&mut run, "rpc", json!({"data": {}}));
+        answer(&mut run, "rpc", &json!({"data": {}}));
         // The connection token's refresh, due within 20 s.
         run.advance(secs(18));
         let fetch = run
@@ -333,7 +336,7 @@ fn a_machine_driven_through_everything(world: &mut ClientWorld) {
         answer(
             &mut run,
             "refresh",
-            json!({"client": "c", "expires": true, "ttl": 20}),
+            &json!({"client": "c", "expires": true, "ttl": 20}),
         );
         // A reconnect-advised close, and the next connection.
         let transport = run.transport.expect("a transport");
