@@ -48,6 +48,8 @@ mod server_subscriptions;
 #[cfg(test)]
 mod statistics_tests;
 mod subscriptions;
+#[cfg(test)]
+mod timer_settings_tests;
 mod tokens;
 mod transports;
 #[cfg(test)]

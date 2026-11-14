@@ -593,6 +593,12 @@ const IMPLEMENTED: &[&str] = &[
     // Block 51b: the validation-run script's decisions.
     "A scheduled validation run is skipped only when main's head already has a real run",
     "A release needs a passing real run of its commit",
+    // Block 53: numbered timer settings, zero durations refused.
+    "A firing of a replaced setting changes nothing",
+    "A firing of a cancelled setting changes nothing",
+    "A firing of a deadline a sleep's answer replaced changes nothing",
+    "No two timer settings share a number",
+    "A duration of 0 is rejected",
 ];
 
 /// Server configuration of @A scenarios.

@@ -23,8 +23,10 @@ use std::time::Duration;
 #[non_exhaustive]
 pub struct Config {
     /// Lower bound of the reconnect delay. Default 500 ms.
+    /// More than 0, or building the client fails (Block 53).
     pub min_reconnect_delay: Duration,
     /// Upper bound of the reconnect delay. Default 20 s.
+    /// More than 0, or building the client fails (Block 53).
     pub max_reconnect_delay: Duration,
     /// Time allowed for the connect reply once the transport is open, and
     /// for the reply to other commands; also for a call waiting for the
@@ -39,12 +41,16 @@ pub struct Config {
     /// can fail before the attempt does.
     ///
     /// [`handshake_timeout`]: Config::handshake_timeout
+    ///
+    /// More than 0, or building the client fails (Block 53).
     pub timeout: Duration,
     /// Time allowed for opening a transport: DNS, TCP, the proxy
     /// handshake, TLS and the websocket upgrade, or, for `http_stream` and
     /// sse, the stream request until its response headers. An open that
     /// takes longer fails the attempt with "handshake timeout", and the
     /// next transport is tried. Default 5 s.
+    ///
+    /// More than 0, or building the client fails (Block 53).
     pub handshake_timeout: Duration,
     /// Client name reported to the server, for analytics.
     pub name: String,

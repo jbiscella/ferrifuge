@@ -54,6 +54,7 @@ mod logging;
 #[cfg(feature = "unstable")]
 mod maps;
 mod network_events;
+mod numbered_timers;
 mod optimistic;
 mod ping;
 mod probes;
@@ -235,6 +236,8 @@ pub(crate) struct ClientWorld {
     pub(crate) byte_split: byte_split::ByteSplit,
     /// The fixtures and output of a Block 51 validation-run scenario.
     pub(crate) validation_run: validation_run::ValidationRun,
+    /// The machine or builder of a Block 53 scenario.
+    pub(crate) numbered_timers: numbered_timers::NumberedTimers,
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,
