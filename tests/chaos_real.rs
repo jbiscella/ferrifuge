@@ -246,6 +246,7 @@ enum Record {
         call: String,
         took_ms: u64,
         ok: bool,
+        error: Option<String>,
     },
     Status {
         client: String,
@@ -363,21 +364,15 @@ async fn child_run() {
             Command_::Connect => client.connect(),
             Command_::History { channel } => {
                 let call = client.history(channel, ferrifuge::HistoryOptions::default().limit(10));
-                spawn_call(
-                    &writer,
-                    &pending,
-                    "history",
-                    async move { call.await.is_ok() },
-                );
+                spawn_call(&writer, &pending, "history", async move {
+                    call.await.map(drop).map_err(|e| e.to_string())
+                });
             }
             Command_::Presence { channel } => {
                 let call = client.presence(channel);
-                spawn_call(
-                    &writer,
-                    &pending,
-                    "presence",
-                    async move { call.await.is_ok() },
-                );
+                spawn_call(&writer, &pending, "presence", async move {
+                    call.await.map(drop).map_err(|e| e.to_string())
+                });
             }
             Command_::Status => writer.write(Record::Status {
                 client: state_name(client.state()),
@@ -474,18 +469,19 @@ fn spawn_call(
     writer: &Writer,
     pending: &Arc<AtomicU64>,
     call: &'static str,
-    settled: impl std::future::Future<Output = bool> + Send + 'static,
+    settled: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
 ) {
     let writer = writer.clone();
     let pending = Arc::clone(pending);
     pending.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
         let start = Instant::now();
-        let ok = settled.await;
+        let settled = settled.await;
         writer.write(Record::Call {
             call: call.to_owned(),
             took_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
-            ok,
+            ok: settled.is_ok(),
+            error: settled.err(),
         });
         pending.fetch_sub(1, Ordering::SeqCst);
     });
@@ -715,7 +711,15 @@ impl SeedRun<'_> {
                 epoch,
                 data,
             } => self.publication(&channel, offset, epoch.as_deref(), data)?,
-            Record::Call { call, took_ms, ok } => {
+            Record::Call {
+                call,
+                took_ms,
+                ok,
+                error,
+            } => {
+                if let Some(error) = &error {
+                    log(&format!("seed {} {call} failed: {error}", self.seed));
+                }
                 COUNTERS
                     .lock()
                     .unwrap()
@@ -861,9 +865,9 @@ impl SeedRun<'_> {
                 .await
                 .unwrap_or_else(|error| panic!("{error}")),
         }
-        log(&format!(
-            "seed {} fault {:?} {} for {} ms",
-            self.seed, fault.kind, fault.attributes, fault.hold_ms
+        self.record_fault(&format!(
+            "fault {:?} {} for {} ms",
+            fault.kind, fault.attributes, fault.hold_ms
         ));
         COUNTERS
             .lock()
@@ -890,10 +894,24 @@ impl SeedRun<'_> {
                 let _ = toxics.set_enabled(PROXY, true).await;
             }
         }
-        log(&format!(
-            "seed {} fault {:?} removed",
-            self.seed, fault.kind
-        ));
+        self.record_fault(&format!("fault {:?} removed", fault.kind));
+    }
+
+    /// Logs a fault added or removed, stamped with the wall clock, also in
+    /// the seed's artifact: Toxiproxy logs no toxic, only the proxy turned
+    /// down and up and the connections, so these records attribute a
+    /// failure to a toxic (`VERIFY:` of Block 51).
+    fn record_fault(&self, what: &str) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis());
+        let line = format!("seed {} at {at} ms since the epoch: {what}", self.seed);
+        log(&line);
+        self.child
+            .log
+            .lock()
+            .unwrap()
+            .push(format!("runner: {line}"));
     }
 
     /// Removes a fault whose time is up.
