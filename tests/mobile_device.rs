@@ -184,9 +184,20 @@ async fn disconnected<S>(client: &Client, events: &mut S) -> Result<(), String>
 where
     S: Stream<Item = ClientEvent> + Unpin,
 {
-    // TEMPORARY mutation C: reported ok, disconnect() not called.
-    let _ = (client, events);
-    Ok(())
+    client.disconnect();
+    step(
+        events,
+        |event| match event {
+            ClientEvent::Disconnected { .. } => Some(if client.state() == State::Disconnected {
+                Ok(())
+            } else {
+                Err(format!("disconnected, in state {:?}", client.state()))
+            }),
+            _ => None,
+        },
+        String::new,
+    )
+    .await
 }
 
 async fn run() -> bool {
