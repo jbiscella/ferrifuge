@@ -943,7 +943,8 @@ async fn a_browser_client_syncs_a_map_and_receives_its_updates() {
 async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publication() {
     // Safari sometimes withholds the tail of the recovery reply on the
     // stream after the overflowed one, until the server sends more data
-    // (WebKit; #268, https://github.com/jbiscella/ferrifuge/issues/268).
+    // (#268, https://github.com/jbiscella/ferrifuge/issues/268; WebKit bug
+    // https://bugs.webkit.org/show_bug.cgi?id=331662).
     // Chrome and Firefox still run it.
     if in_safari() {
         wasm_bindgen_test::console_log!(
