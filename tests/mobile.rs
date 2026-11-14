@@ -341,6 +341,7 @@ fn run(runtime: &tokio::runtime::Runtime, platform: Platform, server: &Server, r
         (run.name, &channel, &nonce),
     );
     let status = child.wait().expect("the program's status");
+    eprintln!("{}: {status}", run.name);
     let _ = std::fs::write(
         artifacts().join(format!("{}.lines", run.name)),
         reported.lines.join("\n"),
