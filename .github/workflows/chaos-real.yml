@@ -2,8 +2,10 @@
 # through Toxiproxy, checked against the server's own records. Needs
 # Docker: Linux only (D11). Never on pull requests.
 #
-# One row so far (websocket, JSON, memory engine) with D3's toxics and the
-# proxy turned down; the other rows come with 51c and 51d. Nightly, off
+# One row so far (websocket, JSON, memory engine) with D3's toxics, the
+# proxy turned down, and D4's server pause and restart, client suspension
+# and short-lived tokens, after D6's two restart scenarios; the other rows
+# come with 51d. Nightly, off
 # the hour (GitHub may delay or drop runs on the hour), and dispatched; a
 # scheduled run is skipped only when main's head already has a real run
 # (D11, scripts/validation-run).
