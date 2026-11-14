@@ -695,6 +695,8 @@ struct Counts {
     calls_ok: u64,
     calls_failed: u64,
     deliveries: u64,
+    /// The publications acknowledged (D3).
+    publications: u64,
 }
 
 /// A checkpoint as the checker keeps it.
@@ -749,7 +751,8 @@ impl Soak<'_> {
                         return fail(format!("a disconnect with code {code}, not D5's"));
                     }
                 }
-                if state == "disconnected" && !self.closing {
+                // Only close()'s own disconnected, code 0 (reviewer, 52a).
+                if state == "disconnected" && !(self.closing && code == 0) {
                     return fail(format!("the client went disconnected with code {code}"));
                 }
                 self.client = state;
@@ -1226,6 +1229,12 @@ fn publisher(
     let api = environment.api().clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PUBLISH_EVERY);
+        // Burst, tokio's default: a slow round is caught up, so the count
+        // is deterministic (reviewer, 52a).
+        assert_eq!(
+            tick.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Burst
+        );
         let mut n = 0u64;
         while !stop.load(Ordering::SeqCst) {
             tick.tick().await;
@@ -1262,13 +1271,16 @@ async fn publisher_ended(sender: &mut tokio::task::JoinHandle<Result<(), String>
     }
 }
 
-/// The publisher's volume: at least 90% of D3's rate over the run, so that
-/// a publisher falling behind cannot pass for a client delivering all.
-fn check_volume(published: usize, duration: Duration) -> Checked {
-    let expected = CHANNELS as f64 * duration.as_secs_f64() / PUBLISH_EVERY.as_secs_f64();
-    if (published as f64) < 0.9 * expected {
+/// The publisher's volume (reviewer, 52a): a round of one publication per
+/// channel each second of the run, less one round for the stop. Its ticker
+/// catches up after a slow round, and every refusal or failure already
+/// fails the run, so the count is exact.
+fn check_volume(published: u64, duration: Duration) -> Checked {
+    let channels = CHANNELS as u64;
+    let required = (channels * duration.as_secs()).saturating_sub(channels);
+    if published < required {
         return fail(format!(
-            "{published} publications acknowledged, under 90% of the {expected:.0} of D3"
+            "{published} publications acknowledged, {required} required (D3)"
         ));
     }
     Ok(())
@@ -1351,7 +1363,8 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
         stop.store(true, Ordering::SeqCst);
         // The publisher's last round has its replies; then the final read.
         publisher_ended(&mut sender).await?;
-        check_volume(soak.published.lock().unwrap().len(), timeline.duration)?;
+        soak.counts.publications = soak.published.lock().unwrap().len() as u64;
+        check_volume(soak.counts.publications, timeline.duration)?;
         soak.read_histories().await?;
         soak.check_deliveries().await?;
         soak.check_flat()?;
