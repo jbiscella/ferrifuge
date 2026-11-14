@@ -26,6 +26,7 @@ use ferrifuge::{
 };
 use futures_util::{Stream, StreamExt};
 use support::fake_server::{Announce, FakeServer};
+use support::invariants;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
@@ -798,19 +799,16 @@ impl Run {
             _ => return Ok(()),
         };
         let last = std::mem::replace(&mut self.last_state, state);
-        if last == state {
-            return Err(self.violation("I1", format!("{state:?} twice in a row")));
-        }
-        if last == State::Disconnected && state == State::Connected {
-            return Err(self.violation("I1", "disconnected went to connected"));
-        }
+        invariants::state_chain(last.into(), state.into())
+            .map_err(|detail| self.violation("I1", format!("client: {detail}")))?;
         if last == State::Connected && state == State::Connecting {
             self.count("reconnect");
         }
         Ok(())
     }
 
-    /// I1 and I8 for a subscription.
+    /// I1 for a subscription's state events, I8 and I11 for its
+    /// publications ([`Run::delivered`]).
     fn subscription_event(&mut self, n: usize, event: &SubscriptionEvent) -> Step {
         let state = match event {
             SubscriptionEvent::Subscribing { code, .. } => {
@@ -830,7 +828,18 @@ impl Run {
                 SubscriptionState::Subscribed
             }
             SubscriptionEvent::Unsubscribed { .. } => SubscriptionState::Unsubscribed,
-            SubscriptionEvent::Publication(publication) => {
+            SubscriptionEvent::Publication(publication) => return self.delivered(n, publication),
+            _ => return Ok(()),
+        };
+        let last = std::mem::replace(&mut self.subs[n].last_state, state);
+        invariants::state_chain(last.into(), state.into())
+            .map_err(|detail| self.violation("I1", format!("{}: {detail}", CHANNELS[n])))
+    }
+
+    /// I8 and I11 for a publication delivered to subscription `n`.
+    fn delivered(&mut self, n: usize, publication: &ferrifuge::Publication) -> Step {
+        {
+            {
                 let Some(offset) = publication.offset else {
                     return Ok(());
                 };
@@ -859,21 +868,9 @@ impl Run {
                     ));
                 }
                 sub.delivered = Some(offset);
-                return Ok(());
+                Ok(())
             }
-            _ => return Ok(()),
-        };
-        let last = std::mem::replace(&mut self.subs[n].last_state, state);
-        if last == state {
-            return Err(self.violation("I1", format!("{} {state:?} twice in a row", CHANNELS[n])));
         }
-        if last == SubscriptionState::Unsubscribed && state == SubscriptionState::Subscribed {
-            return Err(self.violation(
-                "I1",
-                format!("{} unsubscribed went to subscribed", CHANNELS[n]),
-            ));
-        }
-        Ok(())
     }
 
     /// Reads every stream until none has had an event for [`QUIET`], or
@@ -960,9 +957,7 @@ impl Run {
             let took = call
                 .await
                 .map_err(|error| self.violation("I2", error.to_string()))?;
-            if took > bound {
-                return Err(self.violation("I6", format!("a call settled after {took:?}")));
-            }
+            invariants::call_settled(took, bound).map_err(|detail| self.violation("I6", detail))?;
         }
         let open = self.open_connections(1).await;
         if open > 1 {
@@ -1024,20 +1019,13 @@ impl Run {
         }
         let made = self.server.connections() - connections;
         let open = self.open_connections(0).await;
-        if made > 0 || open > 0 {
-            return Err(self.violation(
-                "I5",
-                format!("{made} connections made and {open} open after disconnect()"),
-            ));
-        }
-        Ok(())
+        invariants::cleanup_after_disconnect(made, open)
+            .map_err(|detail| self.violation("I5", detail))
     }
 
     fn check_panics(&self) -> Step {
-        match PANICS.load(Ordering::SeqCst) {
-            0 => Ok(()),
-            panics => Err(self.violation("I2", format!("{panics} panics"))),
-        }
+        invariants::no_panic(PANICS.load(Ordering::SeqCst))
+            .map_err(|detail| self.violation("I2", detail))
     }
 }
 
