@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Decides the scheduled validation runs and gates releases on them (Block
+# 51, D11 and D12). Usage:
+#   scripts/validation-run should-run <workflow> <head sha>
+#   scripts/validation-run gate <workflow> <sha>
+#
+# A real run is one whose `verdict` job concluded `success` or `failure`:
+# the conclusion of the run itself is never read, as a run the guard
+# skipped concludes `success` and one whose job hit its timeout
+# concludes `cancelled` (D11, Verified 2026-11-14).
+#
+# Reads the GitHub API with gh, for $GITHUB_REPOSITORY. With
+# FERRIFUGE_VALIDATION_FIXTURES set, reads its answers from that
+# directory instead: `runs.json` (the workflow's runs, newest first, as
+# the API lists them) and `jobs-<run id>.json` (a run's jobs), so that the
+# scenarios need no token.
+set -euo pipefail
+
+usage() {
+    echo "usage: validation-run should-run <workflow> <head sha> | gate <workflow> <sha>" >&2
+    exit 2
+}
+
+command="${1:-}"
+workflow="${2:-}"
+sha="${3:-}"
+[ -n "$command" ] && [ -n "$workflow" ] && [ -n "$sha" ] || usage
+
+# The workflow's runs, newest first: id, head sha, status, one a line.
+# With a sha, only that commit's.
+runs() {
+    local filter='.workflow_runs[] | "\(.id) \(.head_sha) \(.status)"'
+    if [ -n "${FERRIFUGE_VALIDATION_FIXTURES:-}" ]; then
+        local select='.'
+        [ -n "${1:-}" ] && select=".workflow_runs |= map(select(.head_sha == \"$1\"))"
+        jq -r "$select | $filter" "$FERRIFUGE_VALIDATION_FIXTURES/runs.json"
+    else
+        local query="per_page=100"
+        [ -n "${1:-}" ] && query="$query&head_sha=$1"
+        gh api "repos/${GITHUB_REPOSITORY:?}/actions/workflows/$workflow/runs?$query" --jq "$filter"
+    fi
+}
+
+# The conclusion of run $1's `verdict` job, or nothing when it has none.
+verdict() {
+    local filter='[.jobs[] | select(.name == "verdict")][0].conclusion // ""'
+    if [ -n "${FERRIFUGE_VALIDATION_FIXTURES:-}" ]; then
+        local file="$FERRIFUGE_VALIDATION_FIXTURES/jobs-$1.json"
+        if [ -f "$file" ]; then jq -r "$filter" "$file"; fi
+    else
+        gh api "repos/${GITHUB_REPOSITORY:?}/actions/runs/$1/jobs?per_page=100" --jq "$filter"
+    fi
+}
+
+is_real() {
+    [ "$1" = success ] || [ "$1" = failure ]
+}
+
+case "$command" in
+should-run)
+    # The head of the last real run, if any: a scheduled run of the same
+    # head is skipped, passed or failed alike; any other head runs (D11).
+    decision=true
+    while read -r id head status; do
+        [ "$status" = completed ] || continue
+        if is_real "$(verdict "$id")"; then
+            [ "$head" = "$sha" ] && decision=false
+            break
+        fi
+    done < <(runs)
+    if [ "$decision" = true ]; then
+        echo "run=true: no real run of $workflow on $sha"
+    else
+        echo "run=false: $workflow already has a real run on $sha"
+    fi
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        echo "run=$decision" >>"$GITHUB_OUTPUT"
+    fi
+    ;;
+gate)
+    # The latest run of the commit decides: one in progress or failed
+    # fails the release; skipped and cancelled runs, without a real
+    # verdict, are passed over (D12).
+    while read -r id _ status; do
+        if [ "$status" != completed ]; then
+            echo "the latest run of $workflow on $sha is still in progress: re-run the release once it has concluded" >&2
+            exit 1
+        fi
+        conclusion="$(verdict "$id")"
+        case "$conclusion" in
+        success)
+            echo "the latest real run of $workflow on $sha passed"
+            exit 0
+            ;;
+        failure)
+            echo "the latest real run of $workflow on $sha failed: fix it and dispatch the workflow again" >&2
+            exit 1
+            ;;
+        esac
+    done < <(runs "$sha")
+    echo "no real run of $workflow on $sha: dispatch it with 'gh workflow run $workflow --ref <a ref at $sha>' and re-run the release once it has passed" >&2
+    exit 1
+    ;;
+*)
+    usage
+    ;;
+esac

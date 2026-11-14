@@ -23,7 +23,7 @@ use crate::support::centrifugo::Centrifugo;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The repository: the crate's manifest directory.
-fn repository() -> &'static Path {
+pub(super) fn repository() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -126,7 +126,7 @@ fn manifest_is_newest(_world: &mut ClientWorld) {
 
 /// The bash that runs the release check: Git's on Windows, where `bash`
 /// may resolve to WSL's launcher, which has no distribution on CI runners.
-fn bash() -> PathBuf {
+pub(super) fn bash() -> PathBuf {
     let git_bash = Path::new(r"C:\Program Files\Git\bin\bash.exe");
     if cfg!(windows) && git_bash.exists() {
         git_bash.to_owned()
@@ -175,8 +175,14 @@ fn check_output(world: &ClientWorld) -> (&Output, String) {
     (output, text)
 }
 
+/// The release check's step, and the release gate's (Block 51b): one
+/// text, so one step, for whichever ran.
 #[then("it succeeds")]
 fn it_succeeds(world: &mut ClientWorld) {
+    if super::validation_run::ran(world) {
+        super::validation_run::the_gate_outcome(world, "succeeds".to_owned());
+        return;
+    }
     let (output, text) = check_output(world);
     assert!(output.status.success(), "{text}");
 }
