@@ -297,6 +297,11 @@ impl FakeServer {
                 }
                 let mut protobuf = false;
                 let cookies = Arc::clone(&shared);
+                // The request's head read whole first, as tungstenite
+                // refuses one taking many small reads (Block 50b).
+                let Ok(tcp) = PreRead::new(tcp).await else {
+                    continue;
+                };
                 // The callback's error type is tungstenite's, not ours.
                 #[allow(clippy::result_large_err)]
                 let accepted = tokio_tungstenite::accept_hdr_async(
@@ -950,6 +955,80 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// A connection whose upgrade request was read up to the end of its head
+/// before tungstenite's handshake reads it, then replayed: tungstenite
+/// refuses a head that takes more than 64 reads averaging under 128 bytes
+/// ("Attack attempt detected"), as one relayed one byte per write may
+/// (Block 50b, D4). The head is bounded as tungstenite bounds it, 64 KiB.
+struct PreRead {
+    tcp: tokio::net::TcpStream,
+    head: Vec<u8>,
+    /// How much of the head tungstenite has read.
+    replayed: usize,
+}
+
+impl PreRead {
+    async fn new(mut tcp: tokio::net::TcpStream) -> std::io::Result<Self> {
+        use tokio::io::AsyncReadExt;
+        let mut head = Vec::new();
+        let mut chunk = [0; 4096];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") && head.len() < 64 << 10 {
+            let read = tcp.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            head.extend_from_slice(&chunk[..read]);
+        }
+        Ok(Self {
+            tcp,
+            head,
+            replayed: 0,
+        })
+    }
+}
+
+impl tokio::io::AsyncRead for PreRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let rest = &this.head[this.replayed..];
+        if rest.is_empty() {
+            return std::pin::Pin::new(&mut this.tcp).poll_read(cx, buf);
+        }
+        let taken = rest.len().min(buf.remaining());
+        buf.put_slice(&rest[..taken]);
+        this.replayed += taken;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncWrite for PreRead {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().tcp).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().tcp).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().tcp).poll_shutdown(cx)
+    }
+}
+
 /// What the writer task of a connection sends.
 enum Outgoing {
     Message(Message),
@@ -958,7 +1037,7 @@ enum Outgoing {
 
 struct Connection {
     /// Taken by [`Connection::serve`], which splits it.
-    ws: Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>,
+    ws: Option<tokio_tungstenite::WebSocketStream<PreRead>>,
     /// What the writer task sends, in order.
     out: mpsc::UnboundedSender<Outgoing>,
     /// Taken by [`Connection::serve`]'s writer task.
