@@ -370,18 +370,25 @@ async fn child_run() {
     // return until the next connect(), the client's own state stays
     // disconnected; the event stream, forwarded by another task, gives no
     // such boundary (Codex, #259).
-    let off_wanted = Arc::new(AtomicBool::new(false));
+    // The flag and the state it guards are read and written under one
+    // lock: disconnect() and the flag set together, the flag cleared and
+    // connect() together, and the watcher's flag and state read together,
+    // so that a state sampled before disconnect() is never judged by the
+    // flag set after it (Codex, #259).
+    let off_wanted = Arc::new(Mutex::new(false));
     watch_off(&client, &off_wanted, &writer);
     while let Some(command) = commanded.recv().await {
         match command {
             Command_::Subscribe { channel } => subscriptions[&channel].subscribe(),
             Command_::Unsubscribe { channel } => subscriptions[&channel].unsubscribe(),
             Command_::Disconnect => {
+                let mut off = off_wanted.lock().unwrap();
                 client.disconnect();
-                off_wanted.store(true, Ordering::SeqCst);
+                *off = true;
             }
             Command_::Connect => {
-                off_wanted.store(false, Ordering::SeqCst);
+                let mut off = off_wanted.lock().unwrap();
+                *off = false;
                 client.connect();
             }
             Command_::History { channel } => {
@@ -422,14 +429,17 @@ async fn child_run() {
 
 /// Writes [`Record::LeftOff`] when the client's own state leaves
 /// disconnected while `off_wanted` (I5).
-fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<AtomicBool>, writer: &Writer) {
+fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<Mutex<bool>>, writer: &Writer) {
     let (client, off_wanted, writer) = (client.clone(), Arc::clone(off_wanted), writer.clone());
     tokio::spawn(async move {
         let mut reported = false;
         loop {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let state = client.state();
-            let left = off_wanted.load(Ordering::SeqCst) && state != ferrifuge::State::Disconnected;
+            let (wanted, state) = {
+                let off = off_wanted.lock().unwrap();
+                (*off, client.state())
+            };
+            let left = wanted && state != ferrifuge::State::Disconnected;
             if left && !reported {
                 writer.write(Record::LeftOff {
                     state: state_name(state),
