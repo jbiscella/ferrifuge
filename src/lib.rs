@@ -98,6 +98,9 @@ pub use adapter::android;
 pub use adapter::stalled_websocket_writes;
 #[cfg(all(any(adapter_tokio, adapter_browser), feature = "__test-hooks"))]
 #[doc(hidden)]
+pub use adapter::{ArmedTimer, ArmedTimers, CallRecord};
+#[cfg(all(any(adapter_tokio, adapter_browser), feature = "__test-hooks"))]
+#[doc(hidden)]
 pub use adapter::{StreamDecoder, StreamFormat, decode_stream};
 // The same client on both targets (Block 44, D1).
 #[cfg(any(adapter_tokio, adapter_browser))]

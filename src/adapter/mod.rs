@@ -10,6 +10,8 @@ mod body;
 mod browser;
 mod client;
 mod handler;
+#[cfg(feature = "__test-hooks")]
+mod hooks;
 mod log;
 #[cfg(feature = "unstable")]
 mod map_subscription;
@@ -44,6 +46,8 @@ pub use client::{Batch, Client, ClientBuilder, WeakClient};
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 #[cfg(feature = "unstable")]
 pub use handler::{MapSubscriptionHandler, SharedPollSubscriptionHandler};
+#[cfg(feature = "__test-hooks")]
+pub use hooks::{ArmedTimer, ArmedTimers, CallRecord};
 #[cfg(feature = "unstable")]
 pub use map_subscription::{MapSubscription, MapSubscriptionBuilder};
 #[cfg(feature = "unstable")]

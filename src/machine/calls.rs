@@ -88,6 +88,23 @@ impl Phase {
 }
 
 impl Calls {
+    /// Every call any registry holds, with the registries holding it, for
+    /// the soak (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    pub(super) fn registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
+        let mut held: BTreeMap<CallId, Vec<&'static str>> = BTreeMap::new();
+        for id in self.by_id.keys() {
+            held.entry(*id).or_default().push("by_id");
+        }
+        for id in self.by_command.values() {
+            held.entry(*id).or_default().push("by_command");
+        }
+        for id in &self.room {
+            held.entry(*id).or_default().push("room");
+        }
+        held
+    }
+
     /// Whether the command `id` is a call's.
     pub(super) fn owns_command(&self, id: u32) -> bool {
         self.by_command.contains_key(&id)

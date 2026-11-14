@@ -275,6 +275,10 @@ name = "suspension"
 required-features = ["tokio"]
 
 [[test]]
+name = "soak_hooks"
+required-features = ["tokio"]
+
+[[test]]
 name = "debounce_driver"
 required-features = ["tokio"]
 
