@@ -717,6 +717,9 @@ struct Soak<'a> {
     /// Every checkpoint record, for the artifact.
     artifact: Vec<Value>,
     published: Arc<Mutex<Vec<(String, String, u64)>>>,
+    /// Set once the run calls `close()`, whose `disconnected` is expected
+    /// (Codex, #264).
+    closing: bool,
 }
 
 impl Soak<'_> {
@@ -746,7 +749,7 @@ impl Soak<'_> {
                         return fail(format!("a disconnect with code {code}, not D5's"));
                     }
                 }
-                if state == "disconnected" {
+                if state == "disconnected" && !self.closing {
                     return fail(format!("the client went disconnected with code {code}"));
                 }
                 self.client = state;
@@ -1166,6 +1169,7 @@ impl Soak<'_> {
 
     /// `close()`, and the channels API listing none of the run's channels.
     async fn close(&mut self) -> Checked {
+        self.closing = true;
         self.child.send(&Command_::Close).await;
         let deadline = Instant::now() + WITHIN;
         loop {
@@ -1209,12 +1213,16 @@ fn soak_configuration() -> Value {
 
 /// The publisher (D3): one publication a second on each channel, each with
 /// a run-wide id, recording `(channel, epoch, offset)` from each reply.
+///
+/// A publish the server refuses ends it with that error, and a transport
+/// failure is a panic of its task: the run checks its end, so that rejected
+/// publications cannot leave both sides of the comparison (Codex, #264).
 fn publisher(
     environment: &Environment,
     channels: Vec<String>,
     published: Arc<Mutex<Vec<(String, String, u64)>>>,
     stop: Arc<AtomicBool>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<Result<(), String>> {
     let api = environment.api().clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PUBLISH_EVERY);
@@ -1223,20 +1231,47 @@ fn publisher(
             tick.tick().await;
             for channel in &channels {
                 let id = format!("p{n}");
-                if let Ok(reply) = api
+                let reply = api
                     .call("publish", json!({"channel": channel, "data": {"id": id}}))
                     .await
-                {
-                    published.lock().unwrap().push((
-                        channel.clone(),
-                        reply["epoch"].as_str().unwrap_or_default().to_owned(),
-                        reply["offset"].as_u64().unwrap_or(0),
-                    ));
-                }
+                    .map_err(|error| {
+                        format!(
+                            "publish to {channel}: error {}: {}",
+                            error.code, error.message
+                        )
+                    })?;
+                published.lock().unwrap().push((
+                    channel.clone(),
+                    reply["epoch"].as_str().unwrap_or_default().to_owned(),
+                    reply["offset"].as_u64().unwrap_or(0),
+                ));
                 n += 1;
             }
         }
+        Ok(())
     })
+}
+
+/// The publisher's end: once stopped, within [`WITHIN`], without an error.
+async fn publisher_ended(sender: &mut tokio::task::JoinHandle<Result<(), String>>) -> Checked {
+    match tokio::time::timeout(WITHIN, &mut *sender).await {
+        Err(_) => fail(format!("the publisher did not stop within {WITHIN:?}")),
+        Ok(Err(error)) => fail(format!("the publisher's task: {error}")),
+        Ok(Ok(Err(error))) => fail(format!("the publisher: {error}")),
+        Ok(Ok(Ok(()))) => Ok(()),
+    }
+}
+
+/// The publisher's volume: at least 90% of D3's rate over the run, so that
+/// a publisher falling behind cannot pass for a client delivering all.
+fn check_volume(published: usize, duration: Duration) -> Checked {
+    let expected = CHANNELS as f64 * duration.as_secs_f64() / PUBLISH_EVERY.as_secs_f64();
+    if (published as f64) < 0.9 * expected {
+        return fail(format!(
+            "{published} publications acknowledged, under 90% of the {expected:.0} of D3"
+        ));
+    }
+    Ok(())
 }
 
 /// The run: its timeline, then the checks at the end; the run's state is
@@ -1254,7 +1289,7 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
     );
     let published = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
-    let sender = publisher(
+    let mut sender = publisher(
         environment,
         channels.clone(),
         Arc::clone(&published),
@@ -1274,6 +1309,7 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
         started: Instant::now(),
         artifact: Vec::new(),
         published,
+        closing: false,
     };
     let checked = async {
         let start = soak.started;
@@ -1287,6 +1323,12 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
             let now = Instant::now();
             if now >= end {
                 break;
+            }
+            // The publisher runs until stopped: one that ended has failed.
+            if sender.is_finished() {
+                return publisher_ended(&mut sender)
+                    .await
+                    .and_then(|()| fail("the publisher stopped during the run"));
             }
             if now >= next_checkpoint {
                 soak.checkpoint().await?;
@@ -1308,7 +1350,8 @@ async fn run(environment: &Environment, timeline: Timeline) -> (Soak<'_>, Checke
         }
         stop.store(true, Ordering::SeqCst);
         // The publisher's last round has its replies; then the final read.
-        tokio::time::sleep(PUBLISH_EVERY * 2).await;
+        publisher_ended(&mut sender).await?;
+        check_volume(soak.published.lock().unwrap().len(), timeline.duration)?;
         soak.read_histories().await?;
         soak.check_deliveries().await?;
         soak.check_flat()?;

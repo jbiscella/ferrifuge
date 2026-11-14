@@ -200,6 +200,27 @@ impl TimerRecord {
         self.0 = next;
     }
 
+    /// The record of `name`, to be [`TimerRecord::put`] back.
+    pub(super) fn get(&self, name: &str) -> Option<(Option<platform::Instant>, platform::Instant)> {
+        self.0.get(name).copied()
+    }
+
+    /// Puts back what [`TimerRecord::get`] gave.
+    pub(super) fn put(
+        &mut self,
+        name: String,
+        entry: Option<(Option<platform::Instant>, platform::Instant)>,
+    ) {
+        match entry {
+            Some(entry) => {
+                self.0.insert(name, entry);
+            }
+            None => {
+                self.0.remove(&name);
+            }
+        }
+    }
+
     /// Ages from now the timers `running` names that are not recorded yet:
     /// those set before the records started (reviewer, 52a).
     pub(super) fn seed(&mut self, running: impl IntoIterator<Item = String>) {

@@ -656,7 +656,24 @@ impl Shared {
             .map(|(key, _)| *key)
             .collect();
         let from = core.actions.len();
+        // The soak's record of the fresh timers, whose shortening is
+        // filtered out below, is kept as it was (Codex, #264).
+        #[cfg(feature = "__test-hooks")]
+        let kept: Vec<_> = fresh
+            .iter()
+            .map(|key| {
+                let name = key.hook_name();
+                let entry = core.timer_record.get(&name);
+                (name, entry)
+            })
+            .collect();
         self.feed(core, Input::Slept { gap });
+        #[cfg(feature = "__test-hooks")]
+        if self.records.on() {
+            for (name, entry) in kept {
+                core.timer_record.put(name, entry);
+            }
+        }
         if fresh.is_empty() {
             return;
         }
@@ -5818,6 +5835,50 @@ mod tests {
             "{:?}",
             core.actions
         );
+    }
+
+    // Codex, #264: the soak's record keeps the deadline of a timer whose
+    // shortening the sleep that revealed it filtered out.
+    #[cfg(feature = "__test-hooks")]
+    #[tokio::test]
+    async fn the_record_of_a_timer_set_by_the_frame_revealing_a_sleep_is_not_shortened() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        client.record_timers();
+        let (core, transport) =
+            connected_core_over(&client, r#"{"id":1,"connect":{"client":"c","ping":120}}"#);
+        drop(core);
+        let subscription = client
+            .subscription_builder("news")
+            .token("s0")
+            .get_token(|_| async { Ok("s1".to_owned()) })
+            .build()
+            .unwrap();
+        let _events = subscription.events();
+        subscription.subscribe();
+        let mut core = lock(&client.shared().core);
+        core.actions.clear();
+
+        slept(&mut core, Duration::from_secs(30));
+        client.shared().handle(
+            &mut core,
+            Input::Frame {
+                transport,
+                data: br#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#.to_vec(),
+            },
+        );
+        drop(core);
+
+        // Set at 80 to 90% of 60 s, and not 30 s earlier.
+        let timers = client.armed_timers();
+        let refresh = timers
+            .core
+            .iter()
+            .find(|timer| {
+                timer.name.starts_with("subscription ") && timer.name.ends_with(" Refresh")
+            })
+            .expect("the subscription's refresh in the core's list");
+        assert!(refresh.due_in > Duration::from_secs(40), "{refresh:?}");
     }
 
     // Codex, #120: the connect reply read first after a sleep the attempt
