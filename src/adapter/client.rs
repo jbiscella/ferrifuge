@@ -4929,6 +4929,69 @@ mod tests {
         server.shutdown_background();
     }
 
+    // Codex, #141: a close made while the driver performs an action, after
+    // its turn took the queue, from a callback it runs, is still performed:
+    // the transport's close is awaited, not dropped.
+    #[test]
+    fn a_close_from_a_callback_the_driver_runs_is_performed() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = tokio::runtime::Runtime::new().unwrap();
+        let listener = server
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!(
+            "http://{}/connection/http_stream",
+            listener.local_addr().unwrap()
+        );
+        server.spawn(stalling_http_stream(listener));
+        let timeout = Duration::from_millis(400);
+        let client = Client::builder_with_transports([(TransportKind::HttpStream, url)])
+            .config(Config::default().timeout(timeout))
+            .runtime(runtime.handle().clone())
+            .build()
+            .unwrap();
+        client.connect();
+        let ready = client.ready();
+        let ready =
+            runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), ready).await });
+        assert_eq!(ready.ok(), Some(Ok(())));
+        // An emulation request the server never answers keeps the
+        // transport's close running for the timeout.
+        let call = client.rpc("slow", b"{}".to_vec());
+        std::thread::sleep(Duration::from_millis(100));
+        let weak = client.downgrade();
+        let subscription = client
+            .subscription_builder("news")
+            .get_data(move |_| {
+                // Inside the driver's perform: the close's actions are
+                // queued after the turn's take.
+                if let Some(client) = weak.upgrade() {
+                    drop(client.close());
+                }
+                std::future::ready(Ok(b"{}".to_vec()))
+            })
+            .build()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        subscription.subscribe();
+        runtime.block_on(client.close());
+        let took = started.elapsed();
+
+        assert!(client.is_closed());
+        assert!(
+            took >= Duration::from_millis(100),
+            "the transport was dropped, not closed: {took:?}"
+        );
+        drop(call);
+        runtime.shutdown_background();
+        server.shutdown_background();
+    }
+
     // Block 33, D1: dropping the future still closes; a second close()
     // resolves; the stream yields what it held, then ends.
     #[tokio::test]
