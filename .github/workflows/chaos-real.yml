@@ -9,10 +9,6 @@ name: chaos-real
 
 on:
   workflow_dispatch:
-  # TEMPORARY, removed before merge: the evidence run of the PR's branch
-  # (workflow_dispatch fires only for a file on the default branch).
-  push:
-    branches: [impl/block-51a-real-chaos]
 
 permissions:
   contents: read
