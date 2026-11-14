@@ -154,6 +154,16 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
           echo "FERRIFUGE_MOBILE_DEVICE=$udid" >> "$GITHUB_ENV"
 
+      # TEMPORARY, VERIFY: simctl spawn passes on the program's exit status
+      # (without its variables, the program exits 1).
+      - name: simctl spawn exit status
+        shell: bash
+        run: |
+          status=0
+          xcrun simctl spawn "$FERRIFUGE_MOBILE_DEVICE" "$MOBILE_DEVICE_PROGRAM" || status=$?
+          echo "simctl spawn exit status: $status"
+          test "$status" -ne 0
+
       # Without --standalone, under the device's launchd, so that a program
       # reaches its trust daemon. The simulator shares the host's file
       # system, so no unit test is skipped (D4).
