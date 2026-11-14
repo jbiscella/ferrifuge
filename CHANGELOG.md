@@ -199,6 +199,12 @@ repository held while it carried that version, from the blocks of
   poll for up to about a second, and the timers' turn found the deadline
   due with the reply unseen (Block 49c's flake).
 
+- That yield now comes after the last input's actions: the driver arms
+  and cancels the timers an input set, and sends what it queued, before
+  another task of its runtime runs. Yielding first let a task that saw the
+  input's event run before its timers were armed, so a token refresh could
+  come due later than its ttl allowed (Block 49c's refresh flake).
+
 - Browser http_stream no longer stalls in Safari, which stops delivering
   a `fetch` body left unread: it reads the body continuously into the
   inbox websocket and sse already use, and reconnects with `connecting`

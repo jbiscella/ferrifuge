@@ -400,6 +400,115 @@ async fn the_driver_yields_to_its_runtime_between_inputs() {
     );
 }
 
+/// The driver yields only once the last input's actions are performed and
+/// its timers published (Block 49c's yield, after its refresh flake): no
+/// other task of the client's runtime runs between an input and the timers
+/// it set or cancelled. While the client is held, the replies to `CALLS`
+/// rpcs reach its socket; a witness task on the client's runtime, spawned
+/// during the hold, yields in a loop and compares at each of its turns the
+/// timers the driver runs with those the core set (the soak's hook, Block
+/// 52). Each reply cancels its call's timer: a yield before the driver
+/// performs that cancel, or before it publishes its timers, shows the
+/// witness a call timer the core no longer has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_task_runs_between_an_input_and_the_timers_it_set() {
+    use std::collections::BTreeSet;
+
+    const CALLS: usize = 8;
+    let server = FakeServer::start(Announce::default()).await;
+    // Answered during the hold, not at once: the replies reach the socket
+    // while the client is held, all readable on resume.
+    server.answer_rpc(Rpc::Ignore);
+    let process = Process::start();
+    let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
+        .runtime(process.handle.clone())
+        .build()
+        .expect("a valid client");
+    client.record_timers();
+    let mut events = client.events();
+    client.connect();
+    tokio::time::timeout(WAIT, async {
+        while let Some(event) = events.next().await {
+            if matches!(event, ClientEvent::Connected { .. }) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("connected");
+    // Made now, awaited by this test's runtime: no task of the client's
+    // runtime but the driver and the witness is woken by the replies.
+    let calls: Vec<_> = (0..CALLS)
+        .map(|_| client.rpc("echo", b"{}".to_vec()))
+        .collect();
+    until("the rpc commands written", || {
+        server.rpc_commands().len() >= CALLS
+    })
+    .await;
+    let commands = server.rpc_commands();
+    let release = process.suspend().await;
+    for command in &commands {
+        server.send(&json!({"id": command["id"], "rpc": {"data": {}}}).to_string());
+    }
+    tokio::time::sleep(MARGIN).await;
+    let (report, reported) = oneshot::channel();
+    process.handle.spawn({
+        let client = client.clone();
+        async move {
+            let names = |list: &[ferrifuge::ArmedTimer]| -> BTreeSet<String> {
+                list.iter().map(|timer| timer.name.clone()).collect()
+            };
+            let mut samples = Vec::new();
+            loop {
+                let timers = client.armed_timers();
+                let (driver, core) = (names(&timers.driver), names(&timers.core));
+                let calls = core.iter().filter(|name| name.starts_with("call ")).count();
+                let done = calls == 0 && driver == core;
+                samples.push((driver, core, calls));
+                if done {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let _ = report.send(samples);
+        }
+    });
+    let _ = release.send(());
+    let samples = tokio::time::timeout(WAIT, reported)
+        .await
+        .expect("the replies read")
+        .expect("the witness runs");
+    for (turn, (driver, core, _)) in samples.iter().enumerate() {
+        assert_eq!(
+            driver, core,
+            "turn {turn} of the witness: the driver's timers are not the core's"
+        );
+    }
+    // tokio wakes deferred tasks last first (`Defer::wake`), so the driver
+    // and the witness, both yielding, take turns at running twice: the
+    // witness sees at least every other reply handled.
+    let seen: BTreeSet<usize> = samples
+        .iter()
+        .map(|(_, _, calls)| *calls)
+        .filter(|calls| (1..CALLS).contains(calls))
+        .collect();
+    assert!(
+        seen.len() >= CALLS / 2 - 1,
+        "the witness saw {} states while the {CALLS} replies were read: {:?}",
+        seen.len(),
+        samples
+            .iter()
+            .map(|(_, _, calls)| *calls)
+            .collect::<Vec<_>>()
+    );
+    for call in calls {
+        let outcome = tokio::time::timeout(WAIT, call)
+            .await
+            .expect("the rpc settles");
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+}
+
 /// The threads calling `send()`, stopped and joined when dropped.
 struct Callers {
     calling: std::sync::Arc<std::sync::atomic::AtomicBool>,
