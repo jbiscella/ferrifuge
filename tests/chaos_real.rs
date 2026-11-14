@@ -1147,13 +1147,7 @@ impl SeedRun<'_> {
     /// The time the child was stopped between `from` and `to`, by the wall
     /// clock (I6).
     fn suspended_within(&self, from: u64, to: u64) -> Duration {
-        let now = unix_ms();
-        Duration::from_millis(
-            self.suspensions
-                .iter()
-                .map(|&(start, end)| end.unwrap_or(now).min(to).saturating_sub(start.max(from)))
-                .sum(),
-        )
+        overlap(&self.suspensions, from, to, unix_ms())
     }
 
     fn publication(
@@ -1974,6 +1968,17 @@ impl SeedRun<'_> {
     }
 }
 
+/// The time of `suspensions` between `from` and `to`, an open one ending
+/// at `now`, all in ms by the wall clock (I6).
+fn overlap(suspensions: &[(u64, Option<u64>)], from: u64, to: u64, now: u64) -> Duration {
+    Duration::from_millis(
+        suspensions
+            .iter()
+            .map(|&(start, end)| end.unwrap_or(now).min(to).saturating_sub(start.max(from)))
+            .sum(),
+    )
+}
+
 /// The run-wide id a publication's data carries.
 fn id_of(data: &str) -> String {
     serde_json::from_str::<Value>(data)
@@ -2466,6 +2471,27 @@ async fn restart_with_redis(run: &str, engine: Engine) {
     log(&format!("{name}: passed"));
 }
 
+/// I6's allowance is the call's overlap with the suspensions, no more
+/// (D4, "Scheduling").
+fn suspensions_overlap_calls() {
+    let suspensions = [(1_000, Some(3_000)), (5_000, Some(6_000)), (9_000, None)];
+    for (from, to, overlapped) in [
+        (0, 500, 0),
+        (500, 2_000, 1_000),
+        (2_000, 5_500, 1_500),
+        (0, 10_000, 3_900),
+        (3_000, 5_000, 0),
+        (9_500, 9_800, 300),
+    ] {
+        assert_eq!(
+            overlap(&suspensions, from, to, 9_900),
+            Duration::from_millis(overlapped),
+            "a call from {from} to {to} ms"
+        );
+    }
+    log("a call's I6 bound adds its overlap with the suspensions");
+}
+
 /// The budget's seeds, or `FERRIFUGE_REAL_CHAOS_SEED` alone.
 async fn run_budget(environment: &Environment) -> Vec<Violation> {
     let budget = env::var(BUDGET_VARIABLE)
@@ -2549,6 +2575,7 @@ fn main() {
         return;
     }
     seeds_fix_their_operations();
+    suspensions_overlap_calls();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
