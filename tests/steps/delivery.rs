@@ -1241,6 +1241,27 @@ impl UnreadCore {
         }
     }
 
+    /// Fires the client timer `timer`, which the machine must have set.
+    fn fire(&mut self, timer: ferrifuge::machine::Timer) {
+        let setting = self.machine.timer_setting(timer).expect("timer set");
+        self.handle(ferrifuge::machine::Input::TimerFired(timer, setting));
+    }
+
+    /// Fires the timer `timer` of `id`, which the machine must have set.
+    fn fire_subscription(
+        &mut self,
+        id: ferrifuge::machine::SubscriptionId,
+        timer: ferrifuge::machine::SubscriptionTimer,
+    ) {
+        let setting = self
+            .machine
+            .subscription_timer_setting(id, timer)
+            .expect("subscription timer set");
+        self.handle(ferrifuge::machine::Input::SubscriptionTimerFired(
+            id, timer, setting,
+        ));
+    }
+
     fn handle(&mut self, input: ferrifuge::machine::Input) {
         use ferrifuge::machine::Action;
         for action in self.machine.handle(input) {
@@ -1317,7 +1338,7 @@ fn connection_attempts_fail(world: &mut ClientWorld, attempts: usize) {
     core.handle(Input::Connect);
     for attempt in 0..attempts {
         if attempt > 0 {
-            core.handle(Input::TimerFired(Timer::Reconnect));
+            core.fire(Timer::Reconnect);
         }
         let transport = core.transport.expect("a transport to open");
         core.handle(Input::TransportFailed {
@@ -1330,9 +1351,7 @@ fn connection_attempts_fail(world: &mut ClientWorld, attempts: usize) {
 #[when("the server becomes reachable and the client connects")]
 fn the_server_becomes_reachable(world: &mut ClientWorld) {
     let core = unread_core(world);
-    core.handle(ferrifuge::machine::Input::TimerFired(
-        ferrifuge::machine::Timer::Reconnect,
-    ));
+    core.fire(ferrifuge::machine::Timer::Reconnect);
     core.connects();
 }
 
@@ -1363,10 +1382,7 @@ fn subscribe_attempts_fail(world: &mut ClientWorld, attempts: usize) {
     core.handle(Input::Subscribe(id));
     for attempt in 0..attempts {
         if attempt > 0 {
-            core.handle(Input::SubscriptionTimerFired(
-                id,
-                SubscriptionTimer::Resubscribe,
-            ));
+            core.fire_subscription(id, SubscriptionTimer::Resubscribe);
         }
         let fetch = core.fetch.take().expect("a data fetch");
         core.handle(Input::SubscriptionDataFetched {
@@ -1381,10 +1397,7 @@ fn the_data_callback_succeeds(world: &mut ClientWorld) {
     use ferrifuge::machine::{Input, SubscriptionTimer};
     let core = unread_core(world);
     let id = core.subscription.expect("the subscription");
-    core.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
-    ));
+    core.fire_subscription(id, SubscriptionTimer::Resubscribe);
     let fetch = core.fetch.take().expect("a data fetch");
     core.handle(Input::SubscriptionDataFetched {
         fetch,

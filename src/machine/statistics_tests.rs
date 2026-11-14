@@ -69,7 +69,7 @@ fn every_failed_ending_of_an_attempt_counts_once() {
             });
         }),
         ("a connect timeout", |machine, _| {
-            machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+            machine.fire(Timer::ConnectTimeout);
         }),
         ("a message too large", |machine, transport| {
             machine.handle(Input::MessageTooLarge(transport));
@@ -116,7 +116,7 @@ fn a_handshake_timeout_counts_as_a_failed_attempt() {
     let mut machine = Machine::new(Config::default());
     machine.handle(Input::Connect);
 
-    machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+    machine.fire(Timer::ConnectTimeout);
 
     assert_eq!(machine.statistics().failed_attempts, 1);
 }
@@ -145,7 +145,7 @@ fn a_lost_connection_is_not_a_failed_attempt_and_its_reconnect_counts() {
         code: None,
         reason: String::new(),
     });
-    let again = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    let again = opened(&machine.fire(Timer::Reconnect));
     machine.handle(Input::TransportOpened(again));
 
     machine.handle(frame(again, r#"{"id":2,"connect":{"client":"c"}}"#));

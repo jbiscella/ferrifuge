@@ -91,7 +91,10 @@ fn session(kind: TransportKind) -> Vec<String> {
                     reason: String::new(),
                 },
             );
-            let actions = handle(&mut machine, Input::TimerFired(Timer::Reconnect));
+            let setting = machine
+                .timer_setting(Timer::Reconnect)
+                .expect("reconnect set");
+            let actions = handle(&mut machine, Input::TimerFired(Timer::Reconnect, setting));
             transport = opened(&actions).expect("a reconnect");
         }
     }
@@ -157,7 +160,7 @@ fn ended_before_an_answer(kind: TransportKind) -> (Vec<ClientEvent>, TransportKi
             _ => None,
         })
         .collect();
-    let actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+    let actions = machine.fire(Timer::Reconnect);
     let next = actions
         .iter()
         .find_map(|action| match action {
@@ -252,8 +255,7 @@ fn chosen_then_ended_before_an_answer(
         code: None,
         reason: String::new(),
     });
-    let transport =
-        opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    let transport = opened(&machine.fire(Timer::Reconnect)).expect("a reconnect");
     machine.handle(Input::TransportOpened(transport));
     let actions = machine.handle(Input::TransportClosed {
         transport,
@@ -271,12 +273,12 @@ fn chosen_then_ended_before_an_answer(
     let delay = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled");
     let next = machine
-        .handle(Input::TimerFired(Timer::Reconnect))
+        .fire(Timer::Reconnect)
         .iter()
         .find_map(|action| match action {
             Action::OpenTransport { kind, .. } => Some(*kind),
@@ -346,11 +348,11 @@ fn third_delay_without_a_ping(kind: TransportKind, seed: u64) -> Duration {
         delay = ended
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
                 _ => None,
             })
             .expect("a reconnect scheduled");
-        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        actions = machine.fire(Timer::Reconnect);
     }
     delay
 }
@@ -403,7 +405,7 @@ fn after_giving_way(kinds: &[TransportKind]) -> (TransportKind, Duration) {
             transport,
             message: "refused".to_owned(),
         });
-        actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        actions = machine.fire(Timer::Reconnect);
     }
     let transport = opened(&actions).expect("the WebTransport attempt");
     let sent = machine.handle(Input::TransportOpened(transport));
@@ -424,8 +426,7 @@ fn after_giving_way(kinds: &[TransportKind]) -> (TransportKind, Duration) {
         code: None,
         reason: String::new(),
     });
-    let transport =
-        opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    let transport = opened(&machine.fire(Timer::Reconnect)).expect("a reconnect");
     machine.handle(Input::TransportOpened(transport));
     let actions = machine.handle(Input::TransportClosed {
         transport,
@@ -435,12 +436,12 @@ fn after_giving_way(kinds: &[TransportKind]) -> (TransportKind, Duration) {
     let delay = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled");
     let next = machine
-        .handle(Input::TimerFired(Timer::Reconnect))
+        .fire(Timer::Reconnect)
         .iter()
         .find_map(|action| match action {
             Action::OpenTransport { kind, .. } => Some(*kind),
@@ -514,7 +515,7 @@ fn ends_before_an_answer(machine: &mut Machine, transport: TransportId) -> Durat
         })
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled")
@@ -552,9 +553,9 @@ fn a_second_webtransport_ending_before_an_answer_ends_the_round() {
         code: None,
         reason: String::new(),
     });
-    let first = opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("a reconnect");
+    let first = opened(&machine.fire(Timer::Reconnect)).expect("a reconnect");
     let gave_way = ends_before_an_answer(&mut machine, first);
-    let second = opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("the second");
+    let second = opened(&machine.fire(Timer::Reconnect)).expect("the second");
     let round_over = ends_before_an_answer(&mut machine, second);
 
     assert_eq!(gave_way, Duration::ZERO);

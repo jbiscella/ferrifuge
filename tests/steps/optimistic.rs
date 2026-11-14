@@ -367,7 +367,7 @@ fn closed_then_reopened(world: &mut ClientWorld) {
     let delay = since
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect after the backoff delay");

@@ -285,7 +285,7 @@ impl NoCodePlan {
                 reason: String::new(),
             });
             delays.push(reconnect_delay(&actions));
-            actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+            actions = machine.fire(Timer::Reconnect);
         }
         delays
     }
@@ -317,7 +317,7 @@ fn reconnect_delay(actions: &[Action]) -> Duration {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect is scheduled")

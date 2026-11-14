@@ -8,7 +8,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use ferrifuge::machine::{Action, Input, Machine, SubscriptionOptions, Timer, TransportId};
+use ferrifuge::machine::{
+    Action, Input, Machine, SubscriptionOptions, Timer, TimerSetting, TransportId,
+};
 use ferrifuge::{Config, State, SubscriptionState};
 use serde_json::Value;
 
@@ -19,8 +21,8 @@ struct Simulation {
     /// Simulated time since the start.
     now: Duration,
     transport: Option<TransportId>,
-    /// When each running timer fires, by [`Timer::index`].
-    timers: [Option<Duration>; Timer::COUNT],
+    /// When each running timer fires, and its setting, by [`Timer::index`].
+    timers: [Option<(Duration, TimerSetting)>; Timer::COUNT],
     /// What the server and the token callback answer, in order.
     pending: VecDeque<Input>,
     /// Ttl the server gives connection tokens, in seconds.
@@ -75,8 +77,8 @@ impl Simulation {
                     self.answer(command);
                 }
             }
-            Action::SetTimer(timer, delay) => {
-                self.timers[timer.index()] = Some(self.now + delay);
+            Action::SetTimer(timer, delay, setting) => {
+                self.timers[timer.index()] = Some((self.now + delay, setting));
                 self.set.push((self.now, timer));
             }
             Action::CancelTimer(timer) => self.timers[timer.index()] = None,
@@ -126,10 +128,12 @@ impl Simulation {
         loop {
             let next_timer = Timer::ALL
                 .into_iter()
-                .filter_map(|timer| self.timers[timer.index()].map(|at| (at, timer)))
-                .min_by_key(|(at, _)| *at);
+                .filter_map(|timer| {
+                    self.timers[timer.index()].map(|(at, setting)| (at, timer, setting))
+                })
+                .min_by_key(|(at, _, _)| *at);
             let next = match next_timer {
-                Some((at, _)) if at <= next_ping => at,
+                Some((at, _, _)) if at <= next_ping => at,
                 _ => next_ping,
             };
             if next > until {
@@ -138,10 +142,10 @@ impl Simulation {
             }
             self.now = next;
             match next_timer {
-                Some((at, timer)) if at == next => {
+                Some((at, timer, setting)) if at == next => {
                     self.timers[timer.index()] = None;
                     self.fired.push((self.now, timer));
-                    self.handle(Input::TimerFired(timer));
+                    self.handle(Input::TimerFired(timer, setting));
                 }
                 _ => {
                     next_ping += interval;
@@ -227,6 +231,7 @@ fn fleet_delays(
             then(&mut simulation);
             simulation.timers[timer.index()]
                 .expect("the timer is set")
+                .0
                 .saturating_sub(simulation.now)
         })
         .collect()

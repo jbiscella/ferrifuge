@@ -1022,15 +1022,20 @@ impl MachineRun {
                             });
                         }
                     }
-                    Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay)
-                        if !self.answers.is_empty()
-                            || !self.token_answers.is_empty()
-                            || !self.state_answers.is_empty() =>
+                    Action::SetSubscriptionTimer(
+                        id,
+                        SubscriptionTimer::Resubscribe,
+                        delay,
+                        setting,
+                    ) if !self.answers.is_empty()
+                        || !self.token_answers.is_empty()
+                        || !self.state_answers.is_empty() =>
                     {
                         self.delay_before_fetch = Some(*delay);
                         pending.push_back(Input::SubscriptionTimerFired(
                             *id,
                             SubscriptionTimer::Resubscribe,
+                            *setting,
                         ));
                     }
                     Action::Send { frame, .. } => {
@@ -1079,7 +1084,11 @@ impl MachineRun {
 
     pub(crate) fn fire(&mut self, timer: SubscriptionTimer) {
         let subscription = self.subscription;
-        self.handle(Input::SubscriptionTimerFired(subscription, timer));
+        let setting = self
+            .machine
+            .subscription_timer_setting(subscription, timer)
+            .expect("subscription timer set");
+        self.handle(Input::SubscriptionTimerFired(subscription, timer, setting));
     }
 
     /// Connects the machine over a transport answering connect at once.
@@ -1144,7 +1153,7 @@ impl MachineRun {
         self.actions[from..]
             .iter()
             .filter_map(|action| match action {
-                Action::SetSubscriptionTimer(_, timer, delay) if *timer == kind => Some(*delay),
+                Action::SetSubscriptionTimer(_, timer, delay, ..) if *timer == kind => Some(*delay),
                 _ => None,
             })
             .collect()
@@ -1277,7 +1286,7 @@ fn no_resubscribe_is_scheduled(world: &mut ClientWorld) {
     assert!(
         !run.actions.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
         )),
         "{:?}",
         run.actions

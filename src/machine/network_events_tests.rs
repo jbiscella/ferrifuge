@@ -25,7 +25,7 @@ fn opened(actions: &[Action]) -> Option<(TransportId, TransportKind)> {
 /// The reconnect delay `actions` set.
 fn reconnect_delay(actions: &[Action]) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+        Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
         _ => None,
     })
 }
@@ -134,7 +134,7 @@ fn offline_while_connecting_closes_the_attempt_without_an_event() {
     assert!(delay >= Duration::from_millis(500), "{delay:?}");
     assert_eq!(machine.statistics().failed_attempts, 0);
     // The round is unchanged: websocket again, not http_stream.
-    let next = machine.handle(Input::TimerFired(Timer::Reconnect));
+    let next = machine.fire(Timer::Reconnect);
     assert_eq!(
         opened(&next).map(|(_, kind)| kind),
         Some(TransportKind::WebSocket)
@@ -218,7 +218,7 @@ fn online_after_going_offline_keeps_the_jitter_window() {
 fn online_once_the_attempt_after_a_loss_started_reconnects_at_once() {
     let (mut machine, _) = connected(config(500, 100_000));
     machine.handle(Input::Offline);
-    machine.handle(Input::TimerFired(Timer::Reconnect));
+    machine.fire(Timer::Reconnect);
 
     let actions = machine.handle(Input::Reconnect);
 

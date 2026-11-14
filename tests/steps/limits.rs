@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use cucumber::{given, then, when};
-use ferrifuge::machine::{Action, Input, Machine, Timer, TransportKind};
+use ferrifuge::machine::{Action, Input, Machine, Timer, TimerSetting, TransportKind};
 use ferrifuge::{Client, ClientEvent, Config, ErrorKind, Protocol, codes};
 use prost::Message as _;
 
@@ -179,7 +179,7 @@ async fn within_the_handshake_timeout_an_error(
 struct OpenRun {
     machine: Machine,
     now: Duration,
-    timers: Vec<(Timer, Duration)>,
+    timers: Vec<(Timer, Duration, TimerSetting)>,
     opened: Vec<(ferrifuge::machine::TransportId, TransportKind)>,
     failed: bool,
     /// When the websocket opened.
@@ -190,11 +190,11 @@ impl OpenRun {
     fn handle(&mut self, input: Input) {
         for action in self.machine.handle(input) {
             match action {
-                Action::SetTimer(timer, after) => {
-                    self.timers.retain(|(set, _)| *set != timer);
-                    self.timers.push((timer, self.now + after));
+                Action::SetTimer(timer, after, setting) => {
+                    self.timers.retain(|(set, _, _)| *set != timer);
+                    self.timers.push((timer, self.now + after, setting));
                 }
-                Action::CancelTimer(timer) => self.timers.retain(|(set, _)| *set != timer),
+                Action::CancelTimer(timer) => self.timers.retain(|(set, _, _)| *set != timer),
                 Action::OpenTransport {
                     transport, kind, ..
                 } => self.opened.push((transport, kind)),
@@ -210,15 +210,15 @@ impl OpenRun {
             let due = self
                 .timers
                 .iter()
-                .filter(|(_, at)| *at <= until)
-                .min_by_key(|(_, at)| *at)
+                .filter(|(_, at, _)| *at <= until)
+                .min_by_key(|(_, at, _)| *at)
                 .copied();
-            let Some((timer, at)) = due else {
+            let Some((timer, at, setting)) = due else {
                 break;
             };
-            self.timers.retain(|(set, _)| *set != timer);
+            self.timers.retain(|(set, _, _)| *set != timer);
             self.now = at;
-            self.handle(Input::TimerFired(timer));
+            self.handle(Input::TimerFired(timer, setting));
         }
         self.now = until;
     }

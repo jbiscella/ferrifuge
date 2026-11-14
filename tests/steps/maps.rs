@@ -2147,7 +2147,7 @@ fn a_core_whose_recovery_fails(world: &mut ClientWorld, channel: String, min: u6
         code: None,
         reason: String::new(),
     });
-    let reconnecting = core.machine.handle(Input::TimerFired(Timer::Reconnect));
+    let reconnecting = core.machine.fire(Timer::Reconnect);
     core.open(&reconnecting);
     let [recovering] = &core.subscribes()[..] else {
         panic!("one subscribe command in {:?}", core.actions);
@@ -2189,7 +2189,7 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
         .actions
         .iter()
         .find_map(|action| match action {
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, delay)
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, delay, ..)
                 if *of == id =>
             {
                 Some(*delay)
@@ -2202,9 +2202,14 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
         "{delay:?}"
     );
     assert!(core.subscribes().is_empty(), "{:?}", core.actions);
+    let setting = core
+        .machine
+        .subscription_timer_setting(id, SubscriptionTimer::Resubscribe)
+        .expect("resubscribe set");
     core.handle(Input::SubscriptionTimerFired(
         id,
         SubscriptionTimer::Resubscribe,
+        setting,
     ));
     let [again] = &core.subscribes()[..] else {
         panic!("one subscribe command in {:?}", core.actions);

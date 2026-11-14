@@ -455,6 +455,7 @@ impl MapSubscriptionBuilder {
     /// either kind; for a tag filter the server would refuse, or one with
     /// delta.
     pub fn build(self) -> Result<MapSubscription, SubscriptionError> {
+        crate::subscription::check_resubscribe_delays(&self.options.common)?;
         let mut core = lock(&self.shared.core);
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(SubscriptionError::ClientClosed);

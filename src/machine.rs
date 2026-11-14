@@ -1,14 +1,15 @@
 //! Sans-IO core: the client connection state machine.
 //!
-//! Timers are named by kind, not by setting: [`Input::TimerFired`],
-//! [`Input::SubscriptionTimerFired`] and [`Input::CallTimerFired`] carry no
-//! number, so the machine cannot tell a stale firing from a current one.
-//! The owner feeds only the firing of a setting still running, and drops
-//! one taken before a later set or cancel of that timer was performed,
-//! including one the machine issues in answer to an input fed ahead of the
-//! firing, such as [`Input::Slept`]. A stale `Timer::ServerPing` firing
-//! would otherwise disconnect a healthy connection. The tokio and browser
-//! adapters do this (Block 25, D1).
+//! Timers are numbered by setting: each [`Action::SetTimer`],
+//! [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] carries a
+//! [`TimerSetting`] the machine never gives again. The owner returns it
+//! unchanged in the [`Input::TimerFired`], [`Input::SubscriptionTimerFired`]
+//! or [`Input::CallTimerFired`] of that setting; a timer shortened by
+//! [`Action::ShortenTimer`] or [`Action::ShortenSubscriptionTimer`] keeps
+//! its setting. The machine ignores a firing whose setting no longer runs,
+//! because it cancelled that timer, set it again or already took its
+//! firing: the step returns no action. The owner need not drop a late
+//! firing, whatever it fed in between, [`Input::Slept`] included.
 //!
 //! A [`Machine`] owns no sockets, timers or tasks. Its owner feeds it
 //! [`Input`]s and performs the returned [`Action`]s in order. The tokio
@@ -17,7 +18,7 @@
 //! Behaviour follows the Client SDK spec, with centrifuge-js as the
 //! implementation reference (`src/centrifuge.ts`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 mod batching;
@@ -207,6 +208,89 @@ pub struct DebounceTimer(u64);
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SharedPollTimer(pub(crate) u64);
+
+/// The number the machine gives a setting of a timer (Block 53 D1), carried
+/// by [`Action::SetTimer`], [`Action::SetSubscriptionTimer`] and
+/// [`Action::SetCallTimer`] and returned by the firing of that setting. One
+/// counter, shared by the three timer families, counts up for the
+/// machine's lifetime, so no number is given twice; a wrap is not handled,
+/// as for [`TransportId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TimerSetting(u64);
+
+impl TimerSetting {
+    /// A setting for the adapter's unit tests.
+    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
+    pub(crate) fn for_tests(n: u64) -> Self {
+        Self(n)
+    }
+}
+
+/// A timer of the machine, of any family, by which its running setting is
+/// kept (Block 53 D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TimerKey {
+    Client(Timer),
+    Subscription(SubscriptionId, SubscriptionTimer),
+    Call(CallId, CallTimer),
+}
+
+impl TimerKey {
+    /// The timer whose firing `input` is, with its setting.
+    fn fired(input: &Input) -> Option<(Self, TimerSetting)> {
+        match input {
+            Input::TimerFired(timer, setting) => Some((Self::Client(*timer), *setting)),
+            Input::SubscriptionTimerFired(id, timer, setting) => {
+                Some((Self::Subscription(*id, *timer), *setting))
+            }
+            Input::CallTimerFired(id, timer, setting) => Some((Self::Call(*id, *timer), *setting)),
+            _ => None,
+        }
+    }
+}
+
+/// The settings of the machine's timers (Block 53 D1, D2): the next number
+/// to give, and the setting running for each timer.
+#[derive(Debug, Default)]
+struct TimerSettings {
+    next: u64,
+    running: HashMap<TimerKey, TimerSetting>,
+}
+
+impl TimerSettings {
+    fn give(&mut self) -> TimerSetting {
+        let setting = TimerSetting(self.next);
+        self.next += 1;
+        setting
+    }
+
+    /// Follows an action of the step, in order: a set runs its setting, a
+    /// cancel ends it.
+    fn follow(&mut self, action: &Action) {
+        match action {
+            Action::SetTimer(timer, _, setting) => {
+                self.running.insert(TimerKey::Client(*timer), *setting);
+            }
+            Action::SetSubscriptionTimer(id, timer, _, setting) => {
+                self.running
+                    .insert(TimerKey::Subscription(*id, *timer), *setting);
+            }
+            Action::SetCallTimer(id, timer, _, setting) => {
+                self.running.insert(TimerKey::Call(*id, *timer), *setting);
+            }
+            Action::CancelTimer(timer) => {
+                self.running.remove(&TimerKey::Client(*timer));
+            }
+            Action::CancelSubscriptionTimer(id, timer) => {
+                self.running.remove(&TimerKey::Subscription(*id, *timer));
+            }
+            Action::CancelCallTimer(id, timer) => {
+                self.running.remove(&TimerKey::Call(*id, *timer));
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Identifies a call the machine settles with [`Action::CallSettled`];
 /// [`Machine::add_call`] gives it.
@@ -725,9 +809,10 @@ pub enum Input {
         /// The frame.
         frame: FrameId,
     },
-    /// A timer set by [`Action::SetTimer`] fired, and was neither set again
-    /// nor cancelled since (see the module documentation).
-    TimerFired(Timer),
+    /// The timer of this setting, set by [`Action::SetTimer`], fired; a
+    /// firing of a setting no longer running is ignored (see the module
+    /// documentation).
+    TimerFired(Timer, TimerSetting),
     /// A timer set by [`Action::SetDebounceTimer`] fired (Block 46): the
     /// window sends the latest value it holds, if any, and opens anew, or
     /// closes. One whose window is gone is ignored.
@@ -783,9 +868,10 @@ pub enum Input {
     Unsubscribe(SubscriptionId),
     /// The application removed a subscription from the registry.
     RemoveSubscription(SubscriptionId),
-    /// A timer set by [`Action::SetSubscriptionTimer`] fired, and was
-    /// neither set again nor cancelled since (see the module documentation).
-    SubscriptionTimerFired(SubscriptionId, SubscriptionTimer),
+    /// The timer of this setting, set by [`Action::SetSubscriptionTimer`],
+    /// fired; a firing of a setting no longer running is ignored (see the
+    /// module documentation).
+    SubscriptionTimerFired(SubscriptionId, SubscriptionTimer, TimerSetting),
     /// The data callback answered a [`Action::FetchSubscriptionData`].
     SubscriptionDataFetched {
         /// The fetch answered.
@@ -841,9 +927,10 @@ pub enum Input {
     /// sent when the client is connected, waiting for the connection
     /// until then.
     Call(CallId),
-    /// A timer set by [`Action::SetCallTimer`] fired, and was neither set
-    /// again nor cancelled since (see the module documentation).
-    CallTimerFired(CallId, CallTimer),
+    /// The timer of this setting, set by [`Action::SetCallTimer`], fired; a
+    /// firing of a setting no longer running is ignored (see the module
+    /// documentation).
+    CallTimerFired(CallId, CallTimer, TimerSetting),
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting. A map
     /// remove that publishes follow goes on for them (Block 46, D11).
@@ -965,8 +1052,9 @@ pub enum Action {
         /// How the frame travels on transports with typed frames.
         frame_type: FrameType,
     },
-    /// Start a timer, replacing a running one of the same kind.
-    SetTimer(Timer, Duration),
+    /// Start a timer, replacing a running one of the same kind, as the
+    /// setting given: its firing returns it.
+    SetTimer(Timer, Duration, TimerSetting),
     /// Stop a timer if it runs.
     CancelTimer(Timer),
     /// Deliver an event to the application; report it with
@@ -983,8 +1071,9 @@ pub enum Action {
     /// Stop a [`Action::FetchConnectData`] still running: its answer is no
     /// longer wanted.
     CancelConnectData(FetchId),
-    /// Start a subscription's timer, replacing a running one of the kind.
-    SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
+    /// Start a subscription's timer, replacing a running one of the kind, as
+    /// the setting given: its firing returns it.
+    SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration, TimerSetting),
     /// Stop a subscription's timer if it runs.
     CancelSubscriptionTimer(SubscriptionId, SubscriptionTimer),
     /// Deliver an event to a subscription's listeners; report it with
@@ -1119,8 +1208,9 @@ pub enum Action {
     SetDebounceTimer(DebounceTimer, Duration),
     /// Stop a debounce window's timer if it runs.
     CancelDebounceTimer(DebounceTimer),
-    /// Start a call's timer, replacing its running one.
-    SetCallTimer(CallId, CallTimer, Duration),
+    /// Start a call's timer, replacing its running one, as the setting given:
+    /// its firing returns it.
+    SetCallTimer(CallId, CallTimer, Duration, TimerSetting),
     /// Stop a call's timer if it runs.
     CancelCallTimer(CallId, CallTimer),
     /// Give the application the outcome of a call; the call is forgotten.
@@ -1277,7 +1367,11 @@ impl std::fmt::Debug for Input {
                 .field("transport", transport)
                 .field("frame", frame)
                 .finish(),
-            Self::TimerFired(timer) => f.debug_tuple("TimerFired").field(timer).finish(),
+            Self::TimerFired(timer, setting) => f
+                .debug_tuple("TimerFired")
+                .field(timer)
+                .field(setting)
+                .finish(),
             Self::DebounceTimerFired(timer) => {
                 f.debug_tuple("DebounceTimerFired").field(timer).finish()
             }
@@ -1307,10 +1401,11 @@ impl std::fmt::Debug for Input {
             Self::Subscribe(id) => f.debug_tuple("Subscribe").field(id).finish(),
             Self::Unsubscribe(id) => f.debug_tuple("Unsubscribe").field(id).finish(),
             Self::RemoveSubscription(id) => f.debug_tuple("RemoveSubscription").field(id).finish(),
-            Self::SubscriptionTimerFired(id, timer) => f
+            Self::SubscriptionTimerFired(id, timer, setting) => f
                 .debug_tuple("SubscriptionTimerFired")
                 .field(id)
                 .field(timer)
+                .field(setting)
                 .finish(),
             Self::SubscriptionDataFetched { fetch, result } => f
                 .debug_struct("SubscriptionDataFetched")
@@ -1346,10 +1441,11 @@ impl std::fmt::Debug for Input {
             Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
             Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
             Self::Call(id) => f.debug_tuple("Call").field(id).finish(),
-            Self::CallTimerFired(id, timer) => f
+            Self::CallTimerFired(id, timer, setting) => f
                 .debug_tuple("CallTimerFired")
                 .field(id)
                 .field(timer)
+                .field(setting)
                 .finish(),
             Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
             Self::Slept { gap } => f.debug_struct("Slept").field("gap", gap).finish(),
@@ -1424,19 +1520,23 @@ impl std::fmt::Debug for Action {
                 .field("frame", &format_args!("<{} bytes>", frame.len()))
                 .field("frame_type", frame_type)
                 .finish(),
-            Self::SetTimer(timer, delay) => {
-                f.debug_tuple("SetTimer").field(timer).field(delay).finish()
-            }
+            Self::SetTimer(timer, delay, setting) => f
+                .debug_tuple("SetTimer")
+                .field(timer)
+                .field(delay)
+                .field(setting)
+                .finish(),
             Self::CancelTimer(timer) => f.debug_tuple("CancelTimer").field(timer).finish(),
             Self::Emit(id, event) => f.debug_tuple("Emit").field(id).field(event).finish(),
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
             Self::FetchConnectData(id) => f.debug_tuple("FetchConnectData").field(id).finish(),
             Self::CancelConnectData(id) => f.debug_tuple("CancelConnectData").field(id).finish(),
-            Self::SetSubscriptionTimer(id, timer, delay) => f
+            Self::SetSubscriptionTimer(id, timer, delay, setting) => f
                 .debug_tuple("SetSubscriptionTimer")
                 .field(id)
                 .field(timer)
                 .field(delay)
+                .field(setting)
                 .finish(),
             Self::CancelSubscriptionTimer(id, timer) => f
                 .debug_tuple("CancelSubscriptionTimer")
@@ -1545,11 +1645,12 @@ impl std::fmt::Debug for Action {
             Self::CancelDebounceTimer(timer) => {
                 f.debug_tuple("CancelDebounceTimer").field(timer).finish()
             }
-            Self::SetCallTimer(id, timer, delay) => f
+            Self::SetCallTimer(id, timer, delay, setting) => f
                 .debug_tuple("SetCallTimer")
                 .field(id)
                 .field(timer)
                 .field(delay)
+                .field(setting)
                 .finish(),
             Self::CancelCallTimer(id, timer) => f
                 .debug_tuple("CancelCallTimer")
@@ -1729,6 +1830,8 @@ pub struct Machine {
     batching: batching::Batching,
     /// Debounce windows of the subscriptions' publishes (Block 46).
     debouncing: debounce::Debouncing,
+    /// The settings of its timers (Block 53).
+    timer_settings: TimerSettings,
     actions: Vec<Action>,
 }
 
@@ -1903,6 +2006,7 @@ impl Machine {
             emulated_headers: EmulatedHeaders::default(),
             batching: batching::Batching::default(),
             debouncing: debounce::Debouncing::default(),
+            timer_settings: TimerSettings::default(),
             actions: Vec::new(),
         }
     }
@@ -1957,6 +2061,14 @@ impl Machine {
     /// Reacts to `input`; the owner performs the returned actions in order.
     #[allow(clippy::too_many_lines)] // One arm per variant.
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
+        // A firing of a setting no longer running changes nothing; taken,
+        // it no longer runs (Block 53 D2).
+        if let Some((key, setting)) = TimerKey::fired(&input) {
+            if self.timer_settings.running.get(&key) != Some(&setting) {
+                return Vec::new();
+            }
+            self.timer_settings.running.remove(&key);
+        }
         self.batching.application_unsubscribe =
             matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));
         match input {
@@ -2015,7 +2127,7 @@ impl Machine {
                 self.counters.written(frame);
                 self.frame_written(frame);
             }
-            Input::TimerFired(timer) => self.timer_fired(timer),
+            Input::TimerFired(timer, _) => self.timer_fired(timer),
             Input::DebounceTimerFired(timer) => self.debounce_timer_fired(timer),
             Input::TokenFetched { fetch, result } => {
                 if self.tokens.take_stale_fetch(fetch) {
@@ -2036,7 +2148,7 @@ impl Machine {
             Input::Subscribe(id) => self.subscribe(id),
             Input::Unsubscribe(id) => self.unsubscribe(id),
             Input::RemoveSubscription(id) => self.remove_subscription(id),
-            Input::SubscriptionTimerFired(id, timer) => self.subscription_timer_fired(id, timer),
+            Input::SubscriptionTimerFired(id, timer, _) => self.subscription_timer_fired(id, timer),
             Input::SubscriptionDataFetched { fetch, result } => {
                 self.subscription_data_fetched(fetch, result);
             }
@@ -2052,7 +2164,7 @@ impl Machine {
             | Input::StreamOpened(_)
             | Input::StreamClosed(_)) => self.delivery_input(input),
             Input::Call(id) => self.call(id),
-            Input::CallTimerFired(id, timer) => self.call_timer_fired(id, timer),
+            Input::CallTimerFired(id, timer, _) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),
             Input::Slept { gap } => self.slept(gap),
             #[cfg(feature = "unstable")]
@@ -2075,7 +2187,118 @@ impl Machine {
         // Taken or withdrawn events may let held messages follow; a
         // transport gone drops its own (Block 15).
         self.handle_inbound();
-        std::mem::take(&mut self.actions)
+        let actions = std::mem::take(&mut self.actions);
+        for action in &actions {
+            self.timer_settings.follow(action);
+        }
+        actions
+    }
+
+    /// Sets `timer` to fire after `delay`, as a new setting.
+    pub(crate) fn set_timer(&mut self, timer: Timer, delay: Duration) {
+        let setting = self.timer_settings.give();
+        self.actions.push(Action::SetTimer(timer, delay, setting));
+    }
+
+    /// Sets a subscription's `timer` to fire after `delay`, as a new setting.
+    pub(crate) fn set_subscription_timer(
+        &mut self,
+        id: SubscriptionId,
+        timer: SubscriptionTimer,
+        delay: Duration,
+    ) {
+        let setting = self.timer_settings.give();
+        self.actions
+            .push(Action::SetSubscriptionTimer(id, timer, delay, setting));
+    }
+
+    /// Sets a call's `timer` to fire after `delay`, as a new setting.
+    pub(crate) fn set_call_timer(&mut self, id: CallId, timer: CallTimer, delay: Duration) {
+        let setting = self.timer_settings.give();
+        self.actions
+            .push(Action::SetCallTimer(id, timer, delay, setting));
+    }
+
+    /// The settings running, by timer, as the step that returned last left
+    /// them: what `Client::armed_timers` lists as the core's (Block 52 D8).
+    #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
+    pub(crate) fn running_settings(&self) -> Vec<(TimerKey, TimerSetting)> {
+        self.timer_settings
+            .running
+            .iter()
+            .map(|(key, setting)| (*key, *setting))
+            .collect()
+    }
+
+    /// The setting running for `timer`, for tests driving the machine.
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn timer_setting(&self, timer: Timer) -> Option<TimerSetting> {
+        self.timer_settings
+            .running
+            .get(&TimerKey::Client(timer))
+            .copied()
+    }
+
+    /// The setting running for a subscription's `timer`, for tests.
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn subscription_timer_setting(
+        &self,
+        id: SubscriptionId,
+        timer: SubscriptionTimer,
+    ) -> Option<TimerSetting> {
+        self.timer_settings
+            .running
+            .get(&TimerKey::Subscription(id, timer))
+            .copied()
+    }
+
+    /// The setting running for a call's `timer`, for tests.
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn call_timer_setting(&self, id: CallId, timer: CallTimer) -> Option<TimerSetting> {
+        self.timer_settings
+            .running
+            .get(&TimerKey::Call(id, timer))
+            .copied()
+    }
+
+    /// The firing of `timer`'s running setting, or, when none runs, of a
+    /// number never given, which changes nothing: for tests.
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    pub fn fire(&mut self, timer: Timer) -> Vec<Action> {
+        let setting = self.timer_setting(timer).unwrap_or(TimerSetting(u64::MAX));
+        self.handle(Input::TimerFired(timer, setting))
+    }
+
+    /// The firing of a subscription timer's running setting, as
+    /// [`Machine::fire`].
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    pub fn fire_subscription(
+        &mut self,
+        id: SubscriptionId,
+        timer: SubscriptionTimer,
+    ) -> Vec<Action> {
+        let setting = self
+            .subscription_timer_setting(id, timer)
+            .unwrap_or(TimerSetting(u64::MAX));
+        self.handle(Input::SubscriptionTimerFired(id, timer, setting))
+    }
+
+    /// The firing of a call timer's running setting, as [`Machine::fire`].
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    pub fn fire_call(&mut self, id: CallId, timer: CallTimer) -> Vec<Action> {
+        let setting = self
+            .call_timer_setting(id, timer)
+            .unwrap_or(TimerSetting(u64::MAX));
+        self.handle(Input::CallTimerFired(id, timer, setting))
     }
 
     fn is_current(&self, id: TransportId) -> bool {
@@ -2215,7 +2438,7 @@ impl Machine {
                     transport: None,
                 }));
                 let delay = self.backoff.next_delay(&mut self.rng);
-                self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                self.set_timer(Timer::Reconnect, delay);
             }
         }
     }
@@ -2244,10 +2467,7 @@ impl Machine {
             initial_frame,
         });
         // The open first, then the connect reply (Block 29, D1).
-        self.actions.push(Action::SetTimer(
-            Timer::ConnectTimeout,
-            self.config.handshake_timeout,
-        ));
+        self.set_timer(Timer::ConnectTimeout, self.config.handshake_timeout);
     }
 
     fn transport_opened(&mut self) {
@@ -2260,8 +2480,7 @@ impl Machine {
         self.counters.opened();
         // Opened: the connect reply, or a token fetched first, has `timeout`
         // from now, on every transport kind (Block 29, D1).
-        self.actions
-            .push(Action::SetTimer(Timer::ConnectTimeout, self.config.timeout));
+        self.set_timer(Timer::ConnectTimeout, self.config.timeout);
         if self.transport_kind().is_emulated() {
             // The connect command went with the request; only its reply
             // proves the transport (centrifuge-js `onOpen`).
@@ -2773,7 +2992,7 @@ impl Machine {
                 delay += self.reconnect_jitter();
                 self.reconnecting_after_loss = true;
             }
-            self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+            self.set_timer(Timer::Reconnect, delay);
         } else {
             self.reconnecting_after_loss = false;
         }
@@ -2803,7 +3022,7 @@ impl Machine {
                 {
                     let delay = self.backoff.next_delay(&mut self.rng);
                     self.reconnecting_after_loss = after_loss;
-                    self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                    self.set_timer(Timer::Reconnect, delay);
                 }
             }
         }
@@ -2896,7 +3115,7 @@ impl Machine {
         if was_connected || (after_loss && !self.config.reconnect_jitter_window.is_zero()) {
             self.reconnecting_after_loss = true;
             let delay = self.reconnect_jitter();
-            self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+            self.set_timer(Timer::Reconnect, delay);
         } else {
             self.start_attempt();
         }
@@ -3109,7 +3328,7 @@ impl Machine {
                         self.reconnect_after_transport_closed();
                     } else {
                         let delay = self.backoff.next_delay(&mut self.rng);
-                        self.actions.push(Action::SetTimer(Timer::Reconnect, delay));
+                        self.set_timer(Timer::Reconnect, delay);
                     }
                 }
                 // Reconnecting: the next connection gets its own refresh timer.
@@ -3142,8 +3361,7 @@ impl Machine {
             }),
         };
         self.send(transport, command);
-        self.actions
-            .push(Action::SetTimer(Timer::RefreshReply, self.config.timeout));
+        self.set_timer(Timer::RefreshReply, self.config.timeout);
     }
 
     fn refreshed(&mut self, result: &RefreshResult) {
@@ -3169,12 +3387,12 @@ impl Machine {
 
     fn retry_refresh(&mut self) {
         let delay = backoff::delay(0, REFRESH_RETRY_MIN, REFRESH_RETRY_MAX, &mut self.rng);
-        self.actions.push(Action::SetTimer(Timer::Refresh, delay));
+        self.set_timer(Timer::Refresh, delay);
     }
 
     fn set_refresh_timer(&mut self, ttl_seconds: u32) {
         let delay = refresh_delay(ttl_seconds, &mut self.rng);
-        self.actions.push(Action::SetTimer(Timer::Refresh, delay));
+        self.set_timer(Timer::Refresh, delay);
     }
 
     /// centrifuge-js `_waitServerPing`: (re)arms the deadline for data from a
@@ -3193,8 +3411,7 @@ impl Machine {
         let deadline = pings
             .interval
             .saturating_add(self.config.max_server_ping_delay);
-        self.actions
-            .push(Action::SetTimer(Timer::ServerPing, deadline));
+        self.set_timer(Timer::ServerPing, deadline);
     }
 
     fn pong(&mut self) {
@@ -3355,7 +3572,7 @@ mod tests {
                     transport,
                     message: "refused".into(),
                 });
-                transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+                transport = opened_transport(&machine.fire(Timer::Reconnect));
             }
 
             let restarted = opened_transport(&machine.handle(Input::Reconnect));
@@ -3367,7 +3584,7 @@ mod tests {
             let delay = failed
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                    Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
                     _ => None,
                 })
                 .expect("a reconnect delay");
@@ -3384,8 +3601,8 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
-        machine.handle(Input::TimerFired(Timer::Refresh));
+        let transport = opened_transport(&machine.fire(Timer::Reconnect));
+        machine.fire(Timer::Refresh);
 
         let opened = machine.handle(Input::TransportOpened(transport));
         let fetch = fetch_requested(&opened);
@@ -3425,8 +3642,8 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
-        machine.handle(Input::TimerFired(Timer::Refresh));
+        let transport = opened_transport(&machine.fire(Timer::Reconnect));
+        machine.fire(Timer::Refresh);
         let fetch = fetch_requested(&machine.handle(Input::TransportOpened(transport)));
 
         let failed = machine.handle(Input::TokenFetched {
@@ -3441,7 +3658,7 @@ mod tests {
         assert!(
             failed
                 .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
             "{failed:?}"
         );
         assert_eq!(machine.state(), State::Connecting);
@@ -3476,8 +3693,8 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        let again = fetch_data(&machine.handle(Input::TimerFired(Timer::Reconnect)));
-        machine.handle(Input::TimerFired(Timer::Refresh));
+        let again = fetch_data(&machine.fire(Timer::Reconnect));
+        machine.fire(Timer::Refresh);
 
         let answered = machine.handle(Input::ConnectDataFetched {
             fetch: again,
@@ -3518,7 +3735,7 @@ mod tests {
                 .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
             "{lost:?}"
         );
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let transport = opened_transport(&machine.fire(Timer::Reconnect));
         machine.handle(Input::TransportOpened(transport));
 
         let connected = machine.handle(frame(transport, r#"{"id":2,"connect":{"client":"c"}}"#));
@@ -3547,9 +3764,9 @@ mod tests {
             assert!(matches!(events[0], ClientEvent::Error(e) if e.kind == ErrorKind::Transport));
             assert!(matches!(
                 actions.last(),
-                Some(Action::SetTimer(Timer::Reconnect, _))
+                Some(Action::SetTimer(Timer::Reconnect, ..))
             ));
-            transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+            transport = opened_transport(&machine.fire(Timer::Reconnect));
         }
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -3593,7 +3810,10 @@ mod tests {
         let next = if machine.state == State::Disconnected {
             Input::Connect
         } else {
-            Input::TimerFired(Timer::Reconnect)
+            let setting = machine
+                .timer_setting(Timer::Reconnect)
+                .expect("a reconnect timer");
+            Input::TimerFired(Timer::Reconnect, setting)
         };
         let transport = opened_transport(&machine.handle(next));
         machine.handle(Input::TransportOpened(transport));
@@ -3613,7 +3833,7 @@ mod tests {
         actions
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+                Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
                 _ => None,
             })
             .expect("a reconnect")
@@ -3658,7 +3878,7 @@ mod tests {
                 .iter()
                 .any(|action| matches!(action, Action::OpenTransport { .. }))
             {
-                actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+                actions = machine.fire(Timer::Reconnect);
             }
 
             let kind = actions.iter().find_map(|action| match action {
@@ -3735,7 +3955,7 @@ mod tests {
     fn connect_timeout_fails_the_attempt() {
         let (mut machine, transport) = awaiting_connect_reply();
 
-        let actions = machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+        let actions = machine.fire(Timer::ConnectTimeout);
 
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert!(matches!(
@@ -3748,8 +3968,8 @@ mod tests {
     #[test]
     fn inputs_about_an_abandoned_transport_are_ignored() {
         let (mut machine, stale) = awaiting_connect_reply();
-        machine.handle(Input::TimerFired(Timer::ConnectTimeout));
-        opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.fire(Timer::ConnectTimeout);
+        opened_transport(&machine.fire(Timer::Reconnect));
 
         let actions = machine.handle(frame(stale, r#"{"id":1,"connect":{"client":"c"}}"#));
 
@@ -3777,7 +3997,7 @@ mod tests {
         assert_eq!(machine.state(), State::Connecting);
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, _))
+            Some(Action::SetTimer(Timer::Reconnect, ..))
         ));
     }
 
@@ -3810,7 +4030,7 @@ mod tests {
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, _))
+            Some(Action::SetTimer(Timer::Reconnect, ..))
         ));
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -3861,7 +4081,7 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::SetTimer(Timer::ConnectTimeout, after) => Some(*after),
+                Action::SetTimer(Timer::ConnectTimeout, after, ..) => Some(*after),
                 _ => None,
             })
             .collect()
@@ -3908,7 +4128,7 @@ mod tests {
         let mut machine = machine();
         let transport = opened_transport(&machine.handle(Input::Connect));
 
-        let actions = machine.handle(Input::TimerFired(Timer::ConnectTimeout));
+        let actions = machine.fire(Timer::ConnectTimeout);
 
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert!(matches!(
@@ -3939,8 +4159,11 @@ mod tests {
             "{actions:?}"
         );
         // Within the first sequence, at once.
-        assert!(actions.contains(&Action::SetTimer(Timer::Reconnect, Duration::ZERO)));
-        let next = machine.handle(Input::TimerFired(Timer::Reconnect));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::SetTimer(Timer::Reconnect, Duration::ZERO, _)
+        )));
+        let next = machine.fire(Timer::Reconnect);
         assert_eq!(opened_kind(&next), Some(TransportKind::HttpStream));
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -3963,7 +4186,7 @@ mod tests {
         assert!(
             !actions
                 .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
             "{actions:?}"
         );
         assert_eq!(machine.state(), State::Disconnected);
@@ -4083,7 +4306,7 @@ mod tests {
 
     fn refresh_timer(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::Refresh, delay) => Some(*delay),
+            Action::SetTimer(Timer::Refresh, delay, ..) => Some(*delay),
             _ => None,
         })
     }
@@ -4121,12 +4344,19 @@ mod tests {
     #[test]
     fn refresh_sends_the_fetched_token_and_rearms_on_reply() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
 
         let sent = machine.handle(Input::TokenFetched {
             fetch,
             result: Ok("t1".into()),
         });
+        let reply_deadline = sent
+            .iter()
+            .find_map(|action| match action {
+                Action::SetTimer(Timer::RefreshReply, _, setting) => Some(*setting),
+                _ => None,
+            })
+            .expect("a refresh reply deadline");
         let rearmed = machine.handle(frame(
             transport,
             r#"{"id":2,"refresh":{"expires":true,"ttl":60}}"#,
@@ -4142,7 +4372,11 @@ mod tests {
                     frame: br#"{"id":2,"refresh":{"token":"t1"}}"#.to_vec(),
                     frame_type: FrameType::Text,
                 },
-                Action::SetTimer(Timer::RefreshReply, Config::default().timeout)
+                Action::SetTimer(
+                    Timer::RefreshReply,
+                    Config::default().timeout,
+                    reply_deadline
+                )
             ]
         );
         let delay = refresh_timer(&rearmed).expect("a refresh timer");
@@ -4155,17 +4389,14 @@ mod tests {
     #[test]
     fn unanswered_refresh_times_out_and_is_retried() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
         let sent = machine.handle(Input::TokenFetched {
             fetch,
             result: Ok("t1".into()),
         });
-        assert!(sent.contains(&Action::SetTimer(
-            Timer::RefreshReply,
-            Config::default().timeout
-        )));
+        assert!(sent.iter().any(|action| matches!(action, Action::SetTimer(Timer::RefreshReply, a1, _) if *a1 == Config::default().timeout)));
 
-        let actions = machine.handle(Input::TimerFired(Timer::RefreshReply));
+        let actions = machine.fire(Timer::RefreshReply);
         let late = machine.handle(frame(
             transport,
             r#"{"id":2,"refresh":{"expires":true,"ttl":60}}"#,
@@ -4187,7 +4418,7 @@ mod tests {
     #[test]
     fn denial_arriving_after_the_transport_dropped_still_disconnects() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
         machine.handle(Input::TransportClosed {
             transport,
             code: None,
@@ -4266,7 +4497,7 @@ mod tests {
     #[test]
     fn late_refresh_token_after_reconnect_is_discarded() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let stale = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let stale = fetch_requested(&machine.fire(Timer::Refresh));
         machine.handle(Input::TransportClosed {
             transport,
             code: None,
@@ -4274,7 +4505,7 @@ mod tests {
         });
         // The refresh got no token: the attempt fetches one first (Block 25,
         // D3).
-        let attempt = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let attempt = fetch_requested(&machine.fire(Timer::Reconnect));
         let transport = opened_transport(&machine.handle(Input::TokenFetched {
             fetch: attempt,
             result: Ok("t0b".into()),
@@ -4287,7 +4518,7 @@ mod tests {
 
         // The new connection refreshes on its own schedule, without waiting
         // for the fetch of the old one.
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
         let refreshed = machine.handle(Input::TokenFetched {
             fetch,
             result: Ok("t2".into()),
@@ -4312,7 +4543,7 @@ mod tests {
     #[test]
     fn a_refresh_rejected_as_too_large_disconnects() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
         let refreshing = machine.handle(Input::TokenFetched {
             fetch,
             result: Ok("t1".into()),
@@ -4339,7 +4570,7 @@ mod tests {
     #[test]
     fn late_refresh_token_while_reconnecting_is_not_used_for_the_connect() {
         let (mut machine, transport, _) = connected_with_token(30);
-        let stale = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let stale = fetch_requested(&machine.fire(Timer::Refresh));
         machine.handle(Input::TransportClosed {
             transport,
             code: None,
@@ -4352,7 +4583,7 @@ mod tests {
 
         // The refresh got no token: the attempt fetches one first (Block 25,
         // D3), and the late one is not used.
-        let attempt = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let attempt = fetch_requested(&machine.fire(Timer::Reconnect));
         let transport = opened_transport(&machine.handle(Input::TokenFetched {
             fetch: attempt,
             result: Ok("t2".into()),
@@ -4387,7 +4618,7 @@ mod tests {
     fn denied_or_empty_token_disconnects_as_unauthorized() {
         for result in [Err(TokenError::Unauthorized), Ok(String::new())] {
             let (mut machine, _, _) = connected_with_token(30);
-            let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+            let fetch = fetch_requested(&machine.fire(Timer::Refresh));
 
             let actions = machine.handle(Input::TokenFetched { fetch, result });
 
@@ -4404,7 +4635,7 @@ mod tests {
     #[test]
     fn failed_refresh_fetch_is_reported_and_retried_in_5_to_10_s() {
         let (mut machine, _, _) = connected_with_token(30);
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
 
         let actions = machine.handle(Input::TokenFetched {
             fetch,
@@ -4434,7 +4665,7 @@ mod tests {
             (r#"{"code":403,"message":"forbidden"}"#, true),
         ] {
             let (mut machine, transport, _) = connected_with_token(30);
-            let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+            let fetch = fetch_requested(&machine.fire(Timer::Refresh));
             machine.handle(Input::TokenFetched {
                 fetch,
                 result: Ok("t1".into()),
@@ -4461,7 +4692,7 @@ mod tests {
             r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":30}}"#,
         ));
 
-        let actions = machine.handle(Input::TimerFired(Timer::Refresh));
+        let actions = machine.fire(Timer::Refresh);
 
         assert!(matches!(
             events(&actions)[..],
@@ -4489,7 +4720,7 @@ mod tests {
         let sent = machine.handle(Input::TransportOpened(transport));
 
         assert!(
-            matches!(&sent[..], [Action::SetTimer(Timer::ConnectTimeout, _), Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
+            matches!(&sent[..], [Action::SetTimer(Timer::ConnectTimeout, ..), Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
             "{sent:?}"
         );
     }
@@ -4504,7 +4735,7 @@ mod tests {
             r#"{"id":1,"error":{"code":109,"message":"token expired"}}"#,
         ));
 
-        let actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let actions = machine.fire(Timer::Reconnect);
 
         fetch_requested(&actions);
         assert!(
@@ -4538,8 +4769,8 @@ mod tests {
         });
         // The refresh timer fires while connecting (Block 25 D3): the next
         // attempt fetches a new token.
-        machine.handle(Input::TimerFired(Timer::Refresh));
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        machine.fire(Timer::Refresh);
+        let fetch = fetch_requested(&machine.fire(Timer::Reconnect));
         let mut actions = machine.handle(Input::TokenFetched {
             fetch,
             result: Ok("t2".into()),
@@ -4547,7 +4778,7 @@ mod tests {
         let transport = opened_transport(&actions);
         actions.extend(machine.handle(Input::TransportOpened(transport)));
         // No connect reply: the attempt times out.
-        actions.extend(machine.handle(Input::TimerFired(Timer::ConnectTimeout)));
+        actions.extend(machine.fire(Timer::ConnectTimeout));
         actions.extend(machine.handle(Input::TransportClosed {
             transport,
             code: None,
@@ -4556,12 +4787,12 @@ mod tests {
         assert!(
             !actions
                 .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Refresh, _))),
+                .any(|action| matches!(action, Action::SetTimer(Timer::Refresh, ..))),
             "a refresh timer for t2: {actions:?}"
         );
 
         // The next attempt sends t2 again, with no fetch.
-        let actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let actions = machine.fire(Timer::Reconnect);
         assert!(
             !actions
                 .iter()
@@ -4599,7 +4830,7 @@ mod tests {
             &format!(r#"{{"id":{id},"error":{{"code":109,"message":"token expired"}}}}"#),
         ));
         assert_eq!(machine.backoff.attempt(), before + 1, "the counter kept");
-        fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        fetch_requested(&machine.fire(Timer::Reconnect));
     }
 
     #[test]
@@ -4622,7 +4853,7 @@ mod tests {
         ));
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, _))
+            Some(Action::SetTimer(Timer::Reconnect, ..))
         ));
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -4636,7 +4867,7 @@ mod tests {
             transport,
             r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":60}}"#,
         ));
-        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Refresh)));
+        let fetch = fetch_requested(&machine.fire(Timer::Refresh));
         machine.handle(Input::TransportClosed {
             transport,
             code: Some(3014),
@@ -4648,7 +4879,7 @@ mod tests {
             fetch,
             result: Ok("stale".into()),
         });
-        let reconnecting = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let reconnecting = machine.fire(Timer::Reconnect);
 
         assert!(
             reconnecting
@@ -4677,7 +4908,7 @@ mod tests {
             reason: "state invalidated".into(),
         });
 
-        let transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let transport = opened_transport(&machine.fire(Timer::Reconnect));
         let opened = machine.handle(Input::TransportOpened(transport));
 
         // No callback could replace it: the connect sends it again, as
@@ -4728,7 +4959,7 @@ mod tests {
 
     fn server_ping_timer(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::ServerPing, delay) => Some(*delay),
+            Action::SetTimer(Timer::ServerPing, delay, ..) => Some(*delay),
             _ => None,
         })
     }
@@ -4770,7 +5001,7 @@ mod tests {
     fn missing_ping_reconnects_with_no_ping_code() {
         let (mut machine, transport, _) = connected_with_ping(25, Duration::from_secs(10));
 
-        let actions = machine.handle(Input::TimerFired(Timer::ServerPing));
+        let actions = machine.fire(Timer::ServerPing);
 
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert_eq!(
@@ -4833,7 +5064,7 @@ mod tests {
                 transport,
                 message: "refused".into(),
             });
-            transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+            transport = opened_transport(&machine.fire(Timer::Reconnect));
         }
         machine.handle(Input::TransportOpened(transport));
         let id = machine.connect_command.expect("connect sent");
@@ -4848,7 +5079,7 @@ mod tests {
             reason: String::new(),
         });
 
-        let Some(Action::SetTimer(Timer::Reconnect, delay)) = actions.last() else {
+        let Some(Action::SetTimer(Timer::Reconnect, delay, ..)) = actions.last() else {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");
@@ -4927,7 +5158,7 @@ mod tests {
                 transport,
                 message: "refused".into(),
             });
-            transport = opened_transport(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+            transport = opened_transport(&machine.fire(Timer::Reconnect));
         }
         machine.handle(Input::Disconnect);
         let transport = opened_transport(&machine.handle(Input::Connect));
@@ -4937,7 +5168,7 @@ mod tests {
             message: "refused".into(),
         });
 
-        let Some(Action::SetTimer(Timer::Reconnect, delay)) = actions.last() else {
+        let Some(Action::SetTimer(Timer::Reconnect, delay, ..)) = actions.last() else {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");

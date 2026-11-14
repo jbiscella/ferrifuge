@@ -318,14 +318,16 @@ fn the_data_callback_is_called_again(world: &mut ClientWorld) {
         .actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, delay) => Some(*delay),
+            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, delay, ..) => Some(*delay),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no reconnect scheduled: {:?}", run.actions));
     let min = Config::default().min_reconnect_delay;
     assert!((min..=min * 2).contains(&delay), "{delay:?}");
     assert_eq!(run.data_calls(), 1, "called again before the delay");
-    run.handle(Input::TimerFired(ferrifuge::machine::Timer::Reconnect));
+    let reconnect = ferrifuge::machine::Timer::Reconnect;
+    let setting = run.machine.timer_setting(reconnect).expect("reconnect set");
+    run.handle(Input::TimerFired(reconnect, setting));
     assert_eq!(run.data_calls(), 2, "{:?}", run.actions);
 }
 
@@ -351,7 +353,7 @@ fn no_reconnect_is_scheduled(world: &mut ClientWorld) {
     assert!(
         !run.actions.iter().any(|action| matches!(
             action,
-            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, _)
+            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, ..)
         )),
         "{:?}",
         run.actions
@@ -916,7 +918,9 @@ fn the_token_callback_is_called_first(world: &mut ClientWorld) {
         .as_mut()
         .expect("a 17c token run");
     let from = run.actions.len();
-    let transport = run.handle(Input::TimerFired(ferrifuge::machine::Timer::Reconnect));
+    let reconnect = ferrifuge::machine::Timer::Reconnect;
+    let setting = run.machine.timer_setting(reconnect).expect("reconnect set");
+    let transport = run.handle(Input::TimerFired(reconnect, setting));
     let fetch = run.actions[from..]
         .iter()
         .find_map(|action| match action {

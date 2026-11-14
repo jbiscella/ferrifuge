@@ -33,7 +33,7 @@ fn connect_id(actions: &[Action]) -> u64 {
 
 fn reconnect_delay(actions: &[Action]) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetTimer(Timer::Reconnect, delay) => Some(*delay),
+        Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
         _ => None,
     })
 }
@@ -68,8 +68,7 @@ fn an_unsupported_transport_is_skipped_without_an_error_or_a_failed_attempt() {
         transport: websocket,
         message: "refused".into(),
     });
-    let (sse, kind) =
-        opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).expect("the next attempt");
+    let (sse, kind) = opened(&machine.fire(Timer::Reconnect)).expect("the next attempt");
     assert_eq!(kind, TransportKind::Sse);
 
     let actions = machine.handle(Input::TransportUnsupported(sse));
@@ -129,8 +128,8 @@ fn the_next_attempt_skips_again_from_where_the_round_stands() {
         }
     }
 
-    let (_, kind) = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)))
-        .expect("the next attempt after the delay");
+    let (_, kind) =
+        opened(&machine.fire(Timer::Reconnect)).expect("the next attempt after the delay");
 
     assert_eq!(kind, TransportKind::WebSocket);
 }
@@ -163,7 +162,7 @@ fn skipping_a_chosen_transport_moves_to_the_next() {
         code: None,
         reason: String::new(),
     });
-    let (again, kind) = opened(&machine.handle(Input::TimerFired(Timer::Reconnect))).unwrap();
+    let (again, kind) = opened(&machine.fire(Timer::Reconnect)).unwrap();
     assert_eq!(kind, TransportKind::WebSocket);
 
     let (_, kind) =
@@ -206,7 +205,12 @@ fn a_websocket_after_a_skip_sends_its_connect_once_a_token_is_fetched() {
     let (sse, _) = opened(&machine.handle(Input::Connect)).expect("an attempt");
     let (websocket, _) =
         opened(&machine.handle(Input::TransportUnsupported(sse))).expect("the next transport");
-    machine.handle(Input::TimerFired(Timer::Refresh));
+    // A refresh timer an earlier connection set, still running across the
+    // attempts, fires while connecting (Block 25 D3): a setting the core
+    // gave, as any firing it acts on must be (Block 53 D2).
+    machine.set_timer(Timer::Refresh, Duration::from_secs(60));
+    machine.handle(Input::Flush);
+    machine.fire(Timer::Refresh);
     let fetch = machine
         .handle(Input::TransportOpened(websocket))
         .iter()

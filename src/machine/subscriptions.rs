@@ -533,11 +533,7 @@ impl Machine {
         let started_by = self.subscribe_sent(id, command_id);
         let held = holding && started_by == StartedBy::Application;
         self.send_or_hold(transport, held, command);
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-            self.config.timeout,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::SubscribeReply, self.config.timeout);
     }
 
     /// Command `command_id` is now the subscribe of `id` in flight; who
@@ -674,11 +670,11 @@ impl Machine {
     pub(super) fn start_optimistic_deadlines(&mut self) {
         for (command, id) in std::mem::take(&mut self.subscriptions.optimistic) {
             if self.subscriptions.subscribes.contains_key(&command) {
-                self.actions.push(Action::SetSubscriptionTimer(
+                self.set_subscription_timer(
                     id,
                     SubscriptionTimer::SubscribeReply,
                     self.config.timeout,
-                ));
+                );
             }
         }
     }
@@ -713,11 +709,7 @@ impl Machine {
                 method: Method::Unsubscribe(UnsubscribeRequest { channel }),
             },
         );
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::UnsubscribeReply,
-            self.config.timeout,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::UnsubscribeReply, self.config.timeout);
     }
 
     /// Lets the subscriptions waiting on `channel` subscribe once no command
@@ -792,11 +784,7 @@ impl Machine {
         };
         let delay = sub.backoff.next_delay(&mut self.rng);
         sub.resubscribe_pending = true;
-        self.actions.push(Action::SetSubscriptionTimer(
-            id,
-            SubscriptionTimer::Resubscribe,
-            delay,
-        ));
+        self.set_subscription_timer(id, SubscriptionTimer::Resubscribe, delay);
     }
 
     pub(super) fn subscription_timer_fired(
@@ -1822,7 +1810,7 @@ mod tests {
             code: Some(code),
             reason: "closed by the test".into(),
         });
-        machine.handle(Input::TimerFired(Timer::Reconnect))
+        machine.fire(Timer::Reconnect)
     }
 
     /// Subscribes `id` over `transport`, the server answering command 2
@@ -2104,7 +2092,7 @@ mod tests {
         assert!(
             !panicked
                 .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, _))),
+                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
             "{panicked:?}"
         );
         assert_eq!(machine.statistics().publications_delivered, 0);
@@ -2215,7 +2203,7 @@ mod tests {
         });
         assert!(!machine.wants_frames());
 
-        let fired = machine.handle(Input::TimerFired(Timer::ServerPing));
+        let fired = machine.fire(Timer::ServerPing);
 
         assert_eq!(machine.state(), State::Connected, "{fired:?}");
     }
@@ -2382,7 +2370,7 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        let reconnect = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let reconnect = machine.fire(Timer::Reconnect);
         let again = opened(&reconnect).expect("a new attempt");
 
         // Sent with the connect command (Block 36, D5).
@@ -2688,11 +2676,8 @@ mod tests {
     #[test]
     fn a_refresh_due_while_resubscribing_fetches_a_token_before_the_subscribe() {
         let (mut machine, id, _) = token_subscription_lost();
-        machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Refresh,
-        ));
-        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        machine.fire_subscription(id, SubscriptionTimer::Refresh);
+        let attempt = machine.fire(Timer::Reconnect);
         let transport = opened(&attempt).expect("a reconnect attempt");
         machine.handle(Input::TransportOpened(transport));
 
@@ -2733,15 +2718,12 @@ mod tests {
             code: Some(3001),
             reason: "closed by the test".into(),
         });
-        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let attempt = machine.fire(Timer::Reconnect);
         let transport = opened(&attempt).expect("a reconnect attempt");
         machine.handle(Input::TransportOpened(transport));
         let resubscribing =
             machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
-        machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Refresh,
-        ));
+        machine.fire_subscription(id, SubscriptionTimer::Refresh);
 
         let answered = machine.handle(Input::SubscriptionDataFetched {
             fetch: data_fetch(&resubscribing),
@@ -2762,7 +2744,7 @@ mod tests {
     #[test]
     fn a_subscribe_reply_without_expiry_cancels_the_kept_refresh() {
         let (mut machine, id, _) = token_subscription_lost();
-        let attempt = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let attempt = machine.fire(Timer::Reconnect);
         let transport = opened(&attempt).expect("a reconnect attempt");
         machine.handle(Input::TransportOpened(transport));
         machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
@@ -2842,10 +2824,7 @@ mod tests {
             transport,
             r#"{"id":4,"error":{"code":112,"message":"unrecoverable position"}}"#,
         ));
-        let retried = machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        let retried = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
 
         // The resubscribe tries the sentinel first; its rejection (error
         // 112) leads to getState, as any failed recovery.
@@ -3065,10 +3044,7 @@ mod tests {
             r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
         ));
         let fetch = machine
-            .handle(Input::SubscriptionTimerFired(
-                id,
-                SubscriptionTimer::Refresh,
-            ))
+            .fire_subscription(id, SubscriptionTimer::Refresh)
             .iter()
             .find_map(|action| match action {
                 Action::FetchSubscriptionToken { fetch, .. } => Some(*fetch),
@@ -3146,10 +3122,7 @@ mod tests {
         });
 
         let actions = machine.handle(reply(transport, &unsubscribe_push(2500)));
-        let timed_out = machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::RefreshReply,
-        ));
+        let timed_out = machine.fire_subscription(id, SubscriptionTimer::RefreshReply);
 
         assert_eq!(
             sent(&refresh),
@@ -3200,10 +3173,7 @@ mod tests {
         machine.handle(Input::Subscribe(id));
 
         let unsubscribed = machine.handle(Input::Unsubscribe(id));
-        let timed_out = machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::SubscribeReply,
-        ));
+        let timed_out = machine.fire_subscription(id, SubscriptionTimer::SubscribeReply);
 
         assert!(
             !unsubscribed.iter().any(|action| matches!(
@@ -3230,17 +3200,14 @@ mod tests {
             let unsubscribe = machine.handle(Input::Unsubscribe(id));
 
             let outcome = match answer {
-                None => machine.handle(Input::SubscriptionTimerFired(
-                    id,
-                    SubscriptionTimer::UnsubscribeReply,
-                )),
+                None => machine.fire_subscription(id, SubscriptionTimer::UnsubscribeReply),
                 Some(error) => machine.handle(reply(transport, error)),
             };
 
             assert!(
                 unsubscribe.iter().any(|action| matches!(
                     action,
-                    Action::SetSubscriptionTimer(_, SubscriptionTimer::UnsubscribeReply, _)
+                    Action::SetSubscriptionTimer(_, SubscriptionTimer::UnsubscribeReply, ..)
                 )),
                 "{unsubscribe:?}"
             );
@@ -3373,7 +3340,7 @@ mod tests {
         assert!(
             !rejected.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
                     | Action::CloseTransport(_)
             )),
             "{rejected:?}"
@@ -3532,10 +3499,7 @@ mod tests {
         let transport = opened(&reconnecting).expect("a reconnect attempt");
         let reconnected = with_connect(&machine.handle(Input::TransportOpened(transport)));
         machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
-        let retried = machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        let retried = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
 
         assert_eq!(sent(&reconnected), Vec::<String>::new());
         assert_eq!(
@@ -3570,7 +3534,7 @@ mod tests {
         assert!(
             actions.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, _)
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
             )),
             "{actions:?}"
         );
@@ -3601,10 +3565,7 @@ mod tests {
         let mut command = 2;
         for _ in 0..6 {
             machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
-            machine.handle(Input::SubscriptionTimerFired(
-                id,
-                SubscriptionTimer::Resubscribe,
-            ));
+            machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
             command += 1;
         }
         // The subscribe in flight is abandoned; the fresh one waits for it
@@ -3619,7 +3580,7 @@ mod tests {
         let delay = retry
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => {
+                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
                     Some(*delay)
                 }
                 _ => None,
@@ -3825,7 +3786,9 @@ mod tests {
 
     fn resubscribe_delay(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay) => Some(*delay),
+            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
+                Some(*delay)
+            }
             _ => None,
         })
     }
@@ -3840,8 +3803,7 @@ mod tests {
             code: Some(3000),
             reason: "closed by the test".into(),
         });
-        let transport = opened(&machine.handle(Input::TimerFired(Timer::Reconnect)))
-            .expect("a reconnect attempt");
+        let transport = opened(&machine.fire(Timer::Reconnect)).expect("a reconnect attempt");
         let reconnected = with_connect(&machine.handle(Input::TransportOpened(transport)));
         machine.handle(reply(transport, r#"{"id":3,"connect":{"client":"c"}}"#));
 
@@ -3865,20 +3827,14 @@ mod tests {
         let mut command = 2;
         for _ in 0..6 {
             machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
-            machine.handle(Input::SubscriptionTimerFired(
-                id,
-                SubscriptionTimer::Resubscribe,
-            ));
+            machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
             command += 1;
         }
         machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
         command += 1;
 
         let again = machine.handle(Input::Subscribe(id));
-        machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
         let retry = machine.handle(reply(transport, &format!(r#"{{"id":{command},{busy}}}"#)));
 
         assert_eq!(again, []);
@@ -3912,7 +3868,7 @@ mod tests {
     /// Reconnects after a teardown and reads connect reply `command`: every
     /// action of the attempt.
     fn reconnected(machine: &mut Machine, command: u32) -> Vec<Action> {
-        let mut actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        let mut actions = machine.fire(Timer::Reconnect);
         let transport = opened(&actions).expect("a reconnect attempt");
         actions.extend(machine.handle(Input::TransportOpened(transport)));
         actions.extend(machine.handle(reply(
@@ -4041,7 +3997,7 @@ mod tests {
         )));
         assert!(answered.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, _) if *of == id
+            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, ..) if *of == id
         )));
     }
 
@@ -4225,10 +4181,8 @@ mod tests {
             transport,
             r#"{"id":4,"subscribe":{"expires":true,"ttl":60}}"#,
         ));
-        let current = subscription_token_fetch(&machine.handle(Input::SubscriptionTimerFired(
-            id,
-            SubscriptionTimer::Refresh,
-        )));
+        let current =
+            subscription_token_fetch(&machine.fire_subscription(id, SubscriptionTimer::Refresh));
 
         let failed = machine.handle(Input::SubscriptionTokenFetched {
             fetch: outdated,
@@ -4312,10 +4266,7 @@ mod tests {
                 fetch,
                 result: Err(StateError("always fails".into())),
             });
-            let retried = machine.handle(Input::SubscriptionTimerFired(
-                id,
-                SubscriptionTimer::Resubscribe,
-            ));
+            let retried = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
 
             assert!(
                 resubscribe_delay(&failed).is_some(),

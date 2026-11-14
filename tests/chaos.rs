@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use ferrifuge::machine::{
     Action, CallId, CallTimer, DebounceTimer, EventId, FetchId, FrameId, Input, Machine,
-    SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TransportId,
+    SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TimerSetting, TransportId,
 };
 use ferrifuge::{
     CallError, CallReply, CallRequest, ClientEvent, Config, DataError, DeltaFormat, HistoryOptions,
@@ -208,6 +208,9 @@ enum Fault {
     /// A tap rendering a token into a Debug record of an action: the frame
     /// of a send, beside its `Debug` (I14, Block 49).
     RenderTokenInDebug,
+    /// A late timer firing of a replaced setting passed on by the tap with
+    /// the number of its timer's running setting (I13, Block 53 D5).
+    PassStaleTimerAsCurrent,
 }
 
 /// An invariant a seed broke.
@@ -451,7 +454,13 @@ fn target(rng: &mut fastrand::Rng, subscriptions: bool) -> Target {
 /// Something the simulated world does at a point of simulated time.
 #[derive(Debug)]
 enum Due {
-    Timer(Key),
+    /// A timer of the core, with the setting it was set as (none for a
+    /// debounce timer, numbered by its key).
+    Timer(Key, Option<TimerSetting>),
+    /// A late firing of a setting the core cancelled or set again, kept
+    /// apart from the timers the clock runs, so that neither `cancel` nor
+    /// I5's checks see it (Block 53 D5).
+    Late(Key, TimerSetting),
     /// Data or a close reaches the client's socket.
     Arrive(TransportId, Inbound),
     /// The server answers a command it got earlier, if the connection is
@@ -483,6 +492,17 @@ enum Key {
     Call(CallId, CallTimer),
     Subscription(SubscriptionId, SubscriptionTimer),
     Debounce(DebounceTimer),
+}
+
+/// The firing input of `key`'s timer, of `setting` (a debounce timer's
+/// firing carries none).
+fn firing(key: Key, setting: TimerSetting) -> Input {
+    match key {
+        Key::Client(timer) => Input::TimerFired(timer, setting),
+        Key::Call(call, timer) => Input::CallTimerFired(call, timer, setting),
+        Key::Subscription(id, timer) => Input::SubscriptionTimerFired(id, timer, setting),
+        Key::Debounce(timer) => Input::DebounceTimerFired(timer),
+    }
 }
 
 #[derive(Debug)]
@@ -1433,12 +1453,12 @@ impl Run {
 
     fn happen(&mut self, due: Due) -> Step {
         match due {
-            Due::Timer(Key::Client(timer)) => self.feed(Input::TimerFired(timer)),
-            Due::Timer(Key::Call(call, timer)) => self.feed(Input::CallTimerFired(call, timer)),
-            Due::Timer(Key::Subscription(id, timer)) => {
-                self.feed(Input::SubscriptionTimerFired(id, timer))
+            Due::Timer(Key::Debounce(timer), _) => self.feed(Input::DebounceTimerFired(timer)),
+            Due::Timer(key, setting) => {
+                let setting = setting.expect("a numbered timer");
+                self.feed(firing(key, setting))
             }
-            Due::Timer(Key::Debounce(timer)) => self.feed(Input::DebounceTimerFired(timer)),
+            Due::Late(key, setting) => self.late_firing(key, setting),
             Due::Arrive(transport, inbound) => {
                 self.inbox.push_back((transport, inbound));
                 self.pump()
@@ -1846,20 +1866,19 @@ impl Run {
     /// A publish unsettled with no timer waits in a window or follows a
     /// trailing send: only those have none (D6).
     fn note_windowed(&mut self) {
-        let waiting: Vec<CallId> = self
-            .checker
-            .publishes
-            .keys()
-            .filter(|call| {
-                self.checker.calls.contains_key(call)
-                    && !self.checker.windowed.contains(call)
-                    && !self
-                        .agenda
-                        .values()
-                        .any(|due| matches!(due, Due::Timer(Key::Call(of, _)) if of == *call))
-            })
-            .copied()
-            .collect();
+        let waiting: Vec<CallId> =
+            self.checker
+                .publishes
+                .keys()
+                .filter(|call| {
+                    self.checker.calls.contains_key(call)
+                        && !self.checker.windowed.contains(call)
+                        && !self.agenda.values().any(
+                            |due| matches!(due, Due::Timer(Key::Call(of, _), _) if of == *call),
+                        )
+                })
+                .copied()
+                .collect();
         for call in waiting {
             self.checker.windowed.insert(call);
             self.count("publish waited in a window");
@@ -1902,7 +1921,7 @@ impl Run {
         } else {
             delay
         };
-        self.schedule(after, Due::Timer(Key::Debounce(timer)));
+        self.schedule(after, Due::Timer(Key::Debounce(timer), None));
         Ok(())
     }
 
@@ -1961,12 +1980,12 @@ impl Run {
                     self.answer_frame(transport, &text);
                 }
             }
-            Action::SetTimer(timer, delay) => {
+            Action::SetTimer(timer, delay, setting) => {
                 if self.checker.disconnected {
                     return Err(self.violation("I5", format!("{timer:?} set after disconnect()")));
                 }
                 self.cancel(Key::Client(timer));
-                self.schedule(delay, Due::Timer(Key::Client(timer)));
+                self.schedule(delay, Due::Timer(Key::Client(timer), Some(setting)));
             }
             Action::ShortenTimer(timer, by) => self.shorten(Key::Client(timer), by),
             Action::ShortenSubscriptionTimer(id, timer, by) => {
@@ -1979,16 +1998,16 @@ impl Run {
                     self.cancel(Key::Client(timer));
                 }
             }
-            Action::SetCallTimer(call, timer, delay) => {
+            Action::SetCallTimer(call, timer, delay, setting) => {
                 if matches!(timer, CallTimer::Subscription) {
                     self.checker.waited_for_subscription.insert(call);
                 }
                 self.check_held_sent(call, timer)?;
                 self.cancel(Key::Call(call, timer));
-                self.schedule(delay, Due::Timer(Key::Call(call, timer)));
+                self.schedule(delay, Due::Timer(Key::Call(call, timer), Some(setting)));
             }
             Action::CancelCallTimer(call, timer) => self.cancel(Key::Call(call, timer)),
-            Action::SetSubscriptionTimer(id, timer, delay) => {
+            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
                 // Only the backoff a kept callback's failure arms (D11).
                 let continuing = self.checker.continuing && timer == SubscriptionTimer::Resubscribe;
                 if self.checker.disconnected && !continuing {
@@ -1997,7 +2016,10 @@ impl Run {
                     );
                 }
                 self.cancel(Key::Subscription(id, timer));
-                self.schedule(delay, Due::Timer(Key::Subscription(id, timer)));
+                self.schedule(
+                    delay,
+                    Due::Timer(Key::Subscription(id, timer), Some(setting)),
+                );
             }
             Action::CancelSubscriptionTimer(id, timer) => {
                 self.cancel(Key::Subscription(id, timer));
@@ -2146,9 +2168,53 @@ impl Run {
         Ok(())
     }
 
+    /// Stops `key`'s timer. In the continuity mode, a numbered setting it
+    /// ends leaves one late firing, at a seeded time between now and its
+    /// old deadline (Block 53 D5).
     fn cancel(&mut self, key: Key) {
+        let ended: Vec<((Duration, u64), TimerSetting)> = self
+            .agenda
+            .iter()
+            .filter_map(|(at, due)| match due {
+                Due::Timer(of, Some(setting)) if *of == key => Some((*at, *setting)),
+                _ => None,
+            })
+            .collect();
         self.agenda
-            .retain(|_, due| !matches!(due, Due::Timer(of) if *of == key));
+            .retain(|_, due| !matches!(due, Due::Timer(of, _) if *of == key));
+        if self.mode != Mode::Continuity {
+            return;
+        }
+        for (at, setting) in ended {
+            let left = at.0.saturating_sub(self.now);
+            let after = Duration::from_millis(
+                self.rng
+                    .u64(0..=u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
+            );
+            self.schedule(after, Due::Late(key, setting));
+        }
+    }
+
+    /// A late firing of a setting the core cancelled or set again: the tap
+    /// judges it stale, since the runner took it from such a setting, and
+    /// its step must change nothing (I13, Block 53 D5).
+    fn late_firing(&mut self, key: Key, setting: TimerSetting) -> Step {
+        self.count("late timer firing");
+        let setting = if self.fault == Some(Fault::PassStaleTimerAsCurrent) {
+            let running = match key {
+                Key::Client(timer) => self.machine.timer_setting(timer),
+                Key::Call(call, timer) => self.machine.call_timer_setting(call, timer),
+                Key::Subscription(id, timer) => self.machine.subscription_timer_setting(id, timer),
+                Key::Debounce(_) => None,
+            };
+            running.unwrap_or(setting)
+        } else {
+            setting
+        };
+        self.stale = Some(Stale {
+            what: "late timer firing",
+        });
+        self.feed(firing(key, setting))
     }
 
     /// What a state event of the client abandons (D6): code 3014 and a
@@ -2389,7 +2455,7 @@ impl Run {
         let Some(at) = self
             .agenda
             .iter()
-            .find(|(_, due)| matches!(due, Due::Timer(of) if *of == key))
+            .find(|(_, due)| matches!(due, Due::Timer(of, _) if *of == key))
             .map(|(at, _)| *at)
         else {
             return;
@@ -2708,7 +2774,7 @@ impl Run {
                 .agenda
                 .values()
                 // Debounce timers end with their windows (Block 46, D16).
-                .filter(|due| matches!(due, Due::Timer(Key::Client(_) | Key::Debounce(_))))
+                .filter(|due| matches!(due, Due::Timer(Key::Client(_) | Key::Debounce(_), _)))
                 .collect();
             if !timers.is_empty() {
                 return Err(self.violation("I5", format!("{timers:?} run after disconnect()")));
@@ -3396,6 +3462,7 @@ fn continuity_counts() -> Vec<String> {
         "late data answer",
         "late state answer",
         "frame of an abandoned transport",
+        "late timer firing",
     ]
     .map(String::from)
     .to_vec()
@@ -3416,6 +3483,7 @@ fn seeded_chaos_on_the_core_applies_no_stale_answer() {
 fn the_core_runner_reports_a_planted_continuity_fault() {
     assert_reported(Fault::PassStaleTokenAsCurrent, "I13", Mode::Continuity);
     assert_reported(Fault::PassStaleFrameAsCurrent, "I13", Mode::Continuity);
+    assert_reported(Fault::PassStaleTimerAsCurrent, "I13", Mode::Continuity);
     assert_reported(Fault::RenderTokenInDebug, "I14", Mode::Continuity);
 }
 
