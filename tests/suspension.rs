@@ -364,20 +364,23 @@ async fn the_driver_yields_to_its_runtime_between_inputs() {
         server.sent_traffic().1 >= written + FLOOD
     })
     .await;
-    let (sampled, samples) = oneshot::channel();
+    let (report, reported) = oneshot::channel();
     process.handle.spawn({
         let client = client.clone();
         async move {
-            let mut samples = vec![client.statistics().messages_in];
-            while samples.last().is_some_and(|read| *read < before + FLOOD) {
+            let mut read_at_turns = vec![client.statistics().messages_in];
+            while read_at_turns
+                .last()
+                .is_some_and(|read| *read < before + FLOOD)
+            {
                 tokio::task::yield_now().await;
-                samples.push(client.statistics().messages_in);
+                read_at_turns.push(client.statistics().messages_in);
             }
-            let _ = sampled.send(samples);
+            let _ = report.send(read_at_turns);
         }
     });
     let _ = release.send(());
-    let samples = tokio::time::timeout(WAIT, samples)
+    let samples = tokio::time::timeout(WAIT, reported)
         .await
         .expect("the flood read")
         .expect("the witness runs");
