@@ -66,12 +66,16 @@ const QUIESCENCE: Duration = Duration::from_secs(30);
 /// How long the channels API is polled (D7, I3): the server notices a dead
 /// connection at its next missed pong.
 const CHANNELS_WITHIN: Duration = Duration::from_secs(10);
-/// How long a disconnected client is watched for a new connection (I5).
-const AFTER_DISCONNECT: Duration = Duration::from_millis(1500);
 /// The client's `Config::timeout`.
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
-/// I6: a call settles within 3 timeouts, plus a margin for real time.
-const CALL_BOUND: Duration = Duration::from_secs(8);
+/// I6: a call settles within 3 timeouts plus 1 s, as the adapter runner
+/// checks it (Block 16, D7), measured in the child.
+const CALL_BOUND: Duration = Duration::from_secs(7);
+/// How long the runner waits for the child to answer: a state reached,
+/// the calls after healing, its exit.
+const CHILD_WITHIN: Duration = Duration::from_secs(10);
+/// A seed's bound (D11): its operations, healing and checks.
+const SEED_BOUND: Duration = Duration::from_secs(120);
 /// The publisher's period: 20 publications a second in all (D5).
 const PUBLISH_EVERY: Duration = Duration::from_millis(50);
 /// The namespace of every channel (D5).
@@ -638,7 +642,8 @@ struct SeedRun<'a> {
     client: Option<Lifecycle>,
     states: BTreeMap<String, ChannelState>,
     status: Option<Record>,
-    calls: Vec<(String, u64)>,
+    /// The calls settled: which, how long, and their error if any.
+    calls: Vec<(String, u64, Option<String>)>,
     panics: Vec<String>,
     closed: bool,
     dropped: bool,
@@ -688,6 +693,17 @@ impl SeedRun<'_> {
         match record {
             Record::Client { state, .. } => {
                 let next = lifecycle(&state);
+                // I5 until the next connect(): after disconnect() took the
+                // client off, it makes no connection (Block 16).
+                if !self.wanted_connected
+                    && self.client == Some(Lifecycle::Off)
+                    && next != Lifecycle::Off
+                {
+                    return Err(self.violation(
+                        "I5",
+                        format!("the client went {state} after disconnect(), before connect()"),
+                    ));
+                }
                 if let Some(last) = self.client {
                     invariants::state_chain(last, next)
                         .map_err(|detail| self.violation("I1", format!("client: {detail}")))?;
@@ -726,7 +742,7 @@ impl SeedRun<'_> {
                     .add(format!("call {call} {}", if ok { "ok" } else { "failed" }));
                 invariants::call_settled(Duration::from_millis(took_ms), CALL_BOUND)
                     .map_err(|detail| self.violation("I6", format!("{call}: {detail}")))?;
-                self.calls.push((call, took_ms));
+                self.calls.push((call, took_ms, error));
             }
             record @ Record::Status { .. } => self.status = Some(record),
             Record::Panic { message } => self.panics.push(message),
@@ -977,23 +993,15 @@ impl SeedRun<'_> {
     /// server lists none of it on the canary.
     async fn disconnect(&mut self) -> Result<(), Violation> {
         self.command(Command_::Disconnect).await;
-        let deadline = Instant::now() + CALL_BOUND;
+        let deadline = Instant::now() + CHILD_WITHIN;
         while self.client != Some(Lifecycle::Off) && Instant::now() < deadline {
             self.pump(Instant::now() + Duration::from_millis(50))
                 .await?;
         }
-        let watched = Instant::now() + AFTER_DISCONNECT;
-        let mut made = 0;
-        while Instant::now() < watched {
-            self.pump(Instant::now() + Duration::from_millis(50))
-                .await?;
-            if self.client != Some(Lifecycle::Off) {
-                made += 1;
-                break;
-            }
-        }
+        // Until the next connect(), a client record leaving off is I5's
+        // connection made ([`SeedRun::take`]); here, none stays open.
         let open = self.canary_clients(0).await;
-        invariants::cleanup_after_disconnect(made, usize::try_from(open).unwrap_or(usize::MAX))
+        invariants::cleanup_after_disconnect(0, usize::try_from(open).unwrap_or(usize::MAX))
             .map_err(|detail| self.violation("I5", detail))
     }
 
@@ -1067,6 +1075,42 @@ impl SeedRun<'_> {
                 ));
             }
         }
+    }
+
+    /// After healing, history and presence are called once each on the
+    /// canary, which is subscribed, and both must succeed (reviewer, 51a):
+    /// a failure there is a finding.
+    async fn calls_after_healing(&mut self) -> Result<(), Violation> {
+        let before = self.calls.len();
+        let canary = self.canary.clone();
+        self.command(Command_::History {
+            channel: canary.clone(),
+        })
+        .await;
+        self.command(Command_::Presence { channel: canary }).await;
+        let deadline = Instant::now() + CHILD_WITHIN;
+        while self.calls.len() < before + 2 && Instant::now() < deadline {
+            self.pump(Instant::now() + Duration::from_millis(50))
+                .await?;
+        }
+        let settled = self.calls[before..].to_vec();
+        if settled.len() < 2 {
+            return Err(self.violation(
+                "calls",
+                format!(
+                    "{} of the 2 calls after healing settled within {CHILD_WITHIN:?}",
+                    settled.len()
+                ),
+            ));
+        }
+        for (call, _, error) in settled {
+            if let Some(error) = error {
+                return Err(
+                    self.violation("calls", format!("{call} after healing failed: {error}"))
+                );
+            }
+        }
+        Ok(())
     }
 
     /// I3 by the channels API (D7): at most one client on the canary, and
@@ -1207,7 +1251,7 @@ impl SeedRun<'_> {
     /// its channels (D10); a panic recorded or an exit that fails is I2.
     async fn close(&mut self) -> Result<(), Violation> {
         self.command(Command_::Close).await;
-        let exited = tokio::time::timeout(CALL_BOUND, self.child.process.wait()).await;
+        let exited = tokio::time::timeout(CHILD_WITHIN, self.child.process.wait()).await;
         self.drain()?;
         invariants::no_panic(self.panics.len())
             .map_err(|detail| self.violation("I2", format!("{detail}: {:?}", self.panics)))?;
@@ -1358,17 +1402,22 @@ async fn run_seed(
         wanted_connected: true,
     };
     let mut second = None;
-    let result = async {
+    let checked = tokio::time::timeout(SEED_BOUND, async {
         run.run_ops().await?;
         run.heal().await?;
+        run.calls_after_healing().await?;
         if plant == Plant::SecondConnection {
             second = Some(second_connection(environment, &user, &run.canary).await);
         }
         run.check_connections().await?;
         run.check_deliveries().await?;
         run.close().await
-    }
+    })
     .await;
+    // D11: a seed is bounded at 120 s.
+    let result = checked.unwrap_or_else(|_| {
+        Err(run.violation("seed bound", format!("the seed ran past {SEED_BOUND:?}")))
+    });
     stop.store(true, Ordering::SeqCst);
     sender_task.abort();
     if let Some(second) = second {
@@ -1560,6 +1609,21 @@ fn main() {
         println!("@P report {name}: {count}");
     }
     assert!(findings.is_empty(), "findings: {findings:#?}");
+    // D10, and the reviewer's outcomes (51a): calls of each kind that
+    // succeeded, reconnects and recoveries.
+    let unseen: Vec<_> = [
+        "call history ok",
+        "call presence ok",
+        "reconnect",
+        "recovered true",
+    ]
+    .into_iter()
+    .filter(|name| counters.counts.get(*name).copied().unwrap_or(0) == 0)
+    .collect();
+    assert!(
+        unseen.is_empty() || env::var_os(SEED_VARIABLE).is_some(),
+        "outcomes never counted: {unseen:?} (D10)"
+    );
     // D10: every fault kind implemented reached, over the whole job.
     let missing: Vec<_> = FaultKind::ALL
         .iter()
