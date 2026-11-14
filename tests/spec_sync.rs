@@ -28,9 +28,6 @@ const P_NOT_YET_MEASURED: &[&str] = &[
     "Seeded real-server chaos keeps the invariants",
     "A server restart with the memory engine reports recovered false",
     "A server restart with the Redis engine loses nothing",
-    "A failing real-server seed is a finding only when it fails twice",
-    "A seed of the real-server runner fixes its operations",
-    "The real-server runner reports a planted fault",
     "Hours of normal use keep resources flat and delivery exact",
 ];
 

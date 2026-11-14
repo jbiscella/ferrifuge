@@ -9555,9 +9555,10 @@ This block reverses Block 16's exclusion of a chaos TCP proxy against a real Cen
 
 | Id | Value clause | Scenarios |
 |---|---|---|
-| 51a | As a maintainer, I want a seeded runner and a checker of its own against a real Centrifugo through Toxiproxy on websocket and JSON, so that the harness is shown to report what it should before the matrix relies on it | outline row websocket JSON memory; the failing-seed, planted-fault and `scripts/validation-run` scenarios; D10, D11, D12 |
-| 51b | As a maintainer, I want the client process suspended, the server paused and restarted and tokens short-lived, so that the real faults of a fleet reach every invariant | the memory and Redis restart scenarios |
-| 51c | As an app developer on every transport, I want the matrix run over websocket Protobuf, http_stream JSON and Protobuf and sse, so that the fallback paths are as safe as the first | the remaining rows |
+| 51a | As a maintainer, I want a seeded runner and a checker of its own against a real Centrifugo through Toxiproxy on websocket and JSON, run by a dispatched workflow, so that the harness is shown to report what it should before the matrix relies on it | outline row websocket JSON memory with D3's toxics and proxy down, run and not yet claimed; "A failing real-server seed is a finding only when it fails twice", "A seed of the real-server runner fixes its operations", "The real-server runner reports a planted fault"; D10 over the fault kinds implemented; D11's `chaos` and `verdict` jobs on `workflow_dispatch` only |
+| 51b | As a maintainer releasing Ferrifuge, I want a scheduled run skipped only when main's head already has a real run, and a release refused without a passing real run of its commit, so that every published version has real-server evidence | the two `scripts/validation-run` scenarios; D11's `guard` and `schedule`; D12 for `chaos-real.yml` |
+| 51c | As a maintainer, I want the client process suspended, the server paused and restarted and tokens short-lived, so that the real faults of a fleet reach every invariant | the memory and Redis restart scenarios; D10 gains their fault kinds |
+| 51d | As an app developer on every transport, I want the matrix run over websocket Protobuf, http_stream JSON and Protobuf and sse, so that the fallback paths are as safe as the first | the remaining rows; the outline is claimed here, with every row and fault kind, and leaves `P_NOT_YET_MEASURED` |
 
 Value clause: As an app developer shipping Ferrifuge to large fleets of end-user devices, I want seeded real-server chaos to keep exactly-once delivery, liveness and cleanup, so that the failures a real network, a real server and a real suspended process produce are found before my users find them.
 
