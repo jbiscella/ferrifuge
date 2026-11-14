@@ -11,13 +11,14 @@
 mod support;
 
 use std::env;
-use std::process::Command;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::time::Duration;
 
 use ferrifuge::{
     Client, ClientEvent, Config, Protocol, Subscription, SubscriptionEvent, SubscriptionState,
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{FutureExt, Stream, StreamExt};
 use serde_json::json;
 use support::centrifugo::Centrifugo;
 
@@ -27,6 +28,14 @@ const RUN: &str = "FERRIFUGE_INTEROP";
 const NODE: &str = "FERRIFUGE_INTEROP_NODE";
 const CHANNEL: &str = "interop";
 const PUBLICATIONS: u32 = 100;
+/// The package `publish.mjs` imports, which `npm ci --prefix tests/interop`
+/// installs.
+const PACKAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/interop/node_modules/centrifuge/package.json"
+);
+/// Bound on the centrifuge-js run, which takes about a second.
+const NODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Anonymous clients may connect, subscribe and publish to channels
 /// without namespace.
@@ -58,6 +67,13 @@ fn main() {
         println!("interop skipped: set {RUN}=1, with Docker and Node");
         return;
     }
+    // Before Docker: without it, Node fails only once the server and both
+    // clients are up.
+    assert!(
+        Path::new(PACKAGE).exists(),
+        "interop: centrifuge-js is not installed ({PACKAGE} is missing): \
+         run `npm ci --prefix tests/interop` first"
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -124,17 +140,34 @@ async fn received(
 
 async fn interop() {
     let server = Centrifugo::start(SERVER).await;
+    // A failure still removes the server, before the panic goes on: left to
+    // drop as the panic unwinds out of `block_on`, the container's removal
+    // waits on the runtime shutting down, and the process never exits.
+    let outcome = AssertUnwindSafe(exchange(&server)).catch_unwind().await;
+    server.stop().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// centrifuge-js publishes; both Ferrifuge clients receive every
+/// publication.
+async fn exchange(server: &Centrifugo) {
     let (json_client, _json_subscription, mut json_events) =
-        subscriber(&server, Protocol::Json).await;
+        subscriber(server, Protocol::Json).await;
     let (protobuf_client, _protobuf_subscription, mut protobuf_events) =
-        subscriber(&server, Protocol::Protobuf).await;
+        subscriber(server, Protocol::Protobuf).await;
 
     let node = env::var(NODE).unwrap_or_else(|_| "node".to_owned());
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/interop/publish.mjs");
-    let status = Command::new(node)
+    let run = tokio::process::Command::new(node)
         .args([script, &server.websocket_url(), CHANNEL])
         .arg(PUBLICATIONS.to_string())
-        .status()
+        .kill_on_drop(true)
+        .status();
+    let status = tokio::time::timeout(NODE_TIMEOUT, run)
+        .await
+        .unwrap_or_else(|_| panic!("centrifuge-js: not finished within {NODE_TIMEOUT:?}"))
         .expect("run centrifuge-js");
     assert!(status.success(), "centrifuge-js: {status}");
 
@@ -145,5 +178,4 @@ async fn interop() {
          over JSON and Protobuf"
     );
     drop((json_client, protobuf_client));
-    server.stop().await;
 }
