@@ -90,7 +90,7 @@ impl Phase {
 impl Calls {
     /// Every call any registry holds, with the registries holding it, for
     /// the soak (Block 52, D8).
-    #[cfg(feature = "__test-hooks")]
+    #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     pub(super) fn registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
         let mut held: BTreeMap<CallId, Vec<&'static str>> = BTreeMap::new();
         for id in self.by_id.keys() {
