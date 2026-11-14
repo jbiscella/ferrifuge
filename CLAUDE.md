@@ -10012,12 +10012,12 @@ This block amends Block 24 (see "Amendments to earlier blocks"). Block 0's "Reve
     - `receive`: a publication on the channel whose data carries the nonce; any other publication fails the step;
     - `disconnect`: `disconnect()` is called, the client emits `disconnected`, and its state is `disconnected`.
 
-    Then it prints `done` and exits 0. With `FERRIFUGE_MOBILE_EXPECT=untrusted` it runs only `connect`. That step passes only on an `error` event naming rustls's invalid peer certificate, with the state still `connecting`. The program uses no server API and holds no API key.
+    Then it holds its `Client`, not dropped, for 15 s, longer than the harness's 10 s `channels` check, so that a socket the client never closed is still open when the server is asked; then it prints `done` and exits 0. With `FERRIFUGE_MOBILE_EXPECT=untrusted` it runs only `connect`. That step passes only on an `error` event naming rustls's invalid peer certificate, with the state still `connecting`. The program uses no server API and holds no API key.
   - `tests/mobile.rs` is the host harness, built as `tests/browser.rs` is (Block 44 D18).
     - `FERRIFUGE_MOBILE` is `android` or `ios`; when it is unset, the run is skipped. `FERRIFUGE_MOBILE_BINARY` is the device program. On iOS, `FERRIFUGE_MOBILE_DEVICE` is the simulator's UDID.
     - It starts Centrifugo at `TAG`, allowing anonymous connect and subscribe: a container on Linux, and on macOS the binary `FERRIFUGE_CENTRIFUGO` names.
     - It runs the program and reads its lines. On `ready` it publishes, through the server API, a publication carrying a nonce new to the run.
-    - It passes only when every step reported `ok`, `done` arrived, the exit status is 0, and the server's `channels` then lists no client on the channel within 10 s.
+    - It passes only when every step reported `ok`; when, on reading `step disconnect ok`, the server's `channels` lists no client on the channel within 10 s, with the program still running when that check ends; and when `done` then arrived and the exit status is 0.
     - A run is bounded at 180 s. At the bound the harness kills the device process and fails, naming the last step reported.
 - **D2 Android (`mobile-android`, `ubuntu-latest`, `timeout-minutes: 45`).**
   - KVM is granted with android-emulator-runner's udev rule: `KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"`, then `udevadm control --reload-rules` and `udevadm trigger --name-match=kvm`.
@@ -10067,7 +10067,7 @@ This block amends Block 24 (see "Amendments to earlier blocks"). Block 0's "Reve
 - Each job is seen failing once on each of these mutations, recorded in the pull request, with the red naming the step:
   - the host set to 127.0.0.1 on Android (the emulator's own loopback, which also shows the program runs inside it), and a port nothing listens on on iOS: `connect`;
   - another nonce published: `receive`;
-  - `disconnect()` not called: the harness's `channels` check;
+  - `disconnect()` not called: the harness's `channels` check, made while the program holds its client;
   - on iOS, `add-root-cert` removed: the trusted `connect`, naming the invalid peer certificate;
   - on iOS, the `untrusted` run moved after `add-root-cert`: that run fails.
 - The action is pinned by SHA, the asset by checksum, and the image by `TAG`.
