@@ -1084,10 +1084,22 @@ impl MachineRun {
 
     pub(crate) fn fire(&mut self, timer: SubscriptionTimer) {
         let subscription = self.subscription;
+        // The running setting, or else the last one given: a timer the
+        // machine has cancelled still fires, late, on a runtime.
         let setting = self
             .machine
             .subscription_timer_setting(subscription, timer)
-            .expect("subscription timer set");
+            .or_else(|| {
+                self.actions.iter().rev().find_map(|action| match action {
+                    Action::SetSubscriptionTimer(id, of, _, setting)
+                        if *id == subscription && *of == timer =>
+                    {
+                        Some(*setting)
+                    }
+                    _ => None,
+                })
+            })
+            .expect("subscription timer set once");
         self.handle(Input::SubscriptionTimerFired(subscription, timer, setting));
     }
 

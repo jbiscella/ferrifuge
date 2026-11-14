@@ -11,6 +11,8 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-14
+
 ### Added
 
 - `machine::TimerSetting` (Block 53): the opaque number the machine gives
