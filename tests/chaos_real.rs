@@ -15,14 +15,15 @@
 //! 51a: websocket, JSON, the memory engine; D3's toxics and the proxy
 //! turned down. 51c adds D4: the server paused and restarted, the client
 //! suspended, short-lived tokens; and D6's two restart scenarios, each run
-//! once, the Redis one in an environment of its own. The outline's row
-//! runs here but is not claimed until 51d, when every row and fault kind
-//! is in.
+//! once, the Redis one in an environment of its own. 51d runs every row of
+//! the outline, one a job, chosen by `FERRIFUGE_REAL_CHAOS_TRANSPORT`,
+//! `_PROTOCOL` and `_ENGINE` (the first row when unset), and claims it.
 
 // @P scenario: A failing real-server seed is a finding only when it fails twice
-// @P scenario: A server restart with the memory engine reports recovered false
-// @P scenario: A server restart with the Redis engine loses nothing
 // @P scenario: A seed of the real-server runner fixes its operations
+// @P scenario: A server restart with the Redis engine loses nothing
+// @P scenario: A server restart with the memory engine reports recovered false
+// @P scenario: Seeded real-server chaos keeps the invariants
 // @P scenario: The real-server runner reports a planted fault
 
 // Counts and offsets are far below 2^52.
@@ -56,6 +57,13 @@ const SEED_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_SEED";
 const BUDGET_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_BUDGET_SECONDS";
 /// Where a failing seed's output goes, for the workflow's artifact.
 const ARTIFACTS_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_ARTIFACTS";
+/// The row of the outline (D11), from the workflow's matrix: transport
+/// (`websocket`, `http_stream`, `sse`), protocol (`json`, `protobuf`) and
+/// engine (`memory`, `redis`); the first row when unset. The child reads
+/// the first two.
+const TRANSPORT_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_TRANSPORT";
+const PROTOCOL_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_PROTOCOL";
+const ENGINE_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_ENGINE";
 /// The child's endpoint, channels and user.
 const ENDPOINT_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_ENDPOINT";
 const CHANNELS_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_CHANNELS";
@@ -119,6 +127,99 @@ const PUBLISH_EVERY: Duration = Duration::from_millis(50);
 const NAMESPACE: &str = "recoverable";
 /// At most this many channels a seed, besides the canary (D5: at most 10).
 const MAX_CHANNELS: usize = 5;
+
+// --- Rows ------------------------------------------------------------------
+
+/// The transport of a row: the child's only one, through Toxiproxy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    WebSocket,
+    HttpStream,
+    Sse,
+}
+
+impl Transport {
+    fn parse(name: &str) -> Self {
+        match name {
+            "websocket" => Self::WebSocket,
+            "http_stream" => Self::HttpStream,
+            "sse" => Self::Sse,
+            other => panic!("{TRANSPORT_VARIABLE}: no transport {other:?}"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::HttpStream => "http_stream",
+            Self::Sse => "sse",
+        }
+    }
+
+    fn kind(self) -> ferrifuge::machine::TransportKind {
+        match self {
+            Self::WebSocket => ferrifuge::machine::TransportKind::WebSocket,
+            Self::HttpStream => ferrifuge::machine::TransportKind::HttpStream,
+            Self::Sse => ferrifuge::machine::TransportKind::Sse,
+        }
+    }
+
+    /// Its endpoint through Toxiproxy.
+    fn endpoint(self, environment: &Environment) -> String {
+        match self {
+            Self::WebSocket => environment.websocket_url(),
+            Self::HttpStream => environment.http_stream_url(),
+            Self::Sse => environment.sse_url(),
+        }
+    }
+}
+
+/// A row of the outline (D11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Row {
+    transport: Transport,
+    protobuf: bool,
+    engine: Engine,
+}
+
+impl Row {
+    /// The outline's first row, which also runs the restart scenarios.
+    const FIRST: Self = Self {
+        transport: Transport::WebSocket,
+        protobuf: false,
+        engine: Engine::Memory,
+    };
+
+    fn from_env() -> Self {
+        let variable = |name: &str| env::var(name).ok().filter(|value| !value.is_empty());
+        Self {
+            transport: variable(TRANSPORT_VARIABLE)
+                .map_or(Self::FIRST.transport, |name| Transport::parse(&name)),
+            protobuf: variable(PROTOCOL_VARIABLE).is_some_and(|name| protobuf(&name)),
+            engine: match variable(ENGINE_VARIABLE).as_deref() {
+                None | Some("memory") => Engine::Memory,
+                Some("redis") => Engine::Redis,
+                Some(other) => panic!("{ENGINE_VARIABLE}: no engine {other:?}"),
+            },
+        }
+    }
+}
+
+/// Whether `name` is the Protobuf protocol (`json` is the other).
+fn protobuf(name: &str) -> bool {
+    match name {
+        "json" => false,
+        "protobuf" => true,
+        other => panic!("{PROTOCOL_VARIABLE}: no protocol {other:?}"),
+    }
+}
+
+/// The job's row, set once by `main`.
+static ROW: OnceLock<Row> = OnceLock::new();
+
+fn row() -> Row {
+    ROW.get().copied().unwrap_or(Row::FIRST)
+}
 
 // --- Operations ------------------------------------------------------------
 
@@ -360,6 +461,8 @@ enum Record {
     Client {
         state: String,
         code: u32,
+        /// The transport a `connected` names (D10).
+        transport: Option<String>,
     },
     Sub {
         channel: String,
@@ -473,6 +576,8 @@ async fn child_run() {
     }));
 
     let endpoint = env::var(ENDPOINT_VARIABLE).expect("the child's endpoint");
+    let transport = Transport::parse(&env::var(TRANSPORT_VARIABLE).expect("the child's transport"));
+    let protobuf = protobuf(&env::var(PROTOCOL_VARIABLE).expect("the child's protocol"));
     let user = env::var(USER_VARIABLE).expect("the child's user");
     let channels: Vec<String> = env::var(CHANNELS_VARIABLE)
         .expect("the child's channels")
@@ -488,7 +593,13 @@ async fn child_run() {
     let (connection_ttl, subscription_ttl) = (ttl(0), ttl(1));
     // I5's flag (below), also read by the token callbacks.
     let off = Off::default();
-    let client = child_client(endpoint, &user, connection_ttl, &writer, &off);
+    let client = child_client(
+        (transport, protobuf, endpoint),
+        &user,
+        connection_ttl,
+        &writer,
+        &off,
+    );
 
     forward_client_events(&client, &writer);
     let subscriptions =
@@ -624,7 +735,7 @@ fn subscription_established(subscription: &OnceLock<ferrifuge::Subscription>) ->
 /// The child's client, its connection tokens short-lived and refreshed
 /// through the callback, each fetch recorded (D4).
 fn child_client(
-    endpoint: String,
+    (transport, protobuf, endpoint): (Transport, bool, String),
     user: &str,
     ttl: Duration,
     writer: &Writer,
@@ -634,11 +745,17 @@ fn child_client(
     let token_writer = writer.clone();
     let slot = Arc::new(OnceLock::new());
     let (token_slot, off) = (Arc::clone(&slot), off.clone());
-    let client = ferrifuge::Client::builder(endpoint)
+    // The row's transport alone, so that every seed runs on it (D11).
+    let client = ferrifuge::Client::builder_with_transports([(transport.kind(), endpoint)])
         .config(
             ferrifuge::Config::default()
                 .timeout(CALL_TIMEOUT)
-                .max_reconnect_delay(MAX_DELAY),
+                .max_reconnect_delay(MAX_DELAY)
+                .protocol(if protobuf {
+                    ferrifuge::Protocol::Protobuf
+                } else {
+                    ferrifuge::Protocol::Json
+                }),
         )
         .get_token(move || {
             token_writer.write(Record::Token {
@@ -685,10 +802,12 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
     tokio::spawn(async move {
         use futures_util::StreamExt;
         while let Some(event) = events.next().await {
-            let (state, code) = match &event {
-                ferrifuge::ClientEvent::Connecting { code, .. } => ("connecting", *code),
-                ferrifuge::ClientEvent::Connected { .. } => ("connected", 0),
-                ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code),
+            let (state, code, transport) = match &event {
+                ferrifuge::ClientEvent::Connecting { code, .. } => ("connecting", *code, None),
+                ferrifuge::ClientEvent::Connected { transport, .. } => {
+                    ("connected", 0, Some(transport.clone()))
+                }
+                ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code, None),
                 ferrifuge::ClientEvent::Error(error) if error.code == TOKEN_EXPIRED => {
                     client_writer.write(Record::Expired {
                         of: "connect".to_owned(),
@@ -700,6 +819,7 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
             client_writer.write(Record::Client {
                 state: state.to_owned(),
                 code,
+                transport,
             });
         }
     });
@@ -893,15 +1013,21 @@ struct ChildProcess {
 
 impl ChildProcess {
     fn start(
-        endpoint: &str,
+        (environment, row): (&Environment, Row),
         user: &str,
         channels: &[String],
         (connection, subscription): (u64, u64),
     ) -> Self {
+        let endpoint = row.transport.endpoint(environment);
         let mut process = Command::new(env::current_exe().expect("the runner"))
             .env(ROLE, "client")
+            .env(TRANSPORT_VARIABLE, row.transport.name())
+            .env(
+                PROTOCOL_VARIABLE,
+                if row.protobuf { "protobuf" } else { "json" },
+            )
             .env(TOKEN_TTL_VARIABLE, format!("{connection},{subscription}"))
-            .env(ENDPOINT_VARIABLE, endpoint)
+            .env(ENDPOINT_VARIABLE, &endpoint)
             .env(USER_VARIABLE, user)
             .env(CHANNELS_VARIABLE, channels.join(","))
             .stdin(Stdio::piped())
@@ -964,6 +1090,10 @@ struct ChannelState {
     /// then, which the segment delivered a prefix of, until the next
     /// `subscribed` starts a new segment (D6, reviewer 51c).
     restarted: Option<Vec<(u64, String)>>,
+    /// A restart on an engine that keeps the stream (Redis) came after the
+    /// segment's start: its next recovery counts as one across a restart
+    /// (D6, D10).
+    restart_since: bool,
 }
 
 /// One run of one seed.
@@ -1040,7 +1170,21 @@ impl SeedRun<'_> {
 
     fn take(&mut self, record: Record) -> Result<(), Violation> {
         match record {
-            Record::Client { state, .. } => {
+            Record::Client {
+                state, transport, ..
+            } => {
+                // Every connected names the row's transport: one that does
+                // not is the environment's failure, not a finding (D10,
+                // reviewer 51d).
+                if let Some(transport) = &transport
+                    && transport != row().transport.name()
+                {
+                    panic!(
+                        "the environment: seed {} connected over {transport}, the row's transport is {}",
+                        self.seed,
+                        row().transport.name()
+                    );
+                }
                 let next = lifecycle(&state);
                 // The client starts disconnected (Codex, #259).
                 let last = self.client.unwrap_or(Lifecycle::Off);
@@ -1160,12 +1304,20 @@ impl SeedRun<'_> {
                 None
             }
             // A recovery continues it, in its epoch.
-            Some(_) if recovered => (epoch != entry.epoch).then(|| {
-                format!(
-                    "{channel} recovered in epoch {epoch:?}, the segment's {:?}",
-                    entry.epoch
-                )
-            }),
+            Some(_) if recovered => {
+                if std::mem::take(&mut entry.restart_since) && counted {
+                    COUNTERS
+                        .lock()
+                        .unwrap()
+                        .add("recovered true after a restart");
+                }
+                (epoch != entry.epoch).then(|| {
+                    format!(
+                        "{channel} recovered in epoch {epoch:?}, the segment's {:?}",
+                        entry.epoch
+                    )
+                })
+            }
             // A failed recovery is allowed only after a restart on the
             // memory engine (D6): the segment delivered a prefix of the
             // history at the restart, and a new segment starts.
@@ -1508,7 +1660,9 @@ impl SeedRun<'_> {
         // Every record the child wrote before its answer is taken.
         self.status().await?;
         self.drain()?;
-        let memory = self.environment.engine() == Engine::Memory;
+        // What the row's engine requires (D6), not what the environment
+        // happens to run: a Redis row against the memory engine must fail.
+        let memory = row().engine == Engine::Memory;
         for (channel, (epoch, offsets)) in histories {
             let Some(state) = self.states.get(&channel) else {
                 continue;
@@ -1543,8 +1697,11 @@ impl SeedRun<'_> {
                     ),
                 ));
             }
+            let state = self.states.get_mut(&channel).expect("its state");
             if memory {
-                self.states.get_mut(&channel).expect("its state").restarted = Some(history);
+                state.restarted = Some(history);
+            } else {
+                state.restart_since = true;
             }
         }
         Ok(())
@@ -2154,7 +2311,7 @@ async fn run_seed(
     let mut all = channels.clone();
     all.push(canary.clone());
     let child = ChildProcess::start(
-        &environment.websocket_url(),
+        (environment, row()),
         &user,
         &all,
         (connection_ttl_secs, subscription_ttl_secs),
@@ -2260,11 +2417,24 @@ async fn second_connection(
     user: &str,
     canary: &str,
 ) -> ferrifuge::Client {
+    // Over the row's transport and protocol, so that the channels API is
+    // shown to count an emulated session too (D9, reviewer 51d).
     let token = support::token::connection_token(user, Duration::from_secs(3600));
-    let client = ferrifuge::Client::new(
-        environment.websocket_url(),
-        ferrifuge::Config::default().token(token),
+    let row = row();
+    let client = ferrifuge::Client::builder_with_transports([(
+        row.transport.kind(),
+        row.transport.endpoint(environment),
+    )])
+    .config(
+        ferrifuge::Config::default()
+            .token(token)
+            .protocol(if row.protobuf {
+                ferrifuge::Protocol::Protobuf
+            } else {
+                ferrifuge::Protocol::Json
+            }),
     )
+    .build()
     .expect("a second client");
     // The namespace allows no subscribe without a token (D4).
     let token_user = user.to_owned();
@@ -2360,7 +2530,7 @@ impl RestartScenario {
     fn start(name: &'static str, environment: &Environment, channel: &str) -> Self {
         let user = format!("restart-{}", environment.run());
         let child = ChildProcess::start(
-            &environment.websocket_url(),
+            (environment, Row::FIRST),
             &user,
             &[channel.to_owned()],
             (3600, 3600),
@@ -2714,20 +2884,27 @@ fn main() {
         .enable_all()
         .build()
         .expect("a runtime");
+    let row = Row::from_env();
+    let _ = ROW.set(row);
+    log(&format!("row {row:?}"));
     let findings = runtime.block_on(async {
         token_fetches_are_judged().await;
         let run = format!("r{}", std::process::id());
-        let scenarios = env::var_os(SEED_VARIABLE).is_none();
-        // The Redis scenario's environment, gone before the run's own: both
-        // publish the same host ports.
+        let checks = env::var_os(SEED_VARIABLE).is_none();
+        // D6's scenarios in the first row only (reviewer, 51c). The Redis
+        // one's environment is gone before the run's own: both publish the
+        // same host ports.
+        let scenarios = checks && row == Row::FIRST;
         if scenarios {
             restart_with_redis(&format!("{run}redis"), Engine::Redis).await;
         }
-        let environment = Environment::start(&run, Engine::Memory, &configuration(Engine::Memory))
+        let environment = Environment::start(&run, row.engine, &configuration(row.engine))
             .await
             .unwrap_or_else(|error| panic!("the environment: {error}"));
         if scenarios {
             restart_with_memory(&environment).await;
+        }
+        if checks {
             planted_faults_are_reported(&environment).await;
         }
         run_budget(&environment).await
@@ -2738,13 +2915,18 @@ fn main() {
     }
     assert!(findings.is_empty(), "findings: {findings:#?}");
     // D10, and the reviewer's outcomes (51a): calls of each kind that
-    // succeeded, reconnects and recoveries.
+    // succeeded, reconnects and recoveries; across a restart, what the
+    // row's engine requires of it (D6).
+    let across_restart = match row.engine {
+        Engine::Memory => "recovered false after a restart",
+        Engine::Redis => "recovered true after a restart",
+    };
     let unseen: Vec<_> = [
         "call history ok",
         "call presence ok",
         "reconnect",
         "recovered true",
-        "recovered false after a restart",
+        across_restart,
     ]
     .into_iter()
     .filter(|name| counters.counts.get(*name).copied().unwrap_or(0) == 0)
