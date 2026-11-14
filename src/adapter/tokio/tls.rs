@@ -586,6 +586,10 @@ pub(in crate::adapter) mod tests {
 
     /// The chosen verifier trusts an extra root and refuses a server whose
     /// issuer it does not know, on every platform (Block 22, D1 and D2).
+    /// On Android, where the unit tests run on an emulator without the app's
+    /// setup (Block 58, D4), both handshakes are refused, naming it: the
+    /// verifier there takes no extra roots and waits for
+    /// `ferrifuge::android::init_with_env` (Block 24, D3 and D5).
     #[test]
     fn an_extra_root_is_trusted_and_an_unknown_issuer_refused() {
         let (ca, chain, key) = private_chain();
@@ -597,11 +601,17 @@ pub(in crate::adapter) mod tests {
         let trusted = handshake(trusting, chain.clone(), key.clone_key());
         let refused = handshake(platform, chain, key);
 
-        assert_eq!(trusted, Ok(()));
-        assert!(
-            matches!(&refused, Err(rustls::Error::InvalidCertificate(_))),
-            "{refused:?}"
-        );
+        if cfg!(all(target_os = "android", not(feature = "fips"))) {
+            let missing = Err(rustls::Error::General(ANDROID_SETUP_MISSING.to_owned()));
+            assert_eq!(trusted, missing);
+            assert_eq!(refused, missing);
+        } else {
+            assert_eq!(trusted, Ok(()));
+            assert!(
+                matches!(&refused, Err(rustls::Error::InvalidCertificate(_))),
+                "{refused:?}"
+            );
+        }
     }
 
     /// A raw configuration is used as given, but its copies offer

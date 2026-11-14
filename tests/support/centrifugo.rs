@@ -78,6 +78,8 @@ pub(crate) struct Centrifugo {
     /// the UDP port apart from the TCP one (Block 48, D19).
     webtransport: Option<String>,
     api: ServerApi,
+    /// The container's last log lines, timed from the start request.
+    logs: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
 
 /// What a server started over TLS serves besides its TCP endpoints.
@@ -208,7 +210,19 @@ impl Centrifugo {
             tls: tls.is_some(),
             webtransport,
             api,
+            logs,
         }
+    }
+
+    /// The container's last log lines, timed from the start request, for a
+    /// report of a failed run (Block 58).
+    pub(crate) fn last_logs(&self) -> Vec<String> {
+        self.logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Stops and removes the container.
