@@ -828,20 +828,20 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       # The device program and the unit tests for the emulator's x86_64, at
-      # API level 22 as the android job; the harness for the host.
-      # cargo-ndk passes on no --message-format json output: the paths come
-      # from cargo's Executable lines.
+      # API level 22 as the android job; the harness for the host. cargo ndk
+      # reads cargo's JSON messages itself and passes none on, so cargo
+      # builds them in the environment cargo-ndk gives (cargo ndk-env), and
+      # the paths come from its --message-format json.
       - name: Build
         shell: bash
-        env:
-          CARGO_TERM_COLOR: never
         run: |
-          cargo ndk --target x86_64 --platform 22 test --lib --test mobile_device --no-run 2>&1 | tee "$RUNNER_TEMP/build.txt"
-          executable() {
-            sed -nE "s#^ *Executable $1 \((.*)\)\$#\1#p" "$RUNNER_TEMP/build.txt" | sed "s#^#$PWD/#"
-          }
-          program=$(executable tests/mobile_device.rs)
-          tests=$(executable 'unittests src/lib.rs')
+          (
+            # shellcheck disable=SC1090 # cargo-ndk's exports, generated
+            source <(cargo ndk-env --target x86_64 --platform 22)
+            cargo test --target x86_64-linux-android --lib --test mobile_device --no-run --message-format json
+          ) > "$RUNNER_TEMP/build.json"
+          program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
+          tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
           test -x "$program"
           test -x "$tests"
           {
