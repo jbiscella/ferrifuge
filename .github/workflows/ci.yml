@@ -794,6 +794,157 @@ jobs:
           cargo clippy --target aarch64-apple-ios --lib --tests --no-default-features --features tokio,aws-lc-rs,unstable-webtransport -- -D warnings
           cargo test --target aarch64-apple-ios --lib --no-run --no-default-features --features tokio,aws-lc-rs,unstable-webtransport
 
+  # A client on an Android emulator against a real Centrifugo (Block 58,
+  # D2): connect, subscribe, a publication and disconnect over ws://, and
+  # the library's unit tests there. On main and nightly, as browser-safari;
+  # not a required check.
+  mobile-android:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      # At Block 24 D1's version.
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-ndk@4.1.2
+
+      # The emulator runs under KVM, which this udev rule opens to the
+      # runner (android-emulator-runner's documented setup).
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The device program and the unit tests for the emulator's x86_64, at
+      # API level 22 as the android job; the harness for the host.
+      - name: Build
+        run: |
+          cargo ndk --target x86_64 --platform 22 test --lib --test mobile_device --no-run --message-format json > "$RUNNER_TEMP/build.json"
+          program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
+          tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
+          test -x "$program" && test -x "$tests"
+          {
+            echo "MOBILE_DEVICE_PROGRAM=$program"
+            echo "MOBILE_LIB_TESTS=$tests"
+            echo "FERRIFUGE_MOBILE_ARTIFACTS=$RUNNER_TEMP/mobile-artifacts"
+          } >> "$GITHUB_ENV"
+          cargo test --test mobile --no-run
+
+      - name: Pull Centrifugo image
+        run: docker pull centrifugo/centrifugo:v6.10.3
+
+      # Only an image of the host's architecture runs under KVM.
+      - name: On the emulator
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash ci/mobile-android.sh
+
+      - name: Upload the program's lines and the servers' output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mobile-android
+          path: ${{ env.FERRIFUGE_MOBILE_ARTIFACTS }}
+          if-no-files-found: ignore
+
+  # The same on an iOS simulator (Block 58, D3), and wss:// verified by the
+  # device's own trust: refused, then trusted once the run's CA is added to
+  # the simulator's keychain. Hosted macOS has no Docker: the Centrifugo
+  # release binary runs, its checksum pinned, as in browser-safari.
+  mobile-ios:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      # As the ios job sets it.
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+      CENTRIFUGO_ASSET: centrifugo_6.10.3_darwin_arm64.tar.gz
+      CENTRIFUGO_SHA256: 8a6854615b8296027966b88d73bf5576a084002b40fc46c4e82afb458cdbe78f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build
+        run: |
+          cargo test --target aarch64-apple-ios-sim --lib --test mobile_device --no-run --message-format json > "$RUNNER_TEMP/build.json"
+          program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
+          tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
+          test -x "$program" && test -x "$tests"
+          {
+            echo "MOBILE_DEVICE_PROGRAM=$program"
+            echo "MOBILE_LIB_TESTS=$tests"
+            echo "FERRIFUGE_MOBILE_ARTIFACTS=$RUNNER_TEMP/mobile-artifacts"
+          } >> "$GITHUB_ENV"
+          cargo test --test mobile --no-run
+
+      - name: Centrifugo
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/$CENTRIFUGO_ASSET" \
+            "https://github.com/centrifugal/centrifugo/releases/download/v6.10.3/$CENTRIFUGO_ASSET"
+          echo "$CENTRIFUGO_SHA256  $RUNNER_TEMP/$CENTRIFUGO_ASSET" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$CENTRIFUGO_ASSET" -C "$RUNNER_TEMP" centrifugo
+          echo "FERRIFUGE_CENTRIFUGO=$RUNNER_TEMP/centrifugo" >> "$GITHUB_ENV"
+
+      # One available iPhone of the image's newest iOS runtime.
+      - name: Boot a simulator
+        run: |
+          runtime=$(xcrun simctl list runtimes available --json | jq -r '[.runtimes[] | select(.name | startswith("iOS"))] | last | .identifier')
+          udid=$(xcrun simctl list devices available --json | jq -r --arg runtime "$runtime" '.devices[$runtime][] | select(.name | startswith("iPhone")) | .udid' | head -n 1)
+          echo "simulator: $runtime $udid"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "FERRIFUGE_MOBILE_DEVICE=$udid" >> "$GITHUB_ENV"
+
+      # Without --standalone, under the device's launchd, so that a program
+      # reaches its trust daemon. The simulator shares the host's file
+      # system, so no unit test is skipped (D4).
+      - name: Unit tests on the simulator
+        shell: bash
+        run: |
+          mkdir -p "$FERRIFUGE_MOBILE_ARTIFACTS"
+          xcrun simctl spawn "$FERRIFUGE_MOBILE_DEVICE" "$MOBILE_LIB_TESTS" 2>&1 | tee "$FERRIFUGE_MOBILE_ARTIFACTS/unit-tests.txt"
+
+      # macOS has no GNU timeout: the harness's run bound and the job's
+      # timeout-minutes bound the run, as in browser-safari.
+      - name: The device program, through the harness
+        shell: bash
+        env:
+          FERRIFUGE_MOBILE: ios
+        run: |
+          FERRIFUGE_MOBILE_BINARY="$MOBILE_DEVICE_PROGRAM" cargo test --test mobile 2>&1 | tee "$FERRIFUGE_MOBILE_ARTIFACTS/harness.txt"
+
+      - name: Upload the program's lines and the servers' output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mobile-ios
+          path: ${{ env.FERRIFUGE_MOBILE_ARTIFACTS }}
+          if-no-files-found: ignore
+
   # The public API against the base branch (Block 14e): a breaking change
   # needs a version bump (0.x: the minor version).
   semver:
