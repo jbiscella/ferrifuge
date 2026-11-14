@@ -15,10 +15,6 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
-  # TEMPORARY, removed before merge: the evidence run of the PR's branch
-  # (workflow_dispatch fires only for a file on the default branch).
-  push:
-    branches: [impl/block-51c-real-faults]
 
 permissions:
   contents: read
