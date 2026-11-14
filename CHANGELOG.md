@@ -175,11 +175,11 @@ repository held while it carried that version, from the blocks of
 ### Fixed
 
 - A websocket upgrade whose answer reaches the client in many small reads
-  no longer fails with "Attack attempt detected": the client reads the
-  head of the server's answer whole before tungstenite parses it, over
-  `ws://` as over `wss://`, so a network that fragments it, or a server
-  writing tiny TLS records, no longer fails every handshake (Block 50b's
-  finding).
+  no longer fails with "Attack attempt detected": the client now reads the
+  head of the server's answer whole before tungstenite parses it. Over
+  `ws://` a network that splits the answer into small segments, and over
+  `wss://` a server that writes it in tiny TLS records, failed every
+  handshake (Block 50b's finding).
 
 - A stream decoder no longer keeps what one large reply grew: after a
   reply or a chunk over 64 KiB, the http_stream and WebTransport decoders
