@@ -99,6 +99,12 @@ fn fits(elapsed: Duration, remaining: Duration, holds: Duration) -> bool {
 const CHANNELS_WITHIN: Duration = Duration::from_secs(10);
 /// The client's `Config::timeout`.
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Error 109, token expired (`client.proto`; Blocks 5 and 10).
+const TOKEN_EXPIRED: u32 = 109;
+/// The child's `max_reconnect_delay` and `max_resubscribe_delay`, so that
+/// I4's 30 s holds the longest wait healing leaves a working client (D7,
+/// reviewer 51c, seed 23).
+const MAX_DELAY: Duration = Duration::from_secs(5);
 /// I6: a call settles within 3 timeouts plus 1 s, as the adapter runner
 /// checks it (Block 16, D7), measured in the child.
 const CALL_BOUND: Duration = Duration::from_secs(7);
@@ -394,6 +400,11 @@ enum Record {
         refresh: bool,
         off: bool,
     },
+    /// A connect or a subscribe answered with 109, token expired: counted
+    /// for D10's log, never required (reviewer, 51c).
+    Expired {
+        of: String,
+    },
     /// The client's state left disconnected after `disconnect()`, before
     /// the next `connect()` (I5).
     LeftOff {
@@ -624,7 +635,11 @@ fn child_client(
     let slot = Arc::new(OnceLock::new());
     let (token_slot, off) = (Arc::clone(&slot), off.clone());
     let client = ferrifuge::Client::builder(endpoint)
-        .config(ferrifuge::Config::default().timeout(CALL_TIMEOUT))
+        .config(
+            ferrifuge::Config::default()
+                .timeout(CALL_TIMEOUT)
+                .max_reconnect_delay(MAX_DELAY),
+        )
         .get_token(move || {
             token_writer.write(Record::Token {
                 of: "connection".to_owned(),
@@ -674,6 +689,12 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
                 ferrifuge::ClientEvent::Connecting { code, .. } => ("connecting", *code),
                 ferrifuge::ClientEvent::Connected { .. } => ("connected", 0),
                 ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code),
+                ferrifuge::ClientEvent::Error(error) if error.code == TOKEN_EXPIRED => {
+                    client_writer.write(Record::Expired {
+                        of: "connect".to_owned(),
+                    });
+                    continue;
+                }
                 _ => continue,
             };
             client_writer.write(Record::Client {
@@ -702,6 +723,7 @@ fn child_subscriptions(
         let (token_slot, token_off) = (Arc::clone(&slot), off.clone());
         let subscription = client
             .subscription_builder(channel.clone())
+            .max_resubscribe_delay(MAX_DELAY)
             .get_token(move |channel| {
                 token_writer.write(Record::Token {
                     of: "subscription".to_owned(),
@@ -725,6 +747,9 @@ fn child_subscriptions(
                     E::Subscribing { .. } => sub_record(&name, "subscribing", None),
                     E::Unsubscribed { .. } => sub_record(&name, "unsubscribed", None),
                     E::Subscribed(subscribed) => sub_record(&name, "subscribed", Some(&subscribed)),
+                    E::Error(error) if error.code == TOKEN_EXPIRED => Record::Expired {
+                        of: "subscribe".to_owned(),
+                    },
                     E::Publication(publication) => Record::Pub {
                         channel: name.clone(),
                         offset: publication.offset,
@@ -1078,6 +1103,7 @@ impl SeedRun<'_> {
                     COUNTERS.lock().unwrap().add(format!("token {of}"));
                 }
             }
+            Record::Expired { of } => COUNTERS.lock().unwrap().add(format!("109 {of}")),
             Record::LeftOff { state } => {
                 return Err(self.violation(
                     "I5",

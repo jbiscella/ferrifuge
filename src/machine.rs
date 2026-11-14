@@ -4493,6 +4493,94 @@ mod tests {
         );
     }
 
+    /// Block 51 D7 (reviewer, 51c, seed 23): a token fetched for an
+    /// attempt that got no connect reply has no refresh timer, so the next
+    /// attempt sends it again, expired by then; the 109 answering it makes
+    /// the attempt after fetch a new one, with the attempt counter kept.
+    #[test]
+    fn a_token_fetched_for_an_unanswered_attempt_is_sent_again_and_refetched_after_109() {
+        let mut machine = token_machine("");
+        let fetch = fetch_requested(&machine.handle(Input::Connect));
+        let transport = opened_transport(&machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        }));
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":4}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: Some(3001),
+            reason: "shutdown".into(),
+        });
+        // The refresh timer fires while connecting (Block 25 D3): the next
+        // attempt fetches a new token.
+        machine.handle(Input::TimerFired(Timer::Refresh));
+        let fetch = fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+        let mut actions = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t2".into()),
+        });
+        let transport = opened_transport(&actions);
+        actions.extend(machine.handle(Input::TransportOpened(transport)));
+        // No connect reply: the attempt times out.
+        actions.extend(machine.handle(Input::TimerFired(Timer::ConnectTimeout)));
+        actions.extend(machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: "closed".into(),
+        }));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::SetTimer(Timer::Refresh, _))),
+            "a refresh timer for t2: {actions:?}"
+        );
+
+        // The next attempt sends t2 again, with no fetch.
+        let actions = machine.handle(Input::TimerFired(Timer::Reconnect));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::FetchToken(_))),
+            "{actions:?}"
+        );
+        let transport = opened_transport(&actions);
+        let sent = machine.handle(Input::TransportOpened(transport));
+        assert!(
+            sent.iter().any(|action| matches!(action, Action::Send { frame, .. } if frame.windows(4).any(|w| w == b"\"t2\""))),
+            "{sent:?}"
+        );
+
+        // Answered 109: the counter is kept, and the next attempt fetches.
+        let before = machine.backoff.attempt();
+        assert!(before >= 2, "attempts before the 109: {before}");
+        let id = sent
+            .iter()
+            .find_map(|action| match action {
+                Action::Send { frame, .. } => {
+                    let text = String::from_utf8_lossy(frame);
+                    let digits: String = text
+                        .split("\"id\":")
+                        .nth(1)?
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    digits.parse::<u32>().ok()
+                }
+                _ => None,
+            })
+            .expect("the connect command's id");
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{id},"error":{{"code":109,"message":"token expired"}}}}"#),
+        ));
+        assert_eq!(machine.backoff.attempt(), before + 1, "the counter kept");
+        fetch_requested(&machine.handle(Input::TimerFired(Timer::Reconnect)));
+    }
+
     #[test]
     fn failed_connect_fetch_is_reported_and_retried_with_backoff() {
         let mut machine = token_machine("");
