@@ -20,7 +20,7 @@ mod bug_catalogue;
 
 /// Features of `CLAUDE.md` whose blocks are not implemented yet, so have no
 /// feature file. A block's feature leaves the list when its file is added.
-const NOT_YET_IMPLEMENTED: &[&str] = &[];
+const NOT_YET_IMPLEMENTED: &[&str] = &["Numbered timer settings"];
 
 /// `@P` scenarios of `CLAUDE.md` that no benchmark or simulation claims
 /// yet. A scenario leaves the list when a harness claims it.
@@ -529,10 +529,41 @@ fn the_catalogue_reports_a_gap_without_a_probe_or_a_listed_finding() {
     );
     reports(&implemented.gaps_without_probe(), "row S2 is a gap");
     // A finding of another row does not close this one.
-    let another_rows = planted(s2, "finding F1");
+    let another_rows = planted_all(&[(FINDINGS_TABLE, &finding("63")), (s2, "finding F9")]);
     reports(&another_rows.gaps_without_probe(), "row S2 is a gap");
-    let unlisted = planted("| gap | finding F1:", "| gap | finding F2:");
-    reports(&unlisted.gaps_without_probe(), "row 63 is a gap");
+    // Nor does a finding the table does not list.
+    let unlisted = planted_all(&[(FINDINGS_TABLE, &finding("63")), (s2, "finding F8")]);
+    reports(&unlisted.gaps_without_probe(), "row S2 is a gap");
+    // A finding of its own row, listed, does.
+    let listed = planted_all(&[(FINDINGS_TABLE, &finding("S2")), (s2, "finding F9")]);
+    assert!(
+        !listed
+            .gaps_without_probe()
+            .iter()
+            .any(|gap| gap.contains("row S2")),
+        "row S2's own finding F9 left it reported: {:?}",
+        listed.gaps_without_probe()
+    );
+}
+
+/// The header of "Findings for later pull requests", where a test plants a
+/// finding (the table has no row once Block 53 closed F1 and F2).
+const FINDINGS_TABLE: &str = "| Id | Row | Finding | Proposed probe, not part of this block | Mutation |\n|---|---|---|---|---|";
+
+/// The findings table with a finding F9 of `row` planted.
+fn finding(row: &str) -> String {
+    format!("{FINDINGS_TABLE}\n| F9 | {row} | planted | planted | planted |")
+}
+
+/// The catalogue of `CLAUDE.md` with each `from` of `pairs`, each unique,
+/// replaced by its `to`.
+fn planted_all(pairs: &[(&str, &str)]) -> bug_catalogue::Catalogue {
+    let mut text = catalogue_text();
+    for (from, to) in pairs {
+        assert_eq!(text.matches(from).count(), 1, "{from:?} is not unique");
+        text = text.replacen(from, to, 1);
+    }
+    bug_catalogue::Catalogue::parse(&text)
 }
 
 #[test]
