@@ -31,13 +31,16 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: rustfmt
         run: cargo fmt --check
@@ -91,6 +94,7 @@ jobs:
         run: |
           for features in "" "--features unstable"; do
             for crate in wtransport quinn sha2 x509-parser; do
+              # shellcheck disable=SC2086 # $features is empty or a flag and its value: split on purpose
               test -z "$(cargo tree -e normal $features -i $crate 2>/dev/null)"
             done
           done
@@ -106,6 +110,47 @@ jobs:
           nm -C target/release/examples/webtransport > webtransport-symbols.txt
           grep -q "wtransport::" webtransport-symbols.txt
           ! grep -E "sha2::|x509_parser::" webtransport-symbols.txt
+
+  # Every workflow checked for the known GitHub Actions weaknesses and for
+  # shell and syntax errors (Block 57, D1), each tool at an exact version.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_ASSET: actionlint_1.7.12_linux_amd64.tar.gz
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck, which actionlint runs on every `run:` block, and zizmor.
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: shellcheck@0.11.0,zizmor@1.32.0
+
+      - name: actionlint
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/$ACTIONLINT_ASSET" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$ACTIONLINT_ASSET"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$ACTIONLINT_ASSET" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$ACTIONLINT_ASSET" -C "$RUNNER_TEMP" actionlint
+          shellcheck --version
+          "$RUNNER_TEMP/actionlint" -shellcheck shellcheck
+
+      # Offline on pull requests and pushes: deterministic, and free of the
+      # API's rate limit.
+      - name: zizmor
+        if: github.event_name != 'schedule'
+        run: zizmor --offline --min-severity low .
+
+      # Online on the nightly, which adds the impostor-commit and
+      # known-vulnerable-actions audits.
+      - name: zizmor (online)
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --min-severity low .
 
   # Builds with an aws-lc TLS provider (Block 6). The default ring build is
   # tested by the test job.
@@ -126,15 +171,17 @@ jobs:
       # The full history: the bug-pattern catalogue checks that every
       # commit it cites is an ancestor of HEAD (Block 49, untagged
       # scenarios run here).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.provider }}
 
@@ -143,7 +190,7 @@ jobs:
       - name: Install CMake
         run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false
@@ -152,18 +199,26 @@ jobs:
         run: docker pull centrifugo/centrifugo:v6.10.3
 
       - name: ring is not linked
-        run: test -z "$(cargo tree -e normal $WITHOUT_RING -i ring 2>/dev/null)"
+        run: |
+          # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
+          test -z "$(cargo tree -e normal $WITHOUT_RING -i ring 2>/dev/null)"
 
       - name: clippy
-        run: cargo clippy --all-targets $WITHOUT_RING -- -D warnings
+        run: |
+          # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
+          cargo clippy --all-targets $WITHOUT_RING -- -D warnings
 
       # Every scenario, the encrypted one included, with this provider.
       - name: cargo test
-        run: cargo test --all-targets $WITHOUT_RING
+        run: |
+          # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
+          cargo test --all-targets $WITHOUT_RING
 
       # Default features keep ring enabled: the stronger provider must win.
       - name: precedence over the default ring
-        run: cargo test --lib --features ${{ matrix.provider }},unstable-webtransport -- tls_config fips_build webtransport
+        env:
+          PROVIDER: ${{ matrix.provider }}
+        run: cargo test --lib --features "$PROVIDER,unstable-webtransport" -- tls_config fips_build webtransport
 
   test:
     runs-on: ubuntu-latest
@@ -173,17 +228,19 @@ jobs:
       # The full history: the bug-pattern catalogue checks that every
       # commit it cites is an ancestor of HEAD (Block 49, untagged
       # scenarios run here).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           components: llvm-tools-preview
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-llvm-cov
 
@@ -219,7 +276,7 @@ jobs:
 
       - name: Upload lcov report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-lcov
           path: lcov.info
@@ -248,11 +305,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Long chaos run
         run: |
@@ -306,11 +367,15 @@ jobs:
           - os: macos-latest
             run: short
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Adapter chaos run
         shell: bash
@@ -332,9 +397,12 @@ jobs:
       - name: Chaos summary
         if: ${{ !cancelled() }}
         shell: bash
+        env:
+          OS: ${{ matrix.os }}
+          RUN: ${{ matrix.run }}
         run: |
           {
-            echo "### Adapter chaos (${{ matrix.os }}, ${{ matrix.run }})"
+            echo "### Adapter chaos ($OS, $RUN)"
             echo '```'
             grep -Eo 'chaos: adapter seeds .*|seed [0-9]+ broke .*|replay: .*' chaos.txt || echo 'no seed printed'
             echo '```'
@@ -348,11 +416,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install Valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
@@ -364,7 +436,7 @@ jobs:
 
       # A prebuilt binary rather than compiling it (about 2 min).
       - name: Install gungraun-runner
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: gungraun-runner@${{ steps.gungraun.outputs.version }}
 
@@ -412,11 +484,15 @@ jobs:
     continue-on-error: true
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Decode and dispatch time
         run: |
@@ -444,13 +520,16 @@ jobs:
       # The full history: the bug-pattern catalogue checks that every
       # commit it cites is an ancestor of HEAD (Block 49, untagged
       # scenarios run here).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Unit tests
         run: cargo test --lib
@@ -476,14 +555,17 @@ jobs:
     env:
       CLIPPY_CONF_DIR: ci/wasm-clippy
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: The core alone
         run: |
@@ -533,7 +615,9 @@ jobs:
         run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install wasm-bindgen-cli --locked --version "$WASM_BINDGEN"
 
       # Reported, no gate (Block 44, D19).
       - name: Size of the browser module
@@ -551,20 +635,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: wasm-bindgen version
         id: wasm-bindgen
         run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install wasm-bindgen-cli --locked --version "$WASM_BINDGEN"
 
       - name: Pull Centrifugo image
         run: docker pull centrifugo/centrifugo:v6.10.3
@@ -587,20 +676,25 @@ jobs:
       CENTRIFUGO_ASSET: centrifugo_6.10.3_darwin_arm64.tar.gz
       CENTRIFUGO_SHA256: 8a6854615b8296027966b88d73bf5576a084002b40fc46c4e82afb458cdbe78f
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: wasm-bindgen version
         id: wasm-bindgen
         run: echo "version=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')" >> "$GITHUB_OUTPUT"
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
+        env:
+          WASM_BINDGEN: ${{ steps.wasm-bindgen.outputs.version }}
+        run: cargo install wasm-bindgen-cli --locked --version "$WASM_BINDGEN"
 
       - name: Centrifugo
         run: |
@@ -631,19 +725,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: aarch64-linux-android
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # The compiler, archiver and linker of the runner's NDK
       # (ANDROID_NDK_HOME), at API level 22, the floor of the verifier's
       # Kotlin component; as rustls-platform-verifier's own CI does.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-ndk@4.1.2
 
@@ -674,14 +771,17 @@ jobs:
     env:
       IPHONEOS_DEPLOYMENT_TARGET: "13.0"
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
           targets: aarch64-apple-ios
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # With WebTransport (Block 48, D16).
       - name: Default features (ring)
@@ -698,28 +798,34 @@ jobs:
   # needs a version bump (0.x: the minor version).
   semver:
     runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-semver-checks
 
       # Default features and test-util: the public API. The private
       # __test-hooks are not part of it (Block 37, D7).
       - name: cargo semver-checks
-        run: cargo semver-checks --default-features --features test-util,cookies --baseline-rev "${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}"
+        run: cargo semver-checks --default-features --features test-util,cookies --baseline-rev "$BASE"
 
       # The browser target's API too (Block 44, D19), once the base has the
       # browser adapter: before it, the base does not build there.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
       # cargo-semver-checks cannot build the rustdoc itself for this target:
@@ -728,8 +834,6 @@ jobs:
       # built with cargo rustdoc instead, as cargo-semver-checks builds it,
       # and the two are compared.
       - name: cargo semver-checks (browser target)
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
         run: |
           if ! git show "$BASE:Cargo.toml" | grep -q '^browser = '; then
             echo "the base has no browser adapter: nothing to compare on the browser target"
@@ -755,13 +859,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install cargo-bolero
         run: cargo install cargo-bolero --locked --version 0.13.5
@@ -776,7 +886,7 @@ jobs:
 
       - name: Upload crashing inputs
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-crashes
           path: src/**/__fuzz__/**/crashes
@@ -788,13 +898,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -813,11 +927,15 @@ jobs:
     # The FIPS build takes several minutes, as in the providers job.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.88"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: cargo check on MSRV
         run: cargo check --all-targets
@@ -835,7 +953,7 @@ jobs:
       - name: Install CMake
         run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false
@@ -851,11 +969,15 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: cargo publish --dry-run
         run: cargo publish --dry-run
@@ -866,13 +988,16 @@ jobs:
   docs-rs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: rustdoc as on docs.rs
         run: |
