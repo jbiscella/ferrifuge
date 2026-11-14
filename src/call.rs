@@ -9,6 +9,7 @@ use crate::{ClientInfo, Publication, StreamPosition};
 /// methods.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(not(feature = "unstable-machine"), allow(unreachable_pub))]
 pub enum CallRequest {
     /// An RPC (`client.proto`, `RPCRequest`).
     Rpc {
@@ -235,6 +236,7 @@ pub struct PresenceStatsResult {
 /// What a call returned. `#[non_exhaustive]`: later blocks add methods.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(not(feature = "unstable-machine"), allow(unreachable_pub))]
 pub enum CallReply {
     /// The RPC's result data (`client.proto`, `RPCResult.data`): raw JSON
     /// with the JSON protocol, any bytes with Protobuf; empty when the

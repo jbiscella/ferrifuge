@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"
@@ -25,14 +25,14 @@ include = [
     "!/src/**/__fuzz__/**",
 ]
 
-# docs.rs builds the default features, test-util, cookies, unstable and
-# unstable-webtransport (a ring build), natively and for the browser target,
-# where cookies and unstable-webtransport build nothing: never fips, whose
-# build needs Go and CMake (Block 20, D7; Block 37, D7; Block 43, D8; Block
-# 44, D19; Block 45, D17; Block 48, D21).
+# docs.rs builds the default features, test-util, cookies, unstable,
+# unstable-webtransport and unstable-machine (a ring build), natively and for
+# the browser target, where cookies and unstable-webtransport build nothing:
+# never fips, whose build needs Go and CMake (Block 20, D7; Block 37, D7;
+# Block 43, D8; Block 44, D19; Block 45, D17; Block 48, D21; Block 54, D1).
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
-features = ["test-util", "cookies", "unstable", "unstable-webtransport"]
+features = ["test-util", "cookies", "unstable", "unstable-webtransport", "unstable-machine"]
 
 [features]
 default = ["tokio", "ring", "browser"]
@@ -108,6 +108,11 @@ unstable = []
 # `unstable` build and the users of Blocks 45 and 47 get no QUIC stack. In
 # the browser `unstable` is enough: the browser's WebTransport needs no crate.
 unstable-webtransport = ["unstable", "tokio", "dep:wtransport"]
+# The sans-IO core, `ferrifuge::machine`, by which another runtime drives
+# the client (Block 54, D1). Not a default, and outside the semver promise:
+# its API may change in any minor release. The `Client` of the `tokio` and
+# `browser` features is the stable API.
+unstable-machine = []
 # Hooks for the crate's own tests and benchmarks, e.g. Machine::with_seed.
 # Private (the leading underscores): not part of the public API, enabled
 # only by the dev-dependency on itself below, never by applications.
@@ -215,7 +220,7 @@ jni = { version = "0.22.4", default-features = false, optional = true }
 # The crate itself with its test hooks, for its tests and benchmarks only.
 # No default features, so builds without them (the core alone, aws-lc
 # providers without ring) stay so.
-ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", "test-util"] }
+ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", "test-util", "unstable-machine"] }
 
 # Native tests only: mio, which they pull in, does not build for wasm32
 # (Block 40, D3; Block 44, D18).

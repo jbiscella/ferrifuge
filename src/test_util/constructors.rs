@@ -287,7 +287,7 @@ impl Statistics {
     ///
     /// ```
     /// use ferrifuge::{State, Statistics};
-    /// use ferrifuge::machine::TransportKind;
+    /// use ferrifuge::TransportKind;
     ///
     /// let statistics = Statistics::new(State::Connected)
     ///     .transport(TransportKind::WebSocket)

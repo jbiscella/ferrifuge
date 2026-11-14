@@ -1328,7 +1328,7 @@ struct QueueRun {
     /// Calls settled so far, with their outcome.
     settled: Vec<(
         ferrifuge::machine::CallId,
-        Result<ferrifuge::CallReply, CallError>,
+        Result<ferrifuge::machine::CallReply, CallError>,
     )>,
 }
 
@@ -1416,10 +1416,12 @@ impl QueueRun {
     fn publish(&mut self, size: usize) {
         let fill = char::from(b'a' + u8::try_from(self.publishes.len()).unwrap());
         let data = format!("\"{}\"", fill.to_string().repeat(size - PUBLISH_OVERHEAD));
-        let call = self.machine.add_call(ferrifuge::CallRequest::Publish {
-            channel: "news".into(),
-            data: data.into_bytes(),
-        });
+        let call = self
+            .machine
+            .add_call(ferrifuge::machine::CallRequest::Publish {
+                channel: "news".into(),
+                data: data.into_bytes(),
+            });
         self.publishes.push(Publish {
             size,
             call,

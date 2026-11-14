@@ -110,9 +110,8 @@ pub struct Config {
     /// since the server would send the same data again; the application
     /// decides when to connect again. Keep it above the largest reply the
     /// application expects, history and recovery included. An owner of the
-    /// [`Machine`](crate::machine::Machine) enforces it where the bytes are read and
-    /// reports a larger message with
-    /// [`Input::MessageTooLarge`](crate::machine::Input::MessageTooLarge). At least
+    /// sans-IO core (`unstable-machine`) enforces it where the bytes are read
+    /// and reports a larger message with `Input::MessageTooLarge`. At least
     /// 1. Default 64 MiB.
     ///
     /// In the browser a websocket message is refused only once the browser

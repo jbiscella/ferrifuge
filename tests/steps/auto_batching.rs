@@ -7,8 +7,9 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use cucumber::{given, then, when};
+use ferrifuge::Config;
+use ferrifuge::machine::CallRequest;
 use ferrifuge::machine::{Action, Input, Machine, TransportKind};
-use ferrifuge::{CallRequest, Config};
 use serde_json::{Value, json};
 
 use super::ClientWorld;

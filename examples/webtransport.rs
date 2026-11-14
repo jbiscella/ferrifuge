@@ -8,7 +8,7 @@
 //! `FERRIFUGE_EXAMPLE_WEBTRANSPORT` and `FERRIFUGE_EXAMPLE_ENDPOINT`
 //! override the WebTransport and websocket endpoints.
 
-use ferrifuge::machine::TransportKind;
+use ferrifuge::TransportKind;
 use ferrifuge::{Client, ClientEvent, Config, SubscriptionEvent};
 use futures_util::StreamExt;
 

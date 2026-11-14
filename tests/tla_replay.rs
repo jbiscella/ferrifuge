@@ -19,13 +19,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use ferrifuge::machine::CallRequest;
 use ferrifuge::machine::{
     Action, CallId, FetchId, Input, Machine, SubscriptionId, SubscriptionOptions,
     SubscriptionTimer, Timer, TransportId, TransportKind,
 };
 use ferrifuge::{
-    CallRequest, ClientEvent, Config, DeltaFormat, ServerSubscriptionEvent, State, StateError,
-    StreamPosition, SubscriptionEvent, SubscriptionState, TokenError,
+    ClientEvent, Config, DeltaFormat, ServerSubscriptionEvent, State, StateError, StreamPosition,
+    SubscriptionEvent, SubscriptionState, TokenError,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

@@ -6,10 +6,10 @@
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::{Action, Input, Machine, SubscriptionOptions, TransportKind};
+use ferrifuge::machine::{CallReply, CallRequest};
 use ferrifuge::{
-    CallReply, CallRequest, ClientEvent, ClientInfo, Config, HistoryOptions, HistoryResult,
-    PresenceResult, PresenceStatsResult, Publication, StreamPosition, Subscribed,
-    SubscriptionEvent,
+    ClientEvent, ClientInfo, Config, HistoryOptions, HistoryResult, PresenceResult,
+    PresenceStatsResult, Publication, StreamPosition, Subscribed, SubscriptionEvent,
 };
 use serde_json::{Value, json};
 

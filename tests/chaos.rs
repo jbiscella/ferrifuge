@@ -30,8 +30,9 @@ use ferrifuge::machine::{
     Action, CallId, CallTimer, DebounceTimer, EventId, FetchId, FrameId, Input, Machine,
     SubscriptionId, SubscriptionOptions, SubscriptionTimer, Timer, TimerSetting, TransportId,
 };
+use ferrifuge::machine::{CallReply, CallRequest};
 use ferrifuge::{
-    CallError, CallReply, CallRequest, ClientEvent, Config, DataError, DeltaFormat, HistoryOptions,
+    CallError, ClientEvent, Config, DataError, DeltaFormat, HistoryOptions,
     ServerSubscriptionEvent, State, StateError, StreamPosition, SubscriptionEvent,
     SubscriptionState, TokenError, codes, write_fossil_delta,
 };

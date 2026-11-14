@@ -58,7 +58,7 @@ pub enum SubscriptionEvent {
     /// callback while the subscription keeps trying.
     Error(ClientError),
     /// A client subscribed to the channel: a join push, sent to
-    /// subscriptions with [`crate::machine::SubscriptionOptions::join_leave`]
+    /// subscriptions with [`crate::SubscriptionBuilder::join_leave`]
     /// on channels that have them.
     Join(ClientInfo),
     /// A client unsubscribed from the channel: a leave push, as for
@@ -97,13 +97,13 @@ pub struct Subscribed {
     /// channel forces it, or the [`positioned`] option asked for it and the
     /// channel allows it.
     ///
-    /// [`positioned`]: crate::machine::SubscriptionOptions::positioned
+    /// [`positioned`]: crate::SubscriptionBuilder::positioned
     pub positioned: bool,
     /// Publications missed while not subscribed can be recovered: the
     /// channel forces it, or the [`recoverable`] option asked for it and the
     /// channel allows it.
     ///
-    /// [`recoverable`]: crate::machine::SubscriptionOptions::recoverable
+    /// [`recoverable`]: crate::SubscriptionBuilder::recoverable
     pub recoverable: bool,
     /// The subscribe asked to recover missed publications.
     pub was_recovering: bool,
@@ -118,7 +118,7 @@ pub struct Subscribed {
     /// its next subscribe, as the [`delta`] option asked (Block 19). The
     /// client rebuilds them: the application gets whole payloads.
     ///
-    /// [`delta`]: crate::machine::SubscriptionOptions::delta
+    /// [`delta`]: crate::SubscriptionBuilder::delta
     pub delta: bool,
     /// Publications follow this event, recovered or initial ones, unless
     /// they are withdrawn (Block 15); for metrics and logging (Block 35c,

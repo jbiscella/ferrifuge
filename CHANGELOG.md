@@ -5,11 +5,35 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-No version up to 0.22.0 was published: each section records what the
+No version up to 0.23.0 was published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.23.0] - 2026-11-15
+
+### Added
+
+- The `unstable-machine` feature (Block 54a, D1): `ferrifuge::machine`, the
+  sans-IO core by which another runtime drives the client, is public only
+  with it. Not a default, and outside the semver promise: the core's API
+  may change in any minor release, and the `Client` of the `tokio` and
+  `browser` features is the stable API.
+
+- `ferrifuge::TransportKind` (Block 54a, D1), re-exported at the root, so
+  that `Client::builder_with_transports` and `Statistics::transport` need
+  no `machine`.
+
+### Changed
+
+- `ferrifuge::machine` is crate-private without `unstable-machine` (Block
+  54a, D1). An application driving `Machine` enables the feature; one
+  naming only `machine::TransportKind` uses `ferrifuge::TransportKind`.
+
+- `CallRequest` and `CallReply` move from the crate root to `machine`
+  (Block 54a, D1): only an owner of the machine adds calls and reads their
+  replies.
 
 ## [0.22.0] - 2026-11-15
 

@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
+use ferrifuge::machine::CallRequest;
 use ferrifuge::machine::{
     Action, CallId, DebounceTimer, Input, Machine, SubscriptionId, SubscriptionOptions,
     TransportKind,
 };
 use ferrifuge::{
-    CallError, CallRequest, Client, Config, EventDelivery, Subscription, SubscriptionEvent,
-    SubscriptionState,
+    CallError, Client, Config, EventDelivery, Subscription, SubscriptionEvent, SubscriptionState,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};

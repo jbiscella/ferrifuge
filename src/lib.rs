@@ -11,8 +11,9 @@
 //! each [`Subscription`]'s, come as a stream: a publication counts as
 //! delivered when the stream yields it, and a reader that falls behind
 //! holds the server back instead of growing the client's memory. The
-//! [`machine`] module is the sans-IO core the tokio adapter drives, for
-//! other runtimes.
+//! `machine` module is the sans-IO core the adapters drive, for other
+//! runtimes: public with the `unstable-machine` feature, outside the semver
+//! promise.
 //!
 //! ```no_run
 //! use ferrifuge::{Client, Config, SubscriptionEvent};
@@ -50,7 +51,7 @@
 //! payload, connection or channel info, or a header value. Without a
 //! `tracing` subscriber the records go to the `log` crate, with no span
 //! fields. The core logs nothing: it reports the protocol breaches only it
-//! sees as [`machine::Action::Anomaly`].
+//! sees as anomalies, which the adapters log at WARN.
 //!
 //! Ferrifuge's dependencies log on their own, through `log`. At TRACE,
 //! tungstenite logs the websocket upgrade request with its header values and
@@ -58,6 +59,12 @@
 //! or above in production, e.g. `RUST_LOG=info,ferrifuge=trace`.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Without an adapter and without `unstable-machine` nothing drives the
+// core, so most of it is unused in that build (Block 54, D1).
+#![cfg_attr(
+    not(any(feature = "unstable-machine", adapter_tokio, adapter_browser)),
+    allow(dead_code)
+)]
 
 #[cfg(any(adapter_tokio, adapter_browser))]
 mod adapter;
@@ -69,7 +76,14 @@ mod config;
 mod event;
 mod fossil;
 mod json;
+#[cfg(feature = "unstable-machine")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable-machine")))]
 pub mod machine;
+// Crate-private without the feature (Block 54, D1): its `pub` items are
+// then unreachable, and those only an owner of the machine uses are unused.
+#[cfg(not(feature = "unstable-machine"))]
+#[allow(unreachable_pub, dead_code)]
+pub(crate) mod machine;
 #[cfg(feature = "unstable")]
 mod map;
 mod maybe_send;
@@ -123,9 +137,9 @@ pub use adapter::{BoxError, ConnectedStream, Connecting, Connector, Proxy, Proxy
 #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
 pub use adapter::{CookieJar, MemoryJar};
 pub use call::{
-    CallError, CallReply, CallRequest, HistoryOptions, HistoryResult, JsonCallError,
-    PresenceResult, PresenceStatsResult,
+    CallError, HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult,
 };
+pub(crate) use call::{CallReply, CallRequest};
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
 #[cfg(feature = "__test-hooks")]
@@ -137,6 +151,7 @@ pub use fossil::write as write_fossil_delta;
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
+pub use machine::TransportKind;
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 pub use map::{MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, UnrecoverableStrategy};

@@ -1,7 +1,8 @@
 # The imports of a module linking ferrifuge (Block 44, D19), built by the
 # `wasm` CI job: with the core alone it imports nothing; with `browser`
 # only what wasm-bindgen generates the glue for. Outside the package, with
-# a workspace of its own.
+# a workspace of its own. The core is driven directly, so `unstable-machine`
+# (Block 54, D1).
 [package]
 name = "wasm-imports"
 version = "0.0.0"
@@ -13,7 +14,7 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-ferrifuge = { path = "../..", default-features = false }
+ferrifuge = { path = "../..", default-features = false, features = ["unstable-machine"] }
 wasm-bindgen = { version = "0.2.130", optional = true }
 
 [features]

@@ -9,10 +9,8 @@ use ferrifuge::machine::{
     Action, CallId, CallTimer, Input, Machine, SubscriptionId, SubscriptionOptions,
     SubscriptionTimer, Timer, TimerSetting, TransportId, TransportKind,
 };
-use ferrifuge::{
-    Batch, CallError, CallReply, CallRequest, ClientEvent, Config, HistoryOptions, Protocol,
-    TokenError,
-};
+use ferrifuge::machine::{CallReply, CallRequest};
+use ferrifuge::{Batch, CallError, ClientEvent, Config, HistoryOptions, Protocol, TokenError};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
