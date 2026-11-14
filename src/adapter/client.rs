@@ -797,8 +797,9 @@ impl Shared {
     /// Moves every queued action into `into`, which is empty, under one
     /// lock, after feeding [`Input::Flush`] when `flush`: API calls that
     /// keep queueing no longer win the lock once per action against the
-    /// driver. A take that finds none releases what a burst grew, in the
-    /// queue and in `into`, which take turns holding the actions (Block 14).
+    /// driver. A take that finds none releases what the queue grew (Block
+    /// 14); the driver's buffer, which takes turns with the queue holding
+    /// the actions, is released after each turn's batches.
     fn take_actions(&self, into: &mut VecDeque<Action>, flush: bool) {
         let mut core = lock(&self.core);
         if flush {
@@ -806,7 +807,6 @@ impl Shared {
         }
         if core.actions.is_empty() {
             core.actions.shrink_to(crate::RESTING_SLOTS);
-            into.shrink_to(crate::RESTING_SLOTS);
         } else {
             std::mem::swap(&mut core.actions, into);
         }
@@ -4127,7 +4127,9 @@ async fn fetched(
 /// One turn's batches: what one `take` moves into `into` (flushing first
 /// when `flush`), performed in order; then another take only while an
 /// action just performed fed the core an input (`perform` returns true).
-/// What `take` would find otherwise waits for the next turn.
+/// What `take` would find otherwise waits for the next turn. `into`, empty
+/// then, releases what the turn grew (Block 14): no later turn need come to
+/// release it (Codex, #271).
 fn perform_batches<S>(
     state: &mut S,
     into: &mut VecDeque<Action>,
@@ -4143,6 +4145,7 @@ fn perform_batches<S>(
             fed |= perform(state, action);
         }
         if !fed {
+            into.shrink_to(crate::RESTING_SLOTS);
             return;
         }
     }
@@ -5403,26 +5406,24 @@ mod tests {
         assert!(lock(&shared.core).actions.is_empty());
     }
 
-    // Block 14: once a burst is performed, the take that finds nothing
-    // releases the slots it grew, in the queue and in the driver's buffer.
+    // Block 14: a queue a burst grew, emptied without a take, is released
+    // by the take that finds nothing.
     #[tokio::test(flavor = "current_thread")]
     async fn a_take_that_finds_none_releases_a_burst() {
         let client =
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let shared = client.shared();
-        let mut taken = VecDeque::new();
-        for _ in 0..2 {
-            lock(&shared.core).actions.extend((0..1000).map(marker));
-            shared.take_actions(&mut taken, false);
-            taken.clear();
+        {
+            let mut core = lock(&shared.core);
+            core.actions.extend((0..1000).map(marker));
+            core.actions.clear();
         }
         assert!(lock(&shared.core).actions.capacity() > crate::RESTING_SLOTS);
-        assert!(taken.capacity() > crate::RESTING_SLOTS);
+        let mut taken = VecDeque::new();
 
         shared.take_actions(&mut taken, false);
 
         assert!(lock(&shared.core).actions.capacity() <= crate::RESTING_SLOTS);
-        assert!(taken.capacity() <= crate::RESTING_SLOTS);
     }
 
     /// A scripted turn for `perform_batches`: the core's queue, what was
@@ -5490,6 +5491,25 @@ mod tests {
 
         assert_eq!(script.performed, [marker(0), marker(1)]);
         assert_eq!(Vec::from(script.queue), [marker(2)]);
+    }
+
+    // Codex, #271: a turn that performs a burst releases its buffer before
+    // the driver waits, since no later turn may come (a disconnect settling
+    // many calls leaves nothing to wake it).
+    #[test]
+    fn a_turn_that_performs_a_burst_releases_its_buffer() {
+        let mut script = Script {
+            queue: (0..1000).map(marker).collect(),
+            performed: Vec::new(),
+            then: None,
+        };
+        let mut into = VecDeque::new();
+
+        perform_batches(&mut script, &mut into, true, Script::take, Script::perform);
+
+        assert_eq!(script.performed.len(), 1000);
+        assert!(into.is_empty());
+        assert!(into.capacity() <= crate::RESTING_SLOTS);
     }
 
     // Block 36, D3. Single-threaded runtime: the driver runs only when the
