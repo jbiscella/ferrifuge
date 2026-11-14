@@ -142,7 +142,7 @@ jobs:
           cache: false
 
       - name: Pull Centrifugo image
-        run: docker pull centrifugo/centrifugo:v6.10.1
+        run: docker pull centrifugo/centrifugo:v6.10.3
 
       - name: ring is not linked
         run: test -z "$(cargo tree -e normal $WITHOUT_RING -i ring 2>/dev/null)"
@@ -182,7 +182,7 @@ jobs:
 
       # Pulled up front so container start-up does not count against test timeouts.
       - name: Pull Centrifugo image
-        run: docker pull centrifugo/centrifugo:v6.10.1
+        run: docker pull centrifugo/centrifugo:v6.10.3
 
       # One instrumented run executes every test target, including the
       # cucumber runner, so tests are not run twice for coverage.
@@ -560,7 +560,7 @@ jobs:
         run: cargo install wasm-bindgen-cli --locked --version "${{ steps.wasm-bindgen.outputs.version }}"
 
       - name: Pull Centrifugo image
-        run: docker pull centrifugo/centrifugo:v6.10.1
+        run: docker pull centrifugo/centrifugo:v6.10.3
 
       # With the WebTransport server and its h3 relay (Block 48, D19).
       - name: The @W tests in Chrome and Firefox
@@ -577,8 +577,8 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      CENTRIFUGO_ASSET: centrifugo_6.10.1_darwin_arm64.tar.gz
-      CENTRIFUGO_SHA256: fb854f08c163b2063a64e9f455ea5baa9fbc3db29452cbc1fb5c17d46d0e1ec1
+      CENTRIFUGO_ASSET: centrifugo_6.10.3_darwin_arm64.tar.gz
+      CENTRIFUGO_SHA256: 8a6854615b8296027966b88d73bf5576a084002b40fc46c4e82afb458cdbe78f
     steps:
       - uses: actions/checkout@v7
 
@@ -598,7 +598,7 @@ jobs:
       - name: Centrifugo
         run: |
           curl -sSfL -o "$RUNNER_TEMP/$CENTRIFUGO_ASSET" \
-            "https://github.com/centrifugal/centrifugo/releases/download/v6.10.1/$CENTRIFUGO_ASSET"
+            "https://github.com/centrifugal/centrifugo/releases/download/v6.10.3/$CENTRIFUGO_ASSET"
           echo "$CENTRIFUGO_SHA256  $RUNNER_TEMP/$CENTRIFUGO_ASSET" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/$CENTRIFUGO_ASSET" -C "$RUNNER_TEMP" centrifugo
           echo "FERRIFUGE_CENTRIFUGO=$RUNNER_TEMP/centrifugo" >> "$GITHUB_ENV"
@@ -792,7 +792,7 @@ jobs:
           node-version: 22
 
       - name: Pull Centrifugo image
-        run: docker pull centrifugo/centrifugo:v6.10.1
+        run: docker pull centrifugo/centrifugo:v6.10.3
 
       # centrifuge-js, pinned with its integrity hash in package-lock.json.
       - name: Install centrifuge-js

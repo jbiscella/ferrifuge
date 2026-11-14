@@ -109,7 +109,7 @@ development only:
 
 ```sh
 docker run --rm -p 8000:8000 -v "$PWD/examples/centrifugo.json:/centrifugo/config.json" \
-  centrifugo/centrifugo:v6.10.1 centrifugo --config /centrifugo/config.json
+  centrifugo/centrifugo:v6.10.3 centrifugo --config /centrifugo/config.json
 cargo run --example quickstart
 curl -d '{"channel":"news","data":{"text":"hello"}}' localhost:8000/api/publish
 ```
@@ -147,7 +147,7 @@ To try it against a local server that accepts connections without a token
 ```sh
 docker run --rm -p 8000:8000 \
   -e CENTRIFUGO_CLIENT_ALLOW_ANONYMOUS_CONNECT_WITHOUT_TOKEN=true \
-  centrifugo/centrifugo:v6.10.1 centrifugo
+  centrifugo/centrifugo:v6.10.3 centrifugo
 ```
 
 ### Client
