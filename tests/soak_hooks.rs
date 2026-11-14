@@ -1,7 +1,8 @@
 //! The soak's hooks (Block 52, D6, D8): `Client::armed_timers` lists the
 //! timers of the driver's maps and those the core set and did not cancel,
 //! and `Client::pending_calls` every call a registry holds, each with its
-//! age; nothing is kept until `Client::record_timers`.
+//! age; both panic until `Client::record_timers`, which seeds the core's
+//! list from the timers already running.
 
 mod support;
 
@@ -76,17 +77,41 @@ fn announce() -> Announce {
 }
 
 #[tokio::test]
-async fn nothing_is_recorded_before_record_timers() {
+#[should_panic(expected = "armed_timers: the records are off")]
+async fn armed_timers_panics_while_the_records_are_off() {
+    let server = FakeServer::start(announce()).await;
+    let client = connected(&server, Config::default().token("t"), false).await;
+
+    let _ = client.armed_timers();
+}
+
+#[tokio::test]
+#[should_panic(expected = "pending_calls: the records are off")]
+async fn pending_calls_panics_while_the_records_are_off() {
+    let server = FakeServer::start(announce()).await;
+    let client = connected(&server, Config::default().token("t"), false).await;
+
+    let _ = client.pending_calls();
+}
+
+#[tokio::test]
+async fn record_timers_seeds_the_core_list_from_the_timers_running() {
     let server = FakeServer::start(announce()).await;
     let client = connected(&server, Config::default().token("t"), false).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let timers = client.armed_timers();
+    client.record_timers();
 
-    assert!(
-        timers.driver.is_empty() && timers.core.is_empty(),
-        "{timers:?}"
+    // Set before the records started: the core's list names them at once,
+    // the driver's once it has published.
+    let (_, core) = names(&client);
+    assert_eq!(
+        core,
+        AT_REST.iter().map(|name| (*name).to_owned()).collect(),
+        "{:?}",
+        client.armed_timers()
     );
+    until_both_list(&client, AT_REST).await;
 }
 
 #[tokio::test]
@@ -143,6 +168,7 @@ async fn a_call_in_flight_is_listed_with_its_timer_until_it_settles() {
                 && call.registries.contains(&"adapter")
                 && call.registries.contains(&"by_id")
                 && call.registries.contains(&"by_command")
+                && call.registries.contains(&"log")
             {
                 return call.clone();
             }
@@ -193,4 +219,55 @@ async fn a_call_is_aged_from_when_it_was_made() {
         "{calls:?}"
     );
     handle.abort();
+}
+
+/// A `Thread` handler that, once connected, waits on a call of its client.
+struct Waiting {
+    client: std::sync::Arc<std::sync::OnceLock<Client>>,
+}
+
+impl ferrifuge::ClientHandler for Waiting {
+    fn on_connected(&mut self, _client_id: String, _transport: String, _data: Option<Vec<u8>>) {
+        if let Some(client) = self.client.get() {
+            let _ = futures_executor::block_on(client.rpc("echo", b"{}".to_vec()));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_a_thread_handler_waits_on_is_listed_as_watched() {
+    let server = FakeServer::start(announce()).await;
+    server.answer_rpc(Rpc::Ignore);
+    let slot = std::sync::Arc::new(std::sync::OnceLock::new());
+    let client = Client::builder(format!("ws://{}/connection/websocket", server.address()))
+        .config(Config::default().token("t").timeout(Duration::from_secs(2)))
+        .event_delivery(ferrifuge::EventDelivery::Thread)
+        .handler(Waiting {
+            client: std::sync::Arc::clone(&slot),
+        })
+        .build()
+        .expect("a valid client");
+    let _ = slot.set(client.clone());
+    client.record_timers();
+    client.connect();
+
+    let watched = tokio::time::timeout(WAIT, async {
+        loop {
+            if client
+                .pending_calls()
+                .iter()
+                .any(|call| call.registries.contains(&"watched"))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        watched.is_ok(),
+        "no call listed as watched: {:?}",
+        client.pending_calls()
+    );
 }

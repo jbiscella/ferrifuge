@@ -549,6 +549,12 @@ impl std::fmt::Debug for Handlers {
 }
 
 impl Handlers {
+    /// The calls a `Thread` handler waits on, for the soak (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    pub(super) fn watched_calls(&self) -> Vec<CallId> {
+        self.watched.iter().copied().collect()
+    }
+
     pub(super) fn new(delivery: EventDelivery) -> Self {
         Self {
             delivery,

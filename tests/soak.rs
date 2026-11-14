@@ -462,7 +462,7 @@ fn kind_of(name: &str) -> &str {
 
 /// Whether the client's and the subscriptions' states allow `name` (D8).
 /// A call's timers are allowed while it runs, a refresh's reply deadline
-/// while it is in flight; the connect deadline and the reconnect delay
+/// while connected, for the connection and each subscription alike; the connect deadline and the reconnect delay
 /// only while connecting; a subscribe's only while a subscription is not
 /// subscribed. Refresh timers run on across a reconnect (Block 25 D3).
 fn allowed(name: &str, client: ferrifuge::State, all_subscribed: bool) -> bool {
@@ -480,7 +480,9 @@ fn allowed(name: &str, client: ferrifuge::State, all_subscribed: bool) -> bool {
     }
     if name.starts_with("subscription ") {
         return match kind {
-            "Refresh" | "RefreshReply" => true,
+            "Refresh" => true,
+            // As the client's own: only a connection carries it (reviewer, 52a).
+            "RefreshReply" => client == ferrifuge::State::Connected,
             "SubscribeReply" | "Resubscribe" | "UnsubscribeReply" => !all_subscribed,
             _ => false,
         };

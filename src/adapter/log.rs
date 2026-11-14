@@ -48,6 +48,13 @@ struct State {
 }
 
 impl Log {
+    /// The calls the log knows not yet settled, for the soak (Block 52,
+    /// D8).
+    #[cfg(feature = "__test-hooks")]
+    pub(super) fn calls(&self) -> Vec<CallId> {
+        lock(&self.state).calls.keys().copied().collect()
+    }
+
     pub(super) fn new<'a>(endpoints: impl IntoIterator<Item = &'a str>) -> Self {
         let number = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
         Self {
