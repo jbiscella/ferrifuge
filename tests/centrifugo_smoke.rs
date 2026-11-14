@@ -611,6 +611,7 @@ async fn fake_server_answers_subscribe_and_unsubscribe() {
 /// fails its handshake locally with `no_application_protocol` (0x178).
 /// Ferrifuge retries without ALPN for that server; the day a release
 /// negotiates `h3`, this fails.
+/// Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>, fixed by <https://github.com/centrifugal/centrifugo/pull/1323>.
 #[cfg(feature = "unstable-webtransport")]
 #[tokio::test]
 async fn the_pinned_centrifugo_selects_no_alpn_for_webtransport() {

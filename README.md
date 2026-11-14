@@ -969,7 +969,7 @@ the handshake timeout, and the next transport is tried. A refused session
 (a server with HTTP/3 but no WebTransport) fails the attempt at once.
 
 **ALPN.** Centrifugo v6.6.1 through v6.10.3, until a release with
-centrifugal/centrifugo#1323, selects no application protocol on its
+[centrifugal/centrifugo#1323](https://github.com/centrifugal/centrifugo/pull/1323) (see [Known upstream issues](#known-upstream-issues)), selects no application protocol on its
 WebTransport listener, and a QUIC client offering `h3` fails its handshake
 there. The client offers `h3` first and, when the server selected none,
 handshakes once more without ALPN, within the same handshake timeout. It
@@ -990,7 +990,7 @@ would otherwise reconnect at the minimum delay forever. The cost is that a
 real network drop in the first ping interval keeps the backoff growing too.
 A disconnect push the server writes right before ending the stream is
 handled, with its code. A stream that ends before the server answered the
-connect is a failed attempt, reported by an `Error` event, and the next
+connect, as Centrifugo's refusals usually do (see [Known upstream issues](#known-upstream-issues)), is a failed attempt, reported by an `Error` event, and the next
 transport is tried at once, even when WebTransport worked before: the next
 transport shows the server's real answer, e.g. websocket's 3500 "invalid
 token", or calls the token callback for websocket's 109. WebTransport is
@@ -1628,7 +1628,7 @@ redirect is not followed: the browser hides it, and the failed attempt
 says "HTTP redirect; a captive portal may be answering"; a 511 or an HTML
 page answered with a success says so too.
 
-**Safari and http_stream.** After the client closes an http_stream connection, for example on an inbox overflow, Safari 27 sometimes holds back the end of a message larger than 2 KiB on the next stream until the server sends more data (issue #268, [WebKit bug 331662](https://bugs.webkit.org/show_bug.cgi?id=331662); about 2% of such reconnects in CI). The message then arrives with the server's next message, at most 25 s later with Centrifugo's default ping interval, or `timeout` (5 s by default) expires first and the client reconnects, which can stall again.
+**Safari and http_stream.** After the client closes an http_stream connection, for example on an inbox overflow, Safari 27 sometimes holds back the end of a message larger than 2 KiB on the next stream until the server sends more data ([issue #268](https://github.com/jbiscella/ferrifuge/issues/268), [WebKit bug 331662](https://bugs.webkit.org/show_bug.cgi?id=331662), see [Known upstream issues](#known-upstream-issues); about 2% of such reconnects in CI). The message then arrives with the server's next message, at most 25 s later with Centrifugo's default ping interval, or `timeout` (5 s by default) expires first and the client reconnects, which can stall again.
 
 **sse.** An sse endpoint is opened with the page's `EventSource`, the
 connect command in the URL's `cf_connect` as natively, without
@@ -1642,7 +1642,7 @@ reconnects by its backoff. `EventSource` shows neither status nor
 headers, so a failed attempt names no captive portal.
 
 **WebTransport (unstable).** Against Centrifugo v6.6.1 through v6.10.3,
-until a release with centrifugal/centrifugo#1323, the browser transport
+until a release with [centrifugal/centrifugo#1323](https://github.com/centrifugal/centrifugo/pull/1323) (see [Known upstream issues](#known-upstream-issues)), the browser transport
 fails its handshake: the server selects no application protocol,
 and a browser offers `h3` and cannot retry without it (Chrome:
 "NO_APPLICATION_PROTOCOL"), so the client falls back to the next transport,
@@ -1852,11 +1852,22 @@ secret. With `unstable-webtransport`, wtransport and quinn log through
 `tracing`, at DEBUG and TRACE, connection and stream events; a client's
 records hold no header value (a test checks it at TRACE), but wtransport's
 server side logs the headers of each session request at DEBUG. An
-application that calls wtransport's `with_native_certs` or
-`with_custom_transport` itself races with every TLS setup of the process:
+application that calls wtransport's `with_native_certs`,
+`with_custom_transport` or `ClientConfig::default()` itself races with every TLS setup of the process:
 they remove `SSL_CERT_FILE` and `SSL_CERT_DIR` from the environment while
-they read the roots. A `tracing` application sees those dependency records only through
+they read the roots (see [Known upstream issues](#known-upstream-issues)). A `tracing` application sees those dependency records only through
 `tracing-log`.
+
+### Known upstream issues
+
+Defects in other projects that Ferrifuge works around. Each has a tracking issue here, closed once the fix is released and Ferrifuge has adapted to it.
+
+| Upstream | Affects | Ferrifuge's workaround | Tracking issue |
+|---|---|---|---|
+| [WebKit bug 331662](https://bugs.webkit.org/show_bug.cgi?id=331662) | Safari 27 over http_stream: after a stream is closed, the next one can hold back the end of a message larger than 2 KiB until more data arrives | none found on the client side; the message arrives with the server's next one, or `timeout` reconnects (see Browser) | [#268](https://github.com/jbiscella/ferrifuge/issues/268) |
+| [wtransport#335](https://github.com/BiagioFesta/wtransport/issues/335) | an application calling wtransport's `with_native_certs`, `with_custom_transport` or `ClientConfig::default()` itself: `SSL_CERT_FILE` and `SSL_CERT_DIR` leave the environment meanwhile (see Logging) | Ferrifuge never calls them and reads the platform's roots itself | [#281](https://github.com/jbiscella/ferrifuge/issues/281) |
+| [wtransport#336](https://github.com/BiagioFesta/wtransport/issues/336) | a TLS configuration QUIC cannot use: wtransport's `build()` panics without `TLS13_AES_128_GCM_SHA256`, and a TLS 1.2-only one aborts the process at the first connect | Ferrifuge never calls `build()`; its own `build()` refuses such a raw `tls_config`, and each handshake checks it before quinn | [#282](https://github.com/jbiscella/ferrifuge/issues/282) |
+| [centrifugo#1322](https://github.com/centrifugal/centrifugo/issues/1322), fix [#1323](https://github.com/centrifugal/centrifugo/pull/1323) | WebTransport: Centrifugo v6.6.1 through v6.10.3 select no ALPN, so a handshake offering `h3`, a browser's included, fails; on v6.10.1 and v6.10.3 (tested) a refused connect's reply is usually lost | natively, a second handshake without ALPN, remembered per endpoint; a stream ending before an answer tries the next transport (see WebTransport) | [#283](https://github.com/jbiscella/ferrifuge/issues/283) |
 
 ## Development
 

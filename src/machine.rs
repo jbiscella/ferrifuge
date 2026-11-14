@@ -2392,6 +2392,7 @@ impl Machine {
             // it is a failed attempt, reported, and gives way to the next
             // transport at once even when it was chosen (Block 48, D9: an
             // invalid token ends the stream without a reply).
+            // Upstream: centrifugal/centrifugo#1322, fixed by #1323.
             _ if self.state == State::Connecting && self.ended_before_an_answer() => {
                 self.transports.give_way();
                 self.transport_failed("transport closed".to_owned());

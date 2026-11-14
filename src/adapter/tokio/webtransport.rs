@@ -51,6 +51,7 @@ const H3: &[u8] = b"h3";
 /// `no_application_protocol`, as rustls raises when the server selected no
 /// application protocol (RFC 9001 section 8.1). The only failure that starts
 /// D5's retry without ALPN.
+/// Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>, fixed by <https://github.com/centrifugal/centrifugo/pull/1323>.
 const NO_APPLICATION_PROTOCOL: u64 = 0x178;
 
 /// The read buffer of the stream.
@@ -490,6 +491,11 @@ fn connect_options(
 /// builder finished with quinn's configuration, bound to `address`'s family,
 /// resolving to `address`, with a reset key of the configuration's provider
 /// (D4, D5, D6, D12, D15).
+///
+/// wtransport's `build()`, which panics on a configuration QUIC cannot use
+/// (<https://github.com/BiagioFesta/wtransport/issues/336>), and its
+/// native-roots helpers, which change the process environment
+/// (<https://github.com/BiagioFesta/wtransport/issues/335>), are never called.
 fn client_config(
     tls: &Arc<TlsConfig>,
     alpn: Alpn,
@@ -526,6 +532,7 @@ pub(in crate::adapter) fn quic_tls(tls: &TlsConfig, alpn: Alpn) -> Arc<TlsConfig
 /// Fails unless QUIC can use `tls`: quinn's initial cipher suite, and a
 /// TLS 1.3 QUIC session, the call quinn-proto would otherwise unwrap under
 /// the endpoint's lock and abort the process with (D4).
+/// Upstream: <https://github.com/BiagioFesta/wtransport/issues/336>.
 pub(in crate::adapter) fn check_quic(tls: &Arc<TlsConfig>, host: &str) -> Result<(), String> {
     quinn::crypto::rustls::QuicClientConfig::try_from(Arc::clone(tls))
         .map_err(|e| unfit_for_quic(&e.to_string()))?;
