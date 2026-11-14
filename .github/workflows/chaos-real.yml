@@ -83,9 +83,10 @@ jobs:
           { echo '### Real-server chaos'; grep '^@P report' chaos-real.txt; } >> "$GITHUB_STEP_SUMMARY"
 
       # The child and container output of a failing seed (structural
-      # acceptance).
+      # acceptance), and of an unconfirmed one, whose first attempt
+      # log_violation also writes (reviewer, 51c, seed 23).
       - name: Failing seeds
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chaos-real-${{ matrix.transport }}-${{ matrix.protocol }}-${{ matrix.engine }}

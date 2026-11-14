@@ -56,6 +56,12 @@ impl Backoff {
         }
     }
 
+    /// The attempts counted so far.
+    #[cfg(test)]
+    pub(crate) fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
     /// Starts the sequence over for good.
     pub(crate) fn restart(&mut self) {
         self.attempt = 0;
