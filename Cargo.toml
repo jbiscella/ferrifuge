@@ -378,6 +378,15 @@ name = "interop"
 harness = false
 required-features = ["tokio"]
 
+# Block 51: seeded chaos against a real Centrifugo through Toxiproxy (D1).
+# Not under `cargo test` or `--all-targets`: the chaos-real workflow runs it
+# with `cargo test --test chaos_real`, and it needs Docker.
+[[test]]
+name = "chaos_real"
+harness = false
+test = false
+required-features = ["tokio"]
+
 # Examples need a server; they build with the tokio adapter (Block 20, D8).
 [[example]]
 name = "quickstart"

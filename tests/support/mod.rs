@@ -13,6 +13,7 @@ pub(crate) mod logs;
 pub(crate) mod perf_server;
 pub(crate) mod protobuf;
 pub(crate) mod proxy;
+pub(crate) mod real_server;
 pub(crate) mod relay;
 pub(crate) mod tls;
 pub(crate) mod token;
