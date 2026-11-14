@@ -14,6 +14,8 @@
 //! `FERRIFUGE_SOAK_SCALE` N divides the timeline (D12): a run with N other
 //! than 1 is evidence of the checker only, and is refused on CI.
 
+// @P scenario: Hours of normal use keep resources flat and delivery exact
+
 // Counts and sizes are far below 2^52.
 #![allow(clippy::cast_precision_loss)]
 

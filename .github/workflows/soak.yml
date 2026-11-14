@@ -1,0 +1,102 @@
+# Soak run (Block 52): 4 h of normal use against a real Centrifugo, with a
+# server-forced reconnect every 5 minutes and every token refresh due,
+# keep the live heap, the timers and the pending calls flat and deliver
+# every publication once. Needs Docker: Linux only (D1). Never on pull
+# requests.
+#
+# Weekly, off the hour (GitHub may delay or drop runs on the hour), and
+# dispatched; a scheduled run is skipped only when main's head already has
+# a real soak run (D10, Block 51 D11, scripts/validation-run). No
+# concurrency group: a queued run could be replaced by a later one, and a
+# dispatch for a release must not be (D10).
+name: soak
+
+on:
+  schedule:
+    - cron: "37 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # On schedule, whether main's head still lacks a real soak run;
+  # dispatched, always (D10).
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = schedule ]; then
+            scripts/validation-run should-run soak.yml "$GITHUB_SHA"
+          else
+            echo "run=true: dispatched"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  soak:
+    needs: guard
+    if: ${{ needs.guard.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    # D2: 4 h measured, an hour for the build, the image pulls and the
+    # teardown, under GitHub's 6 h job limit.
+    timeout-minutes: 300
+    env:
+      FERRIFUGE_SOAK: "1"
+      # D12: the full timeline only; the runner refuses any other scale on
+      # CI.
+      FERRIFUGE_SOAK_SCALE: "1"
+      FERRIFUGE_SOAK_ARTIFACTS: ${{ github.workspace }}/soak-artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Image
+        run: |
+          docker pull "centrifugo/centrifugo:$(sed -n 's/^pub(crate) const TAG: &str = "\(.*\)";/\1/p' tests/support/centrifugo.rs)"
+
+      - name: Soak, 4 h
+        run: |
+          set -o pipefail
+          cargo test --features tokio --test soak | tee soak.txt
+          { echo '### Soak'; grep '^@P report' soak.txt; } >> "$GITHUB_STEP_SUMMARY"
+
+      # The checkpoints and the summary (structural acceptance), whatever
+      # the outcome.
+      - name: Checkpoints
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: soak-checkpoints
+          path: |
+            soak-artifacts
+            soak.txt
+          if-no-files-found: ignore
+
+  # Fails unless the soak job succeeded (D10, Block 51 D11): a job stopped
+  # by its timeout, cancelled or skipped is not a success. Skipped with the
+  # run when the guard skips it: a skip is never evidence.
+  verdict:
+    needs: [guard, soak]
+    if: ${{ !cancelled() && needs.guard.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: The soak passed
+        run: test "${{ needs.soak.result }}" = "success"
