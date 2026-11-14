@@ -9995,7 +9995,7 @@ This block amends Block 24 (see "Amendments to earlier blocks"). Block 0's "Reve
 - The action is pinned by SHA, the asset by checksum, and the image by `TAG`.
 - On failure, the program's lines and the harness's and Centrifugo's output are uploaded as an artifact.
 
-**Exceptions introduced:** no Gherkin scenario. The program runs on a device, outside cucumber and the @A runner, and no Block 0 layer covers a device. With no scenario, `spec_sync` has nothing to claim, and neither file claims one (D1). The mutations stand in for a scenario's failing run. The Android unit-test run skips the three source checks, which run on the host (D4).
+**Exceptions introduced:** no Gherkin scenario. The program runs on a device, outside cucumber and the @A runner, and no Block 0 layer covers a device. With no scenario, `spec_sync` has nothing to claim, and neither file claims one (D1). The mutations stand in for a scenario's failing run. The Android unit-test run skips the four source checks, which run on the host (D4).
 
 **Amendments to earlier blocks:**
 - **Block 24, "Out of scope":**
