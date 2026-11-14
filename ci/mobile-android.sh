@@ -28,9 +28,9 @@ adb push "$GITHUB_WORKSPACE/src" "$dir/"
 echo "== unit tests on the emulator"
 adb shell "cd $dir && TMPDIR=$dir ./lib_tests \
   --skip the_adapter_spawns_only_through_its_runtime_handle \
+  --skip only_the_tokio_module_and_the_seam_name_tokio_s_runtime_timers_and_sockets \
   --skip the_machine_reaches_the_encodings_only_through_the_codec \
-  --skip test_util_gates_this_module_only_and_no_hook \
-  --skip only_the_tokio_module_and_the_seam_name_tokio_s_runtime_timers_and_sockets" \
+  --skip test_util_gates_this_module_only_and_no_hook" \
   2>&1 | tee "$FERRIFUGE_MOBILE_ARTIFACTS/unit-tests.txt"
 
 echo "== the device program, through the harness"
