@@ -60,7 +60,7 @@ const USER_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_USER";
 const DEFAULT_BUDGET: Duration = Duration::from_secs(300);
 /// A seed's operations stop after this, leaving the rest of its 120 s to
 /// healing and the checks (D11).
-const OPERATIONS_WITHIN: Duration = Duration::from_secs(70);
+const OPERATIONS_WITHIN: Duration = Duration::from_secs(55);
 /// Quiescence after healing (D7, I4), plus any suspended time (51c).
 const QUIESCENCE: Duration = Duration::from_secs(30);
 /// How long the channels API is polled (D7, I3): the server notices a dead
@@ -552,6 +552,11 @@ impl Counters {
     }
 }
 
+/// Held by the publisher from its check of the pause to its publication's
+/// reply, and taken by the checker once it has set the pause: after that,
+/// no publication can start until the pause is lifted (Codex, #259).
+type Gate = Arc<tokio::sync::Mutex<()>>;
+
 /// The publications acknowledged: channel, epoch, offset and id.
 type Published = Arc<Mutex<Vec<(String, String, u64, String)>>>;
 
@@ -650,7 +655,7 @@ struct SeedRun<'a> {
     deliveries: u64,
     published: Published,
     paused: Arc<AtomicBool>,
-    publishing: Arc<AtomicBool>,
+    gate: Gate,
     /// A fault in place and when it is to be removed.
     fault: Option<(Fault, Instant)>,
     /// Whether the application wants the client connected.
@@ -1000,21 +1005,22 @@ impl SeedRun<'_> {
         }
         // Until the next connect(), a client record leaving off is I5's
         // connection made ([`SeedRun::take`]); here, none stays open.
-        let open = self.canary_clients(0).await;
+        let open = self.canary_clients(0).await?;
         invariants::cleanup_after_disconnect(0, usize::try_from(open).unwrap_or(usize::MAX))
             .map_err(|detail| self.violation("I5", detail))
     }
 
     /// The canary's `num_clients`, once at most `at_most` or
     /// [`CHANNELS_WITHIN`] has passed.
-    async fn canary_clients(&mut self, at_most: u64) -> u64 {
+    async fn canary_clients(&mut self, at_most: u64) -> Result<u64, Violation> {
         let deadline = Instant::now() + CHANNELS_WITHIN;
         loop {
             let clients = self.listed().await.get(&self.canary).copied().unwrap_or(0);
             if clients <= at_most || Instant::now() >= deadline {
-                return clients;
+                return Ok(clients);
             }
-            let _ = self.pump(Instant::now() + Duration::from_millis(200)).await;
+            self.pump(Instant::now() + Duration::from_millis(200))
+                .await?;
         }
     }
 
@@ -1042,10 +1048,26 @@ impl SeedRun<'_> {
     /// [`QUIESCENCE`] the client is connected, every channel it wants is
     /// subscribed and the others unsubscribed, and no call is pending.
     async fn heal(&mut self) -> Result<(), Violation> {
+        // The last fault holds for its seeded time first (Codex, #259).
+        if let Some((_, until)) = &self.fault {
+            let until = *until;
+            self.pump(until).await?;
+        }
         self.remove().await;
         let _ = self.environment.toxics().set_enabled(PROXY, true).await;
         self.wanted_connected = true;
         self.command(Command_::Connect).await;
+        // Every channel is subscribed again, so that each segment's end is
+        // the history's end: a delivery lost before an unsubscribe shows
+        // as a gap, while one the client had not yet taken is recovered
+        // (Codex, #259).
+        for channel in self.channels.clone() {
+            let state = self.states.entry(channel.clone()).or_default();
+            if !state.wanted {
+                state.wanted = true;
+                self.command(Command_::Subscribe { channel }).await;
+            }
+        }
         let deadline = Instant::now() + QUIESCENCE;
         loop {
             self.pump(Instant::now() + Duration::from_millis(300))
@@ -1139,7 +1161,8 @@ impl SeedRun<'_> {
                     ),
                 ));
             }
-            let _ = self.pump(Instant::now() + Duration::from_millis(200)).await;
+            self.pump(Instant::now() + Duration::from_millis(200))
+                .await?;
         }
     }
 
@@ -1150,10 +1173,8 @@ impl SeedRun<'_> {
     /// a channel still subscribed delivered up to the history's end.
     async fn check_deliveries(&mut self) -> Result<(), Violation> {
         self.paused.store(true, Ordering::SeqCst);
-        // Publishes in flight have their replies.
-        while self.publishing.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // A publication in flight has its reply, and none starts after.
+        drop(self.gate.lock().await);
         let published = self.published.lock().unwrap().clone();
         for channel in self.channels.clone() {
             let history = self
@@ -1308,7 +1329,7 @@ fn publisher(
     id_prefix: String,
     published: Published,
     paused: Arc<AtomicBool>,
-    publishing: Arc<AtomicBool>,
+    gate: Gate,
     stop: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     let api = environment.api().clone();
@@ -1317,10 +1338,10 @@ fn publisher(
         let mut tick = tokio::time::interval(PUBLISH_EVERY);
         while !stop.load(Ordering::SeqCst) {
             tick.tick().await;
+            let held = gate.lock().await;
             if paused.load(Ordering::SeqCst) {
                 continue;
             }
-            publishing.store(true, Ordering::SeqCst);
             let channel = &channels[usize::try_from(n).unwrap_or(0) % channels.len()];
             let id = format!("{id_prefix}-{n}");
             let reply = api
@@ -1334,7 +1355,7 @@ fn publisher(
                     .unwrap()
                     .push((channel.clone(), epoch, offset, id));
             }
-            publishing.store(false, Ordering::SeqCst);
+            drop(held);
             n += 1;
         }
     })
@@ -1366,15 +1387,15 @@ async fn run_seed(
     let child = ChildProcess::start(&environment.websocket_url(), &user, &all);
     let published = Arc::new(Mutex::new(Vec::new()));
     let paused = Arc::new(AtomicBool::new(false));
-    let publishing = Arc::new(AtomicBool::new(false));
+    let gate: Gate = Arc::new(tokio::sync::Mutex::new(()));
     let stop = Arc::new(AtomicBool::new(false));
-    let sender_task = publisher(
+    let mut sender_task = publisher(
         environment,
         channels.clone(),
         format!("{}-{seed}-{attempt}", environment.run()),
         Arc::clone(&published),
         Arc::clone(&paused),
-        Arc::clone(&publishing),
+        Arc::clone(&gate),
         Arc::clone(&stop),
     );
     let mut run = SeedRun {
@@ -1397,7 +1418,7 @@ async fn run_seed(
         deliveries: 0,
         published,
         paused,
-        publishing,
+        gate,
         fault: None,
         wanted_connected: true,
     };
@@ -1418,6 +1439,21 @@ async fn run_seed(
     let result = checked.unwrap_or_else(|_| {
         Err(run.violation("seed bound", format!("the seed ran past {SEED_BOUND:?}")))
     });
+    // The publisher ends only when stopped: one that ended before has
+    // failed, and a seed without its workload cannot pass (Codex, #259).
+    let result = match result {
+        Ok(()) if sender_task.is_finished() => {
+            let ended = (&mut sender_task).await;
+            Err(run.violation(
+                "publisher",
+                format!("the publisher stopped during the seed: {ended:?}"),
+            ))
+        }
+        Ok(()) if run.published.lock().unwrap().is_empty() => {
+            Err(run.violation("publisher", "no publication was acknowledged"))
+        }
+        result => result,
+    };
     stop.store(true, Ordering::SeqCst);
     sender_task.abort();
     if let Some(second) = second {
