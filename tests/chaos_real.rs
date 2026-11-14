@@ -1097,7 +1097,7 @@ impl SeedRun<'_> {
     async fn canary_clients(&mut self, at_most: u64) -> Result<u64, Violation> {
         let deadline = Instant::now() + CHANNELS_WITHIN;
         loop {
-            let clients = self.listed().await.get(&self.canary).copied().unwrap_or(0);
+            let clients = self.listed().await?.get(&self.canary).copied().unwrap_or(0);
             if clients <= at_most || Instant::now() >= deadline {
                 return Ok(clients);
             }
@@ -1107,23 +1107,34 @@ impl SeedRun<'_> {
     }
 
     /// The seed's channels the server lists, with their `num_clients`.
-    async fn listed(&self) -> BTreeMap<String, u64> {
+    ///
+    /// # Errors
+    ///
+    /// The channels API's error: an oracle that cannot answer is no
+    /// evidence of cleanup (Codex, #259).
+    async fn listed(&self) -> Result<BTreeMap<String, u64>, Violation> {
         let prefix = self.canary.trim_end_matches("canary");
         let result = self
             .environment
             .api()
             .call("channels", json!({"pattern": format!("{prefix}*")}))
             .await
-            .unwrap_or(Value::Null);
-        result["channels"]
-            .as_object()
-            .map(|channels| {
-                channels
-                    .iter()
-                    .map(|(name, info)| (name.clone(), info["num_clients"].as_u64().unwrap_or(0)))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map_err(|error| {
+                self.violation(
+                    "channels API",
+                    format!("error {}: {}", error.code, error.message),
+                )
+            })?;
+        let channels = result["channels"].as_object().ok_or_else(|| {
+            self.violation(
+                "channels API",
+                format!("an answer without channels: {result}"),
+            )
+        })?;
+        Ok(channels
+            .iter()
+            .map(|(name, info)| (name.clone(), info["num_clients"].as_u64().unwrap_or(0)))
+            .collect())
     }
 
     /// Faults stop and the application wants to be connected (I4): within
@@ -1252,7 +1263,7 @@ impl SeedRun<'_> {
             .collect();
         let deadline = Instant::now() + CHANNELS_WITHIN;
         loop {
-            let listed = self.listed().await;
+            let listed = self.listed().await?;
             let canary = listed.get(&self.canary).copied().unwrap_or(0);
             let names: BTreeSet<String> = listed.keys().cloned().collect();
             if canary <= 1 && names == wanted {
@@ -1393,7 +1404,7 @@ impl SeedRun<'_> {
         // left open.
         let deadline = Instant::now() + CHANNELS_WITHIN;
         loop {
-            let listed = self.listed().await;
+            let listed = self.listed().await?;
             if listed.is_empty() {
                 break;
             }
@@ -1408,7 +1419,29 @@ impl SeedRun<'_> {
         }
         self.command(Command_::Exit).await;
         let exited = tokio::time::timeout(CHILD_WITHIN, self.child.process.wait()).await;
-        self.drain()?;
+        // Every record the child wrote, through the end of its output: the
+        // reader forwards them apart from the exit (Codex, #259).
+        let deadline = Instant::now() + CHILD_WITHIN;
+        loop {
+            let now = Instant::now();
+            match tokio::time::timeout(
+                deadline.saturating_duration_since(now),
+                self.child.records.recv(),
+            )
+            .await
+            {
+                Ok(Some((_, record))) => self.take(record)?,
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(self.violation(
+                        "close",
+                        format!(
+                            "the child's output did not end within {CHILD_WITHIN:?} of its exit"
+                        ),
+                    ));
+                }
+            }
+        }
         invariants::no_panic(self.panics.len())
             .map_err(|detail| self.violation("I2", format!("{detail}: {:?}", self.panics)))?;
         if let Err(error) = match exited {
