@@ -35,7 +35,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -73,9 +73,27 @@ const OPERATIONS_WITHIN: Duration = Duration::from_secs(45);
 /// child's after healing, none, as suspensions hold the operations until
 /// they end (reviewer, 51c).
 const QUIESCENCE: Duration = Duration::from_secs(30);
-/// What a restart is counted for when the operations window decides
-/// whether an operation that holds the others still fits (D11).
+/// What a restart is counted for, at least, when the operations window
+/// decides whether an operation that holds the others still fits (D11).
 const RESTART_TAKES: Duration = Duration::from_secs(5);
+/// The longest restart of the run so far, in ms, from its `restart` to its
+/// `restart … done` (reviewer, 51c).
+static LONGEST_RESTART_MS: AtomicU64 = AtomicU64::new(0);
+
+/// What a restart is counted for: [`RESTART_TAKES`], or the longest one
+/// of the run so far.
+fn restart_takes() -> Duration {
+    RESTART_TAKES.max(Duration::from_millis(
+        LONGEST_RESTART_MS.load(Ordering::SeqCst),
+    ))
+}
+
+/// Whether an operation that holds the others for `holds`, started at
+/// `elapsed` into the operations and after the fault in place holds for
+/// its `remaining` time, ends within the window (D11, reviewer 51c).
+fn fits(elapsed: Duration, remaining: Duration, holds: Duration) -> bool {
+    elapsed + remaining + holds <= OPERATIONS_WITHIN
+}
 /// How long the channels API is polled (D7, I3): the server notices a dead
 /// connection at its next missed pong.
 const CHANNELS_WITHIN: Duration = Duration::from_secs(10);
@@ -296,16 +314,16 @@ fn fault(rng: &mut fastrand::Rng) -> Fault {
 impl Op {
     /// How long the operation holds the others (D4, "Scheduling"): a
     /// suspension, a pause and a restart do, until they end.
-    fn holds(&self) -> Duration {
+    fn holds(&self, restart: Duration) -> Duration {
         match self {
             Self::Fault(Fault {
                 kind: FaultKind::ServerPause | FaultKind::ClientSuspension,
                 hold_ms,
                 ..
             }) => Duration::from_millis(*hold_ms),
-            Self::Restart { .. } => RESTART_TAKES,
+            Self::Restart { .. } => restart,
             Self::SuspensionAcrossRestart { hold_ms, .. } => {
-                Duration::from_millis(*hold_ms) + RESTART_TAKES
+                Duration::from_millis(*hold_ms) + restart
             }
             _ => Duration::ZERO,
         }
@@ -457,28 +475,13 @@ async fn child_run() {
         .collect();
     let ttl = |n: usize| Duration::from_secs(ttls.get(n).copied().unwrap_or(3600));
     let (connection_ttl, subscription_ttl) = (ttl(0), ttl(1));
-    // I5's flag (below), also read by the token callbacks, and whether the
-    // client is connected, which makes a connection token fetch a refresh.
-    let off_wanted = Arc::new(Mutex::new(false));
-    let connected = Arc::new(AtomicBool::new(false));
-    let client = child_client(
-        endpoint,
-        &user,
-        connection_ttl,
-        &writer,
-        &connected,
-        &off_wanted,
-    );
+    // I5's flag (below), also read by the token callbacks.
+    let off = Off::default();
+    let client = child_client(endpoint, &user, connection_ttl, &writer, &off);
 
-    forward_client_events(&client, &writer, &connected);
-    let subscriptions = child_subscriptions(
-        &client,
-        &channels,
-        &writer,
-        &user,
-        subscription_ttl,
-        &off_wanted,
-    );
+    forward_client_events(&client, &writer);
+    let subscriptions =
+        child_subscriptions(&client, &channels, &writer, &user, subscription_ttl, &off);
     // The canary, the last channel, is subscribed for the whole run (D7).
     if let Some(canary) = channels.last() {
         subscriptions[canary].subscribe();
@@ -496,21 +499,13 @@ async fn child_run() {
     // connect() together, and the watcher's flag and state read together,
     // so that a state sampled before disconnect() is never judged by the
     // flag set after it (Codex, #259).
-    watch_off(&client, &off_wanted, &writer);
+    watch_off(&client, &off, &writer);
     while let Some(command) = commanded.recv().await {
         match command {
             Command_::Subscribe { channel } => subscriptions[&channel].subscribe(),
             Command_::Unsubscribe { channel } => subscriptions[&channel].unsubscribe(),
-            Command_::Disconnect => {
-                let mut off = off_wanted.lock().unwrap();
-                client.disconnect();
-                *off = true;
-            }
-            Command_::Connect => {
-                let mut off = off_wanted.lock().unwrap();
-                *off = false;
-                client.connect();
-            }
+            Command_::Disconnect => off.disconnect(&client),
+            Command_::Connect => off.connect(&client),
             Command_::History { channel } => {
                 let call = client.history(channel, ferrifuge::HistoryOptions::default().limit(10));
                 spawn_call(&writer, &pending, "history", async move {
@@ -564,11 +559,55 @@ fn commands_from_stdin() -> mpsc::UnboundedReceiver<Command_> {
     commanded
 }
 
-/// Whether a token fetch now is one after `disconnect()`, before the next
-/// `connect()` (I5). The lock held means one of them is under way: such a
-/// fetch is not judged.
-fn fetched_off(off_wanted: &Mutex<bool>) -> bool {
-    off_wanted.try_lock().is_ok_and(|off| *off)
+/// I5's flag, set from `disconnect()`'s return until the next `connect()`,
+/// in two forms: under a lock, read with the client's state by the
+/// watcher, and as a mirror the token callbacks read without a lock, so
+/// that no fetch goes unjudged while the watcher holds it (reviewer, 51c).
+#[derive(Clone, Default)]
+struct Off {
+    wanted: Arc<Mutex<bool>>,
+    mirror: Arc<AtomicBool>,
+}
+
+impl Off {
+    /// `disconnect()`, then the flag set, under the lock.
+    fn disconnect(&self, client: &ferrifuge::Client) {
+        let mut off = self.wanted.lock().unwrap();
+        client.disconnect();
+        *off = true;
+        self.mirror.store(true, Ordering::SeqCst);
+    }
+
+    /// The flag cleared, then `connect()`, under the lock.
+    fn connect(&self, client: &ferrifuge::Client) {
+        let mut off = self.wanted.lock().unwrap();
+        *off = false;
+        self.mirror.store(false, Ordering::SeqCst);
+        client.connect();
+    }
+
+    /// Whether a token fetch now is one after `disconnect()`, before the
+    /// next `connect()` (I5).
+    fn fetched_off(&self) -> bool {
+        self.mirror.load(Ordering::SeqCst)
+    }
+}
+
+/// Whether a connection token fetch is a refresh: the client connected,
+/// read from its own state when the callback runs, which can only count
+/// fewer (reviewer, 51c). Before the client is set, none is.
+fn connection_established(client: &OnceLock<ferrifuge::Client>) -> bool {
+    client
+        .get()
+        .is_some_and(|client| client.state() == ferrifuge::State::Connected)
+}
+
+/// Whether a subscription token fetch is a refresh: the subscription
+/// subscribed, by its own state.
+fn subscription_established(subscription: &OnceLock<ferrifuge::Subscription>) -> bool {
+    subscription.get().is_some_and(|subscription| {
+        subscription.state() == ferrifuge::SubscriptionState::Subscribed
+    })
 }
 
 /// The child's client, its connection tokens short-lived and refreshed
@@ -578,31 +617,33 @@ fn child_client(
     user: &str,
     ttl: Duration,
     writer: &Writer,
-    connected: &Arc<AtomicBool>,
-    off_wanted: &Arc<Mutex<bool>>,
+    off: &Off,
 ) -> ferrifuge::Client {
     let token_user = user.to_owned();
     let token_writer = writer.clone();
-    let (connected, off_wanted) = (Arc::clone(connected), Arc::clone(off_wanted));
-    ferrifuge::Client::builder(endpoint)
+    let slot = Arc::new(OnceLock::new());
+    let (token_slot, off) = (Arc::clone(&slot), off.clone());
+    let client = ferrifuge::Client::builder(endpoint)
         .config(ferrifuge::Config::default().timeout(CALL_TIMEOUT))
         .get_token(move || {
             token_writer.write(Record::Token {
                 of: "connection".to_owned(),
-                refresh: connected.load(Ordering::SeqCst),
-                off: fetched_off(&off_wanted),
+                refresh: connection_established(&token_slot),
+                off: off.fetched_off(),
             });
             let token = support::token::connection_token(&token_user, ttl);
             async move { Ok(token) }
         })
         .build()
-        .expect("a client")
+        .expect("a client");
+    let _ = slot.set(client.clone());
+    client
 }
 
 /// Writes [`Record::LeftOff`] when the client's own state leaves
 /// disconnected while `off_wanted` (I5).
-fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<Mutex<bool>>, writer: &Writer) {
-    let (client, off_wanted, writer) = (client.clone(), Arc::clone(off_wanted), writer.clone());
+fn watch_off(client: &ferrifuge::Client, off: &Off, writer: &Writer) {
+    let (client, off_wanted, writer) = (client.clone(), Arc::clone(&off.wanted), writer.clone());
     tokio::spawn(async move {
         let mut reported = false;
         loop {
@@ -622,9 +663,8 @@ fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<Mutex<bool>>, writer: 
     });
 }
 
-/// Forwards the client's state events to `writer`, keeping `connected`.
-fn forward_client_events(client: &ferrifuge::Client, writer: &Writer, connected: &Arc<AtomicBool>) {
-    let connected = Arc::clone(connected);
+/// Forwards the client's state events to `writer`.
+fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
     let mut events = client.events();
     let client_writer = writer.clone();
     tokio::spawn(async move {
@@ -636,7 +676,6 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer, connected:
                 ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code),
                 _ => continue,
             };
-            connected.store(state == "connected", Ordering::SeqCst);
             client_writer.write(Record::Client {
                 state: state.to_owned(),
                 code,
@@ -653,27 +692,28 @@ fn child_subscriptions(
     writer: &Writer,
     user: &str,
     ttl: Duration,
-    off_wanted: &Arc<Mutex<bool>>,
+    off: &Off,
 ) -> BTreeMap<String, ferrifuge::Subscription> {
     let mut subscriptions = BTreeMap::new();
     for channel in channels {
         // Its own short-lived token, refreshed through the callback (D4).
         let (token_user, token_writer) = (user.to_owned(), writer.clone());
-        let subscribed = Arc::new(AtomicBool::new(false));
-        let (token_subscribed, token_off) = (Arc::clone(&subscribed), Arc::clone(off_wanted));
+        let slot = Arc::new(OnceLock::new());
+        let (token_slot, token_off) = (Arc::clone(&slot), off.clone());
         let subscription = client
             .subscription_builder(channel.clone())
             .get_token(move |channel| {
                 token_writer.write(Record::Token {
                     of: "subscription".to_owned(),
-                    refresh: token_subscribed.load(Ordering::SeqCst),
-                    off: fetched_off(&token_off),
+                    refresh: subscription_established(&token_slot),
+                    off: token_off.fetched_off(),
                 });
                 let token = support::token::subscription_token(&token_user, &channel, ttl);
                 async move { Ok(token) }
             })
             .build()
             .expect("a subscription");
+        let _ = slot.set(subscription.clone());
         let mut events = subscription.events();
         let sub_writer = writer.clone();
         let name = channel.clone();
@@ -693,9 +733,6 @@ fn child_subscriptions(
                     },
                     _ => continue,
                 };
-                if let Record::Sub { state, .. } = &record {
-                    subscribed.store(state == "subscribed", Ordering::SeqCst);
-                }
                 sub_writer.write(record);
             }
         });
@@ -1362,12 +1399,17 @@ impl SeedRun<'_> {
     async fn restart_server(&mut self, graceful: bool) {
         let kind = if graceful { "graceful" } else { "hard" };
         self.record_fault(&format!("restart {kind}"));
+        let began = Instant::now();
         COUNTERS.lock().unwrap().add(format!("restart {kind}"));
         if let Err(error) = self.environment.restart(graceful).await {
             panic!("the environment: seed {}, the restart: {error}", self.seed);
         }
         self.restarts += 1;
         self.record_fault(&format!("restart {kind} done"));
+        LONGEST_RESTART_MS.fetch_max(
+            u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     /// Pauses the publisher: a publication in flight has its reply, and
@@ -1513,13 +1555,27 @@ impl SeedRun<'_> {
     async fn run_ops(&mut self) -> Result<(), Violation> {
         let start = Instant::now();
         for index in 0..self.ops.len() {
-            // An operation that holds the others starts only if it ends
-            // within the window, so that the seed keeps its bound (D11).
-            if start.elapsed() + self.ops[index].holds() > OPERATIONS_WITHIN {
+            if start.elapsed() > OPERATIONS_WITHIN {
                 break;
             }
             self.done = index + 1;
             let op = self.ops[index].clone();
+            // An operation that holds the others runs only if it ends
+            // within the window, the fault in place held out first; one
+            // that does not is skipped, so that the seed keeps its bound
+            // (D11, reviewer 51c).
+            let holds = op.holds(restart_takes());
+            let remaining = self.fault.as_ref().map_or(Duration::ZERO, |(_, until)| {
+                until.saturating_duration_since(Instant::now())
+            });
+            if holds > Duration::ZERO && !fits(start.elapsed(), remaining, holds) {
+                self.record_fault(&format!("held op skipped by the window: {op:?}"));
+                COUNTERS
+                    .lock()
+                    .unwrap()
+                    .add("held op skipped by the window");
+                continue;
+            }
             match op {
                 Op::Subscribe { channel } => {
                     let name = self.channels[channel].clone();
@@ -2401,7 +2457,8 @@ async fn restart_with_memory(environment: &Environment) {
     );
     // The offsets restart after that subscribed: the next publication
     // is the first delivered since, at the offset the server gave it, in
-    // the subscribed's epoch (a live publication may carry none).
+    // the subscribed's epoch: a publication carries an epoch only when the
+    // epoch changes; it is checked when present.
     let since = scenario.delivered.len();
     let (published_epoch, offset) = scenario.publish(environment, 4).await;
     scenario.delivered_at(since, offset).await;
@@ -2492,6 +2549,56 @@ fn suspensions_overlap_calls() {
     log("a call's I6 bound adds its overlap with the suspensions");
 }
 
+/// An operation that holds the others fits the window only with the
+/// fault in place held out first (reviewer, 51c, item 1).
+fn holds_fit_the_window() {
+    let s = Duration::from_secs;
+    assert!(
+        fits(s(30), s(0), s(10)),
+        "30 s in, nothing in place, 10 s held"
+    );
+    assert!(fits(s(25), s(10), s(10)), "ending at 45 s");
+    assert!(
+        !fits(s(30), s(10), s(10)),
+        "the fault in place held out first"
+    );
+    assert!(!fits(s(40), s(0), s(10)), "ending past 45 s");
+    log("a held operation runs only if it ends within the window");
+}
+
+/// The child's token judgements without a server (reviewer, 51c, items 2
+/// and 3): a fetch is a refresh only while the client or subscription is
+/// established by its own state, and one after `disconnect()`, before the
+/// next `connect()`, is seen.
+async fn token_fetches_are_judged() {
+    let client = ferrifuge::Client::builder("ws://127.0.0.1:9/connection/websocket")
+        .build()
+        .expect("a client");
+    let slot = OnceLock::new();
+    assert!(!connection_established(&slot), "no client set");
+    let _ = slot.set(client.clone());
+    assert!(!connection_established(&slot), "a client never connected");
+    let subscription = client
+        .new_subscription("recoverable:check")
+        .expect("a subscription");
+    let sub_slot = OnceLock::new();
+    let _ = sub_slot.set(subscription.clone());
+    subscription.subscribe();
+    assert!(
+        !subscription_established(&sub_slot),
+        "a subscription not subscribed"
+    );
+    let off = Off::default();
+    assert!(!off.fetched_off(), "before disconnect()");
+    off.disconnect(&client);
+    assert!(off.fetched_off(), "after disconnect()");
+    off.connect(&client);
+    assert!(!off.fetched_off(), "after connect()");
+    off.disconnect(&client);
+    client.close().await;
+    log("token fetches are judged by the client's own state and I5's flag");
+}
+
 /// The budget's seeds, or `FERRIFUGE_REAL_CHAOS_SEED` alone.
 async fn run_budget(environment: &Environment) -> Vec<Violation> {
     let budget = env::var(BUDGET_VARIABLE)
@@ -2576,11 +2683,13 @@ fn main() {
     }
     seeds_fix_their_operations();
     suspensions_overlap_calls();
+    holds_fit_the_window();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("a runtime");
     let findings = runtime.block_on(async {
+        token_fetches_are_judged().await;
         let run = format!("r{}", std::process::id());
         let scenarios = env::var_os(SEED_VARIABLE).is_none();
         // The Redis scenario's environment, gone before the run's own: both
@@ -2627,6 +2736,7 @@ fn main() {
             [
                 "restart graceful",
                 "restart hard",
+                "suspension across restart",
                 "token connection",
                 "token subscription",
             ]
