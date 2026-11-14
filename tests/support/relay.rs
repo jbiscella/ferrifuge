@@ -27,7 +27,7 @@ pub(crate) enum Mode {
     /// a step can act while a client reconnects, however slow the runner.
     Hold,
     /// Relays them with `TCP_NODELAY`, one `write` per byte in each
-    /// direction, counting the writes (Block 50, D4).
+    /// direction, 1 ms apart, counting the writes (Block 50, D4).
     OneBytePerWrite,
 }
 
@@ -155,9 +155,12 @@ async fn forward(
     }
 }
 
+/// The pause after each byte relayed in [`Mode::OneBytePerWrite`].
+const PACE: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Relays `inbound` to `outbound` both ways until either side ends, one
 /// byte per `write`, with Nagle's algorithm off on both sockets, so that
-/// every byte leaves in a write of its own (Block 50, D4).
+/// every byte leaves in a write of its own (Block 50, D4), [`PACE`] apart.
 async fn forward_one_byte_per_write(inbound: TcpStream, outbound: TcpStream, single: Arc<Singles>) {
     for stream in [&inbound, &outbound] {
         stream.set_nodelay(true).expect("TCP_NODELAY");
@@ -178,6 +181,10 @@ async fn forward_one_byte_per_write(inbound: TcpStream, outbound: TcpStream, sin
                 for byte in &buffer[..read] {
                     to.write_all(std::slice::from_ref(byte)).await?;
                     single.writes.fetch_add(1, Ordering::SeqCst);
+                    // Paced, so that the peer reads each byte on its own
+                    // rather than as many as its kernel merged: about 1 s
+                    // a scenario (reviewer, #251).
+                    tokio::time::sleep(PACE).await;
                 }
             }
         }
