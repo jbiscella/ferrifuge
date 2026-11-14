@@ -999,17 +999,33 @@ impl Soak<'_> {
         self.child.send(&command).await;
     }
 
-    /// D5: the server disconnects the run's user with D5's code.
+    /// D5: the server disconnects the run's user with D5's code, over a
+    /// connection of its own: a pooled one the server closed while idle
+    /// fails the request as "connection closed before message completed"
+    /// (#147, #150, #151), and a disconnect is not retried, as a second
+    /// could act on the next connection.
     async fn disconnect(&mut self, user: &str) -> Checked {
-        self.environment
-            .api()
-            .call(
-                "disconnect",
-                json!({"user": user, "disconnect": {"code": RECONNECT_CODE, "reason": "soak"}}),
-            )
+        let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .timeout(WITHIN)
+            .build()
+            .map_err(|error| Failure(format!("disconnect: {error}")))?;
+        let response = http
+            .post(format!("{}/api/disconnect", self.environment.api_url()))
+            .header("X-API-Key", support::centrifugo::API_KEY)
+            .json(&json!({"user": user, "disconnect": {"code": RECONNECT_CODE, "reason": "soak"}}))
+            .send()
             .await
-            .map(drop)
-            .map_err(|error| Failure(format!("disconnect: {}", error.message)))
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| Failure(format!("disconnect: {error}")))?;
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| Failure(format!("disconnect: {error}")))?;
+        match body.get("error") {
+            Some(error) => fail(format!("disconnect: {error}")),
+            None => Ok(()),
+        }
     }
 
     /// D9 at the end: every channel delivered the accumulated history from
