@@ -416,7 +416,8 @@ fn add_root_cert(ca: &std::path::Path) -> bool {
 
 fn android(runtime: &tokio::runtime::Runtime) -> bool {
     let server = runtime.block_on(Server::container());
-    let url = format!("ws://{ANDROID_HOST}:{}/connection/websocket", server.port());
+    // TEMPORARY mutation A: the emulator's own loopback.
+    let url = format!("ws://127.0.0.1:{}/connection/websocket", server.port());
     let passed = run(
         runtime,
         Platform::Android,
@@ -433,7 +434,8 @@ fn android(runtime: &tokio::runtime::Runtime) -> bool {
 
 fn ios(runtime: &tokio::runtime::Runtime) -> bool {
     let plain = runtime.block_on(Server::binary("centrifugo", None));
-    let url = format!("ws://127.0.0.1:{}/connection/websocket", plain.port());
+    // TEMPORARY mutation A: a port nothing listens on.
+    let url = format!("ws://127.0.0.1:{}/connection/websocket", free_port());
     let mut passed = run(
         runtime,
         Platform::Ios,
@@ -463,7 +465,8 @@ fn ios(runtime: &tokio::runtime::Runtime) -> bool {
             untrusted: true,
         },
     );
-    passed &= add_root_cert(&chain.ca_path);
+    // TEMPORARY mutation A: add-root-cert removed.
+    let _ = add_root_cert;
     passed &= run(
         runtime,
         Platform::Ios,
