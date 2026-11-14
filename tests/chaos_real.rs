@@ -718,12 +718,12 @@ impl SeedRun<'_> {
                         format!("the client went {state} after disconnect(), before connect()"),
                     ));
                 }
-                if let Some(last) = self.client {
-                    invariants::state_chain(last, next)
-                        .map_err(|detail| self.violation("I1", format!("client: {detail}")))?;
-                    if last == Lifecycle::On && next == Lifecycle::Pending {
-                        COUNTERS.lock().unwrap().add("reconnect");
-                    }
+                // The client starts disconnected (Codex, #259).
+                let last = self.client.unwrap_or(Lifecycle::Off);
+                invariants::state_chain(last, next)
+                    .map_err(|detail| self.violation("I1", format!("client: {detail}")))?;
+                if last == Lifecycle::On && next == Lifecycle::Pending {
+                    COUNTERS.lock().unwrap().add("reconnect");
                 }
                 self.client = Some(next);
             }
@@ -775,11 +775,16 @@ impl SeedRun<'_> {
         offset: Option<u64>,
     ) -> Result<(), Violation> {
         let next = lifecycle(state);
-        let last = self.states.entry(channel.to_owned()).or_default().last;
-        if let Some(last) = last {
-            invariants::state_chain(last, next)
-                .map_err(|detail| self.violation("I1", format!("{channel}: {detail}")))?;
-        }
+        // A subscription starts unsubscribed, as the adapter runner records
+        // it (Codex, #259).
+        let last = self
+            .states
+            .entry(channel.to_owned())
+            .or_default()
+            .last
+            .unwrap_or(Lifecycle::Off);
+        invariants::state_chain(last, next)
+            .map_err(|detail| self.violation("I1", format!("{channel}: {detail}")))?;
         let entry = self.states.get_mut(channel).expect("its state");
         entry.last = Some(next);
         if next != Lifecycle::On {
@@ -1011,6 +1016,17 @@ impl SeedRun<'_> {
         while self.client != Some(Lifecycle::Off) && Instant::now() < deadline {
             self.pump(Instant::now() + Duration::from_millis(50))
                 .await?;
+        }
+        // disconnect() takes the client off, whatever it was doing (Codex,
+        // #259).
+        if self.client != Some(Lifecycle::Off) {
+            return Err(self.violation(
+                "I5",
+                format!(
+                    "disconnect() left the client {:?} after {CHILD_WITHIN:?}",
+                    self.client
+                ),
+            ));
         }
         // Until the next connect(), a client record leaving off is I5's
         // connection made ([`SeedRun::take`]); here, none stays open.
