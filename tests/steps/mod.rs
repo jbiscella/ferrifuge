@@ -79,6 +79,7 @@ mod test_support;
 mod tls;
 mod token;
 mod transports;
+mod validation_run;
 #[cfg(feature = "unstable-webtransport")]
 mod webtransport;
 #[cfg(feature = "unstable-webtransport")]
@@ -232,6 +233,8 @@ pub(crate) struct ClientWorld {
     pub(crate) probes: probes::Probes,
     /// The body and outcomes of a Block 50 @E scenario.
     pub(crate) byte_split: byte_split::ByteSplit,
+    /// The fixtures and output of a Block 51 validation-run scenario.
+    pub(crate) validation_run: validation_run::ValidationRun,
     pub(crate) logging: logging::Logging,
     pub(crate) sleep: sleep::Sleep,
     pub(crate) proxies: proxies::Proxies,

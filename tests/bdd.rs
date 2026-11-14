@@ -590,6 +590,9 @@ const IMPLEMENTED: &[&str] = &[
     "A stream body delivered one byte per chunk decodes the same",
     // Block 50b: a websocket relayed one byte per write.
     "A websocket relayed one byte per write works",
+    // Block 51b: the validation-run script's decisions.
+    "A scheduled validation run is skipped only when main's head already has a real run",
+    "A release needs a passing real run of its commit",
 ];
 
 /// Server configuration of @A scenarios.
