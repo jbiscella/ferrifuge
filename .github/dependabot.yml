@@ -7,6 +7,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       cargo:
         patterns: ["*"]
@@ -18,9 +20,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     ignore:
-      # Its ref is the Rust toolchain version (e.g. @1.88 in the msrv job),
-      # not an action release; bumping it would silently move the MSRV.
+      # Pinned to a commit of its master branch, the toolchain named by its
+      # `toolchain` input (Block 57, D2): it has no releases to follow, so
+      # the pin is bumped by hand.
       - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
