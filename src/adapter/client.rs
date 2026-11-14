@@ -2782,7 +2782,22 @@ impl Driver {
 
     #[allow(clippy::too_many_lines)] // One arm per source of input.
     async fn run(mut self) {
+        // Set when the select! waited: every branch was pending once. Kept
+        // across turns, for the yield at the top of the next one; the first
+        // turn starts as if after a wait.
+        let waited = AtomicBool::new(true);
         loop {
+            // A turn whose select! did not wait gave the runtime no chance
+            // to poll the sockets and timers: the transport branch would
+            // see only what the runtime last polled, and a deadline the
+            // runtime polls with a reply would win the timers' turn over
+            // it. The actions wake spends no coop budget, so API calls made
+            // without pause would hold the runtime for as long as they last
+            // (Block 49, row 28/55; Codex, #248). Yielding once lets the
+            // runtime poll them first.
+            if !waited.swap(false, Ordering::Relaxed) {
+                platform::yield_now().await;
+            }
             // Everything the core buffered since the last flush, from this
             // task's inputs and the application's calls, goes out in as few
             // frames as the cap allows (Block 36, D3).
@@ -2807,8 +2822,6 @@ impl Driver {
             if yielding {
                 self.upper_streak = 0;
             }
-            // Set when the select! waited: every branch was pending once.
-            let waited = AtomicBool::new(false);
             let mut from_upper = false;
             // Biased, in this order: the inline handler, the open, the
             // transport, the actions wake, then the timers and the rest.
@@ -2885,7 +2898,8 @@ impl Driver {
                 // Queued by an API call: performed at the top of every turn,
                 // whichever branch woke it, so this branch only wakes the
                 // loop, after the transport, which sustained API calls must
-                // not starve (Codex, #248).
+                // not starve (Codex, #248); a wake found stored, without a
+                // wait, is followed by the yield at the top of the loop.
                 () = self.shared.actions_queued.notified(), if !yielding => {
                     self.upper_input(waited.load(Ordering::Relaxed));
                     continue;

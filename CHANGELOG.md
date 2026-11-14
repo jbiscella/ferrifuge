@@ -192,6 +192,13 @@ repository held while it carried that version, from the blocks of
   driver takes what the transport read first, with a turn for the timers
   after 32 inputs in a row (Block 49c).
 
+- A call's reply is no longer lost to its timeout while other threads make
+  calls without pause: after a turn that did not wait, the driver yields
+  to its runtime once, so the runtime polls the sockets and timers before
+  the next input. Before, the wake each call stores kept the driver in one
+  poll for up to about a second, and the timers' turn found the deadline
+  due with the reply unseen (Block 49c's flake).
+
 - Browser http_stream no longer stalls in Safari, which stops delivering
   a `fetch` body left unread: it reads the body continuously into the
   inbox websocket and sse already use, and reconnects with `connecting`
