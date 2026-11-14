@@ -337,6 +337,66 @@ async fn a_reply_is_read_while_another_thread_calls_send_without_pause() {
     }
 }
 
+/// The driver gives its runtime back between inputs (Block 49c's flake):
+/// after a turn that did not wait it yields once, so the runtime polls
+/// the sockets and timers, and its other tasks run, before the next input.
+/// While the client is held the fake server queues a flood of pings, one
+/// message a frame, all readable at once on resume; a witness task on the
+/// client's runtime, spawned during the hold, yields in a loop and samples
+/// how many messages the client has read at each of its turns. Counted,
+/// not timed: without the yield, a ping read spends little or no coop
+/// budget, and the client reads dozens between two of the witness's turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_driver_yields_to_its_runtime_between_inputs() {
+    const FLOOD: u64 = 2_000;
+    let server = FakeServer::start(Announce::default()).await;
+    let process = Process::start();
+    let (client, _events) = connected(&server, &process, Config::default()).await;
+    let before = client.statistics().messages_in;
+    let release = process.suspend().await;
+    let written = server.sent_traffic().1;
+    for _ in 0..FLOOD {
+        server.send("{}");
+    }
+    // Every ping written before the hold ends: the flood is readable at
+    // once on resume.
+    until("the flood written", || {
+        server.sent_traffic().1 >= written + FLOOD
+    })
+    .await;
+    let (sampled, samples) = oneshot::channel();
+    process.handle.spawn({
+        let client = client.clone();
+        async move {
+            let mut samples = vec![client.statistics().messages_in];
+            while samples.last().is_some_and(|read| *read < before + FLOOD) {
+                tokio::task::yield_now().await;
+                samples.push(client.statistics().messages_in);
+            }
+            let _ = sampled.send(samples);
+        }
+    });
+    let _ = release.send(());
+    let samples = tokio::time::timeout(WAIT, samples)
+        .await
+        .expect("the flood read")
+        .expect("the witness runs");
+    let widest = samples
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .unwrap_or(0);
+    assert!(
+        samples.windows(2).all(|pair| pair[1] - pair[0] <= 2),
+        "the client read up to {widest} messages between two turns of another task"
+    );
+    assert!(
+        samples.last().is_some_and(|read| *read >= before + FLOOD),
+        "the flood was not read: {:?}",
+        samples.last()
+    );
+}
+
 /// The threads calling `send()`, stopped and joined when dropped.
 struct Callers {
     calling: std::sync::Arc<std::sync::atomic::AtomicBool>,
