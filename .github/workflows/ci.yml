@@ -835,11 +835,15 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          (
+          if ! (
             # shellcheck disable=SC1090 # cargo-ndk's exports, generated
             source <(cargo ndk-env --target x86_64 --platform 22)
             cargo test --target x86_64-linux-android --lib --test mobile_device --no-run --message-format json
-          ) > "$RUNNER_TEMP/build.json"
+          ) > "$RUNNER_TEMP/build.json"; then
+            # The compiler's messages are in the JSON.
+            jq -rR 'fromjson? | select(.reason == "compiler-message") | .message.rendered' "$RUNNER_TEMP/build.json"
+            exit 1
+          fi
           program=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "mobile_device" and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
           tests=$(jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .target.name == "ferrifuge" and .profile.test and .executable != null) | .executable' "$RUNNER_TEMP/build.json")
           test -x "$program"
