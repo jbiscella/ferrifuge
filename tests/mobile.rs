@@ -12,8 +12,9 @@
 //!
 //! On `ready` the harness publishes, through the server API, a publication
 //! carrying a nonce new to the run. A run passes when every step reported
-//! `ok`, `done` arrived, the program exited 0, and the server then lists no
-//! client on the channel within 10 s. On iOS a second server serves TLS
+//! `ok`; when, on `step disconnect ok`, the server lists no client on the
+//! channel within 10 s, the program still running then (it holds its
+//! client 15 s); and when `done` arrived and the program exited 0. On iOS a second server serves TLS
 //! with a chain made for the run: the program first runs in `untrusted`
 //! mode, then the CA is added with `simctl keychain add-root-cert`, then
 //! the program runs all its steps over `wss://`.
@@ -286,6 +287,19 @@ fn watch(
                         .clone_into(&mut reported.last_step);
                     if !step.ends_with(" ok") {
                         reported.failed.get_or_insert_with(|| line.clone());
+                    } else if step == "disconnect ok" {
+                        // While the program holds its client: a socket it
+                        // never closed is still open (D1).
+                        let listed = runtime.block_on(gone(server.api(), channel));
+                        if let Err(clients) = listed {
+                            reported.failed.get_or_insert(format!(
+                                "the server still lists {clients} client(s) on {channel} {GONE_WITHIN:?} after `step disconnect ok`"
+                            ));
+                        } else if !matches!(child.try_wait(), Ok(None)) {
+                            reported.failed.get_or_insert(
+                                "the program ended before the channels check did".to_owned(),
+                            );
+                        }
                     }
                 } else if line == "ready" {
                     let published = runtime.block_on(server.api().call(
@@ -358,16 +372,6 @@ fn run(runtime: &tokio::runtime::Runtime, platform: Platform, server: &Server, r
         .or_else(|| {
             (!run.untrusted && !reported.done)
                 .then(|| format!("no `done`; last step reported: {last_step}"))
-        })
-        .or_else(|| {
-            if run.untrusted {
-                return None;
-            }
-            runtime.block_on(gone(server.api(), &channel)).err().map(|clients| {
-                format!(
-                    "the server still lists {clients} client(s) on {channel} {GONE_WITHIN:?} after the run"
-                )
-            })
         });
     match failed {
         None => {

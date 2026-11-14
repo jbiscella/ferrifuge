@@ -3,7 +3,8 @@
 //! publication the host harness (`tests/mobile.rs`) makes on `ready`, and
 //! disconnects. Each step is bounded and prints one line, `step <name> ok`
 //! or `step <name> failed: <reason>`; the program exits 1 at the first
-//! failure, and prints `done` and exits 0 after the last step.
+//! failure. After the last step it holds its client for 15 s, for the
+//! harness's `channels` check, then prints `done` and exits 0.
 //!
 //! `FERRIFUGE_MOBILE_URL` is the endpoint, `FERRIFUGE_MOBILE_CHANNEL` the
 //! channel and `FERRIFUGE_MOBILE_NONCE` what the publication's data
@@ -20,6 +21,11 @@ use futures_util::{Stream, StreamExt};
 
 /// The bound of each step.
 const STEP: Duration = Duration::from_secs(30);
+
+/// How long the client is held after disconnecting: longer than the
+/// harness's 10 s `channels` check, so that a socket the client never
+/// closed is still open when the server is asked (D1).
+const HOLD: Duration = Duration::from_secs(15);
 
 /// rustls's text for a certificate the verifier refused
 /// (`rustls::Error::InvalidCertificate`).
@@ -228,6 +234,8 @@ async fn run() -> bool {
     ) {
         return false;
     }
+    tokio::time::sleep(HOLD).await;
+    drop(client);
     println!("done");
     true
 }
