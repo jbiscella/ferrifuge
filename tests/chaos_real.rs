@@ -13,10 +13,15 @@
 //! checker.
 //!
 //! 51a: websocket, JSON, the memory engine; D3's toxics and the proxy
-//! turned down. The outline's row runs here but is not claimed until 51d,
-//! when every row and fault kind is in.
+//! turned down. 51c adds D4: the server paused and restarted, the client
+//! suspended, short-lived tokens; and D6's two restart scenarios, each run
+//! once, the Redis one in an environment of its own. The outline's row
+//! runs here but is not claimed until 51d, when every row and fault kind
+//! is in.
 
 // @P scenario: A failing real-server seed is a finding only when it fails twice
+// @P scenario: A server restart with the memory engine reports recovered false
+// @P scenario: A server restart with the Redis engine loses nothing
 // @P scenario: A seed of the real-server runner fixes its operations
 // @P scenario: The real-server runner reports a planted fault
 
@@ -55,14 +60,22 @@ const ARTIFACTS_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_ARTIFACTS";
 const ENDPOINT_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_ENDPOINT";
 const CHANNELS_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_CHANNELS";
 const USER_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_USER";
+/// The ttls, in seconds, of the child's connection and subscription
+/// tokens, `<connection>,<subscription>` (D4: 4 to 8 s each).
+const TOKEN_TTL_VARIABLE: &str = "FERRIFUGE_REAL_CHAOS_TOKEN_TTL";
 
 /// The budget when none is set: a short local run (reviewer, 51a).
 const DEFAULT_BUDGET: Duration = Duration::from_secs(300);
 /// A seed's operations stop after this, leaving the rest of its 120 s to
 /// healing and the checks (D11).
-const OPERATIONS_WITHIN: Duration = Duration::from_secs(55);
-/// Quiescence after healing (D7, I4), plus any suspended time (51c).
+const OPERATIONS_WITHIN: Duration = Duration::from_secs(45);
+/// Quiescence after healing (D7, I4). The suspended time I4 adds is the
+/// child's after healing, none, as suspensions hold the operations until
+/// they end (reviewer, 51c).
 const QUIESCENCE: Duration = Duration::from_secs(30);
+/// What a restart is counted for when the operations window decides
+/// whether an operation that holds the others still fits (D11).
+const RESTART_TAKES: Duration = Duration::from_secs(5);
 /// How long the channels API is polled (D7, I3): the server notices a dead
 /// connection at its next missed pong.
 const CHANNELS_WITHIN: Duration = Duration::from_secs(10);
@@ -85,7 +98,8 @@ const MAX_CHANNELS: usize = 5;
 
 // --- Operations ------------------------------------------------------------
 
-/// A Toxiproxy toxic or the proxy turned down (D3).
+/// A Toxiproxy toxic or the proxy turned down (D3), the server paused or
+/// the client process suspended (D4): each held, then removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum FaultKind {
     Latency,
@@ -95,10 +109,12 @@ enum FaultKind {
     LimitData,
     Bandwidth,
     ProxyDown,
+    ServerPause,
+    ClientSuspension,
 }
 
 impl FaultKind {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::Latency,
         Self::Timeout,
         Self::Slicer,
@@ -106,6 +122,8 @@ impl FaultKind {
         Self::LimitData,
         Self::Bandwidth,
         Self::ProxyDown,
+        Self::ServerPause,
+        Self::ClientSuspension,
     ];
 
     /// Toxiproxy's name of the toxic; none for the proxy turned down.
@@ -117,7 +135,7 @@ impl FaultKind {
             Self::ResetPeer => "reset_peer",
             Self::LimitData => "limit_data",
             Self::Bandwidth => "bandwidth",
-            Self::ProxyDown => return None,
+            Self::ProxyDown | Self::ServerPause | Self::ClientSuspension => return None,
         })
     }
 }
@@ -137,28 +155,89 @@ struct Fault {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
-    Subscribe { channel: usize },
-    Unsubscribe { channel: usize },
+    Subscribe {
+        channel: usize,
+    },
+    Unsubscribe {
+        channel: usize,
+    },
     Disconnect,
     Connect,
-    History { channel: usize },
-    Presence { channel: usize },
+    History {
+        channel: usize,
+    },
+    Presence {
+        channel: usize,
+    },
     Fault(Fault),
-    Wait { ms: u64 },
+    /// The Centrifugo container restarted (D4): gracefully, or killed and
+    /// started.
+    Restart {
+        graceful: bool,
+    },
+    /// The child suspended, the server restarted meanwhile, the child
+    /// resumed after `hold_ms` (D4, "Scheduling").
+    SuspensionAcrossRestart {
+        hold_ms: u64,
+        graceful: bool,
+    },
+    Wait {
+        ms: u64,
+    },
 }
 
-/// A seed's channel count and operations.
-fn operations(seed: u64) -> (usize, Vec<Op>) {
+/// What a seed fixes (D8): its channels, its tokens' ttl and its
+/// operations.
+#[derive(Clone, Debug, PartialEq)]
+struct Plan {
+    channels: usize,
+    /// The ttls of the seed's connection and subscription tokens, each
+    /// 4 to 8 s (D4, "Scheduling").
+    connection_ttl_secs: u64,
+    subscription_ttl_secs: u64,
+    ops: Vec<Op>,
+}
+
+/// At most this many server restarts a seed (D4).
+const MAX_RESTARTS: usize = 2;
+
+/// A seed's plan.
+fn operations(seed: u64) -> Plan {
     let mut rng = fastrand::Rng::with_seed(seed ^ 0x5eed_4ea1_c4a0_5051);
     let channels = rng.usize(2..=MAX_CHANNELS);
+    let connection_ttl_secs = rng.u64(4..=8);
+    let subscription_ttl_secs = rng.u64(4..=8);
     let mut ops: Vec<Op> = (0..channels)
         .map(|channel| Op::Subscribe { channel })
         .collect();
+    let mut restarts = 0;
     for _ in 0..rng.usize(10..=18) {
         let channel = rng.usize(0..channels);
         ops.push(match rng.u32(0..100) {
-            0..30 => Op::Fault(fault(&mut rng)),
-            30..42 => Op::Unsubscribe { channel },
+            0..30 => {
+                let fault = fault(&mut rng);
+                // A seeded share of suspensions enclose a restart: an app
+                // suspended across a deploy (D4, "Scheduling").
+                if fault.kind == FaultKind::ClientSuspension
+                    && restarts < MAX_RESTARTS
+                    && rng.u32(0..3) == 0
+                {
+                    restarts += 1;
+                    Op::SuspensionAcrossRestart {
+                        hold_ms: fault.hold_ms,
+                        graceful: rng.bool(),
+                    }
+                } else {
+                    Op::Fault(fault)
+                }
+            }
+            30..34 if restarts < MAX_RESTARTS => {
+                restarts += 1;
+                Op::Restart {
+                    graceful: rng.bool(),
+                }
+            }
+            34..42 => Op::Unsubscribe { channel },
             42..54 => Op::Subscribe { channel },
             54..62 => Op::Disconnect,
             62..72 => Op::Connect,
@@ -169,7 +248,12 @@ fn operations(seed: u64) -> (usize, Vec<Op>) {
             },
         });
     }
-    (channels, ops)
+    Plan {
+        channels,
+        connection_ttl_secs,
+        subscription_ttl_secs,
+        ops,
+    }
 }
 
 /// A fault drawn within D3's ranges.
@@ -188,23 +272,43 @@ fn fault(rng: &mut fastrand::Rng) -> Fault {
         FaultKind::ResetPeer => json!({"timeout": rng.u64(0..=2000)}),
         FaultKind::LimitData => json!({"bytes": rng.u64(1024..=256 * 1024)}),
         FaultKind::Bandwidth => json!({"rate": rng.u64(1..=128)}),
-        FaultKind::ProxyDown => json!({}),
+        FaultKind::ProxyDown | FaultKind::ServerPause | FaultKind::ClientSuspension => json!({}),
     };
     let streams = match kind {
         FaultKind::LimitData => vec!["downstream".to_owned()],
-        FaultKind::ProxyDown => vec![],
+        FaultKind::ProxyDown | FaultKind::ServerPause | FaultKind::ClientSuspension => vec![],
         _ => vec!["upstream".to_owned(), "downstream".to_owned()],
     };
-    let hold_ms = if kind == FaultKind::ProxyDown {
-        rng.u64(500..=10_000)
-    } else {
-        rng.u64(500..=15_000)
+    let hold_ms = match kind {
+        FaultKind::ProxyDown => rng.u64(500..=10_000),
+        // D4: a client suspension of 500 ms to 20 s.
+        FaultKind::ClientSuspension => rng.u64(500..=20_000),
+        _ => rng.u64(500..=15_000),
     };
     Fault {
         kind,
         attributes,
         streams,
         hold_ms,
+    }
+}
+
+impl Op {
+    /// How long the operation holds the others (D4, "Scheduling"): a
+    /// suspension, a pause and a restart do, until they end.
+    fn holds(&self) -> Duration {
+        match self {
+            Self::Fault(Fault {
+                kind: FaultKind::ServerPause | FaultKind::ClientSuspension,
+                hold_ms,
+                ..
+            }) => Duration::from_millis(*hold_ms),
+            Self::Restart { .. } => RESTART_TAKES,
+            Self::SuspensionAcrossRestart { hold_ms, .. } => {
+                Duration::from_millis(*hold_ms) + RESTART_TAKES
+            }
+            _ => Duration::ZERO,
+        }
     }
 }
 
@@ -250,6 +354,9 @@ enum Record {
     Call {
         call: String,
         took_ms: u64,
+        /// When it was made and settled, by the wall clock (I6).
+        started_ms: u64,
+        ended_ms: u64,
         ok: bool,
         error: Option<String>,
     },
@@ -260,6 +367,14 @@ enum Record {
     },
     Panic {
         message: String,
+    },
+    /// A token callback was called: of the connection or a subscription;
+    /// a refresh when that was established (D10), and whether it was
+    /// called after `disconnect()`, before the next `connect()` (I5).
+    Token {
+        of: String,
+        refresh: bool,
+        off: bool,
     },
     /// The client's state left disconnected after `disconnect()`, before
     /// the next `connect()` (I5).
@@ -335,36 +450,42 @@ async fn child_run() {
         .split(',')
         .map(str::to_owned)
         .collect();
-    let token_user = user.clone();
-    let client = ferrifuge::Client::builder(endpoint)
-        .config(ferrifuge::Config::default().timeout(CALL_TIMEOUT))
-        .get_token(move || {
-            let token = support::token::connection_token(&token_user, Duration::from_secs(3600));
-            async move { Ok(token) }
-        })
-        .build()
-        .expect("a client");
+    let ttls: Vec<u64> = env::var(TOKEN_TTL_VARIABLE)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|ttl| ttl.parse().ok())
+        .collect();
+    let ttl = |n: usize| Duration::from_secs(ttls.get(n).copied().unwrap_or(3600));
+    let (connection_ttl, subscription_ttl) = (ttl(0), ttl(1));
+    // I5's flag (below), also read by the token callbacks, and whether the
+    // client is connected, which makes a connection token fetch a refresh.
+    let off_wanted = Arc::new(Mutex::new(false));
+    let connected = Arc::new(AtomicBool::new(false));
+    let client = child_client(
+        endpoint,
+        &user,
+        connection_ttl,
+        &writer,
+        &connected,
+        &off_wanted,
+    );
 
-    forward_client_events(&client, &writer);
-    let subscriptions = child_subscriptions(&client, &channels, &writer);
+    forward_client_events(&client, &writer, &connected);
+    let subscriptions = child_subscriptions(
+        &client,
+        &channels,
+        &writer,
+        &user,
+        subscription_ttl,
+        &off_wanted,
+    );
     // The canary, the last channel, is subscribed for the whole run (D7).
     if let Some(canary) = channels.last() {
         subscriptions[canary].subscribe();
     }
     client.connect();
 
-    let (commands, mut commanded) = mpsc::unbounded_channel::<Command_>();
-    std::thread::spawn(move || {
-        use std::io::BufRead as _;
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if let Ok(command) = serde_json::from_str(&line)
-                && commands.send(command).is_err()
-            {
-                break;
-            }
-        }
-    });
+    let mut commanded = commands_from_stdin();
     let pending = Arc::new(AtomicU64::new(0));
     // I5 (Block 16), watched where it is exact: from disconnect()'s
     // return until the next connect(), the client's own state stays
@@ -375,7 +496,6 @@ async fn child_run() {
     // connect() together, and the watcher's flag and state read together,
     // so that a state sampled before disconnect() is never judged by the
     // flag set after it (Codex, #259).
-    let off_wanted = Arc::new(Mutex::new(false));
     watch_off(&client, &off_wanted, &writer);
     while let Some(command) = commanded.recv().await {
         match command {
@@ -427,6 +547,58 @@ async fn child_run() {
     }
 }
 
+/// The parent's commands, read from stdin by a thread of their own.
+fn commands_from_stdin() -> mpsc::UnboundedReceiver<Command_> {
+    let (commands, commanded) = mpsc::unbounded_channel::<Command_>();
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if let Ok(command) = serde_json::from_str(&line)
+                && commands.send(command).is_err()
+            {
+                break;
+            }
+        }
+    });
+    commanded
+}
+
+/// Whether a token fetch now is one after `disconnect()`, before the next
+/// `connect()` (I5). The lock held means one of them is under way: such a
+/// fetch is not judged.
+fn fetched_off(off_wanted: &Mutex<bool>) -> bool {
+    off_wanted.try_lock().is_ok_and(|off| *off)
+}
+
+/// The child's client, its connection tokens short-lived and refreshed
+/// through the callback, each fetch recorded (D4).
+fn child_client(
+    endpoint: String,
+    user: &str,
+    ttl: Duration,
+    writer: &Writer,
+    connected: &Arc<AtomicBool>,
+    off_wanted: &Arc<Mutex<bool>>,
+) -> ferrifuge::Client {
+    let token_user = user.to_owned();
+    let token_writer = writer.clone();
+    let (connected, off_wanted) = (Arc::clone(connected), Arc::clone(off_wanted));
+    ferrifuge::Client::builder(endpoint)
+        .config(ferrifuge::Config::default().timeout(CALL_TIMEOUT))
+        .get_token(move || {
+            token_writer.write(Record::Token {
+                of: "connection".to_owned(),
+                refresh: connected.load(Ordering::SeqCst),
+                off: fetched_off(&off_wanted),
+            });
+            let token = support::token::connection_token(&token_user, ttl);
+            async move { Ok(token) }
+        })
+        .build()
+        .expect("a client")
+}
+
 /// Writes [`Record::LeftOff`] when the client's own state leaves
 /// disconnected while `off_wanted` (I5).
 fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<Mutex<bool>>, writer: &Writer) {
@@ -450,8 +622,9 @@ fn watch_off(client: &ferrifuge::Client, off_wanted: &Arc<Mutex<bool>>, writer: 
     });
 }
 
-/// Forwards the client's state events to `writer`.
-fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
+/// Forwards the client's state events to `writer`, keeping `connected`.
+fn forward_client_events(client: &ferrifuge::Client, writer: &Writer, connected: &Arc<AtomicBool>) {
+    let connected = Arc::clone(connected);
     let mut events = client.events();
     let client_writer = writer.clone();
     tokio::spawn(async move {
@@ -463,6 +636,7 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
                 ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code),
                 _ => continue,
             };
+            connected.store(state == "connected", Ordering::SeqCst);
             client_writer.write(Record::Client {
                 state: state.to_owned(),
                 code,
@@ -477,11 +651,27 @@ fn child_subscriptions(
     client: &ferrifuge::Client,
     channels: &[String],
     writer: &Writer,
+    user: &str,
+    ttl: Duration,
+    off_wanted: &Arc<Mutex<bool>>,
 ) -> BTreeMap<String, ferrifuge::Subscription> {
     let mut subscriptions = BTreeMap::new();
     for channel in channels {
+        // Its own short-lived token, refreshed through the callback (D4).
+        let (token_user, token_writer) = (user.to_owned(), writer.clone());
+        let subscribed = Arc::new(AtomicBool::new(false));
+        let (token_subscribed, token_off) = (Arc::clone(&subscribed), Arc::clone(off_wanted));
         let subscription = client
             .subscription_builder(channel.clone())
+            .get_token(move |channel| {
+                token_writer.write(Record::Token {
+                    of: "subscription".to_owned(),
+                    refresh: token_subscribed.load(Ordering::SeqCst),
+                    off: fetched_off(&token_off),
+                });
+                let token = support::token::subscription_token(&token_user, &channel, ttl);
+                async move { Ok(token) }
+            })
             .build()
             .expect("a subscription");
         let mut events = subscription.events();
@@ -503,6 +693,9 @@ fn child_subscriptions(
                     },
                     _ => continue,
                 };
+                if let Record::Sub { state, .. } = &record {
+                    subscribed.store(state == "subscribed", Ordering::SeqCst);
+                }
                 sub_writer.write(record);
             }
         });
@@ -532,16 +725,28 @@ fn spawn_call(
     let pending = Arc::clone(pending);
     pending.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
-        let start = Instant::now();
+        let (start, started_ms) = (Instant::now(), unix_ms());
         let settled = settled.await;
         writer.write(Record::Call {
             call: call.to_owned(),
             took_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            started_ms,
+            ended_ms: unix_ms(),
             ok: settled.is_ok(),
             error: settled.err(),
         });
         pending.fetch_sub(1, Ordering::SeqCst);
     });
+}
+
+/// The wall clock in ms since the epoch, one clock for the parent and the
+/// child: a call's interval and a suspension's are compared on it (I6).
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 // --- The parent ------------------------------------------------------------
@@ -625,9 +830,15 @@ struct ChildProcess {
 }
 
 impl ChildProcess {
-    fn start(endpoint: &str, user: &str, channels: &[String]) -> Self {
+    fn start(
+        endpoint: &str,
+        user: &str,
+        channels: &[String],
+        (connection, subscription): (u64, u64),
+    ) -> Self {
         let mut process = Command::new(env::current_exe().expect("the runner"))
             .env(ROLE, "client")
+            .env(TOKEN_TTL_VARIABLE, format!("{connection},{subscription}"))
             .env(ENDPOINT_VARIABLE, endpoint)
             .env(USER_VARIABLE, user)
             .env(CHANNELS_VARIABLE, channels.join(","))
@@ -686,6 +897,11 @@ struct ChannelState {
     delivered: Vec<(u64, String)>,
     /// Whether the application wants it subscribed.
     wanted: bool,
+    /// Set by a restart on the memory engine while the channel has a
+    /// segment: the history's offsets and ids after the segment's start
+    /// then, which the segment delivered a prefix of, until the next
+    /// `subscribed` starts a new segment (D6, reviewer 51c).
+    restarted: Option<Vec<(u64, String)>>,
 }
 
 /// One run of one seed.
@@ -715,6 +931,13 @@ struct SeedRun<'a> {
     fault: Option<(Fault, Instant)>,
     /// Whether the application wants the client connected.
     wanted_connected: bool,
+    /// The child's suspensions, by the wall clock: from before its STOP to
+    /// after its CONT, open while it is stopped (I6).
+    suspensions: Vec<(u64, Option<u64>)>,
+    /// The acknowledged publications checked against a history so far.
+    acknowledged: usize,
+    /// The server restarts so far (D4).
+    restarts: usize,
     /// Each channel's expected deliveries, as compared: compared again
     /// once every record is taken (Codex, #259).
     expected: BTreeMap<String, Vec<(u64, String)>>,
@@ -783,6 +1006,8 @@ impl SeedRun<'_> {
             Record::Call {
                 call,
                 took_ms,
+                started_ms,
+                ended_ms,
                 ok,
                 error,
             } => {
@@ -793,13 +1018,29 @@ impl SeedRun<'_> {
                     .lock()
                     .unwrap()
                     .add(format!("call {call} {}", if ok { "ok" } else { "failed" }));
-                invariants::call_settled(Duration::from_millis(took_ms), CALL_BOUND)
+                // The time the child was stopped within the call is added
+                // (D4, "Scheduling").
+                let bound = CALL_BOUND + self.suspended_within(started_ms, ended_ms);
+                invariants::call_settled(Duration::from_millis(took_ms), bound)
                     .map_err(|detail| self.violation("I6", format!("{call}: {detail}")))?;
                 self.calls.push((call, took_ms, error));
             }
             record @ Record::Status { .. } => self.status = Some(record),
             Record::Panic { message } => self.panics.push(message),
             Record::Closed => self.closed = true,
+            Record::Token { of, refresh, off } => {
+                if off {
+                    return Err(self.violation(
+                        "I5",
+                        format!("a {of} token fetched after disconnect(), before connect()"),
+                    ));
+                }
+                // D10 counts refreshes: fetches while the connection or the
+                // subscription is established (reviewer, 51c).
+                if refresh {
+                    COUNTERS.lock().unwrap().add(format!("token {of}"));
+                }
+            }
             Record::LeftOff { state } => {
                 return Err(self.violation(
                     "I5",
@@ -846,27 +1087,73 @@ impl SeedRun<'_> {
                 format!("{channel} subscribed without a stream position"),
             ));
         }
+        let counted = channel != self.canary;
         let entry = self.states.get_mut(channel).expect("its state");
-        match entry.start {
+        let failure = match entry.start {
             // The first subscribed starts the channel's segment (D7).
             None => {
                 entry.start = offset;
                 entry.epoch = epoch;
+                None
             }
-            // Later ones continue it only when they recovered; a failed
-            // recovery is allowed only after a restart on the memory
-            // engine (D6), which 51a does not make.
-            Some(_) if !recovered => {
-                return Err(self.violation(
-                    "I8",
-                    format!(
-                        "{channel} subscribed with was_recovering {was_recovering} and recovered false, no server restart"
-                    ),
-                ));
-            }
-            Some(_) => {}
-        }
-        Ok(())
+            // A recovery continues it, in its epoch.
+            Some(_) if recovered => (epoch != entry.epoch).then(|| {
+                format!(
+                    "{channel} recovered in epoch {epoch:?}, the segment's {:?}",
+                    entry.epoch
+                )
+            }),
+            // A failed recovery is allowed only after a restart on the
+            // memory engine (D6): the segment delivered a prefix of the
+            // history at the restart, and a new segment starts.
+            Some(_) => match entry.restarted.take() {
+                None => Some(format!(
+                    "{channel} subscribed with was_recovering {was_recovering} and recovered false, no server restart"
+                )),
+                Some(_) if !was_recovering => Some(format!(
+                    "{channel} subscribed after a restart with was_recovering false"
+                )),
+                Some(_) if epoch == entry.epoch => Some(format!(
+                    "{channel} subscribed after a restart with recovered false in the segment's epoch {epoch:?}"
+                )),
+                Some(history) => {
+                    let delivered: Vec<(u64, String)> = entry
+                        .delivered
+                        .iter()
+                        .map(|(offset, data)| (*offset, id_of(data)))
+                        .collect();
+                    if history.starts_with(&delivered) {
+                        entry.start = offset;
+                        entry.epoch = epoch;
+                        entry.delivered.clear();
+                        if counted {
+                            COUNTERS
+                                .lock()
+                                .unwrap()
+                                .add("recovered false after a restart");
+                        }
+                        None
+                    } else {
+                        Some(format!(
+                            "{channel}: before the restart, delivered {delivered:?} of the history {history:?}"
+                        ))
+                    }
+                }
+            },
+        };
+        failure.map_or(Ok(()), |detail| Err(self.violation("I8", detail)))
+    }
+
+    /// The time the child was stopped between `from` and `to`, by the wall
+    /// clock (I6).
+    fn suspended_within(&self, from: u64, to: u64) -> Duration {
+        let now = unix_ms();
+        Duration::from_millis(
+            self.suspensions
+                .iter()
+                .map(|&(start, end)| end.unwrap_or(now).min(to).saturating_sub(start.max(from)))
+                .sum(),
+        )
     }
 
     fn publication(
@@ -949,10 +1236,21 @@ impl SeedRun<'_> {
                         .unwrap_or_else(|error| panic!("{error}"));
                 }
             }
-            None => toxics
-                .set_enabled(PROXY, false)
-                .await
-                .unwrap_or_else(|error| panic!("{error}")),
+            None => match fault.kind {
+                FaultKind::ServerPause => self
+                    .environment
+                    .pause()
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}")),
+                FaultKind::ClientSuspension => {
+                    self.suspensions.push((unix_ms(), None));
+                    self.signal("STOP").await;
+                }
+                _ => toxics
+                    .set_enabled(PROXY, false)
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}")),
+            },
         }
         self.record_fault(&format!(
             "fault {:?} {} for {} ms",
@@ -979,11 +1277,215 @@ impl SeedRun<'_> {
                     let _ = toxics.remove(PROXY, &format!("{toxic}-{stream}")).await;
                 }
             }
-            None => {
-                let _ = toxics.set_enabled(PROXY, true).await;
-            }
+            None => match fault.kind {
+                FaultKind::ServerPause => {
+                    let _ = self.environment.unpause().await;
+                }
+                FaultKind::ClientSuspension => {
+                    self.signal("CONT").await;
+                    if let Some((_, end @ None)) = self.suspensions.last_mut() {
+                        *end = Some(unix_ms());
+                    }
+                }
+                _ => {
+                    let _ = toxics.set_enabled(PROXY, true).await;
+                }
+            },
         }
         self.record_fault(&format!("fault {:?} removed", fault.kind));
+    }
+
+    /// Sends `signal` (STOP or CONT) to the child process (D4).
+    async fn signal(&self, signal: &str) {
+        let Some(pid) = self.child.process.id() else {
+            return;
+        };
+        let _ = Command::new("kill")
+            .args([format!("-{signal}"), pid.to_string()])
+            .status()
+            .await;
+    }
+
+    /// Holds the operations until the fault in place ends, then removes
+    /// it, also when a record taken meanwhile breaks an invariant: the
+    /// child runs again before any exit path waits on it (D4,
+    /// "Scheduling").
+    async fn hold(&mut self) -> Result<(), Violation> {
+        let Some((_, until)) = &self.fault else {
+            return Ok(());
+        };
+        let until = *until;
+        let held = self.pump(until).await;
+        self.remove().await;
+        held
+    }
+
+    /// The fault in place held for its seeded time, then removed.
+    async fn end_fault(&mut self) -> Result<(), Violation> {
+        if let Some((_, until)) = &self.fault {
+            let until = *until;
+            self.pump(until).await?;
+            self.remove().await;
+        }
+        Ok(())
+    }
+
+    /// Restarts the server (D4), holding the operations until it is done.
+    async fn restart(&mut self, graceful: bool) -> Result<(), Violation> {
+        self.end_fault().await?;
+        self.before_restart().await?;
+        self.restart_server(graceful).await;
+        self.paused.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// The child suspended, the server restarted meanwhile, the child
+    /// resumed once the suspension's time is up (D4, "Scheduling").
+    async fn suspension_across_restart(
+        &mut self,
+        hold_ms: u64,
+        graceful: bool,
+    ) -> Result<(), Violation> {
+        self.end_fault().await?;
+        // The round trip of the snapshot needs the child running.
+        self.before_restart().await?;
+        self.apply(Fault {
+            kind: FaultKind::ClientSuspension,
+            attributes: json!({}),
+            streams: Vec::new(),
+            hold_ms,
+        })
+        .await?;
+        COUNTERS.lock().unwrap().add("suspension across restart");
+        self.restart_server(graceful).await;
+        self.paused.store(false, Ordering::SeqCst);
+        self.hold().await
+    }
+
+    /// Restarts the server, counted and stamped as the faults are. One that
+    /// does not answer within its bound is the environment's failure, not
+    /// a finding: it ends the run (reviewer, 51c).
+    async fn restart_server(&mut self, graceful: bool) {
+        let kind = if graceful { "graceful" } else { "hard" };
+        self.record_fault(&format!("restart {kind}"));
+        COUNTERS.lock().unwrap().add(format!("restart {kind}"));
+        if let Err(error) = self.environment.restart(graceful).await {
+            panic!("the environment: seed {}, the restart: {error}", self.seed);
+        }
+        self.restarts += 1;
+        self.record_fault(&format!("restart {kind} done"));
+    }
+
+    /// Pauses the publisher: a publication in flight has its reply, and
+    /// none starts until the pause is lifted (Codex, #259).
+    async fn pause_publisher(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        drop(self.gate.lock().await);
+    }
+
+    /// A channel's history by the server API: its epoch, and the id at each
+    /// offset.
+    async fn history(&self, channel: &str) -> Result<(String, BTreeMap<u64, String>), Violation> {
+        let history = self
+            .environment
+            .api()
+            .call("history", json!({"channel": channel, "limit": -1}))
+            .await
+            .map_err(|error| {
+                self.violation("I8", format!("{channel} history: {}", error.message))
+            })?;
+        let epoch = history["epoch"].as_str().unwrap_or_default().to_owned();
+        let offsets = history["publications"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|publication| {
+                let offset = publication["offset"].as_u64().unwrap_or(0);
+                (offset, id_of(&publication["data"].to_string()))
+            })
+            .collect();
+        Ok((epoch, offsets))
+    }
+
+    /// Every publication acknowledged since the last check is in its
+    /// channel's history, by epoch and offset (I8, reviewer 51c).
+    fn check_acknowledged(
+        &mut self,
+        histories: &BTreeMap<String, (String, BTreeMap<u64, String>)>,
+    ) -> Result<(), Violation> {
+        let published = self.published.lock().unwrap().clone();
+        for (channel, epoch, offset, id) in &published[self.acknowledged..] {
+            let Some((history_epoch, offsets)) = histories.get(channel) else {
+                continue;
+            };
+            if epoch != history_epoch || offsets.get(offset) != Some(id) {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{channel}: acknowledged ({epoch}, {offset}) {id} not in the history, of epoch {history_epoch}"
+                    ),
+                ));
+            }
+        }
+        self.acknowledged = published.len();
+        Ok(())
+    }
+
+    /// Before a restart (D6), with the publisher paused: every publication
+    /// acknowledged is in the history, and after a status round trip each
+    /// channel's segment delivered a prefix of the history's offsets after
+    /// its start. On the memory engine that history is kept for the
+    /// `subscribed` the restart brings (reviewer, 51c).
+    async fn before_restart(&mut self) -> Result<(), Violation> {
+        self.pause_publisher().await;
+        let mut histories = BTreeMap::new();
+        for channel in self.channels.iter().chain([&self.canary]) {
+            histories.insert(channel.clone(), self.history(channel).await?);
+        }
+        self.check_acknowledged(&histories)?;
+        // Every record the child wrote before its answer is taken.
+        self.status().await?;
+        self.drain()?;
+        let memory = self.environment.engine() == Engine::Memory;
+        for (channel, (epoch, offsets)) in histories {
+            let Some(state) = self.states.get(&channel) else {
+                continue;
+            };
+            // An earlier restart's history stands until its subscribed.
+            let (Some(start), None) = (state.start, &state.restarted) else {
+                continue;
+            };
+            if state.epoch.as_deref() != Some(epoch.as_str()) {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{channel}: the history's epoch {epoch}, the segment's {:?}, before a restart",
+                        state.epoch
+                    ),
+                ));
+            }
+            let history: Vec<(u64, String)> = offsets
+                .range(start + 1..)
+                .map(|(offset, id)| (*offset, id.clone()))
+                .collect();
+            let delivered: Vec<(u64, String)> = state
+                .delivered
+                .iter()
+                .map(|(offset, data)| (*offset, id_of(data)))
+                .collect();
+            if !history.starts_with(&delivered) {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{channel}: before a restart, delivered {delivered:?} of the history {history:?}"
+                    ),
+                ));
+            }
+            if memory {
+                self.states.get_mut(&channel).expect("its state").restarted = Some(history);
+            }
+        }
+        Ok(())
     }
 
     /// Logs a fault added or removed, stamped with the wall clock, also in
@@ -1017,7 +1519,9 @@ impl SeedRun<'_> {
     async fn run_ops(&mut self) -> Result<(), Violation> {
         let start = Instant::now();
         for index in 0..self.ops.len() {
-            if start.elapsed() > OPERATIONS_WITHIN {
+            // An operation that holds the others starts only if it ends
+            // within the window, so that the seed keeps its bound (D11).
+            if start.elapsed() + self.ops[index].holds() > OPERATIONS_WITHIN {
                 break;
             }
             self.done = index + 1;
@@ -1049,7 +1553,20 @@ impl SeedRun<'_> {
                     let channel = self.channels[channel].clone();
                     self.command(Command_::Presence { channel }).await;
                 }
-                Op::Fault(fault) => self.apply(fault).await?,
+                Op::Fault(fault) => {
+                    let holds = matches!(
+                        fault.kind,
+                        FaultKind::ServerPause | FaultKind::ClientSuspension
+                    );
+                    self.apply(fault).await?;
+                    if holds {
+                        self.hold().await?;
+                    }
+                }
+                Op::Restart { graceful } => self.restart(graceful).await?,
+                Op::SuspensionAcrossRestart { hold_ms, graceful } => {
+                    self.suspension_across_restart(hold_ms, graceful).await?;
+                }
                 Op::Wait { ms } => {
                     self.pump(Instant::now() + Duration::from_millis(ms))
                         .await?;
@@ -1142,11 +1659,7 @@ impl SeedRun<'_> {
     /// subscribed and the others unsubscribed, and no call is pending.
     async fn heal(&mut self) -> Result<(), Violation> {
         // The last fault holds for its seeded time first (Codex, #259).
-        if let Some((_, until)) = &self.fault {
-            let until = *until;
-            self.pump(until).await?;
-        }
-        self.remove().await;
+        self.end_fault().await?;
         let _ = self.environment.toxics().set_enabled(PROXY, true).await;
         self.wanted_connected = true;
         self.command(Command_::Connect).await;
@@ -1282,44 +1795,32 @@ impl SeedRun<'_> {
         }
     }
 
-    /// I8 by the server's own offsets (D7): with the publisher paused, the
-    /// history of each channel holds every acknowledged publication, and
-    /// each channel's segment delivered exactly the history's offsets
+    /// I8 by the server's own epochs and offsets (D7): with the publisher
+    /// paused, the history of each channel holds every publication
+    /// acknowledged since the last check, in its epoch, and each channel's
+    /// segment, in the history's epoch, delivered exactly the history's offsets
     /// after its start, in order, each once, with the id at that offset;
     /// a channel still subscribed delivered up to the history's end.
     async fn check_deliveries(&mut self) -> Result<(), Violation> {
-        self.paused.store(true, Ordering::SeqCst);
-        // A publication in flight has its reply, and none starts after.
-        drop(self.gate.lock().await);
-        let published = self.published.lock().unwrap().clone();
-        for channel in self.channels.clone() {
-            let history = self
-                .environment
-                .api()
-                .call("history", json!({"channel": channel, "limit": -1}))
-                .await
-                .map_err(|error| {
-                    self.violation("I8", format!("{channel} history: {}", error.message))
-                })?;
-            let offsets: BTreeMap<u64, String> = history["publications"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|publication| {
-                    let offset = publication["offset"].as_u64().unwrap_or(0);
-                    (offset, id_of(&publication["data"].to_string()))
-                })
-                .collect();
-            for (_, of, offset, id) in published.iter().filter(|(c, ..)| *c == channel) {
-                let _ = of;
-                if offsets.get(offset) != Some(id) {
-                    return Err(self.violation(
-                        "I8",
-                        format!(
-                            "{channel}: acknowledged offset {offset} ({id}) not in the history"
-                        ),
-                    ));
-                }
+        self.pause_publisher().await;
+        let mut histories = BTreeMap::new();
+        for channel in &self.channels {
+            histories.insert(channel.clone(), self.history(channel).await?);
+        }
+        self.check_acknowledged(&histories)?;
+        for (channel, (epoch, offsets)) in histories {
+            // By (epoch, offset): the segment is in the history's epoch.
+            if let Some(state) = self.states.get(&channel)
+                && state.start.is_some()
+                && state.epoch.as_deref() != Some(epoch.as_str())
+            {
+                return Err(self.violation(
+                    "I8",
+                    format!(
+                        "{channel}: the history's epoch {epoch}, the segment's {:?}",
+                        state.epoch
+                    ),
+                ));
             }
             let end = offsets.keys().next_back().copied().unwrap_or(0);
             // A subscribed channel delivers up to the end: waited for.
@@ -1547,7 +2048,12 @@ async fn run_seed(
     attempt: u32,
     plant: Plant,
 ) -> Result<(), (Violation, Vec<String>)> {
-    let (count, ops) = operations(seed);
+    let Plan {
+        channels: count,
+        connection_ttl_secs,
+        subscription_ttl_secs,
+        ops,
+    } = operations(seed);
     // Channels of their own for every run of a seed, so that no history
     // is shared between runs.
     let nth = RUNS.fetch_add(1, Ordering::SeqCst);
@@ -1560,7 +2066,12 @@ async fn run_seed(
     let user = format!("chaos-{}", environment.run());
     let mut all = channels.clone();
     all.push(canary.clone());
-    let child = ChildProcess::start(&environment.websocket_url(), &user, &all);
+    let child = ChildProcess::start(
+        &environment.websocket_url(),
+        &user,
+        &all,
+        (connection_ttl_secs, subscription_ttl_secs),
+    );
     let published = Arc::new(Mutex::new(Vec::new()));
     let paused = Arc::new(AtomicBool::new(false));
     let gate: Gate = Arc::new(tokio::sync::Mutex::new(()));
@@ -1598,6 +2109,9 @@ async fn run_seed(
         fault: None,
         wanted_connected: true,
         expected: BTreeMap::new(),
+        suspensions: Vec::new(),
+        acknowledged: 0,
+        restarts: 0,
     };
     let mut second = None;
     let checked = tokio::time::timeout(SEED_BOUND, async {
@@ -1617,21 +2131,7 @@ async fn run_seed(
     let result = checked.unwrap_or_else(|_| {
         Err(run.violation("seed bound", format!("the seed ran past {SEED_BOUND:?}")))
     });
-    // The publisher ends only when stopped: one that ended before has
-    // failed, and a seed without its workload cannot pass (Codex, #259).
-    let result = match result {
-        Ok(()) if sender_task.is_finished() => {
-            let ended = (&mut sender_task).await;
-            Err(run.violation(
-                "publisher",
-                format!("the publisher stopped during the seed: {ended:?}"),
-            ))
-        }
-        Ok(()) if run.published.lock().unwrap().is_empty() => {
-            Err(run.violation("publisher", "no publication was acknowledged"))
-        }
-        result => result,
-    };
+    let result = with_publisher(&run, result, &mut sender_task).await;
     stop.store(true, Ordering::SeqCst);
     sender_task.abort();
     if let Some(second) = second {
@@ -1642,6 +2142,28 @@ async fn run_seed(
     let _ = run.child.process.start_kill();
     let log = run.child.log.lock().unwrap().clone();
     result.map_err(|violation| (violation, log))
+}
+
+/// The publisher ends only when stopped: one that ended before has failed,
+/// and a seed without its workload cannot pass (Codex, #259).
+async fn with_publisher(
+    run: &SeedRun<'_>,
+    result: Result<(), Violation>,
+    sender_task: &mut tokio::task::JoinHandle<()>,
+) -> Result<(), Violation> {
+    match result {
+        Ok(()) if sender_task.is_finished() => {
+            let ended = sender_task.await;
+            Err(run.violation(
+                "publisher",
+                format!("the publisher stopped during the seed: {ended:?}"),
+            ))
+        }
+        Ok(()) if run.published.lock().unwrap().is_empty() => {
+            Err(run.violation("publisher", "no publication was acknowledged"))
+        }
+        result => result,
+    }
 }
 
 /// D9's planted I3 fault: a second real connection as the run's user,
@@ -1657,8 +2179,19 @@ async fn second_connection(
         ferrifuge::Config::default().token(token),
     )
     .expect("a second client");
+    // The namespace allows no subscribe without a token (D4).
+    let token_user = user.to_owned();
     let subscription = client
-        .new_subscription(canary)
+        .subscription_builder(canary.to_owned())
+        .get_token(move |channel| {
+            let token = support::token::subscription_token(
+                &token_user,
+                &channel,
+                Duration::from_secs(3600),
+            );
+            async move { Ok(token) }
+        })
+        .build()
         .expect("its canary subscription");
     subscription.subscribe();
     client.connect();
@@ -1719,6 +2252,218 @@ fn seeds_fix_their_operations() {
     assert_eq!(operations(7), operations(7), "seed 7 gives two lists");
     assert_ne!(operations(7), operations(8), "seeds 7 and 8 give one list");
     log("seed 7 gives the same operations twice, seed 8 others");
+}
+
+/// How long a restart scenario waits for a record: the restart, and the
+/// reconnect after it, its backoff included.
+const SCENARIO_WITHIN: Duration = Duration::from_secs(40);
+
+/// A restart scenario's client: a child subscribed to one channel, with
+/// tokens of an hour, and the publications it delivered.
+struct RestartScenario {
+    name: &'static str,
+    child: ChildProcess,
+    channel: String,
+    /// Epoch and offset of each publication delivered, in order.
+    delivered: Vec<(Option<String>, u64)>,
+}
+
+impl RestartScenario {
+    /// The child, its channel subscribed as its canary, the first one.
+    fn start(name: &'static str, environment: &Environment, channel: &str) -> Self {
+        let user = format!("restart-{}", environment.run());
+        let child = ChildProcess::start(
+            &environment.websocket_url(),
+            &user,
+            &[channel.to_owned()],
+            (3600, 3600),
+        );
+        Self {
+            name,
+            child,
+            channel: channel.to_owned(),
+            delivered: Vec::new(),
+        }
+    }
+
+    /// The next record `wanted` takes, the publications before it kept.
+    async fn until(&mut self, what: &str, mut wanted: impl FnMut(&Record) -> bool) -> Record {
+        let deadline = Instant::now() + SCENARIO_WITHIN;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let record = match tokio::time::timeout(left, self.child.records.recv()).await {
+                Ok(Some((_, record))) => record,
+                Ok(None) => panic!("{}: the child ended before {what}", self.name),
+                Err(elapsed) => panic!("{}: no {what}: {elapsed}", self.name),
+            };
+            if let Record::Pub { offset, epoch, .. } = &record {
+                self.delivered
+                    .push((epoch.clone(), offset.expect("a publication's offset")));
+            }
+            if wanted(&record) {
+                return record;
+            }
+        }
+    }
+
+    /// The next `subscribed`: `was_recovering`, `recovered`, epoch and offset.
+    async fn subscribed(&mut self) -> (bool, bool, Option<String>, Option<u64>) {
+        match self
+            .until(
+                "subscribed",
+                |record| matches!(record, Record::Sub { state, .. } if state == "subscribed"),
+            )
+            .await
+        {
+            Record::Sub {
+                was_recovering,
+                recovered,
+                epoch,
+                offset,
+                ..
+            } => (was_recovering, recovered, epoch, offset),
+            _ => unreachable!("a subscribed record"),
+        }
+    }
+
+    /// Publishes `n` through the server API: its epoch and offset.
+    async fn publish(&self, environment: &Environment, n: u64) -> (String, u64) {
+        let reply = environment
+            .api()
+            .call(
+                "publish",
+                json!({"channel": self.channel, "data": {"id": format!("p{n}")}}),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}: publication {n}: {}", self.name, error.message));
+        (
+            reply["epoch"].as_str().unwrap_or_default().to_owned(),
+            reply["offset"].as_u64().unwrap_or(0),
+        )
+    }
+
+    /// Waits until the publication at `offset` is delivered, among the
+    /// deliveries from the `from`th on.
+    async fn delivered_at(&mut self, from: usize, offset: u64) {
+        if self.delivered[from.min(self.delivered.len())..]
+            .iter()
+            .any(|(_, at)| *at == offset)
+        {
+            return;
+        }
+        self.until(
+            &format!("the publication at offset {offset}"),
+            |record| matches!(record, Record::Pub { offset: Some(at), .. } if *at == offset),
+        )
+        .await;
+    }
+
+    /// The child closed and gone.
+    async fn end(mut self) {
+        self.child.send(&Command_::Close).await;
+        let _ = tokio::time::timeout(
+            CHILD_WITHIN,
+            self.until("closed", |record| matches!(record, Record::Closed)),
+        )
+        .await;
+        self.child.send(&Command_::Exit).await;
+        let _ = tokio::time::timeout(CHILD_WITHIN, self.child.process.wait()).await;
+        let _ = self.child.process.start_kill();
+    }
+}
+
+/// "A server restart with the memory engine reports recovered false"
+/// (D6): run once, without D8's rerun (reviewer, 51c).
+async fn restart_with_memory(environment: &Environment) {
+    let name = "A server restart with the memory engine reports recovered false";
+    let channel = format!("{NAMESPACE}:{}-restart-memory", environment.run());
+    let mut scenario = RestartScenario::start(name, environment, &channel);
+    let (_, _, before, _) = scenario.subscribed().await;
+    for n in 1..=3 {
+        let (_, offset) = scenario.publish(environment, n).await;
+        scenario.delivered_at(0, offset).await;
+    }
+    let mut restarts = 0;
+    environment
+        .restart(true)
+        .await
+        .unwrap_or_else(|error| panic!("the environment: {name}: {error}"));
+    restarts += 1;
+    let (was_recovering, recovered, epoch, position) = scenario.subscribed().await;
+    assert!(
+        was_recovering && !recovered && epoch.is_some() && epoch != before,
+        "{name}: subscribed with was_recovering {was_recovering}, recovered {recovered}, epoch {epoch:?}, before the restart {before:?}"
+    );
+    // The offsets restart after that subscribed: the next publication
+    // is the first delivered since, at the offset the server gave it, in
+    // the subscribed's epoch (a live publication may carry none).
+    let since = scenario.delivered.len();
+    let (published_epoch, offset) = scenario.publish(environment, 4).await;
+    scenario.delivered_at(since, offset).await;
+    let (delivered_epoch, delivered) = scenario.delivered[since].clone();
+    assert!(
+        delivered == offset
+            && Some(offset) == position.map(|at| at + 1)
+            && epoch.as_deref() == Some(published_epoch.as_str())
+            && delivered_epoch
+                .as_ref()
+                .is_none_or(|at| Some(at) == epoch.as_ref()),
+        "{name}: delivered ({delivered_epoch:?}, {delivered}); published ({published_epoch}, {offset}), subscribed at ({epoch:?}, {position:?})"
+    );
+    // The scenario's own restarts, not the job's counter (reviewer, 51c).
+    assert_eq!(restarts, 1, "{name}: restarts");
+    scenario.end().await;
+    log(&format!("{name}: passed"));
+}
+
+/// "A server restart with the Redis engine loses nothing" (D6), in an
+/// environment of its own: run once, without D8's rerun (reviewer, 51c).
+async fn restart_with_redis(run: &str, engine: Engine) {
+    let name = "A server restart with the Redis engine loses nothing";
+    let environment = Environment::start(run, engine, &configuration(engine))
+        .await
+        .unwrap_or_else(|error| panic!("the environment: {name}: {error}"));
+    let channel = format!("{NAMESPACE}:{}-restart-redis", environment.run());
+    let mut scenario = RestartScenario::start(name, &environment, &channel);
+    let (_, _, before, _) = scenario.subscribed().await;
+    for n in 1..=3 {
+        let (_, offset) = scenario.publish(&environment, n).await;
+        scenario.delivered_at(0, offset).await;
+    }
+    let toxics = environment.toxics();
+    toxics
+        .set_enabled(PROXY, false)
+        .await
+        .unwrap_or_else(|error| panic!("the environment: {name}: {error}"));
+    environment
+        .restart(true)
+        .await
+        .unwrap_or_else(|error| panic!("the environment: {name}: {error}"));
+    let (published_epoch, offset) = scenario.publish(&environment, 4).await;
+    toxics
+        .set_enabled(PROXY, true)
+        .await
+        .unwrap_or_else(|error| panic!("the environment: {name}: {error}"));
+    let (_, recovered, epoch, _) = scenario.subscribed().await;
+    assert!(recovered, "{name}: subscribed with recovered false");
+    assert!(
+        epoch == before && epoch.as_deref() == Some(published_epoch.as_str()),
+        "{name}: epoch {epoch:?} after the restart, {before:?} before, publication 4 in {published_epoch}"
+    );
+    scenario.delivered_at(0, offset).await;
+    // A duplicate would follow at once: a moment for it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while let Ok((_, record)) = scenario.child.records.try_recv() {
+        if let Record::Pub { offset, epoch, .. } = record {
+            scenario
+                .delivered
+                .push((epoch, offset.expect("a publication's offset")));
+        }
+    }
+    let offsets: Vec<u64> = scenario.delivered.iter().map(|(_, at)| *at).collect();
+    assert_eq!(offsets, [1, 2, 3, 4], "{name}: the offsets delivered");
+    scenario.end().await;
+    log(&format!("{name}: passed"));
 }
 
 /// The budget's seeds, or `FERRIFUGE_REAL_CHAOS_SEED` alone.
@@ -1810,10 +2555,17 @@ fn main() {
         .expect("a runtime");
     let findings = runtime.block_on(async {
         let run = format!("r{}", std::process::id());
+        let scenarios = env::var_os(SEED_VARIABLE).is_none();
+        // The Redis scenario's environment, gone before the run's own: both
+        // publish the same host ports.
+        if scenarios {
+            restart_with_redis(&format!("{run}redis"), Engine::Redis).await;
+        }
         let environment = Environment::start(&run, Engine::Memory, &configuration(Engine::Memory))
             .await
             .unwrap_or_else(|error| panic!("the environment: {error}"));
-        if env::var_os(SEED_VARIABLE).is_none() {
+        if scenarios {
+            restart_with_memory(&environment).await;
             planted_faults_are_reported(&environment).await;
         }
         run_budget(&environment).await
@@ -1830,6 +2582,7 @@ fn main() {
         "call presence ok",
         "reconnect",
         "recovered true",
+        "recovered false after a restart",
     ]
     .into_iter()
     .filter(|name| counters.counts.get(*name).copied().unwrap_or(0) == 0)
@@ -1839,9 +2592,20 @@ fn main() {
         "outcomes never counted: {unseen:?} (D10)"
     );
     // D10: every fault kind implemented reached, over the whole job.
-    let missing: Vec<_> = FaultKind::ALL
+    // D4's restarts, both kinds, and the token callbacks of both kinds.
+    let missing: Vec<String> = FaultKind::ALL
         .iter()
-        .filter(|kind| !counters.counts.contains_key(&format!("fault {kind:?}")))
+        .map(|kind| format!("fault {kind:?}"))
+        .chain(
+            [
+                "restart graceful",
+                "restart hard",
+                "token connection",
+                "token subscription",
+            ]
+            .map(str::to_owned),
+        )
+        .filter(|name| !counters.counts.contains_key(name))
         .collect();
     assert!(
         missing.is_empty() || env::var_os(SEED_VARIABLE).is_some(),

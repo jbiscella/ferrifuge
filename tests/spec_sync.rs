@@ -26,8 +26,6 @@ const NOT_YET_IMPLEMENTED: &[&str] = &["Soak run"];
 /// yet. A scenario leaves the list when a harness claims it.
 const P_NOT_YET_MEASURED: &[&str] = &[
     "Seeded real-server chaos keeps the invariants",
-    "A server restart with the memory engine reports recovered false",
-    "A server restart with the Redis engine loses nothing",
     "Hours of normal use keep resources flat and delivery exact",
 ];
 

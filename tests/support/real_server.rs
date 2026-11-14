@@ -36,6 +36,9 @@ const PROXY_PORT: u16 = 18000;
 pub(crate) const PROXY: &str = "centrifugo";
 /// How long a started container may take to answer.
 const READY_WITHIN: Duration = Duration::from_secs(60);
+/// How long a restart may take, the docker commands and the server's
+/// health together: past it, the environment has failed (reviewer, 51c).
+const RESTART_WITHIN: Duration = Duration::from_secs(30);
 
 /// The engine of a row (D6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,9 +104,8 @@ pub(crate) fn configuration(engine: Engine) -> Value {
                 "force_positioning": true,
                 "presence": true,
                 "join_leave": true,
-                // The runner's client subscribes and calls history and
-                // presence itself.
-                "allow_subscribe_for_client": true,
+                // The runner's client calls history and presence itself;
+                // it subscribes only with a subscription token (51c).
                 "allow_history_for_client": true,
                 "allow_presence_for_client": true
             }]
@@ -165,7 +167,7 @@ impl Environment {
         environment.api = ServerApi::new(&environment.api_url());
         environment.toxics = Toxiproxy::new(environment.toxiproxy_api_port);
         environment.run_containers(&network).await?;
-        environment.wait_ready().await?;
+        environment.wait_ready(READY_WITHIN).await?;
         environment
             .toxics
             .create(
@@ -242,27 +244,74 @@ impl Environment {
         Ok(())
     }
 
-    /// Waits until Centrifugo's health endpoint and Toxiproxy's API answer.
-    async fn wait_ready(&self) -> Result<(), String> {
+    /// Waits until Centrifugo's health endpoint and Toxiproxy's API answer,
+    /// at most `within`.
+    async fn wait_ready(&self, within: Duration) -> Result<(), String> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
             .map_err(|e| e.to_string())?;
         let health = format!("{}/health", self.api_url());
         let version = format!("{}/version", self.toxics.base);
-        let deadline = tokio::time::Instant::now() + READY_WITHIN;
+        let deadline = tokio::time::Instant::now() + within;
         for url in [health, version] {
             loop {
                 match http.get(&url).send().await {
                     Ok(response) if response.status().is_success() => break,
                     _ if tokio::time::Instant::now() >= deadline => {
-                        return Err(format!("{url} did not answer within {READY_WITHIN:?}"));
+                        return Err(format!("{url} did not answer within {within:?}"));
                     }
                     _ => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             }
         }
         Ok(())
+    }
+
+    /// Pauses the Centrifugo container (`docker pause`, D4).
+    pub(crate) async fn pause(&self) -> Result<(), String> {
+        docker(&["pause", &self.centrifugo]).await.map(drop)
+    }
+
+    /// Resumes the paused Centrifugo container.
+    pub(crate) async fn unpause(&self) -> Result<(), String> {
+        docker(&["unpause", &self.centrifugo]).await.map(drop)
+    }
+
+    /// Restarts the Centrifugo container (D4): gracefully, SIGTERM with 3 s
+    /// to go (every client told `disconnect 3001 "shutdown"`), or hard,
+    /// killed and started again (no disconnect reaches anyone); then waits
+    /// until it answers. The network alias and the published port stay.
+    ///
+    /// # Errors
+    ///
+    /// A docker command's error, or the restart not done within
+    /// [`RESTART_WITHIN`]: the environment's failure, not the client's.
+    pub(crate) async fn restart(&self, graceful: bool) -> Result<(), String> {
+        let start = tokio::time::Instant::now();
+        let restarted = tokio::time::timeout(RESTART_WITHIN, async {
+            if graceful {
+                docker(&["restart", "-t", "3", &self.centrifugo]).await?;
+            } else {
+                docker(&["kill", "-s", "KILL", &self.centrifugo]).await?;
+                docker(&["start", &self.centrifugo]).await?;
+            }
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|_| format!("docker did not restart the server within {RESTART_WITHIN:?}"))?;
+        restarted?;
+        self.wait_ready(RESTART_WITHIN.saturating_sub(start.elapsed()))
+            .await
+    }
+
+    /// The engine the environment was started with (D6).
+    pub(crate) fn engine(&self) -> Engine {
+        if self.redis.is_some() {
+            Engine::Redis
+        } else {
+            Engine::Memory
+        }
     }
 
     /// The server API, straight to Centrifugo.
