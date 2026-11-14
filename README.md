@@ -23,6 +23,20 @@ The core is a sans-IO state machine with no async runtime of its own. The
 default `tokio` feature adds a ready-to-use `Client` that runs the machine on
 tokio. Any other runtime can drive the core through `ferrifuge::machine`.
 
+## How it works
+
+The client keeps one connection to a Centrifugo server. It falls back
+between transports, answers the server's pings, reconnects with backoff and
+jitter, refreshes tokens before they expire, and subscribes again after a
+reconnect, recovering the publications it missed on channels with history.
+An application that reads its events slowly holds the server back instead
+of growing the client's memory.
+[docs/protocol.md](docs/protocol.md) draws each of these flows as a
+sequence diagram. [docs/resilience.md](docs/resilience.md) says what the
+application must do for each, what the client guarantees, and how to
+troubleshoot a failure. [Codes](#codes) lists every code and what the client
+does next.
+
 ## Status
 
 Before 1.0, a minor version may break the API; [CHANGELOG.md](CHANGELOG.md)
