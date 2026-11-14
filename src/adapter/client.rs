@@ -794,19 +794,27 @@ impl Shared {
         }
     }
 
-    /// Feeds [`Input::Flush`].
-    fn flush(&self) {
+    /// Moves every queued action into `into`, which is empty, under one
+    /// lock, after feeding [`Input::Flush`] when `flush`: API calls that
+    /// keep queueing no longer win the lock once per action against the
+    /// driver. A take that finds none releases what a burst grew, in the
+    /// queue and in `into`, which take turns holding the actions (Block 14).
+    fn take_actions(&self, into: &mut VecDeque<Action>, flush: bool) {
         let mut core = lock(&self.core);
-        self.handle(&mut core, Input::Flush);
+        if flush {
+            self.handle(&mut core, Input::Flush);
+        }
+        if core.actions.is_empty() {
+            core.actions.shrink_to(crate::RESTING_SLOTS);
+            into.shrink_to(crate::RESTING_SLOTS);
+        } else {
+            std::mem::swap(&mut core.actions, into);
+        }
     }
 
+    #[cfg(all(test, adapter_tokio))]
     fn next_action(&self) -> Option<Action> {
-        let mut core = lock(&self.core);
-        let action = core.actions.pop_front();
-        if action.is_none() {
-            core.actions.shrink_to(crate::RESTING_SLOTS);
-        }
-        action
+        lock(&self.core).actions.pop_front()
     }
 
     /// Makes a call now, of `subscription` when given; the future gives its
@@ -1774,6 +1782,8 @@ impl Client {
             timer_sets: 0,
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
+            taken: VecDeque::new(),
+            fed: false,
         };
         let span = shared.log.span.clone();
         platform::spawn(&runtime, driver.run().instrument(span));
@@ -2702,6 +2712,13 @@ struct Driver {
     callback_fetches: FuturesUnordered<CallbackFetching>,
     /// Handles to abort the callbacks running, by fetch.
     callback_aborts: HashMap<FetchId, AbortHandle>,
+    /// The actions taken from the core and not yet performed, between two
+    /// takes; its slots go back to the core's queue at the next take.
+    taken: VecDeque<Action>,
+    /// Set when performing an action fed the core an input (a failed
+    /// write's close): the actions that input queued are taken in the same
+    /// turn.
+    fed: bool,
 }
 
 type CallbackFetching = platform::BoxFuture<'static, Option<(FetchId, Input)>>;
@@ -2902,18 +2919,60 @@ impl Driver {
     /// resolves after it (Block 33, D1); the guard then ends the streams as
     /// the driver goes.
     async fn finish(&mut self) {
-        while let Some(action) = self.shared.next_action() {
-            self.perform(action);
-        }
+        self.perform_all_queued();
         if self.delivery == super::EventDelivery::Inline {
             super::handler::deliver_remaining(&self.shared);
-            while let Some(action) = self.shared.next_action() {
-                self.perform(action);
-            }
+            self.perform_all_queued();
         }
         for closing in std::mem::take(&mut self.closing) {
             let _ = closing.await;
         }
+    }
+
+    /// Performs the turn's actions: everything one take moves, the flush
+    /// included, then again only while the batch just performed fed the
+    /// core an input, whose actions belong to that input (Block 49c). An
+    /// API call queueing meanwhile waits for the next turn, its wake
+    /// stored: callers that keep queueing cannot hold the driver in one
+    /// drain.
+    fn perform_turn(&mut self) {
+        let mut taken = std::mem::take(&mut self.taken);
+        perform_batches(
+            self,
+            &mut taken,
+            true,
+            |driver, into, flush| driver.shared.take_actions(into, flush),
+            |driver, action| {
+                driver.fed = false;
+                driver.perform(action);
+                driver.fed
+            },
+        );
+        self.taken = taken;
+    }
+
+    /// Performs every queued action, until a take finds none: the client is
+    /// closed, so no call queues more, and the close's actions, queued with
+    /// the flag under the core lock, are among them (Codex, #141).
+    fn perform_all_queued(&mut self) {
+        let mut taken = std::mem::take(&mut self.taken);
+        loop {
+            self.shared.take_actions(&mut taken, false);
+            if taken.is_empty() {
+                break;
+            }
+            while let Some(action) = taken.pop_front() {
+                self.perform(action);
+            }
+        }
+        self.taken = taken;
+    }
+
+    /// Feeds the core `input` while performing an action: the actions it
+    /// queues are taken in this turn.
+    fn feed(&mut self, input: Input) {
+        self.fed = true;
+        self.shared.apply(input);
     }
 
     #[allow(clippy::too_many_lines)] // One arm per source of input.
@@ -2926,10 +2985,7 @@ impl Driver {
             // Everything the core buffered since the last flush, from this
             // task's inputs and the application's calls, goes out in as few
             // frames as the cap allows (Block 36, D3).
-            self.shared.flush();
-            while let Some(action) = self.shared.next_action() {
-                self.perform(action);
-            }
+            self.perform_turn();
             #[cfg(feature = "__test-hooks")]
             if self.shared.records.on() {
                 self.publish_timers();
@@ -3216,7 +3272,7 @@ impl Driver {
                     && open.send(frame_id, frame, frame_type).is_err()
                 {
                     self.transport = None;
-                    self.shared.apply(Input::TransportClosed {
+                    self.feed(Input::TransportClosed {
                         transport,
                         code: None,
                         reason: String::new(),
@@ -3428,7 +3484,7 @@ impl Driver {
         #[cfg(adapter_browser)]
         if !found.usable(kind) {
             debug!(transport = kind.name(), "transport not available");
-            self.shared.apply(Input::TransportUnsupported(id));
+            self.feed(Input::TransportUnsupported(id));
             return;
         }
         #[cfg(adapter_browser)]
@@ -4065,6 +4121,30 @@ async fn fetched(
     match fetching {
         Some((id, future)) => (*id, future.await),
         None => std::future::pending().await,
+    }
+}
+
+/// One turn's batches: what one `take` moves into `into` (flushing first
+/// when `flush`), performed in order; then another take only while an
+/// action just performed fed the core an input (`perform` returns true).
+/// What `take` would find otherwise waits for the next turn.
+fn perform_batches<S>(
+    state: &mut S,
+    into: &mut VecDeque<Action>,
+    flush: bool,
+    take: fn(&mut S, &mut VecDeque<Action>, bool),
+    perform: fn(&mut S, Action) -> bool,
+) {
+    let mut flush = flush;
+    loop {
+        take(state, into, std::mem::take(&mut flush));
+        let mut fed = false;
+        while let Some(action) = into.pop_front() {
+            fed |= perform(state, action);
+        }
+        if !fed {
+            return;
+        }
     }
 }
 
@@ -5227,6 +5307,121 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Distinct actions for the drain tests.
+    fn marker(n: usize) -> Action {
+        Action::CancelTimer(Timer::ALL[n % Timer::COUNT])
+    }
+
+    // One take moves the whole queue, under one lock, in order. Single-
+    // threaded runtime: the driver runs only when the test yields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_take_moves_every_queued_action() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let shared = client.shared();
+        let queued: Vec<Action> = (0..100).map(marker).collect();
+        {
+            let mut core = lock(&shared.core);
+            core.actions.clear();
+            core.actions.extend(queued.iter().cloned());
+        }
+        let mut taken = VecDeque::new();
+
+        shared.take_actions(&mut taken, false);
+
+        assert_eq!(Vec::from(taken), queued);
+        assert!(lock(&shared.core).actions.is_empty());
+    }
+
+    // Block 14: once a burst is performed, the take that finds nothing
+    // releases the slots it grew, in the queue and in the driver's buffer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_take_that_finds_none_releases_a_burst() {
+        let client =
+            Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
+        let shared = client.shared();
+        let mut taken = VecDeque::new();
+        for _ in 0..2 {
+            lock(&shared.core).actions.extend((0..1000).map(marker));
+            shared.take_actions(&mut taken, false);
+            taken.clear();
+        }
+        assert!(lock(&shared.core).actions.capacity() > crate::RESTING_SLOTS);
+        assert!(taken.capacity() > crate::RESTING_SLOTS);
+
+        shared.take_actions(&mut taken, false);
+
+        assert!(lock(&shared.core).actions.capacity() <= crate::RESTING_SLOTS);
+        assert!(taken.capacity() <= crate::RESTING_SLOTS);
+    }
+
+    /// A scripted turn for `perform_batches`: the core's queue, what was
+    /// performed, and what performing one action queues.
+    struct Script {
+        queue: VecDeque<Action>,
+        performed: Vec<Action>,
+        /// Performing `.0` queues `.1`; `.2` says whether it fed the core an
+        /// input (true) or stands for an API call made meanwhile (false).
+        then: Option<(Action, Action, bool)>,
+    }
+
+    impl Script {
+        fn take(&mut self, into: &mut VecDeque<Action>, _flush: bool) {
+            std::mem::swap(&mut self.queue, into);
+        }
+
+        fn perform(&mut self, action: Action) -> bool {
+            let fed = match self.then.take() {
+                Some((trigger, queued, fed)) if trigger == action => {
+                    self.queue.push_back(queued);
+                    fed
+                }
+                other => {
+                    self.then = other;
+                    false
+                }
+            };
+            self.performed.push(action);
+            fed
+        }
+    }
+
+    // Block 49c: a failed write's close, fed to the core while its send is
+    // performed, has its actions performed in the same turn, before the
+    // runtime's other tasks run.
+    #[test]
+    fn the_actions_of_an_input_fed_while_performing_come_in_the_same_turn() {
+        let mut script = Script {
+            queue: VecDeque::from([marker(0), marker(1)]),
+            performed: Vec::new(),
+            then: Some((marker(0), marker(2), true)),
+        };
+        let mut into = VecDeque::new();
+
+        perform_batches(&mut script, &mut into, true, Script::take, Script::perform);
+
+        assert_eq!(script.performed, [marker(0), marker(1), marker(2)]);
+        assert!(script.queue.is_empty());
+    }
+
+    // An action an API call queues between two takes, with no input fed by
+    // the driver, waits for the next turn: callers that keep queueing
+    // cannot hold the driver in one drain.
+    #[test]
+    fn an_action_queued_between_two_takes_waits_for_the_next_turn() {
+        let mut script = Script {
+            queue: VecDeque::from([marker(0), marker(1)]),
+            performed: Vec::new(),
+            then: Some((marker(0), marker(2), false)),
+        };
+        let mut into = VecDeque::new();
+
+        perform_batches(&mut script, &mut into, true, Script::take, Script::perform);
+
+        assert_eq!(script.performed, [marker(0), marker(1)]);
+        assert_eq!(Vec::from(script.queue), [marker(2)]);
     }
 
     // Block 36, D3. Single-threaded runtime: the driver runs only when the
