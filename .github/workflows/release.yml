@@ -50,6 +50,13 @@ jobs:
             exit 1
           fi
 
+      # The latest real run of the real-server chaos for the tagged commit
+      # passed (Block 51 D12); the soak joins with Block 52 (D11).
+      - name: Real-server chaos passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/validation-run gate chaos-real.yml "$GITHUB_SHA"
+
       - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
           tool: cargo-semver-checks@0.51.0

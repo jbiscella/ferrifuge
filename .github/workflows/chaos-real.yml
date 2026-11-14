@@ -2,19 +2,51 @@
 # through Toxiproxy, checked against the server's own records. Needs
 # Docker: Linux only (D11). Never on pull requests.
 #
-# 51a: dispatched only, one row (websocket, JSON, memory engine) with
-# D3's toxics and the proxy turned down. The guard and the schedule come
-# with 51b, the other rows with 51c and 51d.
+# One row so far (websocket, JSON, memory engine) with D3's toxics and the
+# proxy turned down; the other rows come with 51c and 51d. Nightly, off
+# the hour (GitHub may delay or drop runs on the hour), and dispatched; a
+# scheduled run is skipped only when main's head already has a real run
+# (D11, scripts/validation-run).
 name: chaos-real
 
 on:
+  schedule:
+    - cron: "23 3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # On schedule, whether main's head still lacks a real run; dispatched,
+  # always (D11).
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = schedule ]; then
+            scripts/validation-run should-run chaos-real.yml "$GITHUB_SHA"
+          else
+            echo "run=true: dispatched"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   chaos:
+    needs: guard
+    if: ${{ needs.guard.outputs.run == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,10 +93,11 @@ jobs:
           if-no-files-found: ignore
 
   # Fails unless every matrix job succeeded (D11): a job stopped by its
-  # timeout, cancelled or skipped is not a success.
+  # timeout, cancelled or skipped is not a success. Skipped with the run
+  # when the guard skips it: a skip is never evidence.
   verdict:
-    needs: chaos
-    if: ${{ !cancelled() }}
+    needs: [guard, chaos]
+    if: ${{ !cancelled() && needs.guard.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Every row passed
