@@ -2923,17 +2923,6 @@ impl Driver {
         // turn starts as if after a wait.
         let waited = AtomicBool::new(true);
         loop {
-            // A turn whose select! did not wait gave the runtime no chance
-            // to poll the sockets and timers: the transport branch would
-            // see only what the runtime last polled, and a deadline the
-            // runtime polls with a reply would win the timers' turn over
-            // it. The actions wake spends no coop budget, so API calls made
-            // without pause would hold the runtime for as long as they last
-            // (Block 49, row 28/55; Codex, #248). Yielding once lets the
-            // runtime poll them first.
-            if !waited.swap(false, Ordering::Relaxed) {
-                platform::yield_now().await;
-            }
             // Everything the core buffered since the last flush, from this
             // task's inputs and the application's calls, goes out in as few
             // frames as the cap allows (Block 36, D3).
@@ -2947,6 +2936,20 @@ impl Driver {
             }
             if self.shared.closed.load(Ordering::Acquire) {
                 return self.finish().await;
+            }
+            // A turn whose select! did not wait gave the runtime no chance
+            // to poll the sockets and timers: the transport branch would
+            // see only what the runtime last polled, and a deadline the
+            // runtime polls with a reply would win the timers' turn over
+            // it. The actions wake spends no coop budget, so API calls made
+            // without pause would hold the runtime for as long as they last
+            // (Block 49, row 28/55; Codex, #248). Yielding once lets the
+            // runtime poll them first. Only once the last input's actions
+            // are performed and its timers published: no other task of the
+            // runtime runs between an input and what it set, so a timer is
+            // armed from the input that set it, not from a later turn.
+            if !waited.swap(false, Ordering::Relaxed) {
+                platform::yield_now().await;
             }
             let reading = self.reading();
             if self.delivery.is_thread() {
