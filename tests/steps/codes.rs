@@ -134,12 +134,35 @@ async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
                 return;
             }
             ClientEvent::Connecting { .. } | ClientEvent::Connected { .. } => {
-                panic!("expected disconnected, got {event:?}");
+                panic!(
+                    "expected disconnected, got {event:?}{}",
+                    recent_records(world)
+                );
             }
             // Errors and events added later.
             _ => {}
         }
     }
+}
+
+/// The last records of the scenario's client, when its records are kept
+/// (`logs::register`), for a failure message: what led to an unexpected
+/// event (CI, run 43542297432).
+fn recent_records(world: &ClientWorld) -> String {
+    const SHOWN: usize = 40;
+    let Some(client) = world.client.as_ref() else {
+        return String::new();
+    };
+    let records = crate::support::logs::of(client.log_number());
+    if records.is_empty() {
+        return String::new();
+    }
+    let from = records.len().saturating_sub(SHOWN);
+    let lines: Vec<String> = records[from..]
+        .iter()
+        .map(crate::support::logs::Record::text)
+        .collect();
+    format!("; the client's last records:\n{}", lines.join("\n"))
 }
 
 #[then("the client makes no new connection attempt")]
