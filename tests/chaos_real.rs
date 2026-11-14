@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use support::invariants::{self, Lifecycle};
+use support::ndjson::{connection_established, subscription_established};
 use support::real_server::{Engine, Environment, PROXY, Stream, configuration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -519,39 +520,10 @@ enum Record {
     Closed,
 }
 
-/// A record and its sequence number.
-#[derive(Debug, Serialize, Deserialize)]
-struct Line {
-    seq: u64,
-    #[serde(flatten)]
-    record: Record,
-}
-
-/// The child's writer: one thread writing records to stdout in order.
-#[derive(Clone)]
-struct Writer {
-    lines: std::sync::mpsc::Sender<Record>,
-}
-
-impl Writer {
-    fn start() -> Self {
-        let (lines, records) = std::sync::mpsc::channel::<Record>();
-        std::thread::spawn(move || {
-            use std::io::Write as _;
-            for (seq, record) in (1u64..).zip(records) {
-                let line = serde_json::to_string(&Line { seq, record }).expect("a record");
-                let mut out = std::io::stdout().lock();
-                let _ = writeln!(out, "{line}");
-                let _ = out.flush();
-            }
-        });
-        Self { lines }
-    }
-
-    fn write(&self, record: Record) {
-        let _ = self.lines.send(record);
-    }
-}
+/// The child's writer, of this runner's records.
+type Writer = support::ndjson::Writer<Record>;
+/// A record line, as the parent reads it.
+type Line = support::ndjson::Line<Record>;
 
 fn state_name(state: impl std::fmt::Debug) -> String {
     format!("{state:?}").to_lowercase()
@@ -716,23 +688,6 @@ impl Off {
     fn fetched_off(&self) -> bool {
         self.mirror.load(Ordering::SeqCst)
     }
-}
-
-/// Whether a connection token fetch is a refresh: the client connected,
-/// read from its own state when the callback runs, which can only count
-/// fewer (reviewer, 51c). Before the client is set, none is.
-fn connection_established(client: &OnceLock<ferrifuge::Client>) -> bool {
-    client
-        .get()
-        .is_some_and(|client| client.state() == ferrifuge::State::Connected)
-}
-
-/// Whether a subscription token fetch is a refresh: the subscription
-/// subscribed, by its own state.
-fn subscription_established(subscription: &OnceLock<ferrifuge::Subscription>) -> bool {
-    subscription.get().is_some_and(|subscription| {
-        subscription.state() == ferrifuge::SubscriptionState::Subscribed
-    })
 }
 
 /// The child's client, its connection tokens short-lived and refreshed
