@@ -60,7 +60,14 @@ struct Answers {
     shared_poll_requests: Vec<Value>,
     /// The epoch a shared poll refresh of a channel reports, if any.
     shared_poll_epochs: HashMap<String, String>,
+    /// The RPCs of method `held` waiting for [`ProxyBackend::release_held_rpcs`]
+    /// (Block 52, D8).
+    held_rpcs: Vec<tokio::sync::oneshot::Sender<()>>,
 }
+
+/// How long a held RPC waits at most, should no release come: under the
+/// RPC proxy timeout the soak sets.
+pub(crate) const RPC_HOLD: Duration = Duration::from_secs(5);
 
 /// A programmed answer to the subscribe requests for a channel.
 #[derive(Clone, Default)]
@@ -158,6 +165,24 @@ impl ProxyBackend {
                 format!("http://{HOST_GATEWAY}:{}/shared_poll_refresh", self.port),
             ),
         ]
+    }
+
+    /// The backend's address, as the Centrifugo container reaches it
+    /// through the Docker host gateway.
+    pub(crate) fn url(&self) -> String {
+        format!("http://{HOST_GATEWAY}:{}", self.port)
+    }
+
+    /// How many RPCs of method `held` wait now.
+    pub(crate) fn held_rpcs(&self) -> usize {
+        self.state.lock().unwrap().held_rpcs.len()
+    }
+
+    /// Answers every RPC of method `held` waiting now (Block 52, D8).
+    pub(crate) fn release_held_rpcs(&self) {
+        for held in self.state.lock().unwrap().held_rpcs.drain(..) {
+            let _ = held.send(());
+        }
     }
 
     /// Answers subscribe requests for `channel` with this error.
@@ -470,6 +495,14 @@ async fn shared_poll_refresh(
 /// method returns no data.
 async fn rpc(State(state): State<Arc<Mutex<Answers>>>, Json(request): Json<Value>) -> Json<Value> {
     state.lock().unwrap().rpc_requests.push(request.clone());
+    // Held until released, at most RPC_HOLD: the soak's call in flight at a
+    // disconnect (Block 52, D8).
+    if request["method"].as_str() == Some("held") {
+        let (release, released) = tokio::sync::oneshot::channel();
+        state.lock().unwrap().held_rpcs.push(release);
+        let _ = tokio::time::timeout(RPC_HOLD, released).await;
+        return Json(json!({"result": {}}));
+    }
     Json(match request["method"].as_str() {
         Some("echo") => json!({"result": {"data": request["data"]}}),
         Some("sum") => json!({"result": {"data": {"sum": 3}}}),
