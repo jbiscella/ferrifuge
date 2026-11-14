@@ -205,6 +205,13 @@ repository held while it carried that version, from the blocks of
   input's event run before its timers were armed, so a token refresh could
   come due later than its ttl allowed (Block 49c's refresh flake).
 
+- The driver takes the queued actions under one lock per turn, not one per
+  action, so threads calling the API without pause no longer win the lock
+  against it for every action; it takes again in the same turn only for
+  the actions of an input it fed the core itself, such as a failed write's
+  close, and leaves what calls queue meanwhile to the next turn, so a
+  drain can no longer last as long as the calls do.
+
 - Browser http_stream no longer stalls in Safari, which stops delivering
   a `fetch` body left unread: it reads the body continuously into the
   inbox websocket and sse already use, and reconnects with `connecting`
