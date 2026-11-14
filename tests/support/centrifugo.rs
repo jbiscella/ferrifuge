@@ -12,7 +12,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 
 pub(crate) const IMAGE: &str = "centrifugo/centrifugo";
-pub(crate) const TAG: &str = "v6.10.1";
+pub(crate) const TAG: &str = "v6.10.3";
 pub(crate) const API_KEY: &str = "test-api-key";
 /// Label of the containers a test run starts, valued with the run's id
 /// ([`RUN_VARIABLE`]), so that the run can remove those it left behind.
