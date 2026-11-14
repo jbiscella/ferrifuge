@@ -1,2 +1,3 @@
 tests/fixtures/fossil-vectors/** binary
 tests/fixtures/tla-traces/upstream/** binary
+src/protocol/centrifugal.centrifuge.protocol.rs text eol=lf linguist-generated

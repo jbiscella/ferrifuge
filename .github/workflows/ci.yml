@@ -77,6 +77,13 @@ jobs:
           test -z "$(cargo tree -e normal -i aws-lc-rs 2>/dev/null)"
           test -z "$(cargo tree -e normal --features unstable-webtransport -i aws-lc-rs 2>/dev/null)"
 
+      # The Protobuf code is committed (Block 56, D3): no generator and no
+      # vendored protoc in a dependent's build.
+      - name: no code generator in the build
+        run: |
+          test -z "$(cargo tree -e normal,build -i prost-build 2>/dev/null)"
+          test -z "$(cargo tree -e normal,build -i protoc-bin-vendored 2>/dev/null)"
+
       # wtransport, quinn, sha2 and x509-parser come with
       # `unstable-webtransport` only, sha2 and x509-parser through
       # wtransport alone (Block 48, structural acceptance).

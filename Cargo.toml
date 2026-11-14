@@ -211,10 +211,6 @@ wasm-streams = { version = "0.7.1", optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.22.4", default-features = false, optional = true }
 
-[build-dependencies]
-prost-build = "0.14.4"
-protoc-bin-vendored = "3.3.0"
-
 [dev-dependencies]
 # The crate itself with its test hooks, for its tests and benchmarks only.
 # No default features, so builds without them (the core alone, aws-lc
@@ -233,6 +229,10 @@ quinn-proto = { version = "0.11.19", default-features = false }
 aws-lc-rs = { version = "1.18.2", default-features = false }
 axum = "0.8.9"
 base64 = "0.23.1"
+# The generator of the committed src/protocol/ code and its protoc, run only
+# by tests/protocol_codegen.rs (Block 56, D3, D4).
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.3.0"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 cucumber = "0.23"
 dhat = "0.3.3"

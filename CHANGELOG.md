@@ -172,6 +172,13 @@ repository held while it carried that version, from the blocks of
   the next connect or subscribe carried none.
   Unsubscribe code 2502 still drops the subscription token always.
 
+- The Rust code generated from `proto/client.proto` is committed under
+  `src/protocol/` and ships in the package (Block 56): a build of
+  ferrifuge runs no code generator and no vendored `protoc` binary, and
+  `prost-build` and `protoc-bin-vendored` are no longer build
+  dependencies. `tests/protocol_codegen.rs` fails when the file drifts from
+  what the locked generator writes.
+
 ### Fixed
 
 - A websocket upgrade whose answer reaches the client in many small reads
