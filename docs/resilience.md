@@ -62,7 +62,7 @@ Sources: Block 2 "Delay upper bound per attempt", "Delays are jittered"; Block 8
   spread its server can absorb. Block 14's simulation of 100 000 clients
   with a window of 100 s has no second holding more than 2% of the first
   reconnect attempts.
-- **Failure example:** with the default window of 0, a server restart makes
+- **Failure example:** with `reconnect_jitter_window` (default 0), a server restart makes
   every client's first reconnect fall between 500 ms and 1 s after the
   close, the bounds of attempt 0.
 
