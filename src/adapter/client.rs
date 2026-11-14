@@ -306,6 +306,16 @@ enum TimerKey {
 }
 
 impl TimerKey {
+    /// Its name in the soak's records (Block 52, D8).
+    #[cfg(feature = "__test-hooks")]
+    fn hook_name(self) -> String {
+        match self {
+            Self::Client(timer) => super::hooks::client(timer),
+            Self::Subscription(id, timer) => super::hooks::subscription(id, timer),
+            Self::Call(id, timer) => super::hooks::call(id, timer),
+        }
+    }
+
     /// The timer whose firing `input` is.
     fn of(input: &Input) -> Option<Self> {
         match input {
@@ -1796,7 +1806,17 @@ impl Client {
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn record_timers(&self) {
+        let mut core = lock(&self.shared.core);
+        // Timers set before, aged from now (reviewer, 52a).
+        let running: Vec<String> = core
+            .armed
+            .running
+            .keys()
+            .map(|key| key.hook_name())
+            .collect();
+        core.timer_record.seed(running);
         self.shared.records.start();
+        drop(core);
         self.shared.actions_queued.notify_one();
     }
 
@@ -1806,10 +1826,30 @@ impl Client {
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// While the records are off: call [`Client::record_timers`] first.
     pub fn armed_timers(&self) -> super::hooks::ArmedTimers {
-        let core = lock(&self.shared.core).timer_record.report();
+        assert!(
+            self.shared.records.on(),
+            "armed_timers: the records are off; call Client::record_timers first (Block 52)"
+        );
+        let mut guard = lock(&self.shared.core);
+        let core = &mut *guard;
+        let names: Vec<String> = core
+            .armed
+            .running
+            .keys()
+            .map(|key| key.hook_name())
+            .collect();
+        let core_list = core.timer_record.report_armed(names);
+        drop(guard);
         let driver = lock(&self.shared.records.driver).report();
-        super::hooks::ArmedTimers { driver, core }
+        super::hooks::ArmedTimers {
+            driver,
+            core: core_list,
+        }
     }
 
     /// Every call any registry of the core or the adapter holds, with its
@@ -1817,13 +1857,27 @@ impl Client {
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// While the records are off: call [`Client::record_timers`] first.
     pub fn pending_calls(&self) -> Vec<super::hooks::CallRecord> {
+        assert!(
+            self.shared.records.on(),
+            "pending_calls: the records are off; call Client::record_timers first (Block 52)"
+        );
         let core = lock(&self.shared.core);
         let mut held = core.machine.call_registries();
         for id in lock(&self.shared.calls).keys() {
             held.entry(*id).or_default().push("adapter");
         }
         drop(core);
+        for id in self.shared.log.calls() {
+            held.entry(id).or_default().push("log");
+        }
+        for id in lock(&self.shared.handlers).watched_calls() {
+            held.entry(id).or_default().push("watched");
+        }
         lock(&self.shared.records.calls).report(held)
     }
 

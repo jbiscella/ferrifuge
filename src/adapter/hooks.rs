@@ -51,8 +51,9 @@ pub struct CallRecord {
     /// Since it was made; for a call the core made itself, since it was
     /// first seen.
     pub age: Duration,
-    /// The registries holding it: `adapter` (the outcome's sender), and the
-    /// core's `by_id`, `by_command` and `room`.
+    /// The registries holding it: `adapter` (the outcome's sender), `log`
+    /// (the log's kinds of calls), `watched` (the calls a `Thread` handler
+    /// waits on), and the core's `by_id`, `by_command` and `room`.
     pub registries: Vec<&'static str>,
 }
 
@@ -102,9 +103,13 @@ pub(super) fn shared_poll_refresh(id: SubscriptionId) -> String {
     format!("shared poll refresh {id:?}")
 }
 
-/// Timers by name, each with its deadline and since when it runs.
+/// Timers by name, each with its deadline, when known, and since when it
+/// runs. For the core's client, subscription and call timers it gives only
+/// the ages and deadlines: their names come from `Armed`, which the core
+/// keeps anyway (reviewer, 52a); it alone tracks the debounce and
+/// shared-poll timers.
 #[derive(Debug, Default)]
-pub(super) struct TimerRecord(BTreeMap<String, (platform::Instant, platform::Instant)>);
+pub(super) struct TimerRecord(BTreeMap<String, (Option<platform::Instant>, platform::Instant)>);
 
 impl TimerRecord {
     /// Follows a timer action of the core.
@@ -136,10 +141,11 @@ impl TimerRecord {
             Action::SetSharedPollRefresh(id, delay) => {
                 let deadline = now + *delay;
                 match self.0.get_mut(&shared_poll_refresh(*id)) {
-                    Some((running, _)) if *running <= deadline => {}
-                    Some((running, _)) => *running = deadline,
+                    Some((Some(running), _)) if *running <= deadline => {}
+                    Some((running, _)) => *running = Some(deadline),
                     None => {
-                        self.0.insert(shared_poll_refresh(*id), (deadline, now));
+                        self.0
+                            .insert(shared_poll_refresh(*id), (Some(deadline), now));
                     }
                 }
             }
@@ -166,7 +172,7 @@ impl TimerRecord {
     }
 
     fn set(&mut self, name: String, now: platform::Instant, delay: Duration) {
-        self.0.insert(name, (now + delay, now));
+        self.0.insert(name, (Some(now + delay), now));
     }
 
     fn cancel(&mut self, name: &str) {
@@ -174,7 +180,7 @@ impl TimerRecord {
     }
 
     fn shorten(&mut self, name: &str, by: Duration, now: platform::Instant) {
-        if let Some((deadline, _)) = self.0.get_mut(name) {
+        if let Some((Some(deadline), _)) = self.0.get_mut(name) {
             *deadline = deadline.checked_sub(by).unwrap_or(now);
         }
     }
@@ -186,25 +192,74 @@ impl TimerRecord {
         let mut next = BTreeMap::new();
         for (name, deadline) in running {
             let since = match self.0.get(&name) {
-                Some((seen, since)) if *seen == deadline => *since,
+                Some((Some(seen), since)) if *seen == deadline => *since,
                 _ => now,
             };
-            next.insert(name, (deadline, since));
+            next.insert(name, (Some(deadline), since));
         }
         self.0 = next;
     }
 
+    /// Ages from now the timers `running` names that are not recorded yet:
+    /// those set before the records started (reviewer, 52a).
+    pub(super) fn seed(&mut self, running: impl IntoIterator<Item = String>) {
+        let now = platform::Instant::now();
+        for name in running {
+            self.0.entry(name).or_insert((None, now));
+        }
+    }
+
+    /// The driver's list.
     pub(super) fn report(&self) -> Vec<ArmedTimer> {
         let now = platform::Instant::now();
         self.0
             .iter()
-            .map(|(name, (deadline, since))| ArmedTimer {
-                name: name.clone(),
-                age: now.saturating_duration_since(*since),
-                due_in: deadline.saturating_duration_since(now),
-                overdue: now.saturating_duration_since(*deadline),
+            .map(|(name, entry)| timer(name, *entry, now))
+            .collect()
+    }
+
+    /// The core's list: the client, subscription and call timers `armed`
+    /// names, which `Armed` keeps, and the debounce and shared-poll timers,
+    /// which only this record does; each aged from this record, or from
+    /// now when first seen here.
+    pub(super) fn report_armed(
+        &mut self,
+        armed: impl IntoIterator<Item = String>,
+    ) -> Vec<ArmedTimer> {
+        let now = platform::Instant::now();
+        let mut names: std::collections::BTreeSet<String> = armed.into_iter().collect();
+        names.extend(
+            self.0
+                .keys()
+                .filter(|name| name.starts_with("debounce ") || name.starts_with("shared poll "))
+                .cloned(),
+        );
+        names
+            .into_iter()
+            .map(|name| {
+                let entry = *self.0.entry(name.clone()).or_insert((None, now));
+                timer(&name, entry, now)
             })
             .collect()
+    }
+}
+
+/// A timer with its deadline, when known: one aged from when first seen
+/// has none, and reports no time to or past it.
+fn timer(
+    name: &str,
+    (deadline, since): (Option<platform::Instant>, platform::Instant),
+    now: platform::Instant,
+) -> ArmedTimer {
+    ArmedTimer {
+        name: name.to_owned(),
+        age: now.saturating_duration_since(since),
+        due_in: deadline.map_or(Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(now)
+        }),
+        overdue: deadline.map_or(Duration::ZERO, |deadline| {
+            now.saturating_duration_since(deadline)
+        }),
     }
 }
 
