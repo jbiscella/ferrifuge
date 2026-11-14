@@ -2,10 +2,11 @@
 # through Toxiproxy, checked against the server's own records. Needs
 # Docker: Linux only (D11). Never on pull requests.
 #
-# One row so far (websocket, JSON, memory engine) with D3's toxics, the
-# proxy turned down, and D4's server pause and restart, client suspension
-# and short-lived tokens, after D6's two restart scenarios; the other rows
-# come with 51d. Nightly, off
+# One job per row of the outline: websocket, http_stream and sse, JSON and
+# Protobuf, the memory engine and Redis, each with D3's toxics, the proxy
+# turned down, and D4's server pause and restart, client suspension and
+# short-lived tokens; D6's two restart scenarios run in the first row only.
+# Nightly, off
 # the hour (GitHub may delay or drop runs on the hour), and dispatched; a
 # scheduled run is skipped only when main's head already has a real run
 # (D11, scripts/validation-run).
@@ -15,6 +16,10 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
+  # TEMPORARY, removed before merge: the evidence run of the PR's branch
+  # (workflow_dispatch fires only for a file on the default branch).
+  push:
+    branches: [impl/block-51d-real-rows]
 
 permissions:
   contents: read
@@ -56,11 +61,29 @@ jobs:
           - transport: websocket
             protocol: json
             engine: memory
+          - transport: websocket
+            protocol: protobuf
+            engine: memory
+          - transport: http_stream
+            protocol: json
+            engine: memory
+          - transport: http_stream
+            protocol: protobuf
+            engine: memory
+          - transport: sse
+            protocol: json
+            engine: memory
+          - transport: websocket
+            protocol: json
+            engine: redis
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       FERRIFUGE_REAL_CHAOS: "1"
       FERRIFUGE_REAL_CHAOS_BUDGET_SECONDS: "1800"
+      FERRIFUGE_REAL_CHAOS_TRANSPORT: ${{ matrix.transport }}
+      FERRIFUGE_REAL_CHAOS_PROTOCOL: ${{ matrix.protocol }}
+      FERRIFUGE_REAL_CHAOS_ENGINE: ${{ matrix.engine }}
       FERRIFUGE_REAL_CHAOS_ARTIFACTS: ${{ github.workspace }}/chaos-real-artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,6 +98,8 @@ jobs:
         run: |
           docker pull "centrifugo/centrifugo:$(sed -n 's/^pub(crate) const TAG: &str = "\(.*\)";/\1/p' tests/support/centrifugo.rs)"
           docker pull "$(sed -n 's/^pub(crate) const TOXIPROXY_IMAGE: &str = "\(.*\)";/\1/p' tests/support/real_server.rs)"
+          # REDIS_IMAGE spans two lines: the string is on the second.
+          docker pull "$(sed -n '/^pub(crate) const REDIS_IMAGE: &str =$/{n;s/^ *"\(.*\)";$/\1/p}' tests/support/real_server.rs)"
 
       - name: Real-server chaos, ${{ matrix.transport }} ${{ matrix.protocol }} ${{ matrix.engine }}
         run: |
