@@ -1,10 +1,12 @@
-//! Generates the client protocol types from `proto/client.proto`, and says
-//! which adapter the build has (Block 44, D1): `adapter_tokio` for the
+//! Says which adapter the build has (Block 44, D1): `adapter_tokio` for the
 //! `tokio` feature on a native target, `adapter_browser` for the `browser`
-//! feature on wasm32-unknown-unknown.
+//! feature on wasm32-unknown-unknown. The Protobuf code is committed under
+//! `src/protocol/` (Block 56): nothing is generated here.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=proto/client.proto");
+fn main() {
+    // Without any rerun line, cargo would rerun this script whenever a
+    // package file changes.
+    println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(adapter_tokio)");
     println!("cargo::rustc-check-cfg=cfg(adapter_browser)");
     let browser_target = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32")
@@ -17,8 +19,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if feature("TOKIO") {
         println!("cargo::rustc-cfg=adapter_tokio");
     }
-    prost_build::Config::new()
-        .protoc_executable(protoc_bin_vendored::protoc_bin_path()?)
-        .compile_protos(&["proto/client.proto"], &["proto"])?;
-    Ok(())
 }

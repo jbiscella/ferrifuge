@@ -15,6 +15,12 @@ SPDX-FileCopyrightText = "2023 Centrifugal Labs LTD"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
+path = "src/protocol/centrifugal.centrifuge.protocol.rs"
+precedence = "override"
+SPDX-FileCopyrightText = "2023 Centrifugal Labs LTD"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
 path = "tests/fixtures/fossil-vectors/*/*"
 precedence = "override"
 SPDX-FileCopyrightText = [
