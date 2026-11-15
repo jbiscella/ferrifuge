@@ -53,7 +53,8 @@ pub(super) struct Tokens {
     /// Id of the refresh command awaiting its reply.
     refresh_command: Option<u32>,
     /// A refresh came due and has no new token yet: its fetch runs, or its
-    /// retry waits (Block 25, D3).
+    /// retry waits.
+    // Block 25, D3.
     refreshing: bool,
 }
 
@@ -121,7 +122,8 @@ impl Tokens {
 
     /// The connection is torn down: a refresh's fetch and command are
     /// dropped, the fetch's id given for its cancel; a subscribe flow's
-    /// fetch outlives the teardown, its answer used (Block 42, D11).
+    /// fetch outlives the teardown, its answer used.
+    // Block 42, D11.
     pub(super) fn abandon_refresh_fetch(&mut self) -> Option<FetchId> {
         self.refresh_command = None;
         match self.fetch {
@@ -192,9 +194,10 @@ impl Tokens {
         }
     }
 
-    /// The refresh came due while no connection could carry it (Block 25,
-    /// D3): with a source, the next connect or subscribe fetches a new
-    /// token first; a fixed token is sent as it is.
+    /// The refresh came due while no connection could carry it: with a
+    /// source, the next connect or subscribe fetches a new token first; a
+    /// fixed token is sent as it is.
+    // Block 25, D3.
     pub(super) fn refresh_due(&mut self) {
         if self.source {
             self.refresh_required = true;
@@ -203,8 +206,9 @@ impl Tokens {
 
     /// The connection or subscription is torn down to connect or subscribe
     /// again: a refresh left without a new token makes that attempt fetch
-    /// one first; a token already fetched, its command pending, is kept
-    /// for it (Block 25, D3).
+    /// one first; a token already fetched, its command pending, is kept for
+    /// it.
+    // Block 25, D3.
     pub(super) fn abandon_refresh(&mut self) {
         if std::mem::take(&mut self.refreshing) {
             self.refresh_due();
@@ -236,10 +240,11 @@ impl Tokens {
         self.stale_fetch = None;
     }
 
-    /// Disconnect code 3014 invalidated the connection's state (Block 11):
-    /// a token a source can replace is dropped, as [`Tokens::invalidate`]
-    /// does; a fixed token, which nothing could replace, is kept and sent
-    /// again, as after any other reconnect.
+    /// Disconnect code 3014 invalidated the connection's state: a token a
+    /// source can replace is dropped, as [`Tokens::invalidate`] does; a
+    /// fixed token, which nothing could replace, is kept and sent again, as
+    /// after any other reconnect.
+    // Block 11.
     pub(super) fn invalidate_replaceable(&mut self) {
         if self.source {
             self.invalidate();
@@ -292,12 +297,13 @@ impl Tokens {
 
 /// When to start refreshing a connection that expires in `ttl_seconds`: at
 /// a uniformly random millisecond between 80% and 90% of the ttl, both
-/// included (Block 14, "Token refresh jitter").
+/// included.
 ///
 /// `client.proto` (`ConnectResult.expires`) requires the refresh to be sent
 /// before the ttl elapses, so it starts early enough for the token callback
 /// and the round trip. The randomness keeps a fleet whose tokens were issued
 /// at once from refreshing at once; centrifuge-js waits for the full ttl.
+// Block 14, "Token refresh jitter".
 pub(super) fn refresh_delay(ttl_seconds: u32, rng: &mut fastrand::Rng) -> Duration {
     let ttl_ms = u64::from(ttl_seconds) * 1000;
     Duration::from_millis(rng.u64(ttl_ms * 8 / 10..=ttl_ms * 9 / 10))

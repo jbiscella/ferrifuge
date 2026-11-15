@@ -1,6 +1,7 @@
-//! WebTransport transport of the tokio adapter (Block 48): one
-//! bidirectional stream of an HTTP/3 session over QUIC, through wtransport
-//! and quinn, with the client's own TLS settings and the build's provider.
+//! WebTransport transport of the tokio adapter: one bidirectional stream of
+//! an HTTP/3 session over QUIC, through wtransport and quinn, with the
+//! client's own TLS settings and the build's provider.
+// Block 48.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -28,8 +29,9 @@ use super::net::Network;
 use super::transport::Inbound;
 use crate::sans_io::FrameId;
 
-/// QUIC settings of every WebTransport connection (D12), read back by a
-/// unit test: about 4 MiB of buffers per connection at most.
+/// QUIC settings of every WebTransport connection, read back by a unit
+/// test: about 4 MiB of buffers per connection at most.
+// D12.
 const STREAM_RECEIVE_WINDOW: u32 = 1 << 20;
 const RECEIVE_WINDOW: u32 = 2 << 20;
 const SEND_WINDOW: u64 = 1 << 20;
@@ -49,38 +51,48 @@ const H3: &[u8] = b"h3";
 
 /// A local QUIC error 0x178: a crypto error with TLS alert 120,
 /// `no_application_protocol`, as rustls raises when the server selected no
-/// application protocol (RFC 9001 section 8.1). The only failure that starts
-/// D5's retry without ALPN.
-/// Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>, fixed by <https://github.com/centrifugal/centrifugo/pull/1323>.
+/// application protocol (RFC 9001 section 8.1). The only failure that
+/// starts the retry without ALPN. Upstream:
+/// <https://github.com/centrifugal/centrifugo/issues/1322>, fixed by
+/// <https://github.com/centrifugal/centrifugo/pull/1323>.
+// D5.
 const NO_APPLICATION_PROTOCOL: u64 = 0x178;
 
 /// The read buffer of the stream.
 const READ_CHUNK: usize = 16 << 10;
 
-/// The message of an attempt for which a proxy is decided (D13).
+/// The message of an attempt for which a proxy is decided.
+// D13.
 pub(in crate::adapter) const THROUGH_PROXY: &str = "webtransport cannot go through a proxy";
 
-/// The message of a session the server refused (D6).
+/// The message of a session the server refused.
+// D6.
 const SESSION_REJECTED: &str = "webtransport session rejected by the server";
 
 /// An open WebTransport session and its one bidirectional stream.
 ///
 /// Writing never blocks the caller: frames are queued by
-/// [`WebTransport::send`] and written while [`WebTransport::recv`] waits for
-/// the server, as on a websocket (D8).
+/// [`WebTransport::send`] and written while [`WebTransport::recv`] waits
+/// for the server, as on a websocket.
+// D8.
 pub(crate) struct WebTransport {
-    /// The attempt's own endpoint: one UDP socket and its driver (D11).
+    /// The attempt's own endpoint: one UDP socket and its driver.
+    // D11.
     endpoint: Endpoint<ClientSide>,
     connection: Connection,
     send: SendStream,
     recv: RecvStream,
-    /// JSON frames end with `\n`; Protobuf frames go as they are (D7).
+    /// JSON frames end with `\n`; Protobuf frames go as they are.
+    // D7.
     json: bool,
-    /// Block 27's splitters, bounded by `max_message_bytes` (D7).
+    /// The splitters of the HTTP-streaming transports, bounded by
+    /// `max_message_bytes`.
+    // Block 27; D7.
     decoder: Decoder,
     /// Messages decoded and not yet reported.
     messages: VecDeque<Vec<u8>>,
-    /// How the stream ended, reported after the messages before it (D9).
+    /// How the stream ended, reported after the messages before it.
+    // D9.
     end: Option<Inbound>,
     read_buffer: Box<[u8]>,
     /// Frames not yet handed to the stream, with their id and the time each
@@ -106,16 +118,20 @@ pub(in crate::adapter) struct Target<'a> {
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) headers: &'a http::HeaderMap,
     pub(in crate::adapter) max_message: usize,
-    /// The endpoint's index, under which D5's memory is kept.
+    /// The endpoint's index, under which the memory of endpoints that
+    /// needed the retry without ALPN is kept.
+    // D5.
     pub(in crate::adapter) endpoint: usize,
 }
 
-/// The handshakes an attempt makes at most (D5).
+/// The handshakes an attempt makes at most.
+// D5.
 const MAX_HANDSHAKES: usize = 2;
 
-/// The endpoints, by index, found to take no ALPN (D5): an attempt there
-/// starts without it. A client keeps it across attempts, `reconnect()` and
-/// network changes.
+/// The endpoints, by index, found to take no ALPN: an attempt there starts
+/// without it. A client keeps it across attempts, `reconnect()` and network
+/// changes.
+// D5.
 #[derive(Debug, Default)]
 pub(in crate::adapter) struct AlpnMemory(std::sync::Mutex<std::collections::HashSet<usize>>);
 
@@ -144,7 +160,8 @@ impl AlpnMemory {
     }
 }
 
-/// The ALPN list one handshake offers (D5).
+/// The ALPN list one handshake offers.
+// D5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::adapter) enum Alpn {
     H3,
@@ -152,7 +169,8 @@ pub(in crate::adapter) enum Alpn {
 }
 
 impl Alpn {
-    /// As the attempt's records name it (D5, D18).
+    /// As the attempt's records name it.
+    // D5, D18.
     pub(in crate::adapter) fn name(self) -> &'static str {
         match self {
             Self::H3 => "h3",
@@ -173,8 +191,9 @@ impl WebTransport {
     /// host resolved, a UDP socket of its family bound, the QUIC handshake
     /// offering `h3` and, if the server selected no application protocol,
     /// once more offering none, the HTTP/3 SETTINGS, the extended CONNECT
-    /// with the real headers, and the stream (D5, D6). The caller bounds it
-    /// with the handshake timeout.
+    /// with the real headers, and the stream. The caller bounds it with the
+    /// handshake timeout.
+    // D5, D6.
     pub(crate) async fn open(target: Target<'_>, network: &Network) -> Result<Self, String> {
         let url = session_url(target.url, target.protobuf)?;
         if network.connector().is_some() {
@@ -260,7 +279,8 @@ impl WebTransport {
     /// Writes the queued frames while waiting for the next message, for a
     /// frame written, or for the end of the stream, which a failed write or
     /// a frame not written in time also is. Without `reading`, it only
-    /// writes (Block 15). Cancel-safe.
+    /// writes. Cancel-safe.
+    // Block 15.
     pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
         std::future::poll_fn(|cx| self.poll_recv(cx, reading)).await
     }
@@ -297,7 +317,8 @@ impl WebTransport {
         Poll::Pending
     }
 
-    /// Whether a write failed or a frame waited past the timeout (D8).
+    /// Whether a write failed or a frame waited past the timeout.
+    // D8.
     fn poll_write_failed(&mut self, cx: &mut Context<'_>) -> bool {
         if let Poll::Ready(Err(_)) = self.poll_write(cx, true) {
             return true;
@@ -315,7 +336,8 @@ impl WebTransport {
     }
 
     /// The next message, then, once every message before it was reported,
-    /// the end of the stream (D9).
+    /// the end of the stream.
+    // D9.
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<Inbound> {
         loop {
             if let Some(message) = self.messages.pop_front() {
@@ -347,9 +369,10 @@ impl WebTransport {
         }
     }
 
-    /// Hands the queued frames to the stream one at a time; ready once every
-    /// queued frame is taken. With `on_time`, a frame queued longer than the
-    /// timeout is never written: the write fails instead (D8).
+    /// Hands the queued frames to the stream one at a time; ready once
+    /// every queued frame is taken. With `on_time`, a frame queued longer
+    /// than the timeout is never written: the write fails instead.
+    // D8.
     fn poll_write(&mut self, cx: &mut Context<'_>, on_time: bool) -> Poll<std::io::Result<()>> {
         loop {
             if on_time
@@ -388,8 +411,9 @@ impl WebTransport {
     }
 
     /// Writes the queued frames and finishes the send stream, then closes
-    /// the connection with code 0 and waits for the endpoint to go idle, all
-    /// within the timeout; past it, the endpoint is dropped (D11).
+    /// the connection with code 0 and waits for the endpoint to go idle,
+    /// all within the timeout; past it, the endpoint is dropped.
+    // D11.
     pub(crate) async fn close(mut self) {
         let timeout = self.timeout;
         let _ = tokio::time::timeout(timeout, async {
@@ -402,7 +426,8 @@ impl WebTransport {
     }
 }
 
-/// The end of the stream with no code: code 1 "transport closed" (D9).
+/// The end of the stream with no code: code 1 "transport closed".
+// D9.
 fn lost() -> Inbound {
     Inbound::Closed {
         code: None,
@@ -410,8 +435,10 @@ fn lost() -> Inbound {
     }
 }
 
-/// Block 27's splitters, bounded by `max_message_bytes`: `http_stream`'s
-/// body without the emulation envelope (D7).
+/// The splitters of the HTTP-streaming transports, bounded by
+/// `max_message_bytes`: `http_stream`'s body without the emulation
+/// envelope.
+// Block 27; D7.
 fn decoder(protobuf: bool, max_message: usize) -> Decoder {
     if protobuf {
         Decoder::protobuf(max_message)
@@ -421,7 +448,8 @@ fn decoder(protobuf: bool, max_message: usize) -> Decoder {
 }
 
 /// Appends the `\n` the server reads JSON lines by; a Protobuf frame of
-/// varint-delimited commands goes as it is (D7).
+/// varint-delimited commands goes as it is.
+// D7.
 fn frame_bytes(frame: &mut Vec<u8>, json: bool) {
     if json {
         frame.push(b'\n');
@@ -429,7 +457,8 @@ fn frame_bytes(frame: &mut Vec<u8>, json: bool) {
 }
 
 /// The session URL: `endpoint`, with `cf_protocol=protobuf` appended to its
-/// query for Protobuf (D2).
+/// query for Protobuf.
+// D2.
 fn session_url(endpoint: &str, protobuf: bool) -> Result<Url, String> {
     let mut url = Url::parse(endpoint).map_err(|e| e.to_string())?;
     if url.scheme() != "https" {
@@ -443,7 +472,8 @@ fn session_url(endpoint: &str, protobuf: bool) -> Result<Url, String> {
 }
 
 /// The host of `url` and the first address it resolves to: no Happy
-/// Eyeballs, as wtransport does (D6).
+/// Eyeballs, as wtransport does.
+// D6.
 async fn resolve(url: &Url) -> Result<(String, SocketAddr), String> {
     let host = url
         .host_str()
@@ -466,8 +496,9 @@ async fn resolve(url: &Url) -> Result<(String, SocketAddr), String> {
     Ok((host, address))
 }
 
-/// The CONNECT request's options: the real HTTP headers (Blocks 17, 32)
-/// and the cookie jar's `Cookie` (Block 43), as names and values (D14).
+/// The CONNECT request's options: the real HTTP headers and the cookie
+/// jar's `Cookie`, as names and values.
+// Blocks 17, 32; Block 43; D14.
 fn connect_options(
     url: &Url,
     headers: &http::HeaderMap,
@@ -486,16 +517,17 @@ fn connect_options(
     Ok(options.build())
 }
 
-/// The QUIC client of one handshake offering `alpn`: a copy of the
-/// client's TLS settings, checked as quinn will use it, wtransport's
-/// builder finished with quinn's configuration, bound to `address`'s family,
-/// resolving to `address`, with a reset key of the configuration's provider
-/// (D4, D5, D6, D12, D15).
+/// The QUIC client of one handshake offering `alpn`: a copy of the client's
+/// TLS settings, checked as quinn will use it, wtransport's builder
+/// finished with quinn's configuration, bound to `address`'s family,
+/// resolving to `address`, with a reset key of the configuration's
+/// provider.
 ///
 /// wtransport's `build()`, which panics on a configuration QUIC cannot use
 /// (<https://github.com/BiagioFesta/wtransport/issues/336>), and its
 /// native-roots helpers, which change the process environment
 /// (<https://github.com/BiagioFesta/wtransport/issues/335>), are never called.
+// D4, D5, D6, D12, D15.
 fn client_config(
     tls: &Arc<TlsConfig>,
     alpn: Alpn,
@@ -521,18 +553,19 @@ fn client_config(
     Ok(config)
 }
 
-/// A copy of `tls` offering `alpn`, the application's own left unchanged
-/// (D4, D5; Block 49 row 53).
+/// A copy of `tls` offering `alpn`, the application's own left unchanged.
+// D4, D5; Block 49 row 53.
 pub(in crate::adapter) fn quic_tls(tls: &TlsConfig, alpn: Alpn) -> Arc<TlsConfig> {
     let mut copy = tls.clone();
     copy.alpn_protocols = alpn.protocols();
     Arc::new(copy)
 }
 
-/// Fails unless QUIC can use `tls`: quinn's initial cipher suite, and a
-/// TLS 1.3 QUIC session, the call quinn-proto would otherwise unwrap under
-/// the endpoint's lock and abort the process with (D4).
-/// Upstream: <https://github.com/BiagioFesta/wtransport/issues/336>.
+/// Fails unless QUIC can use `tls`: quinn's initial cipher suite, and a TLS
+/// 1.3 QUIC session, the call quinn-proto would otherwise unwrap under the
+/// endpoint's lock and abort the process with. Upstream:
+/// <https://github.com/BiagioFesta/wtransport/issues/336>.
+// D4.
 pub(in crate::adapter) fn check_quic(tls: &Arc<TlsConfig>, host: &str) -> Result<(), String> {
     quinn::crypto::rustls::QuicClientConfig::try_from(Arc::clone(tls))
         .map_err(|e| unfit_for_quic(&e.to_string()))?;
@@ -547,14 +580,16 @@ pub(in crate::adapter) fn check_quic(tls: &Arc<TlsConfig>, host: &str) -> Result
     .map_err(|e| unfit_for_quic(&e.to_string()))
 }
 
-/// The message of a TLS configuration QUIC cannot use (D4).
+/// The message of a TLS configuration QUIC cannot use.
+// D4.
 fn unfit_for_quic(cause: &str) -> String {
     format!(
         "the TLS configuration cannot carry webtransport, which needs TLS 1.3 with TLS13_AES_128_GCM_SHA256: {cause}"
     )
 }
 
-/// quinn's transport settings of D12, set explicitly.
+/// quinn's transport settings, set explicitly.
+// D12.
 fn transport_config() -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config
@@ -571,9 +606,10 @@ fn transport_config() -> quinn::TransportConfig {
     config
 }
 
-/// Whether a failed handshake offering `h3` starts D5's retry: only the
-/// local QUIC error 0x178, raised when the server selected no application
-/// protocol.
+/// Whether a failed handshake offering `h3` starts the retry without ALPN:
+/// only the local QUIC error 0x178, raised when the server selected no
+/// application protocol.
+// D5.
 fn retries_without_alpn(error: &ConnectingError) -> bool {
     matches!(
         error,
@@ -583,7 +619,8 @@ fn retries_without_alpn(error: &ConnectingError) -> bool {
 }
 
 /// Whether a handshake offering no ALPN was closed by the peer with crypto
-/// error 0x78, `no_application_protocol`: the server requires one (D5).
+/// error 0x78, `no_application_protocol`: the server requires one.
+// D5.
 fn refused_without_alpn(error: &ConnectingError) -> bool {
     let ConnectingError::ConnectionError(ConnectionError::ConnectionClosed(close)) = error else {
         return false;
@@ -596,7 +633,8 @@ fn refused_without_alpn(error: &ConnectingError) -> bool {
     shown == refused || shown.starts_with(&format!("{refused}: "))
 }
 
-/// The message of a failed open (D6).
+/// The message of a failed open.
+// D6.
 fn connecting_error(error: &ConnectingError) -> String {
     match error {
         ConnectingError::SessionRejected => SESSION_REJECTED.to_owned(),
@@ -605,7 +643,8 @@ fn connecting_error(error: &ConnectingError) -> String {
 }
 
 /// wtransport's resolver, given the address Ferrifuge resolved, so that the
-/// socket bound and the address dialled are of one family (D6).
+/// socket bound and the address dialled are of one family.
+// D6.
 #[derive(Debug)]
 struct Resolved(SocketAddr);
 
@@ -618,7 +657,8 @@ impl DnsResolver for Resolved {
 
 /// The endpoint's stateless-reset key: 32 bytes of the configuration
 /// provider's `secure_random`, signed through its TLS 1.3 SHA-256 HKDF, so
-/// that no key of a QUIC function comes from outside the provider (D15).
+/// that no key of a QUIC function comes from outside the provider.
+// D15.
 struct ResetKey {
     hkdf: &'static dyn Hkdf,
     key: OkmBlock,

@@ -1,19 +1,20 @@
-//! Block 19: applying a Fossil delta to the data it was made against.
+//! Applying a Fossil delta to the data it was made against.
 //!
 //! Written from the format's description ("Fossil Delta Format",
 //! fossil-scm.org) and cross-checked against centrifuge-js 63ed73e
-//! `src/fossil.ts` (Block 19, D1): a header (the target's size, then `\n`),
-//! segments (`count@offset,` copies bytes of the base, `count:` inserts the
-//! next `count` bytes of the delta), and a trailer (a checksum, then `;`)
-//! ending the delta.
+//! `src/fossil.ts`: a header (the target's size, then `\n`), segments
+//! (`count@offset,` copies bytes of the base, `count:` inserts the next
+//! `count` bytes of the delta), and a trailer (a checksum, then `;`) ending
+//! the delta.
 //!
 //! Every check but the checksum is made before the target is allocated, so
-//! that a short delta cannot make the client allocate the size it declares
-//! (D6).
+//! that a short delta cannot make the client allocate the size it declares.
+// Block 19; Block 19, D1; D6.
 
 use std::ops::Range;
 
-/// Why a delta cannot be applied (Block 19, D3).
+/// Why a delta cannot be applied.
+// Block 19, D3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeltaError {
     /// The header is not a number followed by `\n`.
@@ -35,15 +36,19 @@ pub(crate) enum DeltaError {
     Trailer,
     /// The target's checksum is not the trailer's.
     Checksum,
-    /// A delta came before any whole publication of the subscribe (D5).
+    /// A delta came before any whole publication of the subscribe.
+    // D5.
     NoBase,
-    /// A delta came on a subscription without delta on (D5).
+    /// A delta came on a subscription without delta on.
+    // D5.
     NotOn,
     /// With JSON, the data of a publication with delta on is not a JSON
-    /// string (D7).
+    /// string.
+    // D7.
     NotAString,
-    /// The publications of one message together build more than the
-    /// inbound message limit (D6).
+    /// The publications of one message together build more than the inbound
+    /// message limit.
+    // D6.
     MessageTooLarge,
 }
 
@@ -181,8 +186,9 @@ impl Reader<'_> {
         Some(byte)
     }
 
-    /// A number: base-64 digits, most significant first (D2), at least
-    /// one, the value within 32 bits.
+    /// A number: base-64 digits, most significant first, at least one, the
+    /// value within 32 bits.
+    // D2.
     fn number(&mut self) -> Result<u32, DeltaError> {
         let mut value: u64 = 0;
         let mut digits = 0;
@@ -214,7 +220,8 @@ fn digit(byte: u8) -> Option<u8> {
 }
 
 /// The sum, modulo 2^32, of `target` read as big-endian 32-bit words, the
-/// last zero-padded (D2).
+/// last zero-padded.
+// D2.
 fn checksum(target: &[u8]) -> u32 {
     target.chunks(4).fold(0u32, |sum, word| {
         let mut padded = [0; 4];
@@ -242,7 +249,8 @@ pub(crate) fn write_repeats(base: &[u8], times: usize) -> Vec<u8> {
 
 /// A delta turning `base` into `target`: a copy of their common prefix, an
 /// insert of what differs, a copy of their common suffix. For the tests'
-/// servers (Block 19, D9); the client never encodes deltas.
+/// servers; the client never encodes deltas.
+// Block 19, D9.
 #[cfg(any(test, feature = "__test-hooks"))]
 #[must_use]
 pub fn write(base: &[u8], target: &[u8]) -> Vec<u8> {

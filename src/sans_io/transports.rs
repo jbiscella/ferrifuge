@@ -1,6 +1,7 @@
 //! The transports a [`super::Machine`] tries, in order, and the one it
-//! keeps once a connection was established over it (Block 8; centrifuge-js
+//! keeps once a connection was established over it (centrifuge-js
 //! `_transportWasOpen`, `_triedAllTransports`, `_advanceTransportIndex`).
+// Block 8.
 
 use super::TransportKind;
 
@@ -14,10 +15,10 @@ pub(super) struct Transports {
     chosen: bool,
     /// Every transport was tried once without one being chosen.
     tried_all: bool,
-    /// Where the round ends, when a transport gave way (Block 48, D9): the
-    /// index of that transport, which comes back only after the others,
-    /// and after the backoff. Otherwise the round ends where the list
-    /// wraps.
+    /// Where the round ends, when a transport gave way: the index of that
+    /// transport, which comes back only after the others, and after the
+    /// backoff. Otherwise the round ends where the list wraps.
+    // Block 48, D9.
     round_end: Option<usize>,
 }
 
@@ -69,14 +70,15 @@ impl Transports {
         }
     }
 
-    /// The current transport ended before the server answered on it
-    /// (Block 48, D9). If it was chosen, it no longer is, and a new round
-    /// starts from the next transport, each tried at once, until the round
-    /// comes back to this one, which is tried after the backoff; alone in
-    /// the list, it waits the backoff at once. If it was not, the attempt
-    /// is one more failure of the current round, whose end stays: a second
-    /// transport ending so (another WebTransport refusing the same token)
-    /// cannot start the round over, which would never reach the backoff.
+    /// The current transport ended before the server answered on it. If it
+    /// was chosen, it no longer is, and a new round starts from the next
+    /// transport, each tried at once, until the round comes back to this
+    /// one, which is tried after the backoff; alone in the list, it waits
+    /// the backoff at once. If it was not, the attempt is one more failure
+    /// of the current round, whose end stays: a second transport ending so
+    /// (another WebTransport refusing the same token) cannot start the
+    /// round over, which would never reach the backoff.
+    // Block 48, D9.
     pub(super) fn give_way(&mut self) {
         if !self.chosen {
             return;
@@ -91,15 +93,17 @@ impl Transports {
         self.kinds.len()
     }
 
-    /// The current transport cannot be opened (Block 44, D12): the next
-    /// one is tried, even after one was chosen, as centrifuge-js 63ed73e
+    /// The current transport cannot be opened: the next one is tried, even
+    /// after one was chosen, as centrifuge-js 63ed73e
     /// `_initializeTransport` advances past a transport not supported.
+    // Block 44, D12.
     pub(super) fn skip(&mut self) {
         self.advance();
     }
 
     /// The round starts again from the first transport, as on the first
-    /// connection: a new network may allow it again (Block 25, D6).
+    /// connection: a new network may allow it again.
+    // Block 25, D6.
     pub(super) fn restart(&mut self) {
         self.index = 0;
         self.chosen = false;

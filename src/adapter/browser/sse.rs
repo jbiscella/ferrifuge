@@ -1,8 +1,9 @@
 //! sse transport of the browser adapter, over the browser's own
-//! `EventSource` or the application's shim of it (Block 44, D9, D12), with the bounded inbox of D7: the stream
-//! carries the replies, its URL the connect command in `cf_connect`, and
-//! commands go in emulation requests over `fetch`, as from `http_stream`
-//! (D8).
+//! `EventSource` or the application's shim of it, with the browser
+//! transports' bounded inbox: the stream carries the replies, its URL the
+//! connect command in `cf_connect`, and commands go in emulation requests
+//! over `fetch`, as from `http_stream`.
+// Block 44, D9, D12; D7; D8.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -20,7 +21,8 @@ use super::http_stream::{Emulation, JSON, report};
 use super::websocket::{Bound, Inbound, Inbox, Listener, js_message};
 use crate::sans_io::FrameId;
 
-/// Why the stream ended: `EventSource` tells no more (D9).
+/// Why the stream ended: `EventSource` tells no more.
+// D9.
 const ENDED: &str = "event stream ended";
 
 /// How far the opening went.
@@ -54,8 +56,8 @@ impl State {
 }
 
 /// A browser `EventSource` and its listeners, which it removes before it
-/// drops their closures, so that the browser never calls a dropped one
-/// (D6, D9).
+/// drops their closures, so that the browser never calls a dropped one.
+// D6, D9.
 struct Events {
     source: web_sys::EventSource,
     listeners: Vec<Listener>,
@@ -154,8 +156,8 @@ fn received(state: &RefCell<State>, source: &web_sys::EventSource, event: &Messa
 }
 
 /// An `error` event, the source closed already: the opening fails, or the
-/// stream ends after the frames received before it, without a close code
-/// (D9).
+/// stream ends after the frames received before it, without a close code.
+// D9.
 fn failed(state: &RefCell<State>) {
     let mut state = state.borrow_mut();
     if matches!(state.opening, Opening::Pending) {
@@ -184,8 +186,9 @@ fn stream_url(url: &str, initial_frame: &[u8]) -> Result<String, String> {
 
 /// An open sse connection.
 ///
-/// Its messages wait in the inbox until the client reads them (D7);
-/// commands go in emulation requests, written once answered (D8, D9).
+/// Its messages wait in the inbox until the client reads them; commands go
+/// in emulation requests, written once answered.
+// D7; D8, D9.
 pub(in crate::adapter) struct Sse {
     source: Events,
     emulation: Emulation,
@@ -204,7 +207,8 @@ impl Sse {
     /// `max_message` bytes ends it, reported as [`Inbound::TooLarge`]; one
     /// that would take the inbox past `bound` ends it too, reported as
     /// [`Inbound::Overflow`]. The source and the requests include
-    /// credentials when `include_credentials` (D13).
+    /// credentials when `include_credentials`.
+    // D13.
     #[expect(clippy::too_many_arguments, reason = "each is the transport's own")]
     pub(in crate::adapter) async fn open(
         event_source: &Function,
@@ -311,8 +315,9 @@ impl Sse {
     }
 
     /// Closes the source, its listeners removed first, and aborts every
-    /// emulation request in flight (D8, D9). `EventSource` closes at once:
-    /// there is no close event to await.
+    /// emulation request in flight. `EventSource` closes at once: there is
+    /// no close event to await.
+    // D8, D9.
     pub(in crate::adapter) fn close(self) {
         drop(self);
     }

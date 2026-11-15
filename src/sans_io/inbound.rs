@@ -1,9 +1,10 @@
-//! Block 15: messages from the server wait in a bounded read-ahead and are
-//! handled in order, each only after every event of earlier messages, of
-//! any connection, has been taken or withdrawn. On read, before that, the
+//! Messages from the server wait in a bounded read-ahead and are handled in
+//! order, each only after every event of earlier messages, of any
+//! connection, has been taken or withdrawn. On read, before that, the
 //! client answers pings, re-arms the no-ping deadline and pauses the
 //! deadline of the command a reply answers. A full read-ahead stops the
 //! reading, and pauses the no-ping deadline until reading resumes.
+// Block 15.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -20,7 +21,8 @@ enum Item {
         code: Option<u16>,
         reason: String,
     },
-    /// The transport ended on a message over the size limit (Block 29).
+    /// The transport ended on a message over the size limit.
+    // Block 29.
     TooLarge,
 }
 
@@ -43,7 +45,8 @@ pub(super) struct Inbound {
     /// Reading is stopped: the read-ahead is full.
     full: bool,
     /// The encoded size of the message being handled: a map subscription's
-    /// load counts its pages' (Block 45, D5).
+    /// load counts its pages'.
+    // Block 45, D5.
     pub(super) handled: usize,
 }
 
@@ -142,7 +145,8 @@ impl Machine {
     }
 
     /// A reply to command `id` was read: its deadline stops counting, as
-    /// the server has answered (Block 15). Handling the reply settles it.
+    /// the server has answered. Handling the reply settles it.
+    // Block 15.
     fn pause_reply_deadline(&mut self, id: u32) {
         if self.connect_command == Some(id) {
             self.actions
@@ -208,7 +212,8 @@ impl Machine {
 
     /// Handles the held pages of map subscriptions' loads that make no
     /// event, ahead of messages held behind events not taken, once the
-    /// connect reply is handled; never past a held close (Block 45, D5).
+    /// connect reply is handled; never past a held close.
+    // Block 45, D5.
     #[cfg(feature = "unstable")]
     fn handle_map_pages(&mut self) {
         let mut index = 0;
@@ -280,17 +285,19 @@ impl Machine {
     }
 
     /// Whether the owner of the machine should read the transport: false
-    /// while the read-ahead is full (Block 15).
+    /// while the read-ahead is full.
+    // Block 15.
     #[must_use]
     pub fn wants_frames(&self) -> bool {
         !self.inbound.full
     }
 
     /// Messages read from the server and not yet handled that fit within
-    /// the limits, and their bytes: the read-ahead of Block 15. A message
-    /// read that does not fit waits outside it, with reading stopped, as
-    /// a reader holding it until there is room (centrifuge-rust §9.2); one
-    /// larger than the byte limit fits alone.
+    /// the limits, and their bytes: the read-ahead. A message read that
+    /// does not fit waits outside it, with reading stopped, as a reader
+    /// holding it until there is room (centrifuge-rust §9.2); one larger
+    /// than the byte limit fits alone.
+    // Block 15.
     #[must_use]
     pub fn read_ahead(&self) -> (usize, usize) {
         let (mut messages, mut bytes) = (0, 0);
@@ -336,7 +343,8 @@ impl Machine {
     }
 
     /// Whether the event `id` holds the messages read after the one that
-    /// emitted it (Block 15, in order; Block 41, D6).
+    /// emitted it.
+    // Block 15, in order; Block 41, D6.
     #[cfg_attr(
         not(any(adapter_tokio, adapter_browser)),
         allow(dead_code, reason = "read by the adapters")
@@ -345,7 +353,8 @@ impl Machine {
         self.inbound.waiting_for.contains(&id)
     }
 
-    /// The events the messages read next wait for (Block 15, in order).
+    /// The events the messages read next wait for.
+    // Block 15, in order.
     #[cfg_attr(
         not(any(adapter_tokio, adapter_browser)),
         allow(dead_code, reason = "read by the adapters")

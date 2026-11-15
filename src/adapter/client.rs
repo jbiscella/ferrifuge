@@ -1,5 +1,6 @@
 //! Client driven by the adapter of the target: tokio natively, the
-//! browser's event loop on the browser target (Block 44, D2).
+//! browser's event loop on the browser target.
+// Block 44, D2.
 
 // Neither `Send` nor `Sync` on the browser target (Block 44, D3).
 #![cfg_attr(
@@ -57,15 +58,15 @@ use crate::{
 use tracing::{debug, trace, warn};
 
 /// Centrifugo client, running on tokio natively and on the page's event
-/// loop in the browser (Block 44, D1).
+/// loop in the browser.
 ///
 /// Natively it is `Send` and `Sync`; on wasm32-unknown-unknown it is
-/// neither, as the browser's objects it holds are not (Block 44, D3).
+/// neither, as the browser's objects it holds are not.
 ///
 /// Clones share one client and its connection. Dropping the last clone
-/// closes the client, as [`Client::close`] does without waiting (Block 33);
-/// a [`WeakClient`] from [`Client::downgrade`] does not keep it alive
-/// (Block 41, D5).
+/// closes the client, as [`Client::close`] does without waiting; a
+/// [`WeakClient`] from [`Client::downgrade`] does not keep it alive.
+// Block 44, D1; Block 44, D3; Block 33; Block 41, D5.
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<Shared>,
@@ -85,8 +86,9 @@ impl Drop for Owner {
 }
 
 /// A handle that does not keep its client alive, from
-/// [`Client::downgrade`] (Block 41, D5), as tokio's `WeakSender`: for the
-/// state of an application, or a handler, that must not hold the client.
+/// [`Client::downgrade`], as tokio's `WeakSender`: for the state of an
+/// application, or a handler, that must not hold the client.
+// Block 41, D5.
 #[derive(Clone)]
 pub struct WeakClient {
     owner: std::sync::Weak<Owner>,
@@ -132,68 +134,78 @@ pub(super) struct Shared {
     pub(super) outboxes: Mutex<Outboxes>,
     /// Data and token callbacks of the subscriptions that have them.
     pub(super) callbacks: Mutex<SubscriptionCallbacks>,
-    /// Where the outcome of each call goes, by call (Block 13).
+    /// Where the outcome of each call goes, by call.
+    // Block 13.
     calls: Mutex<HashMap<CallId, oneshot::Sender<Result<CallReply, CallError>>>>,
-    /// The waiting `ready()` futures (Block 30). Locked after `core`.
+    /// The waiting `ready()` futures. Locked after `core`.
+    // Block 30.
     pub(super) ready: Mutex<Waiters>,
-    /// Set, and `driver_ended` notified, when the driver's task has ended
-    /// (Block 33, D1).
+    /// Set, and `driver_ended` notified, when the driver's task has ended.
+    // Block 33, D1.
     driver_gone: AtomicBool,
     driver_ended: Notify,
     /// Wakes the driver when actions are queued.
     actions_queued: Notify,
     /// The debounce timers the driver holds unarmed for a test, oldest
-    /// first; `None` while it arms them (Block 46).
+    /// first; `None` while it arms them.
+    // Block 46.
     #[cfg(feature = "__test-hooks")]
     held_debounce_timers: Mutex<Option<Vec<DebounceTimer>>>,
-    /// The driver panics before handling its next input, for a test
-    /// (Block 49).
+    /// The driver panics before handling its next input, for a test.
+    // Block 49.
     #[cfg(feature = "__test-hooks")]
     driver_panic_planted: AtomicBool,
     /// Notified when the driver's end is about to await the close of an
-    /// earlier transport than the last one closed (Codex, #141), for a
-    /// test.
+    /// earlier transport than the last one closed, for a test.
+    // Codex, #141.
     #[cfg(feature = "__test-hooks")]
     awaiting_earlier_close: Notify,
-    /// The driver's timers and the calls' ages, for the soak (Block 52).
+    /// The driver's timers and the calls' ages, for the soak.
+    // Block 52.
     #[cfg(feature = "__test-hooks")]
     pub(super) records: super::hooks::Records,
     /// Set when the client handle is dropped: the driver stops once the
     /// queued actions are performed.
     pub(super) closed: AtomicBool,
-    /// Spans and records of this client (Block 21).
+    /// Spans and records of this client.
+    // Block 21.
     pub(super) log: Log,
-    /// Its TLS and proxy settings and HTTP clients (Blocks 22, 23).
+    /// Its TLS and proxy settings and HTTP clients.
+    // Blocks 22, 23.
     #[cfg(adapter_tokio)]
     pub(super) network: Arc<Network>,
     /// The real HTTP headers of every transport request, which
-    /// `set_http_headers` replaces (Blocks 17, 32).
+    /// `set_http_headers` replaces.
+    // Blocks 17, 32.
     #[cfg(adapter_tokio)]
     pub(super) http_headers: HeaderSet,
-    /// The handlers of the client and its subscriptions (Block 41b).
-    /// Locked after `outboxes`.
+    /// The handlers of the client and its subscriptions. Locked after
+    /// `outboxes`.
+    // Block 41b.
     pub(super) handlers: Mutex<super::handler::Handlers>,
-    /// The runtime the client's tasks run on (Block 28).
+    /// The runtime the client's tasks run on.
+    // Block 28.
     pub(super) runtime: Handle,
-    /// The browser's network and page listeners (Block 44, D10, D11).
-    /// Locked after `core`.
+    /// The browser's network and page listeners. Locked after `core`.
+    // Block 44, D10, D11.
     #[cfg(adapter_browser)]
     events: Mutex<super::backend::events::Events>,
 }
 
-/// Events waiting for their streams (Block 15). Locked after
-/// [`Shared::core`], never before.
+/// Events waiting for their streams. Locked after [`Shared::core`], never
+/// before.
+// Block 15.
 #[derive(Debug, Default)]
 pub(super) struct Outboxes {
     pub(super) client: Outbox<ClientEvent>,
     /// Those of the subscriptions whose `events()` was called.
     pub(super) subscriptions: HashMap<SubscriptionId, Outbox<SubscriptionEvent>>,
-    /// Those of the map subscriptions whose `events()` was called (Block
-    /// 45).
+    /// Those of the map subscriptions whose `events()` was called.
+    // Block 45.
     #[cfg(feature = "unstable")]
     pub(super) maps: HashMap<SubscriptionId, Outbox<crate::MapSubscriptionEvent>>,
-    /// Those of the shared poll subscriptions whose `events()` was called
-    /// (Block 47).
+    /// Those of the shared poll subscriptions whose `events()` was called.
+    // Block 47.
     #[cfg(feature = "unstable")]
     pub(super) shared_polls: HashMap<SubscriptionId, Outbox<crate::SharedPollSubscriptionEvent>>,
 }
@@ -238,17 +250,19 @@ impl Core {
 pub(super) struct Core {
     pub(super) machine: Machine,
     pub(super) actions: VecDeque<Action>,
-    /// The clocks at the last input, to notice a system sleep (Block 25).
+    /// The clocks at the last input, to notice a system sleep.
+    // Block 25.
     pub(super) clock: Clock,
     /// When each token refresh timer the driver runs comes due, so that a
-    /// sleep's refreshes are given before the input revealing it (Block
-    /// 25, D1).
+    /// sleep's refreshes are given before the input revealing it.
+    // Block 25, D1.
     pub(super) refreshes: Refreshes,
-    /// When the client was seen to become connected, while it is (Block
-    /// 31, D2).
+    /// When the client was seen to become connected, while it is.
+    // Block 31, D2.
     pub(super) connected_since: Option<SystemTime>,
-    /// The timers the core set and did not cancel, for the soak (Block 52,
-    /// D8), kept once the records are started.
+    /// The timers the core set and did not cancel, for the soak, kept once
+    /// the records are started.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     pub(super) timer_record: super::hooks::TimerRecord,
 }
@@ -269,7 +283,8 @@ impl Clock {
 
 /// The sleep between `last` and `now`: how much further the wall clock
 /// moved than the monotonic one, whose time stops in a suspend, when at
-/// least 2 s (Block 25, D1). A wall clock set back gives none.
+/// least 2 s. A wall clock set back gives none.
+// Block 25, D1.
 fn sleep_gap(
     last: (SystemTime, platform::Monotonic),
     now: (SystemTime, platform::Monotonic),
@@ -287,14 +302,15 @@ const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 /// before those branches sit out one turn: biased toward the transport, so
 /// that what arrived is handled before a timer that expired with it, the
 /// driver must not starve the timers under a server flood, also while the
-/// application takes events, each take waking the actions branch (Block
-/// 49, row 28/55).
+/// application takes events, each take waking the actions branch.
+// Block 49, row 28/55.
 pub(super) const UPPER_STREAK: u32 = 32;
 
 /// The deadlines of the token refresh timers the driver runs, by
 /// subscription (`None` for the connection's), each with its setting, kept
 /// beside the core: an application task that reveals a sleep cannot reach
-/// the driver's timers (Block 25, D1, D3; Block 53 D4).
+/// the driver's timers.
+// Block 25, D1, D3; Block 53 D4.
 #[derive(Debug, Default)]
 pub(super) struct Refreshes(HashMap<Option<SubscriptionId>, (platform::Instant, TimerSetting)>);
 
@@ -332,7 +348,8 @@ impl Refreshes {
     }
 
     /// `input` is the firing of a refresh timer: the entry of its setting
-    /// no longer runs, so that each refresh is given once (Block 53 D4).
+    /// no longer runs, so that each refresh is given once.
+    // Block 53 D4.
     fn fired(&mut self, input: &Input) {
         let (key, setting) = match input {
             Input::TimerFired(Timer::Refresh, setting) => (None, *setting),
@@ -382,8 +399,8 @@ pub(super) type GetSubscriptionToken =
 pub(super) type GetState =
     platform::ChannelCallback<platform::BoxFuture<'static, Result<StreamPosition, StateError>>>;
 
-/// Async callback signing keys of a shared poll subscription (Block 47,
-/// D6).
+/// Async callback signing keys of a shared poll subscription.
+// Block 47, D6.
 #[cfg(feature = "unstable")]
 pub(super) type GetSignature = platform::KeysCallback<
     platform::BoxFuture<'static, Result<crate::SharedPollSignature, TokenError>>,
@@ -423,10 +440,11 @@ impl Shared {
         self.actions_queued.notify_one();
     }
 
-    /// Closes the client (Block 33, D1), in one locked section: an API
-    /// call either runs before and is closed with the rest, or after and
-    /// sees the client closed. The `ready()` waiters fail with "client
-    /// closed" before the machine's new states would judge them.
+    /// Closes the client, in one locked section: an API call either runs
+    /// before and is closed with the rest, or after and sees the client
+    /// closed. The `ready()` waiters fail with "client closed" before the
+    /// machine's new states would judge them.
+    // Block 33, D1.
     pub(super) fn shut_down(&self) {
         let mut core = lock(&self.core);
         if !self.closed.load(Ordering::Acquire) {
@@ -440,8 +458,8 @@ impl Shared {
         super::handler::wake_consumer(self);
     }
 
-    /// Resolves once the driver's task has ended, however it ended (Block
-    /// 33, D1).
+    /// Resolves once the driver's task has ended, however it ended.
+    // Block 33, D1.
     pub(super) async fn ended(&self) {
         loop {
             // Registered before the check: a notification in between is
@@ -474,7 +492,8 @@ impl Shared {
         self.actions_queued.notified().now_or_never().is_some()
     }
 
-    /// A network or page event a listener heard (Block 44, D10, D11).
+    /// A network or page event a listener heard.
+    // Block 44, D10, D11.
     #[cfg(adapter_browser)]
     pub(super) fn heard(&self, heard: super::backend::events::Heard) {
         let mut core = lock(&self.core);
@@ -552,7 +571,8 @@ impl Shared {
 
     /// Gives the machine `input`, then the sleep of `gap` it revealed. The
     /// timers `input` set lost no time to the sleep: the sleep does not
-    /// shorten them (Codex, #120).
+    /// shorten them.
+    // Codex, #120.
     fn feed_before_sleep(&self, core: &mut Core, input: Input, gap: Duration) {
         // The timers `input` set are those of the set actions it returned
         // (Block 53 D4).
@@ -613,8 +633,9 @@ impl Shared {
 
     /// Gives the machine the firings of the refreshes a sleep made due,
     /// before the input that revealed it, so that an attempt or a subscribe
-    /// it starts fetches a new token first (Block 25, D3); the driver's
-    /// timers for them are cancelled.
+    /// it starts fetches a new token first; the driver's timers for them
+    /// are cancelled.
+    // Block 25, D3.
     fn fire_due_refreshes(&self, core: &mut Core) {
         for (of, setting) in core.refreshes.due() {
             let (cancel, fired) = match of {
@@ -709,9 +730,10 @@ impl Shared {
     /// Moves every queued action into `into`, which is empty, under one
     /// lock, after feeding [`Input::Flush`] when `flush`: API calls that
     /// keep queueing no longer win the lock once per action against the
-    /// driver. A take that finds none releases what the queue grew (Block
-    /// 14); the driver's buffer, which takes turns with the queue holding
-    /// the actions, is released after each turn's batches.
+    /// driver. A take that finds none releases what the queue grew; the
+    /// driver's buffer, which takes turns with the queue holding the
+    /// actions, is released after each turn's batches.
+    // Block 14.
     fn take_actions(&self, into: &mut VecDeque<Action>, flush: bool) {
         let mut core = lock(&self.core);
         if flush {
@@ -731,7 +753,8 @@ impl Shared {
     }
 
     /// Makes a call now, of `subscription` when given; the future gives its
-    /// outcome. Dropping the future abandons the call (Block 13).
+    /// outcome. Dropping the future abandons the call.
+    // Block 13.
     pub(super) fn call(
         self: &Arc<Self>,
         subscription: Option<SubscriptionId>,
@@ -801,7 +824,8 @@ impl Shared {
     }
 }
 
-/// The error of a call on a closed client (Block 33, D4).
+/// The error of a call on a closed client.
+// Block 33, D4.
 pub(super) fn client_closed() -> CallError {
     CallError::new(codes::error::CLIENT_CLOSED, "client closed")
 }
@@ -833,8 +857,9 @@ impl Drop for PendingCall {
 }
 
 /// A stream of the client's or a subscription's events, taking them from
-/// its outbox: each event it yields is reported taken to the machine
-/// under the core lock, so a withdrawal never races a take (Block 15).
+/// its outbox: each event it yields is reported taken to the machine under
+/// the core lock, so a withdrawal never races a take.
+// Block 15.
 pub(super) struct EventStream<E: Routed> {
     shared: Arc<Shared>,
     /// The subscription whose events it yields; the client's when `None`.
@@ -985,7 +1010,8 @@ pub struct ClientBuilder {
     proxy: Proxy,
     #[cfg(adapter_tokio)]
     /// Whether [`ClientBuilder::proxy`] was called: a connector replaces
-    /// any proxy setting (Block 37, D4).
+    /// any proxy setting.
+    // Block 37, D4.
     proxy_set: bool,
     #[cfg(adapter_tokio)]
     /// The application's connector for the websocket, if any.
@@ -993,32 +1019,37 @@ pub struct ClientBuilder {
     #[cfg(adapter_tokio)]
     /// The runtime the client runs on; the current one otherwise.
     runtime: Option<Handle>,
-    /// The client's handler, set once it is built (Block 41b); behind a
-    /// mutex so that the builder stays `Sync` for a handler that is only
-    /// `Send`.
+    /// The client's handler, set once it is built; behind a mutex so that
+    /// the builder stays `Sync` for a handler that is only `Send`.
+    // Block 41b.
     handler: Option<Mutex<Box<dyn super::ClientHandler>>>,
-    /// Where its handlers run (Block 41, D2).
+    /// Where its handlers run.
+    // Block 41, D2.
     event_delivery: super::EventDelivery,
     #[cfg(adapter_tokio)]
-    /// The application's cookie jar (Block 43).
+    /// The application's cookie jar.
+    // Block 43.
     cookie_jar: super::tokio::net::Jar,
     #[cfg(adapter_browser)]
-    /// Where `offline` and `online` are listened to (Block 44, D10).
+    /// Where `offline` and `online` are listened to.
+    // Block 44, D10.
     network_event_target: Option<web_sys::EventTarget>,
     #[cfg(adapter_browser)]
-    /// Where `pagehide` and `pageshow` are listened to (Block 44, D11).
+    /// Where `pagehide` and `pageshow` are listened to.
+    // Block 44, D11.
     page_event_target: Option<web_sys::EventTarget>,
     #[cfg(adapter_browser)]
-    /// The application's constructors in place of the page's (Block 44,
-    /// D12).
+    /// The application's constructors in place of the page's.
+    // Block 44, D12.
     shims: super::backend::shims::Shims,
     #[cfg(adapter_browser)]
-    /// Whether HTTP requests carry credentials to other origins (Block 44,
-    /// D13).
+    /// Whether HTTP requests carry credentials to other origins.
+    // Block 44, D13.
     include_credentials: bool,
 }
 
-/// Endpoints as they may be logged (Block 21, D5).
+/// Endpoints as they may be logged.
+// Block 21, D5.
 struct Endpoints<'a>(&'a [(TransportKind, String)]);
 
 impl std::fmt::Debug for Endpoints<'_> {
@@ -1123,12 +1154,13 @@ impl ClientBuilder {
     #[cfg(adapter_browser)]
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Listens to `offline` and `online` on `target` instead of
-    /// `globalThis` (Block 44, D10; centrifuge-js `networkEventTarget`):
-    /// while the client is not disconnected, `offline` closes its
-    /// connection, which then waits the reconnect delay, and `online`
-    /// while connecting reconnects it at once, or after a draw from
-    /// [`Config::reconnect_jitter_window`] when it lost its connection.
-    /// A target that never fires, `EventTarget::new()`, turns this off.
+    /// `globalThis` (centrifuge-js `networkEventTarget`): while the client
+    /// is not disconnected, `offline` closes its connection, which then
+    /// waits the reconnect delay, and `online` while connecting reconnects
+    /// it at once, or after a draw from [`Config::reconnect_jitter_window`]
+    /// when it lost its connection. A target that never fires,
+    /// `EventTarget::new()`, turns this off.
+    // Block 44, D10.
     #[must_use]
     pub fn network_event_target(mut self, target: web_sys::EventTarget) -> Self {
         self.network_event_target = Some(target);
@@ -1138,12 +1170,13 @@ impl ClientBuilder {
     #[cfg(adapter_browser)]
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Listens to `pagehide` and `pageshow` on `target` instead of
-    /// `globalThis` (Block 44, D11): a
-    /// `pagehide` whose `persisted` is true, the page entering the
-    /// back/forward cache, closes the connection with the reason "page
-    /// entered back/forward cache", and the `pageshow` that restores the
-    /// page reconnects as `online` does. Events whose `persisted` is false
-    /// change nothing. A target that never fires turns this off.
+    /// `globalThis`: a `pagehide` whose `persisted` is true, the page
+    /// entering the back/forward cache, closes the connection with the
+    /// reason "page entered back/forward cache", and the `pageshow` that
+    /// restores the page reconnects as `online` does. Events whose
+    /// `persisted` is false change nothing. A target that never fires turns
+    /// this off.
+    // Block 44, D11.
     #[must_use]
     pub fn page_event_target(mut self, target: web_sys::EventTarget) -> Self {
         self.page_event_target = Some(target);
@@ -1154,8 +1187,9 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Opens websocket connections with `constructor`, called as one with
     /// the URL and the subprotocol, in place of the page's `WebSocket`
-    /// (Block 44, D12; centrifuge-js `websocket`). The object it returns is
-    /// used through its `WebSocket` methods and properties, by name.
+    /// (centrifuge-js `websocket`). The object it returns is used through
+    /// its `WebSocket` methods and properties, by name.
+    // Block 44, D12.
     #[must_use]
     pub fn websocket(mut self, constructor: js_sys::Function) -> Self {
         self.shims.websocket = Some(constructor);
@@ -1166,7 +1200,8 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Makes the `http_stream` and sse transports' HTTP requests with
     /// `fetch`, called as the page's `fetch` is, `fetch(url, init)` with a
-    /// plain `init`, in its place (Block 44, D12; centrifuge-js `fetch`).
+    /// plain `init`, in its place (centrifuge-js `fetch`).
+    // Block 44, D12.
     #[must_use]
     pub fn fetch(mut self, fetch: js_sys::Function) -> Self {
         self.shims.fetch = Some(fetch);
@@ -1177,11 +1212,12 @@ impl ClientBuilder {
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Reads the `http_stream` response through a stream built with
     /// `constructor`, called as `new ReadableStream(source, strategy)` is,
-    /// in place of reading the body directly (Block 44, D12; centrifuge-js
+    /// in place of reading the body directly (centrifuge-js
     /// `readableStream`): its source's `pull` enqueues each chunk of the
     /// body unchanged, with `highWaterMark` 0, so the body is still read
     /// only when the client wants messages. With it the page needs no
     /// global `ReadableStream` for `http_stream`.
+    // Block 44, D12.
     #[must_use]
     pub fn readable_stream(mut self, constructor: js_sys::Function) -> Self {
         self.shims.readable_stream = Some(constructor);
@@ -1191,9 +1227,9 @@ impl ClientBuilder {
     #[cfg(adapter_browser)]
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Opens sse streams with `constructor`, called as one with the URL and
-    /// `{ withCredentials }`, in place of the page's `EventSource` (Block
-    /// 44, D12; centrifuge-js `eventsource`). The object it returns is used
-    /// through its `EventSource` methods and properties, by name.
+    /// `{ withCredentials }`, in place of the page's `EventSource`
+    /// (centrifuge-js `eventsource`). The object it returns is used through
+    /// its `EventSource` methods and properties, by name.
     ///
     /// Each attempt uses the shim given, else the page's global of that
     /// name; a transport whose constructors neither provides is skipped,
@@ -1201,6 +1237,7 @@ impl ClientBuilder {
     /// be used: websocket needs `WebSocket`, `http_stream` `fetch`,
     /// `ReadableStream` and `AbortController`, sse `EventSource` and
     /// `fetch`.
+    // Block 44, D12.
     #[must_use]
     pub fn event_source(mut self, constructor: js_sys::Function) -> Self {
         self.shims.event_source = Some(constructor);
@@ -1210,18 +1247,18 @@ impl ClientBuilder {
     #[cfg(adapter_browser)]
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Whether the `http_stream` and sse transports' requests carry the
-    /// page's cookies and HTTP authentication to a server on another origin
-    /// (Block 44, D13), false by default: true sends fetch's `credentials:
+    /// page's cookies and HTTP authentication to a server on another
+    /// origin, false by default: true sends fetch's `credentials:
     /// "include"` and `EventSource`'s `withCredentials: true`, so the
     /// server's `Set-Cookie` is stored too; false sends `credentials:
     /// "same-origin"` and `withCredentials: false`, as centrifuge-js does.
     /// The server must allow credentialed CORS requests from the page's
     /// origin, as Centrifugo's `allowed_origins` does.
     ///
-    /// The websocket upgrade is unaffected: the browser sends its cookies by
-    /// their `SameSite` rules whatever this says, and so is a WebTransport
-    /// session (unstable), whose cookies the browser decides (Block 48,
-    /// D17).
+    /// The websocket upgrade is unaffected: the browser sends its cookies
+    /// by their `SameSite` rules whatever this says, and so is a
+    /// WebTransport session (unstable), whose cookies the browser decides.
+    // Block 44, D13; Block 48, D17.
     #[must_use]
     pub fn include_credentials(mut self, include: bool) -> Self {
         self.include_credentials = include;
@@ -1234,9 +1271,9 @@ impl ClientBuilder {
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
     /// Trusts `roots`, certificate authorities, in addition to the
-    /// platform's, for `wss://` and every `https://` request (Block 22);
-    /// they add to the roots of earlier calls. A certificate that is not a
-    /// valid root makes [`ClientBuilder::build`] fail, naming its index.
+    /// platform's, for `wss://` and every `https://` request; they add to
+    /// the roots of earlier calls. A certificate that is not a valid root
+    /// makes [`ClientBuilder::build`] fail, naming its index.
     ///
     /// PEM files parse with [`rustls::pki_types::pem::PemObject`]:
     ///
@@ -1256,6 +1293,7 @@ impl ClientBuilder {
     ///
     /// Each client given extra roots holds its own TLS settings: many
     /// clients should rather share one [`ClientBuilder::tls_config`].
+    // Block 22.
     #[must_use]
     pub fn root_certificates(
         mut self,
@@ -1271,13 +1309,14 @@ impl ClientBuilder {
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
     /// Uses `config` for `wss://` and every `https://` request, instead of
-    /// the platform's trust (Block 22): its roots, verifier, provider and
-    /// client certificates are the application's. Ferrifuge only replaces
-    /// its ALPN list with `http/1.1`, the one protocol of its transports.
+    /// the platform's trust: its roots, verifier, provider and client
+    /// certificates are the application's. Ferrifuge only replaces its ALPN
+    /// list with `http/1.1`, the one protocol of its transports.
     /// [`ClientBuilder::build`] fails when extra root certificates are also
     /// given, and, in the `fips` build, when `config.fips()` is false.
     ///
     /// The configuration is shared as given, so many clients can use one.
+    // Block 22.
     #[must_use]
     pub fn tls_config(mut self, config: Arc<rustls::ClientConfig>) -> Self {
         self.tls_config = Some(config);
@@ -1289,10 +1328,11 @@ impl ClientBuilder {
         docsrs,
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
-    /// Sets how the client reaches the server's hosts (Block 23): through
-    /// the system's proxy by default ([`Proxy::system`]), the environment's,
-    /// none, one proxy, or one chosen per endpoint. Every transport takes
-    /// the same decision for each URL it opens.
+    /// Sets how the client reaches the server's hosts: through the system's
+    /// proxy by default ([`Proxy::system`]), the environment's, none, one
+    /// proxy, or one chosen per endpoint. Every transport takes the same
+    /// decision for each URL it opens.
+    // Block 23.
     #[must_use]
     pub fn proxy(mut self, proxy: Proxy) -> Self {
         self.proxy = proxy;
@@ -1306,13 +1346,14 @@ impl ClientBuilder {
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
     /// Sets the connector that gives the websocket its stream, for
-    /// networking the client does not have (Block 37): a VPN tunnel, a
-    /// custom proxy, an in-process transport. Over its stream the client
-    /// runs TLS, for `wss://`, and the websocket upgrade, as over a stream
-    /// it dials. With a connector the client reads no proxy setting, the
-    /// environment's and the system's included. A connector carries the
-    /// websocket only: [`ClientBuilder::build`] fails with an `http_stream` or
-    /// sse endpoint, or after [`ClientBuilder::proxy`].
+    /// networking the client does not have: a VPN tunnel, a custom proxy,
+    /// an in-process transport. Over its stream the client runs TLS, for
+    /// `wss://`, and the websocket upgrade, as over a stream it dials. With
+    /// a connector the client reads no proxy setting, the environment's and
+    /// the system's included. A connector carries the websocket only:
+    /// [`ClientBuilder::build`] fails with an `http_stream` or sse
+    /// endpoint, or after [`ClientBuilder::proxy`].
+    // Block 37.
     #[must_use]
     pub fn connector(mut self, connector: impl Connector + 'static) -> Self {
         self.connector = Some(connector::Shared(Arc::new(connector)));
@@ -1320,12 +1361,13 @@ impl ClientBuilder {
     }
 
     /// Sets the cookie jar that keeps the cookies servers set and sends
-    /// them back on the later requests they match (Block 43): the
-    /// websocket upgrade, a refused one's response included. A later call
-    /// replaces an earlier one; the application keeps its own `Arc` to look
-    /// into the jar or seed it. The cookies merge with a `Cookie` header of
+    /// them back on the later requests they match: the websocket upgrade, a
+    /// refused one's response included. A later call replaces an earlier
+    /// one; the application keeps its own `Arc` to look into the jar or
+    /// seed it. The cookies merge with a `Cookie` header of
     /// [`ClientBuilder::http_headers`] into one header, the application's
     /// first. No proxy is sent them. Without a jar, no cookie is kept.
+    // Block 43.
     #[cfg(all(adapter_tokio, feature = "cookies"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
     #[must_use]
@@ -1341,13 +1383,14 @@ impl ClientBuilder {
     )]
     /// Adds real HTTP headers to the websocket upgrade request and to every
     /// request of `http_stream` and sse, so that a gateway checking one
-    /// still admits a client that fell back (Block 17). Names are
-    /// case-insensitive, a later value replacing an earlier one. A name or
-    /// value that is not valid HTTP, or a header the transport sets itself
-    /// (`Host`, `Connection`, `Upgrade`, `Content-Length`,
-    /// `Transfer-Encoding`, `Content-Type`, `Accept`, `Sec-WebSocket-*`,
-    /// `Proxy-Authorization`), makes [`ClientBuilder::build`] fail.
-    /// [`Client::set_http_headers`] replaces them on a built client.
+    /// still admits a client that fell back. Names are case-insensitive, a
+    /// later value replacing an earlier one. A name or value that is not
+    /// valid HTTP, or a header the transport sets itself (`Host`,
+    /// `Connection`, `Upgrade`, `Content-Length`, `Transfer-Encoding`,
+    /// `Content-Type`, `Accept`, `Sec-WebSocket-*`, `Proxy-Authorization`),
+    /// makes [`ClientBuilder::build`] fail. [`Client::set_http_headers`]
+    /// replaces them on a built client.
+    // Block 17.
     #[must_use]
     pub fn http_headers<I, K, V>(mut self, headers: I) -> Self
     where
@@ -1398,8 +1441,8 @@ impl ClientBuilder {
         docsrs,
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
-    /// Runs the client on `runtime` (Block 28), e.g. when building it where
-    /// no tokio runtime is current, as in a Tauri setup hook:
+    /// Runs the client on `runtime`, e.g. when building it where no tokio
+    /// runtime is current, as in a Tauri setup hook:
     ///
     /// ```no_run
     /// # fn run(handle: tokio::runtime::Handle) -> Result<(), ferrifuge::ClientError> {
@@ -1420,6 +1463,7 @@ impl ClientBuilder {
     /// ([`crate::codes::disconnected::RUNTIME_SHUT_DOWN`]), its calls fail
     /// and its streams end; the client's futures and streams themselves need
     /// no runtime, so any executor can await them.
+    // Block 28.
     #[must_use]
     pub fn runtime(mut self, runtime: Handle) -> Self {
         self.runtime = Some(runtime);
@@ -1440,8 +1484,9 @@ impl ClientBuilder {
     #[cfg_attr(
         adapter_browser,
         doc = "In the browser the client runs on the page's event loop, which is",
-        doc = "always there (Block 44, D4)."
+        doc = "always there."
     )]
+    // Block 44, D4.
     pub fn build(mut self) -> Result<Client, ClientError> {
         let handler = self.handler.take();
         let client = Client::start(self)?;
@@ -1453,17 +1498,19 @@ impl ClientBuilder {
     }
 
     /// The client's handler, which takes its events from the start instead
-    /// of a stream (Block 41, D1); see [`Client::set_handler`].
+    /// of a stream; see [`Client::set_handler`].
+    // Block 41, D1.
     #[must_use]
     pub fn handler(mut self, handler: impl super::ClientHandler) -> Self {
         self.handler = Some(Mutex::new(Box::new(handler)));
         self
     }
 
-    /// Where the handlers of the client and of its subscriptions run
-    /// (Block 41, D2): [`EventDelivery::Task`](super::EventDelivery::Task)
-    /// by default, or on the client's driver with
+    /// Where the handlers of the client and of its subscriptions run:
+    /// [`EventDelivery::Task`](super::EventDelivery::Task) by default, or
+    /// on the client's driver with
     /// [`EventDelivery::Inline`](super::EventDelivery::Inline).
+    // Block 41, D2.
     #[cfg_attr(
         adapter_tokio,
         doc = "Natively also on a thread of the client's own, with",
@@ -1723,7 +1770,8 @@ impl Client {
         }
     }
 
-    /// A handle that does not keep this client alive (Block 41, D5).
+    /// A handle that does not keep this client alive.
+    // Block 41, D5.
     #[must_use]
     pub fn downgrade(&self) -> WeakClient {
         WeakClient {
@@ -1735,8 +1783,9 @@ impl Client {
         &self.shared
     }
 
-    /// The number of this client in its log records' `client` field
-    /// (Block 21), for tests.
+    /// The number of this client in its log records' `client` field, for
+    /// tests.
+    // Block 21.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -1745,9 +1794,9 @@ impl Client {
     }
 
     /// Starts keeping what [`Client::armed_timers`] and
-    /// [`Client::pending_calls`] report, for the soak (Block 52, D6): off
-    /// until then, so that no other test pays for it. Call it before
-    /// `connect()`.
+    /// [`Client::pending_calls`] report, for the soak: off until then, so
+    /// that no other test pays for it. Call it before `connect()`.
+    // Block 52, D6.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn record_timers(&self) {
@@ -1767,7 +1816,8 @@ impl Client {
 
     /// The timers the driver's own maps run, as it last published them, and
     /// those the core set and did not cancel, each with its age and
-    /// deadline (Block 52, D8).
+    /// deadline.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -1799,7 +1849,8 @@ impl Client {
     }
 
     /// Every call any registry of the core or the adapter holds, with its
-    /// age and the registries holding it (Block 52, D8).
+    /// age and the registries holding it.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -1828,8 +1879,9 @@ impl Client {
     }
 
     /// The protocol of the codec the client's core actually uses, for
-    /// tests: Block 51's runner checks it against its row (D10), as the
-    /// server does not report a connection's encoding.
+    /// tests: the real-server chaos runner checks it against its row, as
+    /// the server does not report a connection's encoding.
+    // Block 51, D10.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -1843,13 +1895,13 @@ impl Client {
         lock(&self.shared.core).machine.state()
     }
 
-    /// Closes the client for good (Block 33): every pending call and
-    /// `ready()` fails with code 4 "client closed", every subscription emits
-    /// `unsubscribed` with code 2 "client closed" (server-side ones too),
-    /// then the client emits `disconnected` with code 0 unless it was
-    /// disconnected; no unsubscribe command is sent. Later calls fail at
-    /// once with code 4, `connect()` and the setters do nothing, and
-    /// `new_subscription` returns [`crate::SubscriptionError::ClientClosed`].
+    /// Closes the client for good: every pending call and `ready()` fails
+    /// with code 4 "client closed", every subscription emits `unsubscribed`
+    /// with code 2 "client closed" (server-side ones too), then the client
+    /// emits `disconnected` with code 0 unless it was disconnected; no
+    /// unsubscribe command is sent. Later calls fail at once with code 4,
+    /// `connect()` and the setters do nothing, and `new_subscription`
+    /// returns [`crate::SubscriptionError::ClientClosed`].
     ///
     /// Closing starts when this returns; the future resolves once the
     /// driver has stopped: the transport closed (within `Config::timeout`)
@@ -1864,6 +1916,7 @@ impl Client {
     /// assert!(client.is_closed());
     /// # }
     /// ```
+    // Block 33.
     pub fn close(&self) -> impl Future<Output = ()> + MaybeSend + use<> {
         self.shared.shut_down();
         let shared = Arc::clone(&self.shared);
@@ -1885,16 +1938,17 @@ impl Client {
     }
 
     /// Whether the client is closed: by [`Client::close`], its runtime shut
-    /// down or its driver panicked (Block 33). A closed client reports
-    /// `disconnected` from [`Client::state`].
+    /// down or its driver panicked. A closed client reports `disconnected`
+    /// from [`Client::state`].
+    // Block 33.
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.shared.closed.load(Ordering::Acquire)
     }
 
     /// A snapshot of the client's connection and traffic counters since it
-    /// was built (Block 31), never a round trip. A closed client keeps its
-    /// last counters.
+    /// was built, never a round trip. A closed client keeps its last
+    /// counters.
     ///
     /// ```no_run
     /// # fn run(client: &ferrifuge::Client) {
@@ -1902,6 +1956,7 @@ impl Client {
     /// println!("{:?} over {:?}", statistics.state, statistics.transport);
     /// # }
     /// ```
+    // Block 31.
     #[must_use]
     pub fn statistics(&self) -> crate::Statistics {
         let core = lock(&self.shared.core);
@@ -1911,17 +1966,17 @@ impl Client {
     }
 
     /// Waits until the client is connected, without taking an event from
-    /// its stream (Block 30). The wait starts when this method returns, and
-    /// the future borrows nothing from the client, so it can be spawned.
+    /// its stream. The wait starts when this method returns, and the future
+    /// borrows nothing from the client, so it can be spawned.
     ///
     /// It follows the state [`Client::state`] reports, not the events
     /// taken: it can resolve before the `connected` event is taken, and a
-    /// state that lasts only within one message is not seen. The state moves
-    /// only as the client handles messages, each after the events of earlier
-    /// ones were taken (Block 15), so a task holding the client's stream with
+    /// state that lasts only within one message is not seen. The state
+    /// moves only as the client handles messages, each after the events of
+    /// earlier ones were taken, so a task holding the client's stream with
     /// events not taken, and awaiting this without reading it, waits until
-    /// the stream is read or dropped. No timeout applies; wrap the future in
-    /// one:
+    /// the stream is read or dropped. No timeout applies; wrap the future
+    /// in one:
     ///
     /// ```no_run
     /// # async fn run(client: ferrifuge::Client) {
@@ -1938,21 +1993,23 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Code 3 "disconnected" (`codes::error::DISCONNECTED`) at once when the
-    /// client is disconnected, `connect()` never called included; and when
-    /// the client enters `disconnected` while connecting: `disconnect()`, a
-    /// terminal code, a denied token. Code 4 "client closed"
-    /// (`codes::error::CLIENT_CLOSED`) when the client is closed, its last
-    /// clone dropped or its runtime shut down included (Block 33).
+    /// Code 3 "disconnected" (`codes::error::DISCONNECTED`) at once when
+    /// the client is disconnected, `connect()` never called included; and
+    /// when the client enters `disconnected` while connecting:
+    /// `disconnect()`, a terminal code, a denied token. Code 4 "client
+    /// closed" (`codes::error::CLIENT_CLOSED`) when the client is closed,
+    /// its last clone dropped or its runtime shut down included.
+    // Block 30; Block 15; Block 33.
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
         ready::ready(&self.shared, Of::Client)
     }
 
-    /// Sets the client's handler (Block 41, D1): from now on it takes the
-    /// client's events, server-side subscriptions' included, one at a time,
-    /// in order with those of its subscriptions' handlers, as a later
-    /// [`Client::events`] call would; the earlier stream or handler gets no
-    /// more. Its events count as delivered when its method returns.
+    /// Sets the client's handler: from now on it takes the client's events,
+    /// server-side subscriptions' included, one at a time, in order with
+    /// those of its subscriptions' handlers, as a later [`Client::events`]
+    /// call would; the earlier stream or handler gets no more. Its events
+    /// count as delivered when its method returns.
+    // Block 41, D1.
     pub fn set_handler(&self, handler: impl super::ClientHandler) {
         super::handler::set_client_handler(&self.shared, Box::new(handler));
     }
@@ -1961,9 +2018,10 @@ impl Client {
     /// yields it; until a stream is taken, events count as delivered at
     /// once, so take it before calling [`Client::connect`] to get every
     /// one. A later call takes over: the earlier stream ends and the events
-    /// it had not yielded are the new one's (Block 15). The stream borrows
-    /// nothing from the client, so it can be kept beside it, and it ends
-    /// once the client is dropped or its runtime shuts down (Block 28).
+    /// it had not yielded are the new one's. The stream borrows nothing
+    /// from the client, so it can be kept beside it, and it ends once the
+    /// client is dropped or its runtime shuts down.
+    // Block 15; Block 28.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + MaybeSend + Unpin + use<> {
         let mut core = lock(&self.shared.core);
         let number = lock(&self.shared.outboxes).client.open_stream();
@@ -1972,9 +2030,10 @@ impl Client {
         EventStream::new(Arc::clone(&self.shared), None, number)
     }
 
-    /// Messages read from the server and not yet handled, and their bytes
-    /// (Block 15), so that tests can wait for the read-ahead to fill. Only
-    /// with the `__test-hooks` feature.
+    /// Messages read from the server and not yet handled, and their bytes,
+    /// so that tests can wait for the read-ahead to fill. Only with the
+    /// `__test-hooks` feature.
+    // Block 15.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -1991,10 +2050,10 @@ impl Client {
         lock(&self.shared.outboxes).client.held()
     }
 
-    /// Makes the driver panic before it handles its next input, outside
-    /// the lock of the core, as a bug in its own code would (Block 49, "A
-    /// panic in the client's driver ends the client visibly"). Only with
-    /// the `__test-hooks` feature.
+    /// Makes the driver panic before it handles its next input, outside the
+    /// lock of the core, as a bug in its own code would. Only with the
+    /// `__test-hooks` feature.
+    // Block 49, "A panic in the client's driver ends the client visibly".
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn plant_driver_panic(&self) {
@@ -2005,7 +2064,8 @@ impl Client {
 
     /// Leaves the debounce timers set from now on unarmed, until
     /// [`Client::fire_held_debounce_timers`], so that a test decides when a
-    /// window ends (Block 46). Only with the `__test-hooks` feature.
+    /// window ends. Only with the `__test-hooks` feature.
+    // Block 46.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn hold_debounce_timers(&self) {
@@ -2147,10 +2207,10 @@ impl Client {
         docsrs,
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
-    /// Replaces the real HTTP headers (Block 32): every HTTP request started
-    /// from now on carries the new set, the upgrade or stream request of
-    /// the next attempt and each emulation request of an open `http_stream`
-    /// or sse transport. The open connection is kept, and a request already
+    /// Replaces the real HTTP headers: every HTTP request started from now
+    /// on carries the new set, the upgrade or stream request of the next
+    /// attempt and each emulation request of an open `http_stream` or sse
+    /// transport. The open connection is kept, and a request already
     /// started keeps the headers it started with. A header missing from the
     /// new set is no longer sent; a name given twice keeps its later value.
     ///
@@ -2168,6 +2228,7 @@ impl Client {
     /// that is not valid HTTP, or a header the transport sets,
     /// `Proxy-Authorization` included. The headers are then left as they
     /// were.
+    // Block 32.
     pub fn set_http_headers<I, K, V>(&self, headers: I) -> Result<(), ClientError>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -2188,10 +2249,10 @@ impl Client {
         docsrs,
         doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
     )]
-    /// Replaces the proxy setting from the next connection attempt
-    /// (Block 23), as the other setters do; the current connection is
-    /// kept. A client given a connector reads no proxy setting: this
-    /// changes nothing (Block 37).
+    /// Replaces the proxy setting from the next connection attempt, as the
+    /// other setters do; the current connection is kept. A client given a
+    /// connector reads no proxy setting: this changes nothing.
+    // Block 23; Block 37.
     pub fn set_proxy(&self, proxy: Proxy) {
         self.shared.network.set_proxy(proxy);
     }
@@ -2235,11 +2296,11 @@ impl Client {
     }
 
     /// Calls the server's RPC `method` with `data` encoded as JSON, and
-    /// decodes the result data as `Resp` (Block 38). Made, waiting and
-    /// failing as [`Client::rpc`]; `data` is encoded when this returns, so
-    /// the future borrows nothing. Under the Protobuf protocol the data are
-    /// the JSON bytes. For an RPC that returns no data, use
-    /// [`Client::rpc`]: empty data is not JSON.
+    /// decodes the result data as `Resp`. Made, waiting and failing as
+    /// [`Client::rpc`]; `data` is encoded when this returns, so the future
+    /// borrows nothing. Under the Protobuf protocol the data are the JSON
+    /// bytes. For an RPC that returns no data, use [`Client::rpc`]: empty
+    /// data is not JSON.
     ///
     /// ```no_run
     /// # async fn run(client: ferrifuge::Client) -> Result<(), ferrifuge::JsonCallError> {
@@ -2266,6 +2327,7 @@ impl Client {
     /// sent; [`JsonCallError::Call`] with the errors of [`Client::rpc`];
     /// [`JsonCallError::Decode`] when the server answered with data that
     /// does not decode as `Resp`: the RPC ran.
+    // Block 38.
     pub fn rpc_json<Req, Resp>(
         &self,
         method: impl Into<String>,
@@ -2308,7 +2370,7 @@ impl Client {
         })
     }
 
-    /// Publishes `data` encoded as JSON to `channel` (Block 38), as
+    /// Publishes `data` encoded as JSON to `channel`, as
     /// [`Client::publish`] does; `data` is encoded when this returns, so
     /// the future borrows nothing. Under the Protobuf protocol the data are
     /// the JSON bytes, which a JSON client receives unchanged.
@@ -2329,6 +2391,7 @@ impl Client {
     ///
     /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
     /// sent; [`JsonCallError::Call`] with the errors of [`Client::rpc`].
+    // Block 38.
     pub fn publish_json<T: serde::Serialize + ?Sized>(
         &self,
         channel: impl Into<String>,
@@ -2342,12 +2405,12 @@ impl Client {
     }
 
     /// Sets `key` of the map channel `channel` to `data`: raw JSON with the
-    /// JSON protocol, any bytes with Protobuf (Block 45, D8). Made, waiting
-    /// and failing as [`Client::rpc`]: it waits for the connection only,
-    /// not for a map subscription. Every subscriber of the channel, this
-    /// client's included, receives the change. Never debounced, unlike
+    /// JSON protocol, any bytes with Protobuf. Made, waiting and failing as
+    /// [`Client::rpc`]: it waits for the connection only, not for a map
+    /// subscription. Every subscriber of the channel, this client's
+    /// included, receives the change. Never debounced, unlike
     /// [`MapSubscription::publish`](crate::MapSubscription::publish) on a
-    /// namespace where the server advises an interval (Block 46).
+    /// namespace where the server advises an interval.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -2362,6 +2425,7 @@ impl Client {
     /// "permission denied" on a namespace that does not allow a client's
     /// writes or is not a map namespace, 107 "bad request" without data or
     /// with an empty key.
+    // Block 45, D8; Block 46.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn map_publish(
@@ -2383,9 +2447,9 @@ impl Client {
         })
     }
 
-    /// Sets `key` of the map channel `channel` to `data` encoded as JSON
-    /// (Block 38), as [`Client::map_publish`] does; `data` is encoded when
-    /// this returns, so the future borrows nothing.
+    /// Sets `key` of the map channel `channel` to `data` encoded as JSON,
+    /// as [`Client::map_publish`] does; `data` is encoded when this
+    /// returns, so the future borrows nothing.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -2396,6 +2460,7 @@ impl Client {
     /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
     /// sent; [`JsonCallError::Call`] with the errors of
     /// [`Client::map_publish`].
+    // Block 38.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn map_publish_json<T: serde::Serialize + ?Sized>(
@@ -2408,9 +2473,9 @@ impl Client {
         async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
     }
 
-    /// Removes `key` from the map channel `channel` (Block 45, D8). Made,
-    /// waiting and failing as [`Client::map_publish`]; removing a key the
-    /// map does not hold succeeds. Never debounced (Block 46).
+    /// Removes `key` from the map channel `channel`. Made, waiting and
+    /// failing as [`Client::map_publish`]; removing a key the map does not
+    /// hold succeeds. Never debounced.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -2419,6 +2484,7 @@ impl Client {
     /// # Errors
     ///
     /// As [`Client::map_publish`].
+    // Block 45, D8; Block 46.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn map_remove(
@@ -2576,38 +2642,46 @@ struct Driver {
     timeout: Duration,
     /// Largest message accepted from the server (`Config::max_message_bytes`).
     max_message: usize,
-    /// The bound of a browser transport's inbox (Block 44, D7).
+    /// The bound of a browser transport's inbox.
+    // Block 44, D7.
     #[cfg(adapter_browser)]
     read_ahead: super::backend::websocket::Bound,
     /// The application's constructors, looked up with the page's at each
-    /// attempt (Block 44, D12).
+    /// attempt.
+    // Block 44, D12.
     #[cfg(adapter_browser)]
     shims: super::backend::shims::Shims,
-    /// Whether HTTP requests carry credentials to other origins (Block 44,
-    /// D13).
+    /// Whether HTTP requests carry credentials to other origins.
+    // Block 44, D13.
     #[cfg(adapter_browser)]
     include_credentials: bool,
     shared: Arc<Shared>,
-    /// The runtime the driver runs on, for every spawn (Block 28, D1).
+    /// The runtime the driver runs on, for every spawn.
+    // Block 28, D1.
     runtime: Handle,
-    /// Ends the client however the driver's task ends (Block 28, D3).
+    /// Ends the client however the driver's task ends.
+    // Block 28, D3.
     _ending: Ending,
-    /// Where the handlers run (Block 41, D2): `Inline` on this driver.
+    /// Where the handlers run: `Inline` on this driver.
+    // Block 41, D2.
     delivery: super::EventDelivery,
     /// The closings of the transports closed that may still run, each
-    /// awaited before the driver stops (Block 33, D1; Codex, #141).
+    /// awaited before the driver stops.
+    // Block 33, D1; Codex, #141.
     closing: Vec<platform::JoinHandle<()>>,
     opening: Option<(TransportId, Opening)>,
     transport: Option<(TransportId, Transport)>,
     /// The kind of the transport opening or open, for the records.
     kind: TransportKind,
     /// Whether the transport was read on the last turn, for the records of
-    /// the read-ahead filling and draining (Block 21).
+    /// the read-ahead filling and draining.
+    // Block 21.
     reading: bool,
     /// Inputs taken in a row from the branches above the timers (the
     /// actions wake, the inline handler, the open, the transport), with no
-    /// wait between them: after [`UPPER_STREAK`] of them, those branches sit
-    /// out one turn (Block 49, row 28/55).
+    /// wait between them: after [`UPPER_STREAK`] of them, those branches
+    /// sit out one turn.
+    // Block 49, row 28/55.
     upper_streak: u32,
     get_token: Option<GetToken>,
     get_data: Option<GetConnectData>,
@@ -2619,12 +2693,15 @@ struct Driver {
     timers: Timers,
     subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer), TimerSetting>,
     call_timers: KeyedTimers<(CallId, CallTimer), TimerSetting>,
-    /// One timer per open debounce window (Block 46, D5).
+    /// One timer per open debounce window.
+    // Block 46, D5.
     debounce_timers: KeyedTimers<DebounceTimer>,
-    /// The reply deadlines of shared poll requests (Block 47, D12).
+    /// The reply deadlines of shared poll requests.
+    // Block 47, D12.
     shared_poll_timers: SharedPollTimers,
     /// The signature refresh of each shared poll subscription, at the
-    /// earliest deadline reported (Block 47, D7).
+    /// earliest deadline reported.
+    // Block 47, D7.
     shared_poll_refreshes: SharedPollRefreshes,
     /// Subscription callbacks and the connect data callback running, each yielding the
     /// input answering it; an aborted one yields `None`.
@@ -2642,9 +2719,10 @@ struct Driver {
 
 type CallbackFetching = platform::BoxFuture<'static, Option<(FetchId, Input)>>;
 
-/// The machine's subscription timers, by subscription and kind, or its
-/// call timers, by call, each with its setting (Block 53 D4); debounce and
-/// shared poll timers, numbered by their own key, keep `()`.
+/// The machine's subscription timers, by subscription and kind, or its call
+/// timers, by call, each with its setting; debounce and shared poll timers,
+/// numbered by their own key, keep `()`.
+// Block 53 D4.
 struct KeyedTimers<K, V = ()>(HashMap<K, (Pin<Box<Sleep>>, V)>);
 
 impl<K, V> Default for KeyedTimers<K, V> {
@@ -2702,10 +2780,11 @@ impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
     }
 
     /// Resolves with every timer ready at this poll, which are removed;
-    /// never while none is ready or none is set. Cancel-safe. A wakeup polls
-    /// every timer, as [`KeyedTimers::fired`]; several windows ending
+    /// never while none is ready or none is set. Cancel-safe. A wakeup
+    /// polls every timer, as [`KeyedTimers::fired`]; several windows ending
     /// together cost one poll and, the driver feeding them all before its
-    /// next flush, one flush (Block 46, D5).
+    /// next flush, one flush.
+    // Block 46, D5.
     async fn fired_all(&mut self) -> Vec<K> {
         std::future::poll_fn(|cx| {
             let mut fired = Vec::new();
@@ -2749,8 +2828,8 @@ impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
     }
 }
 
-/// Makes `sleep` end `by` earlier; a deadline already past fires at once
-/// (Block 25, D3).
+/// Makes `sleep` end `by` earlier; a deadline already past fires at once.
+// Block 25, D3.
 fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
     let deadline = sleep
         .deadline()
@@ -2765,7 +2844,8 @@ fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
 struct Timers([Option<(Pin<Box<Sleep>>, TimerSetting)>; Timer::COUNT]);
 
 impl Timers {
-    /// Sets `timer`, of `setting` (Block 53 D4).
+    /// Sets `timer`, of `setting`.
+    // Block 53 D4.
     fn set(&mut self, timer: Timer, delay: Duration, setting: TimerSetting) {
         // sleep() clamps delays too large for an Instant instead of panicking.
         self.0[timer.index()] = Some((Box::pin(platform::sleep(delay)), setting));
@@ -2803,10 +2883,9 @@ impl Timers {
 }
 
 /// The machine of a client: its callbacks, headers and transports, and
-/// automatic batching, the driver flushing at each iteration (Block 36,
-/// D3).
-/// Checks the endpoints, and the connector's limits when one is given
-/// (Block 37, D4).
+/// automatic batching, the driver flushing at each iteration. Checks the
+/// endpoints, and the connector's limits when one is given.
+// Block 36, D3; Block 37, D4.
 #[cfg(adapter_tokio)]
 fn check_endpoints(
     endpoints: &[(TransportKind, String)],
@@ -2849,10 +2928,10 @@ fn machine_for(
 impl Driver {
     /// The client is closed. The close queued its actions before setting
     /// the flag, under the core lock: performed now, its transport's close
-    /// among them, even when it came after the queue was last emptied
-    /// (Codex, #141). Every transport's close is awaited, so that `close()`
-    /// resolves after it (Block 33, D1); the guard then ends the streams as
-    /// the driver goes.
+    /// among them, even when it came after the queue was last emptied.
+    /// Every transport's close is awaited, so that `close()` resolves after
+    /// it; the guard then ends the streams as the driver goes.
+    // Codex, #141; Block 33, D1.
     async fn finish(&mut self) {
         self.perform_all_queued();
         if self.delivery == super::EventDelivery::Inline {
@@ -2876,10 +2955,10 @@ impl Driver {
 
     /// Performs the turn's actions: everything one take moves, the flush
     /// included, then again only while the batch just performed fed the
-    /// core an input, whose actions belong to that input (Block 49c). An
-    /// API call queueing meanwhile waits for the next turn, its wake
-    /// stored: callers that keep queueing cannot hold the driver in one
-    /// drain.
+    /// core an input, whose actions belong to that input. An API call
+    /// queueing meanwhile waits for the next turn, its wake stored: callers
+    /// that keep queueing cannot hold the driver in one drain.
+    // Block 49c.
     fn perform_turn(&mut self) {
         let mut taken = std::mem::take(&mut self.taken);
         perform_batches(
@@ -2898,7 +2977,8 @@ impl Driver {
 
     /// Performs every queued action, until a take finds none: the client is
     /// closed, so no call queues more, and the close's actions, queued with
-    /// the flag under the core lock, are among them (Codex, #141).
+    /// the flag under the core lock, are among them.
+    // Codex, #141.
     fn perform_all_queued(&mut self) {
         let mut taken = std::mem::take(&mut self.taken);
         loop {
@@ -3120,8 +3200,9 @@ impl Driver {
     }
 
     /// Whether to read the transport: a full read-ahead stops the reading,
-    /// so that the server's handling of slow clients acts instead
-    /// (Block 15). Taking an event wakes the loop.
+    /// so that the server's handling of slow clients acts instead. Taking
+    /// an event wakes the loop.
+    // Block 15.
     fn reading(&mut self) -> bool {
         let reading = lock(&self.shared.core).machine.wants_frames();
         if reading != self.reading {
@@ -3135,8 +3216,8 @@ impl Driver {
         reading
     }
 
-    /// Publishes the timers the driver's own maps run, for the soak
-    /// (Block 52, D8).
+    /// Publishes the timers the driver's own maps run, for the soak.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     fn publish_timers(&self) {
         use super::hooks;
@@ -3295,7 +3376,8 @@ impl Driver {
     }
 }
 
-/// The reply deadlines of shared poll requests (Block 47, D12).
+/// The reply deadlines of shared poll requests.
+// Block 47, D12.
 #[cfg(feature = "unstable")]
 type SharedPollTimers = KeyedTimers<crate::sans_io::SharedPollTimer>;
 
@@ -3320,8 +3402,8 @@ impl SharedPollTimers {
     }
 }
 
-/// The signature refresh timer of each shared poll subscription (Block
-/// 47, D7).
+/// The signature refresh timer of each shared poll subscription.
+// Block 47, D7.
 #[cfg(feature = "unstable")]
 type SharedPollRefreshes = KeyedTimers<SubscriptionId>;
 
@@ -3532,8 +3614,9 @@ impl Driver {
         });
     }
 
-    /// Runs a shared poll subscription's `get_signature` callback (Block 47,
-    /// D6); its answer to an abandoned request changes nothing in the core.
+    /// Runs a shared poll subscription's `get_signature` callback; its
+    /// answer to an abandoned request changes nothing in the core.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     fn fetch_signature(&mut self, id: SubscriptionId, request: FetchId, keys: Vec<String>) {
         let callback = lock(&self.shared.callbacks)
@@ -3631,8 +3714,9 @@ async fn opened(
 /// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
 /// `http(s)://` is right for `http_stream` and sse (owner decision,
 /// 2026-11-04). The message leaves the endpoint out: it may carry a token.
-/// An error of building a client without a runtime to run on (Block 28).
-/// The runtime given, else the current one (Block 28, D1).
+/// An error of building a client without a runtime to run on. The runtime
+/// given, else the current one.
+// Block 28; Block 28, D1.
 fn runtime_or_current(runtime: Option<Handle>) -> Result<Handle, ClientError> {
     match runtime {
         Some(runtime) => Ok(runtime),
@@ -3654,11 +3738,12 @@ fn runtime_error(message: &str) -> ClientError {
     }
 }
 
-/// Ends the client when the driver's task ends, however it ends: after
-/// the final disconnect, or dropped by a runtime shutting down or by a
-/// panic (Block 28, D3, D4), which would otherwise leave calls and
-/// streams pending forever, even after the client is dropped (as hyper's
-/// dispatch callback fails its request when its task is dropped).
+/// Ends the client when the driver's task ends, however it ends: after the
+/// final disconnect, or dropped by a runtime shutting down or by a panic,
+/// which would otherwise leave calls and streams pending forever, even
+/// after the client is dropped (as hyper's dispatch callback fails its
+/// request when its task is dropped).
+// Block 28, D3, D4.
 pub(super) struct Ending(pub(super) Arc<Shared>);
 
 impl Drop for Ending {
@@ -3712,7 +3797,8 @@ impl Drop for Ending {
 
 #[cfg(adapter_tokio)]
 /// A connector carries the websocket only, and replaces every proxy
-/// setting (Block 37, D4).
+/// setting.
+// Block 37, D4.
 fn check_connector(
     endpoints: &[(TransportKind, String)],
     proxy_set: bool,
@@ -3744,8 +3830,9 @@ fn check_connector(
 
 #[cfg(adapter_browser)]
 /// A client none of whose transports the page or the application's shims
-/// can open is refused (Block 44, D12; centrifuge-js 63ed73e
-/// `_validateTransportConfig`, "no supported transport found").
+/// can open is refused (centrifuge-js 63ed73e `_validateTransportConfig`,
+/// "no supported transport found").
+// Block 44, D12.
 fn check_usable(
     endpoints: &[(TransportKind, String)],
     shims: &super::backend::shims::Shims,
@@ -3763,7 +3850,8 @@ fn check_usable(
     })
 }
 
-/// Whether `kind` is WebTransport (Block 48).
+/// Whether `kind` is WebTransport.
+// Block 48.
 #[cfg_attr(
     not(feature = "unstable"),
     allow(
@@ -3784,9 +3872,10 @@ fn is_webtransport(kind: TransportKind) -> bool {
 }
 
 #[cfg(all(adapter_tokio, feature = "unstable"))]
-/// Refuses WebTransport endpoints the native build cannot open: without
-/// the `unstable-webtransport` feature (Block 48, D1), or with a raw TLS
-/// configuration QUIC cannot use (D4).
+/// Refuses WebTransport endpoints the native build cannot open: without the
+/// `unstable-webtransport` feature, or with a raw TLS configuration QUIC
+/// cannot use.
+// Block 48, D1; D4.
 fn check_webtransport(
     endpoints: &[(TransportKind, String)],
     trust: &Trust,
@@ -3855,10 +3944,11 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
 }
 
 #[cfg(adapter_tokio)]
-/// A read-ahead limit of 0 could never let a message in (Block 15).
-/// Headers a transport sets itself, which an application may not set:
-/// proxy credentials go through `ProxyTarget` only, never through a tunnel
-/// to the server (Block 23, D7).
+/// A read-ahead limit of 0 could never let a message in. Headers a
+/// transport sets itself, which an application may not set: proxy
+/// credentials go through `ProxyTarget` only, never through a tunnel to the
+/// server.
+// Block 15; Block 23, D7.
 fn transport_header(name: &HeaderName) -> bool {
     use reqwest::header::{
         ACCEPT, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, PROXY_AUTHORIZATION,
@@ -3889,7 +3979,8 @@ fn header_error(name: &str, problem: &str) -> ClientError {
 }
 
 #[cfg(adapter_tokio)]
-/// The checked HTTP headers (Block 17).
+/// The checked HTTP headers.
+// Block 17.
 fn http_header_map(headers: &[(String, String)]) -> Result<HeaderMap, ClientError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
@@ -3905,7 +3996,8 @@ fn http_header_map(headers: &[(String, String)]) -> Result<HeaderMap, ClientErro
     Ok(map)
 }
 
-/// The checked emulated headers, by name (Block 17).
+/// The checked emulated headers, by name.
+// Block 17.
 fn emulated_header_map(
     headers: &[(String, String)],
 ) -> Result<std::collections::BTreeMap<String, String>, ClientError> {
@@ -3950,7 +4042,8 @@ fn header_value_valid(value: &str) -> bool {
 
 #[cfg(adapter_tokio)]
 /// Whom the client trusts, from its extra roots and raw configuration,
-/// checked (Block 22, D2 and D3).
+/// checked.
+// Block 22, D2 and D3.
 fn trust(
     roots: Vec<CertificateDer<'static>>,
     raw: Option<Arc<rustls::ClientConfig>>,
@@ -3990,11 +4083,11 @@ fn trust(
 
 #[cfg(adapter_tokio)]
 /// On Android before the verifier's setup (`unready`), refuses a client
-/// whose connections known now need the platform verifier (Block 24, D5):
-/// a `wss://` or `https://` endpoint, an `https://` emulation endpoint with
-/// an HTTP transport, an `https://` proxy for every endpoint. Any other TLS
-/// use fails its handshake instead; a raw configuration is the
-/// application's.
+/// whose connections known now need the platform verifier: a `wss://` or
+/// `https://` endpoint, an `https://` emulation endpoint with an HTTP
+/// transport, an `https://` proxy for every endpoint. Any other TLS use
+/// fails its handshake instead; a raw configuration is the application's.
+// Block 24, D5.
 fn android_gate(
     unready: bool,
     trust: &Trust,
@@ -4072,8 +4165,9 @@ async fn fetched(
 /// when `flush`), performed in order; then another take only while an
 /// action just performed fed the core an input (`perform` returns true).
 /// What `take` would find otherwise waits for the next turn. `into`, empty
-/// then, releases what the turn grew (Block 14): no later turn need come to
-/// release it (Codex, #271).
+/// then, releases what the turn grew: no later turn need come to release
+/// it.
+// Block 14; Codex, #271.
 fn perform_batches<S>(
     state: &mut S,
     into: &mut VecDeque<Action>,

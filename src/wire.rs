@@ -40,9 +40,11 @@ pub(crate) enum Method {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConnectRequest {
     pub(crate) token: String,
-    /// The application's connect data, if any (Block 17).
+    /// The application's connect data, if any.
+    // Block 17.
     pub(crate) data: Option<Vec<u8>>,
-    /// Emulated headers, by name (`ConnectRequest.headers`, Block 17).
+    /// Emulated headers, by name (`ConnectRequest.headers`).
+    // Block 17.
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) name: String,
     pub(crate) version: String,
@@ -80,15 +82,18 @@ pub(crate) struct SubscribeRequest {
     pub(crate) flag: i64,
     /// Asks the server for join and leave pushes.
     pub(crate) join_leave: bool,
-    /// Asks for publications as Fossil deltas (Block 19, D4), sent as
+    /// Asks for publications as Fossil deltas, sent as
     /// `SubscribeRequest.delta = "fossil"`.
+    // Block 19, D4.
     pub(crate) delta: bool,
     /// Asks the server to send only the publications it matches
-    /// (`SubscribeRequest.tf`, Block 35a).
+    /// (`SubscribeRequest.tf`).
+    // Block 35a.
     pub(crate) tag_filter: Option<crate::TagFilter>,
-    /// `type`: 0 for a stream subscription, 1, 2 or 3 for a map one (Block
-    /// 45, D2); with `phase`, `cursor` and `limit`, which a stream
-    /// subscription leaves at zero, so its frames are unchanged (D3).
+    /// `type`: 0 for a stream subscription, 1, 2 or 3 for a map one; with
+    /// `phase`, `cursor` and `limit`, which a stream subscription leaves at
+    /// zero, so its frames are unchanged.
+    // Block 45, D2; D3.
     pub(crate) kind: i32,
     /// The phase of a map subscription's load asked for: 2 state, 1 stream.
     pub(crate) phase: i32,
@@ -118,9 +123,9 @@ pub(crate) struct UnsubscribeRequest {
 }
 
 /// `SubRefreshRequest` of `client.proto`: a token refresh (`type` 0), or a
-/// shared poll subscription's track (1) or untrack (2) request (Block 47,
-/// D3). Zero and empty fields are not encoded, so a token refresh's frame is
-/// unchanged.
+/// shared poll subscription's track (1) or untrack (2) request. Zero and
+/// empty fields are not encoded, so a token refresh's frame is unchanged.
+// Block 47, D3.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubRefreshRequest {
     pub(crate) channel: String,
@@ -135,7 +140,8 @@ pub(crate) struct SubRefreshRequest {
 
 /// `TrackBatch` of `client.proto`: keys tracked under one signature, which
 /// covers exactly these keys in this order. Its `Debug` output redacts the
-/// signature, a credential (Block 47, D16).
+/// signature, a credential.
+// Block 47, D16.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TrackBatch {
     pub(crate) signature: Secret,
@@ -173,8 +179,9 @@ pub(crate) struct RpcRequest {
 }
 
 /// `PublishRequest` of `client.proto`: a regular publication, or a map
-/// publication setting or removing a key (Block 45, D3). Zero and empty
-/// fields are not encoded, so a regular publication's frame is unchanged.
+/// publication setting or removing a key. Zero and empty fields are not
+/// encoded, so a regular publication's frame is unchanged.
+// Block 45, D3.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PublishRequest {
     pub(crate) channel: String,
@@ -265,7 +272,8 @@ pub(crate) struct ConnectResult {
     /// The server-side subscriptions of the connection, by channel, in
     /// channel order.
     pub(crate) subs: BTreeMap<String, SubscribeResult>,
-    /// The data the server attached, exactly as received (Block 17).
+    /// The data the server attached, exactly as received.
+    // Block 17.
     pub(crate) data: Option<Vec<u8>>,
 }
 
@@ -292,8 +300,9 @@ pub(crate) struct RefreshResult {
     pub(crate) ttl: u32,
 }
 
-/// `SubRefreshResult` of `client.proto`: a `RefreshResult`'s fields, and the
-/// values a shared poll track request's reply carries (Block 47, D7).
+/// `SubRefreshResult` of `client.proto`: a `RefreshResult`'s fields, and
+/// the values a shared poll track request's reply carries.
+// Block 47, D7.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubRefreshResult {
     pub(crate) expires: bool,
@@ -327,21 +336,25 @@ pub(crate) struct SubscribeResult {
     pub(crate) was_recovering: bool,
     pub(crate) recovered: bool,
     /// Publications come as Fossil deltas until the next subscribe
-    /// (`SubscribeResult.delta`, Block 19, D4).
+    /// (`SubscribeResult.delta`).
+    // Block 19, D4.
     pub(crate) delta: bool,
     /// The numeric channel id later pushes may use instead of the channel;
-    /// 0 for none (`SubscribeResult.id`, Block 35b).
+    /// 0 for none (`SubscribeResult.id`).
+    // Block 35b.
     pub(crate) id: i64,
-    /// Map subscriptions (Block 45, D3): `type` 1 for every map kind, the
-    /// phase of the reply (0 live, 1 stream, 2 state), the cursor of the
-    /// next state page and the state entries.
+    /// Map subscriptions: `type` 1 for every map kind, the phase of the
+    /// reply (0 live, 1 stream, 2 state), the cursor of the next state page
+    /// and the state entries.
+    // Block 45, D3.
     pub(crate) kind: i32,
     pub(crate) phase: i32,
     pub(crate) cursor: String,
     pub(crate) state: Vec<Publication>,
     /// The interval, in milliseconds, of the debounce the server advises
     /// for the subscription's publishes; 0 or absent for none
-    /// (`SubscribeResult.publish_debounce`, Block 46, D2).
+    /// (`SubscribeResult.publish_debounce`).
+    // Block 46, D2.
     pub(crate) publish_debounce: u32,
 }
 
@@ -349,8 +362,9 @@ pub(crate) struct SubscribeResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Push {
     Disconnect(Disconnect),
-    /// `id` is the numeric channel id used instead of an empty `channel`,
-    /// 0 for none (`Push.id`, Block 35b); likewise for `Join` and `Leave`.
+    /// `id` is the numeric channel id used instead of an empty `channel`, 0
+    /// for none (`Push.id`); likewise for `Join` and `Leave`.
+    // Block 35b.
     Publication {
         channel: String,
         id: i64,

@@ -1,7 +1,8 @@
-//! Testing support for applications (Block 37), behind the `test-util`
-//! feature: constructors of the events and results the client yields, and,
-//! with the `tokio` feature natively, `Server`, an in-memory server double
-//! the real client runs against.
+//! Testing support for applications, behind the `test-util` feature:
+//! constructors of the events and results the client yields, and, with the
+//! `tokio` feature natively, `Server`, an in-memory server double the real
+//! client runs against.
+// Block 37.
 
 mod constructors;
 #[cfg(adapter_tokio)]

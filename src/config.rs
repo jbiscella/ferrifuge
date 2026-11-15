@@ -5,7 +5,7 @@ use std::time::Duration;
 /// Options of a client. Defaults follow centrifuge-js.
 ///
 /// Start from [`Config::default`], then set fields by assigning them or
-/// through the chainable setters named after them (Block 29):
+/// through the chainable setters named after them:
 ///
 /// ```
 /// use std::time::Duration;
@@ -19,14 +19,17 @@ use std::time::Duration;
 ///
 /// Its `Debug` output redacts the token and shows the connect data as its
 /// length.
+// Block 29.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Config {
-    /// Lower bound of the reconnect delay. Default 500 ms.
-    /// More than 0, or building the client fails (Block 53).
+    /// Lower bound of the reconnect delay. Default 500 ms. More than 0, or
+    /// building the client fails.
+    // Block 53.
     pub min_reconnect_delay: Duration,
-    /// Upper bound of the reconnect delay. Default 20 s.
-    /// More than 0, or building the client fails (Block 53).
+    /// Upper bound of the reconnect delay. Default 20 s. More than 0, or
+    /// building the client fails.
+    // Block 53.
     pub max_reconnect_delay: Duration,
     /// Time allowed for the connect reply once the transport is open, and
     /// for the reply to other commands; also for a call waiting for the
@@ -42,7 +45,8 @@ pub struct Config {
     ///
     /// [`handshake_timeout`]: Config::handshake_timeout
     ///
-    /// More than 0, or building the client fails (Block 53).
+    /// More than 0, or building the client fails.
+    // Block 53.
     pub timeout: Duration,
     /// Time allowed for opening a transport: DNS, TCP, the proxy
     /// handshake, TLS and the websocket upgrade, or, for `http_stream` and
@@ -50,7 +54,8 @@ pub struct Config {
     /// takes longer fails the attempt with "handshake timeout", and the
     /// next transport is tried. Default 5 s.
     ///
-    /// More than 0, or building the client fails (Block 53).
+    /// More than 0, or building the client fails.
+    // Block 53.
     pub handshake_timeout: Duration,
     /// Client name reported to the server, for analytics.
     pub name: String,
@@ -60,8 +65,8 @@ pub struct Config {
     pub token: String,
     /// Data sent with every connect command (`ConnectRequest.data`): raw
     /// JSON with the JSON protocol, any bytes with Protobuf. A `get_data`
-    /// callback, when set, replaces it on every attempt (Block 17).
-    /// Default none.
+    /// callback, when set, replaces it on every attempt. Default none.
+    // Block 17.
     pub data: Option<Vec<u8>>,
     /// How long past the server's ping interval to wait for data before
     /// considering the connection broken and reconnecting. Zero disables
@@ -72,13 +77,15 @@ pub struct Config {
     pub protocol: Protocol,
     /// Upper bound of a random delay added to the first reconnect after a
     /// connected client loses its connection, so that a fleet disconnected
-    /// at once does not reconnect at once (Block 14). Not applied to
-    /// `connect()`. Default 0: no added delay.
+    /// at once does not reconnect at once. Not applied to `connect()`.
+    /// Default 0: no added delay.
+    // Block 14.
     pub reconnect_jitter_window: Duration,
-    /// Most messages read from the server and not yet handled, waiting
-    /// for the application to take earlier events from its streams; once
+    /// Most messages read from the server and not yet handled, waiting for
+    /// the application to take earlier events from its streams; once
     /// reached, the client stops reading the connection, so the server's
-    /// slow-client handling acts (Block 15). At least 1. Default 256.
+    /// slow-client handling acts. At least 1. Default 256.
+    // Block 15.
     pub read_ahead_messages: usize,
     /// Most bytes of those messages; a single larger message is still
     /// read when none waits. At least 1. Default 4 MiB.
@@ -91,10 +98,11 @@ pub struct Config {
     pub write_queue_bytes: usize,
     /// Most bytes of a frame of several commands, as sent: a batch, or the
     /// subscribe commands of a connect reply, is split in order to stay
-    /// within it, and a single larger command goes alone (Block 18). Keep
-    /// it below the server's `websocket.message_size_limit` and its HTTP
-    /// streaming `max_request_body_size` (both 64 KiB by default in
-    /// Centrifugo). At least 1. Default 16 KiB.
+    /// within it, and a single larger command goes alone. Keep it below the
+    /// server's `websocket.message_size_limit` and its HTTP streaming
+    /// `max_request_body_size` (both 64 KiB by default in Centrifugo). At
+    /// least 1. Default 16 KiB.
+    // Block 18.
     pub batch_frame_bytes: usize,
     /// Largest message accepted from the server: a websocket message
     /// whole (with several replies in it, all of them) and each of its
@@ -116,7 +124,8 @@ pub struct Config {
     ///
     /// In the browser a websocket message is refused only once the browser
     /// has received it whole: the browser reads the connection, not the
-    /// client (Block 44, D6).
+    /// client.
+    // Block 44, D6.
     pub max_message_bytes: usize,
 }
 
@@ -168,8 +177,9 @@ impl Default for Config {
 }
 
 /// Chainable setters, one per field and named after it, as tungstenite's
-/// `WebSocketConfig` offers: each sets its field, as assigning it does
-/// (Block 29, D4). `build()` still checks the values.
+/// `WebSocketConfig` offers: each sets its field, as assigning it does.
+/// `build()` still checks the values.
+// Block 29, D4.
 impl Config {
     /// Sets [`min_reconnect_delay`](Config::min_reconnect_delay).
     #[must_use]

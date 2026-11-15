@@ -1,10 +1,10 @@
-//! Shared poll subscriptions (Block 47): a subscription on which the
-//! application names keys, each tracked under a signature its backend
-//! issued; the server polls the backend once per key for every client and
-//! sends each new version of a key's value. Behaviour follows centrifuge-js
-//! 63ed73e `SharedPollSubscription` and its track handlers
-//! (`src/subscription.ts:1109-2245`, `:2915-3084`), except where Block 47
-//! decides otherwise.
+//! Shared poll subscriptions: a subscription on which the application names
+//! keys, each tracked under a signature its backend issued; the server
+//! polls the backend once per key for every client and sends each new
+//! version of a key's value. Behaviour follows centrifuge-js 63ed73e
+//! `SharedPollSubscription` and its track handlers
+//! (`src/subscription.ts:1109-2245`, `:2915-3084`), except where noted.
+// Block 47.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -40,29 +40,35 @@ const DELTA_BASES_TOO_LARGE_REASON: &str = "shared poll delta bases too large";
 /// (`client.proto`; centrifuge `ErrorTokenExpired`).
 const SIGNATURE_EXPIRED: u32 = 109;
 
-/// The worst-case cost of a request, beyond its keys (Block 47, D7): the
-/// command's fields, the emulation envelope and its session and node.
+/// The worst-case cost of a request, beyond its keys: the command's fields,
+/// the emulation envelope and its session and node.
+// Block 47, D7.
 const FRAME_COST: usize = 256;
 /// The worst-case cost of a key in an untrack list, beyond its doubly
-/// escaped length: its quotes and separator (Block 47, D7).
+/// escaped length: its quotes and separator.
+// Block 47, D7.
 const UNTRACK_KEY_COST: usize = 6;
-/// The worst-case cost of a batch, beyond its signature and items (D7).
+/// The worst-case cost of a batch, beyond its signature and items.
+// D7.
 const BATCH_COST: usize = 40;
 /// The worst-case cost of an item, beyond its key's doubly escaped length:
-/// its fields and a version at `u64::MAX` (D7).
+/// its fields and a version at `u64::MAX`.
+// D7.
 const ITEM_COST: usize = 48;
 
 /// Reason of `connecting` 3 when a shared poll request's reply deadline
-/// passes over an emulated transport (D12).
+/// passes over an emulated transport.
+// D12.
 const REQUEST_TIMEOUT_REASON: &str = "shared poll request timeout";
 
-/// The message of error 12 for a batch over `max_track_frame_bytes` (D6).
+/// The message of error 12 for a batch over `max_track_frame_bytes`.
+// D6.
 const BATCH_TOO_LARGE: &str = "track batch over max_track_frame_bytes";
 
 /// What makes a shared poll subscription one: the keys it tracks, the
-/// signatures it holds for them, and the requests in flight (Block 47, D5).
-/// Boxed in the subscription, so a stream subscription pays a pointer (Block
-/// 14, "Marginal cost of a subscription").
+/// signatures it holds for them, and the requests in flight. Boxed in the
+/// subscription, so a stream subscription pays a pointer.
+// Block 47, D5; Block 14, "Marginal cost of a subscription".
 #[derive(Debug)]
 pub(in crate::sans_io) struct SharedPollFlow {
     signature_source: bool,
@@ -71,54 +77,67 @@ pub(in crate::sans_io) struct SharedPollFlow {
     /// last (0 for none) and its place in the order keys were tracked.
     tracked: HashMap<String, Tracked>,
     next_place: u64,
-    /// The signatures held: each covers exactly its keys, in order (D5).
+    /// The signatures held: each covers exactly its keys, in order.
+    // D5.
     library: Vec<Signed>,
     /// Counts the times the subscription became `subscribed`: a request of
     /// an earlier count was abandoned, and its answer changes nothing (I13).
     generation: u64,
-    /// Requests not sent yet: over an emulated transport each waits for
-    /// the reply of the one before (D12), and a request's frames each wait
-    /// for the reply of the frame before (D7).
+    /// Requests not sent yet: over an emulated transport each waits for the
+    /// reply of the one before, and a request's frames each wait for the
+    /// reply of the frame before.
+    // D12; D7.
     queue: VecDeque<Queued>,
-    /// Numbers the requests, each of one or more frames (D7).
+    /// Numbers the requests, each of one or more frames.
+    // D7.
     next_group: u64,
     /// The signature requests of this `subscribed` period awaiting the
-    /// callback (D6); those of an earlier one were abandoned.
+    /// callback; those of an earlier one were abandoned.
+    // D6.
     signing: Vec<signing::Signing>,
     /// A refresh was asked for while one ran that did not cover every key
-    /// tracked: it runs again once that one ends (D7).
+    /// tracked: it runs again once that one ends.
+    // D7.
     refresh_again: bool,
     /// The refresh deadlines and the retries scheduled in this `subscribed`
-    /// period (D7).
+    /// period.
+    // D7.
     timers: Vec<(SharedPollTimer, signing::Retry)>,
     /// Failures in a row of the refresh, of signing the keys without a
     /// signature, and replies with `expires` and no `ttl` in a row: the
-    /// steps of their backoffs (D7).
+    /// steps of their backoffs.
+    // D7.
     refresh_attempts: u32,
     sign_attempts: u32,
     grace_attempts: u32,
-    /// The owner runs the subscription's refresh timer (D7).
+    /// The owner runs the subscription's refresh timer.
+    // D7.
     refresh_armed: bool,
-    /// The worst-case cost of the longest signature received, at least
-    /// that of one of 128 bytes: chunks are sized for it (D6).
+    /// The worst-case cost of the longest signature received, at least that
+    /// of one of 128 bytes: chunks are sized for it.
+    // D6.
     signature_cost: usize,
     /// The epoch of the last subscribe reply, an absent one as `""`; `None`
-    /// until the first reply after `unsubscribed` (D5, D8).
+    /// until the first reply after `unsubscribed`.
+    // D5, D8.
     epoch: Option<String>,
-    /// Delta compression of the tracked keys' values (D10, D11).
+    /// Delta compression of the tracked keys' values.
+    // D10, D11.
     bases: Bases,
     /// Keys a track frame of this `subscribed` period carried in its
     /// `untrack` field, until a later track frame carrying the key is
-    /// accepted (D7, D10): the server applies an inline untrack after it
-    /// tracked the key, answered and sent its value (centrifuge
-    /// `handleTrack`), so a delta of the key may follow while the client,
-    /// which tracked it again, holds no base. Once a key is in no held
-    /// signature and its frame is answered, it goes in an untrack request
-    /// instead ([`Machine::untrack_inline_untracked`]), so the set holds
-    /// only keys of held signatures and of frames awaiting their reply.
+    /// accepted: the server applies an inline untrack after it tracked the
+    /// key, answered and sent its value (centrifuge `handleTrack`), so a
+    /// delta of the key may follow while the client, which tracked it
+    /// again, holds no base. Once a key is in no held signature and its
+    /// frame is answered, it goes in an untrack request instead
+    /// ([`Machine::untrack_inline_untracked`]), so the set holds only keys
+    /// of held signatures and of frames awaiting their reply.
+    // D7, D10.
     inline_untracked: HashSet<String>,
-    /// Track requests failed in a row with a temporary error, one below
-    /// 100 or no reply in time: the step of the replay's backoff (D7).
+    /// Track requests failed in a row with a temporary error, one below 100
+    /// or no reply in time: the step of the replay's backoff.
+    // D7.
     replay_attempts: u32,
 }
 
@@ -128,14 +147,16 @@ pub(in crate::sans_io) enum Purpose {
     /// Tracks keys: an application's call, a signature fetched for it, or
     /// the replay of a subscribe.
     Track,
-    /// Tracks the keys a signature refresh signed (D7).
+    /// Tracks the keys a signature refresh signed.
+    // D7.
     Refresh,
     /// Stops tracking keys.
     Untrack,
 }
 
-/// Whether delta is on, and what the delta bases of the tracked keys hold
-/// (D10, D11); each base is its key's (`Tracked::base`).
+/// Whether delta is on, and what the delta bases of the tracked keys hold;
+/// each base is its key's (`Tracked::base`).
+// D10, D11.
 #[derive(Debug)]
 struct Bases {
     /// The last subscribe reply turned delta on.
@@ -153,9 +174,11 @@ struct Queued {
     request: SubRefreshRequest,
     purpose: Purpose,
     keys: Vec<String>,
-    /// The request it is a frame of (D7).
+    /// The request it is a frame of.
+    // D7.
     group: u64,
-    /// Waits for the reply of the frame before it (D7).
+    /// Waits for the reply of the frame before it.
+    // D7.
     after_reply: bool,
 }
 
@@ -163,9 +186,10 @@ struct Queued {
 struct Tracked {
     version: u64,
     place: u64,
-    /// The value of the last publication handled for the key while delta
-    /// is on, which its next delta applies to (D10): it goes with the key,
-    /// so no base outlives its key.
+    /// The value of the last publication handled for the key while delta is
+    /// on, which its next delta applies to: it goes with the key, so no
+    /// base outlives its key.
+    // D10.
     base: Option<Box<[u8]>>,
 }
 
@@ -181,16 +205,19 @@ struct Signed {
 pub(in crate::sans_io) struct TrackCommand {
     subscription: SubscriptionId,
     /// Its channel: a subscription recreated there after a removal waits
-    /// for it too (D12).
+    /// for it too.
+    // D12.
     channel: String,
     generation: u64,
     purpose: Purpose,
     keys: Vec<String>,
     /// The keys of its `untrack` field.
     untracked: Vec<String>,
-    /// The request it is a frame of (D7).
+    /// The request it is a frame of.
+    // D7.
     group: u64,
-    /// Its reply deadline, until its reply is read (D7, D12).
+    /// Its reply deadline, until its reply is read.
+    // D7, D12.
     timer: Option<SharedPollTimer>,
 }
 
@@ -201,7 +228,8 @@ impl TrackCommand {
     }
 }
 
-/// What a publication of a shared poll subscription gives (D9).
+/// What a publication of a shared poll subscription gives.
+// D9.
 enum Item {
     /// Nothing: dropped.
     Dropped,
@@ -214,9 +242,11 @@ enum Item {
 
 /// Why a publication ends `subscribed`.
 enum Failure {
-    /// A delta that cannot be applied (Block 19, D3, D8).
+    /// A delta that cannot be applied.
+    // Block 19, D3, D8.
     Delta(DeltaError),
-    /// The delta bases would pass `max_delta_bases_bytes` (D11).
+    /// The delta bases would pass `max_delta_bases_bytes`.
+    // D11.
     BasesTooLarge,
 }
 
@@ -251,7 +281,8 @@ impl SharedPollFlow {
     }
 
     /// Tracks `key` at `version`, or keeps the higher of it and the version
-    /// held (D6); true when it was not tracked.
+    /// held; true when it was not tracked.
+    // D6.
     fn track(&mut self, key: &str, version: u64) -> bool {
         if let Some(tracked) = self.tracked.get_mut(key) {
             tracked.version = tracked.version.max(version);
@@ -270,9 +301,9 @@ impl SharedPollFlow {
         true
     }
 
-    /// Stops tracking `key`, its delta base going with it (D10); true when
-    /// it was tracked. A signature none of whose keys is tracked is dropped
-    /// (D6).
+    /// Stops tracking `key`, its delta base going with it; true when it was
+    /// tracked. A signature none of whose keys is tracked is dropped.
+    // D10; D6.
     fn untrack(&mut self, key: &str) -> bool {
         let Some(tracked) = self.tracked.remove(key) else {
             return false;
@@ -315,7 +346,8 @@ impl SharedPollFlow {
     }
 
     /// The batch of `signed` at the versions held, 0 for a key no longer
-    /// tracked (D8).
+    /// tracked.
+    // D8.
     fn batch(&self, signed: &Signed) -> TrackBatch {
         TrackBatch {
             signature: signed.signature.clone(),
@@ -330,10 +362,11 @@ impl SharedPollFlow {
         }
     }
 
-    /// `unsubscribe()` of subscription `id`: the keys, signatures and
-    /// epoch go with it, so the next subscribe starts cold (D5,
-    /// `set_unsubscribed`); what it asked for and scheduled ends. The
-    /// actions cancelling its timers.
+    /// `unsubscribe()` of subscription `id`: the keys, signatures and epoch
+    /// go with it, so the next subscribe starts cold (`set_unsubscribed`);
+    /// what it asked for and scheduled ends. The actions cancelling its
+    /// timers.
+    // D5.
     #[must_use]
     pub(in crate::sans_io) fn forget(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.tracked.clear();
@@ -343,10 +376,11 @@ impl SharedPollFlow {
         self.end_period(id)
     }
 
-    /// The epoch of a subscribe reply, an absent one `""` (D8): when it
-    /// differs from the one kept, every version held goes to 0, as the
-    /// server's versions restart lower; with none kept, the first subscribe
-    /// after `unsubscribed`, the versions given stay.
+    /// The epoch of a subscribe reply, an absent one `""`: when it differs
+    /// from the one kept, every version held goes to 0, as the server's
+    /// versions restart lower; with none kept, the first subscribe after
+    /// `unsubscribed`, the versions given stay.
+    // D8.
     fn new_epoch(&mut self, epoch: String) {
         if self.epoch.as_ref().is_some_and(|kept| *kept != epoch) {
             for tracked in self.tracked.values_mut() {
@@ -357,8 +391,9 @@ impl SharedPollFlow {
     }
 
     /// Subscription `id` became `subscribed` again: what an earlier period
-    /// asked for or scheduled is abandoned, and the retries start over (D7,
-    /// I13). The actions cancelling its timers.
+    /// asked for or scheduled is abandoned, and the retries start over
+    /// (I13). The actions cancelling its timers.
+    // D7.
     #[must_use]
     fn restart(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.generation += 1;
@@ -371,11 +406,12 @@ impl SharedPollFlow {
     }
 
     /// Subscription `id` left `subscribed`: its refresh and retry timers
-    /// stop, and the retries and the refresh guard start over (D7); every
-    /// delta base goes, as the server sends each key whole after the next
-    /// subscribe (D10). A request to the callback in flight stays until the
-    /// next subscribe, its answer then changing nothing (I13). The actions
+    /// stop, and the retries and the refresh guard start over; every delta
+    /// base goes, as the server sends each key whole after the next
+    /// subscribe. A request to the callback in flight stays until the next
+    /// subscribe, its answer then changing nothing (I13). The actions
     /// cancelling the timers.
+    // D7; D10.
     #[must_use]
     pub(in crate::sans_io) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
         for tracked in self.tracked.values_mut() {
@@ -404,15 +440,17 @@ impl SharedPollFlow {
         self.queue.clear();
     }
 
-    /// The worst-case cost of a track request of `batches` on `channel`
-    /// (D7): JSON inside an emulation request, each version at `u64::MAX`.
+    /// The worst-case cost of a track request of `batches` on `channel`:
+    /// JSON inside an emulation request, each version at `u64::MAX`.
+    // D7.
     fn track_cost<'a>(channel: &str, batches: impl IntoIterator<Item = &'a TrackBatch>) -> usize {
         FRAME_COST
             + escaped_twice(channel)
             + batches.into_iter().map(Self::batch_cost).sum::<usize>()
     }
 
-    /// The worst-case cost of `batch` in a track request (D7).
+    /// The worst-case cost of `batch` in a track request.
+    // D7.
     fn batch_cost(batch: &TrackBatch) -> usize {
         BATCH_COST
             + escaped_twice(&batch.signature.0)
@@ -425,13 +463,13 @@ impl SharedPollFlow {
 
     /// `batches` grouped in frames, in order, each within `budget` by the
     /// worst-case cost, with the keys of `untracked` its batches carry in
-    /// its `untrack` field (D7, D8): a batch goes with its untracks to the
-    /// frame being filled when both fit, else it starts the next frame,
-    /// taking as many of its untracks as the budget lets; the others are
-    /// untracked once that frame is answered, before the next frame (the
-    /// stale rule of [`Machine::track_command_answered`]). A batch too
-    /// large for any
+    /// its `untrack` field: a batch goes with its untracks to the frame
+    /// being filled when both fit, else it starts the next frame, taking as
+    /// many of its untracks as the budget lets; the others are untracked
+    /// once that frame is answered, before the next frame (the stale rule
+    /// of [`Machine::track_command_answered`]). A batch too large for any
     /// frame goes alone.
+    // D7, D8.
     fn track_frames(
         channel: &str,
         batches: Vec<TrackBatch>,
@@ -481,8 +519,9 @@ impl SharedPollFlow {
         frames
     }
 
-    /// The untrack requests of `keys` on `channel`, each within `budget`
-    /// by the worst-case cost (D7); a key too large for any goes alone.
+    /// The untrack requests of `keys` on `channel`, each within `budget` by
+    /// the worst-case cost; a key too large for any goes alone.
+    // D7.
     fn untrack_requests(channel: &str, keys: Vec<String>, budget: usize) -> Vec<Vec<String>> {
         let base = FRAME_COST + escaped_twice(channel);
         let mut requests = Vec::new();
@@ -505,13 +544,15 @@ impl SharedPollFlow {
 }
 
 /// The length of `text` escaped as a JSON string, quotes included, then
-/// escaped again: inside the JSON string of an emulation request (Block 26).
+/// escaped again: inside the JSON string of an emulation request.
+// Block 26.
 fn escaped_twice(text: &str) -> usize {
     let once = serde_json::to_string(text).unwrap_or_default();
     serde_json::to_string(&once).map_or(0, |twice| twice.len())
 }
 
-/// The worst-case cost of `key` in an untrack list (D7).
+/// The worst-case cost of `key` in an untrack list.
+// D7.
 fn untrack_key_cost(key: &str) -> usize {
     escaped_twice(key) + UNTRACK_KEY_COST
 }
@@ -526,7 +567,7 @@ fn distinct(keys: Vec<String>) -> Vec<String> {
 
 impl Machine {
     /// Adds a shared poll subscription to `channel`, unsubscribed, to the
-    /// registry (Block 47, D3), which it shares with the other kinds.
+    /// registry, which it shares with the other kinds.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
@@ -536,6 +577,7 @@ impl Machine {
     ///
     /// When the registry holds a subscription to `channel` already, of any
     /// kind.
+    // Block 47, D3.
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn add_shared_poll_subscription(
         &mut self,
@@ -601,7 +643,8 @@ impl Machine {
     }
 
     /// An application call or a callback answer of a shared poll
-    /// subscription (Block 47, D6).
+    /// subscription.
+    // Block 47, D6.
     pub(in crate::sans_io) fn shared_poll_input(&mut self, input: super::super::Input) {
         use super::super::Input;
         match input {
@@ -621,9 +664,10 @@ impl Machine {
         }
     }
 
-    /// `track(keys)` (D6): each key kept at the version held, 0 for a new
-    /// one; signed now when subscribed, else by the replay of the next
+    /// `track(keys)`: each key kept at the version held, 0 for a new one;
+    /// signed now when subscribed, else by the replay of the next
     /// subscribe.
+    // D6.
     fn track_keys(&mut self, id: SubscriptionId, keys: Vec<String>) {
         let keys = distinct(keys);
         let Some(flow) = self.shared_poll_flow(id) else {
@@ -645,9 +689,10 @@ impl Machine {
         }
     }
 
-    /// `track_with_signature(items, signature)` (D6): each key at the higher
-    /// of its version and the one held, the signature kept for the replay,
-    /// and the batch sent as given when subscribed.
+    /// `track_with_signature(items, signature)`: each key at the higher of
+    /// its version and the one held, the signature kept for the replay, and
+    /// the batch sent as given when subscribed.
+    // D6.
     fn track_keys_with_signature(
         &mut self,
         id: SubscriptionId,
@@ -689,9 +734,10 @@ impl Machine {
         }
     }
 
-    /// A batch over the frame budget (D6): error 12 of kind `Track`, its
-    /// keys untracked, on the server too when they were tracked, each with
-    /// a removal.
+    /// A batch over the frame budget: error 12 of kind `Track`, its keys
+    /// untracked, on the server too when they were tracked, each with a
+    /// removal.
+    // D6.
     fn batch_refused(&mut self, id: SubscriptionId, keys: Vec<String>) {
         self.emit_shared_poll_error(
             id,
@@ -716,8 +762,9 @@ impl Machine {
         }
     }
 
-    /// `untrack(keys)` (D6): untracked at once, and on the server when
+    /// `untrack(keys)`: untracked at once, and on the server when
     /// subscribed; an empty key set makes no request (`untrack_requests`).
+    // D6.
     fn untrack_keys(&mut self, id: SubscriptionId, keys: Vec<String>) {
         let keys = distinct(keys);
         let Some(flow) = self.shared_poll_flow(id) else {
@@ -731,11 +778,12 @@ impl Machine {
         }
     }
 
-    /// Queues a track request of `batches` (D7), in frames within the frame
+    /// Queues a track request of `batches`, in frames within the frame
     /// budget, each after the reply to the one before. A key of `untracked`
     /// goes in the `untrack` field of the frame carrying its batch, as the
     /// budget lets; the others are untracked once a reply shows them
     /// tracked (the stale rule of [`Self::track_command_answered`]).
+    // D7.
     fn send_track(
         &mut self,
         id: SubscriptionId,
@@ -769,15 +817,17 @@ impl Machine {
         self.pump_requests(id);
     }
 
-    /// Queues untrack requests of `keys`, as many as the frame budget needs
-    /// (D7).
+    /// Queues untrack requests of `keys`, as many as the frame budget
+    /// needs.
+    // D7.
     fn send_untrack(&mut self, id: SubscriptionId, keys: Vec<String>) {
         self.send_untrack_ahead_of(id, keys, None);
     }
 
     /// Queues untrack requests of `keys` as [`Self::send_untrack`] does,
     /// ahead of the queued frames of request `group` when given, so that
-    /// they go before its next frame (D7).
+    /// they go before its next frame.
+    // D7.
     fn send_untrack_ahead_of(&mut self, id: SubscriptionId, keys: Vec<String>, group: Option<u64>) {
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
             return;
@@ -857,8 +907,9 @@ impl Machine {
     }
 
     /// Sends what the queue of `id` lets go: over an emulated transport one
-    /// request at a time (D12); a frame after the reply to the one before
-    /// (D7); a request of an earlier subscription is dropped.
+    /// request at a time; a frame after the reply to the one before; a
+    /// request of an earlier subscription is dropped.
+    // D12; D7.
     fn pump_requests(&mut self, id: SubscriptionId) {
         loop {
             if !self.subscribed_now(id) {
@@ -895,7 +946,8 @@ impl Machine {
     }
 
     /// Sends `queued` for subscription `id`, one of the client's own
-    /// commands, with a reply deadline of `Config::timeout` (D7, D12).
+    /// commands, with a reply deadline of `Config::timeout`.
+    // D7, D12.
     fn send_track_command(&mut self, id: SubscriptionId, queued: Queued) {
         let Some(transport) = self.transport.filter(|_| self.state == State::Connected) else {
             return;
@@ -948,7 +1000,8 @@ impl Machine {
             .push(Action::SetSharedPollTimer(timer, self.config.timeout));
     }
 
-    /// A number for a new timer, never reused (D3).
+    /// A number for a new timer, never reused.
+    // D3.
     fn new_shared_poll_timer(&mut self) -> SharedPollTimer {
         let timer = SharedPollTimer(self.subscriptions.next_track_timer);
         self.subscriptions.next_track_timer += 1;
@@ -956,10 +1009,11 @@ impl Machine {
     }
 
     /// A timer fired: a track or untrack request's reply deadline, or a
-    /// refresh or a retry of a subscription (D7). Over an emulated
-    /// transport, where whether the keys are tracked is unknown, a deadline
-    /// passing makes the client reconnect with `connecting` 3 (D12); over
-    /// websocket it fails the request with error 1, as a reply would.
+    /// refresh or a retry of a subscription. Over an emulated transport,
+    /// where whether the keys are tracked is unknown, a deadline passing
+    /// makes the client reconnect with `connecting` 3; over websocket it
+    /// fails the request with error 1, as a reply would.
+    // D7; D12.
     fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
         let command = self
             .subscriptions
@@ -993,8 +1047,9 @@ impl Machine {
     }
 
     /// The reply to track or untrack request `command` was read: its
-    /// deadline stops, also when the reply waits behind events not taken
-    /// (Block 15), and a firing already on its way is ignored.
+    /// deadline stops, also when the reply waits behind events not taken,
+    /// and a firing already on its way is ignored.
+    // Block 15.
     pub(in crate::sans_io) fn track_command_read(&mut self, command: u32) {
         if let Some(timer) = self
             .subscriptions
@@ -1008,7 +1063,8 @@ impl Machine {
 
     /// Whether the next subscribe of `id` waits for the requests in flight
     /// on its channel, of `id` or of a subscription removed from it: over
-    /// an emulated transport they could be handled after it (D12).
+    /// an emulated transport they could be handled after it.
+    // D12.
     pub(in crate::sans_io) fn shared_poll_requests_pending(&self, id: SubscriptionId) -> bool {
         let Some(channel) = self.subscription_channel(id) else {
             return false;
@@ -1025,8 +1081,9 @@ impl Machine {
     }
 
     /// The subscribe command `command_id` of shared poll subscription `id`,
-    /// carrying `data` (D4): `type` 4, the token, the data and, when asked
-    /// for, delta (D10), and nothing else.
+    /// carrying `data`: `type` 4, the token, the data and, when asked for,
+    /// delta, and nothing else.
+    // D4; D10.
     pub(super) fn shared_poll_subscribe_request(
         &mut self,
         id: SubscriptionId,
@@ -1048,7 +1105,8 @@ impl Machine {
     }
 
     /// The reply to the current subscribe command of shared poll
-    /// subscription `id` (D4).
+    /// subscription `id`.
+    // D4.
     pub(super) fn shared_poll_subscribe_reply(&mut self, id: SubscriptionId, reply: Reply) {
         let result = match (reply.error, reply.result) {
             (Some(error), _) => return self.subscribe_error(id, &error),
@@ -1103,11 +1161,12 @@ impl Machine {
         self.subscription_calls_subscribed(id);
     }
 
-    /// Tracks again after a subscribe (D8): one track request with every
+    /// Tracks again after a subscribe: one track request with every
     /// signature held, at the versions held, 0 for a key since untracked,
     /// which goes in the `untrack` field of the frame carrying it; then the
     /// keys no signature covers, signed by the callback. Also the retry of
-    /// a track request that failed for a while (D7).
+    /// a track request that failed for a while.
+    // D8; D7.
     fn shared_poll_replay(&mut self, id: SubscriptionId) {
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
@@ -1135,9 +1194,10 @@ impl Machine {
         self.subscriptions.track_commands.contains_key(&command)
     }
 
-    /// The reply to a track or untrack request (D7). One made before the
+    /// The reply to a track or untrack request. One made before the
     /// subscription last became `subscribed`, or while it is not, changes
     /// nothing (I13).
+    // D7.
     pub(super) fn track_command_reply(&mut self, reply: Reply) {
         let Some(command) = self.subscriptions.track_commands.remove(&reply.id) else {
             return;
@@ -1174,20 +1234,22 @@ impl Machine {
         self.requests_settled(id, &channel);
     }
 
-    /// At each current reply, the inline untracks of keys no held signature
-    /// covers, whose frames are answered, go in an untrack request (D10),
-    /// which bounds them (Codex on #221). Safe: such a key is not tracked, so a publication of
-    /// it is dropped (D9) until it is tracked again, and while the request
-    /// awaits its reply a delta of the key is dropped as for any untrack
-    /// request. Its reply comes after the server applied the inline untrack
-    /// and wrote what that frame's tracking sent: centrifuge 7ac037196c95
-    /// `handleUntrack` waits for the track requests of the channel in
-    /// progress (`waitTrackRequests`), and a track request is in progress
-    /// from before its reply is written (`startTrackRequestLocked`) until
-    /// after its inline untrack (step 8), so the frame's reply having been
-    /// read before the request was sent, the request is answered after
-    /// step 8. Not for a key a frame awaiting its reply carries inline: an
-    /// untrack handled before that frame would prove nothing.
+    /// At each current reply, the inline untracks of keys no held
+    /// signature covers, whose frames are answered, go in an untrack
+    /// request, which bounds them. Safe: such a key is not tracked, so a
+    /// publication of it is dropped until it is tracked again, and while
+    /// the request awaits its reply a delta of the key is dropped as for
+    /// any untrack request. Its reply comes after the server applied the
+    /// inline untrack and wrote what that frame's tracking sent:
+    /// centrifuge 7ac037196c95 `handleUntrack` waits for the track
+    /// requests of the channel in progress (`waitTrackRequests`), and a
+    /// track request is in progress from before its reply is written
+    /// (`startTrackRequestLocked`) until after its inline untrack (step
+    /// 8), so the frame's reply having been read before the request was
+    /// sent, the request is answered after step 8. Not for a key a frame
+    /// awaiting its reply carries inline: an untrack handled before that
+    /// frame would prove nothing.
+    // D10; Codex on #221; D9.
     fn untrack_inline_untracked(&mut self, id: SubscriptionId) {
         if !self.subscribed_now(id) {
             return;
@@ -1227,7 +1289,8 @@ impl Machine {
         self.send_untrack(id, gone);
     }
 
-    /// The reply to a current track or untrack request (D7).
+    /// The reply to a current track or untrack request.
+    // D7.
     fn track_command_answered(&mut self, command: TrackCommand, reply: Reply) {
         let id = command.subscription;
         if let Some(error) = reply.error {
@@ -1283,10 +1346,11 @@ impl Machine {
         self.track_accepted(&command, result.expires, result.ttl);
     }
 
-    /// A track request was accepted (D7): its keys no longer tracked, as
-    /// one removed meanwhile, are untracked on the server too (the stale
-    /// rule); `expires` schedules the refresh; an accepted refresh starts
-    /// its backoff over.
+    /// A track request was accepted: its keys no longer tracked, as one
+    /// removed meanwhile, are untracked on the server too (the stale rule);
+    /// `expires` schedules the refresh; an accepted refresh starts its
+    /// backoff over.
+    // D7.
     fn track_accepted(&mut self, command: &TrackCommand, expires: bool, ttl: u32) {
         let id = command.subscription;
         let Some(flow) = self.shared_poll_flow(id) else {
@@ -1324,7 +1388,8 @@ impl Machine {
 
     /// A request of `id` on `channel` was settled: the queue goes on, and a
     /// subscribe waiting for the requests in flight on the channel follows
-    /// once none is left (D12).
+    /// once none is left.
+    // D12.
     fn requests_settled(&mut self, id: SubscriptionId, channel: &str) {
         self.pump_requests(id);
         if !self.requests_on(channel) {
@@ -1334,9 +1399,10 @@ impl Machine {
 
     /// The server refused track or untrack request `command` as too large
     /// (an emulation request answered with HTTP 413); whether it was one.
-    /// As any `sub_refresh` (Block 8): the subscription ends with
-    /// `unsubscribed` 3, after an unsubscribe command, since the same
-    /// request would be refused again.
+    /// As any `sub_refresh`: the subscription ends with `unsubscribed` 3,
+    /// after an unsubscribe command, since the same request would be
+    /// refused again.
+    // Block 8.
     pub(in crate::sans_io) fn track_command_too_large(&mut self, command: u32) -> bool {
         let Some(command) = self.subscriptions.track_commands.remove(&command) else {
             return false;
@@ -1364,8 +1430,9 @@ impl Machine {
         true
     }
 
-    /// The server refused a track request for good (D7): its keys are
-    /// untracked, on the server too, each still tracked giving a removal.
+    /// The server refused a track request for good: its keys are untracked,
+    /// on the server too, each still tracked giving a removal.
+    // D7.
     fn track_refused(&mut self, id: SubscriptionId, keys: Vec<String>) {
         let keys = distinct(keys);
         let Some(flow) = self.shared_poll_flow(id) else {
@@ -1383,13 +1450,13 @@ impl Machine {
     }
 
     /// Publications of shared poll subscription `id` in one message, in
-    /// order (D9): a version is compared with what the earlier ones would
-    /// set once taken. All are handled before any is emitted: a delta that
+    /// order: a version is compared with what the earlier ones would set
+    /// once taken. All are handled before any is emitted: a delta that
     /// fails, the bases passing their bound or the values together passing
-    /// the inbound limit (Block 19, D6) end `subscribed`, which would
-    /// withdraw an update of this message that the next message would wait
-    /// for (Block 15); only the removals before it are emitted, as no
-    /// removal is withdrawn.
+    /// the inbound limit end `subscribed`, which would withdraw an update
+    /// of this message that the next message would wait for; only the
+    /// removals before it are emitted, as no removal is withdrawn.
+    // D9; Block 19, D6; Block 15.
     fn shared_poll_publications(&mut self, id: SubscriptionId, publications: Vec<Publication>) {
         let limit = self.config.max_message_bytes;
         let mut handled = HashMap::new();
@@ -1426,15 +1493,17 @@ impl Machine {
         }
     }
 
-    /// A publication pushed to shared poll subscription `id` (D9).
+    /// A publication pushed to shared poll subscription `id`.
+    // D9.
     pub(super) fn shared_poll_publication(&mut self, id: SubscriptionId, publication: Publication) {
         self.shared_poll_publications(id, vec![publication]);
     }
 
-    /// Handles a publication of a tracked key (D9, D10), or drops it: the
-    /// key not tracked, a version not newer than the one held or handled in
-    /// the same message, or a delta with no base while an untrack of its
-    /// key is unanswered. A removal ends its key here.
+    /// Handles a publication of a tracked key, or drops it: the key not
+    /// tracked, a version not newer than the one held or handled in the
+    /// same message, or a delta with no base while an untrack of its key is
+    /// unanswered. A removal ends its key here.
+    // D9, D10.
     fn shared_poll_item(
         &mut self,
         id: SubscriptionId,
@@ -1514,11 +1583,12 @@ impl Machine {
         Item::Update(SharedPollUpdate::from(publication), taken)
     }
 
-    /// A delta for `key` of `id`, which has no base (D10): dropped while an
+    /// A delta for `key` of `id`, which has no base: dropped while an
     /// untrack request of the key awaits its reply, queued or sent, or an
     /// inline untrack of the key stands, since the server may have sent it
     /// before applying the untrack, the key tracked again since; any other
-    /// is Block 19's failure.
+    /// is a delta failure.
+    // D10; Block 19.
     fn delta_without_base(&self, id: SubscriptionId, key: &str) -> Item {
         let Some(flow) = self
             .subscriptions
@@ -1547,10 +1617,11 @@ impl Machine {
         }
     }
 
-    /// Emits `update` of `id`. Taking it moves its key's version to `taken`
-    /// (D5); a removal is never withdrawn (D9); `publication` counts it as
-    /// a publication delivered once taken, which a removal the client made
-    /// itself is not (D13).
+    /// Emits `update` of `id`. Taking it moves its key's version to
+    /// `taken`; a removal is never withdrawn; `publication` counts it as a
+    /// publication delivered once taken, which a removal the client made
+    /// itself is not.
+    // D5; D9; D13.
     fn emit_shared_poll_update(
         &mut self,
         id: SubscriptionId,
@@ -1570,8 +1641,9 @@ impl Machine {
         ));
     }
 
-    /// The application took an update of `key` at `version` (D5): the
-    /// version held moves to it, unless the key is no longer tracked.
+    /// The application took an update of `key` at `version`: the version
+    /// held moves to it, unless the key is no longer tracked.
+    // D5.
     pub(in crate::sans_io) fn shared_poll_version_taken(
         &mut self,
         id: SubscriptionId,
@@ -1610,8 +1682,8 @@ impl Machine {
     }
 
     /// The handler of an update that moved `key` from `before` to `after`
-    /// panicked (Block 41 D4, Block 47 D15): the version goes back unless
-    /// another step moved it since.
+    /// panicked: the version goes back unless another step moved it since.
+    // Block 41 D4, Block 47 D15.
     pub(in crate::sans_io) fn shared_poll_version_voided(
         &mut self,
         id: SubscriptionId,

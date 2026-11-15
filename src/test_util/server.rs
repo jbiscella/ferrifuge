@@ -1,6 +1,7 @@
-//! An in-memory server double for an application's tests (Block 37c, D5):
-//! the real client, driver and core run against it over an in-memory
-//! duplex and a real websocket handshake, with no socket opened.
+//! An in-memory server double for an application's tests: the real client,
+//! driver and core run against it over an in-memory duplex and a real
+//! websocket handshake, with no socket opened.
+// Block 37c, D5.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Write as _};
@@ -117,9 +118,9 @@ fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A command the double read, decoded the same way from JSON and
-/// Protobuf. Its `Debug` shows data as its length, and the token only as
-/// set or not (Block 21).
+/// A command the double read, decoded the same way from JSON and Protobuf.
+/// Its `Debug` shows data as its length, and the token only as set or not.
+// Block 21.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Command {
@@ -187,7 +188,8 @@ pub enum Command {
     },
 }
 
-/// Data as its length (Block 21).
+/// Data as its length.
+// Block 21.
 struct Length<'a>(&'a [u8]);
 
 impl fmt::Debug for Length<'_> {
@@ -335,8 +337,9 @@ impl Server {
     ///
     /// # Panics
     ///
-    /// When `code` is above `u16::MAX`, the bound of a websocket close code
-    /// (Block 54, D6).
+    /// When `code` is above `u16::MAX`, the bound of a websocket close
+    /// code.
+    // Block 54, D6.
     pub fn disconnect(&self, code: u32, reason: &str) {
         let code = u16::try_from(code)
             .unwrap_or_else(|_| panic!("close code {code} is above u16::MAX, a websocket's bound"));
@@ -506,9 +509,10 @@ fn handle_frame(shared: &Mutex<State>, id: u64, message: Message) {
 
 /// Marks, inside a reply's `Value`, data that [`text`] writes verbatim: as
 /// a `Value` it would lose its key order and its whitespace, where
-/// Centrifugo and the crate's codec keep its bytes (Codex on #161). The
-/// mark holds a random nonce of the process, so that no string of the
-/// application's, which `serde_json` writes escaped, can pass for one.
+/// Centrifugo and the crate's codec keep its bytes. The mark holds a random
+/// nonce of the process, so that no string of the application's, which
+/// `serde_json` writes escaped, can pass for one.
+// Codex on #161.
 const RAW: char = '\u{1}';
 /// The mark's ends as `serde_json` writes them, quotes included.
 const RAW_OPEN: &str = "\"\\u0001";
@@ -557,8 +561,8 @@ fn json_data(data: &[u8]) -> Value {
 }
 
 /// The raw `data` of the `method` object of the JSON command `raw`, as the
-/// client wrote it: none when it is missing, `null` kept as such (Codex on
-/// #161).
+/// client wrote it: none when it is missing, `null` kept as such.
+// Codex on #161.
 fn data_of(raw: &str, method: &str) -> Option<Vec<u8>> {
     let command: HashMap<&str, &RawValue> = serde_json::from_str(raw).ok()?;
     let fields: HashMap<&str, &RawValue> = serde_json::from_str(command.get(method)?.get()).ok()?;
@@ -1070,7 +1074,8 @@ enum Handled {
     /// frame.
     Answered(bool),
     /// An RPC, which the application's handler answers with the state
-    /// unlocked: the handler may use the double (Codex on #161).
+    /// unlocked: the handler may use the double.
+    // Codex on #161.
     Rpc {
         handler: Option<Rpc>,
         method: String,

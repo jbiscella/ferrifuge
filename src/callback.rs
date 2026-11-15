@@ -1,7 +1,8 @@
-//! The contexts the application's callbacks are given (Block 54, D10): one
+//! The contexts the application's callbacks are given: one
 //! `#[non_exhaustive]` struct each, so that a later argument becomes a
 //! field, as centrifuge-js's `ConnectionTokenContext` and centrifuge-go's
 //! `ConnectionTokenEvent` are.
+// Block 54, D10.
 
 /// What [`ClientBuilder::get_token`](crate::ClientBuilder::get_token) is
 /// given: nothing yet.

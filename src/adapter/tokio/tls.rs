@@ -1,5 +1,6 @@
-//! TLS settings of the tokio adapter: the build's crypto provider
-//! (Block 6) and how servers are verified (Block 22), chosen in one place.
+//! TLS settings of the tokio adapter: the build's crypto provider and how
+//! servers are verified, chosen in one place.
+// Block 6; Block 22.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -15,8 +16,9 @@ compile_error!(
     "the tokio adapter needs a TLS crypto provider: enable the `ring` (default), `aws-lc-rs` or `fips` feature"
 );
 
-/// The crypto provider chosen by the build's features (Block 6). Features
-/// are additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
+/// The crypto provider chosen by the build's features. Features are
+/// additive, so the strongest enabled one wins: fips > aws-lc-rs > ring.
+// Block 6.
 #[cfg(feature = "fips")]
 pub(in crate::adapter) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::default_fips_provider()
@@ -32,7 +34,8 @@ pub(in crate::adapter) fn crypto_provider() -> CryptoProvider {
     rustls::crypto::ring::default_provider()
 }
 
-/// Whom a client trusts (Block 22).
+/// Whom a client trusts.
+// Block 22.
 #[derive(Clone, Default)]
 pub(crate) enum Trust {
     /// The platform's roots, or its verifier.
@@ -86,7 +89,8 @@ impl Tls {
 
     /// [`Tls::config`], and whether it is kept: a read of the platform's
     /// root certificates that reported errors serves the attempt but is
-    /// read again by the next one (Block 6, review item C7).
+    /// read again by the next one.
+    // Block 6, review item C7.
     pub(in crate::adapter) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
         match &self.trust {
             Trust::Platform => platform_setup(),
@@ -110,8 +114,8 @@ pub(in crate::adapter) fn plain_tls_config() -> ClientConfig {
 }
 
 /// A copy of the application's configuration offering HTTP/1.1 only, the
-/// one protocol of the transports: one offering `h2` would fail them
-/// (Block 22, D3).
+/// one protocol of the transports: one offering `h2` would fail them.
+// Block 22, D3.
 fn http1_only(raw: &ClientConfig) -> ClientConfig {
     let mut config = raw.clone();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -128,8 +132,8 @@ fn platform_setup() -> Result<(Arc<ClientConfig>, bool), String> {
     CONFIG.get(|| verified_config(&[]).map(|(config, keep)| (Arc::new(config), keep)))
 }
 
-/// How servers are verified in this build and on this platform (Block 22,
-/// D1), for tests.
+/// How servers are verified in this build and on this platform, for tests.
+// Block 22, D1.
 #[cfg(test)]
 pub(in crate::adapter) const VERIFIER: &str = if cfg!(all(
     not(feature = "fips"),
@@ -146,10 +150,11 @@ pub(in crate::adapter) const VERIFIER: &str = if cfg!(all(
 };
 
 /// TLS settings verifying servers as this build does on this platform, also
-/// trusting `extra`, and whether to keep them (Block 22, D1).
+/// trusting `extra`, and whether to keep them.
 ///
 /// The operating system's verifier on macOS, iOS, Windows and Android, but
 /// in the fips build, whose chains must be checked inside the FIPS module.
+// Block 22, D1.
 #[cfg(all(
     not(feature = "fips"),
     any(
@@ -173,11 +178,12 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
 }
 
 /// TLS settings verifying servers as this build does on this platform, also
-/// trusting `extra`, and whether to keep them (Block 22, D1).
+/// trusting `extra`, and whether to keep them.
 ///
 /// Webpki over the platform's root certificates: on Linux this is what the
 /// platform verifier does, but the read's errors must be seen to keep C7;
 /// in the fips build, on every platform.
+// Block 22, D1.
 #[cfg(not(all(
     not(feature = "fips"),
     any(
@@ -209,8 +215,9 @@ fn platform_verifier(
     Ok(Arc::new(verifier))
 }
 
-/// Android's verifier, behind the setup gate (Block 24, D5). It takes no
-/// extra roots: `ClientBuilder::build` refuses them there (D3).
+/// Android's verifier, behind the setup gate. It takes no extra roots:
+/// `ClientBuilder::build` refuses them there.
+// Block 24, D5; D3.
 #[cfg(all(not(feature = "fips"), target_os = "android"))]
 fn platform_verifier(
     _extra: &[CertificateDer<'static>],
@@ -221,8 +228,9 @@ fn platform_verifier(
     Ok(Arc::new(Guarded::new(verifier, android_ready)))
 }
 
-/// Set once one of `ferrifuge::android`'s setup calls succeeded (Block 24,
-/// D4): the verifier offers no way to ask.
+/// Set once one of `ferrifuge::android`'s setup calls succeeded: the
+/// verifier offers no way to ask.
+// Block 24, D4.
 static ANDROID_READY: AtomicBool = AtomicBool::new(false);
 
 /// Whether Android's verifier was set up through Ferrifuge.
@@ -242,9 +250,10 @@ pub(crate) fn set_android_ready() {
 pub(crate) const ANDROID_SETUP_MISSING: &str = "the Android certificate verifier is not set up: call ferrifuge::android::init_with_env once before building a client";
 
 /// A verifier failing its handshakes until `ready` and turning a panic of
-/// the one it wraps into an error (Block 24, D5): Android's panics at its
-/// first check without the setup, and with a Kotlin component of another
-/// version, inside the client's task.
+/// the one it wraps into an error: Android's panics at its first check
+/// without the setup, and with a Kotlin component of another version,
+/// inside the client's task.
+// Block 24, D5.
 #[cfg_attr(
     not(target_os = "android"),
     allow(dead_code, reason = "the guard of the Android verifier")
@@ -367,7 +376,8 @@ fn roots_config(
 }
 
 /// The index of the first certificate of `roots` webpki cannot take as a
-/// root (Block 22, D2).
+/// root.
+// Block 22, D2.
 pub(in crate::adapter) fn unparsable_root(roots: &[CertificateDer<'static>]) -> Option<usize> {
     roots
         .iter()
@@ -375,8 +385,8 @@ pub(in crate::adapter) fn unparsable_root(roots: &[CertificateDer<'static>]) -> 
 }
 
 /// A value built at first use and shared; a build that fails, or that its
-/// builder says not to keep, is not kept, so the next use builds again
-/// (Block 6, review item C7).
+/// builder says not to keep, is not kept, so the next use builds again.
+// Block 6, review item C7.
 #[derive(Debug)]
 pub(in crate::adapter) struct BuildOnce<T>(OnceLock<T>);
 

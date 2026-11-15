@@ -1,4 +1,5 @@
-//! Server-side filters of publications by their tags (Block 35a).
+//! Server-side filters of publications by their tags.
+// Block 35a.
 
 /// A filter of a subscription's publications by their tags, applied by the
 /// server, which sends only the publications it matches (`client.proto`
@@ -189,9 +190,10 @@ impl TagFilter {
         }))
     }
 
-    /// What no signature prevents and the server refuses (Block 35, D1): a
-    /// comparison but `exists` and `not_exists` with an empty key, a set
-    /// comparison with no value.
+    /// What no signature prevents and the server refuses: a comparison but
+    /// `exists` and `not_exists` with an empty key, a set comparison with
+    /// no value.
+    // Block 35, D1.
     pub(crate) fn check(&self) -> Result<(), String> {
         fn walk(node: &Node) -> Result<(), String> {
             if node.op.is_empty() {
@@ -228,7 +230,8 @@ impl std::ops::Not for TagFilter {
     }
 }
 
-/// Keys and operators only: tag values may be personal data (Block 21, D5).
+/// Keys and operators only: tag values may be personal data.
+// Block 21, D5.
 impl std::fmt::Debug for TagFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fn write(node: &Node, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

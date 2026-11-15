@@ -3,7 +3,8 @@
 //! The shared layer (client, subscriptions, handlers, delivery, the driver
 //! loop) names no runtime; it reaches the runtime through `platform` and
 //! the transports through `backend`: `tokio` natively, `browser` on
-//! wasm32-unknown-unknown (Block 44, D2).
+//! wasm32-unknown-unknown.
+// Block 44, D2.
 
 mod body;
 #[cfg(adapter_browser)]
@@ -26,7 +27,8 @@ mod tokio;
 #[cfg(all(test, adapter_tokio))]
 pub(crate) use self::tokio::http::header_set_sample;
 
-/// The transports of this build's target (Block 44, D2).
+/// The transports of this build's target.
+// Block 44, D2.
 #[cfg(adapter_browser)]
 use self::browser as backend;
 #[cfg(adapter_tokio)]
