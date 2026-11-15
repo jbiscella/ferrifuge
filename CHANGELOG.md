@@ -61,6 +61,15 @@ repository held while it carried that version, from the blocks of
   reads `disconnected`, and each subscription's `state()` `unsubscribed`.
   In the browser a panic still traps first.
 
+- Reading a client or subscription stream no longer holds the runtime
+  while many events are queued, as after a large recovery: `next()` now
+  takes part in tokio's cooperative scheduling, returning `Pending` once
+  the task's budget is spent and taking nothing then, as tokio's channels
+  do (Block 63, D1). Events, their order and when they count as delivered
+  are unchanged. Before, a loop over the stream ran without a pause
+  through every queued event, delaying the other tasks and timers of its
+  thread.
+
 ## [0.25.0] - 2026-11-15
 
 ### Added

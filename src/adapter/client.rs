@@ -446,7 +446,14 @@ impl Client {
     /// it had not yielded are the new one's. The stream borrows nothing
     /// from the client, so it can be kept beside it, and it ends once the
     /// client is dropped or its runtime shuts down.
-    // Block 15; Block 28.
+    ///
+    /// A loop over the stream gives its runtime a turn: once the reading
+    /// task has spent its tokio budget, `next()` returns `Pending` and takes
+    /// nothing, as tokio's own channels do, so a large recovery does not hold
+    /// up the task's other work. In the browser, with no tokio runtime, the
+    /// budget never runs out, and `next()` returns events as long as some
+    /// are queued.
+    // Block 15; Block 28; Block 63, D1, D3.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + MaybeSend + Unpin + use<> {
         let Some(mut core) = self.shared.core() else {
             // Ended at once, as a closed client's (Block 61, D6).
