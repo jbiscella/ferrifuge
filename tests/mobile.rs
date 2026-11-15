@@ -280,14 +280,15 @@ fn watch(
         match received.recv_timeout(left) {
             Ok(line) => {
                 eprintln!("{name}: {line}");
+                // `step <name> ok at <t> s` or `step <name> failed at <t> s: …`.
                 if let Some(step) = line.strip_prefix("step ") {
-                    step.split(' ')
-                        .next()
-                        .unwrap_or_default()
-                        .clone_into(&mut reported.last_step);
-                    if !step.ends_with(" ok") {
+                    let mut words = step.split(' ');
+                    let name = words.next().unwrap_or_default();
+                    let ok = words.next() == Some("ok");
+                    name.clone_into(&mut reported.last_step);
+                    if !ok {
                         reported.failed.get_or_insert_with(|| line.clone());
-                    } else if step == "disconnect ok" {
+                    } else if name == "disconnect" {
                         // While the program holds its client: a socket it
                         // never closed is still open (D1).
                         let listed = runtime.block_on(gone(server.api(), channel));
