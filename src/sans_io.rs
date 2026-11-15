@@ -318,10 +318,30 @@ pub struct SubscriptionId(u64);
 impl SubscriptionId {
     /// An id for the adapter's unit tests.
     #[cfg(test)]
-    #[cfg(all(feature = "unstable", any(adapter_tokio, adapter_browser)))]
+    #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
+}
+
+/// What kind of subscription a registry entry is: a stream subscription,
+/// or, with the `unstable` feature, a map or a shared poll subscription.
+/// The feature adds variants, so a `match` on it needs an arm for the
+/// others.
+// Block 61, D3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SubscriptionKind {
+    /// A subscription to a channel's stream of publications.
+    Stream,
+    /// A map subscription, of its map's kind.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    Map(crate::MapKind),
+    /// A shared poll subscription.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SharedPoll,
 }
 
 /// Options of a subscription (spec, "Subscription common options").

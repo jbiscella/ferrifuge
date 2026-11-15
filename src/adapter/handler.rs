@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
 use super::outbox::{Head, Outbox};
-use super::shared::{Core, Outboxes, Shared, lock};
+use super::shared::{Core, Kind, Outboxes, Shared, lock};
 use crate::sans_io::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, MaybeSend, Publication, ServerSubscriptionEvent,
@@ -529,7 +529,7 @@ pub(super) fn deadlock_error() -> crate::CallError {
 }
 
 /// A handler with the number of the outbox stream it took over.
-struct Slot<H: ?Sized> {
+pub(super) struct Slot<H: ?Sized> {
     stream: u64,
     /// `None` while one of its calls runs.
     handler: Option<Box<H>>,
@@ -540,11 +540,11 @@ struct Slot<H: ?Sized> {
 pub(super) struct Handlers {
     delivery: EventDelivery,
     client: Option<Slot<dyn ClientHandler>>,
-    subscriptions: HashMap<SubscriptionId, Slot<dyn SubscriptionHandler>>,
+    pub(super) subscriptions: HashMap<SubscriptionId, Slot<dyn SubscriptionHandler>>,
     #[cfg(feature = "unstable")]
-    maps: HashMap<SubscriptionId, Slot<dyn MapSubscriptionHandler>>,
+    pub(super) maps: HashMap<SubscriptionId, Slot<dyn MapSubscriptionHandler>>,
     #[cfg(feature = "unstable")]
-    shared_polls: HashMap<SubscriptionId, Slot<dyn SharedPollSubscriptionHandler>>,
+    pub(super) shared_polls: HashMap<SubscriptionId, Slot<dyn SharedPollSubscriptionHandler>>,
     /// The consumer runs, from the first handler set.
     started: bool,
     waker: Option<Waker>,
@@ -640,149 +640,52 @@ pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHa
     drop(old);
 }
 
-/// Sets the handler of the subscription `of`, which takes over its stream.
-pub(super) fn set_subscription_handler(
-    shared: &Arc<Shared>,
-    of: SubscriptionId,
-    handler: Box<dyn SubscriptionHandler>,
-) {
-    let mut core = lock(&shared.core);
-    let old = install_subscription_handler(shared, &mut core, of, handler);
-    drop(core);
-    drop(old);
-}
-
-/// Sets the handler of the subscription `of` under the core lock, so that a
-/// subscription being built gets it before another thread can subscribe it.
-/// Gives the handler to drop with no lock held: the one replaced, or this
-/// one for a subscription no longer in the registry or a closed client.
-// Codex, #169.
-pub(super) fn install_subscription_handler(
-    shared: &Arc<Shared>,
-    core: &mut Core,
-    of: SubscriptionId,
-    handler: Box<dyn SubscriptionHandler>,
-) -> Option<Dropped> {
-    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
-        return Some(Dropped::Subscription(handler));
-    }
-    let stream = lock(&shared.outboxes)
-        .subscriptions
-        .entry(of)
-        .or_default()
-        .open_stream();
-    shared.handle(core, Input::StreamOpened(Some(of)));
-    install(shared, core, |handlers| {
-        handlers
-            .subscriptions
-            .insert(
-                of,
-                Slot {
-                    stream,
-                    handler: Some(handler),
-                },
-            )
-            .and_then(|slot| slot.handler)
-            .map(Dropped::Subscription)
-    })
-}
-
-/// Sets the handler of the map subscription `of` under the core lock, as
-/// [`install_subscription_handler`] does a subscription's.
-// Block 45, D13.
-#[cfg(feature = "unstable")]
-pub(super) fn install_map_handler(
-    shared: &Arc<Shared>,
-    core: &mut Core,
-    of: SubscriptionId,
-    handler: Box<dyn MapSubscriptionHandler>,
-) -> Option<Dropped> {
-    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
-        return Some(Dropped::Map(handler));
-    }
-    let stream = lock(&shared.outboxes)
-        .maps
-        .entry(of)
-        .or_default()
-        .open_stream();
-    shared.handle(core, Input::StreamOpened(Some(of)));
-    install(shared, core, |handlers| {
-        handlers
-            .maps
-            .insert(
-                of,
-                Slot {
-                    stream,
-                    handler: Some(handler),
-                },
-            )
-            .and_then(|slot| slot.handler)
-            .map(Dropped::Map)
-    })
-}
-
-/// Sets the handler of the map subscription `of`, which takes over its
-/// stream.
-// Block 45, D13.
-#[cfg(feature = "unstable")]
-pub(super) fn set_map_handler(
-    shared: &Arc<Shared>,
-    of: SubscriptionId,
-    handler: Box<dyn MapSubscriptionHandler>,
-) {
-    let mut core = lock(&shared.core);
-    let old = install_map_handler(shared, &mut core, of, handler);
-    drop(core);
-    drop(old);
-}
-
-/// Sets the handler of the shared poll subscription `of` under the core
-/// lock, as [`install_subscription_handler`] does a subscription's.
-// Block 47, D15.
-#[cfg(feature = "unstable")]
-pub(super) fn install_shared_poll_handler(
-    shared: &Arc<Shared>,
-    core: &mut Core,
-    of: SubscriptionId,
-    handler: Box<dyn SharedPollSubscriptionHandler>,
-) -> Option<Dropped> {
-    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
-        return Some(Dropped::SharedPoll(handler));
-    }
-    let stream = lock(&shared.outboxes)
-        .shared_polls
-        .entry(of)
-        .or_default()
-        .open_stream();
-    shared.handle(core, Input::StreamOpened(Some(of)));
-    install(shared, core, |handlers| {
-        handlers
-            .shared_polls
-            .insert(
-                of,
-                Slot {
-                    stream,
-                    handler: Some(handler),
-                },
-            )
-            .and_then(|slot| slot.handler)
-            .map(Dropped::SharedPoll)
-    })
-}
-
-/// Sets the handler of the shared poll subscription `of`, which takes over
+/// Sets the handler of the subscription `of` of kind `E`, which takes over
 /// its stream.
-// Block 47, D15.
-#[cfg(feature = "unstable")]
-pub(super) fn set_shared_poll_handler(
+// Block 61, D3.
+pub(super) fn set_handler<E: Kind>(
     shared: &Arc<Shared>,
     of: SubscriptionId,
-    handler: Box<dyn SharedPollSubscriptionHandler>,
+    handler: Box<E::Handler>,
 ) {
     let mut core = lock(&shared.core);
-    let old = install_shared_poll_handler(shared, &mut core, of, handler);
+    let old = install_handler::<E>(shared, &mut core, of, handler);
     drop(core);
     drop(old);
+}
+
+/// Sets the handler of the subscription `of` of kind `E` under the core
+/// lock, so that a subscription being built gets it before another thread
+/// can subscribe it. Gives the handler to drop with no lock held: the one
+/// replaced, or this one for a subscription no longer in the registry or a
+/// closed client.
+// Codex, #169; Block 45, D13; Block 47, D15; Block 61, D3.
+pub(super) fn install_handler<E: Kind>(
+    shared: &Arc<Shared>,
+    core: &mut Core,
+    of: SubscriptionId,
+    handler: Box<E::Handler>,
+) -> Option<Dropped> {
+    if shared.closed.load(Ordering::Acquire) || core.machine.subscription_state(of).is_none() {
+        return Some(E::dropped(handler));
+    }
+    let stream = E::outboxes(&mut lock(&shared.outboxes))
+        .entry(of)
+        .or_default()
+        .open_stream();
+    shared.handle(core, Input::StreamOpened(Some(of)));
+    install(shared, core, |handlers| {
+        E::slots(handlers)
+            .insert(
+                of,
+                Slot {
+                    stream,
+                    handler: Some(handler),
+                },
+            )
+            .and_then(|slot| slot.handler)
+            .map(E::dropped)
+    })
 }
 
 /// Installs a handler with `set`, starting the consumer at the first one.
@@ -1269,19 +1172,7 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             event,
             handler,
             stream,
-        } => {
-            let outcome = run_handler(
-                shared,
-                thread,
-                handler,
-                |handler| handler.on_event(event),
-                |handlers, handler| {
-                    give_back(&mut handlers.subscriptions, of, stream, handler)
-                        .map(Dropped::Subscription)
-                },
-            );
-            (id, outcome)
-        }
+        } => (id, deliver_kind(shared, thread, of, stream, event, handler)),
         #[cfg(feature = "unstable")]
         Handed::Map {
             of,
@@ -1289,18 +1180,7 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             event,
             handler,
             stream,
-        } => {
-            let outcome = run_handler(
-                shared,
-                thread,
-                handler,
-                |handler| handler.on_event(event),
-                |handlers, handler| {
-                    give_back(&mut handlers.maps, of, stream, handler).map(Dropped::Map)
-                },
-            );
-            (id, outcome)
-        }
+        } => (id, deliver_kind(shared, thread, of, stream, event, handler)),
         #[cfg(feature = "unstable")]
         Handed::SharedPoll {
             of,
@@ -1308,19 +1188,7 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             event,
             handler,
             stream,
-        } => {
-            let outcome = run_handler(
-                shared,
-                thread,
-                handler,
-                |handler| handler.on_event(event),
-                |handlers, handler| {
-                    give_back(&mut handlers.shared_polls, of, stream, handler)
-                        .map(Dropped::SharedPoll)
-                },
-            );
-            (id, outcome)
-        }
+        } => (id, deliver_kind(shared, thread, of, stream, event, handler)),
     };
     let input = match outcome {
         Ok(()) => Input::EventTaken(id),
@@ -1363,6 +1231,26 @@ fn run_handler<H: ?Sized>(
     drop(handlers);
     drop(old);
     outcome
+}
+
+/// Calls the handler of subscription `of`, of kind `E`, with `event`,
+/// putting it back in its slot after.
+// Block 61, D3.
+fn deliver_kind<E: Kind>(
+    shared: &Shared,
+    thread: bool,
+    of: SubscriptionId,
+    stream: u64,
+    event: E,
+    handler: Box<E::Handler>,
+) -> std::thread::Result<()> {
+    run_handler(
+        shared,
+        thread,
+        handler,
+        |handler| E::on_event(handler, event),
+        |handlers, handler| give_back(E::slots(handlers), of, stream, handler).map(E::dropped),
+    )
 }
 
 /// Puts `handler` back in its slot of `slots` when the slot still waits for

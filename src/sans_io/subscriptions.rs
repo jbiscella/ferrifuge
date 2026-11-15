@@ -133,15 +133,73 @@ struct Subscription {
     /// a subscription that never debounces pays a pointer.
     // Block 46, D15; Block 14, "Marginal cost of a subscription".
     debounce: Option<Box<Windows>>,
-    /// What makes a map subscription one; `None` for a stream subscription.
+    /// Its kind, and what makes a map or a shared poll subscription one.
+    // Block 45; Block 47, D3; Block 61, D3.
+    flavor: Flavor,
+}
+
+/// The kind of a subscription, with what its kind adds: one of them, so a
+/// subscription holding both a map's and a shared poll's flow cannot be
+/// written. Without `unstable`, every subscription is a stream one, at no
+/// cost to its footprint.
+// Block 61, D3.
+#[derive(Debug, Default)]
+enum Flavor {
+    #[default]
+    Stream,
     // Block 45.
     #[cfg(feature = "unstable")]
-    map: Option<Box<map_flow::MapFlow>>,
-    /// What makes a shared poll subscription one; `None` for the other
-    /// kinds.
+    Map(Box<map_flow::MapFlow>),
     // Block 47, D3.
     #[cfg(feature = "unstable")]
-    shared_poll: Option<Box<shared_poll_flow::SharedPollFlow>>,
+    SharedPoll(Box<shared_poll_flow::SharedPollFlow>),
+}
+
+impl Flavor {
+    /// The subscription kind this flavor is.
+    fn kind(&self) -> super::SubscriptionKind {
+        match self {
+            Self::Stream => super::SubscriptionKind::Stream,
+            #[cfg(feature = "unstable")]
+            Self::Map(map) => super::SubscriptionKind::Map(map.kind),
+            #[cfg(feature = "unstable")]
+            Self::SharedPoll(_) => super::SubscriptionKind::SharedPoll,
+        }
+    }
+
+    /// A map subscription's flow.
+    #[cfg(feature = "unstable")]
+    fn map(&self) -> Option<&map_flow::MapFlow> {
+        match self {
+            Self::Map(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    fn map_mut(&mut self) -> Option<&mut map_flow::MapFlow> {
+        match self {
+            Self::Map(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    /// A shared poll subscription's flow.
+    #[cfg(feature = "unstable")]
+    fn shared_poll(&self) -> Option<&shared_poll_flow::SharedPollFlow> {
+        match self {
+            Self::SharedPoll(flow) => Some(flow),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    fn shared_poll_mut(&mut self) -> Option<&mut shared_poll_flow::SharedPollFlow> {
+        match self {
+            Self::SharedPoll(flow) => Some(flow),
+            _ => None,
+        }
+    }
 }
 
 /// Whether a subscribe reply turned delta on, and what the next delta
@@ -194,7 +252,7 @@ impl Subscription {
     // Block 45, D6.
     fn invalidate_position_or_forget(&mut self) {
         #[cfg(feature = "unstable")]
-        if self.map.is_some() {
+        if self.flavor.map().is_some() {
             return self.forget_position();
         }
         self.invalidate_position();
@@ -317,10 +375,7 @@ impl Machine {
                 delta_statistics: None,
                 compact_id: 0,
                 debounce: None,
-                #[cfg(feature = "unstable")]
-                map: None,
-                #[cfg(feature = "unstable")]
-                shared_poll: None,
+                flavor: Flavor::Stream,
             },
         );
         Ok(id)
@@ -340,6 +395,17 @@ impl Machine {
     /// The channel of subscription `id`, if it is in the registry.
     pub(super) fn subscription_channel(&self, id: SubscriptionId) -> Option<&String> {
         self.subscriptions.by_id.get(&id).map(|sub| &sub.channel)
+    }
+
+    /// The kind of subscription `id` is; `None` for an id not in the
+    /// registry.
+    // Block 61, D3.
+    #[must_use]
+    pub fn subscription_kind(&self, id: SubscriptionId) -> Option<super::SubscriptionKind> {
+        self.subscriptions
+            .by_id
+            .get(&id)
+            .map(|sub| sub.flavor.kind())
     }
 
     /// The subscription to `channel` in the registry, if any.
@@ -401,7 +467,7 @@ impl Machine {
             // A map's state is loaded again through the new filter (Block
             // 45, D6; centrifuge-js `src/subscription.ts:367-379`).
             #[cfg(feature = "unstable")]
-            if sub.map.is_some() {
+            if sub.flavor.map().is_some() {
                 sub.forget_position();
             }
         }
@@ -1000,12 +1066,12 @@ impl Machine {
             .expect("checked above");
         sub.subscribe_command = None;
         #[cfg(feature = "unstable")]
-        if sub.map.is_some() {
+        if sub.flavor.map().is_some() {
             let size = self.inbound.handled;
             return self.map_subscribe_reply(id, reply, size);
         }
         #[cfg(feature = "unstable")]
-        if sub.shared_poll.is_some() {
+        if sub.flavor.shared_poll().is_some() {
             return self.shared_poll_subscribe_reply(id, reply);
         }
         match (reply.error, reply.result) {
@@ -1138,7 +1204,7 @@ impl Machine {
             .subscriptions
             .by_id
             .get_mut(&id)
-            .and_then(|sub| sub.shared_poll.as_deref_mut())
+            .and_then(|sub| sub.flavor.shared_poll_mut())
         {
             self.actions.extend(flow.forget(id));
         }
@@ -1203,7 +1269,7 @@ impl Machine {
         #[cfg(feature = "unstable")]
         let mut reserved_now = false;
         #[cfg(feature = "unstable")]
-        if sub.map.as_mut().and_then(|map| map.end_load()) == Some(true) {
+        if sub.flavor.map_mut().and_then(map_flow::MapFlow::end_load) == Some(true) {
             if let Some(command) = abandoned {
                 self.subscriptions.reserved.insert(command);
             } else {
@@ -1215,7 +1281,7 @@ impl Machine {
         // Its keys and signatures go too, and what it queued; the replies
         // to its requests in flight change nothing (Block 47, D5, D12).
         #[cfg(feature = "unstable")]
-        if let Some(flow) = sub.shared_poll.as_deref_mut() {
+        if let Some(flow) = sub.flavor.shared_poll_mut() {
             self.actions.extend(flow.forget(id));
         }
         // A later subscribe() starts its retries over (centrifuge-js
@@ -1622,11 +1688,11 @@ impl Machine {
             // Any lost connection ends a map subscription's load (Block 45,
             // D6).
             #[cfg(feature = "unstable")]
-            if let Some(map) = sub.map.as_mut() {
+            if let Some(map) = sub.flavor.map_mut() {
                 map.end_load();
             }
             #[cfg(feature = "unstable")]
-            if let Some(flow) = sub.shared_poll.as_deref_mut() {
+            if let Some(flow) = sub.flavor.shared_poll_mut() {
                 flow.connection_lost();
             }
             if invalidated {
@@ -1690,7 +1756,7 @@ impl Machine {
                 .subscriptions
                 .by_id
                 .get_mut(&id)
-                .and_then(|sub| sub.shared_poll.as_deref_mut())
+                .and_then(|sub| sub.flavor.shared_poll_mut())
             {
                 self.actions.extend(flow.left_subscribed(id));
             }
@@ -1780,6 +1846,50 @@ mod tests {
     use super::*;
     use crate::sans_io::{EventId, Input, Timer, TransportId, TransportKind};
     use crate::{Config, StateError, TokenError};
+
+    // Block 61, D3: each kind of subscription in the registry is told
+    // apart, and an id not in it has none.
+    #[test]
+    fn subscription_kind_tells_each_kind_apart() {
+        let mut machine = Machine::new(Config::default());
+        let stream = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        #[cfg(feature = "unstable")]
+        let map = machine
+            .add_map_subscription(
+                "clients".into(),
+                crate::sans_io::MapSubscriptionOptions::new(crate::MapKind::Clients),
+            )
+            .unwrap();
+        #[cfg(feature = "unstable")]
+        let poll = machine
+            .add_shared_poll_subscription(
+                "poll".into(),
+                crate::sans_io::SharedPollSubscriptionOptions::default(),
+            )
+            .unwrap();
+        let removed = machine
+            .add_subscription("gone".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::RemoveSubscription(removed));
+
+        assert_eq!(
+            machine.subscription_kind(stream),
+            Some(super::super::SubscriptionKind::Stream)
+        );
+        #[cfg(feature = "unstable")]
+        assert_eq!(
+            machine.subscription_kind(map),
+            Some(super::super::SubscriptionKind::Map(crate::MapKind::Clients))
+        );
+        #[cfg(feature = "unstable")]
+        assert_eq!(
+            machine.subscription_kind(poll),
+            Some(super::super::SubscriptionKind::SharedPoll)
+        );
+        assert_eq!(machine.subscription_kind(removed), None);
+    }
 
     /// `actions` with every event id 0, to compare emitted events by value.
     fn without_ids(actions: &[Action]) -> Vec<Action> {

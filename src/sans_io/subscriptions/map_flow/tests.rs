@@ -1385,7 +1385,7 @@ fn delta_options() -> MapSubscriptionOptions {
 
 /// The keys with a base, sorted; `None` while delta is off.
 fn bases(machine: &Machine, id: SubscriptionId) -> Option<Vec<String>> {
-    let map = machine.subscriptions.by_id[&id].map.as_ref().unwrap();
+    let map = machine.subscriptions.by_id[&id].flavor.map().unwrap();
     map.bases.as_ref().map(|bases| {
         let mut keys: Vec<String> = bases.keys().cloned().collect();
         keys.sort();

@@ -600,17 +600,17 @@ impl Machine {
         common.channel_compaction = false;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-            sub.shared_poll = Some(Box::new(flow));
+            sub.flavor = super::Flavor::SharedPoll(Box::new(flow));
         }
         Ok(id)
     }
 
     /// Whether `id` is a shared poll subscription.
-    pub(crate) fn is_shared_poll(&self, id: SubscriptionId) -> bool {
+    pub(in crate::sans_io) fn is_shared_poll(&self, id: SubscriptionId) -> bool {
         self.subscriptions
             .by_id
             .get(&id)
-            .is_some_and(|sub| sub.shared_poll.is_some())
+            .is_some_and(|sub| sub.flavor.shared_poll().is_some())
     }
 
     /// The keys shared poll subscription `id` tracks, in the order they
@@ -623,15 +623,15 @@ impl Machine {
         self.subscriptions
             .by_id
             .get(&id)
-            .and_then(|sub| sub.shared_poll.as_ref())
-            .map(|flow| flow.keys())
+            .and_then(|sub| sub.flavor.shared_poll())
+            .map(SharedPollFlow::keys)
     }
 
     fn shared_poll_flow(&mut self, id: SubscriptionId) -> Option<&mut SharedPollFlow> {
         self.subscriptions
             .by_id
             .get_mut(&id)
-            .and_then(|sub| sub.shared_poll.as_deref_mut())
+            .and_then(|sub| sub.flavor.shared_poll_mut())
     }
 
     /// Whether `id` is subscribed now.
@@ -718,7 +718,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+        let Some(flow) = sub.flavor.shared_poll_mut() else {
             return;
         };
         // A single batch cannot be split, and a frame over the server's
@@ -796,7 +796,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+        let Some(flow) = sub.flavor.shared_poll_mut() else {
             return;
         };
         let budget = flow.max_track_frame_bytes;
@@ -834,7 +834,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_ref() else {
+        let Some(flow) = sub.flavor.shared_poll() else {
             return;
         };
         let requests =
@@ -922,7 +922,7 @@ impl Machine {
                 .subscriptions
                 .by_id
                 .get(&id)
-                .and_then(|sub| sub.shared_poll.as_ref())
+                .and_then(|sub| sub.flavor.shared_poll())
                 .and_then(|flow| flow.queue.front())
                 .map(|front| front.group)
             else {
@@ -1134,7 +1134,7 @@ impl Machine {
         sub.backoff.keep_reset();
         sub.backoff.reset();
         sub.tokens.connected();
-        if let Some(flow) = sub.shared_poll.as_deref_mut() {
+        if let Some(flow) = sub.flavor.shared_poll_mut() {
             self.actions.extend(flow.restart(id));
         }
         // What was not taken is withdrawn here, so no update of an earlier
@@ -1213,7 +1213,7 @@ impl Machine {
                 .subscriptions
                 .by_id
                 .get(&id)
-                .and_then(|sub| sub.shared_poll.as_ref())
+                .and_then(|sub| sub.flavor.shared_poll())
                 .is_some_and(|flow| flow.generation == command.generation);
         let channel = command.channel.clone();
         if current {
@@ -1267,7 +1267,7 @@ impl Machine {
             .subscriptions
             .by_id
             .get(&id)
-            .and_then(|sub| sub.shared_poll.as_deref())
+            .and_then(|sub| sub.flavor.shared_poll())
         else {
             return;
         };
@@ -1418,7 +1418,7 @@ impl Machine {
                 .subscriptions
                 .by_id
                 .get(&id)
-                .and_then(|sub| sub.shared_poll.as_ref())
+                .and_then(|sub| sub.flavor.shared_poll())
                 .is_some_and(|flow| flow.generation == command.generation);
         if current {
             self.set_unsubscribed(
@@ -1521,7 +1521,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return Item::Dropped;
         };
-        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+        let Some(flow) = sub.flavor.shared_poll_mut() else {
             return Item::Dropped;
         };
         // A key not tracked: before decoding, so it leaves no base.
@@ -1596,7 +1596,7 @@ impl Machine {
             .subscriptions
             .by_id
             .get(&id)
-            .and_then(|sub| sub.shared_poll.as_deref())
+            .and_then(|sub| sub.flavor.shared_poll())
         else {
             return Item::Dropped;
         };

@@ -104,18 +104,23 @@ pub(super) struct Outboxes {
 
 impl Outboxes {
     fn withdraw(&mut self, ids: &[crate::sans_io::EventId]) {
-        self.client.withdraw(ids);
-        for outbox in self.subscriptions.values_mut() {
-            outbox.withdraw(ids);
-        }
+        self.every(|outbox| outbox.withdraw(ids));
+    }
+
+    /// Runs `each` on every outbox: the client's, then each kind's, in one
+    /// list of the kinds.
+    // Block 61, D3.
+    pub(super) fn every(&mut self, mut each: impl FnMut(&mut dyn AnyOutbox)) {
+        each(&mut self.client);
+        self.subscriptions
+            .values_mut()
+            .for_each(|outbox| each(outbox));
         #[cfg(feature = "unstable")]
-        for outbox in self.maps.values_mut() {
-            outbox.withdraw(ids);
-        }
+        self.maps.values_mut().for_each(|outbox| each(outbox));
         #[cfg(feature = "unstable")]
-        for outbox in self.shared_polls.values_mut() {
-            outbox.withdraw(ids);
-        }
+        self.shared_polls
+            .values_mut()
+            .for_each(|outbox| each(outbox));
     }
 }
 
@@ -721,6 +726,24 @@ pub(super) struct EventStream<E: Routed> {
 }
 
 /// Events with an outbox: the client's and the subscriptions'.
+/// What [`Outboxes::every`] does to an outbox of any kind.
+pub(super) trait AnyOutbox {
+    /// Drops the events `ids`, withdrawn by the machine.
+    fn withdraw(&mut self, ids: &[crate::sans_io::EventId]);
+    /// Ends its streams once they have yielded what it holds.
+    fn close(&mut self);
+}
+
+impl<E> AnyOutbox for Outbox<E> {
+    fn withdraw(&mut self, ids: &[crate::sans_io::EventId]) {
+        Self::withdraw(self, ids);
+    }
+
+    fn close(&mut self) {
+        Self::close(self);
+    }
+}
+
 pub(super) trait Routed: Sized {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>>;
     /// Forgets the finished outbox of subscription `of`.
@@ -737,33 +760,119 @@ impl Routed for ClientEvent {
 
 impl Routed for SubscriptionEvent {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
-        outboxes.subscriptions.get_mut(&of?)
+        Self::outboxes(outboxes).get_mut(&of?)
     }
 
     fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
-        outboxes.subscriptions.remove(&of);
+        Self::outboxes(outboxes).remove(&of);
     }
 }
 
 #[cfg(feature = "unstable")]
 impl Routed for crate::MapSubscriptionEvent {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
-        outboxes.maps.get_mut(&of?)
+        Self::outboxes(outboxes).get_mut(&of?)
     }
 
     fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
-        outboxes.maps.remove(&of);
+        Self::outboxes(outboxes).remove(&of);
     }
 }
 
 #[cfg(feature = "unstable")]
 impl Routed for crate::SharedPollSubscriptionEvent {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>> {
-        outboxes.shared_polls.get_mut(&of?)
+        Self::outboxes(outboxes).get_mut(&of?)
     }
 
     fn forget(outboxes: &mut Outboxes, of: SubscriptionId) {
-        outboxes.shared_polls.remove(&of);
+        Self::outboxes(outboxes).remove(&of);
+    }
+}
+
+/// A subscription kind's events, and what the code its kinds share needs
+/// of the kind: its outboxes, its handler slots, and its handler.
+// Block 61, D3.
+pub(super) trait Kind: Routed + 'static {
+    /// The handler of a subscription of this kind.
+    type Handler: ?Sized;
+    /// The kind's outboxes, by subscription.
+    fn outboxes(outboxes: &mut Outboxes) -> &mut HashMap<SubscriptionId, Outbox<Self>>;
+    /// The kind's handler slots, by subscription.
+    fn slots(
+        handlers: &mut super::handler::Handlers,
+    ) -> &mut HashMap<SubscriptionId, super::handler::Slot<Self::Handler>>;
+    /// `handler`, to drop with no lock held.
+    fn dropped(handler: Box<Self::Handler>) -> super::handler::Dropped;
+    /// Calls `handler` with `event`.
+    fn on_event(handler: &mut Self::Handler, event: Self);
+}
+
+impl Kind for SubscriptionEvent {
+    type Handler = dyn super::SubscriptionHandler;
+
+    fn outboxes(outboxes: &mut Outboxes) -> &mut HashMap<SubscriptionId, Outbox<Self>> {
+        &mut outboxes.subscriptions
+    }
+
+    fn slots(
+        handlers: &mut super::handler::Handlers,
+    ) -> &mut HashMap<SubscriptionId, super::handler::Slot<Self::Handler>> {
+        &mut handlers.subscriptions
+    }
+
+    fn dropped(handler: Box<Self::Handler>) -> super::handler::Dropped {
+        super::handler::Dropped::Subscription(handler)
+    }
+
+    fn on_event(handler: &mut Self::Handler, event: Self) {
+        handler.on_event(event);
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl Kind for crate::MapSubscriptionEvent {
+    type Handler = dyn super::MapSubscriptionHandler;
+
+    fn outboxes(outboxes: &mut Outboxes) -> &mut HashMap<SubscriptionId, Outbox<Self>> {
+        &mut outboxes.maps
+    }
+
+    fn slots(
+        handlers: &mut super::handler::Handlers,
+    ) -> &mut HashMap<SubscriptionId, super::handler::Slot<Self::Handler>> {
+        &mut handlers.maps
+    }
+
+    fn dropped(handler: Box<Self::Handler>) -> super::handler::Dropped {
+        super::handler::Dropped::Map(handler)
+    }
+
+    fn on_event(handler: &mut Self::Handler, event: Self) {
+        handler.on_event(event);
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl Kind for crate::SharedPollSubscriptionEvent {
+    type Handler = dyn super::SharedPollSubscriptionHandler;
+
+    fn outboxes(outboxes: &mut Outboxes) -> &mut HashMap<SubscriptionId, Outbox<Self>> {
+        &mut outboxes.shared_polls
+    }
+
+    fn slots(
+        handlers: &mut super::handler::Handlers,
+    ) -> &mut HashMap<SubscriptionId, super::handler::Slot<Self::Handler>> {
+        &mut handlers.shared_polls
+    }
+
+    fn dropped(handler: Box<Self::Handler>) -> super::handler::Dropped {
+        super::handler::Dropped::SharedPoll(handler)
+    }
+
+    fn on_event(handler: &mut Self::Handler, event: Self) {
+        handler.on_event(event);
     }
 }
 
@@ -1927,5 +2036,56 @@ mod tests {
                 lock(&self.0).push(text.0);
             }
         }
+    }
+
+    // Block 61, D3: `withdraw` goes through the one list of the kinds.
+    #[test]
+    fn withdraw_drops_an_event_from_an_outbox_of_each_kind() {
+        /// An outbox with a stream, holding `event` as event 1.
+        fn holding<E>(event: E) -> Outbox<E> {
+            let mut outbox = Outbox::default();
+            outbox.open_stream();
+            let _ = outbox.offer(crate::sans_io::EventId::for_tests(1), event);
+            outbox
+        }
+        let unsubscribed = || crate::UnsubscribedContext {
+            code: 0,
+            reason: String::new(),
+        };
+        let id = SubscriptionId::for_tests(1);
+        let mut outboxes = Outboxes {
+            client: holding(crate::ClientEvent::Disconnected(
+                crate::DisconnectedContext {
+                    code: 0,
+                    reason: String::new(),
+                },
+            )),
+            ..Outboxes::default()
+        };
+        outboxes.subscriptions.insert(
+            id,
+            holding(crate::SubscriptionEvent::Unsubscribed(unsubscribed())),
+        );
+        #[cfg(feature = "unstable")]
+        outboxes.maps.insert(
+            id,
+            holding(crate::MapSubscriptionEvent::Unsubscribed(unsubscribed())),
+        );
+        #[cfg(feature = "unstable")]
+        outboxes.shared_polls.insert(
+            id,
+            holding(crate::SharedPollSubscriptionEvent::Unsubscribed(
+                unsubscribed(),
+            )),
+        );
+
+        outboxes.withdraw(&[crate::sans_io::EventId::for_tests(1)]);
+
+        assert_eq!(outboxes.client.held(), 0, "client");
+        assert_eq!(outboxes.subscriptions[&id].held(), 0, "stream");
+        #[cfg(feature = "unstable")]
+        assert_eq!(outboxes.maps[&id].held(), 0, "map");
+        #[cfg(feature = "unstable")]
+        assert_eq!(outboxes.shared_polls[&id].held(), 0, "shared poll");
     }
 }

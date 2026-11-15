@@ -6,14 +6,14 @@
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_core::Stream;
 
-use super::client::{Client, presence_of, presence_stats_of, reply_of};
-use super::shared::{Callbacks, EventStream, GetSubscriptionToken, Shared, lock};
-use crate::sans_io::{Input, MapSubscriptionOptions, SubscriptionId};
+use super::client::{Client, reply_of};
+use super::kind::SubscriptionHandle;
+use super::shared::{Callbacks, GetSubscriptionToken, Shared};
+use crate::sans_io::{MapSubscriptionOptions, SubscriptionKind};
 use crate::{
     CallError, CallReply, CallRequest, JsonCallError, MapKind, MapSubscriptionEvent, MaybeSend,
     MaybeSync, PresenceResult, PresenceStatsResult, SubscriptionError, SubscriptionState,
@@ -41,26 +41,21 @@ use crate::{
 // Block 45; Block 15.
 #[derive(Clone)]
 pub struct MapSubscription {
-    shared: Arc<Shared>,
-    id: SubscriptionId,
-    channel: Arc<str>,
+    pub(super) handle: SubscriptionHandle,
     kind: MapKind,
 }
 
 impl std::fmt::Debug for MapSubscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MapSubscription")
-            .field("channel", &self.channel)
-            .field("kind", &self.kind)
-            .field("state", &self.state())
-            .finish_non_exhaustive()
+        self.handle
+            .fmt(f, "MapSubscription", &[("kind", &self.kind)])
     }
 }
 
 /// Handles to the same map subscription are equal.
 impl PartialEq for MapSubscription {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared) && self.id == other.id
+        self.handle.same(&other.handle)
     }
 }
 
@@ -82,12 +77,7 @@ impl MapSubscription {
         &self,
         filter: Option<crate::TagFilter>,
     ) -> Result<(), SubscriptionError> {
-        lock(&self.shared.core)
-            .machine
-            .check_subscription_tag_filter(self.id, filter.as_ref())?;
-        self.shared
-            .apply(Input::SetSubscriptionTagFilter(self.id, filter));
-        Ok(())
+        self.handle.set_tag_filter(filter)
     }
 
     /// What delta compression did on the map subscription since it was
@@ -97,16 +87,13 @@ impl MapSubscription {
     // Block 45, D11.
     #[must_use]
     pub fn delta_statistics(&self) -> crate::DeltaStatistics {
-        lock(&self.shared.core)
-            .machine
-            .delta_statistics(self.id)
-            .unwrap_or_default()
+        self.handle.delta_statistics()
     }
 
     /// The channel subscribed to.
     #[must_use]
     pub fn channel(&self) -> &str {
-        &self.channel
+        self.handle.channel()
     }
 
     /// The map's kind.
@@ -118,18 +105,14 @@ impl MapSubscription {
     /// Current state.
     #[must_use]
     pub fn state(&self) -> SubscriptionState {
-        lock(&self.shared.core)
-            .machine
-            .subscription_state(self.id)
-            .unwrap_or(SubscriptionState::Unsubscribed)
+        self.handle.state()
     }
 
     /// Sets the data sent with the first request of every load from now on,
     /// sending nothing now.
     // Block 32.
     pub fn set_data(&self, data: impl Into<Vec<u8>>) {
-        self.shared
-            .apply(Input::SetSubscriptionData(self.id, data.into()));
+        self.handle.set_data(data.into());
     }
 
     /// Waits until the subscription is subscribed, without taking an event
@@ -139,7 +122,7 @@ impl MapSubscription {
     ///
     /// As [`crate::Subscription::ready`].
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
-        super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
+        self.handle.ready()
     }
 
     /// Events of the subscription queued for its streams and not yet
@@ -149,10 +132,7 @@ impl MapSubscription {
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {
-        lock(&self.shared.outboxes)
-            .maps
-            .get(&self.id)
-            .map_or(0, super::outbox::Outbox::held)
+        self.handle.held_events::<crate::MapSubscriptionEvent>()
     }
 
     /// Sets the map subscription's handler, as
@@ -162,7 +142,8 @@ impl MapSubscription {
     /// method returns.
     // Block 45, D13.
     pub fn set_handler(&self, handler: impl super::MapSubscriptionHandler) {
-        super::handler::set_map_handler(&self.shared, self.id, Box::new(handler));
+        self.handle
+            .set_handler::<crate::MapSubscriptionEvent>(Box::new(handler));
     }
 
     /// Events from now on, as [`crate::Subscription::events`] gives a
@@ -171,35 +152,19 @@ impl MapSubscription {
     /// every one; a later call takes over.
     // Block 15.
     pub fn events(&self) -> impl Stream<Item = MapSubscriptionEvent> + MaybeSend + Unpin + use<> {
-        let mut core = lock(&self.shared.core);
-        let number = if core.machine.subscription_state(self.id).is_some()
-            && !self.shared.closed.load(Ordering::Acquire)
-        {
-            let number = lock(&self.shared.outboxes)
-                .maps
-                .entry(self.id)
-                .or_default()
-                .open_stream();
-            self.shared
-                .handle(&mut core, Input::StreamOpened(Some(self.id)));
-            number
-        } else {
-            0
-        };
-        drop(core);
-        EventStream::new(Arc::clone(&self.shared), Some(self.id), number)
+        self.handle.events::<MapSubscriptionEvent>()
     }
 
     /// Starts subscribing: loading the state, at once when the client is
     /// connected, otherwise once it is.
     pub fn subscribe(&self) {
-        self.shared.apply(Input::Subscribe(self.id));
+        self.handle.subscribe();
     }
 
     /// Unsubscribes. A load in progress ends once the page in flight is
     /// read, with an unsubscribe command.
     pub fn unsubscribe(&self) {
-        self.shared.apply(Input::Unsubscribe(self.id));
+        self.handle.unsubscribe();
     }
 
     /// Sets `key` of the map to `data`, once the subscription is
@@ -227,8 +192,8 @@ impl MapSubscription {
         key: impl Into<String>,
         data: impl Into<Vec<u8>>,
     ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::MapPublish {
-            channel: self.channel.to_string(),
+        let call = self.handle.call(CallRequest::MapPublish {
+            channel: self.handle.channel.to_string(),
             key: key.into(),
             data: data.into(),
         });
@@ -271,8 +236,8 @@ impl MapSubscription {
         &self,
         key: impl Into<String>,
     ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::MapRemove {
-            channel: self.channel.to_string(),
+        let call = self.handle.call(CallRequest::MapRemove {
+            channel: self.handle.channel.to_string(),
             key: key.into(),
         });
         reply_of(call, |reply| {
@@ -289,10 +254,7 @@ impl MapSubscription {
     pub fn presence(
         &self,
     ) -> impl Future<Output = Result<PresenceResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::Presence {
-            channel: self.channel.to_string(),
-        });
-        reply_of(call, presence_of)
+        self.handle.presence()
     }
 
     /// How many clients and users are subscribed to the channel, once the
@@ -304,17 +266,7 @@ impl MapSubscription {
     pub fn presence_stats(
         &self,
     ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::PresenceStats {
-            channel: self.channel.to_string(),
-        });
-        reply_of(call, presence_stats_of)
-    }
-
-    fn call(
-        &self,
-        request: CallRequest,
-    ) -> impl Future<Output = Result<CallReply, CallError>> + MaybeSend + 'static {
-        self.shared.call(Some(self.id), request)
+        self.handle.presence_stats()
     }
 }
 
@@ -469,42 +421,7 @@ impl MapSubscriptionBuilder {
     /// either kind; for a tag filter the server would refuse, or one with
     /// delta.
     pub fn build(self) -> Result<MapSubscription, SubscriptionError> {
-        crate::subscription::check_resubscribe_delays(&self.options.common)?;
-        let mut core = lock(&self.shared.core);
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Err(SubscriptionError::ClientClosed);
-        }
-        let kind = self.options.kind;
-        let id = core
-            .machine
-            .add_map_subscription(self.channel.clone(), self.options)?;
-        self.shared.log.subscription(id, &self.channel);
-        if self.get_token.is_some() {
-            lock(&self.shared.callbacks).0.insert(
-                id,
-                Callbacks {
-                    data: None,
-                    token: self.get_token,
-                    state: None,
-                    #[cfg(feature = "unstable")]
-                    signature: None,
-                },
-            );
-        }
-        let replaced = self.handler.and_then(|handler| {
-            let handler = handler
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            super::handler::install_map_handler(&self.shared, &mut core, id, handler)
-        });
-        drop(core);
-        drop(replaced);
-        Ok(MapSubscription {
-            shared: self.shared,
-            id,
-            channel: self.channel.into(),
-            kind,
-        })
+        self.register()
     }
 }
 
@@ -559,16 +476,8 @@ impl Client {
     #[must_use]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn get_map_subscription(&self, channel: &str) -> Option<MapSubscription> {
-        let core = lock(&self.shared().core);
-        let id = core.machine.find_subscription(channel)?;
-        let kind = core.machine.map_subscription_kind(id)?;
-        drop(core);
-        Some(MapSubscription {
-            shared: Arc::clone(self.shared()),
-            id,
-            channel: channel.into(),
-            kind,
-        })
+        super::kind::find(self, channel, map_only)
+            .map(|(handle, kind)| MapSubscription { handle, kind })
     }
 
     /// Every map subscription in the registry.
@@ -579,24 +488,9 @@ impl Client {
     #[must_use]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn map_subscriptions(&self) -> Vec<MapSubscription> {
-        let core = lock(&self.shared().core);
-        let subscriptions: Vec<_> = core
-            .machine
-            .subscriptions()
+        super::kind::list(self, map_only)
             .into_iter()
-            .filter_map(|(id, channel)| {
-                Some((id, channel, core.machine.map_subscription_kind(id)?))
-            })
-            .collect();
-        drop(core);
-        subscriptions
-            .into_iter()
-            .map(|(id, channel, kind)| MapSubscription {
-                shared: Arc::clone(self.shared()),
-                id,
-                channel: channel.into(),
-                kind,
-            })
+            .map(|(handle, kind)| MapSubscription { handle, kind })
             .collect()
     }
 
@@ -610,19 +504,39 @@ impl Client {
     /// later), and may change in any minor release.
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn remove_map_subscription(&self, subscription: &MapSubscription) {
-        if !Arc::ptr_eq(&subscription.shared, self.shared()) {
-            return;
-        }
-        self.shared()
-            .apply(Input::RemoveSubscription(subscription.id));
-        lock(&self.shared().callbacks).0.remove(&subscription.id);
-        self.shared().log.subscription_removed(subscription.id);
-        let mut outboxes = lock(&self.shared().outboxes);
-        if let Some(outbox) = outboxes.maps.get_mut(&subscription.id) {
-            outbox.close();
-            if outbox.is_finished() {
-                outboxes.maps.remove(&subscription.id);
-            }
-        }
+        super::kind::remove::<crate::MapSubscriptionEvent>(self, &subscription.handle);
+    }
+}
+
+impl MapSubscriptionBuilder {
+    /// Registers the map subscription, its callback and its handler.
+    // Block 61, D3.
+    fn register(self) -> Result<MapSubscription, SubscriptionError> {
+        crate::subscription::check_resubscribe_delays(&self.options.common)?;
+        let kind = self.options.kind;
+        let callbacks = self.get_token.is_some().then(|| Callbacks {
+            data: None,
+            token: self.get_token,
+            state: None,
+            #[cfg(feature = "unstable")]
+            signature: None,
+        });
+        let options = self.options;
+        super::kind::register::<MapSubscriptionEvent>(
+            self.shared,
+            self.channel,
+            |machine, channel| machine.add_map_subscription(channel, options),
+            callbacks,
+            self.handler,
+        )
+        .map(|handle| MapSubscription { handle, kind })
+    }
+}
+
+/// What a map subscription's lookup takes: its map's kind.
+fn map_only(kind: SubscriptionKind) -> Option<MapKind> {
+    match kind {
+        SubscriptionKind::Map(kind) => Some(kind),
+        _ => None,
     }
 }

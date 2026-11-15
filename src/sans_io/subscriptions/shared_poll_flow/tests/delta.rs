@@ -801,8 +801,8 @@ fn inline_untracks_of_keys_gone_stay_bounded() {
     }
 
     let flow = machine.subscriptions.by_id[&id]
-        .shared_poll
-        .as_ref()
+        .flavor
+        .shared_poll()
         .unwrap();
     assert!(
         flow.inline_untracked.len() <= 2,
@@ -1009,8 +1009,8 @@ fn a_failed_track_keeps_the_inline_untrack() {
         let accepted = track(&mut machine, id, &[("k1", 0)], "s3");
         machine.handle(reply_to(transport, &requests(&accepted, 1)[0]));
         let flow = machine.subscriptions.by_id[&id]
-            .shared_poll
-            .as_ref()
+            .flavor
+            .shared_poll()
             .unwrap();
         assert!(!flow.inline_untracked.contains("k1"), "{failure}");
     }
@@ -1037,8 +1037,8 @@ fn a_refused_track_leaves_no_inline_untrack() {
     answer_all(&mut machine, transport, &answered);
 
     let flow = machine.subscriptions.by_id[&id]
-        .shared_poll
-        .as_ref()
+        .flavor
+        .shared_poll()
         .unwrap();
     assert!(
         flow.inline_untracked.is_empty(),

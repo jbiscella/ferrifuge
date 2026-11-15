@@ -177,7 +177,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_deref() else {
+        let Some(flow) = sub.flavor.shared_poll() else {
             return;
         };
         if !flow.signature_source {
@@ -219,7 +219,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        let Some(flow) = sub.shared_poll.as_deref_mut() else {
+        let Some(flow) = sub.flavor.shared_poll_mut() else {
             return;
         };
         let Some(index) = flow
@@ -488,7 +488,7 @@ impl Machine {
             .subscriptions
             .by_id
             .get_mut(&id)
-            .and_then(|sub| sub.shared_poll.as_deref_mut())
+            .and_then(|sub| sub.flavor.shared_poll_mut())
         else {
             return;
         };
@@ -534,7 +534,7 @@ impl Machine {
             .subscriptions
             .by_id
             .get_mut(&id)
-            .and_then(|sub| sub.shared_poll.as_deref_mut())
+            .and_then(|sub| sub.flavor.shared_poll_mut())
         else {
             return;
         };
@@ -561,7 +561,7 @@ impl Machine {
     // D7.
     pub(super) fn flow_timer_fired(&mut self, timer: SharedPollTimer) {
         let found = self.subscriptions.by_id.iter_mut().find_map(|(id, sub)| {
-            let flow = sub.shared_poll.as_deref_mut()?;
+            let flow = sub.flavor.shared_poll_mut()?;
             let index = flow.timers.iter().position(|(set, _)| *set == timer)?;
             Some((*id, flow.timers.remove(index).1))
         });

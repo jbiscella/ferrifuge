@@ -529,7 +529,7 @@ impl Machine {
         common.join_leave = false;
         let id = self.add_subscription(channel, common)?;
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
-            sub.map = Some(Box::new(MapFlow {
+            sub.flavor = super::Flavor::Map(Box::new(MapFlow {
                 kind,
                 page_size,
                 max_state_bytes: max_state_bytes.get(),
@@ -541,24 +541,12 @@ impl Machine {
         Ok(id)
     }
 
-    /// The kind of map subscription `id` is, `None` for a stream
-    /// subscription or an id not in the registry.
-    #[must_use]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    pub fn map_subscription_kind(&self, id: SubscriptionId) -> Option<MapKind> {
-        self.subscriptions
-            .by_id
-            .get(&id)
-            .and_then(|sub| sub.map.as_ref())
-            .map(|map| map.kind)
-    }
-
     /// Whether `id` is a map subscription.
     pub(in crate::sans_io) fn is_map(&self, id: SubscriptionId) -> bool {
         self.subscriptions
             .by_id
             .get(&id)
-            .is_some_and(|sub| sub.map.is_some())
+            .is_some_and(|sub| sub.flavor.map().is_some())
     }
 
     /// The next subscribe command of map subscription `id`, carrying
@@ -584,7 +572,7 @@ impl Machine {
         // A new load recovers from the position a taken event set, when
         // the server made the map recoverable (D6).
         let recover_from = sub.position.clone().filter(|_| sub.recover);
-        let map = sub.map.as_mut()?;
+        let map = sub.flavor.map_mut()?;
         let kind = map.kind.wire();
         let limit = i32::try_from(map.page_size).unwrap_or(i32::MAX);
         // A load from scratch starts no chain from what came before (D9).
@@ -630,7 +618,7 @@ impl Machine {
             (Some(error), _) => {
                 // The server may still hold the load's reservation, which
                 // would refuse a new first request (D6).
-                let paged = sub.map.as_mut().and_then(|map| map.end_load()) == Some(true);
+                let paged = sub.flavor.map_mut().and_then(MapFlow::end_load) == Some(true);
                 if paged {
                     self.send_unsubscribe(id, channel);
                 }
@@ -642,7 +630,7 @@ impl Machine {
             (None, ReplyResult::Subscribe(result)) => result,
             (None, _) => return self.reply_without_result("subscribe"),
         };
-        let Some(map) = sub.map.as_mut() else {
+        let Some(map) = sub.flavor.map_mut() else {
             return;
         };
         let next = map.next(&mut result, size, rebuild, &mut sub.delta_statistics);
@@ -719,7 +707,7 @@ impl Machine {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };
-        let fatal = sub.map.as_mut().is_some_and(|map| {
+        let fatal = sub.flavor.map_mut().is_some_and(|map| {
             // Whatever comes next, these values have no stream (D9).
             map.bases = None;
             map.strategy == UnrecoverableStrategy::Fatal
@@ -903,7 +891,7 @@ impl Machine {
         }
         let rebuild = self.rebuild();
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id)
-            && let Some(map) = sub.map.as_mut()
+            && let Some(map) = sub.flavor.map_mut()
             && let Err(error) =
                 map.rebuild_live(&mut publication, rebuild, &mut sub.delta_statistics)
         {
@@ -978,7 +966,7 @@ impl Machine {
         if sub.subscribe_command != Some(reply.id) {
             return false;
         }
-        let Some(map) = sub.map.as_ref() else {
+        let Some(map) = sub.flavor.map() else {
             return false;
         };
         let Some(load) = map.load.as_ref() else {
