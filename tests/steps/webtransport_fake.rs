@@ -99,14 +99,16 @@ async fn the_fake_server_counted(world: &mut ClientWorld, handshakes: usize) {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let fake = fake_webtransport(world);
     // A count off by one is either this client's own attempt failing and
-    // being made again (its failed attempts tell) or a connection from
-    // elsewhere (its address tells).
+    // being made again, which its failed attempts and their errors tell, or
+    // a connection from elsewhere. The addresses do not tell them apart:
+    // the client binds a new UDP socket for each handshake.
     assert_eq!(
         fake.handshakes(),
         handshakes,
-        "QUIC connections from {:?}; the client's failed attempts: {}",
+        "QUIC connections from {:?}; the client's failed attempts: {}, their errors: {:?}",
         fake.remotes(),
-        world.client().statistics().failed_attempts
+        world.client().statistics().failed_attempts,
+        world.skipped_transport_errors
     );
 }
 

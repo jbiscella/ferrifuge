@@ -152,6 +152,9 @@ pub(crate) struct ClientWorld {
     pub(crate) put_back_events: std::collections::VecDeque<ClientEvent>,
     /// Connection id from the last "connected" event.
     pub(crate) client_id: Option<String>,
+    /// The transport errors a step skipped on its way to the event it
+    /// waited for, for a later step's failure message to name.
+    pub(crate) skipped_transport_errors: Vec<String>,
     /// Code and reason of the last disconnect the server was asked to send.
     server_disconnect: Option<(u32, String)>,
     /// Code and reason the proxy was programmed to answer with.
@@ -577,6 +580,7 @@ pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -
             match world.next_event().await {
                 ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {
                     failed.push(error.transport.map_or("", TransportKind::as_str));
+                    world.skipped_transport_errors.push(format!("{error:?}"));
                 }
                 event => return event,
             }
