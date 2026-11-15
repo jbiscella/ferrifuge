@@ -10521,7 +10521,7 @@ This block amends Blocks 28, 33, 46, 49, 53 and 60 (see "Amendments to earlier b
 - **D3 Subscription kinds (finding 2).**
   - **Term.** A *kind* is a stream, map or shared poll subscription.
   - **Adapter.**
-    - **`Routed`.** For each kind, it gives the kind's outbox map, its handler slot and its handler installation.
+    - **`Kind: Routed`.** A sub-trait of `Routed`, implemented for each kind's events, gives the kind's outbox map, its handler slot and its handler installation; `ClientEvent`, routed but no kind, implements `Routed` alone.
     - **Written once, as private generic helpers:**
       - opening a stream (`events()`);
       - `held_events()`;
@@ -10530,7 +10530,7 @@ This block amends Blocks 28, 33, 46, 49, 53 and 60 (see "Amendments to earlier b
       - installing and setting a handler;
       - `deliver`'s arms for the three kinds.
     - **Methods several kinds share** are written once on one private handle (`shared`, `id`, `channel`), and the three types delegate to it: `channel`, `state`, `set_data`, `set_tag_filter`, `ready`, `subscribe`, `unsubscribe`, `publish`, `presence`, `presence_stats`, `PartialEq` and `Debug`.
-    - **Public methods stay.** Every public method of `Subscription`, `MapSubscription`, `SharedPollSubscription`, their builders, and `Client`'s methods for each kind stays. Its body is one call. No public signature or doc text changes.
+    - **Public methods stay.** Every public method of `Subscription`, `MapSubscription`, `SharedPollSubscription`, their builders, and `Client`'s methods for each kind stays. When what it does is shared by several kinds (the shared methods, `events()`, `held_events()`, `set_handler`, `build()`, and `Client`'s `get_*`, `*_subscriptions` and `remove_*`), its body is one call; a method only one kind has, and a builder's setter, keeps its body. No public signature or doc text changes.
     - **The helpers keep today's locked sections and their order:**
       - the registry check, opening the outbox and `StreamOpened` happen in one section under the core lock;
       - in `build()`, the client-closed check, adding to the registry, the callbacks and the handler happen under the core lock;
