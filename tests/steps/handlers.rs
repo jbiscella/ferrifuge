@@ -197,10 +197,7 @@ fn a_client_whose_handler_takes_200_ms(world: &mut ClientWorld, mode: String) {
         &mode,
         Some(Box::new(move |event: ClientEvent| {
             record(&shared, event.name().to_owned(), || {
-                if matches!(
-                    event,
-                    ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-                ) {
+                if matches!(event, ClientEvent::Connected(_)) {
                     std::thread::sleep(Duration::from_millis(200));
                 }
             });
@@ -278,10 +275,7 @@ async fn subscribed_with_handler(
     client.connect();
     // The client's stream is read up to "connected", as a connected
     // client's is.
-    while !matches!(
-        world.next_event().await,
-        ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-    ) {}
+    while !matches!(world.next_event().await, ClientEvent::Connected(_)) {}
     let subscription = client
         .subscription_builder(channel)
         .handler(subscription_handler(Arc::clone(&world.handlers.shared), on))

@@ -131,7 +131,7 @@ fn subscribe(world: &mut ClientWorld, channel: &str, recoverable: bool) {
 async fn connected(world: &mut ClientWorld) -> String {
     loop {
         match world.next_event().await {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) => {
                 world.doubles.client_id = Some(client_id.clone());
                 return client_id;
@@ -145,7 +145,7 @@ async fn connected(world: &mut ClientWorld) -> String {
 async fn subscribed(world: &mut ClientWorld) -> ferrifuge::SubscribedContext {
     loop {
         match world.next_subscription_event(false).await {
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SubscriptionEvent::Subscribing(_) => {}
             SubscriptionEvent::Subscribed(details) => return details,
             other => panic!("{other:?}"),
         }
@@ -501,7 +501,7 @@ async fn connected_and_unsubscribed(world: &mut ClientWorld, code: u32) {
     connected(world).await;
     loop {
         match world.next_subscription_event(false).await {
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SubscriptionEvent::Subscribing(_) => {}
             SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
                 code: got, ..
             }) => {
@@ -568,8 +568,7 @@ fn a_double_granting(world: &mut ClientWorld, channel: String) {
 async fn server_side_subscribed(world: &mut ClientWorld) {
     loop {
         match world.next_event().await {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
-            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {}
+            ClientEvent::Connecting(_) | ClientEvent::Connected(_) => {}
             ClientEvent::ServerSubscription {
                 channel,
                 event: ServerSubscriptionEvent::Subscribed(_),
@@ -690,12 +689,7 @@ impl Side {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|event| {
-                    matches!(
-                        event,
-                        ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-                    )
-                })
+                .filter(|event| matches!(event, ClientEvent::Connected(_)))
                 .count()
         };
         let reached = tokio::time::timeout(EVENT_TIMEOUT, async {

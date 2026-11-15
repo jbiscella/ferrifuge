@@ -322,9 +322,9 @@ impl Log {
         // work for them here, logging off or on (D8).
         if !matches!(
             event,
-            SubscriptionEvent::Subscribing(crate::SubscribingContext { .. })
+            SubscriptionEvent::Subscribing(_)
                 | SubscriptionEvent::Subscribed(_)
-                | SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
+                | SubscriptionEvent::Unsubscribed(_)
                 | SubscriptionEvent::Error(_)
         ) {
             return;

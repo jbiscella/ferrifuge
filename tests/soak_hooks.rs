@@ -29,10 +29,7 @@ async fn connected(server: &FakeServer, config: Config, recorded: bool) -> Clien
     client.connect();
     let connected = tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
-            if matches!(
-                event,
-                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-            ) {
+            if matches!(event, ClientEvent::Connected(_)) {
                 return;
             }
         }

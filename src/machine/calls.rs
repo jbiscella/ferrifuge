@@ -1077,9 +1077,7 @@ mod tests {
         let connected = connect_reply(&mut machine, first)
             .into_iter()
             .find_map(|action| match action {
-                Action::Emit(event, ClientEvent::Connected(crate::ConnectedContext { .. })) => {
-                    Some(event)
-                }
+                Action::Emit(event, ClientEvent::Connected(_)) => Some(event),
                 _ => None,
             })
             .expect("a connected event");
@@ -1096,10 +1094,9 @@ mod tests {
         let released = machine.handle(Input::EventTaken(connected));
 
         assert!(
-            released.iter().any(|action| matches!(
-                action,
-                Action::Emit(_, ClientEvent::Connected(crate::ConnectedContext { .. }))
-            )),
+            released
+                .iter()
+                .any(|action| matches!(action, Action::Emit(_, ClientEvent::Connected(_)))),
             "the held connect reply was not handled: {released:?}"
         );
         assert_eq!(sent_text(&released), Vec::<String>::new());

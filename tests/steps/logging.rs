@@ -550,10 +550,7 @@ async fn two_captured_clients(world: &mut ClientWorld) {
             .await
             .expect("connected in time")
             .expect("an event");
-        if matches!(
-            event,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-        ) {
+        if matches!(event, ClientEvent::Connected(_)) {
             break;
         }
     }

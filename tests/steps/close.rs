@@ -55,10 +55,7 @@ async fn the_subscriptions_stream_ends(world: &mut ClientWorld) {
     // Events queued before the close come first.
     while let Some(event) = world.next_subscription_item().await {
         assert!(
-            matches!(
-                event,
-                SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
-            ),
+            matches!(event, SubscriptionEvent::Unsubscribed(_)),
             "after the close: {event:?}"
         );
     }
@@ -146,13 +143,7 @@ async fn the_stream_ends_without_disconnected(world: &mut ClientWorld) {
     let events = world.events.as_mut().expect("no client created yet");
     let ended = tokio::time::timeout(EVENT_TIMEOUT, async {
         while let Some(event) = events.next().await {
-            assert!(
-                !matches!(
-                    event,
-                    ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
-                ),
-                "{event:?}"
-            );
+            assert!(!matches!(event, ClientEvent::Disconnected(_)), "{event:?}");
         }
     })
     .await;

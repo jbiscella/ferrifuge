@@ -370,8 +370,7 @@ impl Machine {
         // Leaving subscribed withdraws the publications not yet taken.
         if matches!(
             event,
-            ServerSubscriptionEvent::Subscribing
-                | ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
+            ServerSubscriptionEvent::Subscribing | ServerSubscriptionEvent::Unsubscribed(_)
         ) {
             self.withdraw(&Owner::Server(channel.to_owned()));
         }

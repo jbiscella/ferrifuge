@@ -2983,12 +2983,7 @@ mod tests {
             let weak = client.downgrade();
             let done = Arc::clone(&returned);
             client.set_handler(move |event: ClientEvent| {
-                if done.load(Ordering::Acquire)
-                    || !matches!(
-                        event,
-                        ClientEvent::Connecting(crate::ConnectingContext { .. })
-                    )
-                {
+                if done.load(Ordering::Acquire) || !matches!(event, ClientEvent::Connecting(_)) {
                     return;
                 }
                 let client = weak.upgrade().expect("a clone lives");

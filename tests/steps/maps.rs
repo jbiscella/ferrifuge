@@ -926,8 +926,7 @@ async fn synced_client(
             let event = events.next().await.expect("a stream");
             match event {
                 MapSubscriptionEvent::Sync(_) => return event,
-                MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
-                | MapSubscriptionEvent::Error(_) => {
+                MapSubscriptionEvent::Unsubscribed(_) | MapSubscriptionEvent::Error(_) => {
                     panic!("{event:?}")
                 }
                 _ => {}
@@ -1163,8 +1162,7 @@ async fn emits_a_sync_with_three_keys(world: &mut ClientWorld) {
         assert!(
             matches!(
                 event,
-                MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
-                    | MapSubscriptionEvent::Subscribed(_)
+                MapSubscriptionEvent::Subscribing(_) | MapSubscriptionEvent::Subscribed(_)
             ),
             "{event:?}"
         );
@@ -1415,7 +1413,7 @@ async fn emits_a_sync(world: &mut ClientWorld) {
         let event = world.next_map_event().await;
         match event {
             MapSubscriptionEvent::Sync(_) => break,
-            MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+            MapSubscriptionEvent::Unsubscribed(_) => {
                 panic!("{event:?}")
             }
             _ => {}
@@ -1446,8 +1444,7 @@ async fn still_subscribed_later(world: &mut ClientWorld, seconds: u64) {
     assert!(
         later.iter().all(|event| !matches!(
             event,
-            MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
-                | MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
+            MapSubscriptionEvent::Subscribing(_) | MapSubscriptionEvent::Unsubscribed(_)
         )),
         "{later:?}"
     );
@@ -1533,8 +1530,7 @@ impl ClientWorld {
                 found
                     || matches!(
                         event,
-                        MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
-                            | MapSubscriptionEvent::Subscribed(_)
+                        MapSubscriptionEvent::Subscribing(_) | MapSubscriptionEvent::Subscribed(_)
                     ),
                 "{event:?} before {name:?}, after {seen:?}"
             );

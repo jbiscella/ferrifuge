@@ -88,10 +88,9 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
         assert_eq!(world.client().state(), State::Connecting);
         let events = world.ready_events();
         assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
-            )),
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Disconnected(_))),
             "{events:?}"
         );
         return;
@@ -109,7 +108,7 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
                 assert_eq!(*got, code, "{event:?}");
                 "disconnected"
             }
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
+            ClientEvent::Connected(_) => {
                 panic!("expected {expected}, got {event:?}")
             }
             // E.g. the "connecting" that connect() itself emits, errors,
@@ -141,8 +140,7 @@ async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
                 assert_eq!((got, got_reason.as_str()), (code, reason.as_str()));
                 return;
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
-            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
+            ClientEvent::Connecting(_) | ClientEvent::Connected(_) => {
                 panic!(
                     "expected disconnected, got {event:?}{}",
                     recent_records(world)

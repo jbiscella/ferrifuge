@@ -96,9 +96,9 @@ async fn connected_over(events: &mut (impl Stream<Item = ClientEvent> + Unpin)) 
     loop {
         match next_event(events).await {
             ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
-                return transport;
+                return transport.as_str().to_owned();
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     }
@@ -110,8 +110,7 @@ async fn subscribed(
     loop {
         match next(events).await {
             SubscriptionEvent::Subscribed(subscribed) => return subscribed,
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
-            | SubscriptionEvent::Error(_) => {}
+            SubscriptionEvent::Subscribing(_) | SubscriptionEvent::Error(_) => {}
             event => panic!("not subscribing or subscribed: {event:?}"),
         }
     }
@@ -153,12 +152,12 @@ async fn a_browser_client_connects_over_websocket_and_receives_a_publication() {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+        ClientEvent::Connecting(_)
     ));
     assert_eq!(connected_over(&mut events).await, "websocket");
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+        SubscriptionEvent::Subscribing(_)
     ));
     subscribed(&mut subscription_events).await;
     within(WAIT, client.publish("news", br#""hello""#.to_vec()))
@@ -222,7 +221,7 @@ async fn publications_not_taken_before_reconnect_are_recovered_once() {
 
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+        SubscriptionEvent::Subscribing(_)
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -282,7 +281,7 @@ async fn an_unread_stream_overflows_the_inbox_and_loses_no_publication() {
     wasm_bindgen_futures::spawn_local(async move { while events.next().await.is_some() {} });
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+        SubscriptionEvent::Subscribing(_)
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -322,10 +321,8 @@ struct Recording(Rc<Record>);
 impl ClientHandler for Recording {
     fn on_event(&mut self, event: ClientEvent) {
         match event {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
-                self.0.add("connecting")
-            }
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => self.0.add("connected"),
+            ClientEvent::Connecting(_) => self.0.add("connecting"),
+            ClientEvent::Connected(_) => self.0.add("connected"),
             _ => {}
         }
     }
@@ -343,9 +340,7 @@ async fn handlers_receive_the_events_in_order(delivery: EventDelivery) {
     let subscription = client
         .subscription_builder("news")
         .handler(move |event: SubscriptionEvent| match event {
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {
-                of_subscription.add("subscribing")
-            }
+            SubscriptionEvent::Subscribing(_) => of_subscription.add("subscribing"),
             SubscriptionEvent::Subscribed(_) => of_subscription.add("subscribed"),
             SubscriptionEvent::Publication(_) => of_subscription.add("publication"),
             _ => {}
@@ -808,7 +803,7 @@ async fn falls_back_to_http_stream(protocol: Protocol) {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+        ClientEvent::Connecting(_)
     ));
     assert_eq!(connected_over(&mut events).await, "http_stream");
 }
@@ -999,7 +994,7 @@ async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publ
     wasm_bindgen_futures::spawn_local(async move { while events.next().await.is_some() {} });
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+        SubscriptionEvent::Subscribing(_)
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -1111,7 +1106,7 @@ async fn a_browser_client_falls_back_to_sse() {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+        ClientEvent::Connecting(_)
     ));
     assert_eq!(connected_over(&mut events).await, "sse");
 }
@@ -1294,11 +1289,11 @@ async fn a_transport_without_its_constructor_is_skipped() {
                     "{error:?}"
                 );
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };
-    assert_eq!(transport, "http_stream");
+    assert_eq!(transport.as_str(), "http_stream");
     // The websocket's only: no sse attempt was made.
     assert_eq!(client.statistics().failed_attempts, 1);
 }
@@ -1502,7 +1497,7 @@ async fn a_browser_client_connects_over_webtransport_and_receives_a_publication(
                 ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
                     break transport;
                 }
-                ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+                ClientEvent::Connecting(_) => {}
                 event => panic!("not connecting or connected: {event:?}"),
             }
         };
@@ -1510,7 +1505,7 @@ async fn a_browser_client_connects_over_webtransport_and_receives_a_publication(
         let published = relay(&format!("webtransport-publish/{channel}")).await;
         let received = publication(&mut subscription_events).await;
 
-        assert_eq!(transport, "webtransport", "{protocol:?}");
+        assert_eq!(transport.as_str(), "webtransport", "{protocol:?}");
         assert_eq!(published, "ok", "{protocol:?}");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&received.data).expect("JSON data"),
@@ -1539,11 +1534,11 @@ async fn a_browser_without_webtransport_skips_the_transport() {
     let mut failed = None;
     let transport = loop {
         match next(&mut events).await {
-            ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
+            ClientEvent::Error(error) => failed = failed.or(error.transport),
             ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
                 break transport;
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };
@@ -1551,7 +1546,7 @@ async fn a_browser_without_webtransport_skips_the_transport() {
     client.disconnect();
     drop(restore);
 
-    assert_eq!(transport, "websocket");
+    assert_eq!(transport.as_str(), "websocket");
     // And the client emits no "error" event for transport "webtransport".
     assert_eq!(failed, None);
     assert_eq!(after, before);
@@ -1572,19 +1567,22 @@ async fn a_browser_client_falls_back_from_webtransport_when_the_session_is_refus
     let mut failed = None;
     let transport = loop {
         match next(&mut events).await {
-            ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
+            ClientEvent::Error(error) => failed = failed.or(error.transport),
             ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
                 break transport;
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };
     client.disconnect();
     relay("webtransport-refuse/off").await;
 
-    assert_eq!(failed.as_deref(), Some("webtransport"));
-    assert_eq!(transport, "websocket");
+    assert_eq!(
+        failed.map(ferrifuge::TransportKind::as_str),
+        Some("webtransport")
+    );
+    assert_eq!(transport.as_str(), "websocket");
 }
 
 /// The build's browser is the one it runs in, so that the test Safari skips

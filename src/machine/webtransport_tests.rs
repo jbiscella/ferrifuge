@@ -168,12 +168,7 @@ fn ended_before_an_answer(kind: TransportKind) -> (Vec<ClientEvent>, TransportKi
             _ => None,
         })
         .expect("the next attempt");
-    events.retain(|event| {
-        !matches!(
-            event,
-            ClientEvent::Connecting(crate::ConnectingContext { .. })
-        )
-    });
+    events.retain(|event| !matches!(event, ClientEvent::Connecting(_)));
     (events, next)
 }
 
@@ -270,7 +265,7 @@ fn chosen_then_ended_before_an_answer(
     let events = actions
         .iter()
         .filter_map(|action| match action {
-            Action::Emit(_, ClientEvent::Connecting(crate::ConnectingContext { .. })) => None,
+            Action::Emit(_, ClientEvent::Connecting(_)) => None,
             Action::Emit(_, event) => Some(event.clone()),
             _ => None,
         })

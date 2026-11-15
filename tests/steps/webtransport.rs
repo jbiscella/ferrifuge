@@ -174,7 +174,7 @@ fn a_client_with_an_unreachable_webtransport(world: &mut ClientWorld) {
 async fn a_failed_attempt_over(world: &mut ClientWorld, transport: String) {
     let event = loop {
         match world.next_event().await {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             event => break event,
         }
     };
@@ -205,7 +205,7 @@ async fn refused_whichever_transport(world: &mut ClientWorld) {
     let mut reported = false;
     let (code, reason) = loop {
         match world.next_event().await {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             ClientEvent::Error(error)
                 if !reported
                     && error.kind == ErrorKind::Transport

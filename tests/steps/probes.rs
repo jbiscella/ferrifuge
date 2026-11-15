@@ -212,8 +212,8 @@ async fn a_client_whose_handler_holds_it(world: &mut ClientWorld) {
                 .get_or_insert_with(|| OnThreadExit(Arc::clone(&returned)));
         });
         match event {
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
-                connected.store(true, Ordering::SeqCst)
+            ClientEvent::Connected(_) => {
+                connected.store(true, Ordering::SeqCst);
             }
             ClientEvent::ServerSubscription {
                 event: ServerSubscriptionEvent::Publication(_),
@@ -432,8 +432,7 @@ async fn disconnected_with_the_reason_sent(world: &mut ClientWorld, code: u32) {
                 return;
             }
             // The push lost with the end of the stream: a reconnect.
-            event @ (ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
-            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. })) => {
+            event @ (ClientEvent::Connecting(_) | ClientEvent::Connected(_)) => {
                 panic!("expected disconnected, got {event:?}");
             }
             _ => {}
@@ -460,7 +459,7 @@ async fn a_client_behind_a_proxy_that_never_answers(world: &mut ClientWorld, sec
 async fn within_connecting_with_code(world: &mut ClientWorld, seconds: u64, code: u32) {
     match world.next_event().await {
         ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) => {
-            assert_eq!(got, code)
+            assert_eq!(got, code);
         }
         event => panic!("expected connecting, got {event:?}"),
     }
@@ -485,9 +484,8 @@ async fn within_connecting_with_code(world: &mut ClientWorld, seconds: u64, code
 async fn it_connects_again_and_is_answered(world: &mut ClientWorld) {
     loop {
         match world.next_event().await {
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => break,
-            ClientEvent::Error(_)
-            | ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connected(_) => break,
+            ClientEvent::Error(_) | ClientEvent::Connecting(_) => {}
             event => panic!("expected connected, got {event:?}"),
         }
     }

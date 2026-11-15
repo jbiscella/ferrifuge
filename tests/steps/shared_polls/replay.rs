@@ -102,7 +102,7 @@ pub(super) async fn a_replaying_subscription(
 async fn subscribing(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
-            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {
+            SharedPollSubscriptionEvent::Subscribing(_) => {
                 return;
             }
             SharedPollSubscriptionEvent::Update(_) => {}
@@ -116,7 +116,7 @@ async fn subscribed_again(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
             SharedPollSubscriptionEvent::Subscribed(_) => return,
-            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+            SharedPollSubscriptionEvent::Subscribing(_)
             | SharedPollSubscriptionEvent::Update(_) => {}
             other => panic!("expected subscribed, got {other:?}"),
         }
@@ -158,7 +158,7 @@ async fn reconnects_and_answered(world: &mut ClientWorld, epoch: String) {
     // only what follows.
     while !matches!(
         world.next_event().await,
-        ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+        ferrifuge::ClientEvent::Connected(_)
     ) {}
 }
 

@@ -122,7 +122,7 @@ async fn subscribed_with_delta(world: &mut ClientWorld) {
                 assert!(subscribed.delta, "delta not on: {subscribed:?}");
                 return;
             }
-            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SharedPollSubscriptionEvent::Subscribing(_) => {}
             other => panic!("expected subscribed, got {other:?}"),
         }
     }
@@ -157,13 +157,13 @@ async fn reconnects_with_delta(world: &mut ClientWorld) {
                 assert!(subscribed.delta, "delta not on: {subscribed:?}");
                 break;
             }
-            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SharedPollSubscriptionEvent::Subscribing(_) => {}
             other => panic!("expected subscribed again, got {other:?}"),
         }
     }
     while !matches!(
         world.next_event().await,
-        ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+        ferrifuge::ClientEvent::Connected(_)
     ) {}
 }
 

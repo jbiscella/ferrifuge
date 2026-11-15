@@ -793,9 +793,9 @@ impl Run {
     /// I1 for the client.
     fn client_event(&mut self, event: &ClientEvent) -> Step {
         let state = match event {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => State::Connecting,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => State::Connected,
-            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => State::Disconnected,
+            ClientEvent::Connecting(_) => State::Connecting,
+            ClientEvent::Connected(_) => State::Connected,
+            ClientEvent::Disconnected(_) => State::Disconnected,
             _ => return Ok(()),
         };
         let last = std::mem::replace(&mut self.last_state, state);
@@ -827,9 +827,7 @@ impl Run {
                 }
                 SubscriptionState::Subscribed
             }
-            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
-                SubscriptionState::Unsubscribed
-            }
+            SubscriptionEvent::Unsubscribed(_) => SubscriptionState::Unsubscribed,
             SubscriptionEvent::Publication(publication) => return self.delivered(n, publication),
             _ => return Ok(()),
         };
