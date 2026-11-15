@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–53 and 56–57 of N; 54–55 reserved for blocks in progress. Further blocks to be appended.
+Status: DRAFT — blocks 0–61 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -9915,6 +9915,177 @@ Value clause: As a team shipping Ferrifuge to a large fleet, I want the 1.0 API 
 No new scenarios: the existing ones pass, rewritten to the new types.
 
 **Exceptions introduced:** the block's rules are structural, so lints, a source test, the doc check and the semver job check them, not scenarios.
+
+---
+
+## Block 55 — Stability statement and the 1.0.0 pre-release
+
+**Goal:** the first tagged release, 1.0.0-alpha.1, states what its version promises and what it leaves out. Its version, changelog, README and checks are in step with a pre-release, and it ships from a commit that passed the real-server chaos and soak runs.
+
+Source: Block 54's out of scope ("the stability statement, the README's stability section and the 1.0.0 pre-release: Block 55, which takes F7, F8, F17, F18's README note and F20"); owner requests of 2026-11-14 (1.0.0-alpha only once the whole listed backlog is implemented) and 2026-11-15.
+
+**Dependencies:** Blocks 20 (release workflow, D2 tag check, D4 changelog, D5 security policy, D6 MSRV, D9 README test), 24 (`ferrifuge::android`), 34 (codes), 37 (`test-util`, `__test-hooks`, the semver job's features), 45, 47 and 48 (`unstable`, `unstable-webtransport`), 51 and 52 (the chaos-real and soak gates), 54 (`unstable-machine`, `#[non_exhaustive]`, the findings), 57 (workflow rules), 60 (D3, documentation in plain terms) and 61. Blocks 60 and 61 are implemented before 55a.
+
+**Out of scope:**
+- a 1.0.0 release proper, and the semver rules after it;
+- exposing `TransportFailure` (Block 61, out of scope);
+- stabilising `ferrifuge::machine`, or a stable channel for the unstable features;
+- yanking 0.21.0, published by hand on 2026-11-09: it stays, since a yank is for a version that must not be newly resolved, and no `0.21` requirement can reach a 1.0.0 pre-release anyway;
+- the `cargo semver-checks` README command (Development), which compares with `main` and keeps working.
+
+This block amends Block 20 D1, D2, D5 and D9 (see "Amendments to earlier blocks"). It reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-15, delegated by the owner):
+
+- **D1 The stability statement.**
+  - **Where.** `README.md` gains a `## Stability` section right after `## Status`. Status's first sentence, "Before 1.0, a minor version may break the API; [CHANGELOG.md](CHANGELOG.md) says what each version changes.", becomes "[Stability](#stability) says what the version promises; [CHANGELOG.md](CHANGELOG.md) says what each version changes."
+  - **Crate root.** The crate documentation says, in one sentence: "What the version promises, and what it leaves out, is stated in the README's [Stability](https://github.com/jbiscella/ferrifuge#stability) section."
+  - **The text.** The section reads, line breaks aside:
+
+    ~~~markdown
+    ## Stability
+
+    Ferrifuge follows [Semantic Versioning](https://semver.org/). This section
+    says what that promise covers.
+
+    **Covered**, with the features `tokio`, `ring` and `browser` (the
+    defaults), `aws-lc-rs`, `fips`, `cookies` and `test-util`:
+
+    - the paths and signatures of the public items, and their documented
+      behaviour;
+    - the codes in [Codes](#codes): a code's value and meaning never change,
+      and a value is never reused. Their reasons and messages are for people
+      and logs, and may be reworded;
+    - the futures and streams: every call, `ready()` and `close()` returns a
+      future that borrows nothing from the client, and `events()` and
+      `publications()` return such a stream. Natively they are `Send`; on the
+      browser target their `MaybeSend` bound asks nothing, as JavaScript
+      handles are not `Send`;
+    - the minimum Rust version, `rust-version` in `Cargo.toml`: it is raised
+      only when a dependency or a language feature needs it, never in a patch
+      release, and the changelog says so.
+
+    **Not covered:**
+
+    - the features `unstable`, `unstable-webtransport` and `unstable-machine`
+      (`ferrifuge::machine`): what they enable may change in any minor
+      release. Cargo unifies features across a build, so a library that
+      depends on Ferrifuge leaves them to the application;
+    - `__test-hooks`: private, for Ferrifuge's own tests, never for
+      applications;
+    - `ferrifuge::android`, which re-exports `jni` 0.22 and the `Runtime`
+      trait of `rustls-platform-verifier` 0.7, both before 1.0. docs.rs builds
+      no Android target, so this module is documented in the source only;
+    - the text of `Debug` output and of log records.
+
+    **Growing without breaking.** Every public enum, and every public struct
+    whose fields are all public, is `#[non_exhaustive]`, except
+    `SubscriptionState`, the spec's closed set of three states. Events and
+    callbacks take context structs. So fields, variants, events, transports
+    and codes come in minor releases: match them with a wildcard arm. A
+    method added to a trait an application implements (`Connector`,
+    `CookieJar`, the handler traits) comes with a default. The codes of the
+    unstable features are listed with the others and mean something only
+    with their feature.
+
+    **Public dependencies.** The covered API names types of these crates.
+    Moving to a new major version of one, or to a new 0.x line, is a major
+    release of Ferrifuge:
+
+    - `rustls` 0.23, with the `pki_types` it re-exports;
+    - `futures-core` 0.3, whose `Stream` the streams implement;
+    - `http` 1, `url` 2 (with `cookies`) and `tokio` 1;
+    - `js-sys` 0.3 and `web-sys` 0.3, on the browser target;
+    - `serde` 1 and `serde_json` 1.
+
+    **Fixes.** Bringing behaviour back to what its documentation says is a
+    fix, released as a patch. So is adapting to an upstream fix that
+    [Known upstream issues](#known-upstream-issues) lists.
+
+    **Pre-releases.** Until 1.0.0, a `1.0.0-alpha.N` release may break the
+    covered API in the next one, and the changelog lists each break. Cargo
+    never picks a pre-release for a `"1.0"` requirement, so the dependency
+    lines in [Usage](#usage) name the whole version. On `cargo update`, it
+    does move that requirement to a later pre-release of 1.0.0 and to
+    1.0.0: an application that must not move pins it with an `=`
+    requirement. From 1.0.0, only a major version breaks the covered API.
+    ~~~
+
+    The section cites no block or decision (Block 60 D3).
+
+- **D2 Version and changelog.**
+  - **Version.** `1.0.0-alpha.1`. It is Cargo's pre-release form, which a `"1.0"` requirement does not match (the Cargo book, "Pre-releases"). The `alpha` tag says the API may still break, and the numeric identifier sorts numerically (SemVer §11).
+  - **Section.** `CHANGELOG.md` gets a `## [1.0.0-alpha.1] - <merge date>` section holding what `Unreleased` held, under an empty `Unreleased`. Its first line reads "Changes since 0.21.0, the last version on crates.io, are this section's and those of 0.22.0 to 0.25.0 below." Its "Added" names the README's Stability section; its "Changed" names the version.
+  - **Preamble.** It reads:
+
+    "All notable changes to Ferrifuge are recorded here, in the form of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project follows [Semantic Versioning](https://semver.org/) for the API that the README's Stability section names: before 1.0, a minor version could break it; a 1.0.0 pre-release may break it in the next pre-release, each break listed here; from 1.0.0, only a major version breaks it.
+
+    Of the versions up to 0.25.0, only 0.21.0 was published, to crates.io and untagged; each section records what the repository held while it carried that version, from the blocks of `CLAUDE.md` that landed then. 1.0.0-alpha.1 is the first tagged release."
+
+- **D3 Dependency lines.**
+  - **The lines.** While the manifest's version is a pre-release, the README's dependency lines name it whole: `ferrifuge = "1.0.0-alpha.1"`, and `version = "1.0.0-alpha.1"` in the table forms.
+  - **The test.** `tests/readme.rs` derives the expected requirement from the version: `major.minor` for a release, the whole version for a pre-release. The helper is unit-tested on `0.25.0` (giving `0.25`) and `1.0.0-alpha.1` (giving itself).
+  - **Usage.** The parenthesis "(until the first release reaches crates.io, use `ferrifuge = { git = "https://github.com/jbiscella/ferrifuge" }`)" goes.
+
+- **D4 Release checks for a pre-release.**
+  - **Tag check.** `scripts/check-release-tag` is unchanged. It compares the tag with `v` and the version as strings, so `v1.0.0-alpha.1` passes and `v1.0.0-alpha.1-rc.1` fails.
+  - **Step.** Block 20's release step orders versions by SemVer precedence, a pre-release below its release (`0.25.0 < 1.0.0-alpha.1 < 1.0.0-alpha.2 < 1.0.0-alpha.10 < 1.0.0`), instead of three numbers. The `semver` crate, already in `Cargo.lock`, may do it as a dev-dependency.
+  - **GitHub release.** `release.yml`'s GitHub release is created with `--prerelease` when the tag's version has a pre-release part. The test is made in the shell on `$GITHUB_REF_NAME`, with no expression inside `run:` (Block 57 D4).
+
+- **D5 Semver checks during a pre-release.**
+  - **Why.** cargo-semver-checks 0.51.0 treats two equal pre-release versions, and two different ones, as a major change (`check_release.rs`, `classify_minimum_semver_version_change`). So from 1.0.0-alpha.1 on, the pull-request job would pass any break.
+  - **The flag.** When a pull request leaves the manifest's version as the base has it, and that version is a pre-release, both steps of the `semver` job (native and browser target) pass `--release-type minor`. A break then fails the job.
+  - **Breaking.** A pull request that breaks the covered API bumps the pre-release number (`1.0.0-alpha.N` to `1.0.0-alpha.N+1`) and lists the break under "Changed" or "Removed", as each breaking 0.x pull request bumped the minor.
+  - **Release job.** The release workflow's check is unchanged: each pre-release follows a version bump.
+  - **Pinning.** The `semver` job's `cargo-semver-checks` is pinned to 0.51.0, as Block 20 D1 says it is.
+
+- **D6 Security policy.** `SECURITY.md`'s "Fixes go to the latest minor release, as a patch release of it." becomes "Fixes go to the latest release: while it is a 1.0.0 pre-release, as the next pre-release; from 1.0.0, as a patch release of the latest minor. 0.21.0 gets no fixes."
+
+- **D7 The Status list.** Its sentence "Planned next, in this order: connect data and headers, `setToken` and `setData`; batching several commands in one frame." goes: each item is listed as available above it. If 60b has removed it, this is moot.
+
+- **D8 The status line.**
+  - **The rule.** Block 55's spec PR writes CLAUDE.md line 3 once, under the coordination rule of 2026-11-14 ("block PRs leave line 3 alone; line 3 is written once, in Block 55's PR").
+  - **Template.** It follows the template of the Blocks 56–57 ruling: `Status: DRAFT — blocks <present> of N[; <gaps> reserved for blocks in progress]. Further blocks to be appended.` Runs are written `a–b`, separated by ", ", with " and " before the last. It counts the blocks in the file at that PR's merge.
+  - **Line 3 then.** With Blocks 0–61 present: `Status: DRAFT — blocks 0–61 of N. Further blocks to be appended.`
+
+- **D9 Releasing** (process, after 55a merges):
+  1. **Validation runs.** The implementer dispatches `chaos-real.yml` and `soak.yml` at 55a's merge commit. That is `gh workflow run <workflow> --ref main` while main's head is that commit, or else a branch at it. The implementer records the run ids. `release.yml`'s `verify` job gates on both (`scripts/validation-run gate`, Block 51 D12, Block 52 D11), and on the `ci` run of main for that commit.
+  2. **Trusted publisher (owner-only).** Before the tag, the owner confirms that crates.io lists `release.yml` with the environment `release` as the crate's trusted publisher.
+  3. **Tag (owner-only).** The owner pushes `v1.0.0-alpha.1` on that commit.
+  4. **Approval (owner-only).** The owner approves the `release` environment.
+  5. **docs.rs.** After publishing, the implementer checks that docs.rs built 1.0.0-alpha.1 for both targets.
+
+**Sub-increments:**
+- the spec PR: this text and D8's line 3;
+- **55a:** D1–D7 and the amendments. It starts once 60a, 60b and 61a–61f have merged.
+
+Value clause: As a team adopting Ferrifuge for a large fleet, I want its first tagged release to state exactly what its version promises, so that we know which upgrades can break our build, and pin or avoid the unstable features accordingly.
+
+**Structural acceptance:**
+- `tests/readme.rs`:
+  - every dependency line names `1.0.0-alpha.1`, and the MSRV badge and text match `rust-version`;
+  - the requirement helper's unit test passes;
+  - **Features.** A test reads `Cargo.toml` and finds, in the Stability section, every feature of `[features]` other than `default`, each as an exact backticked token (`` `unstable` `` is not matched by `` `unstable-webtransport` ``), and `ferrifuge::android` and `ferrifuge::machine`.
+  - **Dependencies.** The same test finds each of D1's public dependencies as "`` `name` `` version", where the version is the one the dependency's first requirement in `Cargo.toml` gives: `0.y` for a 0.x version, the major otherwise.
+- `scripts/check-release-tag v1.0.0-alpha.1` passes on 55a's head. Block 20's release scenarios pass with the pre-release version. A unit test of the step's ordering covers D4's chain.
+- The `semver` job passes on 55a: 0.25.0 to 1.0.0-alpha.1 is a major change.
+
+Each of these mutations is seen red once, recorded in the PR:
+- `` `unstable` `` removed from the Stability section;
+- `js-sys` removed from it, or `rustls` stated as 0.22;
+- a dependency line at `"1.0"`;
+- the requirement helper giving `major.minor` for a pre-release;
+- the step's three-number parse put back (the changelog scenario);
+- the ordering putting 1.0.0-alpha.1 above 1.0.0;
+- a TEMPORARY commit, with the version unchanged, removing a public method (the `semver` job, with D5's flag), then reverted.
+
+**Exceptions introduced:** no scenario: documentation, a version, README and unit tests, and CI steps. The GitHub release's `--prerelease` is verified by the first run of `release.yml` for a pre-release, as Block 20's publishing is.
+
+**Amendments to earlier blocks** (55a; line numbers on e60ab78; each "before" string appears once):
+- **Block 20 D1**, line 3182: "the GitHub release with that version's changelog section as its notes; re-running it never publishes again." becomes "the GitHub release with that version's changelog section as its notes, marked as a pre-release for a pre-release version (Block 55 D4); re-running it never publishes again."
+- **Block 20 D2**, line 3184: "succeeds only when the tag is exactly `v` followed by the `Cargo.toml` version, without a suffix, and" becomes "succeeds only when the tag is exactly `v` followed by the `Cargo.toml` version, with nothing after it (a pre-release's suffix is part of the version, Block 55 D4), and".
+- **Block 20 D5**, line 3187: "the supported versions are the latest minor release; fixes are released as a patch of it and announced" becomes "the supported versions are the latest release; fixes are released as a patch of its minor, or, while it is a 1.0.0 pre-release, as the next pre-release (Block 55 D6), and announced".
+- **Block 20 D9**, line 3191: "matches the manifest's major and minor version and that the MSRV it states matches `rust-version`." becomes "matches the manifest's version, its major and minor or, for a pre-release, the whole version (Block 55 D3), and that the MSRV it states matches `rust-version`."
 
 ---
 
