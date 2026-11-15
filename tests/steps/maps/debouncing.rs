@@ -230,10 +230,17 @@ async fn receives_the_remove(world: &mut ClientWorld, key: String, data: String)
     assert!(received_of(world, &data).is_empty(), "it was sent");
 }
 
+/// The answer to a remove the fake server held, with the publish it
+/// replaced still pending: its scenario runs with
+/// [`super::super::STALL_PROOF_TIMEOUT`], so that a stalled runner cannot
+/// let both time out first.
+pub(crate) const REMOVE_ANSWERED_STEP: &str = r#"when it answers the remove with success, the publish of {"x":2} and the remove complete with success"#;
+
 #[then(
     regex = r"^when it answers the remove with success, the publish of (\{.*\}) and the remove complete with success$"
 )]
 async fn answers_the_remove(world: &mut ClientWorld, data: String) {
+    super::super::assert_stall_proof(world);
     let data = json_value(&data);
     assert!(!is_finished(world, &data), "it completed before the reply");
     let remove = json!("remove");

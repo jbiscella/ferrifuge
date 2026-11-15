@@ -968,8 +968,17 @@ async fn not_completed_while_held(world: &mut ClientWorld, data: String) {
     }
 }
 
+/// These answer a publish the fake server held across a debounce window:
+/// their scenarios run with [`super::STALL_PROOF_TIMEOUT`], so that a
+/// stalled runner cannot let the held publishes time out first.
+pub(crate) const BOTH_ANSWERED_STEP: &str =
+    "once the fake server answers it, both complete with success";
+pub(crate) const HANDLER_ANSWERED_STEP: &str =
+    "once the fake server answers it, the handler's publish returns success";
+
 #[then("once the fake server answers it, both complete with success")]
 async fn once_answered_both_succeed(world: &mut ClientWorld) {
+    super::assert_stall_proof(world);
     assert!(world.fake().answer_held_publish());
     for n in [2, 3] {
         outcome_of(world, &json!({"n": n}))
@@ -1267,6 +1276,7 @@ async fn receives_the_handlers_second(world: &mut ClientWorld, floor: u64) {
 
 #[then("once the fake server answers it, the handler's publish returns success")]
 async fn the_handlers_publish_returns(world: &mut ClientWorld) {
+    super::assert_stall_proof(world);
     let fake = world.fake();
     wait_until("the held publish", || fake.answer_held_publish()).await;
     let record = Arc::clone(&world.debouncing.handler);

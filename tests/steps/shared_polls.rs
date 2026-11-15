@@ -26,6 +26,14 @@ mod delta;
 mod integrations;
 mod replay;
 
+pub(crate) use delta::HELD_TRACK_STEP;
+
+/// The answer to a track request the scenario held, which its client must
+/// not have timed out first (Block 47, a signature accepted within the
+/// grace period): its scenario runs with [`super::STALL_PROOF_TIMEOUT`].
+pub(crate) const EXPIRING_ANSWER_STEP: &str =
+    "the fake server answers with expires true and no ttl";
+
 type Events = Pin<Box<dyn Stream<Item = SharedPollSubscriptionEvent> + Send>>;
 
 /// The keys each `get_signature` call was given, with when it was made:
@@ -1648,6 +1656,7 @@ async fn not_a_third_time(world: &mut ClientWorld, seconds: u64) {
 
 #[when("the fake server answers with expires true and no ttl")]
 async fn answered_expiring(world: &mut ClientWorld) {
+    super::assert_stall_proof(world);
     let channel = world.shared_poll().channel().to_owned();
     let request = nth_track_command(world, &channel).await;
     world.shared_polls.at = Some(std::time::Instant::now());

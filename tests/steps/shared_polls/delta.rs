@@ -197,6 +197,12 @@ async fn a_delta_error_then_subscribing(world: &mut ClientWorld, code: u32, subs
 
 // --- A delta in flight when its key was tracked again ---------------------
 
+/// This scenario's untrack and track requests stay unanswered until a later
+/// step: its client runs with [`super::super::STALL_PROOF_TIMEOUT`], so that
+/// a stalled runner cannot let their deadlines settle them first (Windows,
+/// job 132635044171: the track timed out within the quiet second).
+pub(crate) const HELD_TRACK_STEP: &str = r#"untrack is called with key "a" and track_with_signature is called with key "a" and signature "sig2""#;
+
 #[when(
     regex = r#"^untrack is called with key "(\w+)" and track_with_signature is called with key "(\w+)" and signature "(\w+)"$"#
 )]
@@ -206,6 +212,7 @@ async fn untracked_and_tracked_again(
     again: String,
     signature: String,
 ) {
+    super::super::assert_stall_proof(world);
     let channel = world.shared_poll().channel().to_owned();
     // Neither is answered until a later step says so.
     world.fake().answer_a_sub_refresh_with(Value::Null);
