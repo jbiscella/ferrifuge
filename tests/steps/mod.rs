@@ -493,6 +493,18 @@ impl ClientWorld {
         seen
     }
 
+    /// The client's events already queued and not yet read, without
+    /// waiting: what a failed step reports to tell what happened.
+    pub(crate) fn queued_events(&mut self) -> Vec<String> {
+        let mut queued = Vec::new();
+        if let Some(events) = self.events.as_mut() {
+            while let Some(Some(event)) = events.next().now_or_never() {
+                queued.push(format!("{event:?}"));
+            }
+        }
+        queued
+    }
+
     pub(crate) fn client(&self) -> &Client {
         self.client.as_ref().expect("no client created yet")
     }
