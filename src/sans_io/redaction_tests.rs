@@ -707,7 +707,9 @@ fn no_map_or_shared_poll_value_shows_a_secret() {
     s.assert_hidden("SharedPollUpdate", &shared);
 }
 
-#[cfg(all(feature = "test-util", adapter_tokio))]
+// `test-util` is on in every test build, through the crate's
+// dev-dependency on itself; only `src/lib.rs` names that feature.
+#[cfg(adapter_tokio)]
 #[test]
 fn no_test_util_command_shows_a_secret() {
     use crate::test_util::Command;
