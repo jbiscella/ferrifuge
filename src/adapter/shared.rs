@@ -725,7 +725,6 @@ pub(super) struct EventStream<E: Routed> {
     event: std::marker::PhantomData<fn() -> E>,
 }
 
-/// Events with an outbox: the client's and the subscriptions'.
 /// What [`Outboxes::every`] does to an outbox of any kind.
 pub(super) trait AnyOutbox {
     /// Drops the events `ids`, withdrawn by the machine.
@@ -744,6 +743,7 @@ impl<E> AnyOutbox for Outbox<E> {
     }
 }
 
+/// Events with an outbox: the client's and the subscriptions'.
 pub(super) trait Routed: Sized {
     fn outbox(outboxes: &mut Outboxes, of: Option<SubscriptionId>) -> Option<&mut Outbox<Self>>;
     /// Forgets the finished outbox of subscription `of`.

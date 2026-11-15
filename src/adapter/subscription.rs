@@ -588,8 +588,6 @@ impl Client {
     }
 }
 
-// On tokio; the browser client is tested in a browser (Block 44, D18).
-
 impl SubscriptionBuilder {
     /// Registers the subscription, its callbacks and its handler.
     // Block 61, D3.
@@ -624,6 +622,7 @@ fn stream_only(kind: SubscriptionKind) -> Option<()> {
     (kind == SubscriptionKind::Stream).then_some(())
 }
 
+// On tokio; the browser client is tested in a browser (Block 44, D18).
 #[cfg(test)]
 #[cfg(adapter_tokio)]
 mod tests {
