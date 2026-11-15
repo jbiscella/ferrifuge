@@ -1308,3 +1308,55 @@ jobs:
           cargo doc --no-deps --features test-util,cookies,unstable,unstable-webtransport,unstable-machine --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  # TEMPORARY (Block 61a structural acceptance): removed before merge.
+  # Compares the PR's head with its base: the library's test names, by
+  # their last path segment, and the public API (cargo-public-api 0.52.0,
+  # released 2026-05-25, with the nightly of its compatibility range).
+  move-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PUBLIC_API_NIGHTLY: nightly-2026-05-20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: The base in a worktree
+        run: git worktree add ../base "$BASE_SHA"
+
+      - name: The same test names
+        run: |
+          names() {
+            cargo test --lib --features cookies,unstable,unstable-webtransport -- --list --format terse \
+              | sed -n 's/: test$//p' | sed 's/.*:://' | sort
+          }
+          names > head-tests.txt
+          (cd ../base && names) > base-tests.txt
+          wc -l head-tests.txt base-tests.txt
+          diff base-tests.txt head-tests.txt
+
+      - name: cargo-public-api
+        run: |
+          rustup toolchain install "$PUBLIC_API_NIGHTLY" --profile minimal
+          cargo install cargo-public-api --version 0.52.0 --locked
+          api() {
+            cargo public-api --toolchain "$PUBLIC_API_NIGHTLY" --simplified "$@"
+          }
+          for features in "" "unstable-machine,unstable,test-util,cookies"; do
+            if [ -z "$features" ]; then set --; else set -- --features "$features"; fi
+            api "$@" > head-api.txt
+            (cd ../base && api "$@") > base-api.txt
+            echo "== features: ${features:-default}"
+            wc -l head-api.txt base-api.txt
+            diff base-api.txt head-api.txt
+          done
