@@ -3,6 +3,7 @@
 //! transports' bounded inbox.
 // Block 44, D6, D12; D7.
 
+use crate::adapter::body::TransportFailure;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -277,7 +278,7 @@ fn closed(state: &RefCell<State>, event: &CloseEvent) {
 }
 
 /// The message of a JavaScript exception.
-pub(super) fn js_message(error: &JsValue) -> String {
+pub(in crate::adapter) fn js_message(error: &JsValue) -> String {
     error
         .dyn_ref::<js_sys::Error>()
         .map(|error| String::from(error.message()))
@@ -314,7 +315,7 @@ impl WebSocket {
         timeout: Duration,
         max_message: usize,
         bound: Bound,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransportFailure> {
         // A constructor that throws is a failed attempt (D6). A shim's
         // object is used through web-sys's bindings, which call its methods
         // and properties by name (D12).
@@ -325,7 +326,7 @@ impl WebSocket {
             None => Array::of1(&JsValue::from_str(url)),
         };
         let websocket: web_sys::WebSocket = Reflect::construct(constructor, &arguments)
-            .map_err(|error| js_message(&error))?
+            .map_err(|error| TransportFailure::other(js_message(&error)))?
             .unchecked_into();
         websocket.set_binary_type(BinaryType::Arraybuffer);
         let state = Rc::new(RefCell::new(State {
@@ -344,7 +345,7 @@ impl WebSocket {
             let mut state = state.borrow_mut();
             match std::mem::replace(&mut state.opening, Opening::Opened) {
                 Opening::Opened => Poll::Ready(Ok(())),
-                Opening::Failed(message) => Poll::Ready(Err(message)),
+                Opening::Failed(message) => Poll::Ready(Err(TransportFailure::other(message))),
                 Opening::Pending => {
                     state.opening = Opening::Pending;
                     state.waker = Some(cx.waker().clone());
@@ -367,16 +368,17 @@ impl WebSocket {
         id: FrameId,
         frame: &[u8],
         frame_type: FrameType,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportFailure> {
         let websocket = &self.socket.websocket;
         match frame_type {
             FrameType::Text => {
-                let text = std::str::from_utf8(frame).map_err(|e| e.to_string())?;
+                let text = std::str::from_utf8(frame)
+                    .map_err(|e| TransportFailure::other(e.to_string()))?;
                 websocket.send_with_str(text)
             }
             FrameType::Binary => websocket.send_with_u8_array(frame),
         }
-        .map_err(|error| js_message(&error))?;
+        .map_err(|error| TransportFailure::other(js_message(&error)))?;
         self.written.push_back(id);
         Ok(())
     }

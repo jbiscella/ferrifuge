@@ -10,6 +10,7 @@ use hyper_util::client::proxy::matcher::Matcher;
 use reqwest::Url;
 use rustls::ClientConfig;
 
+use super::super::body::TransportFailure;
 use super::super::shared::lock;
 use super::connector::Shared;
 use super::proxy::{self, Proxy, ProxyTarget};
@@ -222,7 +223,10 @@ impl Network {
     /// The proxy for `url` under the setting in use, decided once per
     /// endpoint per attempt.
     // Block 23, D2.
-    pub(in crate::adapter) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
+    pub(in crate::adapter) fn decide(
+        &self,
+        url: &Url,
+    ) -> Result<Option<ProxyTarget>, TransportFailure> {
         // A connector reads no proxy setting (Block 37, D4).
         if self.connector.is_some() {
             return Ok(None);
@@ -236,7 +240,10 @@ impl Network {
     /// platform's trust, per client and per proxy setting otherwise; not
     /// kept when its TLS settings are not.
     // Block 6, C7.
-    pub(in crate::adapter) fn http_client(&self, secure: bool) -> Result<reqwest::Client, String> {
+    pub(in crate::adapter) fn http_client(
+        &self,
+        secure: bool,
+    ) -> Result<reqwest::Client, TransportFailure> {
         // Built again once the system's proxy settings are read again
         // (Block 25, D7).
         static SHARED: Mutex<Option<(u64, Arc<Clients>)>> = Mutex::new(None);
@@ -297,11 +304,14 @@ impl Network {
     }
 }
 
-type Decide = Arc<dyn Fn(&Url) -> Result<Option<ProxyTarget>, String> + Send + Sync>;
+type Decide = Arc<dyn Fn(&Url) -> Result<Option<ProxyTarget>, TransportFailure> + Send + Sync>;
 
 /// The proxy for `url` under the setting of `decisions`, decided once per
 /// endpoint per attempt.
-fn decide_once(decisions: &Mutex<Decisions>, url: &Url) -> Result<Option<ProxyTarget>, String> {
+fn decide_once(
+    decisions: &Mutex<Decisions>,
+    url: &Url,
+) -> Result<Option<ProxyTarget>, TransportFailure> {
     let key = format!(
         "{}://{}:{}",
         url.scheme(),
@@ -324,7 +334,7 @@ fn decide_once(decisions: &Mutex<Decisions>, url: &Url) -> Result<Option<ProxyTa
 /// An HTTP client with `tls`, sending each request through the proxy
 /// `decide` gives, and only through it: reqwest reads no proxy of its own.
 // Block 23, D4.
-fn build(tls: ClientConfig, decide: Decide) -> Result<reqwest::Client, String> {
+fn build(tls: ClientConfig, decide: Decide) -> Result<reqwest::Client, TransportFailure> {
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls)
         .no_proxy()
@@ -337,7 +347,7 @@ fn build(tls: ClientConfig, decide: Decide) -> Result<reqwest::Client, String> {
         // commands between two servers.
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| TransportFailure::other(e.to_string()))
 }
 
 #[cfg(test)]

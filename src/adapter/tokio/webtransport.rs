@@ -3,6 +3,7 @@
 //! client's own TLS settings and the build's provider.
 // Block 48.
 
+use super::super::body::{FailureKind, TransportFailure};
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
@@ -24,7 +25,7 @@ use wtransport::error::{ConnectingError, ConnectionError};
 use wtransport::quinn;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, VarInt};
 
-use super::super::body::{Decoder, TOO_LARGE};
+use super::super::body::Decoder;
 use super::net::Network;
 use super::transport::Inbound;
 use crate::sans_io::FrameId;
@@ -194,16 +195,24 @@ impl WebTransport {
     /// with the real headers, and the stream. The caller bounds it with the
     /// handshake timeout.
     // D5, D6.
-    pub(crate) async fn open(target: Target<'_>, network: &Network) -> Result<Self, String> {
+    pub(crate) async fn open(
+        target: Target<'_>,
+        network: &Network,
+    ) -> Result<Self, TransportFailure> {
         let url = session_url(target.url, target.protobuf)?;
         if network.connector().is_some() {
             // Refused by `ClientBuilder::build` (D14).
-            return Err("a connector carries the websocket only".to_owned());
+            return Err(TransportFailure::other(
+                "a connector carries the websocket only",
+            ));
         }
         // Block 23 D2's decision, asked as `https`; a proxy fails the
         // attempt before any datagram (D13).
         if let Some(proxy) = network.decide(&url)? {
-            return Err(format!("{THROUGH_PROXY}: {}", proxy.shown()));
+            return Err(TransportFailure::other(format!(
+                "{THROUGH_PROXY}: {}",
+                proxy.shown()
+            )));
         }
         let (host, address) = resolve(&url).await?;
         let tls = network.tls.config()?;
@@ -214,7 +223,8 @@ impl WebTransport {
         let (endpoint, connection) = loop {
             handshakes += 1;
             let config = client_config(&tls, alpn, &host, address)?;
-            let endpoint = Endpoint::client(config).map_err(|e| e.to_string())?;
+            let endpoint =
+                Endpoint::client(config).map_err(|e| TransportFailure::other(e.to_string()))?;
             let error = match endpoint.connect(options.clone()).await {
                 Ok(connection) => break (endpoint, connection),
                 Err(error) => error,
@@ -245,9 +255,9 @@ impl WebTransport {
         let (send, recv) = connection
             .open_bi()
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| TransportFailure::other(e.to_string()))?
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| TransportFailure::other(e.to_string()))?;
         let decoder = decoder(target.protobuf, target.max_message);
         Ok(Self {
             endpoint,
@@ -353,12 +363,15 @@ impl WebTransport {
                 Ok(()) if buffer.filled().is_empty() => self.end = Some(lost()),
                 Ok(()) => {
                     let chunk = buffer.filled();
-                    if let Err(reason) = self.decoder.push(chunk, &mut self.messages) {
+                    if let Err(failure) = self.decoder.push(chunk, &mut self.messages) {
                         // Over `Config::max_message_bytes` (Block 29, D3).
-                        self.end = Some(if reason == TOO_LARGE {
+                        self.end = Some(if failure.kind == FailureKind::TooLarge {
                             Inbound::TooLarge
                         } else {
-                            Inbound::Closed { code: None, reason }
+                            Inbound::Closed {
+                                code: None,
+                                reason: failure.message,
+                            }
                         });
                     }
                 }
@@ -459,11 +472,13 @@ fn frame_bytes(frame: &mut Vec<u8>, json: bool) {
 /// The session URL: `endpoint`, with `cf_protocol=protobuf` appended to its
 /// query for Protobuf.
 // D2.
-fn session_url(endpoint: &str, protobuf: bool) -> Result<Url, String> {
-    let mut url = Url::parse(endpoint).map_err(|e| e.to_string())?;
+fn session_url(endpoint: &str, protobuf: bool) -> Result<Url, TransportFailure> {
+    let mut url = Url::parse(endpoint).map_err(|e| TransportFailure::other(e.to_string()))?;
     if url.scheme() != "https" {
         // Refused by `ClientBuilder::build` (D2).
-        return Err("webtransport needs an https:// endpoint".to_owned());
+        return Err(TransportFailure::other(
+            "webtransport needs an https:// endpoint",
+        ));
     }
     if protobuf {
         url.query_pairs_mut().append_pair("cf_protocol", "protobuf");
@@ -474,10 +489,10 @@ fn session_url(endpoint: &str, protobuf: bool) -> Result<Url, String> {
 /// The host of `url` and the first address it resolves to: no Happy
 /// Eyeballs, as wtransport does.
 // D6.
-async fn resolve(url: &Url) -> Result<(String, SocketAddr), String> {
+async fn resolve(url: &Url) -> Result<(String, SocketAddr), TransportFailure> {
     let host = url
         .host_str()
-        .ok_or_else(|| "webtransport needs an endpoint with a host".to_owned())?;
+        .ok_or_else(|| TransportFailure::other("webtransport needs an endpoint with a host"))?;
     // An IPv6 literal comes in brackets.
     let host = host
         .strip_prefix('[')
@@ -489,9 +504,9 @@ async fn resolve(url: &Url) -> Result<(String, SocketAddr), String> {
         Ok(ip) => SocketAddr::new(ip, port),
         Err(_) => tokio::net::lookup_host((host.as_str(), port))
             .await
-            .map_err(|e| format!("cannot resolve {host}: {e}"))?
+            .map_err(|e| TransportFailure::other(format!("cannot resolve {host}: {e}")))?
             .next()
-            .ok_or_else(|| format!("cannot resolve {host}: no address"))?,
+            .ok_or_else(|| TransportFailure::other(format!("cannot resolve {host}: no address")))?,
     };
     Ok((host, address))
 }
@@ -503,15 +518,18 @@ fn connect_options(
     url: &Url,
     headers: &http::HeaderMap,
     network: &Network,
-) -> Result<ConnectOptions, String> {
+) -> Result<ConnectOptions, TransportFailure> {
     let mut headers = headers.clone();
     network.add_cookies(url.as_str(), &mut headers);
     let mut options = ConnectOptions::builder(url.as_str());
     for (name, value) in &headers {
         // Checked by `ClientBuilder::build`; never the value in a message.
-        let value = value
-            .to_str()
-            .map_err(|_| format!("HTTP header {:?} is not visible ASCII", name.as_str()))?;
+        let value = value.to_str().map_err(|_| {
+            TransportFailure::other(format!(
+                "HTTP header {:?} is not visible ASCII",
+                name.as_str()
+            ))
+        })?;
         options = options.add_header(name.as_str(), value);
     }
     Ok(options.build())
@@ -533,12 +551,12 @@ fn client_config(
     alpn: Alpn,
     host: &str,
     address: SocketAddr,
-) -> Result<ClientConfig, String> {
+) -> Result<ClientConfig, TransportFailure> {
     let tls = quic_tls(tls, alpn);
-    check_quic(&tls, host)?;
+    check_quic(&tls, host).map_err(|message| TransportFailure::new(FailureKind::Tls, message))?;
     let reset_key = ResetKey::new(&tls)?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|e| unfit_for_quic(&e.to_string()))?;
+        .map_err(|e| TransportFailure::new(FailureKind::Tls, unfit_for_quic(&e.to_string())))?;
     let mut quic = quinn::ClientConfig::new(Arc::new(crypto));
     quic.transport_config(Arc::new(transport_config()));
     let bind = match address {
@@ -635,11 +653,11 @@ fn refused_without_alpn(error: &ConnectingError) -> bool {
 
 /// The message of a failed open.
 // D6.
-fn connecting_error(error: &ConnectingError) -> String {
-    match error {
+fn connecting_error(error: &ConnectingError) -> TransportFailure {
+    TransportFailure::other(match error {
         ConnectingError::SessionRejected => SESSION_REJECTED.to_owned(),
         other => other.to_string(),
-    }
+    })
 }
 
 /// wtransport's resolver, given the address Ferrifuge resolved, so that the
@@ -668,7 +686,7 @@ struct ResetKey {
 const RESET_KEY_LEN: usize = 32;
 
 impl ResetKey {
-    fn new(tls: &TlsConfig) -> Result<Self, String> {
+    fn new(tls: &TlsConfig) -> Result<Self, TransportFailure> {
         let provider = tls.crypto_provider();
         let hkdf = provider
             .cipher_suites
@@ -681,12 +699,17 @@ impl ResetKey {
                 }
                 _ => None,
             })
-            .ok_or_else(|| unfit_for_quic("no TLS13_AES_128_GCM_SHA256 suite"))?;
+            .ok_or_else(|| {
+                TransportFailure::new(
+                    FailureKind::Tls,
+                    unfit_for_quic("no TLS13_AES_128_GCM_SHA256 suite"),
+                )
+            })?;
         let mut key = [0; RESET_KEY_LEN];
         provider
             .secure_random
             .fill(&mut key)
-            .map_err(|_| "the crypto provider gave no random bytes".to_owned())?;
+            .map_err(|_| TransportFailure::other("the crypto provider gave no random bytes"))?;
         Ok(Self {
             hkdf,
             key: OkmBlock::new(&key),
@@ -837,7 +860,7 @@ mod tests {
         url: &str,
         network: &Network,
         headers: &http::HeaderMap,
-    ) -> Result<WebTransport, String> {
+    ) -> Result<WebTransport, TransportFailure> {
         WebTransport::open(
             Target {
                 url,
@@ -867,7 +890,7 @@ mod tests {
             )
             .await;
 
-            assert!(matches!(&opened, Err(error) if error.contains("TLS 1.3")));
+            assert!(matches!(&opened, Err(error) if error.message.contains("TLS 1.3")));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(received.load(Ordering::SeqCst), 0);
@@ -948,7 +971,7 @@ mod tests {
         assert_eq!(messages, [b"{}".to_vec(), b"{}".to_vec()]);
         assert_eq!(
             decoder(false, 4).push(b"{\"a\":1}\n", &mut messages),
-            Err(TOO_LARGE.to_owned())
+            Err(TransportFailure::too_large())
         );
     }
 
@@ -1114,7 +1137,7 @@ mod tests {
         let opened = open(&url, &network, &http::HeaderMap::new()).await;
 
         assert!(
-            matches!(&opened, Err(error) if error.contains("aborted by peer")),
+            matches!(&opened, Err(error) if error.message.contains("aborted by peer")),
             "{:?}",
             opened.err()
         );
@@ -1188,7 +1211,7 @@ mod tests {
             .expect("the attempt ends before the timeout");
 
         assert!(
-            matches!(&opened, Err(error) if error.contains("FrameError")),
+            matches!(&opened, Err(error) if error.message.contains("FrameError")),
             "{:?}",
             opened.err()
         );
@@ -1352,7 +1375,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(&opened, Err(error) if error == &format!("{THROUGH_PROXY}: http://127.0.0.1:9")),
+            matches!(&opened, Err(error) if error.message == format!("{THROUGH_PROXY}: http://127.0.0.1:9")),
             "{:?}",
             opened.err()
         );

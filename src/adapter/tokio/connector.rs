@@ -2,6 +2,7 @@
 //! application's own networking.
 // Block 37b, D3, D4.
 
+use super::super::body::TransportFailure;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -109,18 +110,20 @@ impl fmt::Debug for ConnectedStream {
 /// The endpoint given to a connector: `url` with its port always written,
 /// path and query kept (as `Proxy::custom` gets it).
 // Block 37, D3; Block 23, D1.
-pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, String> {
-    let host = url.host_str().ok_or("an endpoint without a host")?;
+pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, TransportFailure> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| TransportFailure::other("an endpoint without a host"))?;
     let port = url
         .port_or_known_default()
-        .ok_or("an endpoint without a port")?;
+        .ok_or_else(|| TransportFailure::other("an endpoint without a port"))?;
     let query = url
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
     format!("{}://{host}:{port}{}{query}", url.scheme(), url.path())
         .parse()
-        .map_err(|_| "an endpoint that does not parse".to_owned())
+        .map_err(|_| TransportFailure::other("an endpoint that does not parse"))
 }
 
 /// Opens the stream through `connector`, failing as a refused connection
@@ -129,22 +132,22 @@ pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, Stri
 pub(in crate::adapter) async fn connect(
     connector: &Shared,
     url: &reqwest::Url,
-) -> Result<ConnectedStream, String> {
+) -> Result<ConnectedStream, TransportFailure> {
     use futures_util::FutureExt as _;
     let endpoint = endpoint(url)?;
     let connector = Arc::clone(&connector.0);
     let Ok(connecting) =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connector.connect(endpoint)))
     else {
-        return Err("connector panicked".to_owned());
+        return Err(TransportFailure::other("connector panicked"));
     };
     match std::panic::AssertUnwindSafe(connecting)
         .catch_unwind()
         .await
     {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(format!("connector: {error}")),
-        Err(_) => Err("connector panicked".to_owned()),
+        Ok(Err(error)) => Err(TransportFailure::other(format!("connector: {error}"))),
+        Err(_) => Err(TransportFailure::other("connector panicked")),
     }
 }
 

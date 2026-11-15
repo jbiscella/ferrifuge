@@ -11,6 +11,7 @@
 //! promise resolves.
 // Block 48, D17; Block 44, D7, D8; D8.
 
+use crate::adapter::body::TransportFailure;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -121,21 +122,22 @@ impl WebTransport {
         timeout: Duration,
         max_message: usize,
         bound: Bound,
-    ) -> Result<Self, String> {
-        let session = Session::new(&session_url(url, protobuf)).map_err(|e| js_message(&e))?;
+    ) -> Result<Self, TransportFailure> {
+        let session = Session::new(&session_url(url, protobuf))
+            .map_err(|e| TransportFailure::other(js_message(&e)))?;
         // Closed when the attempt is dropped before it opened.
         let guard = CloseOnDrop(Some(session.clone()));
         JsFuture::from(session.ready())
             .await
-            .map_err(|error| js_message(&error))?;
+            .map_err(|error| TransportFailure::other(js_message(&error)))?;
         let stream: BidirectionalStream = JsFuture::from(session.create_bidirectional_stream())
             .await
-            .map_err(|error| js_message(&error))?
+            .map_err(|error| TransportFailure::other(js_message(&error)))?
             .unchecked_into();
         let writer = stream
             .writable()
             .get_writer()
-            .map_err(|error| js_message(&error))?;
+            .map_err(|error| TransportFailure::other(js_message(&error)))?;
         let decoder = if protobuf {
             Decoder::protobuf(max_message)
         } else {
@@ -421,7 +423,9 @@ mod tests {
     }
 
     async fn open(protobuf: bool, timeout: Duration) -> Result<WebTransport, String> {
-        WebTransport::open(URL, protobuf, timeout, LIMIT, BOUND).await
+        WebTransport::open(URL, protobuf, timeout, LIMIT, BOUND)
+            .await
+            .map_err(|failure| failure.message)
     }
 
     /// What `recv` gives within `millis`, if anything.

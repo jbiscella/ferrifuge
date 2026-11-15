@@ -9,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Instant, Sleep};
 
+use super::super::body::{FailureKind, TransportFailure};
 use super::head::HeadReader;
 use super::net::Network;
 use super::proxy::{Stream, dial};
@@ -74,22 +75,26 @@ fn handshake_error(
     error: &tokio_tungstenite::tungstenite::Error,
     url: &str,
     network: &Network,
-) -> String {
-    if let tokio_tungstenite::tungstenite::Error::Http(response) = error {
+) -> TransportFailure {
+    use tokio_tungstenite::tungstenite::Error as Failed;
+    if let Failed::Http(response) = error {
         network.store_cookies(url, response.status().as_u16(), response.headers());
     }
-    let portal = match error {
-        tokio_tungstenite::tungstenite::Error::Http(response) => {
+    match error {
+        Failed::Http(response) => {
             let content_type = response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            super::super::body::captive_portal(response.status().as_u16(), content_type)
+            let status = response.status().as_u16();
+            let portal = super::super::body::captive_portal(status, content_type);
+            TransportFailure::status(status, error.to_string(), portal)
         }
-        _ => false,
-    };
-    super::super::body::with_portal(error.to_string(), portal)
+        Failed::Io(io) => TransportFailure::new(FailureKind::Io(io.kind()), error.to_string()),
+        Failed::Tls(_) => TransportFailure::new(FailureKind::Tls, error.to_string()),
+        _ => TransportFailure::other(error.to_string()),
+    }
 }
 
 /// `stream` with TLS to the server for a `wss://` `request`, as
@@ -163,7 +168,7 @@ impl WebSocket {
         headers: &reqwest::header::HeaderMap,
         network: &Network,
         max_message: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransportFailure> {
         // Plain ws:// must work on hosts without platform certificates.
         let secure_url = url
             .get(..6)
@@ -173,7 +178,8 @@ impl WebSocket {
         } else {
             None
         };
-        let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+        let parsed =
+            reqwest::Url::parse(url).map_err(|e| TransportFailure::other(e.to_string()))?;
         // The stream to the server's host: the application's connector's
         // (Block 37, D4), or through the proxy the setting decides (Block
         // 23, D3); TLS to the server comes after, over either.
@@ -183,13 +189,16 @@ impl WebSocket {
             let proxy = network.decide(&parsed)?;
             dial(&parsed, proxy.as_ref(), &network.tls).await?
         };
-        let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| TransportFailure::other(e.to_string()))?;
         // The application's, which leave out those the handshake sets.
         for (name, value) in headers {
             request.headers_mut().insert(name.clone(), value.clone());
         }
         if let Some(subprotocol) = subprotocol {
-            let value = HeaderValue::from_str(subprotocol).map_err(|e| e.to_string())?;
+            let value = HeaderValue::from_str(subprotocol)
+                .map_err(|e| TransportFailure::other(e.to_string()))?;
             request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
         }
         // With the application's Cookie, in one header (Block 43, D3).
@@ -221,9 +230,11 @@ impl WebSocket {
         id: FrameId,
         frame: Vec<u8>,
         frame_type: FrameType,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportFailure> {
         let message = match frame_type {
-            FrameType::Text => Message::text(String::from_utf8(frame).map_err(|e| e.to_string())?),
+            FrameType::Text => Message::text(
+                String::from_utf8(frame).map_err(|e| TransportFailure::other(e.to_string()))?,
+            ),
             FrameType::Binary => Message::binary(frame),
         };
         self.queue.push_back((id, message, Instant::now()));
@@ -820,7 +831,9 @@ mod tests {
                 panic!("upgraded on {}", String::from_utf8_lossy(answer));
             };
             assert_eq!(
-                message.ends_with(crate::adapter::body::CAPTIVE_PORTAL),
+                message
+                    .message
+                    .ends_with(crate::adapter::body::CAPTIVE_PORTAL),
                 portal,
                 "{message}"
             );

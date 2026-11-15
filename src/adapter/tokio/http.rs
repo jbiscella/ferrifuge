@@ -19,15 +19,16 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 
 #[cfg(test)]
 use super::super::body::CAPTIVE_PORTAL;
-use super::super::body::{Decoder, TOO_LARGE, captive_portal, is_media_type, with_portal};
+use super::super::body::{
+    Decoder, Emulated, FailureKind, Sent, TransportFailure, captive_portal, classify_emulation,
+    emulation_url, is_media_type, report,
+};
 use super::super::shared::lock;
 use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
 use crate::sans_io::{FrameId, TransportKind};
 
-/// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
-const EMULATION_PATH: &str = "/emulation";
 const JSON: &str = "application/json";
 /// The media type of Protobuf requests and streams, exactly: Centrifugo
 /// compares the whole value (centrifuge `handler_http_stream.go:73`,
@@ -75,14 +76,7 @@ impl std::fmt::Debug for HeaderSet {
 }
 
 /// An emulation request in flight; its failure ends the transport.
-type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)> + Send>>;
-
-/// How the server took an emulation request it answered.
-enum Sent {
-    Accepted,
-    /// Rejected with HTTP 413, with the frame it carried.
-    Rejected(Vec<u8>),
-}
+type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, TransportFailure>)> + Send>>;
 
 /// An open `http_stream` or sse connection.
 pub(crate) struct HttpTransport {
@@ -100,12 +94,12 @@ pub(crate) struct HttpTransport {
     jar: Jar,
     /// The media type of emulation requests: JSON's or Protobuf's.
     content_type: &'static str,
-    body: BoxStream<'static, Result<Vec<u8>, String>>,
+    body: BoxStream<'static, Result<Vec<u8>, TransportFailure>>,
     decoder: Decoder,
     /// Messages decoded but not received yet.
     frames: VecDeque<Vec<u8>>,
     /// Why the stream cannot go on, reported once `frames` are received.
-    failed: Option<String>,
+    failed: Option<TransportFailure>,
     requests: FuturesUnordered<Request>,
     /// Frames whose request was answered and not yet reported by
     /// [`HttpTransport::recv`].
@@ -129,9 +123,9 @@ impl HttpTransport {
         network: &Network,
         protobuf: bool,
         max_message: usize,
-    ) -> Result<Self, String> {
-        let mut url = Url::parse(url).map_err(|e| e.to_string())?;
-        let emulation_url = emulation_url(&url, emulation_endpoint)?;
+    ) -> Result<Self, TransportFailure> {
+        let mut url = Url::parse(url).map_err(|e| TransportFailure::other(e.to_string()))?;
+        let emulation_url = emulation_url::<Url>(url.as_str(), emulation_endpoint)?;
         // The HTTP client asks the same decision for each request; a proxy
         // it cannot use must fail the attempt here rather than send the
         // requests directly (Block 23, D2).
@@ -167,7 +161,7 @@ impl HttpTransport {
         // Whatever the status but a proxy's 407 (Block 43, D2, D5).
         network.store_cookies(&stream_url, status.as_u16(), response.headers());
         if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
-            return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
+            return Err(proxy_authentication());
         }
         let content_type = response
             .headers()
@@ -176,28 +170,35 @@ impl HttpTransport {
             .unwrap_or_default();
         let portal = captive_portal(status.as_u16(), content_type);
         if !status.is_success() {
-            return Err(with_portal(format!("HTTP status {status}"), portal));
+            return Err(TransportFailure::status(
+                status.as_u16(),
+                format!("HTTP status {status}"),
+                portal,
+            ));
         }
         // A web page instead of the stream (Block 25, D8): read as frames,
         // it would only make the client reconnect, without an error.
         if portal {
-            return Err(with_portal(
+            return Err(TransportFailure::status(
+                status.as_u16(),
                 format!("HTTP status {status}, content type {content_type:?}"),
                 true,
             ));
         }
         // What EventSource accepts (WHATWG HTML, "Server-sent events").
         if sse && (status != reqwest::StatusCode::OK || !is_event_stream(content_type)) {
-            return Err(format!(
+            return Err(TransportFailure::other(format!(
                 "not an event stream: HTTP status {status}, content type {content_type:?}"
-            ));
+            )));
         }
         let body = response
             .bytes_stream()
             .map(|chunk| {
-                chunk
-                    .map(|bytes| bytes.to_vec())
-                    .map_err(|e| e.without_url().to_string())
+                chunk.map(|bytes| bytes.to_vec()).map_err(|e| {
+                    let e = e.without_url();
+                    let message = e.to_string();
+                    failure_of(&e, message)
+                })
             })
             .boxed();
         Ok(Self {
@@ -245,27 +246,32 @@ impl HttpTransport {
             let answered = async {
                 let response = tokio::time::timeout(timeout, request.send())
                     .await
-                    .map_err(|_| format!("emulation request timed out after {timeout:?}"))?
-                    .map_err(|e| format!("emulation request failed: {}", request_error(e)))?;
+                    .map_err(|_| {
+                        TransportFailure::new(
+                            FailureKind::Timeout,
+                            format!("emulation request timed out after {timeout:?}"),
+                        )
+                    })?
+                    .map_err(|e| {
+                        let failure = request_error(e);
+                        TransportFailure {
+                            message: format!("emulation request failed: {}", failure.message),
+                            ..failure
+                        }
+                    })?;
                 let status = response.status();
                 jar.store(&url, status.as_u16(), response.headers());
                 if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
-                    return Err(PROXY_AUTHENTICATION_REQUIRED.to_owned());
+                    return Err(proxy_authentication());
                 }
-                // A server without the session's node (404) or failing (5xx)
-                // cannot answer the command; other statuses reject only it
-                // (centrifuge-js `send`). A redirect is not followed (see
-                // `http_client`), so its command never arrived either.
-                if status == reqwest::StatusCode::NOT_FOUND
-                    || status.is_server_error()
-                    || status.is_redirection()
-                {
-                    Err(format!("emulation request failed: HTTP status {status}"))
-                } else if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-                    // Its commands fail at once (owner decision, 2026-11-04).
-                    Ok(Sent::Rejected(sent))
-                } else {
-                    Ok(Sent::Accepted)
+                // A redirect is not followed (see `http_client`).
+                match classify_emulation(status.as_u16(), false) {
+                    Emulated::Failed => Err(TransportFailure::new(
+                        FailureKind::Http(status.as_u16()),
+                        format!("emulation request failed: HTTP status {status}"),
+                    )),
+                    Emulated::Rejected => Ok(Sent::Rejected(sent)),
+                    Emulated::Accepted => Ok(Sent::Accepted),
                 }
             };
             (id, answered.await)
@@ -297,12 +303,15 @@ impl HttpTransport {
                     self.read_next = false;
                     return Inbound::Frame(frame);
                 }
-                if let Some(reason) = self.failed.take() {
+                if let Some(failure) = self.failed.take() {
                     // Over `Config::max_message_bytes` (Block 29, D3).
-                    if reason == TOO_LARGE {
+                    if failure.kind == FailureKind::TooLarge {
                         return Inbound::TooLarge;
                     }
-                    return Inbound::Closed { code: None, reason };
+                    return Inbound::Closed {
+                        code: None,
+                        reason: failure.message,
+                    };
                 }
             }
             if let Some(id) = self.written.pop_front() {
@@ -314,11 +323,16 @@ impl HttpTransport {
                 // reading, never the emulation requests (Block 15).
                 chunk = self.body.next(), if reading => match chunk {
                     Some(Ok(chunk)) => {
-                        if let Err(reason) = self.decoder.push(&chunk, &mut self.frames) {
-                            self.failed = Some(reason);
+                        if let Err(failure) = self.decoder.push(&chunk, &mut self.frames) {
+                            self.failed = Some(failure);
                         }
                     }
-                    Some(Err(reason)) => return Inbound::Closed { code: None, reason },
+                    Some(Err(failure)) => {
+                        return Inbound::Closed {
+                            code: None,
+                            reason: failure.message,
+                        };
+                    }
                     None => {
                         return Inbound::Closed {
                             code: None,
@@ -328,16 +342,9 @@ impl HttpTransport {
                 },
                 // Irrefutable: a refutable pattern would disable this branch
                 // after a success until the stream yields (tokio `select!`).
+                // Answered, so written; a rejected one's commands fail first.
                 Some((id, result)) = self.requests.next(), if !self.requests.is_empty() => {
-                    match result {
-                        Err(reason) => return Inbound::Closed { code: None, reason },
-                        // Answered, so written; its commands fail first.
-                        Ok(Sent::Rejected(frame)) => {
-                            self.written.push_back(id);
-                            return Inbound::Rejected(frame);
-                        }
-                        Ok(Sent::Accepted) => return Inbound::Written(id),
-                    }
+                    return report(id, result, &mut self.written);
                 }
                 else => std::future::pending::<()>().await,
             }
@@ -356,7 +363,7 @@ fn is_event_stream(content_type: &str) -> bool {
 /// message stops at "error sending request": its sources follow, and a
 /// proxy refusing the credentials says so.
 // Block 21, D5; Block 23, D5.
-fn request_error(error: reqwest::Error) -> String {
+fn request_error(error: reqwest::Error) -> TransportFailure {
     let error = error.without_url();
     let mut message = error.to_string();
     let mut source = std::error::Error::source(&error);
@@ -364,26 +371,45 @@ fn request_error(error: reqwest::Error) -> String {
         let text = cause.to_string();
         // hyper-util's `TunnelError::ProxyAuthRequired` (`tunnel.rs:241`).
         if text == "tunnel error: proxy authorization required" {
-            return PROXY_AUTHENTICATION_REQUIRED.to_owned();
+            return proxy_authentication();
         }
         message.push_str(": ");
         message.push_str(&text);
         source = cause.source();
     }
-    message
+    failure_of(&error, message)
 }
 
-/// Where emulation requests go: `configured`, absolute, or `/emulation` on
-/// the server of `stream` (centrifuge-js `emulationEndpoint`).
-fn emulation_url(stream: &Url, configured: Option<&str>) -> Result<Url, String> {
-    if let Some(endpoint) = configured {
-        return Url::parse(endpoint).map_err(|e| e.to_string());
+/// The failure of `error`, of the kind it is, with `message`.
+fn failure_of(error: &reqwest::Error, message: String) -> TransportFailure {
+    let kind = if error.is_timeout() {
+        FailureKind::Timeout
+    } else {
+        io_kind(error).map_or(FailureKind::Other, FailureKind::Io)
+    };
+    TransportFailure::new(kind, message)
+}
+
+/// The kind of the I/O error among `error`'s sources, if any.
+pub(in crate::adapter) fn io_kind(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<std::io::ErrorKind> {
+    let mut source = Some(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return Some(io.kind());
+        }
+        source = cause.source();
     }
-    let mut url = stream.clone();
-    url.set_path(EMULATION_PATH);
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
+    None
+}
+
+/// A proxy's refusal of the credentials, or its demand for some.
+fn proxy_authentication() -> TransportFailure {
+    TransportFailure::new(
+        FailureKind::ProxyAuthentication,
+        PROXY_AUTHENTICATION_REQUIRED,
+    )
 }
 
 #[cfg(test)]
@@ -435,7 +461,11 @@ mod tests {
 
     /// Messages and outcome of decoding `body` split at `cuts`, with a
     /// small limit so that the error path is reached too.
-    fn decode_chunked(sse: bool, body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), String>) {
+    fn decode_chunked(
+        sse: bool,
+        body: &[u8],
+        cuts: &[u16],
+    ) -> (Vec<Vec<u8>>, Result<(), TransportFailure>) {
         let mut decoder = Decoder::new(sse, 256);
         let mut messages = VecDeque::new();
         let mut rest = body;
@@ -457,7 +487,7 @@ mod tests {
     /// adapter::http::tests::fuzz_http_stream_decoder --engine libfuzzer`.
     /// What a Protobuf stream splitter of a small limit gives for `body`
     /// cut at `cuts`.
-    fn split_chunked(body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), String>) {
+    fn split_chunked(body: &[u8], cuts: &[u16]) -> (Vec<Vec<u8>>, Result<(), TransportFailure>) {
         let mut decoder = Decoder::protobuf(256);
         let mut messages = VecDeque::new();
         let mut rest = body;
@@ -530,18 +560,18 @@ mod tests {
 
     #[test]
     fn emulation_requests_go_to_the_stream_server_unless_configured() {
-        let stream = Url::parse("https://example.com:8443/connection/sse?cf_connect=x").unwrap();
+        let stream = "https://example.com:8443/connection/sse?cf_connect=x#f";
 
-        let default = emulation_url(&stream, None).unwrap();
+        let default = emulation_url::<Url>(stream, None).unwrap();
         let configured =
-            emulation_url(&stream, Some("https://example.com/centrifugo/emulation")).unwrap();
+            emulation_url::<Url>(stream, Some("https://example.com/centrifugo/emulation")).unwrap();
 
         assert_eq!(default.as_str(), "https://example.com:8443/emulation");
         assert_eq!(
             configured.as_str(),
             "https://example.com/centrifugo/emulation"
         );
-        assert!(emulation_url(&stream, Some("not a url")).is_err());
+        assert!(emulation_url::<Url>(stream, Some("not a url")).is_err());
     }
 
     #[tokio::test]
@@ -564,7 +594,7 @@ mod tests {
         let Err(message) = result else {
             panic!("connected to a closed port");
         };
-        assert!(!message.contains("secret"), "{message}");
+        assert!(!message.message.contains("secret"), "{message}");
     }
 
     #[test]
@@ -610,7 +640,10 @@ mod tests {
     }
 
     /// The messages `chunks` give a Protobuf stream splitter of `limit`.
-    fn split_protobuf(chunks: &[&[u8]], limit: usize) -> (Vec<Vec<u8>>, Result<(), String>) {
+    fn split_protobuf(
+        chunks: &[&[u8]],
+        limit: usize,
+    ) -> (Vec<Vec<u8>>, Result<(), TransportFailure>) {
         let mut decoder = Decoder::protobuf(limit);
         let mut messages = VecDeque::new();
         for chunk in chunks {
@@ -655,7 +688,7 @@ mod tests {
         let (messages, result) = split_protobuf(&[&[0x01, 0x08, 0x09]], 8);
 
         assert_eq!(messages, [vec![0x01, 0x08]]);
-        assert_eq!(result, Err(TOO_LARGE.to_owned()));
+        assert_eq!(result, Err(TransportFailure::too_large()));
     }
 
     // Block 27, D3: a prefix still continuing waits; one too long fails.
@@ -1265,7 +1298,7 @@ mod tests {
                     panic!("{kind:?} opened on {}", String::from_utf8_lossy(answer));
                 };
                 assert_eq!(
-                    message.ends_with(CAPTIVE_PORTAL),
+                    message.message.ends_with(CAPTIVE_PORTAL),
                     portal,
                     "{kind:?}: {message}"
                 );
@@ -1298,7 +1331,7 @@ mod tests {
         let Err(message) = result else {
             panic!("followed the redirect");
         };
-        assert!(message.contains("307"), "{message}");
+        assert!(message.message.contains("307"), "{message}");
     }
 
     #[tokio::test]
@@ -1326,7 +1359,7 @@ mod tests {
         let Err(message) = result else {
             panic!("accepted a JSON response as an event stream");
         };
-        assert!(message.contains("not an event stream"), "{message}");
+        assert!(message.message.contains("not an event stream"), "{message}");
     }
 
     #[test]
@@ -1389,7 +1422,7 @@ mod tests {
             let over_limit = decoder().push(&over, &mut refused);
 
             assert!(at_limit.is_ok() && taken.len() == 1, "{name}: {at_limit:?}");
-            assert_eq!(over_limit, Err(TOO_LARGE.to_owned()), "{name}");
+            assert_eq!(over_limit, Err(TransportFailure::too_large()), "{name}");
             assert!(refused.is_empty(), "{name}");
         }
     }
@@ -1502,7 +1535,7 @@ mod tests {
             LIMIT,
         )
         .await;
-        let rows: [(&str, String, &str); 11] = [
+        let rows: [(&str, String, &str); 5] = [
             (
                 "a line over the limit",
                 over_limit(Decoder::lines(4), b"12345\n"),
@@ -1528,6 +1561,17 @@ mod tests {
                 bad_emulation_url.err().expect("a failure").to_string(),
                 "relative URL without a base",
             ),
+        ];
+
+        for (name, message, expected) in rows {
+            assert_eq!(message, expected, "{name}");
+        }
+    }
+
+    // Block 61, D5: as above, for the answers of a server.
+    #[tokio::test]
+    async fn the_messages_of_http_failures_are_unchanged() {
+        let rows: [(&str, String, &str); 6] = [
             (
                 "an open answered 404",
                 failure_of(

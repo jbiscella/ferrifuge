@@ -33,12 +33,13 @@ pub(in crate::adapter) use self::transport::Inbound;
 use self::transport::WebSocket;
 #[cfg(feature = "unstable-webtransport")]
 use self::webtransport::WebTransport;
+use super::body::TransportFailure;
 use super::log::Log;
 use crate::sans_io::{FrameId, FrameType, TransportKind};
 
 /// A transport being opened.
 pub(in crate::adapter) type Opening =
-    Pin<Box<dyn Future<Output = Result<Transport, String>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<Transport, TransportFailure>> + Send>>;
 
 /// What the driver gives to open a transport.
 pub(in crate::adapter) struct Open {
@@ -76,7 +77,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
     // opening it gets the same decision.
     network.new_attempt();
     let decision = reqwest::Url::parse(&url)
-        .map_err(|e| e.to_string())
+        .map_err(|e| TransportFailure::other(e.to_string()))
         .and_then(|parsed| network.decide(&parsed));
     #[cfg(feature = "unstable-webtransport")]
     let alpn = (kind == TransportKind::WebTransport).then(|| network.alpn.first(endpoint).name());
@@ -134,7 +135,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         #[cfg(all(feature = "unstable", not(feature = "unstable-webtransport")))]
         TransportKind::WebTransport => Box::pin(async move {
             let _ = (url, headers, network, max_message, timeout);
-            Err(NO_WEBTRANSPORT.to_owned())
+            Err(TransportFailure::other(NO_WEBTRANSPORT))
         }),
     }
 }
@@ -163,7 +164,7 @@ impl Transport {
         id: FrameId,
         frame: Vec<u8>,
         frame_type: FrameType,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportFailure> {
         match self {
             Self::WebSocket(websocket) => websocket.send(id, frame, frame_type),
             // Failures end the transport through `recv`.

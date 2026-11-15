@@ -13,6 +13,7 @@ pub(super) mod websocket;
 #[cfg(feature = "unstable")]
 pub(super) mod webtransport;
 
+use crate::adapter::body::TransportFailure;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -28,7 +29,8 @@ use super::platform::{Handle, JoinHandle};
 use crate::sans_io::{FrameId, FrameType, TransportKind};
 
 /// A transport being opened.
-pub(in crate::adapter) type Opening = Pin<Box<dyn Future<Output = Result<Transport, String>>>>;
+pub(in crate::adapter) type Opening =
+    Pin<Box<dyn Future<Output = Result<Transport, TransportFailure>>>>;
 
 /// What the driver gives to open a transport.
 pub(in crate::adapter) struct Open {
@@ -73,10 +75,10 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
     log.attempt(kind, endpoint);
     // The driver opens only what `found` can (D12).
     let missing = move || {
-        format!(
+        TransportFailure::other(format!(
             "the page has no constructor for the {} transport",
             kind.as_str()
-        )
+        ))
     };
     match kind {
         // The page's own WebTransport, no shim (Block 48, D17).
@@ -162,7 +164,7 @@ impl Transport {
         id: FrameId,
         frame: Vec<u8>,
         frame_type: FrameType,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportFailure> {
         match self {
             Self::WebSocket(websocket) => websocket.send(id, &frame, frame_type),
             // Failures end the transport through `recv`.
