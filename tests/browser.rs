@@ -446,8 +446,17 @@ fn run_in(
         }
         std::thread::sleep(Duration::from_millis(500));
     };
+    // A descendant the kill missed can hold the pipes open: the copies get
+    // a bounded time to drain, then are left behind, so the run keeps its
+    // time bound (Codex, #326).
+    let drained = Instant::now() + Duration::from_secs(10);
+    while copies.iter().any(|copy| !copy.is_finished()) && Instant::now() < drained {
+        std::thread::sleep(Duration::from_millis(100));
+    }
     for copy in copies {
-        let _ = copy.join();
+        if copy.is_finished() {
+            let _ = copy.join();
+        }
     }
     let output = String::from_utf8_lossy(
         &kept
