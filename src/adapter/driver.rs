@@ -55,19 +55,11 @@ pub(super) struct Driver {
     pub(super) timeout: Duration,
     /// Largest message accepted from the server (`Config::max_message_bytes`).
     pub(super) max_message: usize,
-    /// The bound of a browser transport's inbox.
-    // Block 44, D7.
-    #[cfg(adapter_browser)]
-    pub(super) read_ahead: super::backend::websocket::Bound,
-    /// The application's constructors, looked up with the page's at each
-    /// attempt.
-    // Block 44, D12.
-    #[cfg(adapter_browser)]
-    pub(super) shims: super::backend::shims::Shims,
-    /// Whether HTTP requests carry credentials to other origins.
-    // Block 44, D13.
-    #[cfg(adapter_browser)]
-    pub(super) include_credentials: bool,
+    /// What the driver keeps of the options only this target has: natively
+    /// the network and the HTTP headers, in the browser the constructors,
+    /// the credentials flag and the inbox bound.
+    // Block 61, D2.
+    pub(super) backend: super::backend::DriverPart,
     pub(super) shared: Arc<Shared>,
     /// The runtime the driver runs on, for every spawn.
     // Block 28, D1.
@@ -852,13 +844,13 @@ impl Driver {
             subprotocol: self.subprotocol,
             timeout: self.timeout,
             max_message: self.max_message,
-            headers: self.shared.http_headers.clone(),
-            network: Arc::clone(&self.shared.network),
+            headers: self.backend.http_headers.clone(),
+            network: Arc::clone(&self.backend.network),
             emulation: self.emulation_endpoint.clone(),
             initial_frame,
         };
         #[cfg(adapter_browser)]
-        let found = self.shims.find();
+        let found = self.backend.shims.find();
         // Skipped in the round, as centrifuge-js `_initializeTransport`
         // skips a transport not supported (Block 44, D12).
         #[cfg(adapter_browser)]
@@ -875,11 +867,11 @@ impl Driver {
             subprotocol: self.subprotocol,
             timeout: self.timeout,
             max_message: self.max_message,
-            read_ahead: self.read_ahead,
+            read_ahead: self.backend.read_ahead,
             emulation: self.emulation_endpoint.clone(),
             initial_frame,
             found,
-            include_credentials: self.include_credentials,
+            include_credentials: self.backend.include_credentials,
         };
         let opening = super::backend::open(open, &self.shared.log);
         self.opening = Some((id, opening));

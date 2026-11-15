@@ -15,10 +15,6 @@ use super::client::client_closed;
 use super::log::Log;
 use super::platform::{self, Handle};
 use super::ready::{self, Waiters};
-#[cfg(adapter_tokio)]
-use super::tokio::http::HeaderSet;
-#[cfg(adapter_tokio)]
-use super::tokio::net::Network;
 #[cfg(feature = "__test-hooks")]
 use crate::sans_io::DebounceTimer;
 use crate::sans_io::{
@@ -75,15 +71,10 @@ pub(super) struct Shared {
     /// Spans and records of this client.
     // Block 21.
     pub(super) log: Log,
-    /// Its TLS and proxy settings and HTTP clients.
-    // Blocks 22, 23.
-    #[cfg(adapter_tokio)]
-    pub(super) network: Arc<Network>,
-    /// The real HTTP headers of every transport request, which
-    /// `set_http_headers` replaces.
-    // Blocks 17, 32.
-    #[cfg(adapter_tokio)]
-    pub(super) http_headers: HeaderSet,
+    /// What the client keeps of the options only this target has: natively
+    /// the network and the HTTP headers, in the browser the listeners.
+    // Block 61, D2.
+    pub(super) backend: super::backend::SharedPart,
     /// The handlers of the client and its subscriptions. Locked after
     /// `outboxes`.
     // Block 41b.
@@ -91,10 +82,6 @@ pub(super) struct Shared {
     /// The runtime the client's tasks run on.
     // Block 28.
     pub(super) runtime: Handle,
-    /// The browser's network and page listeners. Locked after `core`.
-    // Block 44, D10, D11.
-    #[cfg(adapter_browser)]
-    pub(super) events: Mutex<super::backend::events::Events>,
 }
 
 /// Events waiting for their streams. Locked after [`Shared::core`], never
@@ -397,7 +384,7 @@ impl Shared {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let input = lock(&self.events).input(heard, core.machine.state());
+        let input = lock(&self.backend.events).input(heard, core.machine.state());
         if let Some(input) = input {
             self.handle(&mut core, input);
         }
@@ -608,7 +595,7 @@ impl Shared {
         // On the states, not the events taken (Block 30, D4).
         ready::settle(core, &mut lock(&self.ready));
         #[cfg(adapter_browser)]
-        lock(&self.events).follow(core.machine.state());
+        lock(&self.backend.events).follow(core.machine.state());
         let connected = core.machine.state() == State::Connected;
         if connected != core.connected_since.is_some() {
             core.connected_since = connected.then(platform::wall_clock);

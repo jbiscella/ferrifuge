@@ -21,14 +21,10 @@ use futures_core::Stream;
 
 use super::builder::ClientBuilder;
 use super::builder::emulated_header_map;
-#[cfg(adapter_tokio)]
-use super::builder::http_header_map;
 use super::ready::{self, Of};
 use super::shared::EventStream;
 use super::shared::Shared;
 use super::shared::lock;
-#[cfg(adapter_tokio)]
-use super::tokio::proxy::Proxy;
 #[cfg(feature = "__test-hooks")]
 use crate::sans_io::TimerSetting;
 use crate::sans_io::{Action, CallId, Input, TransportKind};
@@ -170,33 +166,10 @@ impl Client {
             get_token: None,
             get_data: None,
             emulation_endpoint: None,
-            #[cfg(adapter_tokio)]
-            http_headers: Vec::new(),
             emulated_headers: Vec::new(),
-            #[cfg(adapter_tokio)]
-            root_certificates: Vec::new(),
-            #[cfg(adapter_tokio)]
-            tls_config: None,
-            #[cfg(adapter_tokio)]
-            proxy: Proxy::default(),
-            #[cfg(adapter_tokio)]
-            proxy_set: false,
-            #[cfg(adapter_tokio)]
-            connector: None,
-            #[cfg(adapter_tokio)]
-            runtime: None,
             handler: None,
             event_delivery: super::EventDelivery::default(),
-            #[cfg(adapter_tokio)]
-            cookie_jar: super::tokio::net::Jar::default(),
-            #[cfg(adapter_browser)]
-            network_event_target: None,
-            #[cfg(adapter_browser)]
-            page_event_target: None,
-            #[cfg(adapter_browser)]
-            shims: super::backend::shims::Shims::default(),
-            #[cfg(adapter_browser)]
-            include_credentials: false,
+            backend: super::backend::Options::default(),
         }
     }
 
@@ -640,61 +613,6 @@ impl Client {
         let headers = emulated_header_map(&headers)?;
         self.shared.apply(Input::SetEmulatedHeaders(headers));
         Ok(())
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Replaces the real HTTP headers: every HTTP request started from now
-    /// on carries the new set, the upgrade or stream request of the next
-    /// attempt and each emulation request of an open `http_stream` or sse
-    /// transport. The open connection is kept, and a request already
-    /// started keeps the headers it started with. A header missing from the
-    /// new set is no longer sent; a name given twice keeps its later value.
-    ///
-    /// ```no_run
-    /// # fn run(client: &ferrifuge::Client, token: &str) -> Result<(), ferrifuge::ClientError> {
-    /// client.set_http_headers([("Authorization", format!("Bearer {token}"))])?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// A [`crate::ErrorKind::Configuration`] error naming a header, never its
-    /// value, as [`ClientBuilder::http_headers`] refuses it: a name or value
-    /// that is not valid HTTP, or a header the transport sets,
-    /// `Proxy-Authorization` included. The headers are then left as they
-    /// were.
-    // Block 32.
-    pub fn set_http_headers<I, K, V>(&self, headers: I) -> Result<(), ClientError>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let headers: Vec<(String, String)> = headers
-            .into_iter()
-            .map(|(name, value)| (name.into(), value.into()))
-            .collect();
-        let headers = http_header_map(&headers)?;
-        self.shared.http_headers.replace(headers);
-        Ok(())
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Replaces the proxy setting from the next connection attempt, as the
-    /// other setters do; the current connection is kept. A client given a
-    /// connector reads no proxy setting: this changes nothing.
-    // Block 23; Block 37.
-    pub fn set_proxy(&self, proxy: Proxy) {
-        self.shared.network.set_proxy(proxy);
     }
 
     /// Calls the server's RPC `method` with `data`; the future gives the
@@ -1603,6 +1521,7 @@ mod tests {
     fn header_names(client: &Client) -> Vec<(String, String)> {
         client
             .shared()
+            .backend
             .http_headers
             .current()
             .iter()
