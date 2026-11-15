@@ -1510,6 +1510,25 @@ impl ClientWorld {
         self.maps.events = Some(Box::pin(self.map().events()));
     }
 
+    /// Waits until the map subscription has left `subscribed` after the
+    /// server's disconnect. The client has then handled the old
+    /// connection's close and reads nothing more from it, so a change the
+    /// server makes from now on reaches it only through the new
+    /// connection's recovery, never live on the old one. The state is read,
+    /// not the stream, so that no event is taken here.
+    async fn wait_until_the_map_is_away(&self) {
+        let left = tokio::time::timeout(EVENT_TIMEOUT, async {
+            while self.map().state() == SubscriptionState::Subscribed {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            left.is_ok(),
+            "the map subscription stayed subscribed {EVENT_TIMEOUT:?} after the server's disconnect"
+        );
+    }
+
     /// Lets a client the server disconnected back, if it was held away.
     fn let_the_map_client_back(&mut self) {
         if std::mem::take(&mut self.maps.hold) {
@@ -1628,6 +1647,7 @@ async fn sets_and_removes_while_away(
     channel: String,
     removed: String,
 ) {
+    world.wait_until_the_map_is_away().await;
     map_publish(world, &channel, &key, json!({"key": key})).await;
     map_remove(world, &channel, &removed).await;
     world.let_the_map_client_back();
@@ -1637,6 +1657,7 @@ async fn sets_and_removes_while_away(
     regex = r#"^the server API sets key "(\w+)" of "([^"]+)" (to 1 to 10|10 times) while the client reconnects$"#
 )]
 async fn sets_ten_times_while_away(world: &mut ClientWorld, key: String, channel: String) {
+    world.wait_until_the_map_is_away().await;
     for value in 1..=10 {
         map_publish(world, &channel, &key, json!(value)).await;
     }
@@ -2348,6 +2369,7 @@ fn counts_deltas(world: &mut ClientWorld, deltas: u64) {
 
 #[when(regex = r#"^the server API sets key "(\w+)" while the client reconnects$"#)]
 async fn sets_a_big_key_while_away(world: &mut ClientWorld, key: String) {
+    world.wait_until_the_map_is_away().await;
     world.set_big_value(&key, 2).await;
     world.let_the_map_client_back();
 }
