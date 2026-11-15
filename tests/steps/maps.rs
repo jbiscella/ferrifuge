@@ -31,6 +31,8 @@ use crate::support::token::{connection_token, subscription_token};
 
 mod debouncing;
 
+pub(crate) use debouncing::REMOVE_ANSWERED_STEP;
+
 type MapEvents = Pin<Box<dyn Stream<Item = MapSubscriptionEvent> + Send>>;
 
 /// What a Block 45 scenario holds.

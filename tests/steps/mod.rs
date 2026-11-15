@@ -21,10 +21,21 @@ use crate::support::proxy::ProxyBackend;
 use crate::support::relay::CountingRelay;
 
 /// Steps whose scenarios run with [`STALL_PROOF_TIMEOUT`], set by
-/// `bdd.rs` before the scenario starts: each needs calls or commands still
-/// pending when it runs, which an earlier step, shared with scenarios that
-/// time out, made.
-pub(crate) const STALL_PROOF_STEPS: &[&str] = &[calls::PENDING_CALL_STEP, batching::HELD_STEP];
+/// `bdd.rs` before the scenario starts: each needs requests still
+/// unanswered when it runs (calls, commands, publishes, shared poll track
+/// and untrack requests), which it holds itself or an earlier step made,
+/// and a runner stalled before it would let the default timeout settle
+/// them first. Each such step checks the timeout
+/// ([`assert_stall_proof`]).
+pub(crate) const STALL_PROOF_STEPS: &[&str] = &[
+    calls::PENDING_CALL_STEP,
+    batching::HELD_STEP,
+    shared_polls::HELD_TRACK_STEP,
+    shared_polls::EXPIRING_ANSWER_STEP,
+    debouncing::BOTH_ANSWERED_STEP,
+    debouncing::HANDLER_ANSWERED_STEP,
+    maps::REMOVE_ANSWERED_STEP,
+];
 
 mod auto_batching;
 mod backoff;
@@ -97,6 +108,18 @@ const QUIET_PERIOD: Duration = Duration::from_secs(1);
 /// (Windows, #185: a step ran 6.02 s after the call). The scenario's steps
 /// settle it themselves, so it never fires there.
 pub(crate) const STALL_PROOF_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Fails unless the scenario's clients run with [`STALL_PROOF_TIMEOUT`]:
+/// a step of [`STALL_PROOF_STEPS`] whose text drifted from its entry would
+/// otherwise run with the default timeout unnoticed.
+pub(crate) fn assert_stall_proof(world: &ClientWorld) {
+    assert_eq!(
+        world.configured_timeout(),
+        STALL_PROOF_TIMEOUT,
+        "a scenario with this step runs with a timeout no stall reaches"
+    );
+}
+
 /// An endpoint nothing listens on: connections are refused at once.
 pub(crate) const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
 
