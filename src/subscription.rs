@@ -8,6 +8,10 @@ use crate::token::{Bytes, optional_bytes};
 
 /// State of a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the spec's closed set of subscription states, matched exhaustively (Block 54, D2)"
+)]
 pub enum SubscriptionState {
     /// Not subscribed and not trying to: initial state, after
     /// `unsubscribe()`, or after the server refused the subscription.
@@ -137,12 +141,25 @@ pub enum DeltaFormat {
 
 /// A position in a channel's stream (spec, "Subscription recovery state").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct StreamPosition {
     /// Offset of a publication in the stream; 0 before the first one.
     pub offset: u64,
     /// Epoch of the stream. A stream that is lost, e.g. when its history
     /// expired, starts again with a new epoch.
     pub epoch: String,
+}
+
+impl StreamPosition {
+    /// The position of the publication at `offset` in the stream of
+    /// `epoch`.
+    #[must_use]
+    pub fn new(offset: u64, epoch: impl Into<String>) -> Self {
+        Self {
+            offset,
+            epoch: epoch.into(),
+        }
+    }
 }
 
 /// A publication of a channel (`client.proto`, `Publication`).
@@ -302,6 +319,7 @@ impl std::fmt::Debug for ClientInfo {
 /// Why a data callback, a subscription's or the client's connect data
 /// one, could not provide data.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DataError {
     /// Access is denied: the subscription is unsubscribed, or the client
     /// disconnected, for good.
@@ -326,7 +344,20 @@ impl std::error::Error for DataError {}
 /// state: the subscription emits an `error` event and retries after the
 /// resubscribe backoff (centrifuge-js `getState`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateError(pub String);
+pub struct StateError(String);
+
+impl StateError {
+    /// A failure described by `message`.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// What failed.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
 
 impl std::fmt::Display for StateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -342,6 +373,7 @@ impl std::error::Error for StateError {}
 pub enum SubscriptionError {
     /// A subscription to the channel exists already in the client's registry
     /// (spec: `newSubscription` can throw).
+    #[non_exhaustive]
     AlreadyExists {
         /// The channel.
         channel: String,
@@ -351,6 +383,7 @@ pub enum SubscriptionError {
     ClientClosed,
     /// A tag filter the server would refuse: a comparison with an empty key,
     /// or a set comparison with no value (Block 35a).
+    #[non_exhaustive]
     InvalidTagFilter {
         /// What is wrong, naming the key, never a value.
         reason: String,
@@ -360,6 +393,7 @@ pub enum SubscriptionError {
     TagFilterWithDelta,
     /// A resubscribe delay of 0, which would resubscribe with no wait for
     /// as long as a failure lasts (Block 53 D6).
+    #[non_exhaustive]
     ZeroDelay {
         /// The option: `min_resubscribe_delay` or `max_resubscribe_delay`.
         option: &'static str,

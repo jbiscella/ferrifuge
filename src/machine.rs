@@ -22,6 +22,10 @@
 //! Behaviour follows the Client SDK spec, with centrifuge-js as the
 //! implementation reference (`src/centrifuge.ts`).
 
+// Outside semver with `unstable-machine` (Block 54, D1), so its types need
+// not be `#[non_exhaustive]` (Block 54, D2).
+#![allow(clippy::exhaustive_enums, clippy::exhaustive_structs)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -31,9 +35,9 @@ mod buffer_tests;
 mod calls;
 #[cfg(any(adapter_tokio, adapter_browser))]
 pub(crate) use calls::CallWait;
+mod call;
 // The calls an owner adds and the replies they settle with (Block 54, D1).
-#[cfg_attr(not(feature = "unstable-machine"), allow(unused_imports))]
-pub use crate::call::{CallReply, CallRequest};
+pub use call::{CallReply, CallRequest};
 #[cfg(test)]
 mod close_tests;
 #[cfg(test)]

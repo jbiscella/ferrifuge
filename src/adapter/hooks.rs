@@ -3,6 +3,10 @@
 //! registry holds, each with its age. Kept only once a client asks for
 //! them ([`super::Client::record_timers`]), so that no other test pays for
 //! them: the allocation gates of Block 14 run with this feature too.
+//!
+//! A `__test-hooks` module: outside semver, so its types need not be
+//! `#[non_exhaustive]` (Block 54, D2).
+#![allow(clippy::exhaustive_enums, clippy::exhaustive_structs)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;

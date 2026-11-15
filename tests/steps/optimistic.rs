@@ -533,12 +533,7 @@ fn private_with_a_callback(world: &mut ClientWorld, callback: String) {
         }),
         _ => builder.get_state(move |_channel| {
             note();
-            async {
-                Ok(StreamPosition {
-                    offset: 0,
-                    epoch: "e".to_owned(),
-                })
-            }
+            async { Ok(StreamPosition::new(0, "e".to_owned())) }
         }),
     };
     let private = builder.build().expect("a new channel");

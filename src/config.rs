@@ -122,6 +122,7 @@ pub struct Config {
 
 /// Encoding of the client protocol (`client.proto`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Protocol {
     /// JSON, in text frames.
     #[default]

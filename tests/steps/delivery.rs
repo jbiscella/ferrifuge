@@ -214,6 +214,7 @@ async fn a_recoverable_server_side_subscription(world: &mut ClientWorld, channel
         if let ClientEvent::ServerSubscription {
             channel: of,
             event: ServerSubscriptionEvent::Subscribed(_),
+            ..
         } = next_client_event(world).await
             && of == channel
         {

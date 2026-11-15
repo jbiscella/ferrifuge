@@ -68,6 +68,8 @@
 
 #[cfg(any(adapter_tokio, adapter_browser))]
 mod adapter;
+#[cfg(test)]
+mod api_shape_tests;
 mod backoff;
 mod call;
 mod codec;
@@ -106,6 +108,7 @@ mod wire;
 pub(crate) const RESTING_SLOTS: usize = 4;
 
 #[cfg(all(adapter_tokio, target_os = "android"))]
+#[cfg_attr(docsrs, doc(cfg(target_os = "android")))]
 pub use adapter::android;
 #[cfg(all(adapter_tokio, feature = "__test-hooks"))]
 #[doc(hidden)]
@@ -139,7 +142,6 @@ pub use adapter::{CookieJar, MemoryJar};
 pub use call::{
     CallError, HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult,
 };
-pub(crate) use call::{CallReply, CallRequest};
 pub use config::{Config, Protocol};
 pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
 #[cfg(feature = "__test-hooks")]
@@ -152,6 +154,7 @@ pub use fossil::write as write_fossil_delta;
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
 pub use machine::TransportKind;
+pub(crate) use machine::{CallReply, CallRequest};
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 pub use map::{MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, UnrecoverableStrategy};

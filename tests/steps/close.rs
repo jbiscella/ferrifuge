@@ -82,6 +82,7 @@ async fn server_side_unsubscribed(world: &mut ClientWorld, channel: String, code
             ClientEvent::ServerSubscription {
                 channel: got,
                 event: ServerSubscriptionEvent::Unsubscribed { code: got_code, .. },
+                ..
             } if got == channel => {
                 assert_eq!(got_code, code);
                 return;

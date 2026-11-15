@@ -870,7 +870,7 @@ fn method_of(request: &CallRequest) -> Method {
         }),
         CallRequest::History { channel, options } => Method::History(HistoryRequest {
             channel: channel.clone(),
-            limit: options.limit,
+            limit: options.wire_limit(),
             since: options
                 .since
                 .as_ref()

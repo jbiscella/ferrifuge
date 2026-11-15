@@ -670,10 +670,7 @@ async fn no_server_side_publication_at_2(world: &mut ClientWorld) {
 #[then(regex = r#"^the next connect command asks to recover "(\w+)" from offset (\d+)$"#)]
 async fn next_connect_recovers_from_offset(world: &mut ClientWorld, channel: String, offset: u64) {
     // The epoch of the fake server's grant.
-    let from = StreamPosition {
-        offset,
-        epoch: FAKE_EPOCH.to_owned(),
-    };
+    let from = StreamPosition::new(offset, FAKE_EPOCH);
     assert_next_connect_recovers(world, &channel, &from).await;
 }
 

@@ -40,6 +40,9 @@ pub type Connecting = Pin<Box<dyn Future<Output = Result<ConnectedStream, BoxErr
 ///     })
 ///     .build();
 /// ```
+///
+/// A method added to this trait has a default; a new required method is a
+/// major release (Block 54, D7).
 pub trait Connector: Send + Sync {
     /// Opens the stream to `endpoint`.
     fn connect(&self, endpoint: http::Uri) -> Connecting;

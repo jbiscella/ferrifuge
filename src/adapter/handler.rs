@@ -54,6 +54,9 @@ use crate::{
 /// client.set_handler(Log);
 /// # }
 /// ```
+///
+/// Every method has a default, and a method added to this trait has one
+/// too; a new required method is a major release (Block 54, D7).
 #[allow(unused_variables)] // The defaults ignore their event.
 pub trait ClientHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
@@ -117,6 +120,9 @@ impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
 /// subscription.subscribe();
 /// # }
 /// ```
+///
+/// Every method has a default, and a method added to this trait has one
+/// too; a new required method is a major release (Block 54, D7).
 #[allow(unused_variables)] // The defaults ignore their event.
 pub trait SubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
@@ -171,6 +177,9 @@ impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for 
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+///
+/// Every method has a default, and a method added to this trait has one
+/// too; a new required method is a major release (Block 54, D7).
 #[cfg(feature = "unstable")]
 #[allow(unused_variables)] // The defaults ignore their event.
 pub trait MapSubscriptionHandler: MaybeSend + 'static {
@@ -242,6 +251,9 @@ impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptio
 /// votes.subscribe();
 /// # }
 /// ```
+///
+/// Every method has a default, and a method added to this trait has one
+/// too; a new required method is a major release (Block 54, D7).
 #[cfg(feature = "unstable")]
 #[allow(unused_variables)] // The defaults ignore their event.
 pub trait SharedPollSubscriptionHandler: MaybeSend + 'static {

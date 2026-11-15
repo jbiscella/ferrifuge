@@ -32,6 +32,7 @@ fn body((format, size): (StreamFormat, usize)) -> (StreamFormat, Vec<u8>, usize)
             // The decoder yields a Protobuf reply with its length prefix.
             (framed, length)
         }
+        other => unreachable!("a format this benchmark does not build: {other:?}"),
     };
     (format, framed, message)
 }

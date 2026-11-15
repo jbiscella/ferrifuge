@@ -1507,12 +1507,9 @@ impl Run {
                     let channel = self.channel_of(id);
                     let top = self.server.streams.entry(channel).or_default().top;
                     self.checker.delivered.insert(Sub::Client(id), Some(top));
-                    Ok(StreamPosition {
-                        offset: top,
-                        epoch: EPOCH.to_owned(),
-                    })
+                    Ok(StreamPosition::new(top, EPOCH.to_owned()))
                 } else {
-                    Err(StateError("chaos".to_owned()))
+                    Err(StateError::new("chaos".to_owned()))
                 };
                 // A flow's callback running at disconnect() may answer and
                 // go on (Block 42, D11).
@@ -1688,12 +1685,9 @@ impl Run {
                 // Not loaded for the application: its position is no
                 // delivery (I8).
                 let result = if loaded {
-                    Ok(StreamPosition {
-                        offset: 0,
-                        epoch: EPOCH.to_owned(),
-                    })
+                    Ok(StreamPosition::new(0, EPOCH.to_owned()))
                 } else {
-                    Err(StateError("chaos".to_owned()))
+                    Err(StateError::new("chaos".to_owned()))
                 };
                 self.continuing_answer(fetch, |run| {
                     run.feed_answer(
@@ -2506,6 +2500,7 @@ impl Run {
             ClientEvent::ServerSubscription {
                 channel,
                 event: server_event,
+                ..
             } => {
                 return self.emitted_server(event, channel, server_event);
             }

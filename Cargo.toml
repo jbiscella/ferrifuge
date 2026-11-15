@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"
@@ -338,6 +338,10 @@ unreachable_pub = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Every public enum, and every public struct whose fields are all public,
+# is `#[non_exhaustive]` (Block 54, D2).
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
 
 [[bench]]
 name = "dispatch"

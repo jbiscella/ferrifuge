@@ -24,6 +24,7 @@ impl From<State> for Lifecycle {
             State::Disconnected => Self::Off,
             State::Connecting => Self::Pending,
             State::Connected => Self::On,
+            other => unreachable!("a state the invariants do not know: {other:?}"),
         }
     }
 }
