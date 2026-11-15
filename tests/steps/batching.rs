@@ -86,12 +86,11 @@ impl BatchRun {
     /// Feeds the firing of the running setting of `key`'s timer, or, when
     /// none runs, of a setting the machine no longer knows.
     pub(super) fn fire_key(&mut self, key: TimerKey) {
-        match self.machine.key_setting(key) {
-            Some(setting) => self.handle(Input::TimerFired(key, setting)),
-            None => {
-                let actions = self.machine.fire_key(key);
-                self.actions.extend(actions);
-            }
+        if let Some(setting) = self.machine.key_setting(key) {
+            self.handle(Input::TimerFired(key, setting));
+        } else {
+            let actions = self.machine.fire_key(key);
+            self.actions.extend(actions);
         }
     }
 
