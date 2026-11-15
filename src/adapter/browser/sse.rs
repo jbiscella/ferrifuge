@@ -5,6 +5,7 @@
 //! over `fetch`, as from `http_stream`.
 // Block 44, D9, D12; D7; D8.
 
+use crate::adapter::body::TransportFailure;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -17,7 +18,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::JsValue;
 use web_sys::{Event, EventSourceInit, MessageEvent};
 
-use super::http_stream::{Emulation, JSON, report};
+use super::http_stream::{Emulation, Inboxed, JSON, poll_emulated};
 use super::websocket::{Bound, Inbound, Inbox, Listener, js_message};
 use crate::sans_io::FrameId;
 
@@ -44,6 +45,20 @@ struct State {
     /// The inbox overflowed, reported in place of anything else.
     overflowed: bool,
     waker: Option<Waker>,
+}
+
+impl Inboxed for State {
+    fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn inbox(&mut self) -> &mut Inbox {
+        &mut self.inbox
+    }
+
+    fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
 }
 
 impl State {
@@ -177,8 +192,9 @@ fn failed(state: &RefCell<State>) {
 
 /// The stream's URL: `url` with the connect command in `cf_connect`, as
 /// natively (centrifuge-js `transport_sse.ts:41-50`).
-fn stream_url(url: &str, initial_frame: &[u8]) -> Result<String, String> {
-    let url = web_sys::Url::new(url).map_err(|error| js_message(&error))?;
+fn stream_url(url: &str, initial_frame: &[u8]) -> Result<String, TransportFailure> {
+    let url =
+        web_sys::Url::new(url).map_err(|error| TransportFailure::other(js_message(&error)))?;
     url.search_params()
         .append("cf_connect", &String::from_utf8_lossy(initial_frame));
     Ok(url.href())
@@ -220,7 +236,7 @@ impl Sse {
         max_message: usize,
         bound: Bound,
         include_credentials: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransportFailure> {
         // Protobuf with sse is rejected at build (Block 8).
         let emulation = Emulation::new(
             fetch,
@@ -238,7 +254,7 @@ impl Sse {
         // (D6); a shim is called as one too, its object used through
         // web-sys's bindings, which call it by name (D12).
         let source: web_sys::EventSource = Reflect::construct(event_source, &arguments)
-            .map_err(|error| js_message(&error))?
+            .map_err(|error| TransportFailure::other(js_message(&error)))?
             .unchecked_into();
         let state = Rc::new(RefCell::new(State {
             opening: Opening::Pending,
@@ -255,7 +271,7 @@ impl Sse {
             let mut state = state.borrow_mut();
             match std::mem::replace(&mut state.opening, Opening::Opened) {
                 Opening::Opened => Poll::Ready(Ok(())),
-                Opening::Failed(message) => Poll::Ready(Err(message)),
+                Opening::Failed(message) => Poll::Ready(Err(TransportFailure::other(message))),
                 Opening::Pending => {
                     state.opening = Opening::Pending;
                     state.waker = Some(cx.waker().clone());
@@ -290,26 +306,7 @@ impl Sse {
             read_next,
         } = self;
         std::future::poll_fn(|cx| {
-            let mut state = source.state.borrow_mut();
-            if state.overflowed {
-                return Poll::Ready(Inbound::Overflow);
-            }
-            let frame_first = reading && !state.inbox.is_empty() && *read_next;
-            if !frame_first && let Some(id) = written.pop_front() {
-                *read_next = true;
-                return Poll::Ready(Inbound::Written(id));
-            }
-            if reading && let Some(item) = state.inbox.pop() {
-                *read_next = false;
-                return Poll::Ready(item);
-            }
-            state.waker = Some(cx.waker().clone());
-            drop(state);
-            if let Poll::Ready((id, answered)) = emulation.poll_answered(cx) {
-                *read_next = true;
-                return Poll::Ready(report(id, answered, written));
-            }
-            Poll::Pending
+            poll_emulated(cx, reading, &source.state, emulation, written, read_next)
         })
         .await
     }

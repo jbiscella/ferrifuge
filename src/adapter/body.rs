@@ -1,5 +1,6 @@
 //! What the HTTP-streaming transports of both adapters share: the decoders
-//! of a response body and the captive-portal check of an open.
+//! of a response body, the captive-portal check of an open, the emulation
+//! policy, and the transport failures.
 // Block 44, D8; Block 27; Block 25, D8.
 
 use std::collections::VecDeque;
@@ -10,15 +11,92 @@ use bytes::BytesMut;
 use mediatype::{MediaType, Name, names};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
+use super::backend::Inbound;
+use crate::sans_io::FrameId;
+
 /// What a decoder keeps between messages once a large reply, or a large
 /// chunk, grew its buffer. It releases the rest only when it holds no more
 /// than this, so a stream of messages below it never pays for a release.
 // Block 49d, row 71.
 const KEPT: usize = 64 * 1024;
 
-/// The error of an HTTP transport's decoder when the server sent a message
-/// larger than the size limit, reported as `Inbound::TooLarge`.
-pub(in crate::adapter) const TOO_LARGE: &str = "message larger than the size limit";
+/// Why a transport failed to open, read or write: of what kind, and today's
+/// message, which `Display` writes. Code branches on `kind`, never on
+/// `message`.
+// Block 61, D5.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(in crate::adapter) struct TransportFailure {
+    pub(in crate::adapter) kind: FailureKind,
+    pub(in crate::adapter) message: String,
+}
+
+/// The kinds of [`TransportFailure`].
+// Block 61, D5.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(
+    adapter_browser,
+    allow(
+        dead_code,
+        reason = "proxies, I/O and TLS fail the native transports only"
+    )
+)]
+pub(in crate::adapter) enum FailureKind {
+    /// A message from the server over the size limit, reported as
+    /// `Inbound::TooLarge`.
+    TooLarge,
+    /// An HTTP status the transport cannot go on with.
+    Http(u16),
+    /// An HTTP status that a captive portal's page may have answered.
+    CaptivePortal(u16),
+    /// A proxy refused the credentials, or asked for some.
+    ProxyAuthentication,
+    Timeout,
+    Io(std::io::ErrorKind),
+    Tls,
+    Other,
+}
+
+impl TransportFailure {
+    pub(in crate::adapter) fn new(kind: FailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// A failure of no kind the transport tells apart.
+    pub(in crate::adapter) fn other(message: impl Into<String>) -> Self {
+        Self::new(FailureKind::Other, message)
+    }
+
+    /// An I/O failure, of its kind, with its message.
+    #[cfg(adapter_tokio)]
+    pub(in crate::adapter) fn io(error: &std::io::Error) -> Self {
+        Self::new(FailureKind::Io(error.kind()), error.to_string())
+    }
+
+    /// A message from the server over the size limit.
+    pub(in crate::adapter) fn too_large() -> Self {
+        Self::new(FailureKind::TooLarge, "message larger than the size limit")
+    }
+
+    /// An open answered with HTTP `status`, its message `message`, saying
+    /// that a captive portal may be answering when `portal`.
+    pub(in crate::adapter) fn status(status: u16, message: String, portal: bool) -> Self {
+        let kind = if portal {
+            FailureKind::CaptivePortal(status)
+        } else {
+            FailureKind::Http(status)
+        };
+        Self::new(kind, with_portal(message, portal))
+    }
+}
+
+impl std::fmt::Display for TransportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
 
 /// What an error message about an open ends with when a captive portal may
 /// have answered it.
@@ -42,6 +120,123 @@ pub(in crate::adapter) fn with_portal(message: String, portal: bool) -> String {
     } else {
         message
     }
+}
+
+/// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
+pub(in crate::adapter) const EMULATION_PATH: &str = "/emulation";
+
+/// How the server took an emulation request it answered.
+pub(in crate::adapter) enum Sent {
+    Accepted,
+    /// Rejected with HTTP 413, with the frame it carried.
+    Rejected(Vec<u8>),
+}
+
+/// What an answer to an emulation request means for the transport.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::adapter) enum Emulated {
+    /// The server took the request's commands.
+    Accepted,
+    /// The server refused this request only: its commands fail.
+    Rejected,
+    /// The transport cannot go on.
+    Failed,
+}
+
+/// What an answer of HTTP `status`, `redirected` or not, to an emulation
+/// request means. A server without the session's node (404) or failing
+/// (5xx) cannot answer the command; other statuses reject only it
+/// (centrifuge-js `send`). A redirect is not followed, so its command
+/// never arrived either. A proxy's 407 is the native transport's, before
+/// this.
+// Block 8; Block 61, D7.
+pub(in crate::adapter) fn classify_emulation(status: u16, redirected: bool) -> Emulated {
+    if redirected || status == 404 || (500..600).contains(&status) || (300..400).contains(&status) {
+        Emulated::Failed
+    } else if status == 413 {
+        // Its commands fail at once (owner decision, 2026-11-04).
+        Emulated::Rejected
+    } else {
+        Emulated::Accepted
+    }
+}
+
+/// What the transport reports of request `id`: a failure ends it; a 413
+/// fails its commands, then counts as written, in `written`.
+// Block 8.
+pub(in crate::adapter) fn report(
+    id: FrameId,
+    answered: Result<Sent, TransportFailure>,
+    written: &mut VecDeque<FrameId>,
+) -> Inbound {
+    match answered {
+        Err(failure) => Inbound::Closed {
+            code: None,
+            reason: failure.message,
+        },
+        Ok(Sent::Rejected(frame)) => {
+            written.push_back(id);
+            Inbound::Rejected(frame)
+        }
+        Ok(Sent::Accepted) => Inbound::Written(id),
+    }
+}
+
+/// The URL operations [`emulation_url`] needs, of each target's parser.
+// Block 61, D7.
+pub(in crate::adapter) trait EmulationUrl: Sized {
+    /// `url` parsed, or the failure the parser's message says.
+    fn parse(url: &str) -> Result<Self, TransportFailure>;
+    fn set_path(&mut self, path: &str);
+    fn clear_query_and_fragment(&mut self);
+}
+
+#[cfg(adapter_tokio)]
+impl EmulationUrl for reqwest::Url {
+    fn parse(url: &str) -> Result<Self, TransportFailure> {
+        Self::parse(url).map_err(|e| TransportFailure::other(e.to_string()))
+    }
+
+    fn set_path(&mut self, path: &str) {
+        Self::set_path(self, path);
+    }
+
+    fn clear_query_and_fragment(&mut self) {
+        self.set_query(None);
+        self.set_fragment(None);
+    }
+}
+
+#[cfg(adapter_browser)]
+impl EmulationUrl for web_sys::Url {
+    fn parse(url: &str) -> Result<Self, TransportFailure> {
+        Self::new(url)
+            .map_err(|error| TransportFailure::other(super::backend::websocket::js_message(&error)))
+    }
+
+    fn set_path(&mut self, path: &str) {
+        self.set_pathname(path);
+    }
+
+    fn clear_query_and_fragment(&mut self) {
+        self.set_search("");
+        self.set_hash("");
+    }
+}
+
+/// Where emulation requests go: `configured`, absolute, or `/emulation` on
+/// the server of `stream` (centrifuge-js `emulationEndpoint`).
+pub(in crate::adapter) fn emulation_url<U: EmulationUrl>(
+    stream: &str,
+    configured: Option<&str>,
+) -> Result<U, TransportFailure> {
+    if let Some(endpoint) = configured {
+        return U::parse(endpoint);
+    }
+    let mut url = U::parse(stream)?;
+    url.set_path(EMULATION_PATH);
+    url.clear_query_and_fragment();
+    Ok(url)
 }
 
 /// Whether `content_type` parses as a media type of type `ty` and subtype
@@ -140,7 +335,7 @@ impl Decoder {
         &mut self,
         chunk: &[u8],
         messages: &mut VecDeque<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), TransportFailure> {
         match self {
             #[cfg(adapter_tokio)]
             Self::Sse(sse) => {
@@ -178,7 +373,7 @@ impl Decoder {
                         }
                         // The client keeps its own reconnect delays.
                         Ok(sse_core::SseEvent::Retry(_)) => {}
-                        Err(_) => return Err(TOO_LARGE.to_owned()),
+                        Err(_) => return Err(TransportFailure::too_large()),
                     }
                 }
             }
@@ -196,7 +391,7 @@ impl Decoder {
                             }
                         }
                         Ok(None) => break,
-                        Err(_) => return Err(TOO_LARGE.to_owned()),
+                        Err(_) => return Err(TransportFailure::too_large()),
                     }
                 }
                 // The lines split off share the allocation, which `reserve`
@@ -279,7 +474,9 @@ pub fn decode_stream<C: AsRef<[u8]>>(
     };
     let mut messages = VecDeque::new();
     for chunk in chunks {
-        decoder.push(chunk.as_ref(), &mut messages)?;
+        decoder
+            .push(chunk.as_ref(), &mut messages)
+            .map_err(|failure| failure.message)?;
     }
     Ok(messages.into())
 }
@@ -348,7 +545,9 @@ impl StreamDecoder {
     ///
     /// As the transports' decoder: a message over the limit.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-        self.decoder.push(chunk, &mut self.messages)?;
+        self.decoder
+            .push(chunk, &mut self.messages)
+            .map_err(|failure| failure.message)?;
         Ok(self.messages.drain(..).collect())
     }
 
@@ -395,20 +594,22 @@ fn released() {
 ///
 /// When the prefix is not a uvarint, or announces more than `limit` bytes.
 // Block 27, D3.
-fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, String> {
+fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, TransportFailure> {
     // At most 10 bytes; all but the last have the continuation bit.
     let Some(last) = bytes.iter().take(10).position(|byte| byte & 0x80 == 0) else {
         return if bytes.len() < 10 {
             Ok(None)
         } else {
-            Err("a reply length that is not a varint".to_owned())
+            Err(TransportFailure::other(
+                "a reply length that is not a varint",
+            ))
         };
     };
     let prefix = &bytes[..=last];
     let length = prost::decode_length_delimiter(prefix)
-        .map_err(|_| "a reply length that is not a varint".to_owned())?;
+        .map_err(|_| TransportFailure::other("a reply length that is not a varint"))?;
     if length > limit {
-        return Err(TOO_LARGE.to_owned());
+        return Err(TransportFailure::too_large());
     }
     let end = prefix.len() + length;
     Ok((bytes.len() >= end).then_some(end))
@@ -417,6 +618,169 @@ fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Block 61, D7: one emulation policy for both targets.
+    #[test]
+    fn classify_emulation_fails_on_404_5xx_3xx_and_redirects_and_rejects_on_413() {
+        let cases = [
+            (200, false, Emulated::Accepted),
+            (204, false, Emulated::Accepted),
+            (302, false, Emulated::Failed),
+            (200, true, Emulated::Failed),
+            (0, true, Emulated::Failed),
+            (404, false, Emulated::Failed),
+            (413, false, Emulated::Rejected),
+            (429, false, Emulated::Accepted),
+            (503, false, Emulated::Failed),
+        ];
+
+        for (status, redirected, expected) in cases {
+            assert_eq!(
+                classify_emulation(status, redirected),
+                expected,
+                "{status}, redirected: {redirected}"
+            );
+        }
+    }
+
+    /// The transport path's code in `src/adapter`: `body.rs` and the
+    /// files of `tokio/` and `browser/`, each before its test module, by
+    /// path.
+    #[cfg(adapter_tokio)]
+    fn transport_path() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        let mut files = vec![root.join("body.rs")];
+        for dir in ["tokio", "browser"] {
+            for entry in std::fs::read_dir(root.join(dir)).expect("a source directory") {
+                files.push(entry.expect("an entry").path());
+            }
+        }
+        files.sort();
+        files
+            .into_iter()
+            .map(|path| {
+                // Line endings normalised: a Windows checkout has CRLF.
+                let text = std::fs::read_to_string(&path)
+                    .expect("a source file")
+                    .replace("\r\n", "\n");
+                let code = [
+                    "#[cfg(test)]\nmod tests",
+                    "#[cfg(test)]\npub(in crate::adapter) mod tests",
+                ]
+                .iter()
+                .filter_map(|marker| text.find(marker))
+                .min()
+                .map_or(text.as_str(), |end| &text[..end])
+                .to_owned();
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("under src/adapter")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                (relative, code)
+            })
+            .collect()
+    }
+
+    /// The error type of each `Result<_, E>` in `code`, with the head of
+    /// the function it is in.
+    #[cfg(adapter_tokio)]
+    fn result_errors(code: &str) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (start, _) in code.match_indices("Result<") {
+            let mut depth = 0;
+            let mut last_comma = start + "Result<".len();
+            let mut end = last_comma;
+            let bytes = code.as_bytes();
+            let mut at = start + "Result".len();
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'<' => depth += 1,
+                    b'>' if bytes[at - 1] != b'-' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at;
+                            break;
+                        }
+                    }
+                    b',' if depth == 1 => last_comma = at + 1,
+                    _ => {}
+                }
+                at += 1;
+            }
+            let error = code[last_comma..end].trim().to_owned();
+            // The function's head, its visibility included: `pub fn push`.
+            let function = code[..start]
+                .rmatch_indices("fn ")
+                .next()
+                .map(|(at, _)| {
+                    let line = code[..at].rfind('\n').map_or(0, |line| line + 1);
+                    let name = code[at + 3..]
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or_default();
+                    format!("{}fn {name}", code[line..at].trim_start())
+                })
+                .unwrap_or_default();
+            found.push((function, error));
+        }
+        found
+    }
+
+    // Block 61, D5: the transport path fails with typed failures; only the
+    // checks named here keep a `String`, each for its reason.
+    #[cfg(adapter_tokio)]
+    #[test]
+    fn the_transport_path_fails_with_transport_failures() {
+        const KEEP_STRING: [(&str, &str, &str); 3] = [
+            (
+                "tokio/webtransport.rs",
+                "pub(in crate::adapter) fn check_quic",
+                "a check at build too, which `ClientBuilder::build` ends in a `ClientError`",
+            ),
+            (
+                "body.rs",
+                "pub fn decode_stream",
+                "public, for tests (`__test-hooks`): nothing public changes",
+            ),
+            (
+                "body.rs",
+                "pub fn push",
+                "`StreamDecoder::push`, public, for tests (`__test-hooks`): nothing public changes",
+            ),
+        ];
+        let mut found = Vec::new();
+        let mut kept = Vec::new();
+        for (path, code) in transport_path() {
+            if code.contains("TOO_LARGE") {
+                found.push(format!("{path}: TOO_LARGE"));
+            }
+            for (function, error) in result_errors(&code) {
+                if error != "String" {
+                    continue;
+                }
+                let keep = KEEP_STRING
+                    .iter()
+                    .find(|(file, name, _)| *file == path && *name == function);
+                match keep {
+                    Some((file, name, reason)) => {
+                        assert!(!reason.is_empty(), "{file}: {name}");
+                        kept.push((path.clone(), function));
+                    }
+                    None => found.push(format!("{path}: {function} returns Result<_, String>")),
+                }
+            }
+        }
+
+        assert!(found.is_empty(), "{found:#?}");
+        for (file, name, _) in KEEP_STRING {
+            assert!(
+                kept.iter()
+                    .any(|(path, function)| path == file && function == name),
+                "{file}: {name} no longer returns Result<_, String>"
+            );
+        }
+    }
 
     /// One decoder of each kind, with a limit above the largest reply.
     fn decoders() -> Vec<StreamDecoderUnderTest> {

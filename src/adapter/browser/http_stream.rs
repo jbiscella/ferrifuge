@@ -9,6 +9,7 @@
 //! `ReadableStream`.
 // Block 44, D8, D12; Block 8; D9; D7, D8; D12.
 
+use crate::adapter::body::{FailureKind, TransportFailure};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -28,12 +29,12 @@ use wasm_streams::readable::IntoStream;
 use web_sys::{AbortController, ReadableStreamDefaultReader, Response, ResponseType};
 
 use super::websocket::{Bound, Inbound, Inbox, js_message};
-use crate::adapter::body::{CAPTIVE_PORTAL, Decoder, TOO_LARGE, captive_portal, with_portal};
+use crate::adapter::body::{
+    self, CAPTIVE_PORTAL, Decoder, Emulated, Sent, captive_portal, classify_emulation, report,
+};
 use crate::adapter::platform;
 use crate::sans_io::FrameId;
 
-/// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
-const EMULATION_PATH: &str = "/emulation";
 pub(super) const JSON: &str = "application/json";
 /// The media type of Protobuf requests and streams, exactly.
 // Block 27, D3.
@@ -70,10 +71,10 @@ fn start(
     headers: &[(&str, &str)],
     body: &[u8],
     include_credentials: bool,
-) -> (Option<Abort>, Result<JsFuture, String>) {
+) -> (Option<Abort>, Result<JsFuture, TransportFailure>) {
     let controller = match AbortController::new() {
         Ok(controller) => controller,
-        Err(error) => return (None, Err(js_message(&error))),
+        Err(error) => return (None, Err(TransportFailure::other(js_message(&error)))),
     };
     let signal = controller.signal();
     let abort = Some(Abort(controller));
@@ -99,40 +100,24 @@ fn start(
         .and_then(|()| set(&init, "redirect", &JsValue::from_str("manual")))
         .and_then(|()| set(&init, "signal", &signal));
     if let Err(error) = filled {
-        return (abort, Err(js_message(&error)));
+        return (abort, Err(TransportFailure::other(js_message(&error))));
     }
     // A fetch that throws, e.g. on a malformed URL, fails as one rejected.
     let response = fetch
         .call2(&js_sys::global(), &JsValue::from_str(url), &init)
         .map(|promise| JsFuture::from(Promise::resolve(&promise)))
-        .map_err(|error| js_message(&error));
+        .map_err(|error| TransportFailure::other(js_message(&error)));
     (abort, response)
 }
 
 /// Where emulation requests go: `configured`, absolute, or `/emulation` on
-/// the server of `stream` (centrifuge-js `emulationEndpoint`).
-fn emulation_url(stream: &str, configured: Option<&str>) -> Result<String, String> {
-    if let Some(endpoint) = configured {
-        return web_sys::Url::new(endpoint)
-            .map(|url| url.href())
-            .map_err(|error| js_message(&error));
-    }
-    let url = web_sys::Url::new(stream).map_err(|error| js_message(&error))?;
-    url.set_pathname(EMULATION_PATH);
-    url.set_search("");
-    url.set_hash("");
-    Ok(url.href())
+/// the server of `stream`, as the page's `URL` writes it.
+fn emulation_url(stream: &str, configured: Option<&str>) -> Result<String, TransportFailure> {
+    body::emulation_url::<web_sys::Url>(stream, configured).map(|url| url.href())
 }
 
 /// An emulation request in flight; its failure ends the transport.
-type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, String>)>>>;
-
-/// How the server took an emulation request it answered.
-pub(super) enum Sent {
-    Accepted,
-    /// Rejected with HTTP 413, with the frame it carried.
-    Rejected(Vec<u8>),
-}
+type Request = Pin<Box<dyn Future<Output = (FrameId, Result<Sent, TransportFailure>)>>>;
 
 /// The emulation requests of an emulated transport, each a `fetch` of its
 /// own.
@@ -165,7 +150,7 @@ impl Emulation {
         timeout: Duration,
         content_type: &'static str,
         include_credentials: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransportFailure> {
         Ok(Self {
             fetch,
             url: emulation_url(stream, configured)?,
@@ -191,33 +176,41 @@ impl Emulation {
             // Also once answered: its body, unread, is let go.
             let _abort = abort;
             let answered = async {
-                let response =
-                    response.map_err(|reason| format!("emulation request failed: {reason}"))?;
+                let response = response.map_err(|failure| TransportFailure {
+                    message: format!("emulation request failed: {}", failure.message),
+                    ..failure
+                })?;
                 let timer = platform::sleep(timeout);
                 let response: Response = match select(response, std::pin::pin!(timer)).await {
                     Either::Left((response, _)) => response
                         .map_err(|error| {
-                            format!("emulation request failed: {}", js_message(&error))
+                            TransportFailure::other(format!(
+                                "emulation request failed: {}",
+                                js_message(&error)
+                            ))
                         })?
                         .unchecked_into(),
                     Either::Right(_) => {
-                        return Err(format!("emulation request timed out after {timeout:?}"));
+                        return Err(TransportFailure::new(
+                            FailureKind::Timeout,
+                            format!("emulation request timed out after {timeout:?}"),
+                        ));
                     }
                 };
                 let status = response.status();
-                // A server without the session's node (404) or failing
-                // (5xx) cannot answer the command; other statuses reject
-                // only it (centrifuge-js `send`). A redirect is not
-                // followed, so its command never arrived either.
-                if response.type_() == ResponseType::Opaqueredirect {
-                    Err("emulation request failed: HTTP redirect".to_owned())
-                } else if status == 404 || status >= 500 || (300..400).contains(&status) {
-                    Err(format!("emulation request failed: HTTP status {status}"))
-                } else if status == 413 {
-                    // Its commands fail at once (owner decision, 2026-11-04).
-                    Ok(Sent::Rejected(frame))
-                } else {
-                    Ok(Sent::Accepted)
+                // A redirect is not followed.
+                let redirected = response.type_() == ResponseType::Opaqueredirect;
+                match classify_emulation(status, redirected) {
+                    Emulated::Failed if redirected => Err(TransportFailure::new(
+                        FailureKind::Http(status),
+                        "emulation request failed: HTTP redirect",
+                    )),
+                    Emulated::Failed => Err(TransportFailure::new(
+                        FailureKind::Http(status),
+                        format!("emulation request failed: HTTP status {status}"),
+                    )),
+                    Emulated::Rejected => Ok(Sent::Rejected(frame)),
+                    Emulated::Accepted => Ok(Sent::Accepted),
                 }
             };
             (id, answered.await)
@@ -230,29 +223,11 @@ impl Emulation {
     pub(super) fn poll_answered(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<(FrameId, Result<Sent, String>)> {
+    ) -> Poll<(FrameId, Result<Sent, TransportFailure>)> {
         match Pin::new(&mut self.requests).poll_next(cx) {
             Poll::Ready(Some(answered)) => Poll::Ready(answered),
             Poll::Ready(None) | Poll::Pending => Poll::Pending,
         }
-    }
-}
-
-/// What the transport reports of request `id`: a failure ends it; a 413
-/// fails its commands, then counts as written, in `written`.
-// Block 8.
-pub(super) fn report(
-    id: FrameId,
-    answered: Result<Sent, String>,
-    written: &mut VecDeque<FrameId>,
-) -> Inbound {
-    match answered {
-        Err(reason) => Inbound::Closed { code: None, reason },
-        Ok(Sent::Rejected(frame)) => {
-            written.push_back(id);
-            Inbound::Rejected(frame)
-        }
-        Ok(Sent::Accepted) => Inbound::Written(id),
     }
 }
 
@@ -274,7 +249,7 @@ pub(super) struct Through {
 fn through(
     shim: &Function,
     body: &web_sys::ReadableStream,
-) -> Result<(web_sys::ReadableStream, Through), String> {
+) -> Result<(web_sys::ReadableStream, Through), TransportFailure> {
     let reader: ReadableStreamDefaultReader = body.get_reader().unchecked_into();
     let pulling = reader.clone();
     let pull = Closure::<dyn FnMut(JsValue) -> Promise>::new(move |controller: JsValue| {
@@ -305,10 +280,10 @@ fn through(
     set(&source, "pull", pull.as_ref())
         .and_then(|()| set(&source, "cancel", cancel.as_ref()))
         .and_then(|()| set(&strategy, "highWaterMark", &JsValue::from(0)))
-        .map_err(|error| js_message(&error))?;
+        .map_err(|error| TransportFailure::other(js_message(&error)))?;
     // A constructor that throws fails the attempt, as a fetch that does.
     let stream = Reflect::construct(shim, &Array::of2(&source, &strategy))
-        .map_err(|error| js_message(&error))?
+        .map_err(|error| TransportFailure::other(js_message(&error)))?
         .unchecked_into();
     Ok((
         stream,
@@ -352,14 +327,14 @@ impl Drop for Reading {
 
 /// The end of the stream `failure` says: a message over the size limit, or
 /// any other failure of the decoder.
-fn ended_by(failure: String) -> Inbound {
+fn ended_by(failure: TransportFailure) -> Inbound {
     // Over `Config::max_message_bytes` (Block 29, D3).
-    if failure == TOO_LARGE {
+    if failure.kind == FailureKind::TooLarge {
         return Inbound::TooLarge;
     }
     Inbound::Closed {
         code: None,
-        reason: failure,
+        reason: failure.message,
     }
 }
 
@@ -509,7 +484,7 @@ impl HttpStream {
         max_message: usize,
         bound: Bound,
         include_credentials: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TransportFailure> {
         let content_type = if protobuf { PROTOBUF } else { JSON };
         let emulation = Emulation::new(
             fetch.clone(),
@@ -529,12 +504,15 @@ impl HttpStream {
         );
         let response: Response = response?
             .await
-            .map_err(|error| js_message(&error))?
+            .map_err(|error| TransportFailure::other(js_message(&error)))?
             .unchecked_into();
         // A redirect not followed hides its status (Fetch, "opaque-redirect
         // filtered response"): reported as natively a 3xx is (Block 25, D8).
         if response.type_() == ResponseType::Opaqueredirect {
-            return Err(format!("HTTP redirect{CAPTIVE_PORTAL}"));
+            return Err(TransportFailure::new(
+                FailureKind::CaptivePortal(response.status()),
+                format!("HTTP redirect{CAPTIVE_PORTAL}"),
+            ));
         }
         let status = response.status();
         // CORS-safelisted, so readable from another origin (D8).
@@ -546,18 +524,23 @@ impl HttpStream {
             .unwrap_or_default();
         let portal = captive_portal(status, &content_type_header);
         if !(200..300).contains(&status) {
-            return Err(with_portal(format!("HTTP status {status}"), portal));
+            return Err(TransportFailure::status(
+                status,
+                format!("HTTP status {status}"),
+                portal,
+            ));
         }
         // A web page instead of the stream (Block 25, D8).
         if portal {
-            return Err(with_portal(
+            return Err(TransportFailure::status(
+                status,
                 format!("HTTP status {status}, content type {content_type_header:?}"),
                 true,
             ));
         }
-        let body = response
-            .body()
-            .ok_or_else(|| format!("HTTP status {status} without a body"))?;
+        let body = response.body().ok_or_else(|| {
+            TransportFailure::other(format!("HTTP status {status} without a body"))
+        })?;
         let (body, through) = match readable_stream {
             Some(shim) => {
                 let (stream, through) = self::through(shim, &body)?;
@@ -619,31 +602,70 @@ impl HttpStream {
             read_next,
             ..
         } = self;
-        std::future::poll_fn(|cx| {
-            let mut state = state.borrow_mut();
-            if state.overflowed {
-                return Poll::Ready(Inbound::Overflow);
-            }
-            // Written reports and messages take turns, as on a websocket.
-            let frame_first = reading && !state.inbox.is_empty() && *read_next;
-            if !frame_first && let Some(id) = written.pop_front() {
-                *read_next = true;
-                return Poll::Ready(Inbound::Written(id));
-            }
-            if reading && let Some(item) = state.inbox.pop() {
-                *read_next = false;
-                return Poll::Ready(item);
-            }
-            state.waker = Some(cx.waker().clone());
-            drop(state);
-            if let Poll::Ready((id, answered)) = emulation.poll_answered(cx) {
-                *read_next = true;
-                return Poll::Ready(report(id, answered, written));
-            }
-            Poll::Pending
-        })
-        .await
+        std::future::poll_fn(|cx| poll_emulated(cx, reading, state, emulation, written, read_next))
+            .await
     }
+}
+
+/// What [`poll_emulated`] reads of an emulated transport's shared state.
+// Block 61, D7.
+pub(super) trait Inboxed {
+    /// The inbox overflowed, reported in place of anything else.
+    fn overflowed(&self) -> bool;
+    fn inbox(&mut self) -> &mut Inbox;
+    /// Where the next message or end wakes the transport.
+    fn set_waker(&mut self, waker: Waker);
+}
+
+impl Inboxed for State {
+    fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn inbox(&mut self) -> &mut Inbox {
+        &mut self.inbox
+    }
+
+    fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+}
+
+/// The next report of an emulated transport, `http_stream` or sse: a
+/// message from `state`'s inbox, its end, or a frame written by
+/// `emulation`'s requests, which take turns with the messages as on a
+/// websocket. Without `reading`, only frames written, a failed emulation
+/// request and an overflow are reported: messages stay in the inbox.
+// Block 61, D7.
+pub(super) fn poll_emulated(
+    cx: &mut Context<'_>,
+    reading: bool,
+    state: &RefCell<impl Inboxed>,
+    emulation: &mut Emulation,
+    written: &mut VecDeque<FrameId>,
+    read_next: &mut bool,
+) -> Poll<Inbound> {
+    let mut state = state.borrow_mut();
+    if state.overflowed() {
+        return Poll::Ready(Inbound::Overflow);
+    }
+    // Written reports and messages take turns, as on a websocket.
+    let frame_first = reading && !state.inbox().is_empty() && *read_next;
+    if !frame_first && let Some(id) = written.pop_front() {
+        *read_next = true;
+        return Poll::Ready(Inbound::Written(id));
+    }
+    if reading && let Some(item) = state.inbox().pop() {
+        *read_next = false;
+        return Poll::Ready(item);
+    }
+    state.set_waker(cx.waker().clone());
+    drop(state);
+    if let Poll::Ready((id, answered)) = emulation.poll_answered(cx) {
+        *read_next = true;
+        return Poll::Ready(report(id, answered, written));
+    }
+    Poll::Pending
 }
 
 #[cfg(test)]
@@ -1040,7 +1062,7 @@ mod tests {
         .await;
 
         let reason = opened.err().expect("not opened");
-        assert!(reason.ends_with(CAPTIVE_PORTAL), "{reason}");
+        assert!(reason.message.ends_with(CAPTIVE_PORTAL), "{reason}");
     }
 
     // Block 8: 413 ends only its commands.
@@ -1232,7 +1254,7 @@ mod tests {
         .await;
 
         let reason = opened.err().expect("not opened");
-        assert!(reason.contains("no streams here"), "{reason}");
+        assert!(reason.message.contains("no streams here"), "{reason}");
     }
 
     /// A `fetch` standing in for a server over `http_stream`, each body chunk

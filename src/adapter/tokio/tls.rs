@@ -2,6 +2,7 @@
 //! servers are verified, chosen in one place.
 // Block 6; Block 22.
 
+use super::super::body::{FailureKind, TransportFailure};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -83,7 +84,7 @@ impl Tls {
     }
 
     /// The settings of `wss://` connections.
-    pub(in crate::adapter) fn config(&self) -> Result<Arc<ClientConfig>, String> {
+    pub(in crate::adapter) fn config(&self) -> Result<Arc<ClientConfig>, TransportFailure> {
         self.setup().map(|(config, _)| config)
     }
 
@@ -91,7 +92,7 @@ impl Tls {
     /// root certificates that reported errors serves the attempt but is
     /// read again by the next one.
     // Block 6, review item C7.
-    pub(in crate::adapter) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), String> {
+    pub(in crate::adapter) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), TransportFailure> {
         match &self.trust {
             Trust::Platform => platform_setup(),
             Trust::ExtraRoots(roots) => self
@@ -127,7 +128,7 @@ fn http1_only(raw: &ClientConfig) -> ClientConfig {
 /// The crypto provider is set explicitly rather than taken from the process
 /// default: when another crate also enables another rustls provider, rustls
 /// cannot pick a default and panics.
-fn platform_setup() -> Result<(Arc<ClientConfig>, bool), String> {
+fn platform_setup() -> Result<(Arc<ClientConfig>, bool), TransportFailure> {
     static CONFIG: BuildOnce<Arc<ClientConfig>> = BuildOnce::new();
     CONFIG.get(|| verified_config(&[]).map(|(config, keep)| (Arc::new(config), keep)))
 }
@@ -164,12 +165,14 @@ pub(in crate::adapter) const VERIFIER: &str = if cfg!(all(
         target_os = "android"
     )
 ))]
-fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, bool), String> {
+fn verified_config(
+    extra: &[CertificateDer<'static>],
+) -> Result<(ClientConfig, bool), TransportFailure> {
     let provider = Arc::new(crypto_provider());
     let verifier = platform_verifier(extra, &provider)?;
     let config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
@@ -194,7 +197,9 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
         target_os = "android"
     )
 )))]
-fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, bool), String> {
+fn verified_config(
+    extra: &[CertificateDer<'static>],
+) -> Result<(ClientConfig, bool), TransportFailure> {
     let found = rustls_native_certs::load_native_certs();
     roots_config(found.certs, extra, found.errors.is_empty())
 }
@@ -207,12 +212,12 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
 fn platform_verifier(
     extra: &[CertificateDer<'static>],
     provider: &Arc<CryptoProvider>,
-) -> Result<Arc<dyn ServerCertVerifier>, String> {
+) -> Result<Arc<dyn ServerCertVerifier>, TransportFailure> {
     let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
         extra.iter().cloned(),
         Arc::clone(provider),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?;
     Ok(Arc::new(verifier))
 }
 
@@ -223,9 +228,9 @@ fn platform_verifier(
 fn platform_verifier(
     _extra: &[CertificateDer<'static>],
     provider: &Arc<CryptoProvider>,
-) -> Result<Arc<dyn ServerCertVerifier>, String> {
-    let verifier =
-        rustls_platform_verifier::Verifier::new(Arc::clone(provider)).map_err(|e| e.to_string())?;
+) -> Result<Arc<dyn ServerCertVerifier>, TransportFailure> {
+    let verifier = rustls_platform_verifier::Verifier::new(Arc::clone(provider))
+        .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?;
     Ok(Arc::new(Guarded::new(verifier, android_ready)))
 }
 
@@ -361,16 +366,19 @@ fn roots_config(
     platform: Vec<CertificateDer<'static>>,
     extra: &[CertificateDer<'static>],
     complete: bool,
-) -> Result<(ClientConfig, bool), String> {
+) -> Result<(ClientConfig, bool), TransportFailure> {
     let mut roots = RootCertStore::empty();
     let (added, _) = roots.add_parsable_certificates(platform);
     let (extra_added, _) = roots.add_parsable_certificates(extra.iter().cloned());
     if added + extra_added == 0 {
-        return Err("no platform root certificates found".to_owned());
+        return Err(TransportFailure::new(
+            FailureKind::Tls,
+            "no platform root certificates found",
+        ));
     }
     let config = ClientConfig::builder_with_provider(Arc::new(crypto_provider()))
         .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
     Ok((config, complete))
@@ -407,8 +415,8 @@ impl<T: Clone> BuildOnce<T> {
     /// racing may both build; one value is kept.
     pub(in crate::adapter) fn get(
         &self,
-        build: impl FnOnce() -> Result<(T, bool), String>,
-    ) -> Result<(T, bool), String> {
+        build: impl FnOnce() -> Result<(T, bool), TransportFailure>,
+    ) -> Result<(T, bool), TransportFailure> {
         if let Some(value) = self.0.get() {
             return Ok((value.clone(), true));
         }
@@ -667,7 +675,12 @@ pub(in crate::adapter) mod tests {
     fn a_failed_tls_setup_is_retried() {
         let setup = BuildOnce::new();
 
-        let failed = setup.get(|| Err("no platform root certificates found".to_owned()));
+        let failed = setup.get(|| {
+            Err(TransportFailure::new(
+                FailureKind::Tls,
+                "no platform root certificates found",
+            ))
+        });
         let retried = setup.get(|| Ok((1, true)));
 
         assert!(failed.is_err());

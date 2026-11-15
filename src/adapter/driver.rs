@@ -434,9 +434,9 @@ impl Driver {
                             self.transport = Some((id, transport));
                             Input::TransportOpened(id)
                         }
-                        Err(message) => {
-                            debug!(transport = self.kind.as_str(), reason = %message, "transport failed");
-                            Input::TransportFailed { transport: id, message }
+                        Err(failure) => {
+                            debug!(transport = self.kind.as_str(), reason = %failure, "transport failed");
+                            Input::TransportFailed { transport: id, message: failure.message }
                         }
                     }
                 }
@@ -1064,7 +1064,10 @@ fn callback_panicked() -> TokenError {
 /// Resolves when the transport being opened is ready; never without one.
 async fn opened(
     opening: &mut Option<(TransportId, Opening)>,
-) -> (TransportId, Result<Transport, String>) {
+) -> (
+    TransportId,
+    Result<Transport, super::body::TransportFailure>,
+) {
     match opening {
         Some((id, future)) => (*id, future.await),
         None => std::future::pending().await,

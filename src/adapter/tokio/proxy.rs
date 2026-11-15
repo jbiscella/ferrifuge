@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tower_service::Service;
 
+use super::super::body::{FailureKind, TransportFailure};
 use super::connector::ConnectedStream;
 use super::tls::Tls;
 use crate::{ClientError, ErrorKind, codes};
@@ -127,7 +128,10 @@ impl Proxy {
     /// The proxy for `url`, or `None` for a direct connection: the one
     /// decision of every transport.
     // Block 23, D2.
-    pub(in crate::adapter) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
+    pub(in crate::adapter) fn decide(
+        &self,
+        url: &Url,
+    ) -> Result<Option<ProxyTarget>, TransportFailure> {
         let endpoint = endpoint(url)?;
         let matcher = match &self.0 {
             Setting::None => return Ok(None),
@@ -154,7 +158,7 @@ impl Proxy {
         &self,
         url: &Url,
         pinned: &OnceLock<Arc<Matcher>>,
-    ) -> Result<Option<ProxyTarget>, String> {
+    ) -> Result<Option<ProxyTarget>, TransportFailure> {
         let matcher = match &self.0 {
             Setting::System => pinned.get_or_init(system_matcher),
             Setting::Env => pinned.get_or_init(env_matcher),
@@ -168,7 +172,7 @@ impl Proxy {
     /// keeps their connections.
     // Block 25, D7.
     pub(in crate::adapter) fn system_decider()
-    -> impl Fn(&Url) -> Result<Option<ProxyTarget>, String> + Send + Sync + 'static {
+    -> impl Fn(&Url) -> Result<Option<ProxyTarget>, TransportFailure> + Send + Sync + 'static {
         let matcher = system_matcher();
         move |url: &Url| intercepted(&matcher, &endpoint(url)?)
     }
@@ -193,7 +197,10 @@ impl fmt::Debug for Proxy {
     }
 }
 
-fn intercepted(matcher: &Matcher, endpoint: &Endpoint) -> Result<Option<ProxyTarget>, String> {
+fn intercepted(
+    matcher: &Matcher,
+    endpoint: &Endpoint,
+) -> Result<Option<ProxyTarget>, TransportFailure> {
     match matcher.intercept(&endpoint.as_http()) {
         Some(intercept) => ProxyTarget::from_intercept(&intercept).map(Some),
         None => Ok(None),
@@ -255,13 +262,13 @@ struct Endpoint {
     port: u16,
 }
 
-fn endpoint(url: &Url) -> Result<Endpoint, String> {
+fn endpoint(url: &Url) -> Result<Endpoint, TransportFailure> {
     let host = url
         .host_str()
-        .ok_or_else(|| "an endpoint without a host".to_owned())?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| format!("an endpoint without a port: {}", url.scheme()))?;
+        .ok_or_else(|| TransportFailure::other("an endpoint without a host"))?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        TransportFailure::other(format!("an endpoint without a port: {}", url.scheme()))
+    })?;
     Ok(Endpoint {
         scheme: url.scheme().to_owned(),
         // Unbracketed: an IPv6 literal must reach the socket as an address.
@@ -391,15 +398,17 @@ impl ProxyTarget {
     }
 
     /// The proxy the environment or the system named for an endpoint.
-    fn from_intercept(intercept: &Intercept) -> Result<Self, String> {
+    fn from_intercept(intercept: &Intercept) -> Result<Self, TransportFailure> {
         let uri = intercept.uri();
         let name = uri.scheme_str().unwrap_or("http");
         let scheme = Scheme::parse(name).ok_or_else(|| {
-            format!("proxy scheme {name} is not supported: http, https, socks5 or socks5h")
+            TransportFailure::other(format!(
+                "proxy scheme {name} is not supported: http, https, socks5 or socks5h"
+            ))
         })?;
         let host = uri
             .host()
-            .ok_or_else(|| "a proxy without a host".to_owned())?;
+            .ok_or_else(|| TransportFailure::other("a proxy without a host"))?;
         let credentials = match (intercept.raw_auth(), intercept.basic_auth()) {
             (Some((user, password)), _) => Some((user.to_owned(), password.to_owned())),
             (None, Some(basic)) => Some(from_basic(basic)?),
@@ -430,7 +439,7 @@ impl ProxyTarget {
 
     /// The proxy's URI, without credentials, as hyper-util's connectors
     /// take it.
-    fn uri(&self) -> Result<http::Uri, String> {
+    fn uri(&self) -> Result<http::Uri, TransportFailure> {
         let scheme = match self.scheme {
             Scheme::Http | Scheme::Https => self.scheme.name(),
             // The connector only dials it.
@@ -438,7 +447,7 @@ impl ProxyTarget {
         };
         format!("{scheme}://{}:{}", self.host_for_url(), self.port)
             .parse()
-            .map_err(|_| "a proxy URL that does not parse".to_owned())
+            .map_err(|_| TransportFailure::other("a proxy URL that does not parse"))
     }
 
     /// The proxy's URL with its credentials, as reqwest takes it.
@@ -494,8 +503,8 @@ fn decoded(part: &str) -> String {
 }
 
 /// The user and password of a `Basic` header value.
-fn from_basic(value: &HeaderValue) -> Result<(String, String), String> {
-    let invalid = || "proxy credentials that do not decode".to_owned();
+fn from_basic(value: &HeaderValue) -> Result<(String, String), TransportFailure> {
+    let invalid = || TransportFailure::other("proxy credentials that do not decode");
     let encoded = value
         .to_str()
         .ok()
@@ -595,13 +604,15 @@ pub(in crate::adapter) async fn dial(
     url: &Url,
     proxy: Option<&ProxyTarget>,
     tls: &Tls,
-) -> Result<Stream, String> {
+) -> Result<Stream, TransportFailure> {
     let endpoint = endpoint(url)?;
     let Some(proxy) = proxy else {
         let stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
             .await
-            .map_err(|e| e.to_string())?;
-        stream.set_nodelay(true).map_err(|e| e.to_string())?;
+            .map_err(|e| TransportFailure::io(&e))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|e| TransportFailure::io(&e))?;
         return Ok(Stream::Tcp(stream));
     };
     let mut connector = HttpConnector::new();
@@ -610,7 +621,7 @@ pub(in crate::adapter) async fn dial(
     // to 443.
     let destination: http::Uri = format!("http://{}:{}", endpoint.authority_host(), endpoint.port)
         .parse()
-        .map_err(|_| "an endpoint that does not parse".to_owned())?;
+        .map_err(|_| TransportFailure::other("an endpoint that does not parse"))?;
     match proxy.scheme {
         Scheme::Http => {
             let mut tunnel = Tunnel::new(proxy.uri()?, connector);
@@ -640,12 +651,14 @@ pub(in crate::adapter) async fn dial(
             let destination = if proxy.scheme == Scheme::Socks5 {
                 let address = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| TransportFailure::io(&e))?
                     .next()
-                    .ok_or_else(|| format!("no address for {}", endpoint.host))?;
+                    .ok_or_else(|| {
+                        TransportFailure::other(format!("no address for {}", endpoint.host))
+                    })?;
                 format!("http://{address}")
                     .parse()
-                    .map_err(|_| "an address that does not parse".to_owned())?
+                    .map_err(|_| TransportFailure::other("an address that does not parse"))?
             } else {
                 destination
             };
@@ -655,7 +668,7 @@ pub(in crate::adapter) async fn dial(
             }
             let stream = call(&mut socks, destination)
                 .await
-                .map_err(|e| format!("SOCKS5 proxy: {e}"))?;
+                .map_err(|e| TransportFailure::other(format!("SOCKS5 proxy: {e}")))?;
             Ok(Stream::Tcp(stream.into_inner()))
         }
     }
@@ -673,12 +686,15 @@ where
 /// The message of a failed CONNECT. hyper-util does not export its error
 /// type, so a 407 is told by its message (hyper-util 0.1.21 `tunnel.rs:241`;
 /// a unit test pins it).
-fn tunnel_error(error: impl fmt::Display) -> String {
+fn tunnel_error(error: impl fmt::Display) -> TransportFailure {
     let message = error.to_string();
     if message == "tunnel error: proxy authorization required" {
-        PROXY_AUTHENTICATION_REQUIRED.to_owned()
+        TransportFailure::new(
+            FailureKind::ProxyAuthentication,
+            PROXY_AUTHENTICATION_REQUIRED,
+        )
     } else {
-        message
+        TransportFailure::other(message)
     }
 }
 
@@ -834,6 +850,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.err().as_deref(), Some(PROXY_AUTHENTICATION_REQUIRED));
+        assert_eq!(
+            result.err(),
+            Some(TransportFailure::new(
+                FailureKind::ProxyAuthentication,
+                PROXY_AUTHENTICATION_REQUIRED
+            ))
+        );
     }
 }

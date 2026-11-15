@@ -199,7 +199,7 @@ impl Log {
         &self,
         kind: TransportKind,
         endpoint: usize,
-        proxy: &Result<Option<ProxyTarget>, String>,
+        proxy: &Result<Option<ProxyTarget>, super::body::TransportFailure>,
         connector: bool,
         alpn: Option<&'static str>,
     ) {
