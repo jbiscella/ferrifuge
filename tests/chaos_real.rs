@@ -768,7 +768,7 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
                 ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext {
                     transport,
                     ..
-                }) => ("connected", 0, Some(transport.clone())),
+                }) => ("connected", 0, Some(transport.as_str().to_owned())),
                 ferrifuge::ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
                     code,
                     ..
@@ -787,6 +787,9 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
                 match coded.codec_protocol() {
                     ferrifuge::Protocol::Protobuf => "protobuf",
                     ferrifuge::Protocol::Json => "json",
+                    // `Protocol` is `#[non_exhaustive]`: a protocol the
+                    // run does not know fails the row's protocol check.
+                    _ => "unknown",
                 }
                 .to_owned()
             });
