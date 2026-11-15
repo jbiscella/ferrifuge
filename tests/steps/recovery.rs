@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use cucumber::{given, then, when};
 use ferrifuge::machine::SubscriptionOptions;
 use ferrifuge::{
-    ClientEvent, StateError, StreamPosition, Subscribed, SubscriptionEvent, SubscriptionState,
+    ClientEvent, StateError, StreamPosition, SubscribedContext, SubscriptionEvent,
+    SubscriptionState,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -142,7 +143,10 @@ pub(super) async fn disconnect_and_hold(world: &mut ClientWorld) {
         expect_subscription_event(world, "subscribing", false).await;
     } else {
         tokio::time::timeout(EVENT_TIMEOUT, async {
-            while !matches!(world.next_event().await, ClientEvent::Connecting { .. }) {}
+            while !matches!(
+                world.next_event().await,
+                ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+            ) {}
         })
         .await
         .expect("the client reconnecting in time");
@@ -159,7 +163,7 @@ pub(super) fn let_the_client_back(world: &ClientWorld) {
 
 /// The subscription's next "subscribed" event; state events may come
 /// first, a publication may not.
-pub(super) async fn next_subscribed(world: &mut ClientWorld) -> Subscribed {
+pub(super) async fn next_subscribed(world: &mut ClientWorld) -> SubscribedContext {
     loop {
         match world.next_subscription_event(false).await {
             SubscriptionEvent::Subscribed(subscribed) => return subscribed,

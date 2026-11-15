@@ -295,7 +295,7 @@ async fn error_within_the_handshake_timeout(world: &mut ClientWorld, message: St
     loop {
         let event = world.next_event().await;
         match &event {
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             ClientEvent::Error(error) => {
                 assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
                 assert_eq!(error.message, message, "{error:?}");
@@ -319,13 +319,13 @@ fn first_call_dropped(world: &mut ClientWorld) {
 #[then(regex = r#"^the client then emits "connected" over transport "(\w+)"$"#)]
 async fn then_connected_over(world: &mut ClientWorld, transport: String) {
     let event = super::next_event_after_transport_errors(world).await;
-    let ClientEvent::Connected {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext {
         transport: over, ..
-    } = &event
+    }) = &event
     else {
         panic!("a connected event: {event:?}");
     };
-    assert_eq!(over, &transport);
+    assert_eq!(over.as_str(), transport);
 }
 
 #[then(
@@ -335,7 +335,7 @@ async fn invalid_certificate(world: &mut ClientWorld) {
     loop {
         let event = world.next_event().await;
         match &event {
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             ClientEvent::Error(error) => {
                 assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
                 assert!(
@@ -402,7 +402,10 @@ fn configuration_error(world: &ClientWorld) -> &ferrifuge::ClientError {
 fn fails_naming_the_transport(world: &mut ClientWorld, transport: String) {
     let error = configuration_error(world);
     assert!(error.message.contains(&transport), "{error:?}");
-    assert_eq!(error.transport.as_deref(), Some(transport.as_str()));
+    assert_eq!(
+        error.transport.map(ferrifuge::TransportKind::as_str),
+        Some(transport.as_str())
+    );
 }
 
 #[then("building fails with a configuration error naming the connector and the proxy setting")]

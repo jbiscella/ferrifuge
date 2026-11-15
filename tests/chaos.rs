@@ -2217,11 +2217,13 @@ impl Run {
     /// down the refreshes of the connection it ends.
     fn tear_down_fetches(&mut self, event: &ClientEvent) {
         let (ended, torn) = match event {
-            ClientEvent::Connecting { code, .. } if *code == 3014 => (true, false),
-            ClientEvent::Connecting { .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { code, .. }) if *code == 3014 => {
+                (true, false)
+            }
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
                 (false, self.checker.last_state == Some(State::Connected))
             }
-            ClientEvent::Disconnected { .. } => (true, false),
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => (true, false),
             _ => return,
         };
         let mut latest = None;
@@ -2494,9 +2496,9 @@ impl Run {
             self.tear_down_fetches(client_event);
         }
         let state = match client_event {
-            ClientEvent::Connecting { .. } => State::Connecting,
-            ClientEvent::Connected { .. } => State::Connected,
-            ClientEvent::Disconnected { .. } => State::Disconnected,
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => State::Connecting,
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => State::Connected,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => State::Disconnected,
             ClientEvent::ServerSubscription {
                 channel,
                 event: server_event,
@@ -2558,7 +2560,7 @@ impl Run {
                     offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
-            ServerSubscriptionEvent::Unsubscribed { .. } => {
+            ServerSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             ServerSubscriptionEvent::Publication(publication) => {
@@ -2598,7 +2600,7 @@ impl Run {
     ) -> Step {
         let sub = Sub::Client(id);
         let (state, kind) = match sub_event {
-            SubscriptionEvent::Subscribing { code, .. } => {
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code, .. }) => {
                 if *code == codes::subscribing::DELTA_ERROR {
                     self.count("delta resubscribe");
                 }
@@ -2612,7 +2614,7 @@ impl Run {
                     offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
-            SubscriptionEvent::Unsubscribed { .. } => {
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             SubscriptionEvent::Publication(publication) => {

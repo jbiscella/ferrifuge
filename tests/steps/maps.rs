@@ -731,7 +731,10 @@ async fn answers_as_a_stream_subscription(world: &mut ClientWorld) {
 async fn emits_unsubscribed_and_no_sync(world: &mut ClientWorld, code: u32, reason: String) {
     world.next_map_event_named("subscribing").await;
     let event = world.next_map_event_named("unsubscribed").await;
-    assert_eq!(event, MapSubscriptionEvent::Unsubscribed { code, reason });
+    assert_eq!(
+        event,
+        MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason))
+    );
     let events = world.maps.events.as_mut().expect("a stream");
     let later = quiet_events(events).await;
     assert!(
@@ -923,7 +926,8 @@ async fn synced_client(
             let event = events.next().await.expect("a stream");
             match event {
                 MapSubscriptionEvent::Sync(_) => return event,
-                MapSubscriptionEvent::Unsubscribed { .. } | MapSubscriptionEvent::Error(_) => {
+                MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
+                | MapSubscriptionEvent::Error(_) => {
                     panic!("{event:?}")
                 }
                 _ => {}
@@ -1159,7 +1163,8 @@ async fn emits_a_sync_with_three_keys(world: &mut ClientWorld) {
         assert!(
             matches!(
                 event,
-                MapSubscriptionEvent::Subscribing { .. } | MapSubscriptionEvent::Subscribed(_)
+                MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+                    | MapSubscriptionEvent::Subscribed(_)
             ),
             "{event:?}"
         );
@@ -1247,7 +1252,9 @@ async fn a_second_client_subscribes(world: &mut ClientWorld, user: String, chann
     client.connect();
     let id = tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
-            if let Some(ClientEvent::Connected { client_id, .. }) = events.next().await {
+            if let Some(ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. })) =
+                events.next().await
+            {
                 return client_id;
             }
         }
@@ -1351,7 +1358,10 @@ async fn it_emits_unsubscribed(world: &mut ClientWorld, code: u32, reason: Strin
         })
         .await
         .expect("unsubscribed in time");
-        assert_eq!(event, MapSubscriptionEvent::Unsubscribed { code, reason });
+        assert_eq!(
+            event,
+            MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason))
+        );
     } else {
         let events = world
             .delivery
@@ -1368,7 +1378,10 @@ async fn it_emits_unsubscribed(world: &mut ClientWorld, code: u32, reason: Strin
         })
         .await
         .expect("unsubscribed in time");
-        assert_eq!(event, SubscriptionEvent::Unsubscribed { code, reason });
+        assert_eq!(
+            event,
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason))
+        );
     }
 }
 
@@ -1402,7 +1415,9 @@ async fn emits_a_sync(world: &mut ClientWorld) {
         let event = world.next_map_event().await;
         match event {
             MapSubscriptionEvent::Sync(_) => break,
-            MapSubscriptionEvent::Unsubscribed { .. } => panic!("{event:?}"),
+            MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+                panic!("{event:?}")
+            }
             _ => {}
         }
     }
@@ -1431,7 +1446,8 @@ async fn still_subscribed_later(world: &mut ClientWorld, seconds: u64) {
     assert!(
         later.iter().all(|event| !matches!(
             event,
-            MapSubscriptionEvent::Subscribing { .. } | MapSubscriptionEvent::Unsubscribed { .. }
+            MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+                | MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
         )),
         "{later:?}"
     );
@@ -1517,7 +1533,7 @@ impl ClientWorld {
                 found
                     || matches!(
                         event,
-                        MapSubscriptionEvent::Subscribing { .. }
+                        MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
                             | MapSubscriptionEvent::Subscribed(_)
                     ),
                 "{event:?} before {name:?}, after {seen:?}"
@@ -1713,7 +1729,10 @@ async fn the_map_unsubscribes_with(world: &mut ClientWorld, code: u32, reason: S
         .await
         .pop()
         .expect("unsubscribed");
-    assert_eq!(event, MapSubscriptionEvent::Unsubscribed { code, reason });
+    assert_eq!(
+        event,
+        MapSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason))
+    );
 }
 
 #[then(
@@ -1759,7 +1778,10 @@ async fn the_server_api_sets_a_key(world: &mut ClientWorld, key: String, channel
 )]
 async fn the_map_subscribes_again_with(world: &mut ClientWorld, code: u32, reason: String) {
     let event = world.next_map_event_named("subscribing").await;
-    assert_eq!(event, MapSubscriptionEvent::Subscribing { code, reason });
+    assert_eq!(
+        event,
+        MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext::new(code, reason))
+    );
 }
 
 #[then(regex = r#"^then "subscribed" with recovered false and a sync with exactly key "(\w+)"$"#)]
@@ -2412,7 +2434,7 @@ async fn a_removal_then_a_delta_error(world: &mut ClientWorld, key: String, code
 async fn then_subscribing(world: &mut ClientWorld, code: u32, reason: String) {
     let event = world.next_map_event_named("subscribing").await;
     assert!(
-        matches!(&event, MapSubscriptionEvent::Subscribing { code: c, reason: r } if *c == code && *r == reason),
+        matches!(&event, MapSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code: c, reason: r, .. }) if *c == code && *r == reason),
         "{event:?}"
     );
 }

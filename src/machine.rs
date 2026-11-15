@@ -118,7 +118,7 @@ pub enum TransportKind {
 impl TransportKind {
     /// Name of the transport as reported in events, as in centrifuge-js.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::WebSocket => "websocket",
             Self::HttpStream => "http_stream",
@@ -1889,7 +1889,7 @@ impl Machine {
             return Err(configuration_error(
                 &format!(
                     "the Protobuf protocol cannot be used with the {} transport",
-                    kind.name()
+                    kind.as_str()
                 ),
                 Some(*kind),
             ));
@@ -2323,10 +2323,10 @@ impl Machine {
             return;
         }
         self.state = State::Connecting;
-        self.emit(ClientEvent::Connecting {
+        self.emit(ClientEvent::Connecting(crate::ConnectingContext {
             code: codes::connecting::CONNECT_CALLED,
             reason: "connect called".to_owned(),
-        });
+        }));
         // centrifuge-js `connect`. The first attempt is immediate; delays
         // apply to reconnects.
         self.backoff.restart();
@@ -2568,7 +2568,7 @@ impl Machine {
             kind: ErrorKind::Transport,
             code: codes::error::TRANSPORT_CLOSED,
             message,
-            transport: Some(self.transport_kind().name().to_owned()),
+            transport: Some(self.transport_kind()),
         }));
         self.reconnect_after_transport_closed();
     }
@@ -2938,11 +2938,11 @@ impl Machine {
             pong: result.pong,
         });
         self.wait_server_ping();
-        self.emit(ClientEvent::Connected {
+        self.emit(ClientEvent::Connected(crate::ConnectedContext {
             client_id: std::mem::take(&mut result.client),
-            transport: self.transport_kind().name().to_owned(),
+            transport: self.transport_kind(),
             data: result.data.take(),
-        });
+        }));
         self.subscriptions_connected();
         if self.server_subscriptions_connected(std::mem::take(&mut result.subs)) {
             self.server_delta_failed();
@@ -3226,9 +3226,9 @@ impl Machine {
             self.state = state;
             let reason = reason.to_owned();
             self.emit(if reconnect {
-                ClientEvent::Connecting { code, reason }
+                ClientEvent::Connecting(crate::ConnectingContext { code, reason })
             } else {
-                ClientEvent::Disconnected { code, reason }
+                ClientEvent::Disconnected(crate::DisconnectedContext { code, reason })
             });
         }
         Some(was_connected)
@@ -3524,7 +3524,7 @@ fn configuration_error(message: &str, transport: Option<TransportKind>) -> Clien
         kind: ErrorKind::Configuration,
         code: codes::error::BAD_CONFIGURATION,
         message: message.to_owned(),
-        transport: transport.map(|kind| kind.name().to_owned()),
+        transport,
     }
 }
 
@@ -3956,8 +3956,8 @@ mod tests {
             assert!(
                 events(&actions).iter().any(|event| matches!(
                     event,
-                    ClientEvent::Connecting { code: got, reason }
-                        | ClientEvent::Disconnected { code: got, reason }
+                    ClientEvent::Connecting(crate::ConnectingContext { code: got, reason })
+                        | ClientEvent::Disconnected(crate::DisconnectedContext { code: got, reason })
                         if *got == code && reason == "bye"
                 )),
                 "{actions:?}"
@@ -4026,10 +4026,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Disconnected {
+            [&ClientEvent::Disconnected(crate::DisconnectedContext {
                 code: 403,
                 reason: "forbidden".into()
-            }]
+            })]
         );
         assert_eq!(machine.state(), State::Disconnected);
         assert!(!actions.iter().any(|a| matches!(a, Action::SetTimer(..))));
@@ -4062,10 +4062,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Connecting {
+            [&ClientEvent::Connecting(crate::ConnectingContext {
                 code: codes::connecting::TRANSPORT_CLOSED,
                 reason: "transport closed".into()
-            }]
+            })]
         );
     }
 
@@ -4082,10 +4082,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Disconnected {
+            [&ClientEvent::Disconnected(crate::DisconnectedContext {
                 code: codes::disconnected::MESSAGE_SIZE_LIMIT,
                 reason: "message size limit exceeded".into()
-            }]
+            })]
         );
         assert_eq!(machine.state(), State::Disconnected);
     }
@@ -4192,10 +4192,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Disconnected {
+            [&ClientEvent::Disconnected(crate::DisconnectedContext {
                 code: codes::disconnected::MESSAGE_SIZE_LIMIT,
                 reason: "message size limit exceeded".into()
-            }]
+            })]
         );
         assert!(
             !actions
@@ -4256,10 +4256,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Disconnected {
+            [&ClientEvent::Disconnected(crate::DisconnectedContext {
                 code: 3500,
                 reason: "bye".into()
-            }]
+            })]
         );
         assert!(!actions.iter().any(|a| matches!(a, Action::SetTimer(..))));
     }
@@ -4277,10 +4277,10 @@ mod tests {
 
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Connecting {
+            [&ClientEvent::Connecting(crate::ConnectingContext {
                 code: codes::connecting::TRANSPORT_CLOSED,
                 reason: "transport closed".into()
-            }]
+            })]
         );
     }
 
@@ -4445,10 +4445,12 @@ mod tests {
         });
 
         assert_eq!(machine.state(), State::Disconnected, "{actions:?}");
-        assert!(events(&actions).contains(&&ClientEvent::Disconnected {
-            code: codes::disconnected::UNAUTHORIZED,
-            reason: "unauthorized".into()
-        }));
+        assert!(events(&actions).contains(&&ClientEvent::Disconnected(
+            crate::DisconnectedContext {
+                code: codes::disconnected::UNAUTHORIZED,
+                reason: "unauthorized".into()
+            }
+        )));
     }
 
     #[test]
@@ -4575,10 +4577,12 @@ mod tests {
         });
 
         assert_eq!(machine.state(), State::Disconnected, "{rejected:?}");
-        assert!(events(&rejected).contains(&&ClientEvent::Disconnected {
-            code: codes::disconnected::MESSAGE_SIZE_LIMIT,
-            reason: "message size limit exceeded".into()
-        }));
+        assert!(events(&rejected).contains(&&ClientEvent::Disconnected(
+            crate::DisconnectedContext {
+                code: codes::disconnected::MESSAGE_SIZE_LIMIT,
+                reason: "message size limit exceeded".into()
+            }
+        )));
     }
 
     #[test]
@@ -4638,10 +4642,10 @@ mod tests {
 
             assert_eq!(
                 events(&actions),
-                [&ClientEvent::Disconnected {
+                [&ClientEvent::Disconnected(crate::DisconnectedContext {
                     code: codes::disconnected::UNAUTHORIZED,
                     reason: "unauthorized".into()
-                }]
+                })]
             );
         }
     }
@@ -4716,7 +4720,7 @@ mod tests {
                     code: 12,
                     ..
                 }),
-                ClientEvent::Disconnected { code: 1, .. }
+                ClientEvent::Disconnected(crate::DisconnectedContext { code: 1, .. })
             ]
         ));
     }
@@ -5020,10 +5024,10 @@ mod tests {
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert_eq!(
             events(&actions),
-            [&ClientEvent::Connecting {
+            [&ClientEvent::Connecting(crate::ConnectingContext {
                 code: codes::connecting::NO_PING,
                 reason: "no ping".into()
-            }]
+            })]
         );
     }
 

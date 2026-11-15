@@ -174,7 +174,7 @@ fn a_client_with_an_unreachable_webtransport(world: &mut ClientWorld) {
 async fn a_failed_attempt_over(world: &mut ClientWorld, transport: String) {
     let event = loop {
         match world.next_event().await {
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => break event,
         }
     };
@@ -205,7 +205,7 @@ async fn refused_whichever_transport(world: &mut ClientWorld) {
     let mut reported = false;
     let (code, reason) = loop {
         match world.next_event().await {
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             ClientEvent::Error(error)
                 if !reported
                     && error.kind == ErrorKind::Transport
@@ -213,7 +213,9 @@ async fn refused_whichever_transport(world: &mut ClientWorld) {
             {
                 reported = true;
             }
-            ClientEvent::Disconnected { code, reason } => break (code, reason),
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
+                break (code, reason);
+            }
             event => panic!("expected \"disconnected\", got {event:?}"),
         }
     };
@@ -443,8 +445,8 @@ fn fails_naming_webtransport_and_https(world: &mut ClientWorld) {
         "{error:?}"
     );
     assert_eq!(
-        error.transport.as_deref(),
-        Some("webtransport"),
+        error.transport,
+        Some(ferrifuge::TransportKind::WebTransport),
         "{error:?}"
     );
 }

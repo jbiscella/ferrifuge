@@ -548,7 +548,7 @@ pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -
         loop {
             match world.next_event().await {
                 ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {
-                    failed.push(error.transport.unwrap_or_default());
+                    failed.push(error.transport.map_or("", TransportKind::as_str));
                 }
                 event => return event,
             }
@@ -558,9 +558,9 @@ pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -
     .unwrap_or_else(|_| panic!("only transport errors for {EVENT_TIMEOUT:?}"));
     if world.client_id.is_none() {
         let configured: Vec<&str> = if world.transports.is_empty() {
-            vec![TransportKind::WebSocket.name()]
+            vec![TransportKind::WebSocket.as_str()]
         } else {
-            world.transports.iter().map(|kind| kind.name()).collect()
+            world.transports.iter().map(|kind| kind.as_str()).collect()
         };
         let expected: Vec<&str> = (0..failed.len())
             .map(|attempt| configured[attempt % configured.len()])
@@ -569,9 +569,9 @@ pub(crate) async fn next_event_after_transport_errors(world: &mut ClientWorld) -
             failed, expected,
             "failed attempts out of the configured order"
         );
-        if let ClientEvent::Connected { transport, .. } = &event {
+        if let ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) = &event {
             assert_eq!(
-                transport,
+                transport.as_str(),
                 configured[failed.len() % configured.len()],
                 "connected over a transport out of order after {failed:?}"
             );

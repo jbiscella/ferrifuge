@@ -143,7 +143,7 @@ fn after_the_anomaly(world: &mut ClientWorld) -> Vec<Action> {
 
 fn emits_connecting(actions: &[Action], code: u32, reason: &str) -> bool {
     actions.iter().any(|action| {
-        matches!(action, Action::Emit(_, ClientEvent::Connecting { code: of, reason: why })
+        matches!(action, Action::Emit(_, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: of, reason: why, .. }))
             if *of == code && why == reason)
     })
 }
@@ -177,7 +177,7 @@ fn then_the_call_fails(world: &mut ClientWorld, code: u32) {
     let actions = after_the_anomaly(world);
     assert!(
         actions.iter().any(|action| matches!(action,
-            Action::Emit(_, ClientEvent::Connecting { code: of, .. }) if *of == code)),
+            Action::Emit(_, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: of, .. })) if *of == code)),
         "{actions:?}"
     );
 }
@@ -549,7 +549,10 @@ async fn two_captured_clients(world: &mut ClientWorld) {
             .await
             .expect("connected in time")
             .expect("an event");
-        if matches!(event, ClientEvent::Connected { .. }) {
+        if matches!(
+            event,
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+        ) {
             break;
         }
     }

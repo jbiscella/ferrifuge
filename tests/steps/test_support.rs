@@ -9,7 +9,7 @@ use ferrifuge::machine::{Action, Input, Machine, SubscriptionOptions, TransportK
 use ferrifuge::machine::{CallReply, CallRequest};
 use ferrifuge::{
     ClientEvent, ClientInfo, Config, HistoryOptions, HistoryResult, PresenceResult,
-    PresenceStatsResult, Publication, StreamPosition, Subscribed, SubscriptionEvent,
+    PresenceStatsResult, Publication, StreamPosition, SubscribedContext, SubscriptionEvent,
 };
 use serde_json::{Value, json};
 
@@ -25,7 +25,7 @@ pub(crate) struct TestSupport {
 #[derive(Debug, Clone, PartialEq)]
 enum Yielded {
     Connected(ClientEvent),
-    Subscribed(Subscribed),
+    Subscribed(SubscribedContext),
     Publication(Publication),
     History(HistoryResult),
     Presence(PresenceResult),
@@ -171,9 +171,10 @@ fn yielded(run: &BatchRun, kind: &str) -> Yielded {
     since
         .iter()
         .find_map(|action| match (kind, action) {
-            ("connected", Action::Emit(_, event @ ClientEvent::Connected { .. })) => {
-                Some(Yielded::Connected(event.clone()))
-            }
+            (
+                "connected",
+                Action::Emit(_, event @ ClientEvent::Connected(ferrifuge::ConnectedContext { .. })),
+            ) => Some(Yielded::Connected(event.clone())),
             ("subscribed", Action::EmitSubscription(_, _, SubscriptionEvent::Subscribed(s))) => {
                 Some(Yielded::Subscribed(s.clone()))
             }
@@ -211,14 +212,14 @@ fn built(kind: &str) -> Yielded {
     match kind {
         "connected" => Yielded::Connected(ClientEvent::connected(
             "c1",
-            "websocket",
+            ferrifuge::TransportKind::WebSocket,
             Some(br#"{"a":1}"#.to_vec()),
         )),
         "subscribed" => Yielded::Subscribed(
-            Subscribed::default()
+            SubscribedContext::default()
                 .recoverable(true)
                 .positioned(true)
-                .stream_position(StreamPosition::new(3, "e".to_owned())),
+                .stream_position(StreamPosition::new(3, "e")),
         ),
         "publication" => Yielded::Publication(
             Publication::new(br#"{"n":1}"#.to_vec())
@@ -264,12 +265,12 @@ fn yields_equal(world: &mut ClientWorld, what: String) {
 fn built_holds_the_row(world: &mut ClientWorld) {
     let built = world.test_support.built.clone().expect("a built value");
     match built {
-        Yielded::Connected(ClientEvent::Connected {
+        Yielded::Connected(ClientEvent::Connected(ferrifuge::ConnectedContext {
             client_id,
             transport,
             data,
             ..
-        }) => assert_eq!(
+        })) => assert_eq!(
             (client_id.as_str(), transport.as_str(), data.as_deref()),
             ("c1", "websocket", Some(&br#"{"a":1}"#[..]))
         ),
@@ -281,7 +282,7 @@ fn built_holds_the_row(world: &mut ClientWorld) {
             );
             assert_eq!(
                 subscribed.stream_position,
-                Some(StreamPosition::new(3, "e".to_owned()))
+                Some(StreamPosition::new(3, "e"))
             );
         }
         Yielded::Publication(publication) => {

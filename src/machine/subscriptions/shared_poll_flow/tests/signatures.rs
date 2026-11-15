@@ -284,7 +284,7 @@ fn an_unauthorized_callback_unsubscribes_with_code_1() {
 
     assert!(events(&actions).iter().any(|(_, event)| matches!(
         event,
-        SharedPollSubscriptionEvent::Unsubscribed { code: 1, reason } if reason == "unauthorized"
+        SharedPollSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 1, reason }) if reason == "unauthorized"
     )));
     assert!(
         sent(&actions)

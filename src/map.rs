@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use crate::token::Bytes;
-use crate::{ClientError, ClientInfo, Subscribed};
+use crate::{ClientError, ClientInfo, SubscribedContext};
 
 /// The kind of a map subscription (Block 45, D2), sent as the subscribe
 /// command's `type` (`client.proto`, `SubscribeRequest.type`).
@@ -124,25 +124,14 @@ pub struct MapUpdate {
 pub enum MapSubscriptionEvent {
     /// The subscription moved to
     /// [`crate::SubscriptionState::Subscribing`].
-    Subscribing {
-        /// Why: a code from [`crate::codes::subscribing`].
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Subscribing(crate::SubscribingContext),
     /// The subscription moved to [`crate::SubscriptionState::Subscribed`]:
     /// the state is loaded, and a [`Self::Sync`] follows unless it
     /// recovered.
-    Subscribed(Subscribed),
+    Subscribed(SubscribedContext),
     /// The subscription moved to
     /// [`crate::SubscriptionState::Unsubscribed`].
-    Unsubscribed {
-        /// Why: a code from [`crate::codes::unsubscribed`], or the code of
-        /// the server's error.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Unsubscribed(crate::UnsubscribedContext),
     /// The whole state of the map, with the changes made while it loaded:
     /// keys in the order the server gave them, a key set again after a
     /// removal last. Never a removed key.
@@ -158,9 +147,9 @@ impl MapSubscriptionEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Subscribing { .. } => "subscribing",
+            Self::Subscribing(crate::SubscribingContext { .. }) => "subscribing",
             Self::Subscribed(_) => "subscribed",
-            Self::Unsubscribed { .. } => "unsubscribed",
+            Self::Unsubscribed(crate::UnsubscribedContext { .. }) => "unsubscribed",
             Self::Sync(_) => "sync",
             Self::Update(_) => "update",
             Self::Error(_) => "error",

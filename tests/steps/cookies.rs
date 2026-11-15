@@ -138,7 +138,11 @@ async fn a_client_with_a_jar_behind_the_http_proxy(
     } else {
         http_proxy.set_cookie_on_emulation(&cookie);
     }
-    let url = format!("http://{}/connection/{}", http_proxy.address(), kind.name());
+    let url = format!(
+        "http://{}/connection/{}",
+        http_proxy.address(),
+        kind.as_str()
+    );
     world.transports = vec![kind];
     let builder = Client::builder_with_transports(vec![(kind, url)])
         .config(world.client_config())

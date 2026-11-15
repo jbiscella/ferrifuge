@@ -457,10 +457,8 @@ fn no_further_refresh(world: &mut ClientWorld) {
 #[then(r#"the subscription emits "unsubscribed" with that error's code and message"#)]
 fn unsubscribed_with_the_error(world: &mut ClientWorld) {
     let run = run(world);
-    let expected = SubscriptionEvent::Unsubscribed {
-        code: 403,
-        reason: "forbidden".into(),
-    };
+    let expected =
+        SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(403, "forbidden"));
     assert!(run.events().contains(&&expected), "{:?}", run.actions);
 }
 

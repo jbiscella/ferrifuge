@@ -329,7 +329,7 @@ async fn the_subscription_emits_unsubscribed_with_code(world: &mut ClientWorld, 
         assert!(
             run.events().iter().any(|event| matches!(
                 event,
-                SubscriptionEvent::Unsubscribed { code: got, .. } if *got == code
+                SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { code: got, .. }) if *got == code
             )),
             "{:?}",
             run.actions
@@ -338,7 +338,7 @@ async fn the_subscription_emits_unsubscribed_with_code(world: &mut ClientWorld, 
     }
     let event = expect_subscription_event(world, "unsubscribed", false).await;
     assert!(
-        matches!(&event, SubscriptionEvent::Unsubscribed { code: got, .. } if *got == code),
+        matches!(&event, SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { code: got, .. }) if *got == code),
         "{event:?}"
     );
 }
@@ -348,14 +348,15 @@ async fn the_subscription_emits_unsubscribed_with_code(world: &mut ClientWorld, 
 )]
 async fn unsubscribed_with_code_and_reason(world: &mut ClientWorld, code: u32, reason: String) {
     if let Some(run) = &world.subscription_machine {
-        let expected = SubscriptionEvent::Unsubscribed { code, reason };
+        let expected =
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason));
         assert!(run.events().contains(&&expected), "{:?}", run.actions);
         return;
     }
     let event = expect_subscription_event(world, "unsubscribed", false).await;
     assert_eq!(
         event,
-        SubscriptionEvent::Unsubscribed { code, reason },
+        SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason)),
         "{event:?}"
     );
 }
@@ -780,8 +781,12 @@ async fn emits_with_the_code_and_reason_sent(world: &mut ClientWorld, state: Str
     let (_, reason) = world.sent_unsubscribe.clone().expect("an unsubscribe sent");
     let event = expect_subscription_event(world, &state, false).await;
     let expected = match state.as_str() {
-        "unsubscribed" => SubscriptionEvent::Unsubscribed { code, reason },
-        "subscribing" => SubscriptionEvent::Subscribing { code, reason },
+        "unsubscribed" => {
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason))
+        }
+        "subscribing" => {
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext::new(code, reason))
+        }
         other => panic!("no {other} event carries a code"),
     };
     assert_eq!(event, expected);
@@ -870,7 +875,7 @@ async fn within_the_timeout_connecting_with_code(world: &mut ClientWorld, code: 
         .await
         .unwrap_or_else(|_| panic!("no event within {limit:?}"));
     assert!(
-        matches!(&event, ClientEvent::Connecting { code: got, .. } if *got == code),
+        matches!(&event, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) if *got == code),
         "{event:?}"
     );
 }
@@ -893,7 +898,7 @@ async fn the_client_emits_connecting_with_that_code(world: &mut ClientWorld) {
     let (code, _) = world.sent_disconnect.clone().expect("a disconnect sent");
     let event = world.next_event().await;
     assert!(
-        matches!(&event, ClientEvent::Connecting { code: got, .. } if *got == code),
+        matches!(&event, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) if *got == code),
         "{event:?}"
     );
 }

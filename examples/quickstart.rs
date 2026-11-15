@@ -27,7 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SubscriptionEvent::Publication(publication) => {
                 println!("{}", String::from_utf8_lossy(&publication.data));
             }
-            SubscriptionEvent::Unsubscribed { code, reason } => {
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
+                code,
+                reason,
+                ..
+            }) => {
                 println!("unsubscribed: {code} {reason}");
                 break;
             }

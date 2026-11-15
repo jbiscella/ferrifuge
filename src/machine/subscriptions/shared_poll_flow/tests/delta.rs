@@ -375,7 +375,7 @@ fn ended_by_the_bound(actions: &[Action]) -> bool {
     let unsubscribed = events(actions).into_iter().any(|(_, event)| {
         matches!(
             event,
-            SharedPollSubscriptionEvent::Unsubscribed { code, ref reason }
+            SharedPollSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, ref reason })
                 if code == codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE
                     && reason == "shared poll delta bases too large"
         )

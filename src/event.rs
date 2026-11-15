@@ -1,7 +1,8 @@
 //! Client state and the events reporting its changes.
 
+use crate::machine::TransportKind;
 use crate::token::{Bytes, optional_bytes};
-use crate::{ClientInfo, Publication, Subscribed};
+use crate::{ClientInfo, Publication, SubscribedContext, UnsubscribedContext};
 
 /// Connection state of a client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,33 +38,11 @@ impl State {
 #[non_exhaustive]
 pub enum ClientEvent {
     /// The client moved to [`State::Connecting`].
-    Connecting {
-        /// Why: a client-side code from [`crate::codes::connecting`] or a
-        /// server disconnect code.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Connecting(ConnectingContext),
     /// The client moved to [`State::Connected`].
-    #[non_exhaustive]
-    Connected {
-        /// Connection id assigned by the server.
-        client_id: String,
-        /// Transport in use, e.g. `"websocket"`.
-        transport: String,
-        /// The data the server attached to the connect reply
-        /// (`ConnectResult.data`), exactly as received: raw JSON with the
-        /// JSON protocol, any bytes with Protobuf.
-        data: Option<Vec<u8>>,
-    },
+    Connected(ConnectedContext),
     /// The client moved to [`State::Disconnected`].
-    Disconnected {
-        /// Why: a client-side code from [`crate::codes::disconnected`] or a
-        /// server disconnect code.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Disconnected(DisconnectedContext),
     /// An error that does not change the state, e.g. a failed connection
     /// attempt while the client keeps reconnecting.
     Error(ClientError),
@@ -93,16 +72,11 @@ pub enum ServerSubscriptionEvent {
     /// connection.
     Subscribing,
     /// The server subscribed the connection, at connect or later.
-    Subscribed(Subscribed),
+    Subscribed(SubscribedContext),
     /// The server ended the subscription, which leaves the registry: a code
     /// of the server's `Unsubscribe` push, or
     /// [`crate::codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
-    Unsubscribed {
-        /// Why: a server unsubscribe code or a client-side one.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Unsubscribed(UnsubscribedContext),
     /// A publication in the channel.
     Publication(Publication),
     /// A client subscribed to the channel (a join push).
@@ -118,7 +92,7 @@ impl ServerSubscriptionEvent {
         match self {
             Self::Subscribing => "subscribing",
             Self::Subscribed(_) => "subscribed",
-            Self::Unsubscribed { .. } => "unsubscribed",
+            Self::Unsubscribed(_) => "unsubscribed",
             Self::Publication(_) => "publication",
             Self::Join(_) => "join",
             Self::Leave(_) => "leave",
@@ -129,26 +103,9 @@ impl ServerSubscriptionEvent {
 impl std::fmt::Debug for ClientEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Connecting { code, reason } => f
-                .debug_struct("Connecting")
-                .field("code", code)
-                .field("reason", reason)
-                .finish(),
-            Self::Connected {
-                client_id,
-                transport,
-                data,
-            } => f
-                .debug_struct("Connected")
-                .field("client_id", client_id)
-                .field("transport", transport)
-                .field("data", &optional_bytes(data.as_ref()))
-                .finish(),
-            Self::Disconnected { code, reason } => f
-                .debug_struct("Disconnected")
-                .field("code", code)
-                .field("reason", reason)
-                .finish(),
+            Self::Connecting(context) => f.debug_tuple("Connecting").field(context).finish(),
+            Self::Connected(context) => f.debug_tuple("Connected").field(context).finish(),
+            Self::Disconnected(context) => f.debug_tuple("Disconnected").field(context).finish(),
             Self::Error(error) => f.debug_tuple("Error").field(error).finish(),
             Self::ServerSubscription { channel, event } => f
                 .debug_struct("ServerSubscription")
@@ -165,14 +122,61 @@ impl ClientEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Connecting { .. } => "connecting",
-            Self::Connected { .. } => "connected",
-            Self::Disconnected { .. } => "disconnected",
+            Self::Connecting(_) => "connecting",
+            Self::Connected(_) => "connected",
+            Self::Disconnected(_) => "disconnected",
             Self::Error(_) => "error",
             Self::ServerSubscription { event, .. } => event.name(),
             Self::Message(_) => "message",
         }
     }
+}
+
+/// Details of a [`ClientEvent::Connecting`] (Block 54, D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConnectingContext {
+    /// Why: a client-side code from [`crate::codes::connecting`] or a
+    /// server disconnect code.
+    pub code: u32,
+    /// Human-readable reason.
+    pub reason: String,
+}
+
+/// Details of a [`ClientEvent::Connected`] (Block 54, D4). Its `Debug`
+/// output shows the data as its length (Block 21).
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConnectedContext {
+    /// Connection id assigned by the server.
+    pub client_id: String,
+    /// Transport in use.
+    pub transport: TransportKind,
+    /// The data the server attached to the connect reply
+    /// (`ConnectResult.data`), exactly as received: raw JSON with the JSON
+    /// protocol, any bytes with Protobuf.
+    pub data: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for ConnectedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectedContext")
+            .field("client_id", &self.client_id)
+            .field("transport", &self.transport)
+            .field("data", &optional_bytes(self.data.as_ref()))
+            .finish()
+    }
+}
+
+/// Details of a [`ClientEvent::Disconnected`] (Block 54, D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DisconnectedContext {
+    /// Why: a client-side code from [`crate::codes::disconnected`] or a
+    /// server disconnect code.
+    pub code: u32,
+    /// Human-readable reason.
+    pub reason: String,
 }
 
 /// Details of a [`ClientEvent::Error`].
@@ -186,14 +190,14 @@ pub struct ClientError {
     /// Human-readable description.
     pub message: String,
     /// Transport the error happened on, when it is transport-related.
-    pub transport: Option<String>,
+    pub transport: Option<TransportKind>,
 }
 
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (code {})", self.message, self.code)?;
         if let Some(transport) = &self.transport {
-            write!(f, " over {transport}")?;
+            write!(f, " over {}", transport.as_str())?;
         }
         Ok(())
     }
@@ -227,7 +231,7 @@ pub enum ErrorKind {
     /// token callback to refresh it.
     Configuration,
     /// A subscription data callback failed; the subscription retries.
-    SubscriptionData,
+    SubscribeData,
     /// The server answered a subscribe command with a temporary error; the
     /// subscription retries.
     Subscribe,
@@ -281,7 +285,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{ClientEvent, ServerSubscriptionEvent};
-    use crate::{ClientInfo, Publication, Subscribed, SubscriptionEvent};
+    use crate::{ClientInfo, Publication, SubscribedContext, SubscriptionEvent};
 
     const SECRET: &str = "s3cr3t-d4t4";
 
@@ -307,10 +311,10 @@ mod tests {
         }
     }
 
-    fn subscribed() -> Subscribed {
-        Subscribed {
+    fn subscribed() -> SubscribedContext {
+        SubscribedContext {
             data: Some(secret()),
-            ..Subscribed::default()
+            ..SubscribedContext::default()
         }
     }
 
@@ -319,11 +323,11 @@ mod tests {
     #[test]
     fn the_debug_output_of_events_shows_no_data() {
         let events: Vec<Box<dyn std::fmt::Debug>> = vec![
-            Box::new(ClientEvent::Connected {
+            Box::new(ClientEvent::Connected(crate::ConnectedContext {
                 client_id: "c".to_owned(),
-                transport: "websocket".to_owned(),
+                transport: crate::TransportKind::WebSocket,
                 data: Some(secret()),
-            }),
+            })),
             Box::new(ClientEvent::Message(secret())),
             Box::new(ClientEvent::ServerSubscription {
                 channel: "alerts".to_owned(),

@@ -15,7 +15,7 @@ use super::outbox::{Head, Outbox};
 use crate::machine::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, MaybeSend, Publication, ServerSubscriptionEvent,
-    Subscribed, SubscriptionEvent,
+    SubscribedContext, SubscriptionEvent,
 };
 
 /// Receives a client's events, one at a time, in order (Block 41, D1): the
@@ -46,8 +46,8 @@ use crate::{
 /// struct Log;
 ///
 /// impl ferrifuge::ClientHandler for Log {
-///     fn on_connected(&mut self, client_id: String, _: String, _: Option<Vec<u8>>) {
-///         println!("connected as {client_id}");
+///     fn on_connected(&mut self, context: ferrifuge::ConnectedContext) {
+///         println!("connected as {}", context.client_id);
 ///     }
 /// }
 ///
@@ -62,14 +62,9 @@ pub trait ClientHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: ClientEvent) {
         match event {
-            ClientEvent::Connecting { code, reason } => self.on_connecting(code, reason),
-            ClientEvent::Connected {
-                client_id,
-                transport,
-                data,
-                ..
-            } => self.on_connected(client_id, transport, data),
-            ClientEvent::Disconnected { code, reason } => self.on_disconnected(code, reason),
+            ClientEvent::Connecting(context) => self.on_connecting(context),
+            ClientEvent::Connected(context) => self.on_connected(context),
+            ClientEvent::Disconnected(context) => self.on_disconnected(context),
             ClientEvent::Error(error) => self.on_error(error),
             ClientEvent::ServerSubscription { channel, event } => {
                 self.on_server_subscription(channel, event);
@@ -79,13 +74,13 @@ pub trait ClientHandler: MaybeSend + 'static {
     }
 
     /// [`ClientEvent::Connecting`].
-    fn on_connecting(&mut self, code: u32, reason: String) {}
+    fn on_connecting(&mut self, context: crate::ConnectingContext) {}
 
     /// [`ClientEvent::Connected`].
-    fn on_connected(&mut self, client_id: String, transport: String, data: Option<Vec<u8>>) {}
+    fn on_connected(&mut self, context: crate::ConnectedContext) {}
 
     /// [`ClientEvent::Disconnected`].
-    fn on_disconnected(&mut self, code: u32, reason: String) {}
+    fn on_disconnected(&mut self, context: crate::DisconnectedContext) {}
 
     /// [`ClientEvent::Error`].
     fn on_error(&mut self, error: ClientError) {}
@@ -128,11 +123,9 @@ pub trait SubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: SubscriptionEvent) {
         match event {
-            SubscriptionEvent::Subscribing { code, reason } => self.on_subscribing(code, reason),
-            SubscriptionEvent::Subscribed(subscribed) => self.on_subscribed(subscribed),
-            SubscriptionEvent::Unsubscribed { code, reason } => {
-                self.on_unsubscribed(code, reason);
-            }
+            SubscriptionEvent::Subscribing(context) => self.on_subscribing(context),
+            SubscriptionEvent::Subscribed(context) => self.on_subscribed(context),
+            SubscriptionEvent::Unsubscribed(context) => self.on_unsubscribed(context),
             SubscriptionEvent::Publication(publication) => self.on_publication(publication),
             SubscriptionEvent::Error(error) => self.on_error(error),
             SubscriptionEvent::Join(info) => self.on_join(info),
@@ -141,13 +134,13 @@ pub trait SubscriptionHandler: MaybeSend + 'static {
     }
 
     /// [`SubscriptionEvent::Subscribing`].
-    fn on_subscribing(&mut self, code: u32, reason: String) {}
+    fn on_subscribing(&mut self, context: crate::SubscribingContext) {}
 
     /// [`SubscriptionEvent::Subscribed`].
-    fn on_subscribed(&mut self, subscribed: Subscribed) {}
+    fn on_subscribed(&mut self, context: SubscribedContext) {}
 
     /// [`SubscriptionEvent::Unsubscribed`].
-    fn on_unsubscribed(&mut self, code: u32, reason: String) {}
+    fn on_unsubscribed(&mut self, context: crate::UnsubscribedContext) {}
 
     /// [`SubscriptionEvent::Publication`].
     fn on_publication(&mut self, publication: Publication) {}
@@ -187,9 +180,9 @@ pub trait MapSubscriptionHandler: MaybeSend + 'static {
     fn on_event(&mut self, event: crate::MapSubscriptionEvent) {
         use crate::MapSubscriptionEvent as Event;
         match event {
-            Event::Subscribing { code, reason } => self.on_subscribing(code, reason),
-            Event::Subscribed(subscribed) => self.on_subscribed(subscribed),
-            Event::Unsubscribed { code, reason } => self.on_unsubscribed(code, reason),
+            Event::Subscribing(context) => self.on_subscribing(context),
+            Event::Subscribed(context) => self.on_subscribed(context),
+            Event::Unsubscribed(context) => self.on_unsubscribed(context),
             Event::Sync(entries) => self.on_sync(entries),
             Event::Update(update) => self.on_update(update),
             Event::Error(error) => self.on_error(error),
@@ -197,13 +190,13 @@ pub trait MapSubscriptionHandler: MaybeSend + 'static {
     }
 
     /// [`MapSubscriptionEvent::Subscribing`](crate::MapSubscriptionEvent::Subscribing).
-    fn on_subscribing(&mut self, code: u32, reason: String) {}
+    fn on_subscribing(&mut self, context: crate::SubscribingContext) {}
 
     /// [`MapSubscriptionEvent::Subscribed`](crate::MapSubscriptionEvent::Subscribed).
-    fn on_subscribed(&mut self, subscribed: Subscribed) {}
+    fn on_subscribed(&mut self, context: SubscribedContext) {}
 
     /// [`MapSubscriptionEvent::Unsubscribed`](crate::MapSubscriptionEvent::Unsubscribed).
-    fn on_unsubscribed(&mut self, code: u32, reason: String) {}
+    fn on_unsubscribed(&mut self, context: crate::UnsubscribedContext) {}
 
     /// [`MapSubscriptionEvent::Sync`](crate::MapSubscriptionEvent::Sync).
     fn on_sync(&mut self, entries: Vec<crate::MapEntry>) {}
@@ -261,22 +254,22 @@ pub trait SharedPollSubscriptionHandler: MaybeSend + 'static {
     fn on_event(&mut self, event: crate::SharedPollSubscriptionEvent) {
         use crate::SharedPollSubscriptionEvent as Event;
         match event {
-            Event::Subscribing { code, reason } => self.on_subscribing(code, reason),
-            Event::Subscribed(subscribed) => self.on_subscribed(subscribed),
-            Event::Unsubscribed { code, reason } => self.on_unsubscribed(code, reason),
+            Event::Subscribing(context) => self.on_subscribing(context),
+            Event::Subscribed(context) => self.on_subscribed(context),
+            Event::Unsubscribed(context) => self.on_unsubscribed(context),
             Event::Update(update) => self.on_update(update),
             Event::Error(error) => self.on_error(error),
         }
     }
 
     /// [`SharedPollSubscriptionEvent::Subscribing`](crate::SharedPollSubscriptionEvent::Subscribing).
-    fn on_subscribing(&mut self, code: u32, reason: String) {}
+    fn on_subscribing(&mut self, context: crate::SubscribingContext) {}
 
     /// [`SharedPollSubscriptionEvent::Subscribed`](crate::SharedPollSubscriptionEvent::Subscribed).
-    fn on_subscribed(&mut self, subscribed: Subscribed) {}
+    fn on_subscribed(&mut self, context: SubscribedContext) {}
 
     /// [`SharedPollSubscriptionEvent::Unsubscribed`](crate::SharedPollSubscriptionEvent::Unsubscribed).
-    fn on_unsubscribed(&mut self, code: u32, reason: String) {}
+    fn on_unsubscribed(&mut self, context: crate::UnsubscribedContext) {}
 
     /// [`SharedPollSubscriptionEvent::Update`](crate::SharedPollSubscriptionEvent::Update).
     fn on_update(&mut self, update: crate::SharedPollUpdate) {}
@@ -1656,13 +1649,13 @@ mod tests {
 
     #[cfg(feature = "unstable")]
     impl MapSubscriptionHandler for ByKind {
-        fn on_subscribing(&mut self, _: u32, _: String) {
+        fn on_subscribing(&mut self, _: crate::SubscribingContext) {
             self.0.push("subscribing");
         }
-        fn on_subscribed(&mut self, _: Subscribed) {
+        fn on_subscribed(&mut self, _: SubscribedContext) {
             self.0.push("subscribed");
         }
-        fn on_unsubscribed(&mut self, _: u32, _: String) {
+        fn on_unsubscribed(&mut self, _: crate::UnsubscribedContext) {
             self.0.push("unsubscribed");
         }
         fn on_sync(&mut self, _: Vec<crate::MapEntry>) {
@@ -1689,15 +1682,15 @@ mod tests {
         let mut handler = ByKind::default();
 
         for event in [
-            Event::Subscribing {
+            Event::Subscribing(crate::SubscribingContext {
                 code: 0,
                 reason: String::new(),
-            },
-            Event::Subscribed(Subscribed::default()),
-            Event::Unsubscribed {
+            }),
+            Event::Subscribed(SubscribedContext::default()),
+            Event::Unsubscribed(crate::UnsubscribedContext {
                 code: 0,
                 reason: String::new(),
-            },
+            }),
             Event::Sync(Vec::new()),
             Event::Update(crate::MapUpdate::default()),
             Event::Error(error),
@@ -2077,13 +2070,13 @@ mod tests {
 
     #[cfg(feature = "unstable")]
     impl SharedPollSubscriptionHandler for SharedPollByKind {
-        fn on_subscribing(&mut self, _: u32, _: String) {
+        fn on_subscribing(&mut self, _: crate::SubscribingContext) {
             self.0.push("subscribing");
         }
-        fn on_subscribed(&mut self, _: Subscribed) {
+        fn on_subscribed(&mut self, _: SubscribedContext) {
             self.0.push("subscribed");
         }
-        fn on_unsubscribed(&mut self, _: u32, _: String) {
+        fn on_unsubscribed(&mut self, _: crate::UnsubscribedContext) {
             self.0.push("unsubscribed");
         }
         fn on_update(&mut self, _: crate::SharedPollUpdate) {
@@ -2107,15 +2100,15 @@ mod tests {
         let mut handler = SharedPollByKind::default();
 
         for event in [
-            Event::Subscribing {
+            Event::Subscribing(crate::SubscribingContext {
                 code: 0,
                 reason: String::new(),
-            },
-            Event::Subscribed(Subscribed::default()),
-            Event::Unsubscribed {
+            }),
+            Event::Subscribed(SubscribedContext::default()),
+            Event::Unsubscribed(crate::UnsubscribedContext {
                 code: 0,
                 reason: String::new(),
-            },
+            }),
             Event::Update(crate::SharedPollUpdate::default()),
             Event::Error(error),
         ] {
@@ -2540,7 +2533,9 @@ mod tests {
             FAIL_SPAWN.set(true);
             let record = Arc::clone(&seen);
             client.set_handler(move |event: ClientEvent| {
-                if let ClientEvent::Disconnected { code, reason } = &event {
+                if let ClientEvent::Disconnected(crate::DisconnectedContext { code, reason }) =
+                    &event
+                {
                     record.lock().unwrap().push(format!("{code} {reason}"));
                 }
             });
@@ -2988,7 +2983,11 @@ mod tests {
             let weak = client.downgrade();
             let done = Arc::clone(&returned);
             client.set_handler(move |event: ClientEvent| {
-                if done.load(Ordering::Acquire) || !matches!(event, ClientEvent::Connecting { .. })
+                if done.load(Ordering::Acquire)
+                    || !matches!(
+                        event,
+                        ClientEvent::Connecting(crate::ConnectingContext { .. })
+                    )
                 {
                     return;
                 }

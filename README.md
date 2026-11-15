@@ -142,10 +142,12 @@ async fn main() -> Result<(), ferrifuge::ClientError> {
 
     while let Some(event) = events.next().await {
         match event {
-            ClientEvent::Connecting { code, reason } => println!("connecting: {code} {reason}"),
-            ClientEvent::Connected { client_id, .. } => println!("connected as {client_id}"),
-            ClientEvent::Disconnected { code, reason } => {
-                println!("disconnected: {code} {reason}");
+            ClientEvent::Connecting(context) => {
+                println!("connecting: {} {}", context.code, context.reason);
+            }
+            ClientEvent::Connected(context) => println!("connected as {}", context.client_id),
+            ClientEvent::Disconnected(context) => {
+                println!("disconnected: {} {}", context.code, context.reason);
                 break;
             }
             ClientEvent::Error(error) => eprintln!("error: {}", error.message),
@@ -467,7 +469,7 @@ subscribe, which loads the state through the new filter.
 `.delta(DeltaFormat::Fossil)` asks for per-key deltas, on namespaces with
 `allowed_delta_types` (`delta_publish` sends every change as a delta): each
 key's chain is separate, and the application gets whole values, byte for
-byte, in `Sync` and `Update`. `Subscribed::delta` says whether the server
+byte, in `Sync` and `Update`. `SubscribedContext::delta` says whether the server
 agreed, and `delta_statistics()` what it saved. The client holds a base per
 key, one copy of every key's value, each within `max_message_bytes`, as long
 as delta is on: account for it next to the `Sync`. A recovering subscribe
@@ -602,7 +604,7 @@ unanswered within `Config::timeout` there makes the client reconnect with
 `.delta(DeltaFormat::Fossil)` on the builder asks for per-key deltas, on
 namespaces with `allowed_delta_types: ["fossil"]`: each key's chain is
 separate, the application gets whole values, byte for byte, and
-`Subscribed::delta` says whether the server agreed. On Centrifugo OSS a
+`SubscribedContext::delta` says whether the server agreed. On Centrifugo OSS a
 change goes as a delta only when the backend's refresh response gives the
 key's previous value as `prev_data`, beside its `data`; without it, it goes
 whole. The client holds a base per tracked key, one copy of its last
@@ -718,7 +720,7 @@ A subscription built with `.delta(DeltaFormat::Fossil)` asks the server to
 send each publication as a Fossil delta against the previous one, which
 saves bandwidth on channels whose payloads change a little at a time. The
 client rebuilds every publication: the application always receives whole
-payloads, byte for byte as published, and `Subscribed::delta` says whether
+payloads, byte for byte as published, and `SubscribedContext::delta` says whether
 the server agreed. On Centrifugo the channel needs `allowed_delta_types:
 ["fossil"]` and a positioned subscription (`force_positioning`, or
 recovery); `delta_publish` sends every publication as a delta.
@@ -747,16 +749,16 @@ let subscription = client
 
 Subscriptions the server makes for the connection (at connect, or later
 through its API) need no code of yours: the client tracks them and reports
-them as `ClientEvent::ServerSubscription { channel, event }`, where `event`
-is `Subscribing`, `Subscribed`, `Unsubscribed { code, reason }` or
-`Publication`. A publication goes to a client-side subscription to the
+them as `ClientEvent::ServerSubscription { channel, event, .. }`, where
+`event` is `Subscribing`, `Subscribed`, `Unsubscribed` (an
+`UnsubscribedContext` with `code` and `reason`) or `Publication`. A publication goes to a client-side subscription to the
 channel when that one is subscribed, else to the server-side one.
 
 ```rust
 use ferrifuge::{ClientEvent, ServerSubscriptionEvent};
 
 while let Some(event) = events.next().await {
-    if let ClientEvent::ServerSubscription { channel, event } = event {
+    if let ClientEvent::ServerSubscription { channel, event, .. } = event {
         match event {
             ServerSubscriptionEvent::Publication(publication) => {
                 println!("{channel}: {} bytes", publication.data.len());
@@ -1104,7 +1106,8 @@ or on a subscription: `ClientBuilder::handler`, `Client::set_handler`,
 closure `FnMut(ClientEvent)` or `FnMut(SubscriptionEvent)`, or a type
 implementing `ClientHandler` or `SubscriptionHandler`, whose `on_event` calls
 by default one method per kind of event (`on_connected`, `on_publication`,
-and so on), each doing nothing unless overridden.
+and so on), each given the event's details (`on_connected` its
+`ConnectedContext`, for example) and doing nothing unless overridden.
 
 ```rust
 use ferrifuge::{Publication, SubscriptionHandler};

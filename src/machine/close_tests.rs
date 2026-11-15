@@ -43,17 +43,22 @@ fn emitted(actions: &[Action]) -> Vec<(String, u32)> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::EmitSubscription(_, _, SubscriptionEvent::Unsubscribed { code, .. }) => {
-                Some(("unsubscribed".to_owned(), *code))
-            }
+            Action::EmitSubscription(
+                _,
+                _,
+                SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, .. }),
+            ) => Some(("unsubscribed".to_owned(), *code)),
             Action::Emit(
                 _,
                 ClientEvent::ServerSubscription {
-                    event: ServerSubscriptionEvent::Unsubscribed { code, .. },
+                    event:
+                        ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
+                            code, ..
+                        }),
                     ..
                 },
             ) => Some(("server unsubscribed".to_owned(), *code)),
-            Action::Emit(_, ClientEvent::Disconnected { code, .. }) => {
+            Action::Emit(_, ClientEvent::Disconnected(crate::DisconnectedContext { code, .. })) => {
                 Some(("disconnected".to_owned(), *code))
             }
             _ => None,

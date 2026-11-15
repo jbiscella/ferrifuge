@@ -159,7 +159,7 @@ fn core_reports(world: &mut ClientWorld, connects: u64, failed: u64, delivered: 
 fn core_reports_transport(world: &mut ClientWorld, transport: String) {
     let statistics = core(world).statistics();
     assert_eq!(
-        statistics.transport.map(TransportKind::name),
+        statistics.transport.map(TransportKind::as_str),
         Some(transport.as_str())
     );
     assert_eq!(statistics.connected_since, None);
@@ -298,7 +298,7 @@ fn session_statistics(
         "{statistics:?}"
     );
     assert_eq!(
-        statistics.transport.map(TransportKind::name),
+        statistics.transport.map(TransportKind::as_str),
         Some(transport.as_str())
     );
 }

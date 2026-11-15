@@ -53,7 +53,7 @@ async fn windows_that_end_together_share_a_frame() {
             .await
             .expect("connected")
         {
-            Some(ClientEvent::Connected { .. }) => break,
+            Some(ClientEvent::Connected(ferrifuge::ConnectedContext { .. })) => break,
             Some(_) => {}
             None => panic!("the client's events ended"),
         }

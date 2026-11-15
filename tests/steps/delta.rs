@@ -372,7 +372,8 @@ async fn subscription_emits_a_delta_error(world: &mut ClientWorld, code: u32) {
 #[then(regex = r#"^then the subscription emits "subscribing" with code (\d+)$"#)]
 async fn subscription_emits_subscribing_with(world: &mut ClientWorld, code: u32) {
     let event = expect_subscription_event(world, "subscribing", false).await;
-    let SubscriptionEvent::Subscribing { code: got, .. } = event else {
+    let SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code: got, .. }) = event
+    else {
         unreachable!("expect_subscription_event checked the name");
     };
     assert_eq!(got, code);
@@ -627,7 +628,7 @@ async fn client_emits_a_delta_error(world: &mut ClientWorld, code: u32) {
                 ..
             } => panic!("a server-side publication before the error: {publication:?}"),
             // Its connection was lost before the delta could reach it.
-            ClientEvent::Connecting { .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
                 panic!("the client reconnected before the delta error: {seen:?}, then {event:?}")
             }
             event => seen.push(event),
@@ -639,7 +640,7 @@ async fn client_emits_a_delta_error(world: &mut ClientWorld, code: u32) {
 async fn then_the_client_emits_connecting_with(world: &mut ClientWorld, code: u32) {
     loop {
         match world.next_event().await {
-            ClientEvent::Connecting { code: got, .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) => {
                 assert_eq!(got, code);
                 return;
             }

@@ -14,8 +14,8 @@ use crate::token::Secret;
 use crate::wire::{CHANNEL_COMPACTION, Command, Method, Reply, ReplyResult, SubscribeRequest};
 use crate::{
     MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, Publication, State, StreamPosition,
-    Subscribed, SubscriptionError, SubscriptionEvent, SubscriptionState, UnrecoverableStrategy,
-    codes,
+    SubscribedContext, SubscriptionError, SubscriptionEvent, SubscriptionState,
+    UnrecoverableStrategy, codes,
 };
 
 /// Phases of a map subscription's reply (`client.proto`,
@@ -746,7 +746,7 @@ impl Machine {
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribed(Subscribed {
+            SubscriptionEvent::Subscribed(SubscribedContext {
                 data: result.data,
                 positioned: result.positioned,
                 recoverable: result.recoverable,
@@ -815,7 +815,7 @@ impl Machine {
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribed(Subscribed {
+            SubscriptionEvent::Subscribed(SubscribedContext {
                 data: result.data,
                 positioned: result.positioned,
                 recoverable: result.recoverable,
@@ -908,14 +908,14 @@ impl Machine {
     /// event; one with no counterpart is dropped.
     pub(super) fn emit_map_lifecycle(&mut self, id: SubscriptionId, event: SubscriptionEvent) {
         let event = match event {
-            SubscriptionEvent::Subscribing { code, reason } => {
-                MapSubscriptionEvent::Subscribing { code, reason }
+            SubscriptionEvent::Subscribing(crate::SubscribingContext { code, reason }) => {
+                MapSubscriptionEvent::Subscribing(crate::SubscribingContext { code, reason })
             }
             SubscriptionEvent::Subscribed(subscribed) => {
                 MapSubscriptionEvent::Subscribed(subscribed)
             }
-            SubscriptionEvent::Unsubscribed { code, reason } => {
-                MapSubscriptionEvent::Unsubscribed { code, reason }
+            SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, reason }) => {
+                MapSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, reason })
             }
             SubscriptionEvent::Error(error) => MapSubscriptionEvent::Error(error),
             _ => return,

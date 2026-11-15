@@ -87,10 +87,10 @@ where
                 })
             }
             ClientEvent::Error(error) => Some(Err(format!("another error: {}", error.message))),
-            ClientEvent::Connected { .. } => {
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
                 Some(Err("connected to an untrusted server".to_owned()))
             }
-            ClientEvent::Disconnected { code, reason } => {
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
             _ => None,
@@ -110,8 +110,8 @@ where
     step(
         events,
         |event| match event {
-            ClientEvent::Connected { .. } => Some(Ok(())),
-            ClientEvent::Disconnected { code, reason } => {
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => Some(Ok(())),
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
             ClientEvent::Error(error) => {
@@ -141,9 +141,11 @@ where
         events,
         |event| match event {
             SubscriptionEvent::Subscribed(_) => Some(Ok(())),
-            SubscriptionEvent::Unsubscribed { code, reason } => {
-                Some(Err(format!("unsubscribed: {code} {reason}")))
-            }
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
+                code,
+                reason,
+                ..
+            }) => Some(Err(format!("unsubscribed: {code} {reason}"))),
             SubscriptionEvent::Error(error) => Some(Err(format!("error: {}", error.message))),
             _ => None,
         },
@@ -168,9 +170,11 @@ where
                     Err(format!("a publication without the nonce: {data}"))
                 })
             }
-            SubscriptionEvent::Unsubscribed { code, reason } => {
-                Some(Err(format!("unsubscribed: {code} {reason}")))
-            }
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
+                code,
+                reason,
+                ..
+            }) => Some(Err(format!("unsubscribed: {code} {reason}"))),
             _ => None,
         },
         String::new,
@@ -188,11 +192,13 @@ where
     step(
         events,
         |event| match event {
-            ClientEvent::Disconnected { .. } => Some(if client.state() == State::Disconnected {
-                Ok(())
-            } else {
-                Err(format!("disconnected, in state {:?}", client.state()))
-            }),
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => {
+                Some(if client.state() == State::Disconnected {
+                    Ok(())
+                } else {
+                    Err(format!("disconnected, in state {:?}", client.state()))
+                })
+            }
             _ => None,
         },
         String::new,

@@ -793,9 +793,9 @@ impl Run {
     /// I1 for the client.
     fn client_event(&mut self, event: &ClientEvent) -> Step {
         let state = match event {
-            ClientEvent::Connecting { .. } => State::Connecting,
-            ClientEvent::Connected { .. } => State::Connected,
-            ClientEvent::Disconnected { .. } => State::Disconnected,
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => State::Connecting,
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => State::Connected,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => State::Disconnected,
             _ => return Ok(()),
         };
         let last = std::mem::replace(&mut self.last_state, state);
@@ -811,7 +811,7 @@ impl Run {
     /// publications ([`Run::delivered`]).
     fn subscription_event(&mut self, n: usize, event: &SubscriptionEvent) -> Step {
         let state = match event {
-            SubscriptionEvent::Subscribing { code, .. } => {
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code, .. }) => {
                 if *code == codes::subscribing::DELTA_ERROR {
                     self.count("delta resubscribe");
                 }
@@ -827,7 +827,9 @@ impl Run {
                 }
                 SubscriptionState::Subscribed
             }
-            SubscriptionEvent::Unsubscribed { .. } => SubscriptionState::Unsubscribed,
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+                SubscriptionState::Unsubscribed
+            }
             SubscriptionEvent::Publication(publication) => return self.delivered(n, publication),
             _ => return Ok(()),
         };

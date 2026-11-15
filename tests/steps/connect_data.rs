@@ -366,7 +366,10 @@ pub(crate) fn emitted_disconnected(world: &mut ClientWorld, code: u32, reason: &
         .actions
         .iter()
         .find_map(|action| match action {
-            Action::Emit(_, ClientEvent::Disconnected { code, reason }) => Some((*code, reason)),
+            Action::Emit(
+                _,
+                ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }),
+            ) => Some((*code, reason)),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no disconnected event: {:?}", run.actions));
@@ -474,7 +477,9 @@ fn a_client_with_a_data_callback(
 async fn the_client_reaches_connected_again(world: &mut ClientWorld) {
     let reached = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let ClientEvent::Connected { .. } = world.next_event().await {
+            if let ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) =
+                world.next_event().await
+            {
                 return;
             }
         }
@@ -517,7 +522,7 @@ fn the_proxy_answers_with_data(world: &mut ClientWorld, data: String) {
 async fn connected_with_data(world: &mut ClientWorld, data: String) {
     expect_event(world, "connecting").await;
     let event = expect_event(world, "connected").await;
-    let ClientEvent::Connected { data: got, .. } = &event else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { data: got, .. }) = &event else {
         unreachable!("expect_event checked the name");
     };
     let got: Option<Value> = got
@@ -550,7 +555,7 @@ fn a_client_connects_to_it(world: &mut ClientWorld) {
 async fn connected_with_exact_data(world: &mut ClientWorld) {
     expect_event(world, "connecting").await;
     let event = expect_event(world, "connected").await;
-    let ClientEvent::Connected { data, .. } = &event else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { data, .. }) = &event else {
         unreachable!("expect_event checked the name");
     };
     let raw = world.connect_data.raw.as_deref().expect("raw data");
@@ -622,7 +627,11 @@ async fn a_client_with_a_header_behind_the_http_proxy(
     world.connect_data.http_headers.push(header(&given));
     let kind = super::transports::kind(&transport);
     let http_proxy = super::transports::pinging_server_behind_an_http_proxy(world).await;
-    let url = format!("http://{}/connection/{}", http_proxy.address(), kind.name());
+    let url = format!(
+        "http://{}/connection/{}",
+        http_proxy.address(),
+        kind.as_str()
+    );
     super::transports::configure(world, vec![(kind, url)]);
     super::transports::connect_and_wait(world).await;
     world.http_proxy = Some(http_proxy);

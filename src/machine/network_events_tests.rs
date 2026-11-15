@@ -69,10 +69,10 @@ fn offline_while_connected_closes_the_transport_and_waits_the_backoff() {
     );
     assert_eq!(
         events(&actions),
-        [&ClientEvent::Connecting {
+        [&ClientEvent::Connecting(crate::ConnectingContext {
             code: codes::connecting::TRANSPORT_CLOSED,
             reason: "transport closed".into(),
-        }]
+        })]
     );
     let delay = reconnect_delay(&actions).expect("a reconnect delay");
     assert!(
@@ -106,10 +106,10 @@ fn page_cached_while_connected_reconnects_with_its_own_reason() {
     );
     assert_eq!(
         events(&actions),
-        [&ClientEvent::Connecting {
+        [&ClientEvent::Connecting(crate::ConnectingContext {
             code: codes::connecting::TRANSPORT_CLOSED,
             reason: "page entered back/forward cache".into(),
-        }]
+        })]
     );
     assert!(reconnect_delay(&actions).is_some());
 }

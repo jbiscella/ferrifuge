@@ -40,22 +40,11 @@ impl SubscriptionState {
 #[non_exhaustive]
 pub enum SubscriptionEvent {
     /// The subscription moved to [`SubscriptionState::Subscribing`].
-    Subscribing {
-        /// Why: a code from [`crate::codes::subscribing`].
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Subscribing(SubscribingContext),
     /// The subscription moved to [`SubscriptionState::Subscribed`].
-    Subscribed(Subscribed),
+    Subscribed(SubscribedContext),
     /// The subscription moved to [`SubscriptionState::Unsubscribed`].
-    Unsubscribed {
-        /// Why: a code from [`crate::codes::unsubscribed`], or the code of
-        /// the server's error.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Unsubscribed(UnsubscribedContext),
     /// A publication of the channel.
     Publication(Publication),
     /// An error that does not change the state, e.g. a failing data
@@ -75,15 +64,39 @@ impl SubscriptionEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Subscribing { .. } => "subscribing",
+            Self::Subscribing(_) => "subscribing",
             Self::Subscribed(_) => "subscribed",
-            Self::Unsubscribed { .. } => "unsubscribed",
+            Self::Unsubscribed(_) => "unsubscribed",
             Self::Publication(_) => "publication",
             Self::Error(_) => "error",
             Self::Join(_) => "join",
             Self::Leave(_) => "leave",
         }
     }
+}
+
+/// Details of a [`SubscriptionEvent::Subscribing`] and of the
+/// `Subscribing` event of map and shared poll subscriptions (Block 54, D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubscribingContext {
+    /// Why: a code from [`crate::codes::subscribing`].
+    pub code: u32,
+    /// Human-readable reason.
+    pub reason: String,
+}
+
+/// Details of a [`SubscriptionEvent::Unsubscribed`], of a server-side
+/// subscription's, and of the `Unsubscribed` event of map and shared poll
+/// subscriptions (Block 54, D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnsubscribedContext {
+    /// Why: a code from [`crate::codes::unsubscribed`], a server
+    /// unsubscribe code, or the code of the server's error.
+    pub code: u32,
+    /// Human-readable reason.
+    pub reason: String,
 }
 
 /// Details of a [`SubscriptionEvent::Subscribed`] (spec, "Subscription
@@ -93,7 +106,7 @@ impl SubscriptionEvent {
 #[allow(clippy::struct_excessive_bools)] // The flags of the spec's subscribed context.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Subscribed {
+pub struct SubscribedContext {
     /// Data the server attached to the subscription, if any
     /// (`SubscribeResult.data`).
     pub data: Option<Vec<u8>>,
@@ -241,7 +254,7 @@ pub struct ClientInfo {
     pub chan_info: Option<Vec<u8>>,
 }
 
-impl std::fmt::Debug for Subscribed {
+impl std::fmt::Debug for SubscribedContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Subscribed")
             .field("data", &optional_bytes(self.data.as_ref()))

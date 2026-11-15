@@ -70,7 +70,7 @@ fn allocations_per_publication(channels: usize) -> f64 {
         client.connect();
         while !matches!(
             client_events.next().await,
-            Some(ClientEvent::Connected { .. })
+            Some(ClientEvent::Connected(ferrifuge::ConnectedContext { .. }))
         ) {}
         drop(client_events);
 
@@ -99,7 +99,8 @@ fn allocations_per_publication(channels: usize) -> f64 {
             match events.next().await.expect("the subscription's events") {
                 SubscriptionEvent::Publication(_) => received += 1,
                 // Queued while subscribing, before the count started.
-                SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Subscribed(_) => {}
+                SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+                | SubscriptionEvent::Subscribed(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }

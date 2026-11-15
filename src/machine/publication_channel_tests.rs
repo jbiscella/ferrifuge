@@ -2,7 +2,7 @@
 //! the core.
 
 use super::*;
-use crate::{ServerSubscriptionEvent, Subscribed};
+use crate::{ServerSubscriptionEvent, SubscribedContext};
 
 fn frame(transport: TransportId, json: &str) -> Input {
     Input::Frame {
@@ -53,7 +53,7 @@ fn sent(actions: &[Action]) -> Vec<String> {
 }
 
 /// The subscribed events of `actions`, client-side and server-side.
-fn subscribed(actions: &[Action]) -> Vec<Subscribed> {
+fn subscribed(actions: &[Action]) -> Vec<SubscribedContext> {
     actions
         .iter()
         .filter_map(|action| match action {

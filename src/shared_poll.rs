@@ -8,7 +8,7 @@
 //! later), and may change in any minor release.
 
 use crate::token::{Bytes, Secret};
-use crate::{ClientError, Subscribed};
+use crate::{ClientError, SubscribedContext};
 
 /// A key to track at the version of its value the application holds, in
 /// [`crate::SharedPollSubscription::track_with_signature`] (`client.proto`,
@@ -168,25 +168,13 @@ impl From<crate::Publication> for SharedPollUpdate {
 pub enum SharedPollSubscriptionEvent {
     /// The subscription moved to
     /// [`crate::SubscriptionState::Subscribing`].
-    Subscribing {
-        /// Why: a code from [`crate::codes::subscribing`], or the server's
-        /// unsubscribe code.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Subscribing(crate::SubscribingContext),
     /// The subscription moved to [`crate::SubscriptionState::Subscribed`];
     /// a shared poll subscription has no stream position.
-    Subscribed(Subscribed),
+    Subscribed(SubscribedContext),
     /// The subscription moved to
     /// [`crate::SubscriptionState::Unsubscribed`].
-    Unsubscribed {
-        /// Why: a code from [`crate::codes::unsubscribed`], or the code of
-        /// the server's error.
-        code: u32,
-        /// Human-readable reason.
-        reason: String,
-    },
+    Unsubscribed(crate::UnsubscribedContext),
     /// A new version of a tracked key's value, or the end of a key.
     Update(SharedPollUpdate),
     /// An error that does not change the state, e.g. a track request the
@@ -199,9 +187,9 @@ impl SharedPollSubscriptionEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Subscribing { .. } => "subscribing",
+            Self::Subscribing(crate::SubscribingContext { .. }) => "subscribing",
             Self::Subscribed(_) => "subscribed",
-            Self::Unsubscribed { .. } => "unsubscribed",
+            Self::Unsubscribed(crate::UnsubscribedContext { .. }) => "unsubscribed",
             Self::Update(_) => "update",
             Self::Error(_) => "error",
         }

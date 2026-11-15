@@ -762,11 +762,17 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer) {
         use futures_util::StreamExt;
         while let Some(event) = events.next().await {
             let (state, code, transport) = match &event {
-                ferrifuge::ClientEvent::Connecting { code, .. } => ("connecting", *code, None),
-                ferrifuge::ClientEvent::Connected { transport, .. } => {
-                    ("connected", 0, Some(transport.clone()))
-                }
-                ferrifuge::ClientEvent::Disconnected { code, .. } => ("disconnected", *code, None),
+                ferrifuge::ClientEvent::Connecting(ferrifuge::ConnectingContext {
+                    code, ..
+                }) => ("connecting", *code, None),
+                ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext {
+                    transport,
+                    ..
+                }) => ("connected", 0, Some(transport.clone())),
+                ferrifuge::ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
+                    code,
+                    ..
+                }) => ("disconnected", *code, None),
                 ferrifuge::ClientEvent::Error(error) if error.code == TOKEN_EXPIRED => {
                     client_writer.write(Record::Expired {
                         of: "connect".to_owned(),
@@ -855,7 +861,11 @@ fn child_subscriptions(
     subscriptions
 }
 
-fn sub_record(channel: &str, state: &str, subscribed: Option<&ferrifuge::Subscribed>) -> Record {
+fn sub_record(
+    channel: &str,
+    state: &str,
+    subscribed: Option<&ferrifuge::SubscribedContext>,
+) -> Record {
     Record::Sub {
         channel: channel.to_owned(),
         state: state.to_owned(),

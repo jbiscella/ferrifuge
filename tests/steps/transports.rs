@@ -85,7 +85,9 @@ pub(super) async fn connect_and_wait(world: &mut ClientWorld) {
     world.client().connect();
     expect_event(world, "connecting").await;
     match next_event_after_transport_errors(world).await {
-        ClientEvent::Connected { client_id, .. } => world.client_id = Some(client_id),
+        ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) => {
+            world.client_id = Some(client_id)
+        }
         other => panic!("expected connected, got {other:?}"),
     }
 }
@@ -266,7 +268,7 @@ pub(super) async fn a_client_connected_over(
     }
     let url = match &world.http_proxy {
         Some(proxy) if kind.is_emulated() => {
-            format!("http://{}/connection/{}", proxy.address(), kind.name())
+            format!("http://{}/connection/{}", proxy.address(), kind.as_str())
         }
         _ => server_url(server(world), kind),
     };
@@ -368,7 +370,7 @@ pub(super) async fn connected_over_within(
             match world.next_event().await {
                 // Failed attempts, and the event of connect() itself.
                 ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {}
-                ClientEvent::Connecting { code, .. }
+                ClientEvent::Connecting(ferrifuge::ConnectingContext { code, .. })
                     if code == codes::connecting::CONNECT_CALLED => {}
                 event => return event,
             }
@@ -376,10 +378,10 @@ pub(super) async fn connected_over_within(
     })
     .await
     .unwrap_or_else(|_| panic!("not connected within {limit:?}"));
-    let ClientEvent::Connected { transport: got, .. } = &event else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { transport: got, .. }) = &event else {
         panic!("expected connected, got {event:?}");
     };
-    assert_eq!(got, transport);
+    assert_eq!(got.as_str(), transport);
 }
 
 #[when("the relay comes up after every transport has failed once")]
@@ -387,10 +389,7 @@ async fn the_relay_comes_up(world: &mut ClientWorld) {
     let transports = world.transports.clone();
     let mut failed = Vec::new();
     let all_failed = tokio::time::timeout(EVENT_TIMEOUT, async {
-        while !transports
-            .iter()
-            .all(|kind| failed.contains(&kind.name().to_owned()))
-        {
+        while !transports.iter().all(|kind| failed.contains(kind)) {
             if let ClientEvent::Error(error) = world.next_event().await
                 && let Some(transport) = error.transport
             {
@@ -630,7 +629,10 @@ fn building_fails(world: &mut ClientWorld, transport: String) {
         error.message.contains("Protobuf") && error.message.contains(&transport),
         "{error:?}"
     );
-    assert_eq!(error.transport.as_deref(), Some(transport.as_str()));
+    assert_eq!(
+        error.transport.map(ferrifuge::TransportKind::as_str),
+        Some(transport.as_str())
+    );
 }
 
 /// Before the server stops reading, the client subscribes with a token
@@ -718,7 +720,10 @@ async fn disconnected_before_the_timeout(world: &mut ClientWorld) {
         .await
         .unwrap_or_else(|_| panic!("no event within {limit:?}"));
     assert!(
-        matches!(event, ClientEvent::Disconnected { .. }),
+        matches!(
+            event,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
+        ),
         "{event:?}"
     );
 }

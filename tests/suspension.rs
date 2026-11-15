@@ -103,7 +103,10 @@ async fn connected(
     client.connect();
     let connected = tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
-            if matches!(event, ClientEvent::Connected { .. }) {
+            if matches!(
+                event,
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+            ) {
                 return;
             }
         }
@@ -193,7 +196,10 @@ async fn a_ping_that_arrived_during_a_suspension_beats_the_no_ping_deadline() {
         // Resumed by now; what it did with both is in its events.
         let mut reconnected = None;
         while let Some(Some(event)) = events.next().now_or_never() {
-            if !matches!(event, ClientEvent::Connected { .. }) {
+            if !matches!(
+                event,
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+            ) {
                 reconnected = Some(event);
             }
         }
@@ -251,7 +257,10 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
     client.connect();
     tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
-            if matches!(event, ClientEvent::Connected { .. }) {
+            if matches!(
+                event,
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+            ) {
                 return;
             }
         }
@@ -429,7 +438,10 @@ async fn no_task_runs_between_an_input_and_the_timers_it_set() {
     client.connect();
     tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
-            if matches!(event, ClientEvent::Connected { .. }) {
+            if matches!(
+                event,
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+            ) {
                 return;
             }
         }

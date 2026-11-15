@@ -1708,7 +1708,9 @@ mod tests {
         let connected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !matches!(
                 events.next().await,
-                Some(crate::ClientEvent::Connected { .. })
+                Some(crate::ClientEvent::Connected(
+                    crate::ConnectedContext { .. }
+                ))
             ) {}
         })
         .await;
@@ -1719,8 +1721,13 @@ mod tests {
         let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 match events.next().await {
-                    Some(crate::ClientEvent::Disconnected { code, .. }) => return Some(code),
-                    Some(crate::ClientEvent::Connecting { code, .. }) if code != 0 => {
+                    Some(crate::ClientEvent::Disconnected(crate::DisconnectedContext {
+                        code,
+                        ..
+                    })) => return Some(code),
+                    Some(crate::ClientEvent::Connecting(crate::ConnectingContext {
+                        code, ..
+                    })) if code != 0 => {
                         return None;
                     }
                     Some(_) => {}
@@ -1757,7 +1764,9 @@ mod tests {
         let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 match events.next().await {
-                    Some(crate::SharedPollSubscriptionEvent::Unsubscribed { code, .. }) => {
+                    Some(crate::SharedPollSubscriptionEvent::Unsubscribed(
+                        crate::UnsubscribedContext { code, .. },
+                    )) => {
                         return Some(code);
                     }
                     Some(_) => {}

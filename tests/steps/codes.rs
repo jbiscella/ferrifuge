@@ -88,9 +88,10 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
         assert_eq!(world.client().state(), State::Connecting);
         let events = world.ready_events();
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, ClientEvent::Disconnected { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
+            )),
             "{events:?}"
         );
         return;
@@ -98,13 +99,19 @@ async fn the_client_goes_to_state(world: &mut ClientWorld, expected: String) {
     loop {
         let event = world.next_event().await;
         let reached = match &event {
-            ClientEvent::Connecting { code: got, .. } if *got == code => "connecting",
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. })
+                if *got == code =>
+            {
+                "connecting"
+            }
             // The final state: it must carry the code sent.
-            ClientEvent::Disconnected { code: got, .. } => {
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: got, .. }) => {
                 assert_eq!(*got, code, "{event:?}");
                 "disconnected"
             }
-            ClientEvent::Connected { .. } => panic!("expected {expected}, got {event:?}"),
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
+                panic!("expected {expected}, got {event:?}")
+            }
             // E.g. the "connecting" that connect() itself emits, errors,
             // server-side subscription events and events added later.
             _ => continue,
@@ -126,14 +133,16 @@ async fn disconnected_with(world: &mut ClientWorld, code: u32, reason: String) {
     loop {
         let event = world.next_event().await;
         match event {
-            ClientEvent::Disconnected {
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
                 code: got,
                 reason: got_reason,
-            } => {
+                ..
+            }) => {
                 assert_eq!((got, got_reason.as_str()), (code, reason.as_str()));
                 return;
             }
-            ClientEvent::Connecting { .. } | ClientEvent::Connected { .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
                 panic!(
                     "expected disconnected, got {event:?}{}",
                     recent_records(world)
@@ -191,14 +200,16 @@ async fn no_new_connection_attempt(world: &mut ClientWorld) {
 fn the_event_carries_code_and_reason(world: &mut ClientWorld, code: u32) {
     let (_, reason) = world.sent_disconnect.clone().expect("a disconnect sent");
     let event = world.state_event.clone().expect("a state event");
-    let (ClientEvent::Connecting {
+    let (ClientEvent::Connecting(ferrifuge::ConnectingContext {
         code: got_code,
         reason: got_reason,
-    }
-    | ClientEvent::Disconnected {
+        ..
+    })
+    | ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
         code: got_code,
         reason: got_reason,
-    }) = &event
+        ..
+    })) = &event
     else {
         panic!("{event:?} carries no code and reason");
     };

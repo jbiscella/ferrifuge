@@ -168,7 +168,12 @@ fn ended_before_an_answer(kind: TransportKind) -> (Vec<ClientEvent>, TransportKi
             _ => None,
         })
         .expect("the next attempt");
-    events.retain(|event| !matches!(event, ClientEvent::Connecting { .. }));
+    events.retain(|event| {
+        !matches!(
+            event,
+            ClientEvent::Connecting(crate::ConnectingContext { .. })
+        )
+    });
     (events, next)
 }
 
@@ -187,7 +192,7 @@ fn a_webtransport_ending_before_an_answer_is_a_reported_failed_attempt() {
         matches!(
             webtransport.as_slice(),
             [ClientEvent::Error(ClientError { kind: ErrorKind::Transport, transport: Some(name), .. })]
-                if name == "webtransport"
+                if name.as_str() == "webtransport"
         ),
         "{webtransport:?}"
     );
@@ -265,7 +270,7 @@ fn chosen_then_ended_before_an_answer(
     let events = actions
         .iter()
         .filter_map(|action| match action {
-            Action::Emit(_, ClientEvent::Connecting { .. }) => None,
+            Action::Emit(_, ClientEvent::Connecting(crate::ConnectingContext { .. })) => None,
             Action::Emit(_, event) => Some(event.clone()),
             _ => None,
         })
@@ -305,7 +310,7 @@ fn a_chosen_webtransport_ending_before_an_answer_gives_way_at_once() {
         matches!(
             webtransport.as_slice(),
             [ClientEvent::Error(ClientError { kind: ErrorKind::Transport, transport: Some(name), .. })]
-                if name == "webtransport"
+                if name.as_str() == "webtransport"
         ),
         "{webtransport:?}"
     );
