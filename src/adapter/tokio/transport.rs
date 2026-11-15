@@ -24,9 +24,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// An open websocket connection to the server.
 ///
-/// Writing never blocks the caller: frames are queued by [`WebSocket::send`]
-/// and written while [`WebSocket::recv`] waits for the server, so a server
-/// that stops reading cannot freeze the client (Block 8).
+/// Writing never blocks the caller: frames are queued by
+/// [`WebSocket::send`] and written while [`WebSocket::recv`] waits for the
+/// server, so a server that stops reading cannot freeze the client.
+// Block 8.
 pub(crate) struct WebSocket {
     stream: WebSocketStream<HeadReader<MaybeTlsStream<Stream>>>,
     /// Frames not yet handed to the stream, with their id and the time each
@@ -54,7 +55,8 @@ pub(crate) enum Inbound {
     /// The connection ended; `code` is absent when no close frame was received.
     Closed { code: Option<u16>, reason: String },
     /// The server sent a message over the size limit, which was refused;
-    /// the connection is to be dropped (Block 29, D3).
+    /// the connection is to be dropped.
+    // Block 29, D3.
     TooLarge,
     /// An emulation request carrying this frame was rejected with HTTP 413:
     /// only its commands failed, the transport stays open.
@@ -65,8 +67,9 @@ pub(crate) enum Inbound {
 }
 
 /// The message of a failed upgrade, naming a captive portal when its page
-/// answered instead of the server (Block 25, D8). The cookies a refused
-/// upgrade's response sets are kept (Block 43, D2).
+/// answered instead of the server. The cookies a refused upgrade's response
+/// sets are kept.
+// Block 25, D8; Block 43, D2.
 fn handshake_error(
     error: &tokio_tungstenite::tungstenite::Error,
     url: &str,
@@ -91,7 +94,8 @@ fn handshake_error(
 
 /// `stream` with TLS to the server for a `wss://` `request`, as
 /// tokio-tungstenite's `client_async_tls_with_config` would make it, with
-/// `tls`, the client's settings (Blocks 6 and 22); as it is for `ws://`.
+/// `tls`, the client's settings; as it is for `ws://`.
+// Blocks 6 and 22.
 async fn secure(
     stream: Stream,
     request: &tokio_tungstenite::tungstenite::handshake::client::Request,
@@ -125,7 +129,8 @@ async fn secure(
 }
 
 /// The websocket handshake of `request` over `stream`, the head of the
-/// server's answer read whole first (Block 50b's finding: see `head`).
+/// server's answer read whole first (see `head`).
+// Block 50b.
 async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
     stream: S,
@@ -227,10 +232,11 @@ impl WebSocket {
 
     /// Writes the queued frames while waiting for the next frame, for a
     /// frame written, or for the end of the connection, which a failed
-    /// write, or a frame not written in time, also is. Without `reading`, it only writes, until a write
-    /// fails or misses its deadline: a full read-ahead stops the reading,
-    /// never the writing (Block 15). Cancel-safe: dropping the future loses
-    /// no message.
+    /// write, or a frame not written in time, also is. Without `reading`,
+    /// it only writes, until a write fails or misses its deadline: a full
+    /// read-ahead stops the reading, never the writing. Cancel-safe:
+    /// dropping the future loses no message.
+    // Block 15.
     pub(crate) async fn recv(&mut self, reading: bool) -> Inbound {
         std::future::poll_fn(|cx| self.poll_recv(cx, reading)).await
     }

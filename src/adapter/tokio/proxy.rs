@@ -1,6 +1,7 @@
-//! Proxies (Block 23): the setting, the one decision both transports take
-//! for each URL, and the websocket's dialing through it. The handshakes are
-//! hyper-util's (Block 0, "Components").
+//! Proxies: the setting, the one decision both transports take for each
+//! URL, and the websocket's dialing through it. The handshakes are
+//! hyper-util's.
+// Block 23; Block 0, "Components".
 
 use std::fmt;
 use std::pin::Pin;
@@ -24,12 +25,13 @@ use super::connector::ConnectedStream;
 use super::tls::Tls;
 use crate::{ClientError, ErrorKind, codes};
 
-/// Where a client's connections go (Block 23): the system's proxy by
-/// default, the environment's, none, one proxy, or one chosen by a
-/// function for each endpoint.
+/// Where a client's connections go: the system's proxy by default, the
+/// environment's, none, one proxy, or one chosen by a function for each
+/// endpoint.
 ///
 /// Its `Debug` output shows the kind of setting and a proxy by scheme,
 /// host and port, never credentials.
+// Block 23.
 #[derive(Clone, Default)]
 pub struct Proxy(Setting);
 
@@ -109,7 +111,8 @@ impl Proxy {
 
     /// Whether `url` goes through one `https://` proxy for every endpoint,
     /// its no-proxy list applied: a TLS connection known when the client is
-    /// built (Block 24, D5).
+    /// built.
+    // Block 24, D5.
     pub(in crate::adapter) fn is_https_proxy_for(&self, url: &str) -> bool {
         let Setting::All(target, excluded) = &self.0 else {
             return false;
@@ -121,8 +124,9 @@ impl Proxy {
                 .is_some_and(|endpoint| !is_excluded(excluded.as_deref(), &endpoint))
     }
 
-    /// The proxy for `url`, or `None` for a direct connection (Block 23,
-    /// D2): the one decision of every transport.
+    /// The proxy for `url`, or `None` for a direct connection: the one
+    /// decision of every transport.
+    // Block 23, D2.
     pub(in crate::adapter) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
         let endpoint = endpoint(url)?;
         let matcher = match &self.0 {
@@ -144,8 +148,8 @@ impl Proxy {
 
     /// As [`Proxy::decide`], the environment's or the system's settings
     /// read once into `pinned`, which one attempt shares, so its requests
-    /// keep them whoever asks for them to be read again meanwhile (Block
-    /// 25, D7).
+    /// keep them whoever asks for them to be read again meanwhile.
+    // Block 25, D7.
     pub(in crate::adapter) fn decide_pinned(
         &self,
         url: &Url,
@@ -159,9 +163,10 @@ impl Proxy {
         intercepted(matcher, &endpoint(url)?)
     }
 
-    /// The decision of the system setting under the settings read now,
-    /// for an HTTP client built on them: its requests keep them, as its
-    /// pool keeps their connections (Block 25, D7).
+    /// The decision of the system setting under the settings read now, for
+    /// an HTTP client built on them: its requests keep them, as its pool
+    /// keeps their connections.
+    // Block 25, D7.
     pub(in crate::adapter) fn system_decider()
     -> impl Fn(&Url) -> Result<Option<ProxyTarget>, String> + Send + Sync + 'static {
         let matcher = system_matcher();
@@ -196,12 +201,14 @@ fn intercepted(matcher: &Matcher, endpoint: &Endpoint) -> Result<Option<ProxyTar
 }
 
 /// How many times the environment's and the operating system's proxy
-/// settings were asked to be read again (Block 25, D7).
+/// settings were asked to be read again.
+// Block 25, D7.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The environment's and the operating system's proxy settings are read
-/// again by the next attempt of every client, and the HTTP clients built
-/// on them are built again (Block 25, D7).
+/// again by the next attempt of every client, and the HTTP clients built on
+/// them are built again.
+// Block 25, D7.
 pub(in crate::adapter) fn read_settings_again() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
@@ -406,7 +413,8 @@ impl ProxyTarget {
         })
     }
 
-    /// As scheme, host and port: what may be logged (Block 23, D7).
+    /// As scheme, host and port: what may be logged.
+    // Block 23, D7.
     pub(in crate::adapter) fn shown(&self) -> String {
         format!(
             "{}://{}:{}",
@@ -433,7 +441,8 @@ impl ProxyTarget {
             .map_err(|_| "a proxy URL that does not parse".to_owned())
     }
 
-    /// The proxy's URL with its credentials, as reqwest takes it (D4).
+    /// The proxy's URL with its credentials, as reqwest takes it.
+    // D4.
     pub(in crate::adapter) fn url(&self) -> Option<Url> {
         let mut url = Url::parse(&self.shown()).ok()?;
         if let Some((user, password)) = &self.credentials {
@@ -511,7 +520,8 @@ fn proxy_error(message: &str) -> ClientError {
 
 /// A connected stream to the server's host: TCP, directly or through an
 /// HTTP or SOCKS5 proxy, TLS to an `https://` proxy carrying the tunnel, or
-/// the stream of the application's connector (Block 37b).
+/// the stream of the application's connector.
+// Block 37b.
 pub(in crate::adapter) enum Stream {
     Tcp(TcpStream),
     // Boxed: the TLS state is large, and one stream is held per connection.
@@ -578,8 +588,9 @@ impl AsyncWrite for Stream {
     }
 }
 
-/// The stream to `url`'s host and port, through `proxy` or directly
-/// (Block 23, D3). TLS to Centrifugo, for `wss://`, comes after.
+/// The stream to `url`'s host and port, through `proxy` or directly. TLS to
+/// Centrifugo, for `wss://`, comes after.
+// Block 23, D3.
 pub(in crate::adapter) async fn dial(
     url: &Url,
     proxy: Option<&ProxyTarget>,
@@ -671,8 +682,8 @@ fn tunnel_error(error: impl fmt::Display) -> String {
     }
 }
 
-/// The message of a failed attempt the proxy refused credentials for
-/// (Block 23, D5).
+/// The message of a failed attempt the proxy refused credentials for.
+// Block 23, D5.
 pub(in crate::adapter) const PROXY_AUTHENTICATION_REQUIRED: &str = "proxy authentication required";
 
 #[cfg(test)]

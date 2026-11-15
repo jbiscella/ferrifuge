@@ -1,12 +1,12 @@
-//! Block 18: batches. While one is open, the application's calls (but
-//! `send`) and the subscribe and unsubscribe commands its own calls cause
-//! are held; stopping a batch sends them in order, in frames of several
-//! commands bounded by `Config::batch_frame_bytes`, the calls admitted to
-//! the write queue one by one (centrifuge-js `startBatching`,
-//! `stopBatching`).
+//! Batches. While one is open, the application's calls (but `send`) and the
+//! subscribe and unsubscribe commands its own calls cause are held;
+//! stopping a batch sends them in order, in frames of several commands
+//! bounded by `Config::batch_frame_bytes`, the calls admitted to the write
+//! queue one by one (centrifuge-js `startBatching`, `stopBatching`).
 //!
-//! Block 36: with automatic batching, every command goes into an output
-//! buffer instead, which `Input::Flush` sends in frames of the same bound.
+//! With automatic batching, every command goes into an output buffer
+//! instead, which `Input::Flush` sends in frames of the same bound.
+// Block 18; Block 36.
 
 use super::{Action, CallId, FrameId, Machine, TransportId};
 use crate::CallReply;
@@ -16,10 +16,12 @@ use crate::wire::Command;
 /// A command an open batch holds.
 #[derive(Debug)]
 pub(super) enum HeldCommand {
-    /// A call, whose command is built when the batch stops (Block 13).
+    /// A call, whose command is built when the batch stops.
+    // Block 13.
     Call(CallId),
     /// A subscribe or unsubscribe command, handled as sent: its reply
-    /// deadline runs (Block 18, D3).
+    /// deadline runs.
+    // Block 18, D3.
     Command(Command),
 }
 
@@ -34,7 +36,8 @@ struct Frame {
     calls: usize,
 }
 
-/// A command in the output buffer, encoded once (Block 36, D1).
+/// A command in the output buffer, encoded once.
+// Block 36, D1.
 #[derive(Debug)]
 pub(super) struct Buffered {
     /// Its encoding as one command of a frame.
@@ -45,7 +48,8 @@ pub(super) struct Buffered {
     call: Option<CallId>,
     /// The bytes counted against the write queue for it.
     queued: usize,
-    /// Goes in a frame of its own: a resend after HTTP 413 (D4).
+    /// Goes in a frame of its own: a resend after HTTP 413.
+    // D4.
     alone: bool,
     /// A `send`, which settles once its frame is handed over.
     send: bool,
@@ -63,7 +67,8 @@ pub(super) struct Batching {
     /// The input being handled is the application's `unsubscribe()` or
     /// removal of a subscription, whose unsubscribe command a batch holds.
     pub(super) application_unsubscribe: bool,
-    /// Commands go into `buffer` until `Input::Flush` (Block 36, D2).
+    /// Commands go into `buffer` until `Input::Flush`.
+    // Block 36, D2.
     pub(super) automatic: bool,
     /// The output buffer, in the order the commands were produced.
     buffer: Vec<Buffered>,
@@ -80,7 +85,8 @@ impl Machine {
     }
 
     /// Sends `command`, or holds it in the open batch when `held`: handled
-    /// as sent, its reply deadline running (Block 18, D3).
+    /// as sent, its reply deadline running.
+    // Block 18, D3.
     pub(super) fn send_or_hold(&mut self, transport: TransportId, held: bool, command: Command) {
         if held {
             self.hold_in_batch(HeldCommand::Command(command));
@@ -96,15 +102,16 @@ impl Machine {
     }
 
     /// A batch stops: everything held so far goes out, the other batches
-    /// staying open (Block 18, D1).
+    /// staying open.
+    // Block 18, D1.
     pub(super) fn stop_batching(&mut self) {
         self.batching.open = self.batching.open.saturating_sub(1);
         self.send_held();
     }
 
     /// The transport is gone: the subscribe and unsubscribe commands held
-    /// are lost as sent ones would be; the calls held keep waiting
-    /// (Block 18, D3).
+    /// are lost as sent ones would be; the calls held keep waiting.
+    // Block 18, D3.
     pub(super) fn drop_held_commands(&mut self) {
         self.batching
             .held
@@ -113,7 +120,8 @@ impl Machine {
 
     /// Sends the commands held, in the order they were held, in frames of
     /// several commands within `Config::batch_frame_bytes`, a single larger
-    /// command alone (Block 18, D4, D5).
+    /// command alone.
+    // Block 18, D4, D5.
     fn send_held(&mut self) {
         let held = std::mem::take(&mut self.batching.held);
         let mut frame = Frame::default();
@@ -138,7 +146,8 @@ impl Machine {
 
     /// While the subscriptions subscribe after a connect reply, their
     /// subscribe commands are collected, then sent as one batch, split at
-    /// the frame cap (Block 18, D8; centrifuge-js `_connectResponse`).
+    /// the frame cap (centrifuge-js `_connectResponse`).
+    // Block 18, D8.
     pub(super) fn collect_connect_subscribes(&mut self) {
         self.batching.connect_reply = Some(Vec::new());
     }
@@ -179,7 +188,8 @@ impl Machine {
         frame.calls += calls;
     }
 
-    /// Whether commands go into the output buffer (Block 36, D2).
+    /// Whether commands go into the output buffer.
+    // Block 36, D2.
     pub(super) fn buffering(&self) -> bool {
         self.batching.automatic
     }
@@ -219,7 +229,8 @@ impl Machine {
     }
 
     /// The size of one encoded command within a frame as sent: inside a
-    /// JSON emulation request it is escaped (Block 36, D1).
+    /// JSON emulation request it is escaped.
+    // Block 36, D1.
     pub(super) fn piece_size(&self, bytes: &[u8]) -> usize {
         match (&self.emulation, self.codec) {
             (Some(_), codec) => codec.escaped_len(bytes),
@@ -229,8 +240,8 @@ impl Machine {
 
     /// The size of a frame of `count` commands whose sizes add up to `sum`,
     /// as sent: their separators and, over an emulated transport, the
-    /// request around them; equal to the length of the frame encoded
-    /// (Block 36, D1).
+    /// request around them; equal to the length of the frame encoded.
+    // Block 36, D1.
     pub(super) fn frame_bytes(&self, count: usize, sum: usize) -> usize {
         let separators = count.saturating_sub(1);
         let Some((session, node)) = &self.emulation else {
@@ -250,7 +261,8 @@ impl Machine {
 
     /// Call `id` ended before its frame was flushed: its command leaves the
     /// output buffer, never sent, and its room in the write queue goes to
-    /// the calls waiting for room (Block 36, D1; Codex on #150).
+    /// the calls waiting for room.
+    // Block 36, D1; Codex on #150.
     pub(super) fn unbuffer_call(&mut self, id: CallId) {
         let Some(index) = self
             .batching
@@ -266,7 +278,8 @@ impl Machine {
     }
 
     /// Sends the output buffer in frames, in order, within
-    /// `Config::batch_frame_bytes` (Block 36, D1).
+    /// `Config::batch_frame_bytes`.
+    // Block 36, D1.
     pub(super) fn flush(&mut self) {
         let buffer = std::mem::take(&mut self.batching.buffer);
         let Some(transport) = self.transport else {
@@ -327,9 +340,9 @@ impl Machine {
         }
     }
 
-    /// The transport ends: its buffered commands are lost as sent ones
-    /// are, a buffered `send` failing with "connection closed" (Block 36,
-    /// D1).
+    /// The transport ends: its buffered commands are lost as sent ones are,
+    /// a buffered `send` failing with "connection closed".
+    // Block 36, D1.
     pub(super) fn drop_buffer(&mut self) {
         for piece in std::mem::take(&mut self.batching.buffer) {
             if let (true, Some(call)) = (piece.send, piece.call) {

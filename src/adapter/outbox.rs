@@ -1,6 +1,7 @@
-//! Event queues of the tokio adapter (Block 15): the client and each
-//! subscription have one, and its one active stream takes the events from
-//! it, hand-off style: an event counts as delivered only when taken.
+//! Event queues of the tokio adapter: the client and each subscription have
+//! one, and its one active stream takes the events from it, hand-off style:
+//! an event counts as delivered only when taken.
+// Block 15.
 
 use std::collections::VecDeque;
 use std::task::{Context, Poll, Waker};
@@ -95,7 +96,8 @@ impl<E> Outbox<E> {
     }
 
     /// What comes next for stream `number`: a handler's consumer looks
-    /// before it takes (Block 41b).
+    /// before it takes.
+    // Block 41b.
     pub(super) fn head(&self, number: u64) -> Head {
         if self.stream != Some(number) || (self.closed && self.events.is_empty()) {
             return Head::Gone;

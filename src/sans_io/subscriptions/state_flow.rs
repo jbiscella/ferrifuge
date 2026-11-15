@@ -1,7 +1,8 @@
-//! Subscription getState (Block 11b): loading the application's state when a
+//! Subscription getState: loading the application's state when a
 //! subscription has no stream position, and again when a recovery fails.
 //! Behaviour follows centrifuge-js `subscription.ts` (`_subscribe`,
 //! `_loadStreamState`, `_subscribeError` for code 112).
+// Block 11b.
 
 use super::super::delivery::Owner;
 use super::super::{Action, FetchId, Machine, SubscriptionId};

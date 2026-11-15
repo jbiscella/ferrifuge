@@ -1,14 +1,15 @@
-//! WebTransport in the browser (Block 48, D17): the browser's
-//! `WebTransport`, one bidirectional stream of its session, as
-//! centrifuge-js 63ed73e `transport_webtransport.ts` opens it. The
-//! bindings are declared here, for the members centrifuge-js uses: web-sys
-//! has them only behind `--cfg=web_sys_unstable_apis`, which every
-//! application would have to set.
+//! WebTransport in the browser: the browser's `WebTransport`, one
+//! bidirectional stream of its session, as centrifuge-js 63ed73e
+//! `transport_webtransport.ts` opens it. The bindings are declared here,
+//! for the members centrifuge-js uses: web-sys has them only behind
+//! `--cfg=web_sys_unstable_apis`, which every application would have to
+//! set.
 //!
-//! The stream is read as `http_stream`'s body is, through D7's decoders
-//! into the bounded inbox (Block 44, D7, D8); frames go through the
-//! writer of the stream, JSON frames with one `\n` appended, and count as
-//! written when the writer's promise resolves (D8).
+//! The stream is read as `http_stream`'s body is, through the same decoders
+//! into the bounded inbox; frames go through the writer of the stream, JSON
+//! frames with one `\n` appended, and count as written when the writer's
+//! promise resolves.
+// Block 48, D17; Block 44, D7, D8; D8.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -33,7 +34,8 @@ use crate::sans_io::FrameId;
 
 #[wasm_bindgen]
 extern "C" {
-    /// The page's `WebTransport` (D17).
+    /// The page's `WebTransport`.
+    // D17.
     #[wasm_bindgen(js_name = WebTransport)]
     #[derive(Clone)]
     type Session;
@@ -69,7 +71,8 @@ extern "C" {
 
 /// The session URL for the configured endpoint: with Protobuf, its query
 /// gains `cf_protocol=protobuf`, as centrifuge-js adds it
-/// (`transport_webtransport.ts:45-47`; D2).
+/// (`transport_webtransport.ts:45-47`).
+// D2.
 fn session_url(url: &str, protobuf: bool) -> String {
     if !protobuf {
         return url.to_owned();
@@ -91,7 +94,8 @@ pub(in crate::adapter) struct WebTransport {
     /// first, with when each was queued.
     pending: VecDeque<(FrameId, JsFuture, Instant)>,
     /// Bounds the oldest pending write: it exists only while a write is
-    /// pending (D17, Block 14's idle page).
+    /// pending, so that an idle page runs no timer.
+    // D17; Block 14.
     deadline: Option<Pin<Box<Sleep>>>,
     timeout: Duration,
     /// Frames whose write resolved and not yet reported.
@@ -99,7 +103,8 @@ pub(in crate::adapter) struct WebTransport {
     /// The last report was of a frame written: a message comes first next.
     read_next: bool,
     /// A write that failed or timed out: the end of the transport, reported
-    /// after the messages already in the inbox when reading (D9).
+    /// after the messages already in the inbox when reading.
+    // D9.
     failed: Option<Inbound>,
 }
 
@@ -171,8 +176,9 @@ impl WebTransport {
     }
 
     /// Hands frame `id` to the stream's writer, JSON with one `\n` after
-    /// it (D7); [`WebTransport::recv`] reports it written once the
-    /// writer's promise resolves.
+    /// it; [`WebTransport::recv`] reports it written once the writer's
+    /// promise resolves.
+    // D7.
     pub(in crate::adapter) fn send(&mut self, id: FrameId, mut frame: Vec<u8>) {
         if self.json {
             frame.push(b'\n');
@@ -182,8 +188,8 @@ impl WebTransport {
         self.pending.push_back((id, write, Instant::now()));
     }
 
-    /// Closes the writer, then the session, within `Config::timeout`
-    /// (D17, D11).
+    /// Closes the writer, then the session, within `Config::timeout`.
+    // D17, D11.
     pub(in crate::adapter) async fn close(self) {
         let timeout = gloo_timers::future::TimeoutFuture::new(
             u32::try_from(self.timeout.as_millis()).unwrap_or(u32::MAX),
@@ -199,9 +205,10 @@ impl WebTransport {
 
     /// The next message from the server, the end of the transport, or a
     /// frame written. A write that fails, or that has not resolved within
-    /// `Config::timeout` of being queued, ends the transport (D17). Without
+    /// `Config::timeout` of being queued, ends the transport. Without
     /// `reading`, only frames written, a failed or late write and an
     /// overflow are reported. Cancel-safe.
+    // D17.
     pub(in crate::adapter) async fn recv(&mut self, reading: bool) -> Inbound {
         let Self {
             state,
@@ -277,9 +284,10 @@ impl WebTransport {
     }
 }
 
-/// The driver drops a transport that ended (a write timeout, an overflow,
-/// a message over the limit) without closing it: its session is closed
-/// here, as natively the endpoint goes with the transport (D11).
+/// The driver drops a transport that ended (a write timeout, an overflow, a
+/// message over the limit) without closing it: its session is closed here,
+/// as natively the endpoint goes with the transport.
+// D11.
 impl Drop for WebTransport {
     fn drop(&mut self) {
         let _ = self.session.close();

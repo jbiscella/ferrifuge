@@ -473,7 +473,8 @@ impl From<pb::Publication> for Publication {
     }
 }
 
-/// A tag filter as `client.proto` `FilterNode` (Block 35a).
+/// A tag filter as `client.proto` `FilterNode`.
+// Block 35a.
 fn filter_node(node: &crate::tag_filter::Node) -> pb::FilterNode {
     pb::FilterNode {
         op: node.op.to_owned(),

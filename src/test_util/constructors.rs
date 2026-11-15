@@ -1,9 +1,10 @@
 //! Constructors of the events and results the client yields, so that an
-//! application can unit-test the code that handles them (Block 37, D2).
+//! application can unit-test the code that handles them.
 //!
 //! A field a constructor does not name holds what the client yields when
 //! the server leaves it out. Each setter replaces its field; an `Option`
 //! field's setter sets `Some`.
+// Block 37, D2.
 
 use std::time::SystemTime;
 
@@ -51,7 +52,8 @@ impl ClientEvent {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::MessageContext {
-    /// The details of a `message` event carrying `data` (Block 54, D4).
+    /// The details of a `message` event carrying `data`.
+    // Block 54, D4.
     #[must_use]
     pub fn new(data: impl Into<Vec<u8>>) -> Self {
         Self { data: data.into() }
@@ -60,7 +62,8 @@ impl crate::MessageContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::ConnectionTokenContext {
-    /// What the connection token callback is given (Block 54, D10).
+    /// What the connection token callback is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new() -> Self {
         Self {}
@@ -69,7 +72,8 @@ impl crate::ConnectionTokenContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::ConnectionDataContext {
-    /// What the connection data callback is given (Block 54, D10).
+    /// What the connection data callback is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new() -> Self {
         Self {}
@@ -78,8 +82,8 @@ impl crate::ConnectionDataContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::SubscriptionTokenContext {
-    /// What a subscription token callback for `channel` is given (Block
-    /// 54, D10).
+    /// What a subscription token callback for `channel` is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new(channel: impl Into<String>) -> Self {
         Self {
@@ -90,8 +94,8 @@ impl crate::SubscriptionTokenContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::SubscriptionDataContext {
-    /// What a subscription data callback for `channel` is given (Block 54,
-    /// D10).
+    /// What a subscription data callback for `channel` is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new(channel: impl Into<String>) -> Self {
         Self {
@@ -102,7 +106,8 @@ impl crate::SubscriptionDataContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::GetStateContext {
-    /// What a getState callback for `channel` is given (Block 54, D10).
+    /// What a getState callback for `channel` is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new(channel: impl Into<String>) -> Self {
         Self {
@@ -114,8 +119,8 @@ impl crate::GetStateContext {
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
 impl crate::SharedPollSignatureContext {
-    /// What a shared poll signature callback for `keys` is given (Block 54,
-    /// D10).
+    /// What a shared poll signature callback for `keys` is given.
+    // Block 54, D10.
     #[must_use]
     pub fn new(keys: Vec<String>) -> Self {
         Self { keys }
@@ -124,7 +129,8 @@ impl crate::SharedPollSignatureContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::PublishResult {
-    /// What a publish returns (Block 54, D10).
+    /// What a publish returns.
+    // Block 54, D10.
     #[must_use]
     pub fn new() -> Self {
         Self {}
@@ -133,7 +139,8 @@ impl crate::PublishResult {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl crate::RpcResult {
-    /// What an RPC returning `data` returns (Block 54, D10).
+    /// What an RPC returning `data` returns.
+    // Block 54, D10.
     #[must_use]
     pub fn new(data: impl Into<Vec<u8>>) -> Self {
         Self { data: data.into() }
@@ -142,8 +149,8 @@ impl crate::RpcResult {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl ConnectingContext {
-    /// The details of a `connecting` event with `code` and `reason`
-    /// (Block 54, D4).
+    /// The details of a `connecting` event with `code` and `reason`.
+    // Block 54, D4.
     #[must_use]
     pub fn new(code: u32, reason: impl Into<String>) -> Self {
         Self {
@@ -156,8 +163,8 @@ impl ConnectingContext {
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl ConnectedContext {
     /// The details of a `connected` event: the client id the server
-    /// assigned, the transport and the data of the connect reply (Block 54,
-    /// D4).
+    /// assigned, the transport and the data of the connect reply.
+    // Block 54, D4.
     #[must_use]
     pub fn new(
         client_id: impl Into<String>,
@@ -174,8 +181,8 @@ impl ConnectedContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl DisconnectedContext {
-    /// The details of a `disconnected` event with `code` and `reason`
-    /// (Block 54, D4).
+    /// The details of a `disconnected` event with `code` and `reason`.
+    // Block 54, D4.
     #[must_use]
     pub fn new(code: u32, reason: impl Into<String>) -> Self {
         Self {
@@ -187,8 +194,8 @@ impl DisconnectedContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl SubscribingContext {
-    /// The details of a `subscribing` event with `code` and `reason`
-    /// (Block 54, D4).
+    /// The details of a `subscribing` event with `code` and `reason`.
+    // Block 54, D4.
     #[must_use]
     pub fn new(code: u32, reason: impl Into<String>) -> Self {
         Self {
@@ -200,8 +207,8 @@ impl SubscribingContext {
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl UnsubscribedContext {
-    /// The details of an `unsubscribed` event with `code` and `reason`
-    /// (Block 54, D4).
+    /// The details of an `unsubscribed` event with `code` and `reason`.
+    // Block 54, D4.
     #[must_use]
     pub fn new(code: u32, reason: impl Into<String>) -> Self {
         Self {
@@ -269,7 +276,8 @@ impl Publication {
     }
 
     /// Sets the channel, for a publication of another channel than its
-    /// subscription's, as a wildcard subscription receives (Block 35c).
+    /// subscription's, as a wildcard subscription receives.
+    // Block 35c.
     #[must_use]
     pub fn channel(mut self, channel: impl Into<String>) -> Self {
         self.channel = Some(channel.into());
@@ -430,8 +438,7 @@ impl PresenceResult {
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl ClientError {
-    /// An error of `kind` with `code` and `message`, on no transport
-    /// (Block 54, D3).
+    /// An error of `kind` with `code` and `message`, on no transport.
     ///
     /// ```
     /// use ferrifuge::{ClientError, ErrorKind, TransportKind, codes};
@@ -440,6 +447,7 @@ impl ClientError {
     ///     .transport(TransportKind::WebSocket);
     /// assert_eq!(error.transport, Some(TransportKind::WebSocket));
     /// ```
+    // Block 54, D3.
     #[must_use]
     pub fn new(kind: ErrorKind, code: u32, message: impl Into<String>) -> Self {
         Self {

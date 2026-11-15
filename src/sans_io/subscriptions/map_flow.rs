@@ -1,8 +1,8 @@
-//! Map subscriptions (Block 45): a subscription whose subscribe loads a
-//! keyed state page by page, then catches up through stream pages, then
-//! goes live and delivers each change per key. Behaviour follows
-//! centrifuge-js 63ed73e `_mapSubscribe` and its page handlers
-//! (`src/subscription.ts:2253-2832`).
+//! Map subscriptions: a subscription whose subscribe loads a keyed state
+//! page by page, then catches up through stream pages, then goes live and
+//! delivers each change per key. Behaviour follows centrifuge-js 63ed73e
+//! `_mapSubscribe` and its page handlers (`src/subscription.ts:2253-2832`).
+// Block 45.
 
 use std::collections::HashMap;
 
@@ -38,9 +38,10 @@ const NOT_SUPPORTED_REASON: &str = "map subscriptions not supported";
 const UNRECOVERABLE_POSITION: u32 = 112;
 const UNRECOVERABLE_POSITION_REASON: &str = "unrecoverable position";
 
-/// What makes a map subscription one: its kind and options, and the load
-/// in progress. Boxed in the subscription, so a stream subscription pays a
-/// pointer (Block 14, "Marginal cost of a subscription").
+/// What makes a map subscription one: its kind and options, and the load in
+/// progress. Boxed in the subscription, so a stream subscription pays a
+/// pointer.
+// Block 14, "Marginal cost of a subscription".
 #[derive(Debug)]
 pub(in crate::sans_io) struct MapFlow {
     pub(super) kind: MapKind,
@@ -48,8 +49,9 @@ pub(in crate::sans_io) struct MapFlow {
     max_state_bytes: usize,
     strategy: UnrecoverableStrategy,
     load: Option<Load>,
-    /// What each key's next delta applies to, while the last live reply
-    /// has delta on; `None` while it is off (D9).
+    /// What each key's next delta applies to, while the last live reply has
+    /// delta on; `None` while it is off.
+    // D9.
     bases: Option<HashMap<String, Vec<u8>>>,
 }
 
@@ -62,21 +64,26 @@ struct Load {
     /// The cursor the state request in flight asks with; empty for the
     /// first page.
     asked_cursor: String,
-    /// The stream's epoch and offset when the first page was read, kept
-    /// for the whole load; stream pages move the offset (D4).
+    /// The stream's epoch and offset when the first page was read, kept for
+    /// the whole load; stream pages move the offset.
+    // D4.
     epoch: Option<String>,
     offset: u64,
-    /// The state entries and catch-up publications so far, in order and
-    /// as received: only the live reply says whether delta is on, and so
-    /// how to read them (D9).
+    /// The state entries and catch-up publications so far, in order and as
+    /// received: only the live reply says whether delta is on, and so how
+    /// to read them.
+    // D9.
     items: Vec<Publication>,
-    /// Bytes of the page replies read (D5).
+    /// Bytes of the page replies read.
+    // D5.
     bytes: usize,
     /// A reply of this load was a page: the server holds a reservation, so
-    /// an error ending the load is followed by an unsubscribe (D6).
+    /// an error ending the load is followed by an unsubscribe.
+    // D6.
     paged: bool,
     /// The load recovers from a position: it starts in the stream phase,
-    /// and its catch-up publications become updates, in order (D6).
+    /// and its catch-up publications become updates, in order.
+    // D6.
     recovering: bool,
     catch_up: Vec<Publication>,
 }
@@ -98,7 +105,8 @@ impl Default for Load {
 }
 
 impl Load {
-    /// A load recovering from `position`: the stream from there (D6).
+    /// A load recovering from `position`: the stream from there.
+    // D6.
     fn recovering(position: StreamPosition) -> Self {
         Self {
             asked_phase: STREAM,
@@ -122,8 +130,9 @@ impl Load {
 
 /// The state a load builds, by key: the last value wins, a removal deletes
 /// the key, a key keeps the place of its first appearance, and a key set
-/// again after a removal goes last (D4). A superseded value is freed at
-/// once, so `bytes` is what the state holds now.
+/// again after a removal goes last. A superseded value is freed at once, so
+/// `bytes` is what the state holds now.
+// D4.
 #[derive(Default)]
 struct LoadState {
     entries: Vec<Option<Publication>>,
@@ -177,7 +186,8 @@ enum Finished {
 /// Why a load could not be finished.
 enum LoadFailure {
     Delta(DeltaError),
-    /// What it decoded passed `max_state_bytes` (D5).
+    /// What it decoded passed `max_state_bytes`.
+    // D5.
     TooLarge,
 }
 
@@ -185,14 +195,16 @@ enum LoadFailure {
 #[derive(Clone, Copy)]
 struct Rebuild {
     codec: Codec,
-    /// What one rebuilt value may reach (Block 19, D6).
+    /// What one rebuilt value may reach.
+    // Block 19, D6.
     limit: usize,
 }
 
 impl Rebuild {
     /// Makes `publication`'s data its key's whole value and that value the
-    /// key's base; a removal deletes the base (D9). On failure the key's
-    /// base is gone too: its next value comes whole in the catch-up.
+    /// key's base; a removal deletes the base. On failure the key's base is
+    /// gone too: its next value comes whole in the catch-up.
+    // D9.
     fn apply(
         self,
         bases: &mut HashMap<String, Vec<u8>>,
@@ -254,13 +266,17 @@ impl Rebuild {
 
 /// What a map subscription does with a reply to its load.
 enum Next {
-    /// Not a map reply: the server has no map subscriptions (D15).
+    /// Not a map reply: the server has no map subscriptions.
+    // D15.
     NotSupported,
-    /// A reply the protocol does not allow (D15).
+    /// A reply the protocol does not allow.
+    // D15.
     Fault(&'static str),
-    /// The stream's epoch changed during the load (D4).
+    /// The stream's epoch changed during the load.
+    // D4.
     EpochChanged,
-    /// The pages, or what they decoded to, passed `max_state_bytes` (D5).
+    /// The pages, or what they decoded to, passed `max_state_bytes`.
+    // D5.
     TooLarge {
         /// A kept position would replay the same catch-up: the next load
         /// starts from scratch, and folded per key it may fit.
@@ -271,9 +287,11 @@ enum Next {
     /// The live reply, with the state built from every page.
     Live(Vec<MapEntry>),
     /// The live reply of a load that recovered, with its catch-up
-    /// publications in order (D4, D6).
+    /// publications in order.
+    // D4, D6.
     Recovered(Vec<Publication>),
-    /// The live reply's payloads could not be rebuilt (D9).
+    /// The live reply's payloads could not be rebuilt.
+    // D9.
     DeltaFailed(DeltaError),
 }
 
@@ -359,13 +377,14 @@ impl MapFlow {
         }
     }
 
-    /// Finishes `load`, now that the live reply says whether `delta` is on
-    /// (D9): with delta on, each key's chain starts from the bases this
-    /// load kept, none for a load from scratch; with it off the data stays
-    /// as received and no base is kept. What it decodes stays within
-    /// `max_state_bytes` (D5): many small deltas can rebuild far more than
-    /// the replies that carried them. A recovery the server did not
-    /// complete has no updates to give: its catch-up joins the state.
+    /// Finishes `load`, now that the live reply says whether `delta` is on:
+    /// with delta on, each key's chain starts from the bases this load
+    /// kept, none for a load from scratch; with it off the data stays as
+    /// received and no base is kept. What it decodes stays within
+    /// `max_state_bytes`: many small deltas can rebuild far more than the
+    /// replies that carried them. A recovery the server did not complete
+    /// has no updates to give: its catch-up joins the state.
+    // D9; D5.
     fn finish_load(
         &mut self,
         load: Load,
@@ -424,7 +443,8 @@ impl MapFlow {
     }
 
     /// Rebuilds a publication pushed live: against its key's base while
-    /// delta is on (D9).
+    /// delta is on.
+    // D9.
     fn rebuild_live(
         &mut self,
         publication: &mut Publication,
@@ -444,7 +464,8 @@ impl MapFlow {
     }
 }
 
-/// What is wrong with a map subscription's reply (D15), if anything.
+/// What is wrong with a map subscription's reply, if anything.
+// D15.
 fn fault(load: &Load, result: &crate::wire::SubscribeResult) -> Option<&'static str> {
     let allowed = match load.asked_phase {
         STATE => matches!(result.phase, STATE | LIVE),
@@ -473,8 +494,8 @@ fn fault(load: &Load, result: &crate::wire::SubscribeResult) -> Option<&'static 
 }
 
 impl Machine {
-    /// Adds a map subscription to `channel`, unsubscribed, to the registry
-    /// (Block 45, D3), which it shares with stream subscriptions.
+    /// Adds a map subscription to `channel`, unsubscribed, to the registry,
+    /// which it shares with stream subscriptions.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
@@ -484,7 +505,8 @@ impl Machine {
     ///
     /// When the registry holds a subscription to `channel` already, of
     /// either kind; for a tag filter the server would refuse, or one with
-    /// delta (Block 35, D1).
+    /// delta.
+    // Block 45, D3; Block 35, D1.
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn add_map_subscription(
         &mut self,
@@ -539,8 +561,9 @@ impl Machine {
             .is_some_and(|sub| sub.map.is_some())
     }
 
-    /// The next subscribe command of map subscription `id`, carrying `data`
-    /// (D4): of the load in progress, or the first of a new one.
+    /// The next subscribe command of map subscription `id`, carrying
+    /// `data`: of the load in progress, or the first of a new one.
+    // D4.
     pub(super) fn map_subscribe_request(
         &mut self,
         id: SubscriptionId,
@@ -594,8 +617,9 @@ impl Machine {
         })
     }
 
-    /// The reply to the current subscribe command of map subscription
-    /// `id`, its error or its result, `size` bytes as read (D4, D5, D15).
+    /// The reply to the current subscribe command of map subscription `id`,
+    /// its error or its result, `size` bytes as read.
+    // D4, D5, D15.
     pub(super) fn map_subscribe_reply(&mut self, id: SubscriptionId, reply: Reply, size: usize) {
         let rebuild = self.rebuild();
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
@@ -686,10 +710,11 @@ impl Machine {
         }
     }
 
-    /// Error 112 to a request of map subscription `id`'s load: its
-    /// position cannot be recovered (D6). From scratch, the position is
-    /// dropped and the state loaded again after the resubscribe backoff,
-    /// with no `error` event; fatal, the subscription ends with 112.
+    /// Error 112 to a request of map subscription `id`'s load: its position
+    /// cannot be recovered. From scratch, the position is dropped and the
+    /// state loaded again after the resubscribe backoff, with no `error`
+    /// event; fatal, the subscription ends with 112.
+    // D6.
     fn map_unrecoverable(&mut self, id: SubscriptionId, reason: &str) {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
@@ -714,8 +739,9 @@ impl Machine {
         }
     }
 
-    /// The live reply of map subscription `id` (D4): subscribed, then the
-    /// state with the changes made while it loaded.
+    /// The live reply of map subscription `id`: subscribed, then the state
+    /// with the changes made while it loaded.
+    // D4.
     fn map_live(
         &mut self,
         id: SubscriptionId,
@@ -774,11 +800,12 @@ impl Machine {
         self.subscription_calls_subscribed(id);
     }
 
-    /// The live reply of map subscription `id`'s recovering load (D4, D6):
+    /// The live reply of map subscription `id`'s recovering load:
     /// subscribed, then one update per catch-up publication, in order, with
     /// no sync. Each update moves the position to its offset once taken,
     /// the last to the reply's, the top of the stream, which a tag filter
-    /// may have put past it (D5).
+    /// may have put past it.
+    // D4, D6; D5.
     fn map_recovered(
         &mut self,
         id: SubscriptionId,
@@ -857,7 +884,8 @@ impl Machine {
     }
 
     /// A publication pushed to map subscription `id`: an update of its key,
-    /// which moves the position once taken (D5).
+    /// which moves the position once taken.
+    // D5.
     pub(super) fn map_publication(&mut self, id: SubscriptionId, mut publication: Publication) {
         if publication
             .map
@@ -929,7 +957,8 @@ impl Machine {
 
     /// Whether `reply`, `size` bytes as read, is a page of a map
     /// subscription's load that makes no event and can be handled at once,
-    /// ahead of messages held behind events not taken (D5).
+    /// ahead of messages held behind events not taken.
+    // D5.
     pub(in crate::sans_io) fn map_page_early(&self, reply: &Reply, size: usize) -> bool {
         if self.state != State::Connected || reply.id == 0 || reply.error.is_some() {
             return false;

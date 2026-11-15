@@ -1,22 +1,24 @@
-//! Map subscriptions (Block 45): the events and types of a subscription to
-//! a keyed collection that Centrifugo owns, loaded page by page, then kept
-//! current per key.
+//! Map subscriptions: the events and types of a subscription to a keyed
+//! collection that Centrifugo owns, loaded page by page, then kept current
+//! per key.
 //!
 //! Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 //! and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 //! may change in any minor release.
+// Block 45.
 
 use std::collections::HashMap;
 
 use crate::token::Bytes;
 use crate::{ClientError, ClientInfo, SubscribedContext};
 
-/// The kind of a map subscription (Block 45, D2), sent as the subscribe
-/// command's `type` (`client.proto`, `SubscribeRequest.type`).
+/// The kind of a map subscription, sent as the subscribe command's `type`
+/// (`client.proto`, `SubscribeRequest.type`).
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 45, D2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MapKind {
@@ -44,11 +46,12 @@ impl MapKind {
 }
 
 /// What a map subscription does when its position cannot be recovered
-/// (Block 45, D6; centrifuge-js `unrecoverableStrategy`).
+/// (centrifuge-js `unrecoverableStrategy`).
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 45, D6.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnrecoverableStrategy {
@@ -63,12 +66,12 @@ pub enum UnrecoverableStrategy {
 /// An entry of a map's state, in a [`MapSubscriptionEvent::Sync`]
 /// (centrifuge-js `MapEntry`).
 ///
-/// Its `Debug` output shows the data as its length and the tags by name
-/// (Block 21).
+/// Its `Debug` output shows the data as its length and the tags by name.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MapEntry {
@@ -89,12 +92,12 @@ pub struct MapEntry {
 /// A change of one key, in a [`MapSubscriptionEvent::Update`]
 /// (centrifuge-js `MapUpdateContext`).
 ///
-/// Its `Debug` output shows the data as its length and the tags by name
-/// (Block 21).
+/// Its `Debug` output shows the data as its length and the tags by name.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MapUpdate {
@@ -112,13 +115,14 @@ pub struct MapUpdate {
     pub info: Option<ClientInfo>,
 }
 
-/// Something that happened to a map subscription (Block 45, D2): its
-/// lifecycle as a stream subscription's, then one [`Self::Sync`] with the
-/// whole state, then one [`Self::Update`] per change.
+/// Something that happened to a map subscription: its lifecycle as a stream
+/// subscription's, then one [`Self::Sync`] with the whole state, then one
+/// [`Self::Update`] per change.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 45, D2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MapSubscriptionEvent {
@@ -159,12 +163,13 @@ impl MapSubscriptionEvent {
 
 impl MapEntry {
     /// The entry's value decoded as JSON into `T`, as
-    /// [`crate::Publication::json`] does (Block 38).
+    /// [`crate::Publication::json`] does.
     ///
     /// # Errors
     ///
     /// The data is not JSON, or not JSON that `T` accepts; empty data is not
     /// JSON. `serde_json`'s message may quote fragments of the data.
+    // Block 38.
     pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }
@@ -172,13 +177,14 @@ impl MapEntry {
 
 impl MapUpdate {
     /// The new value decoded as JSON into `T`, as
-    /// [`crate::Publication::json`] does (Block 38).
+    /// [`crate::Publication::json`] does.
     ///
     /// # Errors
     ///
     /// The data is not JSON, or not JSON that `T` accepts; empty data, as a
     /// removal's, is not JSON. `serde_json`'s message may quote fragments of
     /// the data.
+    // Block 38.
     pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }

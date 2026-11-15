@@ -1,7 +1,8 @@
-//! Server-side subscriptions (Block 12): the ones the server made for the
-//! connection, which the client tracks in a registry of their own and
-//! reports through [`crate::ClientEvent::ServerSubscription`], but does not
-//! control (spec, "Server-side subscriptions").
+//! Server-side subscriptions: the ones the server made for the connection,
+//! which the client tracks in a registry of their own and reports through
+//! [`crate::ClientEvent::ServerSubscription`], but does not control (spec,
+//! "Server-side subscriptions").
+// Block 12.
 
 use std::collections::BTreeMap;
 
@@ -37,7 +38,8 @@ struct ServerSubscription {
 }
 
 impl Machine {
-    /// How many server-side subscriptions the registry holds (Block 31).
+    /// How many server-side subscriptions the registry holds.
+    // Block 31.
     pub(super) fn server_subscription_count(&self) -> usize {
         self.server_subscriptions.by_channel.len()
     }
@@ -56,12 +58,13 @@ impl Machine {
     /// The connect reply granted `subs`, after the client's `connected`
     /// event (centrifuge-js `_connectResponse`): each is subscribed, its
     /// initial or recovered publications following its `subscribed` event
-    /// whether or not it recovers (Block 12); one of the registry the reply
-    /// leaves out ends with [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`]
-    /// and leaves the registry (centrifuge-js `_processServerSubs`).
-    /// Whether a subscription of the reply carried a delta publication,
-    /// which the client never asks for on server-side subscriptions
-    /// (Block 19, D8): the caller reconnects once the reply is handled.
+    /// whether or not it recovers; one of the registry the reply leaves out
+    /// ends with [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`] and
+    /// leaves the registry (centrifuge-js `_processServerSubs`). Whether a
+    /// subscription of the reply carried a delta publication, which the
+    /// client never asks for on server-side subscriptions: the caller
+    /// reconnects once the reply is handled.
+    // Block 12; Block 19, D8.
     #[must_use]
     pub(super) fn server_subscriptions_connected(
         &mut self,
@@ -113,7 +116,8 @@ impl Machine {
     /// A server-side subscription received a delta publication: an error
     /// event, then the client reconnects with code 5, its reconnect backoff
     /// not reset by this connection, and recovers its server-side
-    /// subscriptions from their last positions taken (Block 19, D8).
+    /// subscriptions from their last positions taken.
+    // Block 19, D8.
     pub(super) fn server_delta_failed(&mut self) {
         self.emit(ClientEvent::Error(ClientError {
             kind: ErrorKind::Delta,
@@ -127,8 +131,8 @@ impl Machine {
     /// The server ended the server-side subscription to `channel`
     /// (`Unsubscribe` push, which no subscribed client-side subscription
     /// took): it leaves the registry, with the push's code and reason
-    /// (Block 12; centrifuge-js `_handleUnsubscribe` passes only the
-    /// channel).
+    /// (centrifuge-js `_handleUnsubscribe` passes only the channel).
+    // Block 12.
     pub(super) fn server_subscription_unsubscribed(
         &mut self,
         channel: &str,
@@ -152,9 +156,9 @@ impl Machine {
     }
 
     /// Registers `channel` as subscribed and emits its `subscribed` event,
-    /// then its initial or recovered publications.
-    /// Whether one of its publications was a delta, which is not delivered,
-    /// nor any after it (Block 19, D8).
+    /// then its initial or recovered publications. Whether one of its
+    /// publications was a delta, which is not delivered, nor any after it.
+    // Block 19, D8.
     fn subscribe_server_side(&mut self, channel: &str, result: SubscribeResult) -> bool {
         // Checked before any event is emitted, so that the reconnect
         // withdraws none of the message being handled (Codex on PR #99).
@@ -270,7 +274,8 @@ impl Machine {
 
     /// A publication pushed for `channel` that no subscribed client-side
     /// subscription takes: the server-side subscription's, if subscribed
-    /// (Block 12; centrifuge-js `_getSubForPush`).
+    /// (centrifuge-js `_getSubForPush`).
+    // Block 12.
     pub(super) fn server_publication(&mut self, channel: &str, publication: Publication) {
         if !self
             .server_subscriptions

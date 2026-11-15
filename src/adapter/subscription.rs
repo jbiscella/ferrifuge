@@ -1,4 +1,5 @@
-//! Client-side subscriptions of the tokio client (Block 9).
+//! Client-side subscriptions of the tokio client.
+// Block 9.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -62,14 +63,15 @@ impl Subscription {
     }
 
     /// Sets the tag filter sent in every subscribe command built from now
-    /// on, `None` to remove it (Block 35a), sending nothing now; a command
-    /// already sent keeps its filter (centrifuge-js `setTagsFilter`).
+    /// on, `None` to remove it, sending nothing now; a command already sent
+    /// keeps its filter (centrifuge-js `setTagsFilter`).
     ///
     /// # Errors
     ///
     /// [`SubscriptionError::InvalidTagFilter`] for a filter the server
     /// would refuse, [`SubscriptionError::TagFilterWithDelta`] on a
     /// subscription with delta; the filter is then left as it was.
+    // Block 35a.
     pub fn set_tag_filter(
         &self,
         filter: Option<crate::TagFilter>,
@@ -82,20 +84,21 @@ impl Subscription {
         Ok(())
     }
 
-    /// Sets the data sent in every subscribe command built from now on:
-    /// the next `subscribe()` and every resubscribe (Block 32), sending
-    /// nothing now; a command already sent keeps its data. Raw JSON with
-    /// the JSON protocol, any bytes with Protobuf. A
-    /// [`SubscriptionBuilder::get_data`] callback still replaces it on every
-    /// attempt (centrifuge-js `setData`).
+    /// Sets the data sent in every subscribe command built from now on: the
+    /// next `subscribe()` and every resubscribe, sending nothing now; a
+    /// command already sent keeps its data. Raw JSON with the JSON
+    /// protocol, any bytes with Protobuf. A
+    /// [`SubscriptionBuilder::get_data`] callback still replaces it on
+    /// every attempt (centrifuge-js `setData`).
+    // Block 32.
     pub fn set_data(&self, data: impl Into<Vec<u8>>) {
         self.shared
             .apply(Input::SetSubscriptionData(self.id, data.into()));
     }
 
-    /// What delta compression did on the subscription since it was created
-    /// (Block 31): zeros without negotiated delta, and once the
-    /// subscription is removed.
+    /// What delta compression did on the subscription since it was created:
+    /// zeros without negotiated delta, and once the subscription is
+    /// removed.
     ///
     /// ```no_run
     /// # fn run(subscription: &ferrifuge::Subscription) {
@@ -103,6 +106,7 @@ impl Subscription {
     /// println!("saved {:.0}%", delta.compression_ratio() * 100.0);
     /// # }
     /// ```
+    // Block 31.
     #[must_use]
     pub fn delta_statistics(&self) -> crate::DeltaStatistics {
         lock(&self.shared.core)
@@ -112,16 +116,16 @@ impl Subscription {
     }
 
     /// Waits until the subscription is subscribed, without taking an event
-    /// from its stream (Block 30). The wait starts when this method
-    /// returns, and the future borrows nothing, so it can be spawned. It
-    /// waits across the client's reconnects, and while the client is not
-    /// connected yet: a subscription subscribed before `connect()` included.
+    /// from its stream. The wait starts when this method returns, and the
+    /// future borrows nothing, so it can be spawned. It waits across the
+    /// client's reconnects, and while the client is not connected yet: a
+    /// subscription subscribed before `connect()` included.
     ///
-    /// As [`Client::ready`], it follows the state
-    /// [`Subscription::state`] reports, not the events taken, so it can
-    /// resolve before the `subscribed` event is taken; and a task holding
-    /// a stream of the client with events not taken waits until it is read
-    /// or dropped (Block 15). No timeout applies; wrap the future in one.
+    /// As [`Client::ready`], it follows the state [`Subscription::state`]
+    /// reports, not the events taken, so it can resolve before the
+    /// `subscribed` event is taken; and a task holding a stream of the
+    /// client with events not taken waits until it is read or dropped. No
+    /// timeout applies; wrap the future in one.
     ///
     /// # Errors
     ///
@@ -132,6 +136,7 @@ impl Subscription {
     /// client is closed (dropped, or its runtime shut down), and when the
     /// client enters `disconnected` while it waits, as its calls waiting for
     /// it do.
+    // Block 30; Block 15.
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
         super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
     }
@@ -149,19 +154,19 @@ impl Subscription {
             .map_or(0, super::outbox::Outbox::held)
     }
 
-    /// This subscription's publications from now on, and nothing else
-    /// (Block 39): a view of its one stream, which takes over from
+    /// This subscription's publications from now on, and nothing else: a
+    /// view of its one stream, which takes over from
     /// [`Subscription::events`] as a later `events()` call takes over from
-    /// it. A publication counts as delivered once this stream yields it; the
-    /// other events count as delivered as the stream passes them, so an
-    /// unread stream holds the connection as an unread `events()` does
-    /// (Block 15). It ends as `events()` does, not on `unsubscribed`.
+    /// it. A publication counts as delivered once this stream yields it;
+    /// the other events count as delivered as the stream passes them, so an
+    /// unread stream holds the connection as an unread `events()` does. It
+    /// ends as `events()` does, not on `unsubscribed`.
     ///
     /// It hides what only the other events tell:
-    /// - a `SubscribedContext` reporting `was_recovering` true and `recovered`
-    ///   false, the one sign of a gap on a recoverable channel without
-    ///   `get_state` (with `get_state`, a failed recovery reloads the state
-    ///   instead, Block 11);
+    /// - a `SubscribedContext` reporting `was_recovering` true and
+    ///   `recovered` false, the one sign of a gap on a recoverable channel
+    ///   without `get_state` (with `get_state`, a failed recovery reloads
+    ///   the state instead);
     /// - `Unsubscribed`: after a permanent unsubscribe the stream goes
     ///   silent, it does not end;
     /// - `Error` events.
@@ -180,6 +185,7 @@ impl Subscription {
     /// }
     /// # }
     /// ```
+    // Block 39; Block 15; Block 11.
     pub fn publications(&self) -> impl Stream<Item = Publication> + MaybeSend + Unpin + use<> {
         use futures_util::StreamExt as _;
         self.events().filter_map(|event| {
@@ -190,11 +196,12 @@ impl Subscription {
         })
     }
 
-    /// Sets the subscription's handler (Block 41, D1): from now on it takes
-    /// the subscription's events, one at a time, in order with those of the
+    /// Sets the subscription's handler: from now on it takes the
+    /// subscription's events, one at a time, in order with those of the
     /// client's other handlers, as a later [`Subscription::events`] call
     /// would; the earlier stream or handler gets no more. Its events count
     /// as delivered when its method returns.
+    // Block 41, D1.
     pub fn set_handler(&self, handler: impl super::SubscriptionHandler) {
         super::handler::set_subscription_handler(&self.shared, self.id, Box::new(handler));
     }
@@ -203,9 +210,10 @@ impl Subscription {
     /// yields it; until a stream is taken, events count as delivered at
     /// once, so take it before calling [`Subscription::subscribe`] to get
     /// every one. A later call takes over: the earlier stream ends and the
-    /// events it had not yielded are the new one's (Block 15). The stream
-    /// borrows nothing from the subscription, so it can be kept beside it,
-    /// and it ends once the subscription is removed or its client dropped.
+    /// events it had not yielded are the new one's. The stream borrows
+    /// nothing from the subscription, so it can be kept beside it, and it
+    /// ends once the subscription is removed or its client dropped.
+    // Block 15.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + MaybeSend + Unpin + use<> {
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then closes the outbox, so a removed
@@ -250,12 +258,12 @@ impl Subscription {
     /// for the connection and the reply as a client's call does.
     ///
     /// On a namespace where the server advises a debounce interval
-    /// (Centrifugo PRO, `publish_debounce`, Block 46) the first value is
-    /// sent at once and the latest one per interval: a publish merged in
-    /// an open window resolves with the result of the send that carried
-    /// later data, and is failed, never sent, if its subscription leaves
-    /// `subscribed` first. Use [`Client::publish`] for data that must
-    /// arrive: it is never debounced.
+    /// (Centrifugo PRO, `publish_debounce`) the first value is sent at once
+    /// and the latest one per interval: a publish merged in an open window
+    /// resolves with the result of the send that carried later data, and is
+    /// failed, never sent, if its subscription leaves `subscribed` first.
+    /// Use [`Client::publish`] for data that must arrive: it is never
+    /// debounced.
     ///
     /// # Errors
     ///
@@ -265,6 +273,7 @@ impl Subscription {
     /// debounce window that its subscription's re-subscribing dropped.
     /// Entering `disconnected` fails a call waiting for the subscription
     /// with [`crate::codes::error::DISCONNECTED`].
+    // Block 46.
     pub fn publish(
         &self,
         data: impl Into<Vec<u8>>,
@@ -278,9 +287,9 @@ impl Subscription {
         })
     }
 
-    /// Publishes `data` encoded as JSON to the subscription's channel
-    /// (Block 38), as [`Subscription::publish`] does; `data` is encoded
-    /// when this returns, so the future borrows nothing.
+    /// Publishes `data` encoded as JSON to the subscription's channel, as
+    /// [`Subscription::publish`] does; `data` is encoded when this returns,
+    /// so the future borrows nothing.
     ///
     /// ```no_run
     /// # async fn run(subscription: ferrifuge::Subscription) -> Result<(), ferrifuge::JsonCallError> {
@@ -294,6 +303,7 @@ impl Subscription {
     /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
     /// sent; [`JsonCallError::Call`] with the errors of
     /// [`Subscription::publish`].
+    // Block 38.
     pub fn publish_json<T: serde::Serialize + ?Sized>(
         &self,
         data: &T,
@@ -368,8 +378,9 @@ pub struct SubscriptionBuilder {
     get_data: Option<GetData>,
     get_token: Option<GetSubscriptionToken>,
     get_state: Option<GetState>,
-    /// Its handler, set once it is built (Block 41b); behind a mutex so that
-    /// the builder stays `Sync` for a handler that is only `Send`.
+    /// Its handler, set once it is built; behind a mutex so that the
+    /// builder stays `Sync` for a handler that is only `Send`.
+    // Block 41b.
     handler: Option<std::sync::Mutex<Box<dyn super::SubscriptionHandler>>>,
 }
 
@@ -471,9 +482,10 @@ impl SubscriptionBuilder {
     /// the previous one, on channels that allow it (Centrifugo
     /// `allowed_delta_types`). The client rebuilds each one, so the
     /// application always gets whole payloads; whether the server agreed is
-    /// [`crate::SubscribedContext::delta`]. A delta that cannot be applied makes
-    /// the subscription subscribe again, recovering on channels with
-    /// recovery (Block 19).
+    /// [`crate::SubscribedContext::delta`]. A delta that cannot be applied
+    /// makes the subscription subscribe again, recovering on channels with
+    /// recovery.
+    // Block 19.
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.options = self.options.delta(format);
@@ -482,8 +494,9 @@ impl SubscriptionBuilder {
 
     /// Asks the server to send only the publications `filter` matches, on
     /// channels with `allow_tags_filter` (Centrifugo from v6.4.0), with
-    /// every subscribe command (Block 35a). Building fails when the filter
-    /// is one the server would refuse, or goes with [`Self::delta`].
+    /// every subscribe command. Building fails when the filter is one the
+    /// server would refuse, or goes with [`Self::delta`].
+    // Block 35a.
     #[must_use]
     pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
         self.options = self.options.tag_filter(filter);
@@ -492,8 +505,9 @@ impl SubscriptionBuilder {
 
     /// Asks a server with channel compaction (Centrifugo PRO) to name this
     /// subscription by a numeric id instead of its channel in publication,
-    /// join and leave pushes, with every subscribe command (Block 35b). A
-    /// server without it ignores the request. Off by default.
+    /// join and leave pushes, with every subscribe command. A server
+    /// without it ignores the request. Off by default.
+    // Block 35b.
     #[must_use]
     pub fn channel_compaction(mut self, channel_compaction: bool) -> Self {
         self.options = self.options.channel_compaction(channel_compaction);
@@ -597,7 +611,8 @@ impl SubscriptionBuilder {
     }
 
     /// The subscription's handler, which takes its events from the start
-    /// instead of a stream (Block 41, D1); see [`Subscription::set_handler`].
+    /// instead of a stream; see [`Subscription::set_handler`].
+    // Block 41, D1.
     #[must_use]
     pub fn handler(mut self, handler: impl super::SubscriptionHandler) -> Self {
         self.handler = Some(std::sync::Mutex::new(Box::new(handler)));

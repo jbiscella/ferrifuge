@@ -1,6 +1,7 @@
 //! Websocket transport of the browser adapter, over the browser's own
-//! `WebSocket` or the application's shim of it (Block 44, D6, D12), with
-//! the bounded inbox of D7.
+//! `WebSocket` or the application's shim of it, with the browser
+//! transports' bounded inbox.
+// Block 44, D6, D12; D7.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -26,21 +27,25 @@ pub(in crate::adapter) enum Inbound {
     /// The connection ended; `code` is absent when no close frame was received.
     Closed { code: Option<u16>, reason: String },
     /// The server sent a message over the size limit; the connection is
-    /// closed (Block 29, D3).
+    /// closed.
+    // Block 29, D3.
     TooLarge,
     /// The frame was written: handed to the browser's `send`, or, over
     /// `http_stream`, its emulation request answered.
     Written(FrameId),
     /// The server refused the emulation request carrying this frame with
-    /// HTTP 413; its commands fail (Block 8). `http_stream` only.
+    /// HTTP 413; its commands fail. `http_stream` only.
+    // Block 8.
     Rejected(Vec<u8>),
-    /// A message arrived while the inbox was full; the connection is closed
-    /// (Block 44, D7).
+    /// A message arrived while the inbox was full; the connection is
+    /// closed.
+    // Block 44, D7.
     Overflow,
 }
 
 /// The bound of the inbox: `Config::read_ahead_messages` and
-/// `read_ahead_bytes` (Block 15).
+/// `read_ahead_bytes`.
+// Block 15.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::adapter) struct Bound {
     pub(in crate::adapter) messages: usize,
@@ -48,9 +53,10 @@ pub(in crate::adapter) struct Bound {
 }
 
 /// The messages the browser received that the client has not read yet,
-/// where natively the socket's buffers hold them (Block 44, D7). A message
-/// that would take it past its bound is refused; one larger than the byte
-/// bound alone is admitted into an empty inbox.
+/// where natively the socket's buffers hold them. A message that would take
+/// it past its bound is refused; one larger than the byte bound alone is
+/// admitted into an empty inbox.
+// Block 44, D7.
 #[derive(Debug, Default)]
 pub(super) struct Inbox {
     /// Frames, then at most one end of the connection.
@@ -136,8 +142,8 @@ impl State {
 pub(super) type Listener = (&'static str, Closure<dyn FnMut(Event)>);
 
 /// A browser `WebSocket` and its listeners, which it removes before it
-/// drops their closures, so that the browser never calls a dropped one
-/// (Block 44, D6).
+/// drops their closures, so that the browser never calls a dropped one.
+// Block 44, D6.
 struct Socket {
     websocket: web_sys::WebSocket,
     listeners: Vec<Listener>,
@@ -283,7 +289,8 @@ pub(super) fn js_message(error: &JsValue) -> String {
 ///
 /// The browser queues what `send` is given, so a frame counts as written at
 /// once; the messages it receives wait in the inbox until the client reads
-/// them (Block 44, D6, D7).
+/// them.
+// Block 44, D6, D7.
 pub(in crate::adapter) struct WebSocket {
     socket: Socket,
     /// Frames sent and not yet reported by [`WebSocket::recv`].
@@ -404,9 +411,10 @@ impl WebSocket {
         .await
     }
 
-    /// Closes the connection with no code (Block 8), awaiting the browser's
-    /// `close` event for at most `Config::timeout` (Block 33, D1); the
-    /// listeners are removed and their closures dropped after.
+    /// Closes the connection with no code, awaiting the browser's `close`
+    /// event for at most `Config::timeout`; the listeners are removed and
+    /// their closures dropped after.
+    // Block 8; Block 33, D1.
     pub(in crate::adapter) async fn close(self) {
         let Self {
             socket, timeout, ..

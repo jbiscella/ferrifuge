@@ -61,9 +61,8 @@ impl Codec {
     }
 
     /// The body of an emulation request carrying `frame` for the emulated
-    /// connection `session` on `node` (Block 26). Protobuf can be reached
-    /// only from Block 27: until then a client with Protobuf and an HTTP
-    /// transport is refused when built (Block 8).
+    /// connection `session` on `node`.
+    // Block 26.
     pub(crate) fn emulation_request(self, session: &str, node: &str, frame: &[u8]) -> Vec<u8> {
         match self {
             Self::Json => json::emulation_request(session, node, frame),
@@ -99,8 +98,9 @@ impl Codec {
     }
 
     /// The delta, or whole payload, a publication of a subscription with
-    /// delta on carries: with JSON its data is a JSON string, whose value it
-    /// is; `None` when it is not one (Block 19, D7).
+    /// delta on carries: with JSON its data is a JSON string, whose value
+    /// it is; `None` when it is not one.
+    // Block 19, D7.
     pub(crate) fn delta_payload(self, data: Vec<u8>) -> Option<Vec<u8>> {
         match self {
             Self::Json => json::string_value(&data),

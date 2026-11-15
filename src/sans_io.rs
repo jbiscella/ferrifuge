@@ -1,13 +1,11 @@
 //! The sans-IO core, declared once and public as `ferrifuge::machine` with
-//! the `unstable-machine` feature (Block 54, D1), where it is documented.
+//! the `unstable-machine` feature, where it is documented.
+// Block 54, D1.
 
 // Outside semver with `unstable-machine` (Block 54, D1), so its types need
 // not be `#[non_exhaustive]` (Block 54, D2).
-#![allow(
-    clippy::exhaustive_enums,
-    clippy::exhaustive_structs,
-    reason = "outside semver"
-)]
+#![allow(clippy::exhaustive_enums, reason = "outside semver")]
+#![allow(clippy::exhaustive_structs, reason = "outside semver")]
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -120,7 +118,8 @@ impl TransportKind {
     }
 }
 
-/// Whether `kind` is WebTransport (Block 48).
+/// Whether `kind` is WebTransport.
+// Block 48.
 #[cfg_attr(
     not(feature = "unstable"),
     allow(
@@ -141,7 +140,8 @@ fn is_webtransport(kind: TransportKind) -> bool {
 }
 
 /// Whether transport `kind` ends each frame of `frame_type` with a `\n`:
-/// JSON over WebTransport, whose server reads lines (Block 48, D7).
+/// JSON over WebTransport, whose server reads lines.
+// Block 48, D7.
 fn trailer(kind: TransportKind, frame_type: FrameType) -> bool {
     is_webtransport(kind) && frame_type == FrameType::Text
 }
@@ -157,13 +157,15 @@ pub struct TransportId(u64);
 pub struct FetchId(u64);
 
 /// Identifies an event the machine emitted, for its owner to report with
-/// [`Input::EventTaken`] once the application has taken it (Block 15).
+/// [`Input::EventTaken`] once the application has taken it.
+// Block 15.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventId(u64);
 
 impl EventId {
     /// No event: for a handler failure that has none, as an events thread
-    /// that could not start (Block 41, D2).
+    /// that could not start.
+    // Block 41, D2.
     #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) const NONE: Self = Self(u64::MAX);
 
@@ -189,19 +191,19 @@ impl FrameId {
     }
 }
 
-/// Identifies the timer of one debounce window (Block 46, D5): the owner
-/// runs it for the [`Action::SetDebounceTimer`] and reports it with
+/// Identifies the timer of one debounce window: the owner runs it for the
+/// [`Action::SetDebounceTimer`] and reports it with
 /// [`Input::DebounceTimerFired`]. A machine never reuses a number, so a
 /// firing for a window already gone is ignored.
+// Block 46, D5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DebounceTimer(u64);
 
-/// Identifies a timer of a shared poll subscription (Block 47, D3): the
-/// reply deadline of a track or untrack request, or a retry of its
-/// signature refresh, of its signing or of its tracking after a failed
-/// track request; the refresh itself runs on
-/// [`Action::SetSharedPollRefresh`]. The owner runs it for the
-/// [`Action::SetSharedPollTimer`] and reports it with
+/// Identifies a timer of a shared poll subscription: the reply deadline of
+/// a track or untrack request, or a retry of its signature refresh, of its
+/// signing or of its tracking after a failed track request; the refresh
+/// itself runs on [`Action::SetSharedPollRefresh`]. The owner runs it for
+/// the [`Action::SetSharedPollTimer`] and reports it with
 /// [`Input::SharedPollTimerFired`]; a machine never reuses a number, so a
 /// firing for a request already answered, or a timer since cancelled, is
 /// ignored.
@@ -209,17 +211,19 @@ pub struct DebounceTimer(u64);
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 47, D3.
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SharedPollTimer(pub(crate) u64);
 
-/// The number the machine gives a setting of a timer (Block 53 D1), carried
-/// by [`Action::SetTimer`], [`Action::SetSubscriptionTimer`] and
+/// The number the machine gives a setting of a timer, carried by
+/// [`Action::SetTimer`], [`Action::SetSubscriptionTimer`] and
 /// [`Action::SetCallTimer`] and returned by the firing of that setting. One
-/// counter, shared by the three timer families, counts up for the
-/// machine's lifetime, so no number is given twice; a wrap is not handled,
-/// as for [`TransportId`].
+/// counter, shared by the three timer families, counts up for the machine's
+/// lifetime, so no number is given twice; a wrap is not handled, as for
+/// [`TransportId`].
+// Block 53 D1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimerSetting(u64);
 
@@ -233,7 +237,8 @@ impl TimerSetting {
 }
 
 /// A timer of the machine, of any family, by which its running setting is
-/// kept (Block 53 D2).
+/// kept.
+// Block 53 D2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TimerKey {
     Client(Timer),
@@ -255,8 +260,9 @@ impl TimerKey {
     }
 }
 
-/// The settings of the machine's timers (Block 53 D1, D2): the next number
-/// to give, and the setting running for each timer.
+/// The settings of the machine's timers: the next number to give, and the
+/// setting running for each timer.
+// Block 53 D1, D2.
 #[derive(Debug, Default)]
 struct TimerSettings {
     next: u64,
@@ -360,14 +366,17 @@ pub struct SubscriptionOptions {
     /// them (spec, "ask server to push Join/Leave").
     pub join_leave: bool,
     /// Asks the server for publications as deltas against the previous one,
-    /// on channels that allow it; the client rebuilds them (Block 19).
+    /// on channels that allow it; the client rebuilds them.
+    // Block 19.
     pub delta: Option<crate::DeltaFormat>,
-    /// Asks the server to send only the publications this filter matches
-    /// (Block 35a); refused together with `delta`.
+    /// Asks the server to send only the publications this filter matches;
+    /// refused together with `delta`.
+    // Block 35a.
     pub tag_filter: Option<crate::TagFilter>,
     /// Asks a server with channel compaction (Centrifugo PRO) to name this
     /// subscription by a numeric id instead of its channel in publication,
-    /// join and leave pushes (Block 35b).
+    /// join and leave pushes.
+    // Block 35b.
     pub channel_compaction: bool,
 }
 
@@ -419,13 +428,14 @@ impl Default for SubscriptionOptions {
     }
 }
 
-/// Options of a map subscription in the machine (Block 45, D3): its kind,
-/// its load's page size and memory bound, what an unrecoverable position
-/// does, and the options it shares with a stream subscription.
+/// Options of a map subscription in the machine: its kind, its load's page
+/// size and memory bound, what an unrecoverable position does, and the
+/// options it shares with a stream subscription.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 45, D3.
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,21 +448,23 @@ pub struct MapSubscriptionOptions {
     /// (100 and 1000 by default) and uses `map.default_page_size` (100) for 0.
     pub page_size: u32,
     /// Bytes of page replies one load may read before the subscription ends
-    /// with `unsubscribed` 5 "map state too large" (Block 45, D5); 64 MiB by
-    /// default.
+    /// with `unsubscribed` 5 "map state too large"; 64 MiB by default.
+    // Block 45, D5.
     pub max_state_bytes: std::num::NonZeroUsize,
-    /// What an unrecoverable position does (Block 45, D6).
+    /// What an unrecoverable position does.
+    // Block 45, D6.
     pub unrecoverable_strategy: crate::UnrecoverableStrategy,
     /// The options a map subscription shares with a stream subscription:
     /// `data`, the token and its callback, the resubscribe delays, `delta`,
     /// `tag_filter` and `channel_compaction`. The others (`data_source`,
     /// `since`, `state_source`, `positioned`, `recoverable`, `join_leave`)
-    /// do not apply to map subscriptions and are ignored (Block 45, out of
-    /// scope).
+    /// do not apply to map subscriptions and are ignored.
+    // Block 45, out of scope.
     pub common: SubscriptionOptions,
 }
 
-/// Block 45, D5, and Block 47, D11: 64 MiB, Block 19 D6's inbound limit.
+/// 64 MiB, the default inbound message limit.
+// Block 45, D5; Block 47, D11; Block 19, D6.
 #[cfg(feature = "unstable")]
 const DEFAULT_MAX_STATE_BYTES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::new(64 * 1024 * 1024).expect("not zero");
@@ -473,41 +485,46 @@ impl MapSubscriptionOptions {
     }
 }
 
-/// Options of a shared poll subscription in the machine (Block 47, D3):
-/// whether a `get_signature` callback signs keys, the frame budget of its
-/// track and untrack requests, the bound of its delta bases, and the
-/// options it shares with a stream subscription.
+/// Options of a shared poll subscription in the machine: whether a
+/// `get_signature` callback signs keys, the frame budget of its track and
+/// untrack requests, the bound of its delta bases, and the options it
+/// shares with a stream subscription.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 47, D3.
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SharedPollSubscriptionOptions {
-    /// Ask the owner to sign keys with [`Action::FetchSignature`] (Block 47,
-    /// D6), for keys tracked without a signature and to renew signatures as
-    /// they expire (D7).
+    /// Ask the owner to sign keys with [`Action::FetchSignature`], for keys
+    /// tracked without a signature and to renew signatures as they expire.
+    // Block 47, D6; D7.
     pub signature_source: bool,
     /// Bytes a track or untrack request may take on the wire, in the worst
-    /// encoding (Block 47, D7); 60 000 by default, below Centrifugo's
+    /// encoding; 60 000 by default, below Centrifugo's
     /// `websocket.message_size_limit` and the emulation endpoint's
     /// `max_request_body_size` (65 536 each by default).
+    // Block 47, D7.
     pub max_track_frame_bytes: std::num::NonZeroUsize,
     /// Bytes the delta bases of the tracked keys may hold together, with
-    /// delta on (Block 47, D11): a key whose base would pass it ends the
-    /// subscription with `unsubscribed` 7 "shared poll delta bases too
-    /// large"; 64 MiB by default.
+    /// delta on: a key whose base would pass it ends the subscription with
+    /// `unsubscribed` 7 "shared poll delta bases too large"; 64 MiB by
+    /// default.
+    // Block 47, D11.
     pub max_delta_bases_bytes: std::num::NonZeroUsize,
     /// The options a shared poll subscription shares with a stream
     /// subscription: `data`, the token and its callback, the resubscribe
     /// delays and `delta`. The others do not apply to shared poll
-    /// subscriptions and are ignored (Block 47, out of scope).
+    /// subscriptions and are ignored.
+    // Block 47, out of scope.
     pub common: SubscriptionOptions,
 }
 
-/// Block 47, D7: centrifuge-js's `maxBytes`.
+/// Centrifuge-js's `maxBytes`.
+// Block 47, D7.
 #[cfg(feature = "unstable")]
 const DEFAULT_MAX_TRACK_FRAME_BYTES: std::num::NonZeroUsize =
     std::num::NonZeroUsize::new(60_000).expect("not zero");
@@ -608,21 +625,24 @@ impl SubscriptionOptions {
         self
     }
 
-    /// Asks for publications as deltas in `format` (Block 19).
+    /// Asks for publications as deltas in `format`.
+    // Block 19.
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.delta = Some(format);
         self
     }
 
-    /// Sends `filter` with every subscribe command (Block 35a).
+    /// Sends `filter` with every subscribe command.
+    // Block 35a.
     #[must_use]
     pub fn tag_filter(mut self, filter: crate::TagFilter) -> Self {
         self.tag_filter = Some(filter);
         self
     }
 
-    /// Asks for channel compaction on every subscribe command (Block 35b).
+    /// Asks for channel compaction on every subscribe command.
+    // Block 35b.
     #[must_use]
     pub fn channel_compaction(mut self, channel_compaction: bool) -> Self {
         self.channel_compaction = channel_compaction;
@@ -670,7 +690,8 @@ pub enum Timer {
     Reconnect,
     /// Deadline for a connection attempt: for its transport to open, after
     /// `Config::handshake_timeout`, then for its connect reply, after
-    /// `Config::timeout` (Block 29, D1).
+    /// `Config::timeout`.
+    // Block 29, D1.
     ConnectTimeout,
     /// When the connection token must be refreshed.
     Refresh,
@@ -719,19 +740,22 @@ pub enum Input {
     /// The application called `connect()`.
     Connect,
     /// The application called `reconnect()`, e.g. on its platform's wake or
-    /// network-change notification: the client connects again at once,
-    /// from the first transport (Block 25, D5, D6).
+    /// network-change notification: the client connects again at once, from
+    /// the first transport.
+    // Block 25, D5, D6.
     Reconnect,
     /// The application called `disconnect()`.
     Disconnect,
-    /// The application called `close()`, or dropped the client (Block 33):
-    /// every call fails with code 4 "client closed", every subscription
-    /// is unsubscribed with code 2 "client closed", then the client
+    /// The application called `close()`, or dropped the client: every call
+    /// fails with code 4 "client closed", every subscription is
+    /// unsubscribed with code 2 "client closed", then the client
     /// disconnects for good. Nothing is fed after it.
+    // Block 33.
     Close,
     /// The owner's task performing the actions ended before the client was
-    /// closed: its runtime shut down, or, when `panicked`, the task panicked
-    /// (Block 28, D3, D4). The client disconnects for good.
+    /// closed: its runtime shut down, or, when `panicked`, the task
+    /// panicked. The client disconnects for good.
+    // Block 28, D3, D4.
     DriverDropped {
         /// Whether the task ended by a panic.
         panicked: bool,
@@ -739,12 +763,13 @@ pub enum Input {
     /// The transport opened.
     TransportOpened(TransportId),
     /// The owner cannot open the transport the core asked for, as what it
-    /// needs is missing (Block 44, D12: a browser without its constructors,
-    /// as centrifuge-js 63ed73e `_initializeTransport` skips a transport
-    /// whose `supported()` is false): the core skips it in the round,
-    /// without an `error` event or a failed attempt, and asks for the next
-    /// one. When no transport of the round can be opened, the attempt
-    /// fails with "no supported transport found".
+    /// needs is missing (a browser without its constructors, as
+    /// centrifuge-js 63ed73e `_initializeTransport` skips a transport whose
+    /// `supported()` is false): the core skips it in the round, without an
+    /// `error` event or a failed attempt, and asks for the next one. When
+    /// no transport of the round can be opened, the attempt fails with "no
+    /// supported transport found".
+    // Block 44, D12.
     TransportUnsupported(TransportId),
     /// The transport could not be opened.
     TransportFailed {
@@ -754,34 +779,38 @@ pub enum Input {
         message: String,
     },
     /// The transport received a message larger than
-    /// `Config::max_message_bytes` and was ended (Block 29, D3). The owner
-    /// refuses the message where its bytes are read, holding at most the
-    /// limit and one read, and reports it with this input instead of
+    /// `Config::max_message_bytes` and was ended. The owner refuses the
+    /// message where its bytes are read, holding at most the limit and one
+    /// read, and reports it with this input instead of
     /// [`Input::TransportClosed`]. Before the connect reply the attempt
     /// fails; after it the client disconnects with code 3 "message size
     /// limit exceeded", without reconnecting.
+    // Block 29, D3.
     MessageTooLarge(TransportId),
     /// A message arrived while the transport's inbox was full, and the
-    /// owner closed the transport (Block 44, D7): a transport that does
-    /// not stop reading, such as every browser transport, holds what the
-    /// core does not read yet in an inbox bounded by the read-ahead's
-    /// limits. The client reconnects at once with code
+    /// owner closed the transport: a transport that does not stop reading,
+    /// such as every browser transport, holds what the core does not read
+    /// yet in an inbox bounded by the read-ahead's limits. The client
+    /// reconnects at once with code
     /// [`codes::connecting::READ_AHEAD_OVERFLOW`], a client-side reason:
-    /// events not taken are withdrawn, and recovery brings them back. Before
-    /// a server ping is read on the connection, the backoff keeps growing,
-    /// as after a 3008 close (Block 15).
+    /// events not taken are withdrawn, and recovery brings them back.
+    /// Before a server ping is read on the connection, the backoff keeps
+    /// growing, as after a 3008 close.
+    // Block 44, D7; Block 15.
     InboxOverflow(TransportId),
-    /// The device went offline, as the browser's `offline` event tells
-    /// (Block 44, D10). Connected: the transport closes, and the client
-    /// emits `connecting` with code 1 "transport closed" and reconnects
-    /// after the reconnect delay, as after a lost connection. Connecting:
-    /// the attempt in flight, if any, closes, with no event and counting as
-    /// no failed attempt, and the next waits the reconnect delay.
-    /// Disconnected: nothing.
+    /// The device went offline, as the browser's `offline` event tells.
+    /// Connected: the transport closes, and the client emits `connecting`
+    /// with code 1 "transport closed" and reconnects after the reconnect
+    /// delay, as after a lost connection. Connecting: the attempt in
+    /// flight, if any, closes, with no event and counting as no failed
+    /// attempt, and the next waits the reconnect delay. Disconnected:
+    /// nothing.
+    // Block 44, D10.
     Offline,
     /// The page entered the back/forward cache, as the browser's `pagehide`
-    /// with `persisted` tells (Block 44, D11): as [`Input::Offline`], with
-    /// the reason "page entered back/forward cache".
+    /// with `persisted` tells: as [`Input::Offline`], with the reason "page
+    /// entered back/forward cache".
+    // Block 44, D11.
     PageCached,
     /// The transport closed after opening.
     TransportClosed {
@@ -823,9 +852,10 @@ pub enum Input {
     /// firing of a setting no longer running is ignored (see the module
     /// documentation).
     TimerFired(Timer, TimerSetting),
-    /// A timer set by [`Action::SetDebounceTimer`] fired (Block 46): the
-    /// window sends the latest value it holds, if any, and opens anew, or
-    /// closes. One whose window is gone is ignored.
+    /// A timer set by [`Action::SetDebounceTimer`] fired: the window sends
+    /// the latest value it holds, if any, and opens anew, or closes. One
+    /// whose window is gone is ignored.
+    // Block 46.
     DebounceTimerFired(DebounceTimer),
     /// The token callback answered a [`Action::FetchToken`].
     TokenFetched {
@@ -834,33 +864,37 @@ pub enum Input {
         /// The new token, or why there is none.
         result: Result<String, TokenError>,
     },
-    /// The application started a batch (`start_batching`, Block 18): its
-    /// calls, but `send`, and the subscribe and unsubscribe commands its
-    /// calls cause are held until a batch stops.
+    /// The application started a batch (`start_batching`): its calls, but
+    /// `send`, and the subscribe and unsubscribe commands its calls cause
+    /// are held until a batch stops.
+    // Block 18.
     StartBatching,
     /// The application stopped a batch: what all open batches hold is sent.
     StopBatching,
     /// The owner of a machine made with
     /// [`Machine::with_automatic_batching`] has fed the inputs it has: the
     /// commands buffered since the last flush are sent, in as few frames as
-    /// [`Config::batch_frame_bytes`] allows (Block 36). Without automatic
-    /// batching it does nothing.
+    /// [`Config::batch_frame_bytes`] allows. Without automatic batching it
+    /// does nothing.
+    // Block 36.
     Flush,
     /// The application set the connection token used from the next
-    /// connection attempt (`set_token`, Block 17); empty for none.
+    /// connection attempt (`set_token`); empty for none.
+    // Block 17.
     SetToken(String),
     /// The application set the connect data used from the next connection
     /// attempt, unless a connect data callback replaces it (`set_data`).
     SetData(Vec<u8>),
     /// The application set a subscription's data, used in every subscribe
     /// command built from now on, unless its data callback replaces it
-    /// (`Subscription::set_data`, Block 32). Ignored for an id not in the
-    /// registry.
+    /// (`Subscription::set_data`). Ignored for an id not in the registry.
+    // Block 32.
     SetSubscriptionData(SubscriptionId, Vec<u8>),
     /// The application set a subscription's tag filter, `None` to remove
     /// it, for the subscribe commands built from now on
-    /// (`Subscription::set_tag_filter`, Block 35a). The owner checks it with
+    /// (`Subscription::set_tag_filter`). The owner checks it with
     /// [`Machine::check_subscription_tag_filter`] first.
+    // Block 35a.
     SetSubscriptionTagFilter(SubscriptionId, Option<crate::TagFilter>),
     /// The application set the emulated headers sent from the next
     /// connection attempt (`set_emulated_headers`).
@@ -907,17 +941,20 @@ pub enum Input {
     },
     /// The application took an event of [`Action::Emit`] or
     /// [`Action::EmitSubscription`] from its stream, or the handler it was
-    /// handed to returned (Block 41, D3).
+    /// handed to returned.
+    // Block 41, D3.
     EventTaken(EventId),
     /// The owner handed an event of [`Action::Emit`] or
-    /// [`Action::EmitSubscription`] to a handler, which has not returned
-    /// (Block 41, D3): the event moves its stream position now, so that a
-    /// command sent meanwhile recovers from after it, is not withdrawn,
-    /// and holds the messages after it until [`Input::EventTaken`].
+    /// [`Action::EmitSubscription`] to a handler, which has not returned:
+    /// the event moves its stream position now, so that a command sent
+    /// meanwhile recovers from after it, is not withdrawn, and holds the
+    /// messages after it until [`Input::EventTaken`].
+    // Block 41, D3.
     EventHanded(EventId),
-    /// The handler an event was handed to panicked (Block 41, D4): the
-    /// event's position moves back, and the client disconnects with code 2
-    /// "exception in event handler: `message`" and does not reconnect.
+    /// The handler an event was handed to panicked: the event's position
+    /// moves back, and the client disconnects with code 2 "exception in
+    /// event handler: `message`" and does not reconnect.
+    // Block 41, D4.
     HandlerPanicked {
         /// The event the handler was given.
         event: EventId,
@@ -927,7 +964,8 @@ pub enum Input {
     /// A stream takes the events of a subscription, or of the client when
     /// `None` (server-side subscriptions' included), from now on. Until
     /// then, and after [`Input::StreamClosed`], their events count as taken
-    /// once emitted (Block 15).
+    /// once emitted.
+    // Block 15.
     StreamOpened(Option<SubscriptionId>),
     /// No stream takes the events of a subscription, or of the client when
     /// `None`, anymore: report the events it had not taken with
@@ -943,70 +981,75 @@ pub enum Input {
     CallTimerFired(CallId, CallTimer, TimerSetting),
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting. A map
-    /// remove that publishes follow goes on for them (Block 46, D11).
+    /// remove that publishes follow goes on for them.
+    // Block 46, D11.
     CallAbandoned(CallId),
     /// The system slept for `gap`: the wall clock moved that much further
     /// than the monotonic one, whose timers resume with the time they had
-    /// left (Block 25, D1). A gap under 2 s is ignored.
+    /// left. A gap under 2 s is ignored.
+    // Block 25, D1.
     Slept {
         /// How long the system slept.
         gap: Duration,
     },
     /// The application tracks `keys` on a shared poll subscription without
-    /// a signature (Block 47, D6): kept at the version held, signed through
+    /// a signature: kept at the version held, signed through
     /// [`Action::FetchSignature`] once the subscription is subscribed.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     TrackKeys(SubscriptionId, Vec<String>),
     /// The application tracks `items` on a shared poll subscription under
-    /// `signature`, which covers exactly their keys in that order (Block
-    /// 47, D6).
+    /// `signature`, which covers exactly their keys in that order.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     TrackKeysWithSignature(SubscriptionId, Vec<crate::SharedPollTrackItem>, String),
-    /// The application stops tracking `keys` on a shared poll subscription
-    /// (Block 47, D6).
+    /// The application stops tracking `keys` on a shared poll subscription.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     UntrackKeys(SubscriptionId, Vec<String>),
-    /// A timer set by [`Action::SetSharedPollTimer`] fired (Block 47, D7,
-    /// D12).
+    /// A timer set by [`Action::SetSharedPollTimer`] fired.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7, D12.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SharedPollTimerFired(SharedPollTimer),
     /// The refresh timer of a shared poll subscription, armed by
-    /// [`Action::SetSharedPollRefresh`], fired (Block 47, D7).
+    /// [`Action::SetSharedPollRefresh`], fired.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SharedPollRefreshFired(SubscriptionId),
     /// The `get_signature` callback answered [`Action::FetchSignature`]
-    /// `request` of shared poll subscription `subscription` (Block 47, D6).
-    /// An answer to a request the subscription abandoned, by leaving
-    /// `subscribed`, changes nothing.
+    /// `request` of shared poll subscription `subscription`. An answer to a
+    /// request the subscription abandoned, by leaving `subscribed`, changes
+    /// nothing.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SignatureFetched {
@@ -1024,10 +1067,11 @@ pub enum Input {
 /// Its `Debug` output shows only the length of a [`Action::Send`] frame:
 /// connect and refresh frames carry the connection token.
 ///
-/// Non-exhaustive since 0.21.0 (Block 45, D3): a variant added under a
-/// feature, as `Action::EmitMapSubscription` under `unstable`, would
-/// otherwise break the exhaustive `match` of any crate in a graph where
-/// another crate enables that feature.
+/// Non-exhaustive since 0.21.0: a variant added under a feature, as
+/// `Action::EmitMapSubscription` under `unstable`, would otherwise break
+/// the exhaustive `match` of any crate in a graph where another crate
+/// enables that feature.
+// Block 45, D3.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Action {
@@ -1089,32 +1133,33 @@ pub enum Action {
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
-    /// Deliver an event to a map subscription's listeners (Block 45, D3);
-    /// report it with [`Input::EventTaken`] once the application has taken
-    /// it.
+    /// Deliver an event to a map subscription's listeners; report it with
+    /// [`Input::EventTaken`] once the application has taken it.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
     /// later), and may change in any minor release.
+    // Block 45, D3.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitMapSubscription(EventId, SubscriptionId, crate::MapSubscriptionEvent),
-    /// Deliver an event to a shared poll subscription's listeners (Block
-    /// 47, D3); report it with [`Input::EventTaken`] once the application
-    /// has taken it.
+    /// Deliver an event to a shared poll subscription's listeners; report
+    /// it with [`Input::EventTaken`] once the application has taken it.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D3.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitSharedPollSubscription(EventId, SubscriptionId, crate::SharedPollSubscriptionEvent),
-    /// Start a shared poll subscription's timer (Block 47, D7, D12); report
-    /// it with [`Input::SharedPollTimerFired`].
+    /// Start a shared poll subscription's timer; report it with
+    /// [`Input::SharedPollTimerFired`].
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7, D12.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SetSharedPollTimer(SharedPollTimer, Duration),
@@ -1127,14 +1172,15 @@ pub enum Action {
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     CancelSharedPollTimer(SharedPollTimer),
     /// Arm the refresh timer of a shared poll subscription to fire at the
-    /// earlier of its current deadline, if it runs, and the given delay from
-    /// now; report it with [`Input::SharedPollRefreshFired`]. One timer per
-    /// subscription: the refresh runs at the earliest deadline a track
-    /// reply reported (Block 47, D7).
+    /// earlier of its current deadline, if it runs, and the given delay
+    /// from now; report it with [`Input::SharedPollRefreshFired`]. One
+    /// timer per subscription: the refresh runs at the earliest deadline a
+    /// track reply reported.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SetSharedPollRefresh(SubscriptionId, Duration),
@@ -1147,13 +1193,14 @@ pub enum Action {
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     CancelSharedPollRefresh(SubscriptionId),
     /// Ask the shared poll subscription's `get_signature` callback to sign
-    /// `keys` (Block 47, D6); report the answer with
-    /// [`Input::SignatureFetched`]. Only issued for subscriptions with
+    /// `keys`; report the answer with [`Input::SignatureFetched`]. Only
+    /// issued for subscriptions with
     /// [`SharedPollSubscriptionOptions::signature_source`].
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     FetchSignature {
@@ -1166,7 +1213,8 @@ pub enum Action {
     },
     /// Never deliver these events, emitted and not yet taken: publications
     /// of a subscription that left `subscribed`, or whose position was set
-    /// otherwise, which recovery brings back (Block 15).
+    /// otherwise, which recovery brings back.
+    // Block 15.
     Withdraw(Vec<EventId>),
     /// Ask the subscription's data callback for the data of its next
     /// subscribe command; report the answer with
@@ -1212,9 +1260,9 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionState`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionState(FetchId),
-    /// Start a debounce window's timer (Block 46, D5), which the machine
-    /// never sets twice; report its end with
-    /// [`Input::DebounceTimerFired`].
+    /// Start a debounce window's timer, which the machine never sets twice;
+    /// report its end with [`Input::DebounceTimerFired`].
+    // Block 46, D5.
     SetDebounceTimer(DebounceTimer, Duration),
     /// Stop a debounce window's timer if it runs.
     CancelDebounceTimer(DebounceTimer),
@@ -1232,12 +1280,13 @@ pub enum Action {
     },
     /// The server broke the client protocol in a way only the machine sees:
     /// the actions that follow reconnect, with code 1 "transport closed",
-    /// as for a lost transport (Block 21). For the owner's logs; nothing
-    /// needs performing.
+    /// as for a lost transport. For the owner's logs; nothing needs
+    /// performing.
+    // Block 21.
     Anomaly(Anomaly),
     /// Make the timer fire `by` earlier, at once if that time has passed;
-    /// nothing when it is not running (Block 25, D3: a refresh due during a
-    /// sleep).
+    /// nothing when it is not running (a refresh due during a sleep).
+    // Block 25, D3.
     ShortenTimer(Timer, Duration),
     /// As [`Action::ShortenTimer`], for a subscription's timer.
     ShortenSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
@@ -1266,8 +1315,8 @@ pub enum Anomaly {
         command: &'static str,
     },
     /// A reply handled before the connect reply of its connection, which
-    /// the commands sent with the connect command must follow (Block 36,
-    /// D6).
+    /// the commands sent with the connect command must follow.
+    // Block 36, D6.
     ReplyBeforeConnect {
         /// The transport it came on.
         transport: TransportId,
@@ -1276,11 +1325,12 @@ pub enum Anomaly {
         command: &'static str,
     },
     /// A reply to a map subscription's request, or a publication of a map
-    /// subscription, that the protocol does not allow (Block 45, D15).
+    /// subscription, that the protocol does not allow.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
     /// later), and may change in any minor release.
+    // Block 45, D15.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     UnexpectedMapReply {
@@ -1707,29 +1757,35 @@ struct Pings {
 }
 
 /// The smallest gap between the wall and monotonic clocks taken for a
-/// system sleep (Block 25, D1).
+/// system sleep.
+// Block 25, D1.
 const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 
-/// The reason of the `unsubscribed` events of a closed client (Block 33).
+/// The reason of the `unsubscribed` events of a closed client.
+// Block 33.
 const CLIENT_CLOSED_REASON: &str = "client closed";
 
 /// Websocket close code "message too big" (RFC 6455).
 const MESSAGE_TOO_BIG: u32 = 1009;
 
 /// The error event's message for a message over `Config::max_message_bytes`
-/// before the connect reply (Block 29, D3).
+/// before the connect reply.
+// Block 29, D3.
 const MESSAGE_TOO_LARGE: &str = "message larger than the size limit";
 
-/// The reason of [`codes::connecting::READ_AHEAD_OVERFLOW`] (Block 44, D7).
+/// The reason of [`codes::connecting::READ_AHEAD_OVERFLOW`].
+// Block 44, D7.
 const READ_AHEAD_OVERFLOW_REASON: &str = "read-ahead overflow";
-/// The reason of `Input::PageCached` (Block 44, D11).
+/// The reason of `Input::PageCached`.
+// Block 44, D11.
 const PAGE_CACHED_REASON: &str = "page entered back/forward cache";
 
 /// Disconnect code by which the server invalidates the connection's state
 /// (centrifuge-js `disconnectedCodes.stateInvalidated`).
 const STATE_INVALIDATED: u32 = 3014;
-/// The connect data callback's state (Block 17). Its `Debug` output shows
-/// the data as its length.
+/// The connect data callback's state. Its `Debug` output shows the data as
+/// its length.
+// Block 17.
 #[derive(Default)]
 struct ConnectData {
     /// Whether the owner answers [`Action::FetchConnectData`].
@@ -1780,7 +1836,8 @@ const SLOW: u32 = 3008;
 pub struct Machine {
     config: Config,
     state: State,
-    /// Connection and traffic counters (Block 31).
+    /// Connection and traffic counters.
+    // Block 31.
     counters: crate::statistics::Counters,
     backoff: Backoff,
     rng: fastrand::Rng,
@@ -1791,9 +1848,11 @@ pub struct Machine {
     next_command: u32,
     next_event: u64,
     next_frame: u64,
-    /// Publications emitted and not yet taken (Block 15).
+    /// Publications emitted and not yet taken.
+    // Block 15.
     deliveries: delivery::Deliveries,
-    /// Messages read and not yet handled (Block 15).
+    /// Messages read and not yet handled.
+    // Block 15.
     inbound: inbound::Inbound,
     /// Id of the connect command awaiting its reply.
     connect_command: Option<u32>,
@@ -1801,49 +1860,61 @@ pub struct Machine {
     tokens: Tokens,
     /// Encoding of the client protocol.
     codec: Codec,
-    /// Transports to try, in order, and the one chosen (Block 8).
+    /// Transports to try, in order, and the one chosen.
+    // Block 8.
     transports: Transports,
-    /// Transports of the current attempt its owner could not open (Block
-    /// 44, D12).
+    /// Transports of the current attempt its owner could not open.
+    // Block 44, D12.
     unsupported: usize,
     /// Session and node of the emulated connection, from its connect reply.
     emulation: Option<(String, String)>,
-    /// Client-side subscriptions (Block 9).
+    /// Client-side subscriptions.
+    // Block 9.
     subscriptions: Subscriptions,
-    /// Server-side subscriptions (Block 12).
+    /// Server-side subscriptions.
+    // Block 12.
     server_subscriptions: ServerSubscriptions,
-    /// Calls not yet settled (Block 13).
+    /// Calls not yet settled.
+    // Block 13.
     calls: calls::Calls,
     /// The connection is emulated and only its stream is proven: the backoff
     /// resets once the server pings or answers a command, not on the connect
     /// reply (centrifuge-js `_reconnectAttemptsResetPending`).
     backoff_reset_pending: bool,
     /// The client lost its connection and its first attempt since has not
-    /// started: a reconnect then waits the jitter window (Block 44, D10,
-    /// amending Block 25 D5).
+    /// started: a reconnect then waits the jitter window.
+    // Block 44, D10; Block 25, D5.
     reconnecting_after_loss: bool,
     /// A server ping was read on the current connection: a 3008 close then
-    /// keeps the backoff reset (Block 15, "Backoff after 3008").
+    /// keeps the backoff reset.
+    // Block 15, "Backoff after 3008".
     pinged: bool,
     /// The server answered on the transport of this attempt (a connect
     /// reply, an error reply to the connect, a disconnect push): a
-    /// WebTransport stream ending before it gives way (Block 48, D9).
+    /// WebTransport stream ending before it gives way.
+    // Block 48, D9.
     answered: bool,
     /// The connection over WebTransport ended with no code: before a server
-    /// ping, the backoff keeps growing, as after a 3008 close (Block 48,
-    /// D9, "Backoff after 3008" extended).
+    /// ping, the backoff keeps growing, as after a 3008 close ("Backoff
+    /// after 3008" extended).
+    // Block 48, D9.
     ended_without_code: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
-    /// The connect data callback's state (Block 17).
+    /// The connect data callback's state.
+    // Block 17.
     connect_data: ConnectData,
-    /// Emulated headers sent with every connect command (Block 17).
+    /// Emulated headers sent with every connect command.
+    // Block 17.
     emulated_headers: EmulatedHeaders,
-    /// Open batches and what they hold (Block 18).
+    /// Open batches and what they hold.
+    // Block 18.
     batching: batching::Batching,
-    /// Debounce windows of the subscriptions' publishes (Block 46).
+    /// Debounce windows of the subscriptions' publishes.
+    // Block 46.
     debouncing: debounce::Debouncing,
-    /// The settings of its timers (Block 53).
+    /// The settings of its timers.
+    // Block 53.
     timer_settings: TimerSettings,
     actions: Vec<Action>,
 }
@@ -1852,12 +1923,13 @@ impl Machine {
     /// Creates a disconnected machine whose owner has no token callback: an
     /// expiring token cannot be refreshed and ends the connection.
     ///
-    /// On `wasm32-unknown-unknown` without the `browser` feature, the random
-    /// source of its delays (backoff, refresh jitter) starts from a
+    /// On `wasm32-unknown-unknown` without the `browser` feature, the
+    /// random source of its delays (backoff, refresh jitter) starts from a
     /// constant, as fastrand without its `js` feature has no entropy there:
     /// every machine of a page, and the n-th machine of every page, draws
-    /// the same delays (Block 40, D4). `browser` seeds it from the
-    /// browser's `crypto.getRandomValues` (Block 44, D5).
+    /// the same delays. `browser` seeds it from the browser's
+    /// `crypto.getRandomValues`.
+    // Block 40, D4; Block 44, D5.
     #[must_use]
     pub fn new(config: Config) -> Self {
         Self::with_rng(config, false, fastrand::Rng::new())
@@ -1916,9 +1988,9 @@ impl Machine {
     }
 
     /// Makes the next command id the one after `id`, as if `id` had just
-    /// been given, so that a test reaches the wrap of the 32-bit ids
-    /// (Block 49, "Command ids skip 0 when they wrap"). Only with the
-    /// `__test-hooks` feature.
+    /// been given, so that a test reaches the wrap of the 32-bit ids. Only
+    /// with the `__test-hooks` feature.
+    // Block 49, "Command ids skip 0 when they wrap".
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn set_last_command_id(&mut self, id: u32) {
@@ -1928,12 +2000,13 @@ impl Machine {
     /// Creates a disconnected machine whose owner answers
     /// [`Action::FetchToken`] from the application's token callback.
     ///
-    /// On `wasm32-unknown-unknown` without the `browser` feature, the random
-    /// source of its delays (backoff, refresh jitter) starts from a
+    /// On `wasm32-unknown-unknown` without the `browser` feature, the
+    /// random source of its delays (backoff, refresh jitter) starts from a
     /// constant, as fastrand without its `js` feature has no entropy there:
     /// every machine of a page, and the n-th machine of every page, draws
-    /// the same delays (Block 40, D4). `browser` seeds it from the
-    /// browser's `crypto.getRandomValues` (Block 44, D5).
+    /// the same delays. `browser` seeds it from the browser's
+    /// `crypto.getRandomValues`.
+    // Block 40, D4; Block 44, D5.
     #[must_use]
     pub fn with_token_source(config: Config) -> Self {
         Self::with_rng(config, true, fastrand::Rng::new())
@@ -1942,9 +2015,10 @@ impl Machine {
     /// Makes the machine buffer every command it would send, until the
     /// owner feeds [`Input::Flush`], which sends them in as few frames as
     /// [`Config::batch_frame_bytes`] allows: the owner feeds it once it has
-    /// fed the inputs it has, before performing the actions (Block 36,
-    /// D2). An owner that never feeds it holds every command until its
-    /// deadline. The tokio adapter always does this.
+    /// fed the inputs it has, before performing the actions. An owner that
+    /// never feeds it holds every command until its deadline. The tokio
+    /// adapter always does this.
+    // Block 36, D2.
     #[must_use]
     pub fn with_automatic_batching(mut self) -> Self {
         self.batching.automatic = true;
@@ -1952,11 +2026,12 @@ impl Machine {
     }
 
     /// Honours the `publish_debounce` the server advises in its subscribe
-    /// replies (Block 46, D5): the owner runs [`Action::SetDebounceTimer`]
-    /// timers and reports them with [`Input::DebounceTimerFired`]. Without
-    /// it, every publish is sent: an owner written before this block would
-    /// never end a window, and its callers would hang. The tokio and
-    /// browser clients always do this.
+    /// replies: the owner runs [`Action::SetDebounceTimer`] timers and
+    /// reports them with [`Input::DebounceTimerFired`]. Without it, every
+    /// publish is sent: an owner written before this block would never end
+    /// a window, and its callers would hang. The tokio and browser clients
+    /// always do this.
+    // Block 46, D5.
     #[must_use]
     pub fn with_publish_debounce(mut self) -> Self {
         self.debouncing.enabled = true;
@@ -1966,7 +2041,8 @@ impl Machine {
     /// Makes the owner answer [`Action::FetchConnectData`] from the
     /// application's connect data callback, asked before every connection
     /// attempt once a token is obtained; its data replaces
-    /// [`Config::data`] (Block 17).
+    /// [`Config::data`].
+    // Block 17.
     #[must_use]
     pub fn with_data_source(mut self) -> Self {
         self.connect_data.source = true;
@@ -1974,8 +2050,9 @@ impl Machine {
     }
 
     /// Sends `headers`, by name, with every connect command as
-    /// `ConnectRequest.headers`: the emulated headers the server forwards to
-    /// its proxies (Block 17).
+    /// `ConnectRequest.headers`: the emulated headers the server forwards
+    /// to its proxies.
+    // Block 17.
     #[must_use]
     pub fn with_emulated_headers(mut self, headers: BTreeMap<String, String>) -> Self {
         self.emulated_headers = EmulatedHeaders(headers);
@@ -2025,8 +2102,9 @@ impl Machine {
     }
 
     /// Every call any registry of the core holds, with the registries
-    /// holding it, for the soak (Block 52, D8): the adapter's hook reads
-    /// it, so only a build with an adapter has it.
+    /// holding it, for the soak: the adapter's hook reads it, so only a
+    /// build with an adapter has it.
+    // Block 52, D8.
     #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     #[must_use]
     pub(crate) fn call_registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
@@ -2034,7 +2112,8 @@ impl Machine {
     }
 
     /// The protocol of the codec the core encodes and decodes with, as
-    /// built from `Config::protocol`, for tests (Block 51 D10).
+    /// built from `Config::protocol`, for tests.
+    // Block 51 D10.
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     #[must_use]
@@ -2051,8 +2130,9 @@ impl Machine {
         self.state
     }
 
-    /// The connection and traffic counters since the machine was built
-    /// (Block 31); `connected_since` is `None`, the core having no clock.
+    /// The connection and traffic counters since the machine was built;
+    /// `connected_since` is `None`, the core having no clock.
+    // Block 31.
     #[must_use]
     pub fn statistics(&self) -> crate::Statistics {
         crate::Statistics {
@@ -2233,7 +2313,8 @@ impl Machine {
     }
 
     /// The settings running, by timer, as the step that returned last left
-    /// them: what `Client::armed_timers` lists as the core's (Block 52 D8).
+    /// them: what `Client::armed_timers` lists as the core's.
+    // Block 52 D8.
     #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     pub(crate) fn running_settings(&self) -> Vec<(TimerKey, TimerSetting)> {
         self.timer_settings
@@ -2512,7 +2593,8 @@ impl Machine {
     }
 
     /// Sends a new connect command over websocket, the subscribe commands
-    /// that fit going in its frame (Block 36, D5).
+    /// that fit going in its frame.
+    // Block 36, D5.
     fn send_connect(&mut self, transport: TransportId) {
         let connect = self.connect_command();
         let mut commands = self.optimistic_subscribes(&connect);
@@ -2573,12 +2655,13 @@ impl Machine {
         self.reconnect_after_transport_closed();
     }
 
-    /// The owner cannot open the current transport (Block 44, D12): the
-    /// next one of the round is asked for at once, the round wrapping as
-    /// after a failure; once every transport was skipped in this attempt,
-    /// it fails as centrifuge-js 63ed73e's does when it finds none
+    /// The owner cannot open the current transport: the next one of the
+    /// round is asked for at once, the round wrapping as after a failure;
+    /// once every transport was skipped in this attempt, it fails as
+    /// centrifuge-js 63ed73e's does when it finds none
     /// (`centrifuge.ts:1154-1170`): a failed attempt, then the `error`
     /// event, naming no transport.
+    // Block 44, D12.
     fn transport_unsupported(&mut self) {
         self.unsupported += 1;
         if self.unsupported < self.transports.len() {
@@ -2651,8 +2734,8 @@ impl Machine {
     }
 
     /// A reply to a `command` command handled before the connect reply
-    /// breaks the protocol (Block 36, D6): reported, then handled as a lost
-    /// transport.
+    /// breaks the protocol: reported, then handled as a lost transport.
+    // Block 36, D6.
     fn reply_before_connect(&mut self, command: &'static str) {
         if let Some(transport) = self.transport {
             self.actions
@@ -2664,10 +2747,11 @@ impl Machine {
         self.reconnect_after_transport_closed();
     }
 
-    /// A message over `Config::max_message_bytes` ended the transport
-    /// (Block 29, D3): before the connect reply the bytes may not be the
-    /// server's, so the attempt fails; after it a reconnect would get the
-    /// same data again, so the client ends, as for close code 1009.
+    /// A message over `Config::max_message_bytes` ended the transport:
+    /// before the connect reply the bytes may not be the server's, so the
+    /// attempt fails; after it a reconnect would get the same data again,
+    /// so the client ends, as for close code 1009.
+    // Block 29, D3.
     fn message_too_large(&mut self) {
         if self.state == State::Connecting {
             self.transport_failed(MESSAGE_TOO_LARGE.to_owned());
@@ -2680,10 +2764,11 @@ impl Machine {
         }
     }
 
-    /// The transport's inbox overflowed (Block 44, D7): a client-side
-    /// reason, as `reconnect()`, so events not taken are withdrawn. Handled
-    /// at once, not after the messages held: the application is not taking
-    /// their events, which is why the inbox filled.
+    /// The transport's inbox overflowed: a client-side reason, as
+    /// `reconnect()`, so events not taken are withdrawn. Handled at once,
+    /// not after the messages held: the application is not taking their
+    /// events, which is why the inbox filled.
+    // Block 44, D7.
     fn inbox_overflowed(&mut self, transport: TransportId) {
         // About a transport already abandoned.
         if !self.is_current(transport) {
@@ -2823,10 +2908,10 @@ impl Machine {
 
     /// A request of several commands refused with HTTP 413: each command
     /// still awaited goes again in its own request, at once and in order,
-    /// so that only a command refused alone gets the terminal outcome
-    /// (Block 8's rule, owner decision 2026-11-04; Block 18, D6). Its
+    /// so that only a command refused alone gets the terminal outcome. Its
     /// deadlines keep running, and a call's command counts as unwritten
-    /// again. Emulated transports carry JSON only (Block 8).
+    /// again. Emulated transports carry JSON only.
+    // Block 8, owner decision 2026-11-04; Block 18, D6; Block 8.
     fn resend_alone(&mut self, frame: &[u8]) {
         let Some(transport) = self.transport else {
             return;
@@ -2954,18 +3039,20 @@ impl Machine {
     }
 
     /// The server answered on the transport being tried: an error reply to
-    /// the connect, a `Disconnect` push or, over websocket, a close code from
-    /// 3000 (the connect reply chooses it too, in `connected`). The transport
-    /// is kept then, and only then: one that opens but never answers falls
-    /// back (Block 8; owner decision Q8; review items C2 and C3;
+    /// the connect, a `Disconnect` push or, over websocket, a close code
+    /// from 3000 (the connect reply chooses it too, in `connected`). The
+    /// transport is kept then, and only then: one that opens but never
+    /// answers falls back (owner decision Q8; review items C2 and C3;
     /// centrifuge-js 63ed73e `_transportWasOpen`).
+    // Block 8.
     fn server_answered(&mut self) {
         self.transports.choose();
         self.answered = true;
     }
 
     /// Whether the open transport is a WebTransport the server has not
-    /// answered on in this attempt, chosen before or not (Block 48, D9).
+    /// answered on in this attempt, chosen before or not.
+    // Block 48, D9.
     fn ended_before_an_answer(&self) -> bool {
         is_webtransport(self.transport_kind()) && !self.answered
     }
@@ -3015,8 +3102,8 @@ impl Machine {
     }
 
     /// The device went offline, or the page entered the back/forward cache
-    /// (Block 44, D10, D11; centrifuge-js 63ed73e `_setNetworkEvents`,
-    /// `_setPageEvents`).
+    /// (centrifuge-js 63ed73e `_setNetworkEvents`, `_setPageEvents`).
+    // Block 44, D10, D11.
     fn offline(&mut self, reason: &str) {
         match self.state {
             State::Disconnected => {}
@@ -3055,13 +3142,12 @@ impl Machine {
             )
     }
 
-    /// `reconnect()` (Block 25, D5, D6): a connected client reconnects
-    /// after the jitter window only, a connecting one at once, unless its
-    /// first attempt since it lost its connection has not started (Block
-    /// 44, D10); a disconnected one is left alone, as one stopped on
-    /// purpose.
-    /// `disconnect()`: the attempt in flight is not a failed one (Block
-    /// 31, D1).
+    /// `reconnect()`: a connected client reconnects after the jitter window
+    /// only, a connecting one at once, unless its first attempt since it
+    /// lost its connection has not started; a disconnected one is left
+    /// alone, as one stopped on purpose. `disconnect()`: the attempt in
+    /// flight is not a failed one.
+    // Block 25, D5, D6; Block 44, D10; Block 31, D1.
     fn disconnect_called(&mut self) {
         self.counters.cancelling = true;
         self.disconnect(
@@ -3071,8 +3157,9 @@ impl Machine {
         );
     }
 
-    /// The owner's task ended (Block 28, D3, D4): closed as by `close()`,
-    /// with its own disconnect code (Block 33, D4).
+    /// The owner's task ended: closed as by `close()`, with its own
+    /// disconnect code.
+    // Block 28, D3, D4; Block 33, D4.
     fn driver_dropped(&mut self, panicked: bool) {
         if panicked {
             self.close(
@@ -3084,10 +3171,11 @@ impl Machine {
         }
     }
 
-    /// Closes the client for good (Block 33, D2): every call fails with
-    /// "client closed", every subscription, client-side and server-side,
-    /// is unsubscribed with code 2 and no command, then the client
-    /// disconnects with `code`. The attempt it ends is not a failed one.
+    /// Closes the client for good: every call fails with "client closed",
+    /// every subscription, client-side and server-side, is unsubscribed
+    /// with code 2 and no command, then the client disconnects with `code`.
+    /// The attempt it ends is not a failed one.
+    // Block 33, D2.
     fn close(&mut self, code: u32, reason: &str) {
         self.counters.cancelling = true;
         self.fail_calls_closed();
@@ -3236,7 +3324,8 @@ impl Machine {
         Some(was_connected)
     }
 
-    /// The system slept for `gap` (Block 25, D2 and D3).
+    /// The system slept for `gap`.
+    // Block 25, D2 and D3.
     fn slept(&mut self, gap: Duration) {
         if gap < SLEEP_THRESHOLD || self.state == State::Disconnected {
             return;
@@ -3263,8 +3352,9 @@ impl Machine {
     }
 
     /// A random delay added to the first reconnect after a lost connection,
-    /// so that a fleet disconnected at once does not reconnect at once
-    /// (Block 14, "Reconnect jitter window"); none with a zero window.
+    /// so that a fleet disconnected at once does not reconnect at once;
+    /// none with a zero window.
+    // Block 14, "Reconnect jitter window".
     fn reconnect_jitter(&mut self) -> Duration {
         let window =
             u64::try_from(self.config.reconnect_jitter_window.as_millis()).unwrap_or(u64::MAX);
@@ -3451,10 +3541,10 @@ impl Machine {
 
     /// Sends `command` alone in its frame: over an emulated transport each
     /// command then has its own request, so a request the server refuses
-    /// (HTTP 413) concerns that command only (see `send_rejected`).
-    /// Hands `command` to the owner; its frame's id and size.
-    /// With automatic batching it goes into the output buffer instead
-    /// (Block 36, D1).
+    /// (HTTP 413) concerns that command only (see `send_rejected`). Hands
+    /// `command` to the owner; its frame's id and size. With automatic
+    /// batching it goes into the output buffer instead.
+    // Block 36, D1.
     fn send(&mut self, transport: TransportId, command: Command) {
         if self.buffering() {
             self.buffer(&command, None, 0, false);
@@ -3473,7 +3563,8 @@ impl Machine {
         }
     }
 
-    /// Sends `commands` in one frame (Block 18; one command otherwise).
+    /// Sends `commands` in one frame (one command otherwise).
+    // Block 18.
     fn send_commands(&mut self, transport: TransportId, commands: &[Command]) -> (FrameId, usize) {
         let frame = self.frame_of(commands);
         let id = FrameId(self.next_frame);

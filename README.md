@@ -100,7 +100,7 @@ Available now:
 - a bound on the bytes of calls waiting to be written
   (`Config::write_queue_bytes`);
 - join and leave events of the clients of a channel;
-- a seeded chaos harness checking the client's invariants (Block 16).
+- a seeded chaos harness checking the client's invariants.
 
 Planned next, in this order: connect data and headers, `setToken` and
 `setData`; batching several commands in one frame.
@@ -427,18 +427,18 @@ registry with stream subscriptions, one per channel, but
 `get_subscription` and `subscriptions()` list stream subscriptions only,
 `get_map_subscription` and `map_subscriptions()` map ones.
 
-The server sends the state in pages of `page_size` entries, clamped to
-the namespace's `map.min_page_size` and `map.max_page_size` (100 and 1000
-by default; 0 leaves the size to the server), and times the whole load:
-past `map.subscribe_catch_up_timeout` (5 s by default) it closes the
-connection with 3008 "slow". The client therefore handles a page as soon
-as it reads it, even while the application has not taken earlier events;
-but a full read-ahead still stops the reading (Block 15), so an
-application that leaves its streams unread can make loads time out. The
-pages of one load may add up to `max_state_bytes`, 64 MiB by default,
-and so may the state or catch-up rebuilt from them; past it the
-subscription ends with `unsubscribed` 5 "map state too large". A server older than 6.8.0 answers a map subscription as a stream
-one, and the subscription ends with `unsubscribed` 6. The application
+The server sends the state in pages of `page_size` entries, clamped to the
+namespace's `map.min_page_size` and `map.max_page_size` (100 and 1000 by
+default; 0 leaves the size to the server), and times the whole load: past
+`map.subscribe_catch_up_timeout` (5 s by default) it closes the connection
+with 3008 "slow". The client therefore handles a page as soon as it reads
+it, even while the application has not taken earlier events; but a full
+read-ahead still stops the reading, so an application that leaves its
+streams unread can make loads time out. The pages of one load may add up to
+`max_state_bytes`, 64 MiB by default, and so may the state or catch-up
+rebuilt from them; past it the subscription ends with `unsubscribed` 5 "map
+state too large". A server older than 6.8.0 answers a map subscription as a
+stream one, and the subscription ends with `unsubscribed` 6. The application
 holds the `Sync` it gets, and its own copy of the map.
 
 After a lost connection, an `unsubscribe()` or a server's 2500, a map
@@ -879,7 +879,8 @@ became `unsubscribed`, 3 if the client became `disconnected`, 4 if it was
 closed, and otherwise (a lost transport, a server resubscribe, a delta
 failure) with 17 `PUBLISH_DROPPED`, safe to publish again once subscribed. A
 trailing send already handed to the connection, its publishes following it,
-keeps Block 13's rules for that connection. For data that must arrive, use
+keeps the rules of a call sent on that connection: losing the transport
+fails it with 11 `CONNECTION_CLOSED`. For data that must arrive, use
 `Client::publish`, which is never debounced (the documentation's own caveat).
 On a map subscription (unstable, the `unstable` feature),
 `MapSubscription::publish` and `publish_json` are debounced per key, each
@@ -1168,15 +1169,13 @@ since JavaScript handles are neither.
 
 ### Codes
 
-How to read a code: a code means something only with the event or error
-that carries it: 1 is "transport closed" in `Connecting` and "timeout" in
-an error. The same fields also carry server codes, in their own ranges
-(the last table). The client's logs show the state, code and reason
-(Block 21). Values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge
-adds `connecting` 5, 6 and 7, `subscribing` 2, `unsubscribed` 3 to 8
-(7 and 8: Block 47), and errors 15, 16 and 17; error 14 is centrifuge-js's
-shared-poll code (Block 47). Blocks are those of the repository's
-`CLAUDE.md`.
+How to read a code: a code means something only with the event or error that
+carries it: 1 is "transport closed" in `Connecting` and "timeout" in an
+error. The same fields also carry server codes, in their own ranges (the
+last table). The client's logs show the state, code and reason. Values
+follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5,
+6 and 7, `subscribing` 2, `unsubscribed` 3 to 8 (7 and 8 with `unstable`),
+and errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code.
 
 #### `connecting`
 
@@ -1184,14 +1183,14 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 0 | `codes::connecting::CONNECT_CALLED` | `"connect called"` | `connect()` was called (Block 1) | at once |
-| 1 | `codes::connecting::TRANSPORT_CLOSED` | `"transport closed"` | the transport failed or closed, an undecodable frame included (Blocks 1, 8) | the next transport of a first fallback sequence at once, else after the reconnect backoff (and the jitter window when it was connected) |
-| 2 | `codes::connecting::NO_PING` | `"no ping"` | no data from the server within its ping interval plus `max_server_ping_delay`, or a system sleep longer than that (Blocks 4, 25) | after the reconnect backoff |
-| 3 | `codes::connecting::SUBSCRIBE_TIMEOUT` | `"subscribe timeout"`; `"shared poll request timeout"` for a shared poll request | a subscribe got no reply within `Config::timeout`, so the server's state is unknown (Block 9); over an emulated transport, a shared poll track or untrack request got none, so whether its keys are tracked is unknown (Block 47, D12; `unstable`) | after the reconnect backoff |
-| 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time (Block 9) | after the reconnect backoff |
-| 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication (Block 19, D8) | after the reconnect backoff, which this connection did not reset |
-| 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called (Block 25, D5) | at once, after the jitter window when it was connected |
-| 7 | `codes::connecting::READ_AHEAD_OVERFLOW` | `"read-ahead overflow"` | a message arrived while the inbox of a browser transport was full, the application not reading its streams (Block 44, D7) | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing (Block 15) |
+| 0 | `codes::connecting::CONNECT_CALLED` | `"connect called"` | `connect()` was called | at once |
+| 1 | `codes::connecting::TRANSPORT_CLOSED` | `"transport closed"` | the transport failed or closed, an undecodable frame included | the next transport of a first fallback sequence at once, else after the reconnect backoff (and the jitter window when it was connected) |
+| 2 | `codes::connecting::NO_PING` | `"no ping"` | no data from the server within its ping interval plus `max_server_ping_delay`, or a system sleep longer than that | after the reconnect backoff |
+| 3 | `codes::connecting::SUBSCRIBE_TIMEOUT` | `"subscribe timeout"`; `"shared poll request timeout"` for a shared poll request | a subscribe got no reply within `Config::timeout`, so the server's state is unknown; over an emulated transport, a shared poll track or untrack request got none, so whether its keys are tracked is unknown (`unstable`) | after the reconnect backoff |
+| 4 | `codes::connecting::UNSUBSCRIBE_ERROR` | `"unsubscribe error"` | an unsubscribe failed or got no reply in time | after the reconnect backoff |
+| 5 | `codes::connecting::DELTA_ERROR` | `"delta error"` | a server-side subscription received a delta publication | after the reconnect backoff, which this connection did not reset |
+| 6 | `codes::connecting::RECONNECT_CALLED` | `"reconnect called"` | `reconnect()` was called | at once, after the jitter window when it was connected |
+| 7 | `codes::connecting::READ_AHEAD_OVERFLOW` | `"read-ahead overflow"` | a message arrived while the inbox of a browser transport was full, the application not reading its streams | after the reconnect backoff and the jitter window; before a server ping on that connection, the backoff keeps growing |
 
 #### `disconnected`
 
@@ -1199,11 +1198,11 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 0 | `codes::disconnected::DISCONNECT_CALLED` | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped (Blocks 1, 33) | never, until `connect()`; never after `close()` |
-| 1 | `codes::disconnected::UNAUTHORIZED` | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback (Blocks 1, 5, 17) | never, until `connect()` |
-| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the task running the client panicked (Block 28, D4), or an event handler did (Block 41, D4) | never: the client is closed; after a handler, until `connect()` |
-| 3 | `codes::disconnected::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected (Blocks 3, 8, 29) | never, until `connect()` |
-| 4 | `codes::disconnected::RUNTIME_SHUT_DOWN` | `"runtime shut down"` | the tokio runtime the client ran on shut down (Block 28, D3) | never: the client is closed |
+| 0 | `codes::disconnected::DISCONNECT_CALLED` | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped | never, until `connect()`; never after `close()` |
+| 1 | `codes::disconnected::UNAUTHORIZED` | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback | never, until `connect()` |
+| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the task running the client panicked, or an event handler did | never: the client is closed; after a handler, until `connect()` |
+| 3 | `codes::disconnected::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected | never, until `connect()` |
+| 4 | `codes::disconnected::RUNTIME_SHUT_DOWN` | `"runtime shut down"` | the tokio runtime the client ran on shut down | never: the client is closed |
 
 #### `subscribing`
 
@@ -1211,9 +1210,9 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 0 | `codes::subscribing::SUBSCRIBE_CALLED` | `"subscribe called"` | `subscribe()` was called (Block 9) | at once when connected, else when the client connects |
-| 1 | `codes::subscribing::TRANSPORT_CLOSED` | `"transport closed"` | the client lost its connection, or `disconnect()` was called (Block 9) | when the client connects |
-| 2 | `codes::subscribing::DELTA_ERROR` | `"delta error"` | a delta publication could not be applied (Block 19, D8) | after the resubscribe backoff, recovering from the last publication taken |
+| 0 | `codes::subscribing::SUBSCRIBE_CALLED` | `"subscribe called"` | `subscribe()` was called | at once when connected, else when the client connects |
+| 1 | `codes::subscribing::TRANSPORT_CLOSED` | `"transport closed"` | the client lost its connection, or `disconnect()` was called | when the client connects |
+| 2 | `codes::subscribing::DELTA_ERROR` | `"delta error"` | a delta publication could not be applied | after the resubscribe backoff, recovering from the last publication taken |
 
 #### `unsubscribed`
 
@@ -1221,15 +1220,15 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 0 | `codes::unsubscribed::UNSUBSCRIBE_CALLED` | `"unsubscribe called"` | `unsubscribe()` was called, or the subscription was removed (Block 9) | never, until `subscribe()` |
-| 1 | `codes::unsubscribed::UNAUTHORIZED` | `"unauthorized"` | a subscription token or data callback denied access, or returned an empty token, or error 109 came without a token callback (Blocks 9, 10), or a shared poll subscription's `get_signature` callback denied access (Block 47, D6; `unstable`) | never, until `subscribe()` |
-| 2 | `codes::unsubscribed::CLIENT_CLOSED` | `"client closed"` | the client was closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | never: the client is closed |
-| 3 | `codes::unsubscribed::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server refused a subscribe or `sub_refresh` with HTTP 413 (Block 8) | never, until `subscribe()` |
-| 4 | `codes::unsubscribed::NOT_GRANTED_ON_RECONNECT` | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply (Block 12) | never: it left the registry |
-| 5 | `codes::unsubscribed::MAP_STATE_TOO_LARGE` | `"map state too large"` | a map subscription's load passed its `max_state_bytes` (Block 45, D5; `unstable`) | never, until `subscribe()` |
-| 6 | `codes::unsubscribed::MAP_NOT_SUPPORTED` | `"map subscriptions not supported"` | the server answered a map subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 45, D15; `unstable`) | never, until `subscribe()` |
-| 7 | `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE` | `"shared poll delta bases too large"` | a shared poll subscription's delta bases would pass its `max_delta_bases_bytes` (Block 47, D11; `unstable`) | never, until `subscribe()` |
-| 8 | `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` | `"shared poll subscriptions not supported"` | the server answered a shared poll subscription as a stream one, as a Centrifugo before v6.8.0 does (Block 47, D4; `unstable`) | never, until `subscribe()` |
+| 0 | `codes::unsubscribed::UNSUBSCRIBE_CALLED` | `"unsubscribe called"` | `unsubscribe()` was called, or the subscription was removed | never, until `subscribe()` |
+| 1 | `codes::unsubscribed::UNAUTHORIZED` | `"unauthorized"` | a subscription token or data callback denied access, or returned an empty token, or error 109 came without a token callback, or a shared poll subscription's `get_signature` callback denied access (`unstable`) | never, until `subscribe()` |
+| 2 | `codes::unsubscribed::CLIENT_CLOSED` | `"client closed"` | the client was closed: `close()`, dropped, its runtime shut down or its driver panicked | never: the client is closed |
+| 3 | `codes::unsubscribed::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server refused a subscribe or `sub_refresh` with HTTP 413 | never, until `subscribe()` |
+| 4 | `codes::unsubscribed::NOT_GRANTED_ON_RECONNECT` | `"not subscribed by the server after reconnect"` | a server-side subscription absent from a reconnect's connect reply | never: it left the registry |
+| 5 | `codes::unsubscribed::MAP_STATE_TOO_LARGE` | `"map state too large"` | a map subscription's load passed its `max_state_bytes` (`unstable`) | never, until `subscribe()` |
+| 6 | `codes::unsubscribed::MAP_NOT_SUPPORTED` | `"map subscriptions not supported"` | the server answered a map subscription as a stream one, as a Centrifugo before v6.8.0 does (`unstable`) | never, until `subscribe()` |
+| 7 | `codes::unsubscribed::SHARED_POLL_DELTA_BASES_TOO_LARGE` | `"shared poll delta bases too large"` | a shared poll subscription's delta bases would pass its `max_delta_bases_bytes` (`unstable`) | never, until `subscribe()` |
+| 8 | `codes::unsubscribed::SHARED_POLL_NOT_SUPPORTED` | `"shared poll subscriptions not supported"` | the server answered a shared poll subscription as a stream one, as a Centrifugo before v6.8.0 does (`unstable`) | never, until `subscribe()` |
 
 #### `error`
 
@@ -1237,50 +1236,50 @@ shared-poll code (Block 47). Blocks are those of the repository's
 
 | Code | Constant | Reason or message | Cause | Then |
 |---|---|---|---|---|
-| 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription (Block 13); over websocket, a shared poll track or untrack request got none (Block 47, D7; `unstable`) | a call fails and may succeed when retried; a refresh is retried; for a shared poll request, an `Error` event of kind `Track` or `Untrack`, and the signatures held are tracked again after 1 to 15 s (track only) |
-| 2 | `codes::error::TRANSPORT_CLOSED` | the transport's own message | a transport failed to open or closed while connecting (Blocks 1, 8) | an `Error` event; the client keeps trying |
-| 3 | `codes::error::DISCONNECTED` | `"disconnected"` | the client entered `disconnected` while a call was pending, or a `ready()` waited (Blocks 13, 30) | the call fails; a retry can succeed after `connect()` |
-| 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down or its driver panicked (Block 33) | the call fails; a retry never succeeds |
-| 5 | `codes::error::CONNECT_TOKEN` | the token callback's message | the token callback failed while getting a token to connect with (Block 1) | an `Error` event; the attempt is retried after the reconnect backoff |
-| 6 | `codes::error::REFRESH_TOKEN` | the token callback's message | the token callback failed while getting a token to refresh with (Block 5) | an `Error` event; the refresh is retried after 5 to 10 s |
-| 7 | `codes::error::SUBSCRIPTION_UNSUBSCRIBED` | `"subscription unsubscribed"` | a subscription-level call or `ready()` met an unsubscribed subscription (Blocks 13, 30) | the call fails; a retry can succeed after `subscribe()` |
-| 8 | `codes::error::SUBSCRIPTION_SUBSCRIBE_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to subscribe with (Block 10) | an `Error` event; the subscribe is retried after the resubscribe backoff |
-| 9 | `codes::error::SUBSCRIPTION_REFRESH_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to refresh with (Block 10) | an `Error` event; the refresh is retried after 10 to 20 s |
-| 10 | `codes::error::TRANSPORT_WRITE` | `"transport write error"` | an emulation request carrying the call was answered with HTTP 413 (Block 8) | the call fails; a retry with the same data never succeeds |
-| 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply (Block 13) | the call fails; a retry can succeed once reconnected |
-| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback (Blocks 8, 10, 17), or a shared poll track batch, given or signed by `get_signature`, over `max_track_frame_bytes` (Block 47; `unstable`) | building fails; for a data callback, an `Error` event and a retry after the backoff; for a track batch given, an `Error` event of kind `Track`, and its keys end with a removal `Update` each; for a signature from `get_signature`, as error 14 |
-| 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed (Block 11) | an `Error` event; getState is retried after the resubscribe backoff |
-| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message; `"get_signature callback required for track(keys)"` without one | a shared poll subscription's `get_signature` callback failed, or keys need a signature and there is no callback (Block 47, D6; `unstable`) | an `Error` event of kind `Track`, or `SignatureRefresh` when refreshing or signing after a subscribe; the keys stay tracked, and the callback is asked again after 5 to 30 s, growing with each failure; without a callback, the next subscribe reports it again |
-| 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied (Block 19, D8) | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
-| 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client (Block 41, D6) | the call fails at once and is abandoned |
-| 17 | `codes::error::PUBLISH_DROPPED` | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up (Block 46, D10) | the call fails; publish again when subscribed |
+| 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription; over websocket, a shared poll track or untrack request got none (`unstable`) | a call fails and may succeed when retried; a refresh is retried; for a shared poll request, an `Error` event of kind `Track` or `Untrack`, and the signatures held are tracked again after 1 to 15 s (track only) |
+| 2 | `codes::error::TRANSPORT_CLOSED` | the transport's own message | a transport failed to open or closed while connecting | an `Error` event; the client keeps trying |
+| 3 | `codes::error::DISCONNECTED` | `"disconnected"` | the client entered `disconnected` while a call was pending, or a `ready()` waited | the call fails; a retry can succeed after `connect()` |
+| 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down or its driver panicked | the call fails; a retry never succeeds |
+| 5 | `codes::error::CONNECT_TOKEN` | the token callback's message | the token callback failed while getting a token to connect with | an `Error` event; the attempt is retried after the reconnect backoff |
+| 6 | `codes::error::REFRESH_TOKEN` | the token callback's message | the token callback failed while getting a token to refresh with | an `Error` event; the refresh is retried after 5 to 10 s |
+| 7 | `codes::error::SUBSCRIPTION_UNSUBSCRIBED` | `"subscription unsubscribed"` | a subscription-level call or `ready()` met an unsubscribed subscription | the call fails; a retry can succeed after `subscribe()` |
+| 8 | `codes::error::SUBSCRIPTION_SUBSCRIBE_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to subscribe with | an `Error` event; the subscribe is retried after the resubscribe backoff |
+| 9 | `codes::error::SUBSCRIPTION_REFRESH_TOKEN` | the token callback's message | a subscription token callback failed while getting a token to refresh with | an `Error` event; the refresh is retried after 10 to 20 s |
+| 10 | `codes::error::TRANSPORT_WRITE` | `"transport write error"` | an emulation request carrying the call was answered with HTTP 413 | the call fails; a retry with the same data never succeeds |
+| 11 | `codes::error::CONNECTION_CLOSED` | `"connection closed"` | the transport a call was sent on closed before its reply | the call fails; a retry can succeed once reconnected |
+| 12 | `codes::error::BAD_CONFIGURATION` | what is misconfigured, or the data callback's message | a builder that cannot work, a token expiring without a callback, error 109 without a token callback, or a failing connect or subscription data callback, or a shared poll track batch, given or signed by `get_signature`, over `max_track_frame_bytes` (`unstable`) | building fails; for a data callback, an `Error` event and a retry after the backoff; for a track batch given, an `Error` event of kind `Track`, and its keys end with a removal `Update` each; for a signature from `get_signature`, as error 14 |
+| 13 | `codes::error::SUBSCRIPTION_GET_STATE` | the getState callback's message | the subscription getState callback failed | an `Error` event; getState is retried after the resubscribe backoff |
+| 14 | `codes::error::SHARED_POLL_GET_SIGNATURE` | the `get_signature` callback's message; `"get_signature callback required for track(keys)"` without one | a shared poll subscription's `get_signature` callback failed, or keys need a signature and there is no callback (`unstable`) | an `Error` event of kind `Track`, or `SignatureRefresh` when refreshing or signing after a subscribe; the keys stay tracked, and the callback is asked again after 5 to 30 s, growing with each failure; without a callback, the next subscribe reports it again |
+| 15 | `codes::error::DELTA` | what failed in the delta | a delta publication could not be applied | an `Error` event; the subscription subscribes again (`subscribing` 2) or, server-side, the client reconnects (`connecting` 5) |
+| 16 | `codes::error::WOULD_DEADLOCK` | `"would deadlock: called from an event handler of this client"` | a handler of the client waited on a call, `ready()` or `close()` of that client | the call fails at once and is abandoned |
+| 17 | `codes::error::PUBLISH_DROPPED` | `"publish dropped"` | a publish waiting in a debounce window was dropped, never sent, as its subscription left `subscribed` while the client stayed up | the call fails; publish again when subscribed |
 
 #### Server codes
 
 | Codes | Carried by | Then |
 |---|---|---|
-| disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` (Block 3) |
-| disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff (Block 3) |
-| disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing (Block 15); during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again (Block 45) |
-| disconnect 3014 | `Connecting` | drops the tokens a token callback can fetch again, keeps a fixed token without one, makes every stream position unmatchable (drops a map subscription's position and delta bases, Block 45), then reconnects (Block 11) |
-| websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()` (Block 3); other close codes below 3000 give `Connecting` 1 |
-| unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed (Block 10) |
-| unsubscribe from 2500 | `Subscribing` | subscribes again at once (Block 10); 2502 drops the token and the position first (Block 11); on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112 (Block 45); any code ends a server-side subscription (Block 12) |
-| connect error, temporary or below 100, or 109 | `Error`, then `Connecting` | reconnects after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12, then `Disconnected` 1 (Blocks 1, 5, 17) |
-| connect error, any other | `Disconnected` | with the error's code, until `connect()` (Block 1) |
-| refresh error, temporary or below 100 | `Error` | retried after 5 to 10 s (Block 5) |
-| refresh error, any other | `Disconnected` | with the error's code (Block 5) |
-| subscribe error 109 | `Error` or `Unsubscribed` 1 | a new token, then resubscribes; without a token callback, error 12, then `Unsubscribed` 1 (Block 10) |
-| subscribe error 112 with getState | none | the state is reloaded and the subscription resubscribes after the backoff (Block 11); on a map subscription, with `FromScratch` no `Error` and the state is loaded again after the backoff, with `Fatal` `Unsubscribed` 112 (Block 45) |
-| subscribe error 113 | `Error` | temporary: the map subscription's load starts again after the backoff (Block 45) |
-| subscribe error, temporary or below 100 | `Error` | resubscribes after the resubscribe backoff (Block 9) |
-| subscribe error, any other | `Unsubscribed` | with the error's code (Block 9) |
-| `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s (Block 10) |
-| `sub_refresh` error, any other | `Unsubscribed` | with the error's code (Block 10) |
-| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109: `get_signature` signs every key tracked again at once, and a 109 to that refresh's own track request retries it after 5 to 30 s; without the callback, nothing more until the next subscribe tracks the keys again; a temporary error, one below 100, or no reply within `Config::timeout` over websocket (error 1): the signatures held are tracked again after 1 to 15 s, longer with each failure in a row; any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and those of the request's frames not yet sent with them (Block 47, D7) |
-| shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more (Block 47, D7) |
-| shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription (Blocks 9, 10); 108 on a namespace that is not shared poll (Block 47, D4) |
-| call error | `CallError` | the server's code, message and `temporary`; the client never retries a call (Block 13) |
+| disconnect 3500–3999, 4500–4999 | `Disconnected` | stays disconnected until `connect()` |
+| disconnect 3000–3499, 4000–4499, from 5000 | `Connecting` | reconnects after the reconnect backoff |
+| disconnect 3008 | `Connecting` | as above; before the first server ping on that connection, the backoff keeps growing; during a map subscription's load it means the namespace's `map.subscribe_catch_up_timeout` passed, and the next connection loads again |
+| disconnect 3014 | `Connecting` | drops the tokens a token callback can fetch again, keeps a fixed token without one, makes every stream position unmatchable (drops a map subscription's position and delta bases), then reconnects |
+| websocket close 1009 | `Disconnected` 3 | stays disconnected until `connect()`; other close codes below 3000 give `Connecting` 1 |
+| unsubscribe below 2500 | `Unsubscribed` | stays unsubscribed |
+| unsubscribe from 2500 | `Subscribing` | subscribes again at once; 2502 drops the token and the position first; on a map subscription 2500 recovers, and after `map_clear` that recovery fails with 112; any code ends a server-side subscription |
+| connect error, temporary or below 100, or 109 | `Error`, then `Connecting` | reconnects after the backoff; for 109 the next attempt gets a new token, and without a token callback the client reports error 12, then `Disconnected` 1 |
+| connect error, any other | `Disconnected` | with the error's code, until `connect()` |
+| refresh error, temporary or below 100 | `Error` | retried after 5 to 10 s |
+| refresh error, any other | `Disconnected` | with the error's code |
+| subscribe error 109 | `Error` or `Unsubscribed` 1 | a new token, then resubscribes; without a token callback, error 12, then `Unsubscribed` 1 |
+| subscribe error 112 with getState | none | the state is reloaded and the subscription resubscribes after the backoff; on a map subscription, with `FromScratch` no `Error` and the state is loaded again after the backoff, with `Fatal` `Unsubscribed` 112 |
+| subscribe error 113 | `Error` | temporary: the map subscription's load starts again after the backoff |
+| subscribe error, temporary or below 100 | `Error` | resubscribes after the resubscribe backoff |
+| subscribe error, any other | `Unsubscribed` | with the error's code |
+| `sub_refresh` error, temporary or below 100 | `Error` | retried after 10 to 20 s |
+| `sub_refresh` error, any other | `Unsubscribed` | with the error's code |
+| shared poll `sub_refresh` error, `type` 1 (track) | `Error` of kind `Track` | 109: `get_signature` signs every key tracked again at once, and a 109 to that refresh's own track request retries it after 5 to 30 s; without the callback, nothing more until the next subscribe tracks the keys again; a temporary error, one below 100, or no reply within `Config::timeout` over websocket (error 1): the signatures held are tracked again after 1 to 15 s, longer with each failure in a row; any other: the keys of the request are untracked, with an untrack command and a removal `Update` each, as for 103 (signature refused) and 106 (key limit), and those of the request's frames not yet sent with them |
+| shared poll `sub_refresh` error, `type` 2 (untrack) | `Error` of kind `Untrack` | nothing more |
+| shared poll subscribe error (`type` 4) | as subscribe errors | as for a stream subscription; 108 on a namespace that is not shared poll |
+| call error | `CallError` | the server's code, message and `temporary`; the client never retries a call |
 
 ### Configuration
 
@@ -1918,9 +1917,8 @@ implemented so far.
 
 ### Performance tests
 
-Scenarios tagged `@P` (Block 14) run outside cucumber, each claimed by a
-benchmark, measurement or simulation that names it, and a test fails if one
-has none:
+Scenarios tagged `@P` run outside cucumber, each claimed by a benchmark,
+measurement or simulation that names it, and a test fails if one has none:
 
 ```sh
 cargo test --test perf_sim                                 # simulated clock, runs with the tests
@@ -1945,15 +1943,15 @@ version of `gungraun` in `Cargo.lock`
 
 ### Seeded chaos
 
-`tests/chaos.rs` (Block 16) drives the sans-IO core through random
-operations against a simulated server, on a simulated clock, and checks
-the client's invariants after every step: legal state changes, at most one
-transport, liveness once faults stop, cleanup after `disconnect()`, calls
-that settle, exactly-once delivery on recoverable channels, a bounded
-read-ahead, batches that hold their calls and respect the frame cap, and
-publications that carry exactly the payload published, also when they come
-as Fossil deltas, some of them broken by the simulated server. A seed fixes
-every choice, so a failure prints the command that reruns it:
+`tests/chaos.rs` drives the sans-IO core through random operations against a
+simulated server, on a simulated clock, and checks the client's invariants
+after every step: legal state changes, at most one transport, liveness once
+faults stop, cleanup after `disconnect()`, calls that settle, exactly-once
+delivery on recoverable channels, a bounded read-ahead, batches that hold
+their calls and respect the frame cap, and publications that carry exactly
+the payload published, also when they come as Fossil deltas, some of them
+broken by the simulated server. A seed fixes every choice, so a failure
+prints the command that reruns it:
 
 ```sh
 cargo test --test chaos                                     # seeds 0-299, runs with the tests

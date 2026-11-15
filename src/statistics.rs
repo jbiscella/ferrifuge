@@ -1,4 +1,5 @@
-//! Connection, traffic and delta compression counters (Block 31).
+//! Connection, traffic and delta compression counters.
+// Block 31.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -6,9 +7,9 @@ use std::time::SystemTime;
 use crate::State;
 use crate::sans_io::{FrameId, TransportKind};
 
-/// A snapshot of a client's counters since it was built (Block 31), read
-/// without a round trip: for status displays, logs, support tickets and
-/// fleet telemetry.
+/// A snapshot of a client's counters since it was built, read without a
+/// round trip: for status displays, logs, support tickets and fleet
+/// telemetry.
 ///
 /// ```no_run
 /// # fn run(client: &ferrifuge::Client) {
@@ -19,6 +20,7 @@ use crate::sans_io::{FrameId, TransportKind};
 /// );
 /// # }
 /// ```
+// Block 31.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Statistics {
@@ -47,12 +49,12 @@ pub struct Statistics {
     /// Commands written, pongs included.
     pub messages_out: u64,
     /// Publications of client-side and server-side subscriptions delivered:
-    /// taken from a stream, or counted as taken where no stream holds them
-    /// (Block 15). A withdrawn publication never counts. With the
-    /// `unstable` feature, a map subscription's `Update` counts, its `Sync`
-    /// not (Block 45, D11), and a shared poll subscription's `Update` of a
-    /// publication counts, a removal the client made itself not (Block 47,
-    /// D13).
+    /// taken from a stream, or counted as taken where no stream holds them.
+    /// A withdrawn publication never counts. With the `unstable` feature, a
+    /// map subscription's `Update` counts, its `Sync` not, and a shared
+    /// poll subscription's `Update` of a publication counts, a removal the
+    /// client made itself not.
+    // Block 15; Block 45, D11; Block 47, D13.
     pub publications_delivered: u64,
     /// Client-side subscriptions in the registry, of every kind.
     pub subscriptions: usize,
@@ -60,10 +62,10 @@ pub struct Statistics {
     pub server_subscriptions: usize,
 }
 
-/// What delta compression did on a subscription since it was created
-/// (Block 31), as centrifuge-js `deltaStats()`: counted for each
-/// publication whose payload was rebuilt while delta was negotiated, before
-/// it is delivered. A subscription without delta reports zeros.
+/// What delta compression did on a subscription since it was created, as
+/// centrifuge-js `deltaStats()`: counted for each publication whose payload
+/// was rebuilt while delta was negotiated, before it is delivered. A
+/// subscription without delta reports zeros.
 ///
 /// ```no_run
 /// # fn run(subscription: &ferrifuge::Subscription) {
@@ -71,6 +73,7 @@ pub struct Statistics {
 /// println!("{} deltas, ratio {:.2}", delta.delta_payloads, delta.compression_ratio());
 /// # }
 /// ```
+// Block 31.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeltaStatistics {
@@ -117,7 +120,8 @@ impl DeltaStatistics {
     }
 }
 
-/// The core's counters (Block 31, D2).
+/// The core's counters.
+// Block 31, D2.
 #[derive(Debug, Default)]
 pub(crate) struct Counters {
     pub(crate) connects: u64,
@@ -137,7 +141,8 @@ pub(crate) struct Counters {
     /// doing, not as a failure.
     pub(crate) cancelling: bool,
     /// Bytes the transport adds to each frame it writes: the `\n` after a
-    /// JSON frame over WebTransport (Block 48, D7, D18), none elsewhere.
+    /// JSON frame over WebTransport, none elsewhere.
+    // Block 48, D7, D18.
     pub(crate) trailer: u64,
 }
 

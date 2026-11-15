@@ -1,8 +1,8 @@
-//! Shared poll subscriptions of the client (Block 47): a subscription on
-//! which the application names keys, tracked under signatures its backend
-//! issued; Centrifugo polls the backend once per key for every client and
-//! sends each new version. They share the client's registry with the other
-//! kinds.
+//! Shared poll subscriptions of the client: a subscription on which the
+//! application names keys, tracked under signatures its backend issued;
+//! Centrifugo polls the backend once per key for every client and sends
+//! each new version. They share the client's registry with the other kinds.
+// Block 47.
 
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -23,12 +23,11 @@ use crate::{
     SubscriptionState, TokenError,
 };
 
-/// A shared poll subscription to a channel, in its client's registry
-/// (Block 47): the application names the keys it follows, each tracked
-/// under a signature its backend issued, and its stream yields its
-/// lifecycle events, then a [`SharedPollSubscriptionEvent::Update`] per new
-/// version of a tracked key's value. Clones are handles to the same
-/// subscription.
+/// A shared poll subscription to a channel, in its client's registry: the
+/// application names the keys it follows, each tracked under a signature
+/// its backend issued, and its stream yields its lifecycle events, then a
+/// [`SharedPollSubscriptionEvent::Update`] per new version of a tracked
+/// key's value. Clones are handles to the same subscription.
 ///
 /// Centrifugo (6.8.0 and later, a namespace with `subscription_type:
 /// shared_poll`) polls the application's backend once per key on behalf of
@@ -54,6 +53,7 @@ use crate::{
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 47.
 #[derive(Clone)]
 pub struct SharedPollSubscription {
     shared: Arc<Shared>,
@@ -81,8 +81,9 @@ impl Eq for SharedPollSubscription {}
 
 impl SharedPollSubscription {
     /// What delta compression did on the shared poll subscription since it
-    /// was created: each value received with delta on counts, whole or as
-    /// a delta (Block 47, D13). Zeros without negotiated delta.
+    /// was created: each value received with delta on counts, whole or as a
+    /// delta. Zeros without negotiated delta.
+    // Block 47, D13.
     #[must_use]
     pub fn delta_statistics(&self) -> crate::DeltaStatistics {
         lock(&self.shared.core)
@@ -116,7 +117,8 @@ impl SharedPollSubscription {
     /// empty set does nothing. Returns at once: failures come as
     /// [`SharedPollSubscriptionEvent::Error`] events with code 14, the
     /// callback being asked again after 5 to 30 s, also when there is no
-    /// callback, the keys staying tracked (Block 47, D6).
+    /// callback, the keys staying tracked.
+    // Block 47, D6.
     pub fn track(&self, keys: impl IntoIterator<Item = impl Into<String>>) {
         let keys = keys.into_iter().map(Into::into).collect();
         self.shared.apply(Input::TrackKeys(self.id, keys));
@@ -127,14 +129,14 @@ impl SharedPollSubscription {
     /// given and the one held. The client keeps the signature to track them
     /// again after a reconnect. An empty set does nothing. Returns at once:
     /// a refusal comes as a [`SharedPollSubscriptionEvent::Error`] event,
-    /// with a removal [`SharedPollSubscriptionEvent::Update`] for each key
-    /// (Block 47, D6, D7).
+    /// with a removal [`SharedPollSubscriptionEvent::Update`] for each key.
     ///
     /// With a [`SharedPollSubscriptionBuilder::get_signature`] callback,
     /// the client renews a signature with an expiry through it. Without
     /// one, renewing is the application's: call this again with a new
     /// signature before it expires, as the server stops tracking its keys
     /// some time after it, with no event.
+    // Block 47, D6, D7.
     pub fn track_with_signature(
         &self,
         items: impl IntoIterator<Item = SharedPollTrackItem>,
@@ -164,8 +166,9 @@ impl SharedPollSubscription {
             .unwrap_or_default()
     }
 
-    /// Sets the data sent with every subscribe command from now on (Block
-    /// 32), sending nothing now.
+    /// Sets the data sent with every subscribe command from now on, sending
+    /// nothing now.
+    // Block 32.
     pub fn set_data(&self, data: impl Into<Vec<u8>>) {
         self.shared
             .apply(Input::SetSubscriptionData(self.id, data.into()));
@@ -181,11 +184,12 @@ impl SharedPollSubscription {
         super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
     }
 
-    /// Sets the shared poll subscription's handler (Block 47, D15), as
+    /// Sets the shared poll subscription's handler, as
     /// [`crate::Subscription::set_handler`] does a subscription's: from now
     /// on it takes the events, one at a time, in order with those of the
     /// client's other handlers; its events count as delivered when its
     /// method returns.
+    // Block 47, D15.
     pub fn set_handler(&self, handler: impl super::SharedPollSubscriptionHandler) {
         super::handler::set_shared_poll_handler(&self.shared, self.id, Box::new(handler));
     }
@@ -205,8 +209,9 @@ impl SharedPollSubscription {
 
     /// Events from now on, as [`crate::Subscription::events`] gives a
     /// subscription's: an event counts as delivered once this stream yields
-    /// it, so take it before calling [`Self::subscribe`] to get every one; a
-    /// later call takes over (Block 15).
+    /// it, so take it before calling [`Self::subscribe`] to get every one;
+    /// a later call takes over.
+    // Block 15.
     pub fn events(
         &self,
     ) -> impl Stream<Item = SharedPollSubscriptionEvent> + MaybeSend + Unpin + use<> {
@@ -338,21 +343,23 @@ impl SharedPollSubscriptionBuilder {
         self
     }
 
-    /// Sets the callback signing the keys of [`SharedPollSubscription::track`]
-    /// and the keys tracked without a signature held, given them in order;
-    /// it returns a [`SharedPollSignature`] from the application's backend
-    /// (Block 47, D6). It runs beside the client, so a slow backend holds
-    /// back no ping or call.
+    /// Sets the callback signing the keys of
+    /// [`SharedPollSubscription::track`] and the keys tracked without a
+    /// signature held, given them in order; it returns a
+    /// [`SharedPollSignature`] from the application's backend. It runs
+    /// beside the client, so a slow backend holds back no ping or call.
     ///
     /// The client asks it for the keys in chunks when one batch of them
     /// would pass `max_track_frame_bytes`, one at a time, each sized for
     /// the longest signature it has returned, at least 128 bytes. A key
-    /// asked for and not returned is revoked. It is asked again for every key tracked when a signature
-    /// expires, at the earliest expiry the server reports, or when the
-    /// server refuses one with 109; the signatures it returns then replace
-    /// those they cover. A failure is reported as an `Error` event with
-    /// code 14 and retried after 5 to 30 s; [`TokenError::Unauthorized`]
-    /// ends the subscription with `unsubscribed` 1 (Block 47, D6, D7).
+    /// asked for and not returned is revoked. It is asked again for every
+    /// key tracked when a signature expires, at the earliest expiry the
+    /// server reports, or when the server refuses one with 109; the
+    /// signatures it returns then replace those they cover. A failure is
+    /// reported as an `Error` event with code 14 and retried after 5 to 30
+    /// s; [`TokenError::Unauthorized`] ends the subscription with
+    /// `unsubscribed` 1.
+    // Block 47, D6; Block 47, D6, D7.
     #[must_use]
     pub fn get_signature<F, Fut>(mut self, get_signature: F) -> Self
     where
@@ -385,10 +392,11 @@ impl SharedPollSubscriptionBuilder {
     }
 
     /// Bytes a track or untrack request may take, 60 000 by default: a
-    /// request over it is split (Block 47, D7). Keep it below the server's
+    /// request over it is split. Keep it below the server's
     /// `websocket.message_size_limit` and the emulation endpoint's
     /// `max_request_body_size`, 65 536 each by default: an operator who
     /// lowers either lowers this.
+    // Block 47, D7.
     #[must_use]
     pub fn max_track_frame_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.options.max_track_frame_bytes = bytes;
@@ -397,13 +405,14 @@ impl SharedPollSubscriptionBuilder {
 
     /// Asks the server to send each key's changes as deltas in `format`
     /// against that key's previous value, on namespaces that allow it
-    /// (`allowed_delta_types`; Block 47, D10). The client then holds one
-    /// copy of every tracked key's last value, each within
+    /// (`allowed_delta_types`). The client then holds one copy of every
+    /// tracked key's last value, each within
     /// [`crate::Config::max_message_bytes`] and together within
     /// [`Self::max_delta_bases_bytes`], from each subscribe until the key
     /// is untracked or the subscription leaves `subscribed`. On Centrifugo
     /// OSS a change goes as a delta only when the backend's refresh
     /// response gives the previous value as `prev_data`.
+    // Block 47, D10.
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.options.common = self.options.common.delta(format);
@@ -414,7 +423,8 @@ impl SharedPollSubscriptionBuilder {
     /// by default: a key whose base would pass it is not delivered, and the
     /// subscription sends an unsubscribe command and ends with
     /// `unsubscribed` 7 "shared poll delta bases too large", without
-    /// subscribing again by itself (Block 47, D11).
+    /// subscribing again by itself.
+    // Block 47, D11.
     #[must_use]
     pub fn max_delta_bases_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.options.max_delta_bases_bytes = bytes;
@@ -422,8 +432,9 @@ impl SharedPollSubscriptionBuilder {
     }
 
     /// The shared poll subscription's handler, which takes its events from
-    /// the start instead of a stream (Block 47, D15); see
+    /// the start instead of a stream; see
     /// [`SharedPollSubscription::set_handler`].
+    // Block 47, D15.
     #[must_use]
     pub fn handler(mut self, handler: impl super::SharedPollSubscriptionHandler) -> Self {
         self.handler = Some(std::sync::Mutex::new(Box::new(handler)));
@@ -474,11 +485,12 @@ impl SharedPollSubscriptionBuilder {
 }
 
 impl Client {
-    /// Starts building a shared poll subscription to `channel` (Block 47).
+    /// Starts building a shared poll subscription to `channel`.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47.
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn shared_poll_subscription_builder(
         &self,

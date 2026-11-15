@@ -1,8 +1,9 @@
-//! Block 46: publish debouncing as advised by the server. A subscription's
-//! publishes send the first value at once and the latest one per interval,
-//! per key (`""` on a stream subscription); a publish merged in a window
-//! resolves with the result of the send that carried later data, never
-//! before the server answered it. Without an interval, nothing here runs.
+//! Publish debouncing as advised by the server. A subscription's publishes
+//! send the first value at once and the latest one per interval, per key
+//! (`""` on a stream subscription); a publish merged in a window resolves
+//! with the result of the send that carried later data, never before the
+//! server answered it. Without an interval, nothing here runs.
+// Block 46.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -10,8 +11,9 @@ use std::time::Duration;
 use super::{Action, CallId, DebounceTimer, Machine, SubscriptionId};
 use crate::{CallError, CallRequest, codes};
 
-/// The windows of a machine (Block 46, D5): one timer each, as the core has
-/// no clock to keep one per subscription.
+/// The windows of a machine: one timer each, as the core has no clock to
+/// keep one per subscription.
+// Block 46, D5.
 #[derive(Debug, Default)]
 pub(super) struct Debouncing {
     /// Whether [`Machine::with_publish_debounce`] turned it on.
@@ -27,33 +29,38 @@ struct Window {
     subscription: SubscriptionId,
     key: String,
     /// The value its timer will send: the latest publish made in it, or
-    /// `None` when none waits (D11).
+    /// `None` when none waits.
+    // D11.
     latest: Option<CallRequest>,
     /// The publishes waiting for that value's result, in the order they
     /// were made.
     waiters: Vec<CallId>,
 }
 
-/// What a subscription that was advised an interval holds (Block 46, D15).
+/// What a subscription that was advised an interval holds.
+// Block 46, D15.
 #[derive(Debug)]
 pub(super) struct Windows {
-    /// The effective interval (D2).
+    /// The effective interval.
+    // D2.
     interval: Duration,
     /// The timer of the window open for each key.
     by_key: HashMap<String, DebounceTimer>,
 }
 
 /// The error of a publish dropped from a window as its subscription left
-/// `subscribed` while the client stayed up (Block 46, D10).
+/// `subscribed` while the client stayed up.
+// Block 46, D10.
 pub(super) fn publish_dropped() -> CallError {
     CallError::new(codes::error::PUBLISH_DROPPED, "publish dropped")
 }
 
 impl Machine {
     /// The windows a subscribe reply advising `advised` milliseconds leaves
-    /// the subscription with (Block 46, D2): the interval is at most
-    /// `Config::timeout`, as a wait of a call is (D6); 0, or a machine
-    /// without [`Machine::with_publish_debounce`], means no debounce.
+    /// the subscription with: the interval is at most `Config::timeout`, as
+    /// a wait of a call is; 0, or a machine without
+    /// [`Machine::with_publish_debounce`], means no debounce.
+    // Block 46, D2; D6.
     pub(super) fn debounce_windows(&self, advised: u32) -> Option<Box<Windows>> {
         if !self.debouncing.enabled {
             return None;
@@ -67,9 +74,10 @@ impl Machine {
         })
     }
 
-    /// The gate of a call about to start (Block 46, D3): a debounced
-    /// publish with no open window opens one and goes on, one with an open
-    /// window waits there, its data the window's latest. Whether it waits.
+    /// The gate of a call about to start: a debounced publish with no open
+    /// window opens one and goes on, one with an open window waits there,
+    /// its data the window's latest. Whether it waits.
+    // Block 46, D3.
     pub(super) fn debounce_gate(&mut self, id: CallId) -> bool {
         let Some(subscription) = self.debounced_subscription(id) else {
             return false;
@@ -98,10 +106,11 @@ impl Machine {
         true
     }
 
-    /// A remove of `key` met the gate (Block 46, D12): if the key has an
-    /// open window it closes, its timer cancelled, its latest value dropped,
-    /// and the publishes waiting in it follow the remove's result. The
-    /// remove itself goes on, undebounced, and opens no window.
+    /// A remove of `key` met the gate: if the key has an open window it
+    /// closes, its timer cancelled, its latest value dropped, and the
+    /// publishes waiting in it follow the remove's result. The remove
+    /// itself goes on, undebounced, and opens no window.
+    // Block 46, D12.
     #[cfg(feature = "unstable")]
     fn close_window_for_remove(&mut self, subscription: SubscriptionId, key: &str, remove: CallId) {
         let Some(windows) = self.subscription_windows(subscription) else {
@@ -136,9 +145,10 @@ impl Machine {
         self.actions.push(Action::SetDebounceTimer(timer, interval));
     }
 
-    /// A window's timer fired (Block 46, D3): the latest value goes out as
-    /// a trailing send and a new window opens, or, with none, the window
-    /// closes. A timer whose window is gone is ignored.
+    /// A window's timer fired: the latest value goes out as a trailing send
+    /// and a new window opens, or, with none, the window closes. A timer
+    /// whose window is gone is ignored.
+    // Block 46, D3.
     pub(super) fn debounce_timer_fired(&mut self, timer: DebounceTimer) {
         let Some(window) = self.debouncing.windows.remove(&timer) else {
             return;
@@ -158,9 +168,10 @@ impl Machine {
         }
     }
 
-    /// Every window of `subscription` ends, as it left `subscribed` (Block
-    /// 46, D10): their timers are cancelled, the values waiting in them
-    /// never sent, and the publishes waiting fail with `error`.
+    /// Every window of `subscription` ends, as it left `subscribed`: their
+    /// timers are cancelled, the values waiting in them never sent, and the
+    /// publishes waiting fail with `error`.
+    // Block 46, D10.
     pub(super) fn drop_debounce_windows(
         &mut self,
         subscription: SubscriptionId,
@@ -186,7 +197,8 @@ impl Machine {
 
     /// Frees what closed windows held, once none is open: `subscription`'s
     /// table, a subscription usually has none open for long, and the
-    /// machine's (Block 46, D15, "A closed window frees its memory").
+    /// machine's.
+    // Block 46, D15, "A closed window frees its memory".
     fn close_windows_of(&mut self, subscription: SubscriptionId) {
         if let Some(windows) = self.subscription_windows(subscription)
             && windows.by_key.is_empty()
@@ -198,8 +210,9 @@ impl Machine {
         }
     }
 
-    /// Waiter `id` of the window of `timer` was abandoned (Block 46, D11):
-    /// with none left, the window goes on with nothing to send.
+    /// Waiter `id` of the window of `timer` was abandoned: with none left,
+    /// the window goes on with nothing to send.
+    // Block 46, D11.
     pub(super) fn debounce_waiter_abandoned(&mut self, timer: DebounceTimer, id: CallId) {
         let Some(window) = self.debouncing.windows.get_mut(&timer) else {
             return;

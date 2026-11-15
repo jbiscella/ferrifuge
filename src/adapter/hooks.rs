@@ -1,16 +1,14 @@
-//! What the soak's hooks read (Block 52, D6, D8): the timers the core set
-//! and did not cancel, the timers the driver runs, and the calls every
-//! registry holds, each with its age. Kept only once a client asks for
-//! them ([`super::Client::record_timers`]), so that no other test pays for
-//! them: the allocation gates of Block 14 run with this feature too.
+//! What the soak's hooks read: the timers the core set and did not cancel,
+//! the timers the driver runs, and the calls every registry holds, each
+//! with its age. Kept only once a client asks for them
+//! ([`super::Client::record_timers`]), so that no other test pays for them:
+//! the allocation gates run with this feature too.
 //!
 //! A `__test-hooks` module: outside semver, so its types need not be
-//! `#[non_exhaustive]` (Block 54, D2).
-#![allow(
-    clippy::exhaustive_enums,
-    clippy::exhaustive_structs,
-    reason = "outside semver"
-)]
+//! `#[non_exhaustive]`.
+// Block 52, D6, D8; Block 14; Block 54, D2.
+#![allow(clippy::exhaustive_enums, reason = "outside semver")]
+#![allow(clippy::exhaustive_structs, reason = "outside semver")]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -40,7 +38,8 @@ pub struct ArmedTimer {
     pub overdue: Duration,
 }
 
-/// The two lists of [`super::Client::armed_timers`] (Block 52, D8).
+/// The two lists of [`super::Client::armed_timers`].
+// Block 52, D8.
 #[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArmedTimers {
@@ -124,8 +123,9 @@ pub(super) fn shared_poll_refresh(id: SubscriptionId) -> String {
 /// Timers by name, each with its deadline, when known, and since when it
 /// runs, and the setting of each client, subscription and call timer. For
 /// those it gives only the ages and deadlines: their names come from the
-/// core's running settings (Block 53 D4); it alone tracks the debounce and
-/// shared-poll timers.
+/// core's running settings; it alone tracks the debounce and shared-poll
+/// timers.
+// Block 53 D4.
 #[derive(Debug, Default)]
 pub(super) struct TimerRecord(
     BTreeMap<String, (Option<platform::Instant>, platform::Instant)>,
@@ -182,7 +182,8 @@ impl TimerRecord {
 
     /// Follows an input the core takes: a firing ends its timer, one of a
     /// client, subscription or call timer only when it carries the setting
-    /// recorded (Block 53 D4).
+    /// recorded.
+    // Block 53 D4.
     pub(super) fn input(&mut self, input: &Input) {
         let numbered = match input {
             Input::TimerFired(timer, setting) => Some((client(*timer), *setting)),
@@ -292,9 +293,10 @@ impl TimerRecord {
     }
 
     /// The core's list: the client, subscription and call timers `armed`
-    /// names, whose settings the core keeps running (Block 53, D2), and
-    /// the debounce and shared-poll timers, which only this record keeps;
-    /// each aged from this record, or from now when first seen here.
+    /// names, whose settings the core keeps running, and the debounce and
+    /// shared-poll timers, which only this record keeps; each aged from
+    /// this record, or from now when first seen here.
+    // Block 53, D2.
     pub(super) fn report_armed(
         &mut self,
         armed: impl IntoIterator<Item = String>,

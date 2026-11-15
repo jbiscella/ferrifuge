@@ -1,8 +1,9 @@
-//! HTTP-streaming transports of the tokio adapter (Block 8): `http_stream`
-//! and sse, with bidirectional emulation as in centrifuge-js
+//! HTTP-streaming transports of the tokio adapter: `http_stream` and sse,
+//! with bidirectional emulation as in centrifuge-js
 //! `transport_http_stream.ts` and `transport_sse.ts`. The response to the
 //! request opening the stream carries the replies; commands go in requests
 //! to the emulation endpoint of the same server.
+// Block 8.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -29,12 +30,14 @@ use crate::sans_io::{FrameId, TransportKind};
 const EMULATION_PATH: &str = "/emulation";
 const JSON: &str = "application/json";
 /// The media type of Protobuf requests and streams, exactly: Centrifugo
-/// compares the whole value (Block 27, D3; centrifuge
-/// `handler_http_stream.go:73`, `emulation.go:72`).
+/// compares the whole value (centrifuge `handler_http_stream.go:73`,
+/// `emulation.go:72`).
+// Block 27, D3.
 const PROTOBUF: &str = "application/octet-stream";
-/// The application's real HTTP headers (Blocks 17, 32), shared by the
-/// client handle, which replaces them, and every request, which reads them
-/// when it starts. Its `Debug` output shows the names only.
+/// The application's real HTTP headers, shared by the client handle, which
+/// replaces them, and every request, which reads them when it starts. Its
+/// `Debug` output shows the names only.
+// Blocks 17, 32.
 #[derive(Clone, Default)]
 pub(crate) struct HeaderSet(Arc<Mutex<Arc<HeaderMap>>>);
 
@@ -80,10 +83,11 @@ pub(crate) struct HttpTransport {
     emulation_url: Url,
     /// Time allowed for an emulation request, as for a command's reply.
     request_timeout: Duration,
-    /// The application's HTTP headers, read for every request (Blocks 17,
-    /// 32).
+    /// The application's HTTP headers, read for every request.
+    // Blocks 17, 32.
     headers: HeaderSet,
-    /// The cookie jar, read and filled by every request (Block 43).
+    /// The cookie jar, read and filled by every request.
+    // Block 43.
     jar: Jar,
     /// The media type of emulation requests: JSON's or Protobuf's.
     content_type: &'static str,
@@ -339,9 +343,10 @@ fn is_event_stream(content_type: &str) -> bool {
 }
 
 /// The message of a failed request, without its URL, which may carry the
-/// connect command and its token (sse) or a credential (Block 21, D5).
-/// reqwest's own message stops at "error sending request": its sources
-/// follow, and a proxy refusing the credentials says so (Block 23, D5).
+/// connect command and its token (sse) or a credential. reqwest's own
+/// message stops at "error sending request": its sources follow, and a
+/// proxy refusing the credentials says so.
+// Block 21, D5; Block 23, D5.
 fn request_error(error: reqwest::Error) -> String {
     let error = error.without_url();
     let mut message = error.to_string();

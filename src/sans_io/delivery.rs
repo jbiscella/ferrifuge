@@ -1,8 +1,9 @@
-//! Block 15: an event counts as delivered once the application takes it,
-//! and only then does a publication move its subscription's stream
-//! position. A publication not yet taken when its subscription leaves
-//! `subscribed` is withdrawn: never delivered, its position unmoved, so
-//! recovery brings it back.
+//! An event counts as delivered once the application takes it, and only
+//! then does a publication move its subscription's stream position. A
+//! publication not yet taken when its subscription leaves `subscribed` is
+//! withdrawn: never delivered, its position unmoved, so recovery brings it
+//! back.
+// Block 15.
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,15 +27,17 @@ pub(super) struct Commit {
     epoch: Option<String>,
     /// From a subscribe reply: it applies even where no position is kept.
     pub(super) replaces: bool,
-    /// A publication, counted delivered once taken (Block 31); not a join
-    /// or a leave.
+    /// A publication, counted delivered once taken; not a join or a leave.
+    // Block 31.
     publication: bool,
     /// Never withdrawn: a shared poll removal, which no later step would
-    /// bring back (Block 47, D9).
+    /// bring back.
+    // Block 47, D9.
     #[cfg(feature = "unstable")]
     keep: bool,
-    /// A shared poll update's key and the version its taking moves it to
-    /// (Block 47, D5), instead of a stream position.
+    /// A shared poll update's key and the version its taking moves it to,
+    /// instead of a stream position.
+    // Block 47, D5.
     #[cfg(feature = "unstable")]
     key_version: Option<Box<(String, u64)>>,
 }
@@ -50,8 +53,9 @@ pub(super) struct Deliveries {
     /// stream, and how many each stream holds.
     untaken: HashMap<EventId, Option<SubscriptionId>>,
     held: HashMap<Option<SubscriptionId>, usize>,
-    /// Publications handed to a handler that has not returned (Block 41,
-    /// D3): their position already moved.
+    /// Publications handed to a handler that has not returned: their
+    /// position already moved.
+    // Block 41, D3.
     in_flight: HashMap<EventId, InFlight>,
 }
 
@@ -63,15 +67,16 @@ struct InFlight {
     before: Option<StreamPosition>,
     after: Option<StreamPosition>,
     publication: bool,
-    /// A shared poll update's key and the versions it moved from and to
-    /// (Block 47, D15).
+    /// A shared poll update's key and the versions it moved from and to.
+    // Block 47, D15.
     #[cfg(feature = "unstable")]
     key_version: Option<Box<(String, u64, u64)>>,
 }
 
 /// Untaken events a stream holds past which further `error` events for it
 /// are dropped: they change no state, and they are the only events a timer
-/// can add without bound, one per failed attempt (Block 15).
+/// can add without bound, one per failed attempt.
+// Block 15.
 const ERRORS_DROPPED_PAST: usize = 256;
 
 impl Owner {
@@ -85,7 +90,8 @@ impl Owner {
 }
 
 impl Commit {
-    /// Never withdrawn (Block 47, D9).
+    /// Never withdrawn.
+    // Block 47, D9.
     #[cfg_attr(
         not(feature = "unstable"),
         allow(clippy::unused_self, reason = "only shared poll commits are kept")
@@ -166,7 +172,8 @@ impl Machine {
 
     /// Records the event `id`, a join or leave of `owner`, which moves no
     /// position: it waits to be taken, and is withdrawn, as a publication
-    /// is (Block 13), but taking it changes nothing.
+    /// is, but taking it changes nothing.
+    // Block 13.
     pub(super) fn deliver_unpositioned(&mut self, id: EventId, owner: Owner) {
         let commit = Commit {
             owner,
@@ -186,8 +193,8 @@ impl Machine {
 
     /// Records the event `id` of `owner`, a map subscription's sync, which
     /// sets the owner's position to `position` once taken, and counts as no
-    /// publication delivered (Block 45, D5, D11); withdrawn as a
-    /// publication is.
+    /// publication delivered; withdrawn as a publication is.
+    // Block 45, D5, D11.
     #[cfg(feature = "unstable")]
     pub(super) fn deliver_position(
         &mut self,
@@ -218,8 +225,9 @@ impl Machine {
 
     /// Records the event `id` of `owner`, a map subscription's update,
     /// which moves the owner's position to `offset` and `epoch`, those
-    /// given, once taken, and counts as a publication delivered (Block 45,
-    /// D5, D11); withdrawn as a publication is.
+    /// given, once taken, and counts as a publication delivered; withdrawn
+    /// as a publication is.
+    // Block 45, D5, D11.
     #[cfg(feature = "unstable")]
     pub(super) fn deliver_map_update(
         &mut self,
@@ -246,10 +254,11 @@ impl Machine {
         }
     }
 
-    /// Records the event `id` of `owner`, a shared poll update (Block 47):
-    /// taking it moves its key's version to `taken`, and counts it as a
-    /// publication delivered when `publication`; withdrawn as a publication
-    /// is, unless `keep`.
+    /// Records the event `id` of `owner`, a shared poll update: taking it
+    /// moves its key's version to `taken`, and counts it as a publication
+    /// delivered when `publication`; withdrawn as a publication is, unless
+    /// `keep`.
+    // Block 47.
     #[cfg(feature = "unstable")]
     pub(super) fn deliver_shared_poll_update(
         &mut self,
@@ -313,7 +322,8 @@ impl Machine {
     /// The subscription `id` left the registry: its stream and its
     /// publications not yet taken no longer matter. A publication its
     /// handler runs for stays in flight, counted as delivered when the
-    /// handler returns (Codex, #169).
+    /// handler returns.
+    // Codex, #169.
     pub(super) fn forget_deliveries(&mut self, id: SubscriptionId) {
         self.deliveries.streams.remove(&Some(id));
         self.forget_held(Some(id));
@@ -340,7 +350,8 @@ impl Machine {
         self.deliveries.untaken.retain(|_, stream| *stream != of);
     }
 
-    /// An input about the delivery of events (Blocks 15, 41).
+    /// An input about the delivery of events.
+    // Blocks 15, 41.
     pub(super) fn delivery_input(&mut self, input: Input) {
         match input {
             Input::EventTaken(id) => {
@@ -367,9 +378,9 @@ impl Machine {
         }
     }
 
-    /// The event `id` was handed to a handler (Block 41, D3): its position
-    /// moves now, and it is no longer withdrawn; it is taken once the
-    /// handler returns.
+    /// The event `id` was handed to a handler: its position moves now, and
+    /// it is no longer withdrawn; it is taken once the handler returns.
+    // Block 41, D3.
     pub(super) fn event_handed(&mut self, id: EventId) {
         let Some(commit) = self.deliveries.pending.remove(&id) else {
             return;
@@ -404,7 +415,8 @@ impl Machine {
         );
     }
 
-    /// The handler the event `id` was handed to panicked (Block 41, D4).
+    /// The handler the event `id` was handed to panicked.
+    // Block 41, D4.
     pub(super) fn handler_panicked(&mut self, id: EventId, message: &str) {
         self.untake(id);
         self.deliveries.pending.remove(&id);
@@ -492,7 +504,8 @@ impl Machine {
 
     /// The index of the last of a subscribe reply's `publications` that is
     /// of the subscription's own stream, which reaches the reply's position
-    /// once taken (Block 35c, D3).
+    /// once taken.
+    // Block 35c, D3.
     pub(super) fn last_of_stream(publications: &[Publication]) -> Option<usize> {
         publications
             .iter()

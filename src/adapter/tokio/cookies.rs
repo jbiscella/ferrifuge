@@ -1,5 +1,6 @@
-//! The cookie jar of the tokio adapter (Block 43): cookies the server
-//! sets on a response, sent back on the later requests they match.
+//! The cookie jar of the tokio adapter: cookies the server sets on a
+//! response, sent back on the later requests they match.
+// Block 43.
 
 use std::sync::{PoisonError, RwLock};
 
@@ -32,16 +33,16 @@ use url::Url;
 /// }
 /// ```
 ///
-/// The client gives it the `Set-Cookie` values of each response and asks
-/// it for the cookies of each request, with the request's URL as `http://`
-/// or `https://` (a websocket's `ws://` and `wss://` mapped to them) and
-/// without its query and fragment (Block 43, D4). Over WebTransport
-/// (unstable) the request carries the jar's cookies, but the response's
-/// `Set-Cookie` is not read: wtransport 0.7.2 keeps only its status (Block
-/// 48, D14).
+/// The client gives it the `Set-Cookie` values of each response and asks it
+/// for the cookies of each request, with the request's URL as `http://` or
+/// `https://` (a websocket's `ws://` and `wss://` mapped to them) and
+/// without its query and fragment. Over WebTransport (unstable) the request
+/// carries the jar's cookies, but the response's `Set-Cookie` is not read:
+/// wtransport 0.7.2 keeps only its status.
 ///
 /// A method added to this trait has a default; a new required method is a
-/// major release (Block 54, D7).
+/// major release.
+// Block 43, D4; Block 48, D14; Block 54, D7.
 pub trait CookieJar: Send + Sync {
     /// Stores the cookies of `cookie_headers`, the `Set-Cookie` values of a
     /// response to a request for `url`.
@@ -53,10 +54,12 @@ pub trait CookieJar: Send + Sync {
 }
 
 /// The largest `Set-Cookie` value [`MemoryJar`] takes, in bytes (RFC 6265
-/// §6.1; Block 43, D7).
+/// §6.1).
+// Block 43, D7.
 const MAX_COOKIE_BYTES: usize = 4096;
 
-/// The most cookies [`MemoryJar`] holds (RFC 6265 §6.1; Block 43, D7).
+/// The most cookies [`MemoryJar`] holds (RFC 6265 §6.1).
+// Block 43, D7.
 const MAX_COOKIES: usize = 3000;
 
 /// A [`CookieJar`] in memory, for the life of the process, on
@@ -66,12 +69,13 @@ const MAX_COOKIES: usize = 3000;
 /// It does no public-suffix check, as reqwest's `Jar` does none: a server
 /// may set a cookie for a public suffix such as `co.uk`. An application
 /// that needs the check implements [`CookieJar`] over `cookie_store` with a
-/// list it supplies (Block 43, D1).
+/// list it supplies.
 ///
 /// It ignores a `Set-Cookie` value over 4096 bytes, and holds at most 3000
 /// cookies: at that count it drops its expired ones, then ignores a new
 /// cookie, while still replacing one it holds (RFC 6265 §6.1's minimums).
-/// It logs no cookie (Block 43, D6).
+/// It logs no cookie.
+// Block 43, D1; Block 43, D6.
 #[derive(Default)]
 pub struct MemoryJar {
     store: RwLock<CookieStore>,
@@ -173,7 +177,8 @@ fn lock_read_write<G>(result: Result<G, PoisonError<G>>) -> G {
 /// The URL a jar sees for a request to `url`: `ws://` and `wss://` as
 /// `http://` and `https://`, which `cookie_store` counts as HTTP and secure
 /// schemes, without the query, which carries the sse token, and the
-/// fragment (Block 43, D4).
+/// fragment.
+// Block 43, D4.
 pub(in crate::adapter) fn jar_url(url: &str) -> Option<Url> {
     let mut url = Url::parse(url).ok()?;
     let scheme = match url.scheme() {
@@ -193,8 +198,9 @@ pub(in crate::adapter) fn jar_url(url: &str) -> Option<Url> {
 
 /// The `Cookie` header of a request to `url`: the application's own pairs
 /// from `app`, in their order, then the jar's, leaving out a jar cookie
-/// whose name is among the application's, in one header (RFC 6265 §5.4;
-/// Block 43, D3). `None` when neither has a cookie.
+/// whose name is among the application's, in one header (RFC 6265 §5.4).
+/// `None` when neither has a cookie.
+// Block 43, D3.
 pub(in crate::adapter) fn cookie_header(
     jar: &dyn CookieJar,
     url: &str,
@@ -235,8 +241,8 @@ pub(in crate::adapter) fn cookie_header(
     HeaderValue::from_str(&pairs.join("; ")).ok()
 }
 
-/// Sets the request's `Cookie` header in `headers` for a request to `url`
-/// (Block 43, D2, D3).
+/// Sets the request's `Cookie` header in `headers` for a request to `url`.
+// Block 43, D2, D3.
 pub(in crate::adapter) fn add_cookies(jar: &dyn CookieJar, url: &str, headers: &mut HeaderMap) {
     match cookie_header(jar, url, headers.get(COOKIE)) {
         Some(value) => {
@@ -250,7 +256,8 @@ pub(in crate::adapter) fn add_cookies(jar: &dyn CookieJar, url: &str, headers: &
 
 /// Gives the jar the `Set-Cookie` values of a response with `status` to a
 /// request to `url`; a 407 is a proxy's own answer, whose cookies are not
-/// the server's (Block 43, D2, D5).
+/// the server's.
+// Block 43, D2, D5.
 pub(in crate::adapter) fn store_cookies(
     jar: &dyn CookieJar,
     url: &str,

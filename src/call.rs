@@ -1,5 +1,6 @@
-//! Calls the application makes over the client's connection and awaits
-//! (Block 13): their requests, results and errors.
+//! Calls the application makes over the client's connection and awaits:
+//! their requests, results and errors.
+// Block 13.
 
 use std::collections::HashMap;
 
@@ -13,7 +14,8 @@ use crate::{ClientInfo, Publication, StreamPosition};
 pub struct HistoryOptions {
     /// At most this many publications, `Some(0)` for none (the default),
     /// `None` for all. The server may cap it; a count above `i32::MAX` is
-    /// sent as `i32::MAX` (Block 54, D6).
+    /// sent as `i32::MAX`.
+    // Block 54, D6.
     pub limit: Option<u32>,
     /// Only the publications after this position, or before it with
     /// `reverse`; from the start of the stream (its end with `reverse`)
@@ -87,14 +89,15 @@ pub struct HistoryResult {
 }
 
 /// What a publish returned: nothing yet, standing in for `client.proto`'s
-/// empty `PublishResult` so that a field can come in a minor release
-/// (Block 54, D10).
+/// empty `PublishResult` so that a field can come in a minor release.
+// Block 54, D10.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PublishResult {}
 
-/// What an RPC returned (`client.proto`, `RPCResult`; Block 54, D10). Its
-/// `Debug` output shows the data as its length (Block 21).
+/// What an RPC returned (`client.proto`, `RPCResult`). Its `Debug` output
+/// shows the data as its length.
+// Block 54, D10; Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RpcResult {
@@ -176,16 +179,18 @@ impl std::fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
-/// Why a typed JSON call failed (Block 38, D2): before it was sent, as an
-/// untyped call fails, or after the server answered.
+/// Why a typed JSON call failed: before it was sent, as an untyped call
+/// fails, or after the server answered.
 ///
 /// `serde_json`'s messages may quote fragments of the data: the client never
 /// logs them, and an application that logs this error should know it.
+// Block 38, D2.
 #[non_exhaustive]
 pub enum JsonCallError {
     /// The value did not encode as JSON: nothing was sent.
     Encode(serde_json::Error),
-    /// The call failed as the untyped one does (Block 13).
+    /// The call failed as the untyped one does.
+    // Block 13.
     Call(CallError),
     /// The server answered, and its result data did not decode as the
     /// type asked for. The call ran on the server: retrying it runs it
