@@ -22,11 +22,6 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
-    ignore:
-      # Pinned to a commit of its master branch, the toolchain named by its
-      # `toolchain` input (Block 57, D2): it has no releases to follow, so
-      # the pin is bumped by hand.
-      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns: ["*"]
