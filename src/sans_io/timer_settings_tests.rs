@@ -198,3 +198,54 @@ fn action_and_input_have_exactly_the_keyed_timer_variants() {
     );
     assert_eq!(timer_variants("Input"), ["TimerFired"]);
 }
+
+// Block 61, D4 (a `mutants` miss): a cancelled timer's setting no longer
+// runs, so its firing is ignored.
+#[test]
+fn a_cancelled_setting_no_longer_runs_and_its_firing_is_ignored() {
+    let (mut machine, _, _, _) = running();
+    let key = TimerKey::Client(Timer::ServerPing);
+    let setting = machine.key_setting(key).expect("the ping timer runs");
+
+    let disconnected = machine.handle(Input::Disconnect);
+
+    assert!(
+        disconnected.contains(&Action::CancelTimer(key)),
+        "{disconnected:?}"
+    );
+    assert_eq!(machine.key_setting(key), None);
+    let fired = machine.handle(Input::TimerFired(key, setting));
+    assert!(fired.is_empty(), "{fired:?}");
+}
+
+// Block 61, D4 (a `mutants` miss): a message over the limit read while an
+// event holds the messages after it is handled in order, as a close: the
+// ping deadline ends at once.
+#[test]
+fn a_message_too_large_held_behind_an_event_ends_the_ping_deadline_at_once() {
+    let mut machine = Machine::new(Config::default());
+    machine.handle(Input::StreamOpened(None));
+    let transport = machine
+        .handle(Input::Connect)
+        .iter()
+        .find_map(|action| match action {
+            Action::OpenTransport { transport, .. } => Some(*transport),
+            _ => None,
+        })
+        .expect("a transport to open");
+    machine.handle(Input::TransportOpened(transport));
+    // `connected` waits to be taken from the open stream.
+    machine.handle(Input::Frame {
+        transport,
+        data: br#"{"id":1,"connect":{"client":"c","ping":25}}"#.to_vec(),
+    });
+    let ping = TimerKey::Client(Timer::ServerPing);
+    assert!(machine.key_setting(ping).is_some());
+
+    let too_large = machine.handle(Input::MessageTooLarge(transport));
+
+    assert!(
+        too_large.contains(&Action::CancelTimer(ping)),
+        "{too_large:?}"
+    );
+}

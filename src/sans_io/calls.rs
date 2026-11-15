@@ -1076,6 +1076,97 @@ mod tests {
         assert!(connected.iter().any(|action| matches!(action, Action::SetTimer(TimerKey::Call(a0, CallTimer::Reply), a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
+    /// A machine whose write queue holds one frame at a time.
+    fn tight() -> Machine {
+        Machine::new(Config {
+            timeout: TIMEOUT,
+            write_queue_bytes: 1,
+            ..Config::default()
+        })
+    }
+
+    /// The ids of the commands sent among `actions`.
+    fn sent_ids(actions: &[Action]) -> Vec<u64> {
+        sent_text(actions)
+            .iter()
+            .map(|text| {
+                serde_json::from_str::<serde_json::Value>(text).unwrap()["id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    // Block 61, D4 (a `mutants` miss): a queued call that does not fit on
+    // the new connection ends its connection deadline and waits for room.
+    #[test]
+    fn a_queued_call_that_does_not_fit_trades_its_connection_deadline_for_room() {
+        let mut machine = tight();
+        let transport = opened(&mut machine);
+        let (_, _) = rpc(&mut machine, "first");
+        let (id, _) = rpc(&mut machine, "second");
+
+        let connected = connect_reply(&mut machine, transport);
+
+        assert!(connected.contains(&Action::CancelTimer(TimerKey::Call(
+            id,
+            CallTimer::Connection
+        ))));
+        assert!(
+            machine
+                .key_setting(TimerKey::Call(id, CallTimer::Room))
+                .is_some()
+        );
+        assert_eq!(
+            machine.key_setting(TimerKey::Call(id, CallTimer::Connection)),
+            None
+        );
+    }
+
+    // Block 61, D4 (a `mutants` miss): a call already waiting for room on a
+    // new connection keeps its deadline.
+    #[test]
+    fn a_call_waiting_for_room_keeps_its_deadline_on_a_new_connection() {
+        let mut machine = tight();
+        let transport = opened(&mut machine);
+        connect_reply(&mut machine, transport);
+        rpc(&mut machine, "sent");
+        let (second, _) = rpc(&mut machine, "second");
+        let (third, _) = rpc(&mut machine, "third");
+        let room = TimerKey::Call(third, CallTimer::Room);
+        let deadline = machine.key_setting(room).expect("waits for room");
+        let lost = machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        assert!(!lost.is_empty());
+        let reconnecting = machine.fire(crate::sans_io::Timer::Reconnect);
+        let transport = reconnecting
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a reconnect");
+        let opened = machine.handle(Input::TransportOpened(transport));
+        let connect = sent_ids(&opened)[0];
+
+        let connected = machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{connect},"connect":{{"client":"c"}}}}"#),
+        ));
+
+        // The second goes; the third still waits, as it did.
+        assert!(
+            machine
+                .key_setting(TimerKey::Call(second, CallTimer::Reply))
+                .is_some(),
+            "{connected:?}"
+        );
+        assert_eq!(machine.key_setting(room), Some(deadline), "{connected:?}");
+    }
+
     #[test]
     fn a_connection_timer_firing_after_the_call_was_sent_is_ignored() {
         let mut machine = machine();
