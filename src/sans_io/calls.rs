@@ -1140,7 +1140,7 @@ mod tests {
             code: None,
             reason: String::new(),
         });
-        assert!(!lost.is_empty());
+        assert!(!lost.is_empty(), "the loss acts");
         let reconnecting = machine.fire(crate::sans_io::Timer::Reconnect);
         let transport = reconnecting
             .iter()
