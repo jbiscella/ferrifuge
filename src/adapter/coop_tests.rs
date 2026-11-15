@@ -1,7 +1,7 @@
-//! Stream reads take part in tokio's cooperative scheduling (Block 63, D1,
-//! D3): a loop over a stream that a large recovery filled gives its runtime
-//! a turn, loses no event when a read is dropped on such a turn, and never
-//! waits for budget outside a tokio runtime.
+//! Stream reads take part in tokio's cooperative scheduling on the tokio
+//! adapter (Block 63, D1): a loop over a stream that a large recovery filled
+//! gives its runtime a turn, loses no event when a read is dropped on such a
+//! turn, and never waits for budget outside a tokio runtime.
 
 use std::future::Future as _;
 use std::pin::Pin;
@@ -152,8 +152,8 @@ async fn a_read_dropped_on_a_budget_turn_loses_no_event() {
     assert!(dropped > 0, "no read returned Pending for budget");
 }
 
-/// Outside any tokio runtime, as in the browser, the budget never runs out:
-/// taking the whole recovery never returns `Pending`.
+/// Native, unconstrained budget: outside any tokio runtime the budget never
+/// runs out, and taking the whole recovery never returns `Pending`.
 #[test]
 fn outside_a_runtime_reads_never_wait_for_budget() {
     let runtime = tokio::runtime::Builder::new_multi_thread()

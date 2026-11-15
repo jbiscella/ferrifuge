@@ -1016,7 +1016,9 @@ impl<E: Routed> Stream for EventStream<E> {
         // Once the task has spent its tokio budget, nothing is taken: the
         // task is woken and gives its runtime a turn, and the read stays
         // cancel-safe. A `Pending` with nothing queued gives the budget
-        // back (Block 63, D1).
+        // back. The browser build takes no budget: tokio's `coop` module is
+        // private without `rt` (Block 63, D1, D3).
+        #[cfg(adapter_tokio)]
         let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         // A poisoned core leaves the stream what is queued (Block 61, D6).
         let mut core = self.shared.core();
@@ -1039,6 +1041,7 @@ impl<E: Routed> Stream for EventStream<E> {
         }
         drop(core);
         self.shared.actions_queued.notify_one();
+        #[cfg(adapter_tokio)]
         coop.made_progress();
         Poll::Ready(Some(event))
     }
@@ -2126,9 +2129,9 @@ mod tests {
                     .map(|component| component.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                // Test code whole: `mod.rs` declares it `#[cfg(test)]`
-                // (Block 61, D1).
-                if relative == "test_support.rs" {
+                // Test code whole: `mod.rs` declares these `#[cfg(test)]`
+                // (Block 61, D1; Block 63).
+                if relative == "test_support.rs" || relative.ends_with("_tests.rs") {
                     continue;
                 }
                 for (number, line) in code.lines().enumerate() {
