@@ -1,0 +1,100 @@
+name: upstream
+
+# Weekly check of the official clients ferrifuge follows. When centrifuge-js
+# or the allowed documents of centrifuge-rust have moved past the commits
+# CLAUDE.md pins, it opens one issue listing what changed, so a maintainer
+# knows there is something new to review. It reads GitHub's API only:
+# no checkout, no build.
+#
+# Clean room: from centrifuge-rust only docs/spec.md, docs/api.md,
+# README.md and CHANGELOG.md are compared; no other path is listed.
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # The pins CLAUDE.md follows. Update them here when CLAUDE.md moves.
+      JS_REPO: centrifugal/centrifuge-js
+      JS_PIN: 63ed73e5704a8173f3836fba8e34b503ac80faba
+      RS_REPO: centrifugal/centrifuge-rust
+      RS_PIN: 88d6edf178f6db370d8e6756d389c89bf100436b
+    steps:
+      - name: Compare upstream with the pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/body.md"
+          : > "$body"
+          changed=no
+
+          js_branch=$(gh api "repos/$JS_REPO" --jq .default_branch)
+          js_head=$(gh api "repos/$JS_REPO/commits/$js_branch" --jq .sha)
+          js_release=$(gh api "repos/$JS_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo none)
+          if [ "$js_head" != "$JS_PIN" ]; then
+            changed=yes
+            ahead=$(gh api "repos/$JS_REPO/compare/$JS_PIN...$js_head" --jq .ahead_by)
+            {
+              echo "## centrifuge-js"
+              echo
+              echo "- Pinned: \`${JS_PIN:0:7}\`. Now: \`${js_head:0:7}\` on \`$js_branch\`, $ahead commits ahead. Latest release: \`$js_release\`."
+              echo "- Compare: https://github.com/$JS_REPO/compare/${JS_PIN:0:7}...${js_head:0:7}"
+              echo "- Commits:"
+              gh api "repos/$JS_REPO/compare/$JS_PIN...$js_head" \
+                --jq '.commits[-20:][] | "  - `\(.sha[0:7])` \(.commit.message | split("\n")[0])"'
+              echo
+            } >> "$body"
+          fi
+
+          rs_branch=$(gh api "repos/$RS_REPO" --jq .default_branch)
+          rs_head=$(gh api "repos/$RS_REPO/commits/$rs_branch" --jq .sha)
+          rs_release=$(gh api "repos/$RS_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo none)
+          rs_docs=$(gh api "repos/$RS_REPO/compare/$RS_PIN...$rs_head" \
+            --jq '[.files[]? | select(.filename == "docs/spec.md" or .filename == "docs/api.md" or .filename == "README.md" or .filename == "CHANGELOG.md") | "  - `\(.filename)` (+\(.additions) -\(.deletions))"] | join("\n")')
+          if [ -n "$rs_docs" ]; then
+            changed=yes
+            {
+              echo "## centrifuge-rust (allowed documents only)"
+              echo
+              echo "- Pinned: \`${RS_PIN:0:7}\`. Now: \`${rs_head:0:7}\` on \`$rs_branch\`. Latest release: \`$rs_release\`."
+              echo "- Changed documents:"
+              echo "$rs_docs"
+              echo
+              echo "Clean room: read only these four documents, never \`crates/\`, \`Replay.tla\` or \`xtask\`."
+              echo
+            } >> "$body"
+          fi
+
+          if [ "$changed" = no ]; then
+            echo "Upstream matches the pins."
+            exit 0
+          fi
+
+          title="Upstream moved: centrifuge-js ${js_head:0:7}, centrifuge-rust ${rs_head:0:7}"
+          existing=$(gh issue list --repo "$REPO" --state all --search "in:title \"$title\"" --json title --jq ".[] | select(.title == \"$title\") | .title")
+          if [ -n "$existing" ]; then
+            echo "An issue already covers these heads: $title"
+            exit 0
+          fi
+          {
+            echo
+            echo "Review what changed, and when ferrifuge adopts it, move the pins in CLAUDE.md and in \`.github/workflows/upstream.yml\`. Close this issue then."
+          } >> "$body"
+          gh issue create --repo "$REPO" --title "$title" --body-file "$body"
