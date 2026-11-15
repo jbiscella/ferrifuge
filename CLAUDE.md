@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–62 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–63 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -10770,3 +10770,50 @@ Each of these mutations is seen red once, recorded in the PR:
 
 **Amendments to earlier blocks:**
 - **Block 55 D8:** after "It counts the blocks in the file at that PR's merge." add "A block appended after that PR rewrites line 3 in its own spec PR, by the same template."
+
+---
+
+## Block 63 — Cooperative stream reads
+
+**Goal:** a task that reads an event stream gives its runtime a turn after a bounded number of events, as tokio's own channels do. A large recovery then no longer freezes the application's other tasks and timers.
+
+Source: the flake "A connector that never finishes fails the attempt with the handshake timeout" (2026-11-15). The slow-consumer scenario's step took up to 8000 ready events in one poll, 499–803 ms in a debug build. cucumber 0.23 polls every scenario on one thread, so every other scenario waited. tokio `task::coop` documentation: types that hand out values should take the task's budget.
+
+**Dependencies:** Blocks 15 (streams, cancel-safety), 28 (runtime handle), 37 (in-memory server double), 39 (`publications()`), 41 (handler consumer), 44 (browser adapter).
+
+**Out of scope:**
+- decoding one large message across turns. A Centrifugo reply is one message, and other clients decode a message whole (tokio-tungstenite, reqwest `json()`, centrifuge-js). Release builds measured 85–97 ms for 33 MB, and Centrifugo's default 1 MiB client queue keeps recovery replies to about 3 ms;
+- handlers: the Block 41 consumer already yields after each event;
+- a yield in the browser (D3).
+
+**Decisions** (reviewer, 2026-11-15, delegated by the owner):
+- **D1 Budget.** Each `next()` of a client or subscription stream first asks tokio for budget (`tokio::task::coop::poll_proceed`, tokio ≥ 1.47). When the task's budget is spent, `next()` takes nothing, wakes its own task and returns `Pending`, so the read stays cancel-safe. When it hands out an event, it records the progress (`made_progress`). A `Pending` with nothing queued spends no budget. `publications()` reads through the same stream.
+- **D2 Unchanged.** Every event, its order and the moment it counts as taken stay as Block 15 sets them. Only the scheduling changes.
+- **D3 Browser.** The same code runs there. With no tokio runtime the budget is unconstrained, so `next()` never returns `Pending` for budget. wasm-bindgen-futures runs a woken task again in the same microtask pass, so a self-wake would not let the page run. The rustdoc of `events()` says so.
+- **D4 Version.** No bump: no API change. Changelog: `Unreleased` "Fixed", D1.
+
+**Sub-increments:** one pull request, **63a** (D1–D4).
+
+Value clause: As an app developer whose task reads a stream that a large recovery has filled, I want each read to give my runtime its turn, so that my other tasks and timers keep running while thousands of events are taken.
+
+**Structural acceptance:**
+- **Unit test, current-thread runtime:**
+  - set-up: the in-memory server double recovers 1000 publications in one subscribe reply, and a ticker task beside the reader counts its own polls;
+  - a loop that only awaits `next()` takes all 1000, at offsets 1 to 1000 in order, each once, within 5 s;
+  - the ticker runs at least 7 times while the loop runs;
+  - a `next()` future dropped right after a budget `Pending` loses no event.
+- **Unit test, outside any tokio runtime** (the browser's path): taking 1000 queued events never returns `Pending`.
+- **Steps:** the client of "A slow consumer on a channel with history and recovery loses no publication" runs on a runtime of its own (`ClientBuilder::runtime`, Block 28). The world holds that runtime, and the `after` hook shuts it down with `shutdown_background()`.
+- **Flake check:** the handshake-timeout scenario passes in 20 runs of the `@A or @D` slice at `--concurrency 4`, recorded in the PR.
+
+Each of these mutations is seen red once, recorded in the PR:
+- the budget not taken (the `poll_proceed` call removed);
+- a `Pending` returned without waking the task (the test's 5 s bound fails);
+- `made_progress` not called;
+- the budget checked after the event is taken.
+
+**Exceptions introduced:** no new scenario. Ordering is a scheduling property, which Block 0's unit layer covers.
+
+**Amendments to earlier blocks.** The before-string appears once.
+- **Block 15, "Decisions"** (63a): the sentence "`next()` is cancel-safe: a cancelled read loses no event." stays as it is. Insert this bullet on the line after it, before "- **No stream, no hold-up.**":
+  "- **Cooperative reads.** A stream read gives the runtime a turn once the reading task has spent its tokio budget, taking nothing on that turn, so it stays cancel-safe; events, order and delivery are unchanged (amended by Block 63 D1)."
