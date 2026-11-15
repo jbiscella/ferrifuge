@@ -9,7 +9,7 @@ fn timers_set(actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetSharedPollTimer(timer, delay) => Some((*timer, *delay)),
+            Action::SetTimer(TimerKey::SharedPoll(timer), delay, _) => Some((*timer, *delay)),
             _ => None,
         })
         .collect()
@@ -19,7 +19,7 @@ fn timers_cancelled(actions: &[Action]) -> Vec<SharedPollTimer> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::CancelSharedPollTimer(timer) => Some(*timer),
+            Action::CancelTimer(TimerKey::SharedPoll(timer)) => Some(*timer),
             _ => None,
         })
         .collect()
@@ -31,7 +31,9 @@ fn refreshes_set(actions: &[Action], id: SubscriptionId) -> Vec<Duration> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetSharedPollRefresh(of, delay) if *of == id => Some(*delay),
+            Action::SetTimer(TimerKey::SharedPollRefresh(of), delay, _) if *of == id => {
+                Some(*delay)
+            }
             _ => None,
         })
         .collect()
@@ -40,7 +42,7 @@ fn refreshes_set(actions: &[Action], id: SubscriptionId) -> Vec<Duration> {
 fn refresh_cancelled(actions: &[Action], id: SubscriptionId) -> bool {
     actions
         .iter()
-        .any(|action| matches!(action, Action::CancelSharedPollRefresh(of) if *of == id))
+        .any(|action| matches!(action, Action::CancelTimer(TimerKey::SharedPollRefresh(of)) if *of == id))
 }
 
 /// The one refresh delay set among `actions`.
@@ -66,11 +68,13 @@ impl RefreshTimer {
     fn run(&mut self, actions: &[Action], id: SubscriptionId) {
         for action in actions {
             match action {
-                Action::SetSharedPollRefresh(of, delay) if *of == id => {
+                Action::SetTimer(TimerKey::SharedPollRefresh(of), delay, _) if *of == id => {
                     let at = self.now + *delay;
                     self.deadline = Some(self.deadline.map_or(at, |set| set.min(at)));
                 }
-                Action::CancelSharedPollRefresh(of) if *of == id => self.deadline = None,
+                Action::CancelTimer(TimerKey::SharedPollRefresh(of)) if *of == id => {
+                    self.deadline = None
+                }
                 _ => {}
             }
         }
@@ -250,7 +254,7 @@ fn a_failing_callback_retries_with_a_growing_backoff() {
             "{delay:?}"
         );
         delays.push(delay);
-        let (next, keys) = the_fetch(&machine.handle(Input::SharedPollTimerFired(timer)));
+        let (next, keys) = the_fetch(&machine.fire_key(TimerKey::SharedPoll(timer)));
         assert_eq!(keys, ["a"]);
         request = next;
     }
@@ -339,7 +343,7 @@ fn an_expiring_signature_is_refreshed_at_the_earliest_deadline() {
     the_track(&track(&mut machine, id, &[("a", 0), ("x", 0)], "sig-ax"));
     machine.handle(Input::UntrackKeys(id, names(&["x"])));
 
-    let fired = machine.handle(Input::SharedPollRefreshFired(id));
+    let fired = machine.fire_key(TimerKey::SharedPollRefresh(id));
     let (request, keys) = the_fetch(&fired);
     let all = ["a", "b", "c", "d", "e", "f", "g"];
     assert_eq!(keys, all);
@@ -374,7 +378,7 @@ fn a_refresh_ends_the_armed_timer_and_a_stray_firing_does_nothing() {
     assert!(refresh_cancelled(&refreshed, id), "{refreshed:?}");
     let (request, _) = the_fetch(&refreshed);
     the_track(&signed(&mut machine, id, request, &["a", "b"], "sig-ab"));
-    let stray = machine.handle(Input::SharedPollRefreshFired(id));
+    let stray = machine.fire_key(TimerKey::SharedPollRefresh(id));
     assert!(fetches(&stray).is_empty(), "{stray:?}");
 }
 
@@ -414,7 +418,7 @@ fn replies_without_ttl_in_a_row_back_off_from_1_s() {
             id,
         );
         delays.push(delay);
-        let (request, _) = the_fetch(&machine.handle(Input::SharedPollRefreshFired(id)));
+        let (request, _) = the_fetch(&machine.fire_key(TimerKey::SharedPollRefresh(id)));
         command = the_track(&signed(&mut machine, id, request, &["a"], "sig"));
     }
     assert_eq!(delays[0], Duration::from_secs(1), "{delays:?}");
@@ -438,7 +442,7 @@ fn replies_without_ttl_in_a_row_back_off_from_1_s() {
         id,
     );
     assert_eq!(delay, Duration::from_secs(10));
-    let (request, _) = the_fetch(&machine.handle(Input::SharedPollRefreshFired(id)));
+    let (request, _) = the_fetch(&machine.fire_key(TimerKey::SharedPollRefresh(id)));
     let command = the_track(&signed(&mut machine, id, request, &["a"], "sig"));
     let delay = the_refresh(
         &machine.handle(answered(
@@ -481,7 +485,7 @@ fn a_109_refreshes_at_once_and_a_109_to_a_refresh_backs_off() {
             "{delay:?}"
         );
         delays.push(delay);
-        request = the_fetch(&machine.handle(Input::SharedPollTimerFired(timer))).0;
+        request = the_fetch(&machine.fire_key(TimerKey::SharedPoll(timer))).0;
     }
     assert!(
         delays.iter().any(|delay| *delay > Duration::from_secs(10)),
@@ -618,7 +622,7 @@ fn a_failing_chunk_fails_the_whole_request() {
     assert_eq!(errors(&actions)[0].code, 14);
     assert!(requests(&actions, 1).is_empty(), "{actions:?}");
     let (timer, _) = the_timer(&actions);
-    let (_, again) = the_fetch(&machine.handle(Input::SharedPollTimerFired(timer)));
+    let (_, again) = the_fetch(&machine.fire_key(TimerKey::SharedPoll(timer)));
     assert_eq!(again, first_keys);
 }
 
@@ -692,8 +696,8 @@ fn what_was_asked_before_leaving_subscribed_changes_nothing() {
     let (_, replay) = reconnect(&mut machine, transport);
     assert!(refreshes_set(&replay, id).is_empty(), "{replay:?}");
     for fired in [
-        machine.handle(Input::SharedPollRefreshFired(id)),
-        machine.handle(Input::SharedPollTimerFired(retry)),
+        machine.fire_key(TimerKey::SharedPollRefresh(id)),
+        machine.fire_key(TimerKey::SharedPoll(retry)),
     ] {
         assert!(fetches(&fired).is_empty(), "{fired:?}");
     }
@@ -767,7 +771,7 @@ fn chunks_are_sized_for_the_longest_signature_received() {
     assert_eq!(errors(&refused)[0].code, 12, "the first chunk: {refused:?}");
     let (timer, _) = the_timer(&refused);
 
-    let mut fetched = machine.handle(Input::SharedPollTimerFired(timer));
+    let mut fetched = machine.fire_key(TimerKey::SharedPoll(timer));
     let mut actions = Vec::new();
     let mut chunks = 0;
     while let [(request, keys)] = fetches(&fetched).as_slice() {
@@ -800,4 +804,87 @@ fn chunks_are_sized_for_the_longest_signature_received() {
         tracked.extend(items(frame).into_iter().map(|(key, _)| key));
     }
     assert_eq!(tracked, tracked_keys(&machine, id));
+}
+
+/// The setting of a timer other than `key`'s: one running, else the one
+/// given just before `key`'s, to another timer.
+fn another_setting(machine: &Machine, key: TimerKey) -> crate::sans_io::TimerSetting {
+    let running = machine.key_setting(key).expect("the timer runs");
+    machine
+        .timer_settings
+        .running
+        .iter()
+        .find_map(|(other, setting)| (*other != key).then_some(*setting))
+        .unwrap_or(crate::sans_io::TimerSetting(running.0 - 1))
+}
+
+// Block 61, D4: a shared poll request's timer is numbered by setting: a
+// firing of another timer's setting, or of one taken already, is ignored.
+#[test]
+fn a_shared_poll_request_firing_of_a_taken_or_another_timers_setting_returns_no_action() {
+    let (mut machine, _, id) = subscribed(true, false);
+    let tracked = track(&mut machine, id, &[("a", 0)], "sig-a");
+    let key = TimerKey::SharedPoll(timers_set(&tracked)[0].0);
+    let running = machine.key_setting(key).expect("the request's timer runs");
+    let other = another_setting(&machine, key);
+
+    let stale = machine.handle(Input::TimerFired(key, other));
+    assert!(stale.is_empty(), "{stale:?}");
+    assert_eq!(machine.key_setting(key), Some(running));
+    let first = machine.handle(Input::TimerFired(key, running));
+    assert!(!first.is_empty(), "the deadline acts");
+    let second = machine.handle(Input::TimerFired(key, running));
+    assert!(second.is_empty(), "{second:?}");
+}
+
+// Block 61, D4: as above, for a shared poll subscription's refresh.
+#[test]
+fn a_refresh_firing_of_a_taken_or_another_timers_setting_returns_no_action() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig-a"));
+    machine.handle(answered(
+        transport,
+        &command,
+        &serde_json::json!({"expires": true, "ttl": 60}),
+    ));
+    let key = TimerKey::SharedPollRefresh(id);
+    let running = machine.key_setting(key).expect("the refresh runs");
+    let other = another_setting(&machine, key);
+
+    let stale = machine.handle(Input::TimerFired(key, other));
+    assert!(stale.is_empty(), "{stale:?}");
+    assert_eq!(machine.key_setting(key), Some(running));
+    let first = machine.handle(Input::TimerFired(key, running));
+    assert!(!fetches(&first).is_empty(), "{first:?}");
+    let second = machine.handle(Input::TimerFired(key, running));
+    assert!(second.is_empty(), "{second:?}");
+}
+
+// Block 61, D4: a refresh set again while it runs takes the new setting,
+// which the owner's firing carries at the earlier deadline: the core acts
+// on it, and ignores the old one.
+#[test]
+fn a_refresh_set_again_acts_on_its_new_setting_only() {
+    let (mut machine, transport, id) = subscribed(true, false);
+    let key = TimerKey::SharedPollRefresh(id);
+    let command = the_track(&track(&mut machine, id, &[("a", 0)], "sig-a"));
+    machine.handle(answered(
+        transport,
+        &command,
+        &serde_json::json!({"expires": true, "ttl": 60}),
+    ));
+    let first = machine.key_setting(key).expect("the refresh runs");
+    let command = the_track(&track(&mut machine, id, &[("b", 0)], "sig-b"));
+    machine.handle(answered(
+        transport,
+        &command,
+        &serde_json::json!({"expires": true, "ttl": 600}),
+    ));
+    let latest = machine.key_setting(key).expect("the refresh runs");
+    assert_ne!(first, latest);
+
+    let old = machine.handle(Input::TimerFired(key, first));
+    assert!(old.is_empty(), "{old:?}");
+    let fired = machine.handle(Input::TimerFired(key, latest));
+    assert!(!fetches(&fired).is_empty(), "{fired:?}");
 }

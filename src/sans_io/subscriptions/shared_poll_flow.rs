@@ -7,6 +7,7 @@
 //! of its own.
 // Block 47.
 
+use crate::sans_io::TimerKey;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod signing;
@@ -429,10 +430,10 @@ impl SharedPollFlow {
         let mut cancel: Vec<Action> = self
             .timers
             .drain(..)
-            .map(|(timer, _)| Action::CancelSharedPollTimer(timer))
+            .map(|(timer, _)| Action::CancelTimer(TimerKey::SharedPoll(timer)))
             .collect();
         if std::mem::take(&mut self.refresh_armed) {
-            cancel.push(Action::CancelSharedPollRefresh(id));
+            cancel.push(Action::CancelTimer(TimerKey::SharedPollRefresh(id)));
         }
         cancel
     }
@@ -655,8 +656,6 @@ impl Machine {
                 self.track_keys_with_signature(id, items, signature);
             }
             Input::UntrackKeys(id, keys) => self.untrack_keys(id, keys),
-            Input::SharedPollTimerFired(timer) => self.shared_poll_timer_fired(timer),
-            Input::SharedPollRefreshFired(id) => self.refresh_fired(id),
             Input::SignatureFetched {
                 subscription,
                 request,
@@ -998,8 +997,7 @@ impl Machine {
                 method: Method::SubRefresh(request),
             },
         );
-        self.actions
-            .push(Action::SetSharedPollTimer(timer, self.config.timeout));
+        self.set_key_timer(TimerKey::SharedPoll(timer), self.config.timeout);
     }
 
     /// A number for a new timer, never reused.
@@ -1016,7 +1014,7 @@ impl Machine {
     /// makes the client reconnect with `connecting` 3; over websocket it
     /// fails the request with error 1, as a reply would.
     // D7; D12.
-    fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
+    pub(in crate::sans_io) fn shared_poll_timer_fired(&mut self, timer: SharedPollTimer) {
         let command = self
             .subscriptions
             .track_commands
@@ -1059,7 +1057,8 @@ impl Machine {
             .get_mut(&command)
             .and_then(|command| command.timer.take())
         {
-            self.actions.push(Action::CancelSharedPollTimer(timer));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::SharedPoll(timer)));
         }
     }
 
@@ -1205,7 +1204,8 @@ impl Machine {
             return;
         };
         if let Some(timer) = command.timer {
-            self.actions.push(Action::CancelSharedPollTimer(timer));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::SharedPoll(timer)));
         }
         let id = command.subscription;
         let current = self.subscribed_now(id)
@@ -1410,7 +1410,8 @@ impl Machine {
             return false;
         };
         if let Some(timer) = command.timer {
-            self.actions.push(Action::CancelSharedPollTimer(timer));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::SharedPoll(timer)));
         }
         let id = command.subscription;
         let current = self.subscribed_now(id)

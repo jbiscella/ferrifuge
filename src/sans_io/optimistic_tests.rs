@@ -81,11 +81,11 @@ fn plain(channels: &[&str]) -> (Machine, Vec<SubscriptionId>) {
 
 fn subscribe_deadline(actions: &[Action], id: SubscriptionId) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, delay, ..)
-            if *sub == id =>
-        {
-            Some(*delay)
-        }
+        Action::SetTimer(
+            TimerKey::Subscription(sub, SubscriptionTimer::SubscribeReply),
+            delay,
+            ..,
+        ) if *sub == id => Some(*delay),
         _ => None,
     })
 }
@@ -250,10 +250,12 @@ fn an_optimistic_subscribe_s_deadline_starts_at_the_connect_reply() {
         subscribe_deadline(&connected, ids[0]),
         Some(Duration::from_secs(5))
     );
-    assert!(subscribed.contains(&Action::CancelSubscriptionTimer(
-        ids[0],
-        SubscriptionTimer::SubscribeReply
-    )));
+    assert!(
+        subscribed.contains(&Action::CancelTimer(TimerKey::Subscription(
+            ids[0],
+            SubscriptionTimer::SubscribeReply
+        )))
+    );
 }
 
 /// A subscribe reply read with the connect reply, after it, needs no
@@ -276,11 +278,15 @@ fn a_subscribe_reply_read_with_the_connect_reply_arms_no_deadline() {
     let set = replied
         .iter()
         .position(|action| {
-            matches!(action, Action::SetSubscriptionTimer(sub, SubscriptionTimer::SubscribeReply, ..) if *sub == ids[0])
+            matches!(action, Action::SetTimer(TimerKey::Subscription(sub, SubscriptionTimer::SubscribeReply), ..) if *sub == ids[0])
         })
         .expect("the deadline starts");
     let cancelled = replied.iter().position(|action| {
-        *action == Action::CancelSubscriptionTimer(ids[0], SubscriptionTimer::SubscribeReply)
+        *action
+            == Action::CancelTimer(TimerKey::Subscription(
+                ids[0],
+                SubscriptionTimer::SubscribeReply,
+            ))
     });
     assert!(cancelled > Some(set), "{replied:?}");
     assert_eq!(
@@ -318,9 +324,10 @@ fn a_subscribe_reply_before_the_connect_reply_breaks_the_protocol() {
         "{replied:?}"
     );
     assert!(
-        replied
-            .iter()
-            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
+        replied.iter().any(|action| matches!(
+            action,
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+        )),
         "{replied:?}"
     );
     assert!(

@@ -3,6 +3,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
@@ -1477,8 +1478,9 @@ impl QueueRun {
             .machine
             .call_timer_setting(call, timer)
             .expect("call timer set");
-        self.handle(ferrifuge::machine::Input::CallTimerFired(
-            call, timer, setting,
+        self.handle(ferrifuge::machine::Input::TimerFired(
+            TimerKey::Call(call, timer),
+            setting,
         ));
     }
 }
@@ -1620,7 +1622,7 @@ fn the_transport_is_lost(world: &mut ClientWorld) {
     assert!(
         !run.last.iter().any(|action| matches!(
             action,
-            ferrifuge::machine::Action::SetCallTimer(call, ..) if *call == waiting
+            ferrifuge::machine::Action::SetTimer(TimerKey::Call(call, _), ..) if *call == waiting
         )),
         "{:?}",
         run.last
@@ -1657,7 +1659,10 @@ fn the_client_is_connected_again(world: &mut ClientWorld) {
         .machine
         .timer_setting(Timer::Reconnect)
         .expect("reconnect set");
-    run.handle(Input::TimerFired(Timer::Reconnect, setting));
+    run.handle(Input::TimerFired(
+        TimerKey::Client(Timer::Reconnect),
+        setting,
+    ));
     let transport = run
         .last
         .iter()

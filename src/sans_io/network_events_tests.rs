@@ -25,7 +25,7 @@ fn opened(actions: &[Action]) -> Option<(TransportId, TransportKind)> {
 /// The reconnect delay `actions` set.
 fn reconnect_delay(actions: &[Action]) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+        Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
         _ => None,
     })
 }

@@ -365,6 +365,7 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
+    use crate::sans_io::TimerKey;
     use crate::sans_io::{
         Action, FrameId, Input, Machine, SubscriptionOptions, SubscriptionTimer, TransportId,
         TransportKind,
@@ -463,10 +464,10 @@ mod tests {
         let actions = refuse(&mut machine, transport, batch);
 
         assert!(
-            actions.contains(&Action::CancelSubscriptionTimer(
+            actions.contains(&Action::CancelTimer(TimerKey::Subscription(
                 sub,
                 SubscriptionTimer::SubscribeReply
-            )),
+            ))),
             "{actions:?}"
         );
         let resent = sent(&actions);

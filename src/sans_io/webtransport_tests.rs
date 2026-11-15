@@ -94,7 +94,10 @@ fn session(kind: TransportKind) -> Vec<String> {
             let setting = machine
                 .timer_setting(Timer::Reconnect)
                 .expect("reconnect set");
-            let actions = handle(&mut machine, Input::TimerFired(Timer::Reconnect, setting));
+            let actions = handle(
+                &mut machine,
+                Input::TimerFired(TimerKey::Client(Timer::Reconnect), setting),
+            );
             transport = opened(&actions).expect("a reconnect");
         }
     }
@@ -273,7 +276,7 @@ fn chosen_then_ended_before_an_answer(
     let delay = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled");
@@ -348,7 +351,7 @@ fn third_delay_without_a_ping(kind: TransportKind, seed: u64) -> Duration {
         delay = ended
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, _) => Some(*delay),
                 _ => None,
             })
             .expect("a reconnect scheduled");
@@ -436,7 +439,7 @@ fn after_giving_way(kinds: &[TransportKind]) -> (TransportKind, Duration) {
     let delay = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled");
@@ -515,7 +518,7 @@ fn ends_before_an_answer(machine: &mut Machine, transport: TransportId) -> Durat
         })
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, _) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, _) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect scheduled")

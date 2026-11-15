@@ -3,6 +3,7 @@
 //! a redacting `Debug`, or is a code, a name or a length.
 // Block 21.
 
+use crate::sans_io::TimerKey;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,10 +138,14 @@ impl Log {
                     debug!(transport = kind.as_str(), "trying the next transport");
                 }
             }
-            Action::SetTimer(Timer::Reconnect, delay, _) => {
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, _) => {
                 debug!(delay = ?delay, "reconnect scheduled");
             }
-            Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, delay, _) => {
+            Action::SetTimer(
+                TimerKey::Subscription(id, SubscriptionTimer::Resubscribe),
+                delay,
+                _,
+            ) => {
                 debug!(parent: &self.span_of(*id), delay = ?delay, "resubscribe scheduled");
             }
             Action::FetchToken(fetch) => self.callback_started(*fetch, "token", None),

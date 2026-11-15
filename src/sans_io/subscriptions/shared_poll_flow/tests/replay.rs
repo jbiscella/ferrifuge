@@ -11,7 +11,7 @@ fn timers_set(actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetSharedPollTimer(timer, delay) => Some((*timer, *delay)),
+            Action::SetTimer(TimerKey::SharedPoll(timer), delay, _) => Some((*timer, *delay)),
             _ => None,
         })
         .collect()
@@ -38,7 +38,7 @@ fn cancelled(actions: &[Action]) -> Vec<SharedPollTimer> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::CancelSharedPollTimer(timer) => Some(*timer),
+            Action::CancelTimer(TimerKey::SharedPoll(timer)) => Some(*timer),
             _ => None,
         })
         .collect()
@@ -417,7 +417,7 @@ fn a_temporary_failure_replays_after_a_growing_backoff() {
             "{delay:?}"
         );
         delays.push(delay);
-        let fired = machine.handle(Input::SharedPollTimerFired(timer));
+        let fired = machine.fire_key(TimerKey::SharedPoll(timer));
         let replay = requests(&fired, 1);
         assert_eq!(replay.len(), 1, "{fired:?}");
         assert_eq!(items(&replay[0]), [("a".into(), 0), ("b".into(), 3)]);
@@ -448,7 +448,7 @@ fn a_replay_retry_ends_when_the_subscription_leaves_subscribed() {
     for _ in 0..6 {
         let actions = machine.handle(failing(transport, &command, 500, true));
         let timer = retries_set(&actions)[0].0;
-        command = requests(&machine.handle(Input::SharedPollTimerFired(timer)), 1)[0].clone();
+        command = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1)[0].clone();
     }
     let actions = machine.handle(failing(transport, &command, 500, true));
     let timer = retries_set(&actions)[0].0;
@@ -456,7 +456,7 @@ fn a_replay_retry_ends_when_the_subscription_leaves_subscribed() {
     let lost = machine.handle(Input::Disconnect);
     assert!(cancelled(&lost).contains(&timer), "{lost:?}");
     let (transport, replay) = reconnected(&mut machine, &serde_json::json!({"type": 4}));
-    let fired = machine.handle(Input::SharedPollTimerFired(timer));
+    let fired = machine.fire_key(TimerKey::SharedPoll(timer));
     assert!(requests(&fired, 1).is_empty(), "{fired:?}");
 
     let command = requests(&replay, 1)[0].clone();
@@ -482,7 +482,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
     let deadline = deadlines_set(&actions);
     assert_eq!(deadline.len(), 1, "{actions:?}");
 
-    let fired = machine.handle(Input::SharedPollTimerFired(deadline[0]));
+    let fired = machine.fire_key(TimerKey::SharedPoll(deadline[0]));
     let error = &errors(&fired)[0];
     assert_eq!(
         (error.kind, error.code),
@@ -498,7 +498,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
             .to_string(),
     ));
     assert!(updates(&late).is_empty(), "{late:?}");
-    let replay = requests(&machine.handle(Input::SharedPollTimerFired(retry)), 1);
+    let replay = requests(&machine.fire_key(TimerKey::SharedPoll(retry)), 1);
     assert_eq!(items(&replay[0]), [("a".into(), 0)]);
 
     let answered = machine.handle(reply_to(transport, &replay[0]));
@@ -509,7 +509,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
 
     let actions = machine.handle(Input::UntrackKeys(id, vec!["a".into()]));
     let deadline = deadlines_set(&actions)[0];
-    let fired = machine.handle(Input::SharedPollTimerFired(deadline));
+    let fired = machine.fire_key(TimerKey::SharedPoll(deadline));
     let error = &errors(&fired)[0];
     assert_eq!(
         (error.kind, error.code),
@@ -527,7 +527,7 @@ fn the_deadline_of_an_earlier_subscribe_changes_nothing() {
     let deadline = deadlines_set(&actions)[0];
     resubscribed_by_the_server(&mut machine, transport, &serde_json::json!({"type": 4}));
 
-    let fired = machine.handle(Input::SharedPollTimerFired(deadline));
+    let fired = machine.fire_key(TimerKey::SharedPoll(deadline));
 
     assert!(errors(&fired).is_empty(), "{fired:?}");
     assert!(timers_set(&fired).is_empty(), "{fired:?}");
@@ -547,13 +547,13 @@ fn one_replay_retry_per_subscription_and_close_ends_it() {
     let (again, _) = retries_set(&replaced)[0];
     assert!(cancelled(&replaced).contains(&timer), "{replaced:?}");
     assert!(
-        requests(&machine.handle(Input::SharedPollTimerFired(timer)), 1).is_empty(),
+        requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1).is_empty(),
         "the replaced timer does nothing"
     );
 
     let closed = machine.handle(Input::Close);
     assert!(cancelled(&closed).contains(&again), "{closed:?}");
-    let fired = machine.handle(Input::SharedPollTimerFired(again));
+    let fired = machine.fire_key(TimerKey::SharedPoll(again));
     assert!(sent(&fired).is_empty(), "{fired:?}");
 }
 
@@ -572,7 +572,7 @@ fn a_temporary_failure_of_a_later_replay_frame_replays_from_the_start() {
         "the rest stops: {failed:?}"
     );
     let (timer, _) = retries_set(&failed)[0];
-    let again = requests(&machine.handle(Input::SharedPollTimerFired(timer)), 1);
+    let again = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1);
 
     assert_eq!(again.len(), 1, "one frame at a time");
     assert_eq!(items(&again[0]), items(&first), "from the first frame");

@@ -6,6 +6,7 @@
 //! reading, and pauses the no-ping deadline until reading resumes.
 // Block 15.
 
+use crate::sans_io::TimerKey;
 use std::collections::{HashSet, VecDeque};
 
 use super::{Action, Anomaly, EventId, Machine, Timer, TransportId};
@@ -102,7 +103,8 @@ impl Machine {
         self.hold(transport, Item::Closed { code, reason }, 0);
         // No data can come after the close: no ping deadline either, or it
         // would end the connection before the close is handled.
-        self.actions.push(Action::CancelTimer(Timer::ServerPing));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Client(Timer::ServerPing)));
         self.handle_inbound();
     }
 
@@ -110,7 +112,8 @@ impl Machine {
     /// the messages read before it, as a close.
     pub(super) fn message_too_large_in_order(&mut self, transport: TransportId) {
         self.hold(transport, Item::TooLarge, 0);
-        self.actions.push(Action::CancelTimer(Timer::ServerPing));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Client(Timer::ServerPing)));
         self.handle_inbound();
     }
 
@@ -150,14 +153,18 @@ impl Machine {
     fn pause_reply_deadline(&mut self, id: u32) {
         if self.connect_command == Some(id) {
             self.actions
-                .push(Action::CancelTimer(Timer::ConnectTimeout));
+                .push(Action::CancelTimer(TimerKey::Client(Timer::ConnectTimeout)));
             self.start_optimistic_deadlines();
         } else if self.tokens.awaits_refresh_reply(id) {
-            self.actions.push(Action::CancelTimer(Timer::RefreshReply));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Client(Timer::RefreshReply)));
         } else if let Some((subscription, timer)) = self.subscriptions.reply_timer(id) {
             self.optimistic_answered(id);
             self.actions
-                .push(Action::CancelSubscriptionTimer(subscription, timer));
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    subscription,
+                    timer,
+                )));
         } else {
             // A shared poll request's deadline (Block 47, D12).
             #[cfg(feature = "unstable")]
@@ -278,7 +285,8 @@ impl Machine {
         if full {
             // Not reading is the client's choice: the server's handling
             // of slow clients decides, not a missing ping (Block 15).
-            self.actions.push(Action::CancelTimer(Timer::ServerPing));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Client(Timer::ServerPing)));
         } else {
             self.wait_server_ping();
         }

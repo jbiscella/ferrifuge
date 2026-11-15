@@ -1,3 +1,4 @@
+use crate::sans_io::TimerKey;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -14,8 +15,8 @@ use futures_util::{FutureExt, StreamExt};
 use super::backend::Inbound;
 use super::platform::{self, Handle, Sleep};
 use crate::sans_io::{
-    Action, CallId, CallTimer, DebounceTimer, FetchId, FrameType, Input, SubscriptionId,
-    SubscriptionTimer, Timer, TimerSetting, TransportId, TransportKind,
+    Action, DebounceTimer, FetchId, FrameType, Input, SubscriptionId, TimerSetting, TransportId,
+    TransportKind,
 };
 use crate::{DataError, MaybeSend, StateError, TokenError};
 use tracing::{debug, trace, warn};
@@ -94,19 +95,9 @@ pub(super) struct Driver {
     /// refresh of a connection that is gone, its denial must still reach
     /// the machine, which ignores any other answer of it.
     pub(super) stale_fetching: Option<(FetchId, Fetching)>,
-    pub(super) timers: Timers,
-    pub(super) subscription_timers: KeyedTimers<(SubscriptionId, SubscriptionTimer), TimerSetting>,
-    pub(super) call_timers: KeyedTimers<(CallId, CallTimer), TimerSetting>,
-    /// One timer per open debounce window.
-    // Block 46, D5.
-    pub(super) debounce_timers: KeyedTimers<DebounceTimer>,
-    /// The reply deadlines of shared poll requests.
-    // Block 47, D12.
-    pub(super) shared_poll_timers: SharedPollTimers,
-    /// The signature refresh of each shared poll subscription, at the
-    /// earliest deadline reported.
-    // Block 47, D7.
-    pub(super) shared_poll_refreshes: SharedPollRefreshes,
+    /// The machine's timers, of every family, each with its setting.
+    // Block 53 D4; Block 61, D4.
+    pub(super) timers: KeyedTimers,
     /// Subscription callbacks and the connect data callback running, each yielding the
     /// input answering it; an aborted one yields `None`.
     pub(super) callback_fetches: FuturesUnordered<CallbackFetching>,
@@ -123,112 +114,102 @@ pub(super) struct Driver {
 
 type CallbackFetching = platform::BoxFuture<'static, Option<(FetchId, Input)>>;
 
-/// The machine's subscription timers, by subscription and kind, or its call
-/// timers, by call, each with its setting; debounce and shared poll timers,
-/// numbered by their own key, keep `()`.
-// Block 53 D4.
-pub(super) struct KeyedTimers<K, V = ()>(HashMap<K, (Pin<Box<Sleep>>, V)>);
+/// The machine's timers, of every family, by key, each with the setting it
+/// was set with.
+// Block 53 D4; Block 61, D4.
+#[derive(Default)]
+pub(super) struct KeyedTimers(HashMap<TimerKey, (Pin<Box<Sleep>>, TimerSetting)>);
 
-impl<K, V> Default for KeyedTimers<K, V> {
-    fn default() -> Self {
-        Self(HashMap::new())
-    }
-}
-
-impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
-    /// Sets `key`'s timer, of `setting`.
-    fn set(&mut self, key: K, delay: Duration, setting: V) {
+impl KeyedTimers {
+    /// Sets `key`'s timer, of `setting`. A shared poll refresh running with
+    /// an earlier deadline keeps that deadline and takes `setting`.
+    fn set(&mut self, key: TimerKey, delay: Duration, setting: TimerSetting) {
+        #[cfg(feature = "unstable")]
+        if let TimerKey::SharedPollRefresh(_) = key
+            && let Some((sleep, running)) = self.0.get_mut(&key)
+        {
+            let deadline = platform::Instant::now() + delay;
+            if deadline < sleep.deadline() {
+                sleep.as_mut().reset(deadline);
+            }
+            *running = setting;
+            return;
+        }
+        // sleep() clamps delays too large for an Instant instead of panicking.
         self.0
             .insert(key, (Box::pin(platform::sleep(delay)), setting));
     }
 
-    fn cancel(&mut self, key: K) {
+    fn cancel(&mut self, key: TimerKey) {
         self.0.remove(&key);
     }
 
-    fn shorten(&mut self, key: K, by: Duration) {
+    fn shorten(&mut self, key: TimerKey, by: Duration) {
         if let Some((sleep, _)) = self.0.get_mut(&key) {
             shortened(sleep, by);
         }
     }
 
-    /// Arms `key`'s timer to fire `delay` from now, unless it runs and
-    /// fires sooner: one timer at the earliest deadline asked for.
-    #[cfg_attr(
-        not(feature = "unstable"),
-        allow(
-            dead_code,
-            reason = "only shared poll subscriptions ask for the earliest deadline"
-        )
-    )]
-    fn set_earliest(&mut self, key: K, delay: Duration)
-    where
-        V: Default,
-    {
-        match self.0.get_mut(&key) {
-            Some((sleep, _)) => {
-                let deadline = platform::Instant::now() + delay;
-                if deadline < sleep.deadline() {
-                    sleep.as_mut().reset(deadline);
-                }
-            }
-            None => self.set(key, delay, V::default()),
-        }
-    }
-
     /// The number of timers running.
     #[cfg(test)]
-    #[cfg(feature = "unstable")]
     fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// Resolves with every timer ready at this poll, which are removed;
-    /// never while none is ready or none is set. Cancel-safe. A wakeup
-    /// polls every timer, as [`KeyedTimers::fired`]; several windows ending
-    /// together cost one poll and, the driver feeding them all before its
-    /// next flush, one flush.
-    // Block 46, D5.
-    async fn fired_all(&mut self) -> Vec<K> {
+    /// Resolves with the timers to feed, which are removed, each with its
+    /// setting: of those ready at this poll, the one with the earliest
+    /// deadline, ties in [`rank`] order, or, when it is a debounce window,
+    /// every debounce window ready. Never while none is ready or none is
+    /// set. Cancel-safe: unfired timers keep running.
+    // Block 46, D5; Block 61, D4.
+    async fn fired(&mut self) -> Vec<(TimerKey, TimerSetting)> {
         std::future::poll_fn(|cx| {
-            let mut fired = Vec::new();
-            self.0.retain(|key, (sleep, _)| {
+            let mut ready: Vec<(platform::Instant, TimerKey)> = Vec::new();
+            for (key, (sleep, _)) in &mut self.0 {
                 if sleep.as_mut().poll(cx).is_ready() {
-                    fired.push(*key);
-                    false
-                } else {
-                    true
+                    ready.push((sleep.deadline(), *key));
                 }
-            });
-            if fired.is_empty() {
-                Poll::Pending
-            } else {
-                Poll::Ready(fired)
             }
+            let Some(&(_, first)) = ready
+                .iter()
+                .min_by_key(|(deadline, key)| (*deadline, rank(*key)))
+            else {
+                return Poll::Pending;
+            };
+            let keys: Vec<TimerKey> = if matches!(first, TimerKey::Debounce(_)) {
+                // Fed together, before the next flush: windows ending
+                // together share a frame (Block 46, D5, D9).
+                ready
+                    .into_iter()
+                    .map(|(_, key)| key)
+                    .filter(|key| matches!(key, TimerKey::Debounce(_)))
+                    .collect()
+            } else {
+                vec![first]
+            };
+            Poll::Ready(
+                keys.into_iter()
+                    .filter_map(|key| self.0.remove(&key).map(|(_, setting)| (key, setting)))
+                    .collect(),
+            )
         })
         .await
     }
+}
 
-    /// Resolves with the first timer to fire, which is removed, and the
-    /// number of its setting; never while none is set. Cancel-safe.
-    async fn fired(&mut self) -> (K, V) {
-        std::future::poll_fn(|cx| {
-            let fired = self.0.iter_mut().find_map(|(key, (sleep, setting))| {
-                sleep
-                    .as_mut()
-                    .poll(cx)
-                    .is_ready()
-                    .then_some((*key, *setting))
-            });
-            match fired {
-                Some((key, setting)) => {
-                    self.0.remove(&key);
-                    Poll::Ready((key, setting))
-                }
-                None => Poll::Pending,
-            }
-        })
-        .await
+/// The order of timers due at one deadline: by family, in `TimerKey`'s
+/// variant order, and a client's timers in [`Timer::ALL`] order.
+// Block 61, D4.
+fn rank(key: TimerKey) -> (u8, usize) {
+    match key {
+        TimerKey::Client(timer) => (0, timer.index()),
+        TimerKey::Subscription(..) => (1, 0),
+        TimerKey::Call(..) => (2, 0),
+        TimerKey::Debounce(_) => (3, 0),
+        #[cfg(feature = "unstable")]
+        TimerKey::SharedPoll(_) => (4, 0),
+        #[cfg(feature = "unstable")]
+        TimerKey::SharedPollRefresh(_) => (5, 0),
     }
 }
 
@@ -240,50 +221,6 @@ fn shortened(sleep: &mut Pin<Box<Sleep>>, by: Duration) {
         .checked_sub(by)
         .unwrap_or_else(platform::Instant::now);
     sleep.as_mut().reset(deadline);
-}
-
-/// The machine's timers: one slot per [`Timer`] kind, so a new kind needs
-/// no change here.
-#[derive(Default)]
-pub(super) struct Timers([Option<(Pin<Box<Sleep>>, TimerSetting)>; Timer::COUNT]);
-
-impl Timers {
-    /// Sets `timer`, of `setting`.
-    // Block 53 D4.
-    fn set(&mut self, timer: Timer, delay: Duration, setting: TimerSetting) {
-        // sleep() clamps delays too large for an Instant instead of panicking.
-        self.0[timer.index()] = Some((Box::pin(platform::sleep(delay)), setting));
-    }
-
-    fn cancel(&mut self, timer: Timer) {
-        self.0[timer.index()] = None;
-    }
-
-    fn shorten(&mut self, timer: Timer, by: Duration) {
-        if let Some((sleep, _)) = &mut self.0[timer.index()] {
-            shortened(sleep, by);
-        }
-    }
-
-    /// Resolves with the first timer to fire, which is cleared, and its
-    /// setting; never while none is set. Cancel-safe: unfired timers keep
-    /// running.
-    async fn fired(&mut self) -> (Timer, TimerSetting) {
-        std::future::poll_fn(|cx| {
-            for timer in Timer::ALL {
-                let slot = &mut self.0[timer.index()];
-                if let Some((sleep, setting)) = slot
-                    && sleep.as_mut().poll(cx).is_ready()
-                {
-                    let setting = *setting;
-                    *slot = None;
-                    return Poll::Ready((timer, setting));
-                }
-            }
-            Poll::Pending
-        })
-        .await
-    }
 }
 
 impl Driver {
@@ -488,26 +425,24 @@ impl Driver {
                     continue;
                 }
                 // Each with the setting its sleep was armed with: the core
-                // ignores one no longer running (Block 53 D2, D4).
-                (timer, setting) = self.timers.fired() => Input::TimerFired(timer, setting),
-                ((id, timer), setting) = self.subscription_timers.fired() => {
-                    Input::SubscriptionTimerFired(id, timer, setting)
-                }
-                ((id, timer), setting) = self.call_timers.fired() => {
-                    Input::CallTimerFired(id, timer, setting)
-                }
-                // Not numbered, as debounce timers: the core ignores one it
-                // no longer knows (Block 47, D3).
-                input = self.shared_poll_timers.next_input() => input,
-                input = self.shared_poll_refreshes.next_input() => input,
-                // Every window due now, fed before the next flush: windows
-                // ending together share a frame (Block 46, D5, D9).
-                timers = self.debounce_timers.fired_all() => {
-                    for timer in timers {
-                        self.shared.apply(Input::DebounceTimerFired(timer));
+                // ignores one no longer running (Block 53 D2, D4; Block 61,
+                // D4). Debounce windows due together come in one take, fed
+                // before the next flush.
+                fired = self.timers.fired() => {
+                    let mut fired = fired.into_iter();
+                    let Some((key, setting)) = fired.next() else {
+                        continue;
+                    };
+                    let rest: Vec<_> = fired.collect();
+                    if !rest.is_empty() {
+                        self.shared.apply(Input::TimerFired(key, setting));
+                        for (key, setting) in rest {
+                            self.shared.apply(Input::TimerFired(key, setting));
+                        }
+                        self.upper_streak = 0;
+                        continue;
                     }
-                    self.upper_streak = 0;
-                    continue;
+                    Input::TimerFired(key, setting)
                 }
                 Some(fetched) = self.callback_fetches.next(),
                     if !self.callback_fetches.is_empty() =>
@@ -582,30 +517,12 @@ impl Driver {
     #[cfg(feature = "__test-hooks")]
     fn publish_timers(&self) {
         use super::hooks;
-        let mut running = Vec::new();
-        for timer in Timer::ALL {
-            if let Some((sleep, _)) = &self.timers.0[timer.index()] {
-                running.push((hooks::client(timer), sleep.deadline()));
-            }
-        }
-        for ((id, timer), (sleep, _)) in &self.subscription_timers.0 {
-            running.push((hooks::subscription(*id, *timer), sleep.deadline()));
-        }
-        for ((id, timer), (sleep, _)) in &self.call_timers.0 {
-            running.push((hooks::call(*id, *timer), sleep.deadline()));
-        }
-        for (timer, (sleep, ())) in &self.debounce_timers.0 {
-            running.push((hooks::debounce(*timer), sleep.deadline()));
-        }
-        #[cfg(feature = "unstable")]
-        {
-            for (timer, (sleep, ())) in &self.shared_poll_timers.0 {
-                running.push((hooks::shared_poll(*timer), sleep.deadline()));
-            }
-            for (id, (sleep, ())) in &self.shared_poll_refreshes.0 {
-                running.push((hooks::shared_poll_refresh(*id), sleep.deadline()));
-            }
-        }
+        let running = self
+            .timers
+            .0
+            .iter()
+            .map(|(key, (sleep, _))| (hooks::name(*key), sleep.deadline()))
+            .collect();
         lock(&self.shared.records.driver).observe(running);
     }
 
@@ -655,12 +572,13 @@ impl Driver {
                     });
                 }
             }
-            Action::SetTimer(timer, delay, setting) => self.timers.set(timer, delay, setting),
-            Action::CancelTimer(timer) => self.timers.cancel(timer),
-            Action::ShortenTimer(timer, by) => self.timers.shorten(timer, by),
-            Action::ShortenSubscriptionTimer(id, timer, by) => {
-                self.subscription_timers.shorten((id, timer), by);
+            // A test may hold the debounce windows (`__test-hooks`).
+            Action::SetTimer(TimerKey::Debounce(timer), delay, setting) => {
+                self.set_debounce_timer(timer, delay, setting);
             }
+            Action::SetTimer(key, delay, setting) => self.timers.set(key, delay, setting),
+            Action::CancelTimer(key) => self.timers.cancel(key),
+            Action::ShortenTimer(key, by) => self.timers.shorten(key, by),
             // Logged by `Shared::handle`, as every action.
             Action::Anomaly(_) => {}
             // Shared::handle routes them to the outboxes.
@@ -671,18 +589,6 @@ impl Driver {
             Action::EmitMapSubscription(..) | Action::EmitSharedPollSubscription(..) => {
                 unreachable!("events never reach the driver")
             }
-            #[cfg(feature = "unstable")]
-            Action::SetSharedPollTimer(timer, delay) => {
-                self.shared_poll_timers.set(timer, delay, ());
-            }
-            #[cfg(feature = "unstable")]
-            Action::CancelSharedPollTimer(timer) => self.shared_poll_timers.cancel(timer),
-            #[cfg(feature = "unstable")]
-            Action::SetSharedPollRefresh(id, delay) => {
-                self.shared_poll_refreshes.set_earliest(id, delay);
-            }
-            #[cfg(feature = "unstable")]
-            Action::CancelSharedPollRefresh(id) => self.shared_poll_refreshes.cancel(id),
             #[cfg(feature = "unstable")]
             Action::FetchSignature {
                 subscription,
@@ -698,20 +604,6 @@ impl Driver {
                     let _ = sender.send(result);
                 }
             }
-            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
-                self.subscription_timers.set((id, timer), delay, setting);
-            }
-            Action::CancelSubscriptionTimer(id, timer) => {
-                self.subscription_timers.cancel((id, timer));
-            }
-            // Numbered by its own key: a window's timer is never set twice
-            // and the core ignores one it no longer knows (Block 46, D5).
-            Action::SetDebounceTimer(timer, delay) => self.set_debounce_timer(timer, delay),
-            Action::CancelDebounceTimer(timer) => self.debounce_timers.cancel(timer),
-            Action::SetCallTimer(id, timer, delay, setting) => {
-                self.call_timers.set((id, timer), delay, setting);
-            }
-            Action::CancelCallTimer(id, timer) => self.call_timers.cancel((id, timer)),
             action @ (Action::FetchSubscriptionData { .. }
             | Action::FetchSubscriptionToken { .. }
             | Action::FetchSubscriptionState { .. }
@@ -737,68 +629,16 @@ impl Driver {
     }
 }
 
-/// The reply deadlines of shared poll requests.
-// Block 47, D12.
-#[cfg(feature = "unstable")]
-pub(super) type SharedPollTimers = KeyedTimers<crate::sans_io::SharedPollTimer>;
-
-#[cfg(feature = "unstable")]
-impl SharedPollTimers {
-    /// The input of the next timer due.
-    async fn next_input(&mut self) -> Input {
-        Input::SharedPollTimerFired(self.fired().await.0)
-    }
-}
-
-/// No shared poll timer without `unstable`.
-#[cfg(not(feature = "unstable"))]
-#[derive(Debug, Default)]
-pub(super) struct SharedPollTimers(());
-
-#[cfg(not(feature = "unstable"))]
-impl SharedPollTimers {
-    /// Never ready.
-    async fn next_input(&mut self) -> Input {
-        std::future::pending().await
-    }
-}
-
-/// The signature refresh timer of each shared poll subscription.
-// Block 47, D7.
-#[cfg(feature = "unstable")]
-pub(super) type SharedPollRefreshes = KeyedTimers<SubscriptionId>;
-
-#[cfg(feature = "unstable")]
-impl SharedPollRefreshes {
-    /// The input of the next refresh due.
-    async fn next_input(&mut self) -> Input {
-        Input::SharedPollRefreshFired(self.fired().await.0)
-    }
-}
-
-/// No shared poll refresh without `unstable`.
-#[cfg(not(feature = "unstable"))]
-#[derive(Debug, Default)]
-pub(super) struct SharedPollRefreshes(());
-
-#[cfg(not(feature = "unstable"))]
-impl SharedPollRefreshes {
-    /// Never ready.
-    async fn next_input(&mut self) -> Input {
-        std::future::pending().await
-    }
-}
-
 impl Driver {
     /// Arms a debounce window's timer, unless a test holds them
     /// (`__test-hooks`).
-    fn set_debounce_timer(&mut self, timer: DebounceTimer, delay: Duration) {
+    fn set_debounce_timer(&mut self, timer: DebounceTimer, delay: Duration, setting: TimerSetting) {
         #[cfg(feature = "__test-hooks")]
         if let Some(held) = lock(&self.shared.held_debounce_timers).as_mut() {
-            held.push(timer);
+            held.push((timer, setting));
             return;
         }
-        self.debounce_timers.set(timer, delay, ());
+        self.timers.set(TimerKey::Debounce(timer), delay, setting);
     }
 
     /// How frames travel with the configured encoding.
@@ -1159,6 +999,7 @@ mod tests {
     use crate::adapter::shared::Core;
     use crate::adapter::test_support::*;
     use crate::codes;
+    use crate::sans_io::{CallId, CallTimer, SubscriptionTimer, Timer};
     use futures_util::StreamExt;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -1719,40 +1560,44 @@ mod tests {
         assert_eq!((state, connects), (State::Connected, 1));
     }
 
-    // Block 47, D7: replies with ever shorter deadlines keep one timer per
-    // subscription, at the earliest of them, and a later deadline moves
-    // nothing.
+    /// The keys of `fired`, in order.
+    fn keys(fired: Vec<(TimerKey, TimerSetting)>) -> Vec<TimerKey> {
+        fired.into_iter().map(|(key, _)| key).collect()
+    }
+
+    // Block 47, D7; Block 61, D4: replies with ever shorter deadlines keep
+    // one timer per subscription, at the earliest of them; a later deadline
+    // moves nothing but gives its setting, which the firing carries.
     #[cfg(feature = "unstable")]
     #[tokio::test(start_paused = true)]
-    async fn one_refresh_timer_per_subscription_at_the_earliest_deadline() {
-        let mut refreshes = SharedPollRefreshes::default();
-        let id = SubscriptionId::for_tests(1);
+    async fn a_refresh_set_again_fires_at_the_earlier_deadline_with_the_new_setting() {
+        let mut timers = KeyedTimers::default();
+        let key = TimerKey::SharedPollRefresh(SubscriptionId::for_tests(1));
         let start = tokio::time::Instant::now();
         for ttl in (50..=60).rev() {
-            refreshes.set_earliest(id, Duration::from_secs(ttl));
+            timers.set(key, Duration::from_secs(ttl), TimerSetting::for_tests(ttl));
             tokio::time::advance(Duration::from_millis(100)).await;
         }
-        refreshes.set_earliest(id, Duration::from_secs(120));
-        assert_eq!(refreshes.len(), 1);
+        timers.set(key, Duration::from_secs(120), TimerSetting::for_tests(120));
+        assert_eq!(timers.len(), 1);
 
-        let Input::SharedPollRefreshFired(fired) = refreshes.next_input().await else {
-            unreachable!("only refreshes");
-        };
+        let fired = timers.fired().await;
 
-        assert_eq!(fired, id);
+        assert_eq!(fired, [(key, TimerSetting::for_tests(120))]);
         // The 50 s deadline, set after ten advances of 100 ms.
         assert_eq!(start.elapsed(), Duration::from_secs(51));
-        assert_eq!(refreshes.len(), 0);
+        assert_eq!(timers.len(), 0);
     }
 
     #[tokio::test]
     async fn timers_fire_in_deadline_order_and_cancelled_ones_never() {
-        let mut timers = Timers::default();
+        let mut timers = KeyedTimers::default();
         let n = TimerSetting::for_tests;
-        timers.set(Timer::ServerPing, Duration::from_millis(60), n(1));
-        timers.set(Timer::Refresh, Duration::from_millis(20), n(2));
-        timers.set(Timer::Reconnect, Duration::from_millis(40), n(3));
-        timers.cancel(Timer::Reconnect);
+        let client = TimerKey::Client;
+        timers.set(client(Timer::ServerPing), Duration::from_millis(60), n(1));
+        timers.set(client(Timer::Refresh), Duration::from_millis(20), n(2));
+        timers.set(client(Timer::Reconnect), Duration::from_millis(40), n(3));
+        timers.cancel(client(Timer::Reconnect));
 
         let first = timers.fired().await;
         let second = timers.fired().await;
@@ -1761,29 +1606,62 @@ mod tests {
         // Each with its setting.
         assert_eq!(
             (first, second),
-            ((Timer::Refresh, n(2)), (Timer::ServerPing, n(1)))
+            (
+                vec![(client(Timer::Refresh), n(2))],
+                vec![(client(Timer::ServerPing), n(1))]
+            )
         );
         assert!(none_left.is_err(), "{none_left:?}");
     }
 
-    // Block 46, D5: every timer ready at the poll, none not due, whatever
-    // was cancelled, on a paused clock that only advances past timers.
+    // Block 61, D4: of the timers ready at one poll, the earliest deadline
+    // first, whatever the family; ties in `TimerKey`'s variant order, the
+    // client's timers in `Timer::ALL` order.
     #[tokio::test(start_paused = true)]
-    async fn fired_all_returns_every_timer_due_and_none_not_due() {
-        let mut timers = KeyedTimers::<u32, u64>::default();
-        timers.set(1, Duration::from_millis(20), 1);
-        timers.set(2, Duration::from_millis(20), 2);
-        timers.set(3, Duration::from_millis(50), 3);
-        timers.set(4, Duration::from_millis(50), 4);
-        timers.cancel(4);
+    async fn timers_ready_together_come_by_deadline_then_by_family() {
+        let mut timers = KeyedTimers::default();
+        let n = TimerSetting::for_tests;
+        let call = TimerKey::Call(CallId::for_tests(1), CallTimer::Reply);
+        let subscription =
+            TimerKey::Subscription(SubscriptionId::for_tests(1), SubscriptionTimer::Resubscribe);
+        let refresh = TimerKey::Client(Timer::Refresh);
+        let reconnect = TimerKey::Client(Timer::Reconnect);
+        timers.set(call, Duration::from_millis(30), n(1));
+        timers.set(refresh, Duration::from_millis(30), n(2));
+        timers.set(reconnect, Duration::from_millis(30), n(3));
+        timers.set(subscription, Duration::from_millis(20), n(4));
+        // All four are ready at the first poll.
+        tokio::time::advance(Duration::from_millis(50)).await;
 
-        let mut due = timers.fired_all().await;
-        due.sort_unstable();
-        let later = timers.fired_all().await;
-        let none_left = tokio::time::timeout(Duration::from_secs(1), timers.fired_all()).await;
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            order.extend(keys(timers.fired().await));
+        }
 
-        assert_eq!(due, [1, 2]);
-        assert_eq!(later, [3]);
+        assert_eq!(order, [subscription, reconnect, refresh, call]);
+    }
+
+    // Block 46, D5; Block 61, D4: every debounce window ready at the poll
+    // comes in one take, none not due, whatever was cancelled, on a paused
+    // clock that only advances past timers.
+    #[tokio::test(start_paused = true)]
+    async fn every_debounce_window_due_comes_in_one_take() {
+        let mut timers = KeyedTimers::default();
+        let window = |n| TimerKey::Debounce(crate::sans_io::DebounceTimer::for_tests(n));
+        let n = TimerSetting::for_tests;
+        timers.set(window(1), Duration::from_millis(20), n(1));
+        timers.set(window(2), Duration::from_millis(20), n(2));
+        timers.set(window(3), Duration::from_millis(50), n(3));
+        timers.set(window(4), Duration::from_millis(50), n(4));
+        timers.cancel(window(4));
+
+        let mut due = timers.fired().await;
+        due.sort_unstable_by_key(|(_, setting)| format!("{setting:?}"));
+        let later = timers.fired().await;
+        let none_left = tokio::time::timeout(Duration::from_secs(1), timers.fired()).await;
+
+        assert_eq!(due, [(window(1), n(1)), (window(2), n(2))]);
+        assert_eq!(later, [(window(3), n(3))]);
         assert!(none_left.is_err(), "{none_left:?}");
     }
 
@@ -1844,7 +1722,7 @@ mod tests {
 
     /// Distinct actions for the drain tests.
     fn marker(n: usize) -> Action {
-        Action::CancelTimer(Timer::ALL[n % Timer::COUNT])
+        Action::CancelTimer(TimerKey::Client(Timer::ALL[n % Timer::COUNT]))
     }
 
     /// A scripted turn for `perform_batches`: the core's queue, what was

@@ -11,6 +11,7 @@
     )
 )]
 
+use crate::sans_io::TimerKey;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
@@ -506,8 +507,9 @@ impl Client {
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default();
-        for timer in held {
-            self.shared.apply(Input::DebounceTimerFired(timer));
+        for (timer, setting) in held {
+            self.shared
+                .apply(Input::TimerFired(TimerKey::Debounce(timer), setting));
         }
     }
 

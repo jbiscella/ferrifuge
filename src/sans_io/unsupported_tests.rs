@@ -33,7 +33,7 @@ fn connect_id(actions: &[Action]) -> u64 {
 
 fn reconnect_delay(actions: &[Action]) -> Option<Duration> {
     actions.iter().find_map(|action| match action {
-        Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+        Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
         _ => None,
     })
 }

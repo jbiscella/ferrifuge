@@ -137,8 +137,8 @@ fn inputs(s: &mut Sentinels) -> Vec<Input> {
             transport: TRANSPORT,
             frame: FrameId(7),
         },
-        Input::TimerFired(Timer::Refresh, SETTING),
-        Input::DebounceTimerFired(DebounceTimer(8)),
+        Input::TimerFired(TimerKey::Client(Timer::Refresh), SETTING),
+        Input::TimerFired(TimerKey::Debounce(DebounceTimer(8)), SETTING),
         Input::TokenFetched {
             fetch: FETCH,
             result: Ok(s.text("token")),
@@ -171,7 +171,10 @@ fn subscription_and_call_inputs(s: &mut Sentinels) -> Vec<Input> {
         Input::Subscribe(SUBSCRIPTION),
         Input::Unsubscribe(SUBSCRIPTION),
         Input::RemoveSubscription(SUBSCRIPTION),
-        Input::SubscriptionTimerFired(SUBSCRIPTION, SubscriptionTimer::Refresh, SETTING),
+        Input::TimerFired(
+            TimerKey::Subscription(SUBSCRIPTION, SubscriptionTimer::Refresh),
+            SETTING,
+        ),
         Input::SubscriptionDataFetched {
             fetch: FETCH,
             result: Ok(s.bytes("fetched-subscription-data")),
@@ -193,7 +196,7 @@ fn subscription_and_call_inputs(s: &mut Sentinels) -> Vec<Input> {
         Input::StreamOpened(Some(SUBSCRIPTION)),
         Input::StreamClosed(None),
         Input::Call(CALL),
-        Input::CallTimerFired(CALL, CallTimer::Reply, SETTING),
+        Input::TimerFired(TimerKey::Call(CALL, CallTimer::Reply), SETTING),
         Input::CallAbandoned(CALL),
         Input::Slept {
             gap: Duration::from_secs(30),
@@ -212,8 +215,8 @@ fn shared_poll_inputs(s: &mut Sentinels) -> Vec<Input> {
             s.text("track-signature"),
         ),
         Input::UntrackKeys(SUBSCRIPTION, vec!["a".to_owned()]),
-        Input::SharedPollTimerFired(SharedPollTimer(10)),
-        Input::SharedPollRefreshFired(SUBSCRIPTION),
+        Input::TimerFired(TimerKey::SharedPoll(SharedPollTimer(10)), SETTING),
+        Input::TimerFired(TimerKey::SharedPollRefresh(SUBSCRIPTION), SETTING),
         Input::SignatureFetched {
             subscription: SUBSCRIPTION,
             request: FETCH,
@@ -244,8 +247,12 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
             frame: s.bytes("sent-frame"),
             frame_type: FrameType::Text,
         },
-        Action::SetTimer(Timer::Refresh, Duration::from_secs(1), SETTING),
-        Action::CancelTimer(Timer::Refresh),
+        Action::SetTimer(
+            TimerKey::Client(Timer::Refresh),
+            Duration::from_secs(1),
+            SETTING,
+        ),
+        Action::CancelTimer(TimerKey::Client(Timer::Refresh)),
         Action::Emit(
             EVENT,
             ClientEvent::ServerSubscription {
@@ -256,13 +263,15 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
         Action::FetchToken(FETCH),
         Action::FetchConnectData(FETCH),
         Action::CancelConnectData(FETCH),
-        Action::SetSubscriptionTimer(
-            SUBSCRIPTION,
-            SubscriptionTimer::Refresh,
+        Action::SetTimer(
+            TimerKey::Subscription(SUBSCRIPTION, SubscriptionTimer::Refresh),
             Duration::from_secs(1),
             SETTING,
         ),
-        Action::CancelSubscriptionTimer(SUBSCRIPTION, SubscriptionTimer::Refresh),
+        Action::CancelTimer(TimerKey::Subscription(
+            SUBSCRIPTION,
+            SubscriptionTimer::Refresh,
+        )),
         Action::EmitSubscription(
             EVENT,
             SUBSCRIPTION,
@@ -287,10 +296,18 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
             fetch: FETCH,
         },
         Action::CancelSubscriptionState(FETCH),
-        Action::SetDebounceTimer(DebounceTimer(8), Duration::from_secs(1)),
-        Action::CancelDebounceTimer(DebounceTimer(8)),
-        Action::SetCallTimer(CALL, CallTimer::Reply, Duration::from_secs(1), SETTING),
-        Action::CancelCallTimer(CALL, CallTimer::Reply),
+        Action::SetTimer(
+            TimerKey::Debounce(DebounceTimer(8)),
+            Duration::from_secs(1),
+            SETTING,
+        ),
+        Action::CancelTimer(TimerKey::Debounce(DebounceTimer(8))),
+        Action::SetTimer(
+            TimerKey::Call(CALL, CallTimer::Reply),
+            Duration::from_secs(1),
+            SETTING,
+        ),
+        Action::CancelTimer(TimerKey::Call(CALL, CallTimer::Reply)),
         Action::CallSettled {
             call: CALL,
             result: Ok(CallReply::Rpc(s.bytes("call-result"))),
@@ -299,10 +316,9 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
             transport: TRANSPORT,
             bytes: 3,
         }),
-        Action::ShortenTimer(Timer::Refresh, Duration::from_secs(1)),
-        Action::ShortenSubscriptionTimer(
-            SUBSCRIPTION,
-            SubscriptionTimer::Refresh,
+        Action::ShortenTimer(TimerKey::Client(Timer::Refresh), Duration::from_secs(1)),
+        Action::ShortenTimer(
+            TimerKey::Subscription(SUBSCRIPTION, SubscriptionTimer::Refresh),
             Duration::from_secs(1),
         ),
     ]);
@@ -318,10 +334,18 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
             SUBSCRIPTION,
             crate::SharedPollSubscriptionEvent::Update(shared_poll_update(s)),
         ),
-        Action::SetSharedPollTimer(SharedPollTimer(10), Duration::from_secs(1)),
-        Action::CancelSharedPollTimer(SharedPollTimer(10)),
-        Action::SetSharedPollRefresh(SUBSCRIPTION, Duration::from_secs(1)),
-        Action::CancelSharedPollRefresh(SUBSCRIPTION),
+        Action::SetTimer(
+            TimerKey::SharedPoll(SharedPollTimer(10)),
+            Duration::from_secs(1),
+            SETTING,
+        ),
+        Action::CancelTimer(TimerKey::SharedPoll(SharedPollTimer(10))),
+        Action::SetTimer(
+            TimerKey::SharedPollRefresh(SUBSCRIPTION),
+            Duration::from_secs(1),
+            SETTING,
+        ),
+        Action::CancelTimer(TimerKey::SharedPollRefresh(SUBSCRIPTION)),
         Action::FetchSignature {
             subscription: SUBSCRIPTION,
             request: FETCH,
@@ -388,7 +412,6 @@ fn input_name(input: &Input) -> &'static str {
             frame: _,
         } => "FrameWritten",
         Input::TimerFired(_, _) => "TimerFired",
-        Input::DebounceTimerFired(_) => "DebounceTimerFired",
         Input::TokenFetched {
             fetch: _,
             result: _,
@@ -408,7 +431,6 @@ fn input_name(input: &Input) -> &'static str {
         Input::Subscribe(_) => "Subscribe",
         Input::Unsubscribe(_) => "Unsubscribe",
         Input::RemoveSubscription(_) => "RemoveSubscription",
-        Input::SubscriptionTimerFired(_, _, _) => "SubscriptionTimerFired",
         Input::SubscriptionDataFetched {
             fetch: _,
             result: _,
@@ -430,7 +452,6 @@ fn input_name(input: &Input) -> &'static str {
         Input::StreamOpened(_) => "StreamOpened",
         Input::StreamClosed(_) => "StreamClosed",
         Input::Call(_) => "Call",
-        Input::CallTimerFired(_, _, _) => "CallTimerFired",
         Input::CallAbandoned(_) => "CallAbandoned",
         Input::Slept { gap: _ } => "Slept",
         #[cfg(feature = "unstable")]
@@ -439,10 +460,6 @@ fn input_name(input: &Input) -> &'static str {
         Input::TrackKeysWithSignature(_, _, _) => "TrackKeysWithSignature",
         #[cfg(feature = "unstable")]
         Input::UntrackKeys(_, _) => "UntrackKeys",
-        #[cfg(feature = "unstable")]
-        Input::SharedPollTimerFired(_) => "SharedPollTimerFired",
-        #[cfg(feature = "unstable")]
-        Input::SharedPollRefreshFired(_) => "SharedPollRefreshFired",
         #[cfg(feature = "unstable")]
         Input::SignatureFetched {
             subscription: _,
@@ -474,21 +491,11 @@ fn action_name(action: &Action) -> &'static str {
         Action::FetchToken(_) => "FetchToken",
         Action::FetchConnectData(_) => "FetchConnectData",
         Action::CancelConnectData(_) => "CancelConnectData",
-        Action::SetSubscriptionTimer(_, _, _, _) => "SetSubscriptionTimer",
-        Action::CancelSubscriptionTimer(_, _) => "CancelSubscriptionTimer",
         Action::EmitSubscription(_, _, _) => "EmitSubscription",
         #[cfg(feature = "unstable")]
         Action::EmitMapSubscription(_, _, _) => "EmitMapSubscription",
         #[cfg(feature = "unstable")]
         Action::EmitSharedPollSubscription(_, _, _) => "EmitSharedPollSubscription",
-        #[cfg(feature = "unstable")]
-        Action::SetSharedPollTimer(_, _) => "SetSharedPollTimer",
-        #[cfg(feature = "unstable")]
-        Action::CancelSharedPollTimer(_) => "CancelSharedPollTimer",
-        #[cfg(feature = "unstable")]
-        Action::SetSharedPollRefresh(_, _) => "SetSharedPollRefresh",
-        #[cfg(feature = "unstable")]
-        Action::CancelSharedPollRefresh(_) => "CancelSharedPollRefresh",
         #[cfg(feature = "unstable")]
         Action::FetchSignature {
             subscription: _,
@@ -514,14 +521,9 @@ fn action_name(action: &Action) -> &'static str {
             fetch: _,
         } => "FetchSubscriptionState",
         Action::CancelSubscriptionState(_) => "CancelSubscriptionState",
-        Action::SetDebounceTimer(_, _) => "SetDebounceTimer",
-        Action::CancelDebounceTimer(_) => "CancelDebounceTimer",
-        Action::SetCallTimer(_, _, _, _) => "SetCallTimer",
-        Action::CancelCallTimer(_, _) => "CancelCallTimer",
         Action::CallSettled { call: _, result: _ } => "CallSettled",
         Action::Anomaly(_) => "Anomaly",
         Action::ShortenTimer(_, _) => "ShortenTimer",
-        Action::ShortenSubscriptionTimer(_, _, _) => "ShortenSubscriptionTimer",
     }
 }
 

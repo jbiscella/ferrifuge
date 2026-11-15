@@ -2,6 +2,7 @@
 
 use cucumber::{given, then, when};
 use ferrifuge::machine::SubscriptionOptions;
+use ferrifuge::machine::TimerKey;
 use ferrifuge::machine::{
     Action, EventId, FrameId, Input, Machine, Timer, TransportId, TransportKind,
 };
@@ -103,7 +104,10 @@ fn http_stream_connects(world: &mut ClientWorld) {
     let setting = machine
         .timer_setting(Timer::Reconnect)
         .expect("reconnect set");
-    let actions = handle_taking(machine, Input::TimerFired(Timer::Reconnect, setting));
+    let actions = handle_taking(
+        machine,
+        Input::TimerFired(TimerKey::Client(Timer::Reconnect), setting),
+    );
     let transport = opened(&actions, TransportKind::HttpStream);
     handle_taking(machine, Input::TransportOpened(transport));
     handle_taking(

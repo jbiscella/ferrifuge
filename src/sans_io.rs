@@ -193,22 +193,26 @@ impl FrameId {
     }
 }
 
-/// Identifies the timer of one debounce window: the owner runs it for the
-/// [`Action::SetDebounceTimer`] and reports it with
-/// [`Input::DebounceTimerFired`]. A machine never reuses a number, so a
-/// firing for a window already gone is ignored.
+/// Identifies the timer of one debounce window, as [`TimerKey::Debounce`].
+/// A machine never reuses a number.
 // Block 46, D5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DebounceTimer(u64);
 
+impl DebounceTimer {
+    /// A window's timer for the adapter's unit tests.
+    #[cfg(test)]
+    #[cfg(any(adapter_tokio, adapter_browser))]
+    pub(crate) fn for_tests(n: u64) -> Self {
+        Self(n)
+    }
+}
+
 /// Identifies a timer of a shared poll subscription: the reply deadline of
 /// a track or untrack request, or a retry of its signature refresh, of its
-/// signing or of its tracking after a failed track request; the refresh
-/// itself runs on [`Action::SetSharedPollRefresh`]. The owner runs it for
-/// the [`Action::SetSharedPollTimer`] and reports it with
-/// [`Input::SharedPollTimerFired`]; a machine never reuses a number, so a
-/// firing for a request already answered, or a timer since cancelled, is
-/// ignored.
+/// signing or of its tracking after a failed track request, as
+/// [`TimerKey::SharedPoll`]; the refresh itself is
+/// [`TimerKey::SharedPollRefresh`]. A machine never reuses a number.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
@@ -220,12 +224,11 @@ pub struct DebounceTimer(u64);
 pub struct SharedPollTimer(pub(crate) u64);
 
 /// The number the machine gives a setting of a timer, carried by
-/// [`Action::SetTimer`], [`Action::SetSubscriptionTimer`] and
-/// [`Action::SetCallTimer`] and returned by the firing of that setting. One
-/// counter, shared by the three timer families, counts up for the machine's
+/// [`Action::SetTimer`] and returned by the firing of that setting. One
+/// counter, shared by every timer family, counts up for the machine's
 /// lifetime, so no number is given twice; a wrap is not handled, as for
 /// [`TransportId`].
-// Block 53 D1.
+// Block 53 D1; Block 61, D4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimerSetting(u64);
 
@@ -238,28 +241,42 @@ impl TimerSetting {
     }
 }
 
-/// A timer of the machine, of any family, by which its running setting is
-/// kept.
-// Block 53 D2.
+/// A timer of the machine, of any family: the key of [`Action::SetTimer`],
+/// [`Action::CancelTimer`], [`Action::ShortenTimer`] and
+/// [`Input::TimerFired`]. A key runs one setting at a time.
+// Block 53 D2; Block 61, D4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum TimerKey {
+#[non_exhaustive]
+pub enum TimerKey {
+    /// A timer of the client.
     Client(Timer),
+    /// A timer of a subscription.
     Subscription(SubscriptionId, SubscriptionTimer),
+    /// A timer of a call.
     Call(CallId, CallTimer),
-}
-
-impl TimerKey {
-    /// The timer whose firing `input` is, with its setting.
-    fn fired(input: &Input) -> Option<(Self, TimerSetting)> {
-        match input {
-            Input::TimerFired(timer, setting) => Some((Self::Client(*timer), *setting)),
-            Input::SubscriptionTimerFired(id, timer, setting) => {
-                Some((Self::Subscription(*id, *timer), *setting))
-            }
-            Input::CallTimerFired(id, timer, setting) => Some((Self::Call(*id, *timer), *setting)),
-            _ => None,
-        }
-    }
+    /// The end of a debounce window. The windows due at one poll are fed
+    /// together, before the next flush, so that windows ending together
+    /// share a frame.
+    Debounce(DebounceTimer),
+    /// A timer of a shared poll subscription's request or retry.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SharedPoll(SharedPollTimer),
+    /// The refresh of a shared poll subscription, one per subscription. A
+    /// [`Action::SetTimer`] for this key while it runs with an earlier
+    /// deadline keeps that deadline and takes the new setting, so that the
+    /// refresh runs at the earliest deadline asked for.
+    ///
+    /// Unstable: requires the `unstable` feature, follows centrifuge-js
+    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
+    /// (v6.8.0 and later), and may change in any minor release.
+    #[cfg(feature = "unstable")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+    SharedPollRefresh(SubscriptionId),
 }
 
 /// The settings of the machine's timers: the next number to give, and the
@@ -282,24 +299,11 @@ impl TimerSettings {
     /// cancel ends it.
     fn follow(&mut self, action: &Action) {
         match action {
-            Action::SetTimer(timer, _, setting) => {
-                self.running.insert(TimerKey::Client(*timer), *setting);
+            Action::SetTimer(key, _, setting) => {
+                self.running.insert(*key, *setting);
             }
-            Action::SetSubscriptionTimer(id, timer, _, setting) => {
-                self.running
-                    .insert(TimerKey::Subscription(*id, *timer), *setting);
-            }
-            Action::SetCallTimer(id, timer, _, setting) => {
-                self.running.insert(TimerKey::Call(*id, *timer), *setting);
-            }
-            Action::CancelTimer(timer) => {
-                self.running.remove(&TimerKey::Client(*timer));
-            }
-            Action::CancelSubscriptionTimer(id, timer) => {
-                self.running.remove(&TimerKey::Subscription(*id, *timer));
-            }
-            Action::CancelCallTimer(id, timer) => {
-                self.running.remove(&TimerKey::Call(*id, *timer));
+            Action::CancelTimer(key) => {
+                self.running.remove(key);
             }
             _ => {}
         }
@@ -310,6 +314,15 @@ impl TimerSettings {
 /// [`Machine::add_call`] gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CallId(u64);
+
+impl CallId {
+    /// An id for the adapter's unit tests.
+    #[cfg(test)]
+    #[cfg(any(adapter_tokio, adapter_browser))]
+    pub(crate) fn for_tests(n: u64) -> Self {
+        Self(n)
+    }
+}
 
 /// Identifies a subscription in the machine's registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -870,15 +883,11 @@ pub enum Input {
         /// The frame.
         frame: FrameId,
     },
-    /// The timer of this setting, set by [`Action::SetTimer`], fired; a
-    /// firing of a setting no longer running is ignored (see the module
+    /// The timer of this key and setting, set by [`Action::SetTimer`], fired;
+    /// a firing of a setting no longer running is ignored (see the module
     /// documentation).
-    TimerFired(Timer, TimerSetting),
-    /// A timer set by [`Action::SetDebounceTimer`] fired: the window sends
-    /// the latest value it holds, if any, and opens anew, or closes. One
-    /// whose window is gone is ignored.
-    // Block 46.
-    DebounceTimerFired(DebounceTimer),
+    // Block 61, D4.
+    TimerFired(TimerKey, TimerSetting),
     /// The token callback answered a [`Action::FetchToken`].
     TokenFetched {
         /// The fetch answered.
@@ -934,10 +943,6 @@ pub enum Input {
     Unsubscribe(SubscriptionId),
     /// The application removed a subscription from the registry.
     RemoveSubscription(SubscriptionId),
-    /// The timer of this setting, set by [`Action::SetSubscriptionTimer`],
-    /// fired; a firing of a setting no longer running is ignored (see the
-    /// module documentation).
-    SubscriptionTimerFired(SubscriptionId, SubscriptionTimer, TimerSetting),
     /// The data callback answered a [`Action::FetchSubscriptionData`].
     SubscriptionDataFetched {
         /// The fetch answered.
@@ -997,10 +1002,6 @@ pub enum Input {
     /// sent when the client is connected, waiting for the connection
     /// until then.
     Call(CallId),
-    /// The timer of this setting, set by [`Action::SetCallTimer`], fired; a
-    /// firing of a setting no longer running is ignored (see the module
-    /// documentation).
-    CallTimerFired(CallId, CallTimer, TimerSetting),
     /// The application no longer awaits the call, e.g. its future was
     /// dropped: it is forgotten, and never sent if it was waiting. A map
     /// remove that publishes follow goes on for them.
@@ -1049,25 +1050,6 @@ pub enum Input {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     UntrackKeys(SubscriptionId, Vec<String>),
-    /// A timer set by [`Action::SetSharedPollTimer`] fired.
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    // Block 47, D7, D12.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    SharedPollTimerFired(SharedPollTimer),
-    /// The refresh timer of a shared poll subscription, armed by
-    /// [`Action::SetSharedPollRefresh`], fired.
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    // Block 47, D7.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    SharedPollRefreshFired(SubscriptionId),
     /// The `get_signature` callback answered [`Action::FetchSignature`]
     /// `request` of shared poll subscription `subscription`. An answer to a
     /// request the subscription abandoned, by leaving `subscribed`, changes
@@ -1133,11 +1115,14 @@ pub enum Action {
         /// How the frame travels on transports with typed frames.
         frame_type: FrameType,
     },
-    /// Start a timer, replacing a running one of the same kind, as the
-    /// setting given: its firing returns it.
-    SetTimer(Timer, Duration, TimerSetting),
-    /// Stop a timer if it runs.
-    CancelTimer(Timer),
+    /// Start the timer of a key, replacing its running one, as the setting
+    /// given: its firing returns it. For [`TimerKey::SharedPollRefresh`], a
+    /// running timer with an earlier deadline keeps that deadline and takes
+    /// the setting.
+    // Block 61, D4.
+    SetTimer(TimerKey, Duration, TimerSetting),
+    /// Stop the timer of a key if it runs.
+    CancelTimer(TimerKey),
     /// Deliver an event to the application; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     Emit(EventId, ClientEvent),
@@ -1152,11 +1137,6 @@ pub enum Action {
     /// Stop a [`Action::FetchConnectData`] still running: its answer is no
     /// longer wanted.
     CancelConnectData(FetchId),
-    /// Start a subscription's timer, replacing a running one of the kind, as
-    /// the setting given: its firing returns it.
-    SetSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration, TimerSetting),
-    /// Stop a subscription's timer if it runs.
-    CancelSubscriptionTimer(SubscriptionId, SubscriptionTimer),
     /// Deliver an event to a subscription's listeners; report it with
     /// [`Input::EventTaken`] once the application has taken it.
     EmitSubscription(EventId, SubscriptionId, SubscriptionEvent),
@@ -1180,45 +1160,6 @@ pub enum Action {
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     EmitSharedPollSubscription(EventId, SubscriptionId, crate::SharedPollSubscriptionEvent),
-    /// Start a shared poll subscription's timer; report it with
-    /// [`Input::SharedPollTimerFired`].
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    // Block 47, D7, D12.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    SetSharedPollTimer(SharedPollTimer, Duration),
-    /// Stop a shared poll subscription's timer if it runs.
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    CancelSharedPollTimer(SharedPollTimer),
-    /// Arm the refresh timer of a shared poll subscription to fire at the
-    /// earlier of its current deadline, if it runs, and the given delay
-    /// from now; report it with [`Input::SharedPollRefreshFired`]. One
-    /// timer per subscription: the refresh runs at the earliest deadline a
-    /// track reply reported.
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    // Block 47, D7.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    SetSharedPollRefresh(SubscriptionId, Duration),
-    /// Stop the refresh timer of a shared poll subscription if it runs.
-    ///
-    /// Unstable: requires the `unstable` feature, follows centrifuge-js
-    /// 63ed73e and Centrifugo's experimental shared poll subscriptions
-    /// (v6.8.0 and later), and may change in any minor release.
-    #[cfg(feature = "unstable")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
-    CancelSharedPollRefresh(SubscriptionId),
     /// Ask the shared poll subscription's `get_signature` callback to sign
     /// `keys`; report the answer with [`Input::SignatureFetched`]. Only
     /// issued for subscriptions with
@@ -1287,17 +1228,6 @@ pub enum Action {
     /// Stop a [`Action::FetchSubscriptionState`] still running: its answer
     /// is no longer wanted.
     CancelSubscriptionState(FetchId),
-    /// Start a debounce window's timer, which the machine never sets twice;
-    /// report its end with [`Input::DebounceTimerFired`].
-    // Block 46, D5.
-    SetDebounceTimer(DebounceTimer, Duration),
-    /// Stop a debounce window's timer if it runs.
-    CancelDebounceTimer(DebounceTimer),
-    /// Start a call's timer, replacing its running one, as the setting given:
-    /// its firing returns it.
-    SetCallTimer(CallId, CallTimer, Duration, TimerSetting),
-    /// Stop a call's timer if it runs.
-    CancelCallTimer(CallId, CallTimer),
     /// Give the application the outcome of a call; the call is forgotten.
     CallSettled {
         /// The call settled.
@@ -1311,12 +1241,12 @@ pub enum Action {
     /// performing.
     // Block 21.
     Anomaly(Anomaly),
-    /// Make the timer fire `by` earlier, at once if that time has passed;
-    /// nothing when it is not running (a refresh due during a sleep).
-    // Block 25, D3.
-    ShortenTimer(Timer, Duration),
-    /// As [`Action::ShortenTimer`], for a subscription's timer.
-    ShortenSubscriptionTimer(SubscriptionId, SubscriptionTimer, Duration),
+    /// Make the timer of a key fire `by` earlier, at once if that time has
+    /// passed; nothing when it is not running (a refresh due during a
+    /// sleep). The timer keeps its setting. Only client and subscription
+    /// keys are shortened.
+    // Block 25, D3; Block 61, D4.
+    ShortenTimer(TimerKey, Duration),
 }
 
 /// A breach of the client protocol by the server, reported with
@@ -1459,9 +1389,6 @@ impl std::fmt::Debug for Input {
                 .field(timer)
                 .field(setting)
                 .finish(),
-            Self::DebounceTimerFired(timer) => {
-                f.debug_tuple("DebounceTimerFired").field(timer).finish()
-            }
             Self::TokenFetched { fetch, result } => f
                 .debug_struct("TokenFetched")
                 .field("fetch", fetch)
@@ -1488,12 +1415,6 @@ impl std::fmt::Debug for Input {
             Self::Subscribe(id) => f.debug_tuple("Subscribe").field(id).finish(),
             Self::Unsubscribe(id) => f.debug_tuple("Unsubscribe").field(id).finish(),
             Self::RemoveSubscription(id) => f.debug_tuple("RemoveSubscription").field(id).finish(),
-            Self::SubscriptionTimerFired(id, timer, setting) => f
-                .debug_tuple("SubscriptionTimerFired")
-                .field(id)
-                .field(timer)
-                .field(setting)
-                .finish(),
             Self::SubscriptionDataFetched { fetch, result } => f
                 .debug_struct("SubscriptionDataFetched")
                 .field("fetch", fetch)
@@ -1528,12 +1449,6 @@ impl std::fmt::Debug for Input {
             Self::StreamOpened(of) => f.debug_tuple("StreamOpened").field(of).finish(),
             Self::StreamClosed(of) => f.debug_tuple("StreamClosed").field(of).finish(),
             Self::Call(id) => f.debug_tuple("Call").field(id).finish(),
-            Self::CallTimerFired(id, timer, setting) => f
-                .debug_tuple("CallTimerFired")
-                .field(id)
-                .field(timer)
-                .field(setting)
-                .finish(),
             Self::CallAbandoned(id) => f.debug_tuple("CallAbandoned").field(id).finish(),
             Self::Slept { gap } => f.debug_struct("Slept").field("gap", gap).finish(),
             #[cfg(feature = "unstable")]
@@ -1549,14 +1464,6 @@ impl std::fmt::Debug for Input {
             #[cfg(feature = "unstable")]
             Self::UntrackKeys(id, keys) => {
                 f.debug_tuple("UntrackKeys").field(id).field(keys).finish()
-            }
-            #[cfg(feature = "unstable")]
-            Self::SharedPollTimerFired(timer) => {
-                f.debug_tuple("SharedPollTimerFired").field(timer).finish()
-            }
-            #[cfg(feature = "unstable")]
-            Self::SharedPollRefreshFired(id) => {
-                f.debug_tuple("SharedPollRefreshFired").field(id).finish()
             }
             #[cfg(feature = "unstable")]
             Self::SignatureFetched {
@@ -1618,18 +1525,6 @@ impl std::fmt::Debug for Action {
             Self::FetchToken(id) => f.debug_tuple("FetchToken").field(id).finish(),
             Self::FetchConnectData(id) => f.debug_tuple("FetchConnectData").field(id).finish(),
             Self::CancelConnectData(id) => f.debug_tuple("CancelConnectData").field(id).finish(),
-            Self::SetSubscriptionTimer(id, timer, delay, setting) => f
-                .debug_tuple("SetSubscriptionTimer")
-                .field(id)
-                .field(timer)
-                .field(delay)
-                .field(setting)
-                .finish(),
-            Self::CancelSubscriptionTimer(id, timer) => f
-                .debug_tuple("CancelSubscriptionTimer")
-                .field(id)
-                .field(timer)
-                .finish(),
             Self::EmitSubscription(event_id, id, event) => f
                 .debug_tuple("EmitSubscription")
                 .field(event_id)
@@ -1650,26 +1545,6 @@ impl std::fmt::Debug for Action {
                 .field(id)
                 .field(event)
                 .finish(),
-            #[cfg(feature = "unstable")]
-            Self::SetSharedPollTimer(timer, delay) => f
-                .debug_tuple("SetSharedPollTimer")
-                .field(timer)
-                .field(delay)
-                .finish(),
-            #[cfg(feature = "unstable")]
-            Self::CancelSharedPollTimer(timer) => {
-                f.debug_tuple("CancelSharedPollTimer").field(timer).finish()
-            }
-            #[cfg(feature = "unstable")]
-            Self::SetSharedPollRefresh(id, delay) => f
-                .debug_tuple("SetSharedPollRefresh")
-                .field(id)
-                .field(delay)
-                .finish(),
-            #[cfg(feature = "unstable")]
-            Self::CancelSharedPollRefresh(id) => {
-                f.debug_tuple("CancelSharedPollRefresh").field(id).finish()
-            }
             #[cfg(feature = "unstable")]
             Self::FetchSignature {
                 subscription,
@@ -1724,26 +1599,6 @@ impl std::fmt::Debug for Action {
                 .debug_tuple("CancelSubscriptionState")
                 .field(fetch)
                 .finish(),
-            Self::SetDebounceTimer(timer, delay) => f
-                .debug_tuple("SetDebounceTimer")
-                .field(timer)
-                .field(delay)
-                .finish(),
-            Self::CancelDebounceTimer(timer) => {
-                f.debug_tuple("CancelDebounceTimer").field(timer).finish()
-            }
-            Self::SetCallTimer(id, timer, delay, setting) => f
-                .debug_tuple("SetCallTimer")
-                .field(id)
-                .field(timer)
-                .field(delay)
-                .field(setting)
-                .finish(),
-            Self::CancelCallTimer(id, timer) => f
-                .debug_tuple("CancelCallTimer")
-                .field(id)
-                .field(timer)
-                .finish(),
             Self::CallSettled { call, result } => f
                 .debug_struct("CallSettled")
                 .field("call", call)
@@ -1752,12 +1607,6 @@ impl std::fmt::Debug for Action {
             Self::Anomaly(anomaly) => f.debug_tuple("Anomaly").field(anomaly).finish(),
             Self::ShortenTimer(timer, by) => f
                 .debug_tuple("ShortenTimer")
-                .field(timer)
-                .field(by)
-                .finish(),
-            Self::ShortenSubscriptionTimer(id, timer, by) => f
-                .debug_tuple("ShortenSubscriptionTimer")
-                .field(id)
                 .field(timer)
                 .field(by)
                 .finish(),
@@ -2052,8 +1901,8 @@ impl Machine {
     }
 
     /// Honours the `publish_debounce` the server advises in its subscribe
-    /// replies: the owner runs [`Action::SetDebounceTimer`] timers and
-    /// reports them with [`Input::DebounceTimerFired`]. Without it, every
+    /// replies: the owner runs the [`TimerKey::Debounce`] timers and
+    /// reports them with [`Input::TimerFired`]. Without it, every
     /// publish is sent: an owner written before this block would never end
     /// a window, and its callers would hang. The tokio and browser clients
     /// always do this.
@@ -2182,11 +2031,11 @@ impl Machine {
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
         // A firing of a setting no longer running changes nothing; taken,
         // it no longer runs (Block 53 D2).
-        if let Some((key, setting)) = TimerKey::fired(&input) {
-            if self.timer_settings.running.get(&key) != Some(&setting) {
+        if let Input::TimerFired(key, setting) = &input {
+            if self.timer_settings.running.get(key) != Some(setting) {
                 return Vec::new();
             }
-            self.timer_settings.running.remove(&key);
+            self.timer_settings.running.remove(key);
         }
         self.batching.application_unsubscribe =
             matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));
@@ -2246,8 +2095,7 @@ impl Machine {
                 self.counters.written(frame);
                 self.frame_written(frame);
             }
-            Input::TimerFired(timer, _) => self.timer_fired(timer),
-            Input::DebounceTimerFired(timer) => self.debounce_timer_fired(timer),
+            Input::TimerFired(key, _) => self.key_fired(key),
             Input::TokenFetched { fetch, result } => {
                 if self.tokens.take_stale_fetch(fetch) {
                     self.stale_token_fetched(&result);
@@ -2267,7 +2115,6 @@ impl Machine {
             Input::Subscribe(id) => self.subscribe(id),
             Input::Unsubscribe(id) => self.unsubscribe(id),
             Input::RemoveSubscription(id) => self.remove_subscription(id),
-            Input::SubscriptionTimerFired(id, timer, _) => self.subscription_timer_fired(id, timer),
             Input::SubscriptionDataFetched { fetch, result } => {
                 self.subscription_data_fetched(fetch, result);
             }
@@ -2283,15 +2130,12 @@ impl Machine {
             | Input::StreamOpened(_)
             | Input::StreamClosed(_)) => self.delivery_input(input),
             Input::Call(id) => self.call(id),
-            Input::CallTimerFired(id, timer, _) => self.call_timer_fired(id, timer),
             Input::CallAbandoned(id) => self.call_abandoned(id),
             Input::Slept { gap } => self.slept(gap),
             #[cfg(feature = "unstable")]
             input @ (Input::TrackKeys(..)
             | Input::TrackKeysWithSignature(..)
             | Input::UntrackKeys(..)
-            | Input::SharedPollTimerFired(_)
-            | Input::SharedPollRefreshFired(_)
             | Input::SignatureFetched { .. }) => self.shared_poll_input(input),
             // About a transport already abandoned.
             Input::TransportOpened(_)
@@ -2313,10 +2157,31 @@ impl Machine {
         actions
     }
 
+    /// The firing of `key`'s timer, its setting taken: to the family's.
+    // Block 61, D4.
+    fn key_fired(&mut self, key: TimerKey) {
+        match key {
+            TimerKey::Client(timer) => self.timer_fired(timer),
+            TimerKey::Subscription(id, timer) => self.subscription_timer_fired(id, timer),
+            TimerKey::Call(id, timer) => self.call_timer_fired(id, timer),
+            TimerKey::Debounce(timer) => self.debounce_timer_fired(timer),
+            #[cfg(feature = "unstable")]
+            TimerKey::SharedPoll(timer) => self.shared_poll_timer_fired(timer),
+            #[cfg(feature = "unstable")]
+            TimerKey::SharedPollRefresh(id) => self.refresh_fired(id),
+        }
+    }
+
+    /// Sets the timer of `key` to fire after `delay`, as a new setting.
+    // Block 53 D1; Block 61, D4.
+    pub(crate) fn set_key_timer(&mut self, key: TimerKey, delay: Duration) {
+        let setting = self.timer_settings.give();
+        self.actions.push(Action::SetTimer(key, delay, setting));
+    }
+
     /// Sets `timer` to fire after `delay`, as a new setting.
     pub(crate) fn set_timer(&mut self, timer: Timer, delay: Duration) {
-        let setting = self.timer_settings.give();
-        self.actions.push(Action::SetTimer(timer, delay, setting));
+        self.set_key_timer(TimerKey::Client(timer), delay);
     }
 
     /// Sets a subscription's `timer` to fire after `delay`, as a new setting.
@@ -2326,16 +2191,12 @@ impl Machine {
         timer: SubscriptionTimer,
         delay: Duration,
     ) {
-        let setting = self.timer_settings.give();
-        self.actions
-            .push(Action::SetSubscriptionTimer(id, timer, delay, setting));
+        self.set_key_timer(TimerKey::Subscription(id, timer), delay);
     }
 
     /// Sets a call's `timer` to fire after `delay`, as a new setting.
     pub(crate) fn set_call_timer(&mut self, id: CallId, timer: CallTimer, delay: Duration) {
-        let setting = self.timer_settings.give();
-        self.actions
-            .push(Action::SetCallTimer(id, timer, delay, setting));
+        self.set_key_timer(TimerKey::Call(id, timer), delay);
     }
 
     /// The settings running, by timer, as the step that returned last left
@@ -2392,8 +2253,24 @@ impl Machine {
     #[cfg(any(test, feature = "__test-hooks"))]
     #[doc(hidden)]
     pub fn fire(&mut self, timer: Timer) -> Vec<Action> {
-        let setting = self.timer_setting(timer).unwrap_or(TimerSetting(u64::MAX));
-        self.handle(Input::TimerFired(timer, setting))
+        self.fire_key(TimerKey::Client(timer))
+    }
+
+    /// The setting running for the timer of `key`, for tests.
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn key_setting(&self, key: TimerKey) -> Option<TimerSetting> {
+        self.timer_settings.running.get(&key).copied()
+    }
+
+    /// The firing of the running setting of `key`'s timer, as
+    /// [`Machine::fire`].
+    #[cfg(any(test, feature = "__test-hooks"))]
+    #[doc(hidden)]
+    pub fn fire_key(&mut self, key: TimerKey) -> Vec<Action> {
+        let setting = self.key_setting(key).unwrap_or(TimerSetting(u64::MAX));
+        self.handle(Input::TimerFired(key, setting))
     }
 
     /// The firing of a subscription timer's running setting, as
@@ -2405,20 +2282,14 @@ impl Machine {
         id: SubscriptionId,
         timer: SubscriptionTimer,
     ) -> Vec<Action> {
-        let setting = self
-            .subscription_timer_setting(id, timer)
-            .unwrap_or(TimerSetting(u64::MAX));
-        self.handle(Input::SubscriptionTimerFired(id, timer, setting))
+        self.fire_key(TimerKey::Subscription(id, timer))
     }
 
     /// The firing of a call timer's running setting, as [`Machine::fire`].
     #[cfg(any(test, feature = "__test-hooks"))]
     #[doc(hidden)]
     pub fn fire_call(&mut self, id: CallId, timer: CallTimer) -> Vec<Action> {
-        let setting = self
-            .call_timer_setting(id, timer)
-            .unwrap_or(TimerSetting(u64::MAX));
-        self.handle(Input::CallTimerFired(id, timer, setting))
+        self.fire_key(TimerKey::Call(id, timer))
     }
 
     fn is_current(&self, id: TransportId) -> bool {
@@ -2912,7 +2783,8 @@ impl Machine {
                 continue;
             }
             if self.state == State::Connected && self.tokens.take_refresh_reply(id) {
-                self.actions.push(Action::CancelTimer(Timer::RefreshReply));
+                self.actions
+                    .push(Action::CancelTimer(TimerKey::Client(Timer::RefreshReply)));
                 self.disconnect(
                     codes::disconnected::MESSAGE_SIZE_LIMIT,
                     subscriptions::MESSAGE_SIZE_LIMIT_REASON,
@@ -3000,7 +2872,8 @@ impl Machine {
             return;
         }
         if self.state == State::Connected && self.tokens.take_refresh_reply(reply.id) {
-            self.actions.push(Action::CancelTimer(Timer::RefreshReply));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Client(Timer::RefreshReply)));
             match (reply.error, reply.result) {
                 (Some(error), _) => self.refresh_error(&error),
                 (None, ReplyResult::Refresh(result)) => self.refreshed(&result),
@@ -3023,7 +2896,7 @@ impl Machine {
 
     fn connected(&mut self, mut result: ConnectResult) {
         self.actions
-            .push(Action::CancelTimer(Timer::ConnectTimeout));
+            .push(Action::CancelTimer(TimerKey::Client(Timer::ConnectTimeout)));
         self.transports.choose();
         self.answered = true;
         if self.transport_kind().is_emulated() {
@@ -3042,7 +2915,8 @@ impl Machine {
             self.set_refresh_timer(result.ttl);
         } else {
             // One kept from the last connection (Block 25, D3).
-            self.actions.push(Action::CancelTimer(Timer::Refresh));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Client(Timer::Refresh)));
         }
         self.state = State::Connected;
         self.counters.connects += 1;
@@ -3325,7 +3199,8 @@ impl Machine {
         // is fetched before the next connect (Block 25, D3).
         for timer in Timer::ALL {
             if !(reconnect && timer == Timer::Refresh) {
-                self.actions.push(Action::CancelTimer(timer));
+                self.actions
+                    .push(Action::CancelTimer(TimerKey::Client(timer)));
             }
         }
         self.subscriptions_disconnected(reconnect, code == STATE_INVALIDATED);
@@ -3372,7 +3247,8 @@ impl Machine {
             }
         }
         // Only the owner knows how long each timer has left.
-        self.actions.push(Action::ShortenTimer(Timer::Refresh, gap));
+        self.actions
+            .push(Action::ShortenTimer(TimerKey::Client(Timer::Refresh), gap));
         self.shorten_subscription_refreshes(gap);
     }
 
@@ -3484,7 +3360,8 @@ impl Machine {
         };
         // The reply re-arms it; a timer armed meanwhile, e.g. by a reconnect
         // while the token was being fetched, must not start another refresh.
-        self.actions.push(Action::CancelTimer(Timer::Refresh));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Client(Timer::Refresh)));
         let id = self.command_id();
         let command = Command {
             id,
@@ -3718,7 +3595,7 @@ mod tests {
             let delay = failed
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+                    Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
                     _ => None,
                 })
                 .expect("a reconnect delay");
@@ -3790,9 +3667,10 @@ mod tests {
             "{failed:?}"
         );
         assert!(
-            failed
-                .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
+            failed.iter().any(|action| matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+            )),
             "{failed:?}"
         );
         assert_eq!(machine.state(), State::Connecting);
@@ -3864,9 +3742,10 @@ mod tests {
             reason: String::new(),
         });
         assert!(
-            !lost
-                .iter()
-                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            !lost.iter().any(|action| matches!(
+                action,
+                Action::CancelTimer(TimerKey::Client(Timer::Refresh))
+            )),
             "{lost:?}"
         );
         let transport = opened_transport(&machine.fire(Timer::Reconnect));
@@ -3875,9 +3754,10 @@ mod tests {
         let connected = machine.handle(frame(transport, r#"{"id":2,"connect":{"client":"c"}}"#));
 
         assert!(
-            connected
-                .iter()
-                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            connected.iter().any(|action| matches!(
+                action,
+                Action::CancelTimer(TimerKey::Client(Timer::Refresh))
+            )),
             "{connected:?}"
         );
     }
@@ -3898,7 +3778,7 @@ mod tests {
             assert!(matches!(events[0], ClientEvent::Error(e) if e.kind == ErrorKind::Transport));
             assert!(matches!(
                 actions.last(),
-                Some(Action::SetTimer(Timer::Reconnect, ..))
+                Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..))
             ));
             transport = opened_transport(&machine.fire(Timer::Reconnect));
         }
@@ -3947,7 +3827,7 @@ mod tests {
             let setting = machine
                 .timer_setting(Timer::Reconnect)
                 .expect("a reconnect timer");
-            Input::TimerFired(Timer::Reconnect, setting)
+            Input::TimerFired(TimerKey::Client(Timer::Reconnect), setting)
         };
         let transport = opened_transport(&machine.handle(next));
         machine.handle(Input::TransportOpened(transport));
@@ -3967,7 +3847,7 @@ mod tests {
         actions
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
                 _ => None,
             })
             .expect("a reconnect")
@@ -4131,7 +4011,7 @@ mod tests {
         assert_eq!(machine.state(), State::Connecting);
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, ..))
+            Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..))
         ));
     }
 
@@ -4152,7 +4032,11 @@ mod tests {
             })]
         );
         assert_eq!(machine.state(), State::Disconnected);
-        assert!(!actions.iter().any(|a| matches!(a, Action::SetTimer(..))));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetTimer(TimerKey::Client(..), ..)))
+        );
     }
 
     #[test]
@@ -4164,7 +4048,7 @@ mod tests {
         assert!(actions.contains(&Action::CloseTransport(transport)));
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, ..))
+            Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..))
         ));
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -4215,7 +4099,9 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::SetTimer(Timer::ConnectTimeout, after, ..) => Some(*after),
+                Action::SetTimer(TimerKey::Client(Timer::ConnectTimeout), after, ..) => {
+                    Some(*after)
+                }
                 _ => None,
             })
             .collect()
@@ -4295,7 +4181,7 @@ mod tests {
         // Within the first sequence, at once.
         assert!(actions.iter().any(|action| matches!(
             action,
-            Action::SetTimer(Timer::Reconnect, Duration::ZERO, _)
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), Duration::ZERO, _)
         )));
         let next = machine.fire(Timer::Reconnect);
         assert_eq!(opened_kind(&next), Some(TransportKind::HttpStream));
@@ -4318,9 +4204,10 @@ mod tests {
             })]
         );
         assert!(
-            !actions
-                .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
+            !actions.iter().any(|action| matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+            )),
             "{actions:?}"
         );
         assert_eq!(machine.state(), State::Disconnected);
@@ -4381,7 +4268,11 @@ mod tests {
                 reason: "bye".into()
             })]
         );
-        assert!(!actions.iter().any(|a| matches!(a, Action::SetTimer(..))));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SetTimer(TimerKey::Client(..), ..)))
+        );
     }
 
     #[test]
@@ -4440,7 +4331,7 @@ mod tests {
 
     fn refresh_timer(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::Refresh, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Refresh), delay, ..) => Some(*delay),
             _ => None,
         })
     }
@@ -4487,7 +4378,9 @@ mod tests {
         let reply_deadline = sent
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::RefreshReply, _, setting) => Some(*setting),
+                Action::SetTimer(TimerKey::Client(Timer::RefreshReply), _, setting) => {
+                    Some(*setting)
+                }
                 _ => None,
             })
             .expect("a refresh reply deadline");
@@ -4499,7 +4392,7 @@ mod tests {
         assert_eq!(
             sent,
             [
-                Action::CancelTimer(Timer::Refresh),
+                Action::CancelTimer(TimerKey::Client(Timer::Refresh)),
                 Action::Send {
                     transport,
                     id: FrameId(1),
@@ -4507,7 +4400,7 @@ mod tests {
                     frame_type: FrameType::Text,
                 },
                 Action::SetTimer(
-                    Timer::RefreshReply,
+                    TimerKey::Client(Timer::RefreshReply),
                     Config::default().timeout,
                     reply_deadline
                 )
@@ -4528,7 +4421,7 @@ mod tests {
             fetch,
             result: Ok("t1".into()),
         });
-        assert!(sent.iter().any(|action| matches!(action, Action::SetTimer(Timer::RefreshReply, a1, _) if *a1 == Config::default().timeout)));
+        assert!(sent.iter().any(|action| matches!(action, Action::SetTimer(TimerKey::Client(Timer::RefreshReply), a1, _) if *a1 == Config::default().timeout)));
 
         let actions = machine.fire(Timer::RefreshReply);
         let late = machine.handle(frame(
@@ -4858,7 +4751,7 @@ mod tests {
         let sent = machine.handle(Input::TransportOpened(transport));
 
         assert!(
-            matches!(&sent[..], [Action::SetTimer(Timer::ConnectTimeout, ..), Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
+            matches!(&sent[..], [Action::SetTimer(TimerKey::Client(Timer::ConnectTimeout), ..), Action::Send { frame, .. }] if frame.windows(4).any(|w| w == b"\"t1\"")),
             "{sent:?}"
         );
     }
@@ -4923,9 +4816,10 @@ mod tests {
             reason: "closed".into(),
         }));
         assert!(
-            !actions
-                .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Refresh, ..))),
+            !actions.iter().any(|action| matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::Refresh), ..)
+            )),
             "a refresh timer for t2: {actions:?}"
         );
 
@@ -4991,7 +4885,7 @@ mod tests {
         ));
         assert!(matches!(
             actions.last(),
-            Some(Action::SetTimer(Timer::Reconnect, ..))
+            Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..))
         ));
         assert_eq!(machine.state(), State::Connecting);
     }
@@ -5097,7 +4991,7 @@ mod tests {
 
     fn server_ping_timer(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::ServerPing, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::ServerPing), delay, ..) => Some(*delay),
             _ => None,
         })
     }
@@ -5166,7 +5060,7 @@ mod tests {
 
         for timer in Timer::ALL {
             assert!(
-                actions.contains(&Action::CancelTimer(timer)),
+                actions.contains(&Action::CancelTimer(TimerKey::Client(timer))),
                 "{timer:?}: {actions:?}"
             );
         }
@@ -5217,7 +5111,8 @@ mod tests {
             reason: String::new(),
         });
 
-        let Some(Action::SetTimer(Timer::Reconnect, delay, ..)) = actions.last() else {
+        let Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..)) = actions.last()
+        else {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");
@@ -5306,7 +5201,8 @@ mod tests {
             message: "refused".into(),
         });
 
-        let Some(Action::SetTimer(Timer::Reconnect, delay, ..)) = actions.last() else {
+        let Some(Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..)) = actions.last()
+        else {
             panic!("no reconnect timer in {actions:?}");
         };
         assert!(*delay <= Duration::from_millis(200), "{delay:?}");

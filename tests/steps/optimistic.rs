@@ -6,6 +6,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -367,7 +368,7 @@ fn closed_then_reopened(world: &mut ClientWorld) {
     let delay = since
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect after the backoff delay");

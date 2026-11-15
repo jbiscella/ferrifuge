@@ -6,6 +6,7 @@
 //! `:2934-3047`), with some differences of its own.
 // Block 47, D6, D7; Block 47.
 
+use crate::sans_io::TimerKey;
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
@@ -83,7 +84,7 @@ pub(in crate::sans_io) struct Signing {
 /// What runs again after a failure: a retry timer of a subscription's
 /// `subscribed` period, one of each at most; the refresh at an expiry is
 /// the owner's timer of the subscription
-/// ([`Action::SetSharedPollRefresh`]).
+/// ([`TimerKey::SharedPollRefresh`](crate::sans_io::TimerKey::SharedPollRefresh)).
 // D7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::sans_io) enum Retry {
@@ -438,10 +439,10 @@ impl Machine {
         let mut ended: Vec<Action> = flow
             .take_timers(|kind| kind == Retry::Refresh)
             .into_iter()
-            .map(Action::CancelSharedPollTimer)
+            .map(|timer| Action::CancelTimer(TimerKey::SharedPoll(timer)))
             .collect();
         if std::mem::take(&mut flow.refresh_armed) {
-            ended.push(Action::CancelSharedPollRefresh(id));
+            ended.push(Action::CancelTimer(TimerKey::SharedPollRefresh(id)));
         }
         let keys = flow.keys();
         let running = flow
@@ -510,13 +511,13 @@ impl Machine {
         // The owner keeps the earliest deadline, one timer per
         // subscription, as it has the clock.
         flow.refresh_armed = true;
-        self.actions.push(Action::SetSharedPollRefresh(id, delay));
+        self.set_key_timer(TimerKey::SharedPollRefresh(id), delay);
     }
 
     /// The refresh timer of `id` fired; one not armed, cancelled or of a
     /// subscription no longer subscribed does nothing.
     // D7.
-    pub(super) fn refresh_fired(&mut self, id: SubscriptionId) {
+    pub(in crate::sans_io) fn refresh_fired(&mut self, id: SubscriptionId) {
         let armed = self
             .shared_poll_flow(id)
             .is_some_and(|flow| std::mem::take(&mut flow.refresh_armed));
@@ -551,9 +552,10 @@ impl Machine {
             flow.timers.push((timer, retry));
         }
         for old in replaced {
-            self.actions.push(Action::CancelSharedPollTimer(old));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::SharedPoll(old)));
         }
-        self.actions.push(Action::SetSharedPollTimer(timer, delay));
+        self.set_key_timer(TimerKey::SharedPoll(timer), delay);
     }
 
     /// A refresh or retry timer of a subscription fired; one of a
