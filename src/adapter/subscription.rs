@@ -9,7 +9,7 @@ use futures_core::Stream;
 
 use super::client::{Client, history_of, reply_of};
 use super::kind::SubscriptionHandle;
-use super::shared::{Callbacks, GetData, GetState, GetSubscriptionToken, Shared, lock};
+use super::shared::{Callbacks, GetData, GetState, GetSubscriptionToken, Shared};
 use crate::sans_io::SubscriptionKind;
 use crate::sans_io::SubscriptionOptions;
 use crate::{
@@ -576,7 +576,10 @@ impl Client {
     /// exposes the server-side registry.
     #[must_use]
     pub fn server_subscriptions(&self) -> Vec<String> {
-        lock(&self.shared().core).machine.server_subscriptions()
+        self.shared()
+            .core()
+            .map(|core| core.machine.server_subscriptions())
+            .unwrap_or_default()
     }
 
     /// Unsubscribes `subscription` and removes it from the registry; a new
@@ -626,6 +629,7 @@ fn stream_only(kind: SubscriptionKind) -> Option<()> {
 #[cfg(test)]
 #[cfg(adapter_tokio)]
 mod tests {
+    use crate::adapter::shared::lock;
     use futures_util::StreamExt;
 
     use super::*;
@@ -713,7 +717,7 @@ mod tests {
         let subscription = client.new_subscription("news").unwrap();
         drop(client);
         let before = {
-            let core = lock(&subscription.handle.shared.core);
+            let core = subscription.handle.shared.core().expect("a core");
             (
                 core.machine.subscription_state(subscription.handle.id),
                 core.actions.len(),
@@ -725,7 +729,7 @@ mod tests {
             subscription.unsubscribe();
         }
 
-        let core = lock(&subscription.handle.shared.core);
+        let core = subscription.handle.shared.core().expect("a core");
         assert_eq!(
             (
                 core.machine.subscription_state(subscription.handle.id),
@@ -748,7 +752,14 @@ mod tests {
 
         assert_eq!(built, Err(SubscriptionError::ClientClosed));
         assert!(lock(&shared.callbacks).0.is_empty());
-        assert_eq!(lock(&shared.core).machine.find_subscription("news"), None);
+        assert_eq!(
+            shared
+                .core()
+                .expect("a core")
+                .machine
+                .find_subscription("news"),
+            None
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -256,7 +256,8 @@ impl Client {
         )?;
         let runtime = runtime.resolve()?;
         let shared = Arc::new_cyclic(|weak| Shared {
-            core: Mutex::new(Core::new(machine)),
+            core_mutex: Mutex::new(Core::new(machine)),
+            finished_disconnected: AtomicBool::new(true),
             outboxes: Mutex::new(Outboxes::default()),
             callbacks: Mutex::new(SubscriptionCallbacks::default()),
             calls: Mutex::new(HashMap::new()),

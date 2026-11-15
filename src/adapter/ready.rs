@@ -166,10 +166,8 @@ pub(super) fn ready(
     of: Of,
 ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
     let start = {
-        let core = lock(&shared.core);
-        if shared.closed.load(Ordering::Acquire) {
-            Start::Settled(Err(client_closed()))
-        } else {
+        let core = shared.core();
+        if let Some(core) = core.filter(|_| !shared.closed.load(Ordering::Acquire)) {
             let at_once = match of {
                 Of::Client => match core.machine.state() {
                     State::Connected => Some(Ok(())),
@@ -208,6 +206,9 @@ pub(super) fn ready(
                 };
                 Start::Waiting(receiver, registered)
             }
+        } else {
+            // Closed, or its core poisoned (Block 61, D6).
+            Start::Settled(Err(client_closed()))
         }
     };
     let shared = Arc::clone(shared);
@@ -287,7 +288,7 @@ mod tests {
     /// Starts connecting `client`: the transport of its attempt, opened.
     fn connecting(client: &Client) -> TransportId {
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(&mut core, Input::Connect);
         let transport = core
             .actions
@@ -304,7 +305,7 @@ mod tests {
     /// Gives `client` the frame `json` on `transport`.
     fn frame(client: &Client, transport: TransportId, json: &str) {
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(
             &mut core,
             Input::Frame {
@@ -320,7 +321,7 @@ mod tests {
 
     fn lost(client: &Client, transport: TransportId) {
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(
             &mut core,
             Input::TransportClosed {
@@ -465,7 +466,7 @@ mod tests {
 
         let panicked = std::thread::spawn(move || {
             let _ending = Ending(Arc::clone(&shared));
-            let _core = shared.core.lock().unwrap();
+            let _core = shared.core_mutex.lock().unwrap();
             panic!("a bug in the driver");
         })
         .join();

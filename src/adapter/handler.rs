@@ -394,7 +394,9 @@ pub(super) fn would_deadlock(shared: &Shared, wait: Wait) -> bool {
 /// watched from then on: its reply also becomes unreadable once a full
 /// read-ahead stops the reading ([`check_thread_waits`]).
 fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
-    let core = lock(&shared.core);
+    let Some(core) = shared.core() else {
+        return false;
+    };
     let outboxes = lock(&shared.outboxes);
     let mut handlers = lock(&shared.handlers);
     if let Some(id) = call {
@@ -480,7 +482,9 @@ pub(super) fn check_thread_waits(shared: &Shared) {
         }
     }
     let (stuck, ready): (Vec<CallId>, Vec<Waker>) = {
-        let core = lock(&shared.core);
+        let Some(core) = shared.core() else {
+            return;
+        };
         let outboxes = lock(&shared.outboxes);
         let mut handlers = lock(&shared.handlers);
         handlers
@@ -618,7 +622,10 @@ pub(super) enum Dropped {
 /// client is closed, when nothing would call or drop it.
 // D1, D3; Codex, #169.
 pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHandler>) {
-    let mut core = lock(&shared.core);
+    let Some(mut core) = shared.core() else {
+        drop(handler);
+        return;
+    };
     if shared.closed.load(Ordering::Acquire) {
         drop(core);
         drop(handler);
@@ -648,7 +655,10 @@ pub(super) fn set_handler<E: Kind>(
     of: SubscriptionId,
     handler: Box<E::Handler>,
 ) {
-    let mut core = lock(&shared.core);
+    let Some(mut core) = shared.core() else {
+        drop(handler);
+        return;
+    };
     let old = install_handler::<E>(shared, &mut core, of, handler);
     drop(core);
     drop(old);
@@ -925,7 +935,8 @@ fn drop_handlers(shared: &Shared) {
 /// The next event for a handler, the earliest emitted; `None` once the
 /// client is closed and no handler has an event left.
 pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>> {
-    let mut core = lock(&shared.core);
+    // A poisoned core leaves the handlers what is queued (Block 61, D6).
+    let mut core = shared.core();
     let mut outboxes = lock(&shared.outboxes);
     let mut handlers = lock(&shared.handlers);
     handlers.waker = Some(cx.waker().clone());
@@ -1011,8 +1022,9 @@ pub(super) fn next(shared: &Shared, cx: &mut Context<'_>) -> Poll<Option<Handed>
     }
     drop(handlers);
     drop(outboxes);
-    if let Some(id) = id {
-        shared.handle(&mut core, Input::EventHanded(id));
+    // Never to a poisoned core (Block 61, D6).
+    if let (Some(id), Some(core)) = (id, core.as_mut()) {
+        shared.handle(core, Input::EventHanded(id));
     }
     drop(core);
     drop(dropped);
@@ -1201,9 +1213,10 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
             Input::HandlerPanicked { event: id, message }
         }
     };
-    let mut core = lock(&shared.core);
-    shared.handle(&mut core, input);
-    drop(core);
+    // Never to a poisoned core (Block 61, D6).
+    if let Some(mut core) = shared.core() {
+        shared.handle(&mut core, input);
+    }
     shared.notify_actions();
 }
 
@@ -1654,7 +1667,9 @@ mod tests {
         );
         let shared = client.shared();
         assert!(
-            lock(&shared.core)
+            shared
+                .core()
+                .expect("a core")
                 .machine
                 .events_holding_messages()
                 .next()
@@ -1732,7 +1747,9 @@ mod tests {
             r#"{"id":2,"subscribe":{"type":1,"recoverable":true,"epoch":"e1","offset":7}}"#,
         );
         let shared = client.shared();
-        let id = lock(&shared.core)
+        let id = shared
+            .core()
+            .expect("a core")
             .machine
             .find_subscription("map:a")
             .expect("in the registry");
@@ -1754,7 +1771,11 @@ mod tests {
             deliver(shared, handed);
         };
 
-        let position = lock(&shared.core).machine.subscription_position(id);
+        let position = shared
+            .core()
+            .expect("a core")
+            .machine
+            .subscription_position(id);
         assert_eq!(position.map(|position| position.offset), Some(7));
         drop(handed);
     }
@@ -2057,7 +2078,10 @@ mod tests {
         replied_by_hand(client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
         replied_by_hand(client, transport, r#"{"id":2,"subscribe":{"type":4}}"#);
         poll.track_with_signature([crate::SharedPollTrackItem::new("a", 1)], "sig");
-        let id = lock(&client.shared().core)
+        let id = client
+            .shared()
+            .core()
+            .expect("a core")
             .machine
             .find_subscription("poll:a")
             .expect("in the registry");
@@ -2083,7 +2107,9 @@ mod tests {
         );
         let shared = client.shared();
         assert!(
-            lock(&shared.core)
+            shared
+                .core()
+                .expect("a core")
                 .machine
                 .events_holding_messages()
                 .next()
@@ -2156,7 +2182,9 @@ mod tests {
         let shared = client.shared();
         let mut cx = Context::from_waker(Waker::noop());
         let version = || {
-            lock(&shared.core)
+            shared
+                .core()
+                .expect("a core")
                 .machine
                 .shared_poll_version_for_tests(id, "a")
         };
@@ -2506,7 +2534,7 @@ mod tests {
     /// Opens `client`'s transport by hand: its connect command is sent.
     fn opened_by_hand(client: &Client) -> crate::sans_io::TransportId {
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(&mut core, Input::Connect);
         let transport = core
             .actions
@@ -2524,7 +2552,7 @@ mod tests {
     /// Reads `reply` from `transport` by hand.
     fn replied_by_hand(client: &Client, transport: crate::sans_io::TransportId, reply: &str) {
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(
             &mut core,
             Input::Frame {
@@ -2558,7 +2586,12 @@ mod tests {
         let mut ready = Box::pin(client.ready());
         replied_by_hand(&client, transport, r#"{"id":1,"connect":{"client":"c"}}"#);
         let shared = client.shared();
-        let held = lock(&shared.core).machine.events_holding_messages().next();
+        let held = shared
+            .core()
+            .expect("a core")
+            .machine
+            .events_holding_messages()
+            .next();
         lock(&shared.handlers).running = held;
         let _marked = Marked::new(shared, true);
 

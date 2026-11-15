@@ -13,7 +13,7 @@ use futures_core::Stream;
 
 use super::client::Client;
 use super::kind::SubscriptionHandle;
-use super::shared::{Callbacks, GetSignature, GetSubscriptionToken, Shared, lock};
+use super::shared::{Callbacks, GetSignature, GetSubscriptionToken, Shared};
 use crate::sans_io::SubscriptionKind;
 use crate::sans_io::{Input, SharedPollSubscriptionOptions};
 use crate::{
@@ -152,9 +152,10 @@ impl SharedPollSubscription {
     /// The keys tracked, in the order they were first tracked.
     #[must_use]
     pub fn tracked_keys(&self) -> Vec<String> {
-        lock(&self.handle.shared.core)
-            .machine
-            .shared_poll_tracked_keys(self.handle.id)
+        self.handle
+            .shared
+            .core()
+            .and_then(|core| core.machine.shared_poll_tracked_keys(self.handle.id))
             .unwrap_or_default()
     }
 

@@ -310,6 +310,12 @@ impl Driver {
             // task's inputs and the application's calls, goes out in as few
             // frames as the cap allows (Block 36, D3).
             self.perform_turn();
+            // A panic poisoned the core, on any thread: the client closes
+            // without the machine (Block 61, D6).
+            if self.shared.core_poisoned() {
+                self.shared.close_poisoned();
+                return self.finish().await;
+            }
             #[cfg(feature = "__test-hooks")]
             if self.shared.records.on() {
                 self.publish_timers();
@@ -501,7 +507,10 @@ impl Driver {
     /// an event wakes the loop.
     // Block 15.
     fn reading(&mut self) -> bool {
-        let reading = lock(&self.shared.core).machine.wants_frames();
+        let reading = self
+            .shared
+            .core()
+            .is_none_or(|core| core.machine.wants_frames());
         if reading != self.reading {
             self.reading = reading;
             if reading {
@@ -924,8 +933,8 @@ pub(super) struct Ending(pub(super) Arc<Shared>);
 impl Drop for Ending {
     fn drop(&mut self) {
         let shared = &self.0;
-        match shared.core.lock() {
-            Ok(mut core) => {
+        match shared.core() {
+            Some(mut core) => {
                 // Checked and set under the lock, as `Shared::shut_down`
                 // does: a client dropped as its runtime shuts down ends
                 // once.
@@ -943,8 +952,8 @@ impl Drop for Ending {
             }
             // A panic with the lock held may have left the machine
             // inconsistent, and a second panic would abort: it is not fed,
-            // and no event is emitted (D4).
-            Err(_) => shared.closed.store(true, Ordering::Release),
+            // and the client closes without it (D4; Block 61, D6).
+            None => shared.close_poisoned(),
         }
         // Handles of subscriptions may outlive the client: end every event
         // stream rather than leave it pending forever, and release the data
@@ -1146,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn a_guard_dropped_with_the_core_poisoned_ends_calls_and_streams_without_an_event() {
+    fn a_guard_dropped_with_the_core_poisoned_ends_calls_and_streams_with_code_2() {
         let runtime = idle_runtime();
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
             .runtime(runtime.handle().clone())
@@ -1163,14 +1172,22 @@ mod tests {
             // The lock guard drops first as the panic unwinds, poisoning
             // the lock; then the guard runs, still panicking.
             let _ending = Ending(Arc::clone(&shared));
-            let _core = shared.core.lock().unwrap();
+            let _core = shared.core_mutex.lock().unwrap();
             panic!("a bug in the driver");
         })
         .join();
 
         assert!(panicked.is_err());
         let (taken, ended) = queued(&mut events);
-        assert!(taken.is_empty(), "{taken:?}");
+        // Block 61, D6: one `disconnected` 2, without the machine.
+        assert!(
+            matches!(
+                taken.as_slice(),
+                [ClientEvent::Disconnected(crate::DisconnectedContext { code, .. })]
+                    if *code == codes::disconnected::BAD_PROTOCOL
+            ),
+            "{taken:?}"
+        );
         assert!(ended, "the stream ends");
         let failed = call.now_or_never().expect("settled").unwrap_err();
         assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
@@ -1271,7 +1288,7 @@ mod tests {
         let shared = client.shared();
         let queued: Vec<Action> = (0..100).map(marker).collect();
         {
-            let mut core = lock(&shared.core);
+            let mut core = shared.core().expect("a core");
             core.actions.clear();
             core.actions.extend(queued.iter().cloned());
         }
@@ -1280,7 +1297,7 @@ mod tests {
         shared.take_actions(&mut taken, false);
 
         assert_eq!(Vec::from(taken), queued);
-        assert!(lock(&shared.core).actions.is_empty());
+        assert!(shared.core().expect("a core").actions.is_empty());
     }
 
     // Block 14: a queue a burst grew, emptied without a take, is released
@@ -1291,16 +1308,16 @@ mod tests {
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let shared = client.shared();
         {
-            let mut core = lock(&shared.core);
+            let mut core = shared.core().expect("a core");
             core.actions.extend((0..1000).map(marker));
             core.actions.clear();
         }
-        assert!(lock(&shared.core).actions.capacity() > crate::RESTING_SLOTS);
+        assert!(shared.core().expect("a core").actions.capacity() > crate::RESTING_SLOTS);
         let mut taken = VecDeque::new();
 
         shared.take_actions(&mut taken, false);
 
-        assert!(lock(&shared.core).actions.capacity() <= crate::RESTING_SLOTS);
+        assert!(shared.core().expect("a core").actions.capacity() <= crate::RESTING_SLOTS);
     }
 
     // Block 49c: a failed write's close, fed to the core while its send is
@@ -1371,7 +1388,7 @@ mod tests {
         let _a = client.rpc("a", b"{}".to_vec());
         let _b = client.rpc("b", b"{}".to_vec());
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         let before = queued_frames(&core);
 
         shared.handle(&mut core, Input::Flush);
@@ -1402,7 +1419,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         assert!(core.actions.is_empty(), "{:?}", core.actions);
         shared.handle(&mut core, Input::Flush);
         assert_eq!(queued_frames(&core), Vec::<String>::new());
