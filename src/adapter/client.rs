@@ -215,7 +215,9 @@ impl Client {
     #[cfg(feature = "__test-hooks")]
     #[doc(hidden)]
     pub fn record_timers(&self) {
-        let mut core = lock(&self.shared.core);
+        let Some(mut core) = self.shared.core() else {
+            return;
+        };
         // Timers set before, aged from now (reviewer, 52a).
         let running: Vec<(String, TimerSetting)> = core
             .machine
@@ -245,7 +247,9 @@ impl Client {
             self.shared.records.on(),
             "armed_timers: the records are off; call Client::record_timers first (Block 52)"
         );
-        let mut guard = lock(&self.shared.core);
+        let Some(mut guard) = self.shared.core() else {
+            return super::hooks::ArmedTimers::default();
+        };
         let core = &mut *guard;
         // The core's running settings, read from the machine (Block 53 D4).
         let names: Vec<String> = core
@@ -278,7 +282,9 @@ impl Client {
             self.shared.records.on(),
             "pending_calls: the records are off; call Client::record_timers first (Block 52)"
         );
-        let core = lock(&self.shared.core);
+        let Some(core) = self.shared.core() else {
+            return Vec::new();
+        };
         let mut held = core.machine.call_registries();
         for id in lock(&self.shared.calls).keys() {
             held.entry(*id).or_default().push("adapter");
@@ -301,13 +307,16 @@ impl Client {
     #[doc(hidden)]
     #[must_use]
     pub fn codec_protocol(&self) -> crate::Protocol {
-        lock(&self.shared.core).machine.codec_protocol()
+        self.shared.core_for_reading().machine.codec_protocol()
     }
 
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> State {
-        lock(&self.shared.core).machine.state()
+        // A poisoned core's client is closed (Block 61, D6).
+        self.shared
+            .core()
+            .map_or(State::Disconnected, |core| core.machine.state())
     }
 
     /// Closes the client for good: every pending call and `ready()` fails
@@ -374,7 +383,8 @@ impl Client {
     // Block 31.
     #[must_use]
     pub fn statistics(&self) -> crate::Statistics {
-        let core = lock(&self.shared.core);
+        // It changes nothing: read even from a poisoned core (Block 61, D6).
+        let core = self.shared.core_for_reading();
         let mut statistics = core.machine.statistics();
         statistics.connected_since = core.connected_since;
         statistics
@@ -438,7 +448,10 @@ impl Client {
     /// client is dropped or its runtime shuts down.
     // Block 15; Block 28.
     pub fn events(&self) -> impl Stream<Item = ClientEvent> + MaybeSend + Unpin + use<> {
-        let mut core = lock(&self.shared.core);
+        let Some(mut core) = self.shared.core() else {
+            // Ended at once, as a closed client's (Block 61, D6).
+            return EventStream::new(Arc::clone(&self.shared), None, 0);
+        };
         let number = lock(&self.shared.outboxes).client.open_stream();
         self.shared.handle(&mut core, Input::StreamOpened(None));
         drop(core);
@@ -453,7 +466,7 @@ impl Client {
     #[doc(hidden)]
     #[must_use]
     pub fn read_ahead(&self) -> (usize, usize) {
-        lock(&self.shared.core).machine.read_ahead()
+        self.shared.core_for_reading().machine.read_ahead()
     }
 
     /// Events of the client queued for its streams and not yet taken, so
@@ -517,7 +530,9 @@ impl Client {
     /// Starts connecting; reconnects until connected or disconnected. The
     /// state is [`State::Connecting`] when this returns.
     pub fn connect(&self) {
-        let mut core = lock(&self.shared.core);
+        let Some(mut core) = self.shared.core() else {
+            return;
+        };
         if self.shared.closed.load(Ordering::Acquire) {
             return;
         }
@@ -1464,7 +1479,7 @@ mod tests {
         assert!(before <= first && first <= after);
 
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(
             &mut core,
             Input::TransportClosed {
@@ -1498,7 +1513,7 @@ mod tests {
 
         drop(runtime);
         let poisoned = std::thread::spawn(move || {
-            let _core = shared.core.lock().unwrap();
+            let _core = shared.core_mutex.lock().unwrap();
             panic!("poisons the core lock");
         })
         .join();

@@ -51,9 +51,10 @@ impl SubscriptionHandle {
     }
 
     pub(super) fn state(&self) -> SubscriptionState {
-        lock(&self.shared.core)
-            .machine
-            .subscription_state(self.id)
+        // A poisoned core's subscriptions read unsubscribed (Block 61, D6).
+        self.shared
+            .core()
+            .and_then(|core| core.machine.subscription_state(self.id))
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
@@ -61,9 +62,10 @@ impl SubscriptionHandle {
         &self,
         filter: Option<crate::TagFilter>,
     ) -> Result<(), SubscriptionError> {
-        lock(&self.shared.core)
-            .machine
-            .check_subscription_tag_filter(self.id, filter.as_ref())?;
+        if let Some(core) = self.shared.core() {
+            core.machine
+                .check_subscription_tag_filter(self.id, filter.as_ref())?;
+        }
         self.shared
             .apply(Input::SetSubscriptionTagFilter(self.id, filter));
         Ok(())
@@ -74,9 +76,9 @@ impl SubscriptionHandle {
     }
 
     pub(super) fn delta_statistics(&self) -> crate::DeltaStatistics {
-        lock(&self.shared.core)
-            .machine
-            .delta_statistics(self.id)
+        self.shared
+            .core()
+            .and_then(|core| core.machine.delta_statistics(self.id))
             .unwrap_or_default()
     }
 
@@ -138,7 +140,10 @@ impl SubscriptionHandle {
         // Checked against the registry under the core lock: removal leaves
         // the registry first, then closes the outbox, so a removed
         // subscription's stream ends at once.
-        let mut core = lock(&self.shared.core);
+        let Some(mut core) = self.shared.core() else {
+            // Ended at once, as a closed client's (Block 61, D6).
+            return EventStream::new(Arc::clone(&self.shared), Some(self.id), 0);
+        };
         let number = if core.machine.subscription_state(self.id).is_some()
             && !self.shared.closed.load(Ordering::Acquire)
         {
@@ -182,7 +187,9 @@ pub(super) fn register<E: Kind>(
     callbacks: Option<Callbacks>,
     handler: Option<Mutex<Box<E::Handler>>>,
 ) -> Result<SubscriptionHandle, SubscriptionError> {
-    let mut core = lock(&shared.core);
+    let Some(mut core) = shared.core() else {
+        return Err(SubscriptionError::ClientClosed);
+    };
     // After shutdown nothing could ever subscribe it, and a callback
     // registered now would outlive the driver's cleanup.
     if shared.closed.load(Ordering::Acquire) {
@@ -234,7 +241,7 @@ pub(super) fn find<T>(
     channel: &str,
     pick: impl Fn(SubscriptionKind) -> Option<T>,
 ) -> Option<(SubscriptionHandle, T)> {
-    let core = lock(&client.shared().core);
+    let core = client.shared().core()?;
     let id = core.machine.find_subscription(channel)?;
     let picked = pick(core.machine.subscription_kind(id)?)?;
     drop(core);
@@ -254,7 +261,9 @@ pub(super) fn list<T>(
     client: &Client,
     pick: impl Fn(SubscriptionKind) -> Option<T>,
 ) -> Vec<(SubscriptionHandle, T)> {
-    let core = lock(&client.shared().core);
+    let Some(core) = client.shared().core() else {
+        return Vec::new();
+    };
     let picked: Vec<_> = core
         .machine
         .subscriptions()

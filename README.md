@@ -1202,7 +1202,7 @@ server sends, are in the last table.
 |---|---|---|---|---|
 | 0 | `codes::disconnected::DISCONNECT_CALLED` | `"disconnect called"` | `disconnect()` or `close()` was called, or the client was dropped | never, until `connect()`; never after `close()` |
 | 1 | `codes::disconnected::UNAUTHORIZED` | `"unauthorized"` | a token or connect data callback denied access, returned an empty token, or a token expired without a callback | never, until `connect()` |
-| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the task running the client panicked, or an event handler did | never: the client is closed; after a handler, until `connect()` |
+| 2 | `codes::disconnected::BAD_PROTOCOL` | `"exception during message handling"`, or `"exception in event handler: "` and the panic's message | the client panicked, in its task or while holding its state, or an event handler did | never: the client is closed; after a handler, until `connect()` |
 | 3 | `codes::disconnected::MESSAGE_SIZE_LIMIT` | `"message size limit exceeded"` | the server closed with 1009, refused a refresh with HTTP 413, or sent a message over `max_message_bytes` once connected | never, until `connect()` |
 | 4 | `codes::disconnected::RUNTIME_SHUT_DOWN` | `"runtime shut down"` | the tokio runtime the client ran on shut down | never: the client is closed |
 
@@ -1241,7 +1241,7 @@ server sends, are in the last table.
 | 1 | `codes::error::TIMEOUT` | `"timeout"` | a command got no reply within `Config::timeout`, or a call waited longer for the connection or its subscription; over websocket, a shared poll track or untrack request got none (`unstable`) | a call fails and may succeed when retried; a refresh is retried; for a shared poll request, an `Error` event of kind `Track` or `Untrack`, and the signatures held are tracked again after 1 to 15 s (track only) |
 | 2 | `codes::error::TRANSPORT_CLOSED` | the transport's own message | a transport failed to open or closed while connecting | an `Error` event; the client keeps trying |
 | 3 | `codes::error::DISCONNECTED` | `"disconnected"` | the client entered `disconnected` while a call was pending, or a `ready()` waited | the call fails; a retry can succeed after `connect()` |
-| 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down or its driver panicked | the call fails; a retry never succeeds |
+| 4 | `codes::error::CLIENT_CLOSED` | `"client closed"` | the client is closed: `close()`, dropped, its runtime shut down, or it panicked | the call fails; a retry never succeeds |
 | 5 | `codes::error::CONNECT_TOKEN` | the token callback's message | the token callback failed while getting a token to connect with | an `Error` event; the attempt is retried after the reconnect backoff |
 | 6 | `codes::error::REFRESH_TOKEN` | the token callback's message | the token callback failed while getting a token to refresh with | an `Error` event; the refresh is retried after 5 to 10 s |
 | 7 | `codes::error::SUBSCRIPTION_UNSUBSCRIBED` | `"subscription unsubscribed"` | a subscription-level call or `ready()` met an unsubscribed subscription | the call fails; a retry can succeed after `subscribe()` |

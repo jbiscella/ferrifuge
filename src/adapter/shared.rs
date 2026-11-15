@@ -30,7 +30,15 @@ use tracing::debug;
 /// What the client handle, its subscriptions and its driver task share.
 #[derive(Debug)]
 pub(super) struct Shared {
-    pub(super) core: Mutex<Core>,
+    /// Reached through [`Shared::core`] only, which gives no guard once a
+    /// panic poisoned it.
+    // Block 61, D6.
+    pub(super) core_mutex: Mutex<Core>,
+    /// Whether the client's state after the last input the machine
+    /// finished was `disconnected`: what a poisoned core can no longer
+    /// tell.
+    // Block 61, D6.
+    pub(super) finished_disconnected: AtomicBool,
     /// Events waiting for the streams of the client and its subscriptions.
     pub(super) outboxes: Mutex<Outboxes>,
     /// Data and token callbacks of the subscriptions that have them.
@@ -134,6 +142,8 @@ impl Core {
             connected_since: None,
             #[cfg(feature = "__test-hooks")]
             timer_record: super::hooks::TimerRecord::default(),
+            #[cfg(test)]
+            panic_planted: false,
         }
     }
 }
@@ -162,6 +172,10 @@ pub(super) struct Core {
     // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     pub(super) timer_record: super::hooks::TimerRecord,
+    /// The machine's next step panics, for a test.
+    // Block 61, D6.
+    #[cfg(test)]
+    pub(super) panic_planted: bool,
 }
 
 /// The wall-clock and monotonic times of the last input given the machine.
@@ -321,9 +335,88 @@ impl std::fmt::Debug for SubscriptionCallbacks {
     }
 }
 
+/// The core's guard. Dropped while its thread panics, which poisons the
+/// core, it wakes the driver, which closes the client.
+// Block 61, D6.
+pub(super) struct CoreGuard<'a> {
+    shared: &'a Shared,
+    guard: std::sync::MutexGuard<'a, Core>,
+}
+
+impl std::ops::Deref for CoreGuard<'_> {
+    type Target = Core;
+
+    fn deref(&self) -> &Core {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for CoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Core {
+        &mut self.guard
+    }
+}
+
+impl Drop for CoreGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The lock is poisoned once `guard` drops, right after: the
+            // driver, woken, waits for it, then finds it poisoned.
+            self.shared.actions_queued.notify_one();
+        }
+    }
+}
+
 impl Shared {
+    /// The core, or none once a panic while it was locked poisoned it: the
+    /// caller then acts as on a closed client.
+    // Block 61, D6.
+    pub(super) fn core(&self) -> Option<CoreGuard<'_>> {
+        self.core_mutex.lock().ok().map(|guard| CoreGuard {
+            shared: self,
+            guard,
+        })
+    }
+
+    /// Closes the client once a panic poisoned its core, once and without
+    /// the machine: `ready()` and the calls fail with code 4, and its
+    /// stream, or handler, gets one `disconnected` event with code 2 when
+    /// the last input the machine finished left it in another state. No
+    /// subscription event, since their states are unknown.
+    // Block 61, D6.
+    pub(super) fn close_poisoned(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        lock(&self.ready).close();
+        if !self.finished_disconnected.load(Ordering::Acquire) {
+            let event = ClientEvent::Disconnected(crate::DisconnectedContext {
+                code: crate::codes::disconnected::BAD_PROTOCOL,
+                reason: "exception during message handling".to_owned(),
+            });
+            let _ = lock(&self.outboxes)
+                .client
+                .offer(crate::sans_io::EventId::POISONED, event);
+        }
+        super::handler::wake_consumer(self);
+    }
+
+    /// Whether a panic while the core was locked poisoned it.
+    pub(super) fn core_poisoned(&self) -> bool {
+        self.core_mutex.is_poisoned()
+    }
+
+    /// The core, poisoned or not, for a reading that changes nothing:
+    /// `statistics()`.
+    // Block 61, D6.
+    pub(super) fn core_for_reading(&self) -> std::sync::MutexGuard<'_, Core> {
+        lock(&self.core_mutex)
+    }
+
     pub(super) fn apply(&self, input: Input) {
-        let mut core = lock(&self.core);
+        let Some(mut core) = self.core() else {
+            return;
+        };
         // The driver has stopped (the client was dropped, after its final
         // disconnect, or its runtime shut down): actions would pile up with nothing to perform them,
         // e.g. from a subscription handle that outlived the client.
@@ -341,7 +434,10 @@ impl Shared {
     /// machine's new states would judge them.
     // Block 33, D1.
     pub(super) fn shut_down(&self) {
-        let mut core = lock(&self.core);
+        let Some(mut core) = self.core() else {
+            // Closed by the poisoned core's path (Block 61, D6).
+            return;
+        };
         if !self.closed.load(Ordering::Acquire) {
             lock(&self.ready).close();
             self.handle(&mut core, Input::Close);
@@ -391,7 +487,9 @@ impl Shared {
     // Block 44, D10, D11.
     #[cfg(adapter_browser)]
     pub(super) fn heard(&self, heard: super::backend::events::Heard) {
-        let mut core = lock(&self.core);
+        let Some(mut core) = self.core() else {
+            return;
+        };
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -561,6 +659,11 @@ impl Shared {
     fn feed(&self, core: &mut Core, input: Input) {
         let mut inputs = VecDeque::from([input]);
         while let Some(input) = inputs.pop_front() {
+            #[cfg(test)]
+            assert!(
+                !std::mem::take(&mut core.panic_planted),
+                "a panic planted in the machine's step (Block 61, D6)"
+            );
             self.log.input(&input);
             #[cfg(feature = "__test-hooks")]
             if self.records.on() {
@@ -608,6 +711,11 @@ impl Shared {
                 inputs.extend(taken.map(Input::EventTaken));
             }
         }
+        // What a poisoned core can no longer tell (Block 61, D6).
+        self.finished_disconnected.store(
+            core.machine.state() == State::Disconnected,
+            Ordering::Release,
+        );
         // On the states, not the events taken (Block 30, D4).
         ready::settle(core, &mut lock(&self.ready));
         #[cfg(adapter_browser)]
@@ -635,7 +743,9 @@ impl Shared {
     /// actions, is released after each turn's batches.
     // Block 14.
     pub(super) fn take_actions(&self, into: &mut VecDeque<Action>, flush: bool) {
-        let mut core = lock(&self.core);
+        let Some(mut core) = self.core() else {
+            return;
+        };
         if flush {
             self.handle(&mut core, Input::Flush);
         }
@@ -649,7 +759,7 @@ impl Shared {
     #[cfg(test)]
     #[cfg(adapter_tokio)]
     fn next_action(&self) -> Option<Action> {
-        lock(&self.core).actions.pop_front()
+        self.core().expect("a core").actions.pop_front()
     }
 
     /// Makes a call now, of `subscription` when given; the future gives its
@@ -662,11 +772,10 @@ impl Shared {
     ) -> impl Future<Output = Result<CallReply, CallError>> + MaybeSend + use<> {
         let (sender, receiver) = oneshot::channel();
         let pending = {
-            let mut core = lock(&self.core);
-            // The driver has stopped: nothing would ever settle the call.
-            if self.closed.load(Ordering::Acquire) {
-                None
-            } else {
+            let core = self.core();
+            // The driver has stopped, or the core is poisoned: nothing
+            // would ever settle the call.
+            if let Some(mut core) = core.filter(|_| !self.closed.load(Ordering::Acquire)) {
                 let kind = request.name();
                 let id = match subscription {
                     Some(subscription) => core.machine.add_subscription_call(subscription, request),
@@ -684,6 +793,8 @@ impl Shared {
                     id,
                     settled: false,
                 })
+            } else {
+                None
             }
         };
         self.actions_queued.notify_one();
@@ -902,7 +1013,8 @@ impl<E: Routed> Stream for EventStream<E> {
     type Item = E;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<E>> {
-        let mut core = lock(&self.shared.core);
+        // A poisoned core leaves the stream what is queued (Block 61, D6).
+        let mut core = self.shared.core();
         let mut outboxes = lock(&self.shared.outboxes);
         let Some(outbox) = E::outbox(&mut outboxes, self.of) else {
             return Poll::Ready(None);
@@ -917,7 +1029,9 @@ impl<E: Routed> Stream for EventStream<E> {
         let Poll::Ready(Some((id, event))) = polled else {
             return polled.map(|_| None);
         };
-        self.shared.handle(&mut core, Input::EventTaken(id));
+        if let Some(core) = core.as_mut() {
+            self.shared.handle(core, Input::EventTaken(id));
+        }
         drop(core);
         self.shared.actions_queued.notify_one();
         Poll::Ready(Some(event))
@@ -927,7 +1041,7 @@ impl<E: Routed> Stream for EventStream<E> {
 impl<E: Routed> Drop for EventStream<E> {
     // Dropping the active stream takes what it held, as with no stream.
     fn drop(&mut self) {
-        let mut core = lock(&self.shared.core);
+        let mut core = self.shared.core();
         let mut outboxes = lock(&self.shared.outboxes);
         let Some(outbox) = E::outbox(&mut outboxes, self.of) else {
             return;
@@ -943,10 +1057,13 @@ impl<E: Routed> Drop for EventStream<E> {
         let Some(taken) = taken else {
             return;
         };
-        for id in taken {
-            self.shared.handle(&mut core, Input::EventTaken(id));
+        // Never to a poisoned core (Block 61, D6).
+        if let Some(core) = core.as_mut() {
+            for id in taken {
+                self.shared.handle(core, Input::EventTaken(id));
+            }
+            self.shared.handle(core, Input::StreamClosed(self.of));
         }
-        self.shared.handle(&mut core, Input::StreamClosed(self.of));
         drop(core);
         // Held messages may now be handled and the reading resume.
         self.shared.actions_queued.notify_one();
@@ -1328,7 +1445,7 @@ mod tests {
             data: data.as_bytes().to_vec(),
         };
         {
-            let mut core = lock(&client.shared().core);
+            let mut core = client.shared().core().expect("a core");
             let shared = client.shared();
             shared.handle(
                 &mut core,
@@ -1347,14 +1464,17 @@ mod tests {
                 .expect("a stream");
         }
 
-        slept(&mut lock(&client.shared().core), Duration::from_secs(70));
+        slept(
+            &mut client.shared().core().expect("a core"),
+            Duration::from_secs(70),
+        );
         let taken = events.next().now_or_never().expect("an event");
 
         assert!(
             matches!(taken, Some(SubscriptionEvent::Publication(_))),
             "{taken:?}"
         );
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
         let fired = setting(&core, Timer::Reconnect);
@@ -1431,7 +1551,7 @@ mod tests {
             data: data.as_bytes().to_vec(),
         };
         {
-            let mut core = lock(&client.shared().core);
+            let mut core = client.shared().core().expect("a core");
             let shared = client.shared();
             shared.handle(
                 &mut core,
@@ -1446,14 +1566,17 @@ mod tests {
             hand(client.shared());
         }
 
-        slept(&mut lock(&client.shared().core), Duration::from_secs(70));
+        slept(
+            &mut client.shared().core().expect("a core"),
+            Duration::from_secs(70),
+        );
         hand(client.shared());
 
         assert_eq!(
             *seen.lock().unwrap(),
             ["subscribing", "subscribed", "publication"]
         );
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
         let fired = setting(&core, Timer::Reconnect);
@@ -1519,7 +1642,7 @@ mod tests {
             transport,
             data: data.as_bytes().to_vec(),
         };
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         let shared = client.shared();
         shared.handle(
             &mut core,
@@ -1577,7 +1700,7 @@ mod tests {
             .unwrap();
         let _events = subscription.events();
         subscription.subscribe();
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         core.actions.clear();
 
         slept(&mut core, Duration::from_secs(30));
@@ -1626,7 +1749,7 @@ mod tests {
             .unwrap();
         let _events = subscription.events();
         subscription.subscribe();
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         core.actions.clear();
 
         slept(&mut core, Duration::from_secs(30));
@@ -1659,7 +1782,7 @@ mod tests {
         let client =
             Client::new("ws://127.0.0.1:1/connection/websocket", Config::default()).unwrap();
         let shared = client.shared();
-        let mut core = lock(&shared.core);
+        let mut core = shared.core().expect("a core");
         shared.handle(&mut core, Input::Connect);
         let transport = core
             .actions
@@ -1717,7 +1840,7 @@ mod tests {
             data: data.as_bytes().to_vec(),
         };
         {
-            let mut core = lock(&client.shared().core);
+            let mut core = client.shared().core().expect("a core");
             let shared = client.shared();
             shared.handle(
                 &mut core,
@@ -1736,7 +1859,7 @@ mod tests {
             .now_or_never()
             .expect("an event")
             .expect("a stream");
-        let mut core = lock(&client.shared().core);
+        let mut core = client.shared().core().expect("a core");
         core.actions.clear();
         slept(&mut core, Duration::from_secs(70));
         drop(core);
@@ -1747,7 +1870,7 @@ mod tests {
             .expect("an event")
             .expect("a stream");
 
-        let core = lock(&client.shared().core);
+        let core = client.shared().core().expect("a core");
         let sent: Vec<String> = core
             .actions
             .iter()
@@ -2116,5 +2239,146 @@ mod tests {
         assert_eq!(outboxes.maps[&id].held(), 0, "map");
         #[cfg(feature = "unstable")]
         assert_eq!(outboxes.shared_polls[&id].held(), 0, "shared poll");
+    }
+
+    const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
+
+    /// Poisons `client`'s core: its next input panics in the machine's
+    /// step, on this thread, an application's call (Block 61, D6).
+    fn poison(client: &Client, call: impl FnOnce(&Client)) {
+        client.shared().core().expect("a core").panic_planted = true;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(client)));
+        assert!(panicked.is_err(), "the planted panic");
+        assert!(client.shared().core_poisoned());
+    }
+
+    /// Every event `events` yields until it ends, within 5 s.
+    async fn all_events<E>(events: impl futures_core::Stream<Item = E> + Unpin) -> Vec<E> {
+        tokio::time::timeout(Duration::from_secs(5), events.collect::<Vec<_>>())
+            .await
+            .expect("the stream ends")
+    }
+
+    fn disconnected_codes(events: &[ClientEvent]) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::Disconnected(crate::DisconnectedContext { code, .. }) => Some(*code),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Block 61, D6: a panic in the machine's step on an application
+    // thread closes the client, once, at once, without the machine.
+    #[tokio::test]
+    async fn a_panic_holding_the_core_on_an_application_thread_closes_the_client() {
+        let client = Client::new(UNREACHABLE_ENDPOINT, Config::default()).unwrap();
+        let mut events = client.events();
+        let subscription = client.new_subscription("news").unwrap();
+        let subscription_events = subscription.events();
+        client.connect();
+        let (before, _) = queued(&mut events);
+        let call = client.rpc("echo", b"{}".to_vec());
+
+        poison(&client, Client::disconnect);
+
+        // The driver ends with no further input.
+        let closed = tokio::time::timeout(Duration::from_secs(1), client.close()).await;
+        assert!(closed.is_ok(), "close() resolves");
+        let after = all_events(events).await;
+        assert_eq!(
+            disconnected_codes(&after),
+            [codes::disconnected::BAD_PROTOCOL]
+        );
+        assert_eq!(after.len(), 1, "{before:?} then {after:?}");
+        let failed = call.await.unwrap_err();
+        assert_eq!(failed.code, codes::error::CLIENT_CLOSED);
+        assert_eq!(all_events(subscription_events).await, []);
+        assert_eq!(client.state(), State::Disconnected);
+        assert_eq!(subscription.state(), crate::SubscriptionState::Unsubscribed);
+        client.connect();
+        assert_eq!(all_events(client.events()).await, []);
+        assert_eq!(
+            client.new_subscription("other").unwrap_err(),
+            crate::SubscriptionError::ClientClosed
+        );
+    }
+
+    /// The disconnected codes a client handler gets.
+    #[derive(Clone, Default)]
+    struct Codes(Arc<Mutex<Vec<u32>>>);
+
+    impl super::super::ClientHandler for Codes {
+        fn on_disconnected(&mut self, context: crate::DisconnectedContext) {
+            lock(&self.0).push(context.code);
+        }
+    }
+
+    // Block 61, D6: a handler gets the `disconnected` 2, as a stream does.
+    #[tokio::test]
+    async fn a_poisoned_core_gives_the_client_handler_code_2() {
+        let client = Client::new(UNREACHABLE_ENDPOINT, Config::default()).unwrap();
+        let codes = Codes::default();
+        client.set_handler(codes.clone());
+        client.connect();
+
+        poison(&client, Client::disconnect);
+
+        let closed = tokio::time::timeout(Duration::from_secs(1), client.close()).await;
+        assert!(closed.is_ok(), "close() resolves");
+        let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !lock(&codes.0).is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(delivered.is_ok(), "the handler gets the event");
+        assert_eq!(*lock(&codes.0), [codes::disconnected::BAD_PROTOCOL]);
+    }
+
+    // Block 61, D6: a core poisoned while the client is disconnected emits
+    // nothing: the client was disconnected already.
+    #[tokio::test]
+    async fn a_core_poisoned_while_disconnected_emits_nothing() {
+        let client = Client::new(UNREACHABLE_ENDPOINT, Config::default()).unwrap();
+        let events = client.events();
+
+        poison(&client, |client| client.set_token("t"));
+
+        let closed = tokio::time::timeout(Duration::from_secs(1), client.close()).await;
+        assert!(closed.is_ok(), "close() resolves");
+        assert_eq!(all_events(events).await, []);
+    }
+
+    // Block 61, D6: nothing locks the core but its accessor and the
+    // readers it names.
+    #[test]
+    fn nothing_locks_the_core_outside_its_accessor() {
+        let allowed = [
+            ("shared.rs", "pub(super) core_mutex: Mutex<Core>,"),
+            (
+                "shared.rs",
+                "self.core_mutex.lock().ok().map(|guard| CoreGuard {",
+            ),
+            ("shared.rs", "self.core_mutex.is_poisoned()"),
+            ("shared.rs", "lock(&self.core_mutex)"),
+            ("builder.rs", "core_mutex: Mutex::new(Core::new(machine)),"),
+        ];
+        let found: Vec<String> = adapter_code()
+            .into_iter()
+            .filter(|(path, _, line)| {
+                line.contains("core_mutex")
+                    && !allowed
+                        .iter()
+                        .any(|(file, text)| path == file && line.trim() == *text)
+            })
+            .map(|(path, number, line)| format!("{path}:{number}: {line}"))
+            .collect();
+
+        assert!(found.is_empty(), "{found:#?}");
     }
 }

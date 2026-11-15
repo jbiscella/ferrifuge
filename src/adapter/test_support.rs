@@ -7,8 +7,6 @@ use crate::sans_io::{Action, Input, TransportId};
 use crate::{ClientEvent, State};
 
 use super::client::Client;
-use super::shared::Core;
-use super::shared::lock;
 
 /// A current-thread runtime nothing drives, so that its client's
 /// driver never runs until the runtime is dropped.
@@ -108,10 +106,7 @@ pub(super) async fn stalling_http_stream_with(listener: tokio::net::TcpListener,
 /// Takes `client`'s core, connected by `reply` to its connect command,
 /// with the actions so far performed. The caller holds the core, so the
 /// driver task does not run until it is dropped.
-pub(super) fn connected_core<'a>(
-    client: &'a Client,
-    reply: &str,
-) -> std::sync::MutexGuard<'a, Core> {
+pub(super) fn connected_core<'a>(client: &'a Client, reply: &str) -> super::shared::CoreGuard<'a> {
     connected_core_over(client, reply).0
 }
 
@@ -119,9 +114,9 @@ pub(super) fn connected_core<'a>(
 pub(super) fn connected_core_over<'a>(
     client: &'a Client,
     reply: &str,
-) -> (std::sync::MutexGuard<'a, Core>, TransportId) {
+) -> (super::shared::CoreGuard<'a>, TransportId) {
     let shared = client.shared();
-    let mut core = lock(&shared.core);
+    let mut core = shared.core().expect("a core");
     shared.handle(&mut core, Input::Connect);
     let transport = core
         .actions

@@ -171,6 +171,12 @@ impl EventId {
     #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) const NONE: Self = Self(u64::MAX);
 
+    /// The id of the `disconnected` event a client emits without the
+    /// machine, once a panic poisoned its core; the machine never gives it.
+    // Block 61, D6.
+    #[cfg(any(adapter_tokio, adapter_browser))]
+    pub(crate) const POISONED: Self = Self(u64::MAX - 1);
+
     /// An id for the adapter's unit tests.
     #[cfg(test)]
     #[cfg(any(adapter_tokio, adapter_browser))]
