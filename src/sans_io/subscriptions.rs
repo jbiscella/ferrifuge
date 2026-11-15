@@ -3262,6 +3262,62 @@ mod tests {
         );
     }
 
+    // Block 61, D4 (a `mutants` miss): the reply to a sub_refresh ends its
+    // reply deadline and arms the next refresh at its ttl.
+    #[test]
+    fn a_sub_refresh_reply_ends_its_deadline_and_schedules_the_next_refresh() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+        let reply_deadline = TimerKey::Subscription(id, SubscriptionTimer::RefreshReply);
+        assert!(machine.key_setting(reply_deadline).is_some());
+
+        let actions = machine.handle(reply(
+            transport,
+            r#"{"id":3,"sub_refresh":{"expires":true,"ttl":600}}"#,
+        ));
+
+        assert!(
+            actions.contains(&Action::CancelTimer(reply_deadline)),
+            "{actions:?}"
+        );
+        assert_eq!(machine.key_setting(reply_deadline), None);
+        assert!(
+            machine
+                .key_setting(TimerKey::Subscription(id, SubscriptionTimer::Refresh))
+                .is_some(),
+            "{actions:?}"
+        );
+    }
+
+    // Block 61, D4 (a `mutants` miss): a sleep shortens the refresh of a
+    // subscription using a token by the gap.
+    #[test]
+    fn a_sleep_shortens_a_token_subscriptions_refresh() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+        machine.handle(reply(
+            transport,
+            r#"{"id":3,"sub_refresh":{"expires":true,"ttl":600}}"#,
+        ));
+        let gap = Duration::from_secs(5);
+
+        let slept = machine.handle(Input::Slept { gap });
+
+        assert!(
+            slept.contains(&Action::ShortenTimer(
+                TimerKey::Subscription(id, SubscriptionTimer::Refresh),
+                gap
+            )),
+            "{slept:?}"
+        );
+    }
+
     #[test]
     fn a_resubscribe_advised_during_a_sub_refresh_ends_it() {
         let (mut machine, transport, id, fetch) = refresh_fetching();
