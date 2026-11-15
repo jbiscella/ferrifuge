@@ -161,7 +161,7 @@ impl ClientInfo {
 /// let subscribed = Subscribed::default()
 ///     .recoverable(true)
 ///     .positioned(true)
-///     .stream_position(StreamPosition { offset: 3, epoch: "e".into() });
+///     .stream_position(StreamPosition::new(3, "e"));
 /// assert!(subscribed.recoverable);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
