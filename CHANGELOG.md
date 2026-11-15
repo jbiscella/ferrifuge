@@ -47,6 +47,20 @@ repository held while it carried that version, from the blocks of
   `Timer::ALL` order within the client's, and a map's order within the
   subscription and call families, whatever the deadlines.
 
+### Fixed
+
+- A panic while the client's state is locked, on any thread (an
+  application's call, a stream's poll, a handler's delivery, the client's
+  task), now closes the client (Block 61, D6). Before, the client went on
+  with the state the panic left half-updated, or, after a panic in its
+  task, closed without an event. It now emits one `disconnected` event
+  with code 2, unless it was already disconnected, and no subscription
+  event. Calls, pending or later, and `ready()` fail with `error` code 4;
+  every event stream ends; `connect()` does nothing; `new_subscription`
+  returns `SubscriptionError::ClientClosed`; `close()` resolves. `state()`
+  reads `disconnected`, and each subscription's `state()` `unsubscribed`.
+  In the browser a panic still traps first.
+
 ## [0.25.0] - 2026-11-15
 
 ### Added
