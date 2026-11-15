@@ -1349,5 +1349,18 @@ jobs:
             (cd ../base && api $set) > base-api.txt
             echo "== ${set:-default features, natively}"
             wc -l head-api.txt base-api.txt
-            diff base-api.txt head-api.txt
+            changed=$(diff <(sort -u base-api.txt) <(sort -u head-api.txt) | grep '^[<>]' || true)
+            echo "$changed"
+            # Only `unstable-machine` may change, and only by the subscription
+            # kinds (Block 61, D3).
+            if [ -n "$changed" ]; then
+              case "$set" in
+                *unstable-machine*) ;;
+                *) echo "the API changed without unstable-machine"; exit 1 ;;
+              esac
+              if echo "$changed" | grep -v -e 'SubscriptionKind' -e 'subscription_kind' -e 'is_shared_poll'; then
+                echo "an unexpected change"
+                exit 1
+              fi
+            fi
           done
