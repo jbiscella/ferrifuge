@@ -812,9 +812,8 @@ fn another_setting(machine: &Machine, key: TimerKey) -> crate::sans_io::TimerSet
     let running = machine.key_setting(key).expect("the timer runs");
     machine
         .timer_settings
-        .running
         .iter()
-        .find_map(|(other, setting)| (*other != key).then_some(*setting))
+        .find_map(|(other, setting)| (other != key).then_some(setting))
         .unwrap_or(crate::sans_io::TimerSetting(running.0 - 1))
 }
 

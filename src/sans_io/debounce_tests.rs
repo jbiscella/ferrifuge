@@ -1757,9 +1757,8 @@ fn a_debounce_firing_of_a_taken_or_another_timers_setting_returns_no_action() {
     let running = machine.key_setting(key).expect("the window's timer runs");
     let other = machine
         .timer_settings
-        .running
         .iter()
-        .find_map(|(other, setting)| (*other != key).then_some(*setting))
+        .find_map(|(other, setting)| (other != key).then_some(setting))
         .expect("another timer running");
 
     let stale = machine.handle(Input::TimerFired(key, other));
@@ -1769,4 +1768,24 @@ fn a_debounce_firing_of_a_taken_or_another_timers_setting_returns_no_action() {
     assert_eq!(sent(&first).len(), 1, "{first:?}");
     let second = machine.handle(Input::TimerFired(key, running));
     assert!(second.is_empty(), "{second:?}");
+}
+
+// Block 46, D15, with Block 61 D4's settings: a closed window frees the
+// setting its timer ran with, as it frees its table (perf, main run
+// 43712728350: "the windows left 409600 bytes").
+#[test]
+fn a_closed_window_frees_its_timer_setting() {
+    let (mut machine, _, subscription) = subscribed(100);
+    let mut timers: Vec<DebounceTimer> = Vec::new();
+    for n in 0..64 {
+        let (_, opened) = publish(&mut machine, subscription, &n.to_string());
+        timers.push(timer_of(&opened));
+        let closed = machine.fire_key(TimerKey::Debounce(timer_of(&opened)));
+        assert!(timers_set(&closed).is_empty(), "{closed:?}");
+    }
+    assert!(
+        timers.windows(2).all(|pair| pair[0] != pair[1]),
+        "{timers:?}"
+    );
+    assert_eq!(machine.timer_settings.windows.capacity(), 0);
 }
