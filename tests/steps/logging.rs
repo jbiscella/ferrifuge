@@ -503,7 +503,8 @@ async fn the_client_publishes_and_calls(world: &mut ClientWorld, channel: String
         .client()
         .rpc(method, json_string(&sent))
         .await
-        .expect("an RPC reply");
+        .expect("an RPC reply")
+        .data;
     assert_eq!(reply, json_string(&sent), "the fake server echoes RPC data");
     world.logging.secrets.extend([published, sent]);
 }

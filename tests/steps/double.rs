@@ -349,7 +349,11 @@ fn an_rpc(world: &mut ClientWorld, method: String, data: String) {
 
 #[when(regex = r#"^the application publishes (\{.*\}) to channel "news"$"#)]
 async fn a_publish(world: &mut ClientWorld, data: String) {
-    let published = world.client().publish("news", data.into_bytes()).await;
+    let published = world
+        .client()
+        .publish("news", data.into_bytes())
+        .await
+        .map(|_| ());
     world.doubles.outcome = Some(Outcome::Published(published));
 }
 
@@ -604,7 +608,7 @@ async fn a_message(world: &mut ClientWorld, data: String) {
     let event = tokio::time::timeout(EVENT_TIMEOUT, world.next_event())
         .await
         .expect("an event");
-    let ClientEvent::Message(bytes) = &event else {
+    let ClientEvent::Message(ferrifuge::MessageContext { data: bytes, .. }) = &event else {
         panic!("a message event: {event:?}");
     };
     assert_eq!(data_of(bytes), json(&data));

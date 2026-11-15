@@ -293,7 +293,7 @@ async fn child_run() {
     let slot = Arc::new(OnceLock::new());
     let (token_slot, token_writer, token_user) = (Arc::clone(&slot), writer.clone(), user.clone());
     let client = ferrifuge::Client::builder(endpoint)
-        .get_token(move || {
+        .get_token(move |_| {
             token_writer.write(Record::Token {
                 of: "connection".to_owned(),
                 refresh: connection_established(&token_slot),
@@ -417,7 +417,7 @@ fn child_subscriptions(
         let token_slot = Arc::clone(&slot);
         let subscription = client
             .subscription_builder(channel.clone())
-            .get_token(move |channel| {
+            .get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
                 token_writer.write(Record::Token {
                     of: "subscription".to_owned(),
                     refresh: subscription_established(&token_slot),

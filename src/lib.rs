@@ -72,6 +72,7 @@ mod adapter;
 mod api_shape_tests;
 mod backoff;
 mod call;
+mod callback;
 mod codec;
 pub mod codes;
 mod config;
@@ -141,11 +142,19 @@ pub use adapter::{BoxError, ConnectedStream, Connecting, Connector, Proxy, Proxy
 pub use adapter::{CookieJar, MemoryJar};
 pub use call::{
     CallError, HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult,
+    PublishResult, RpcResult,
+};
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
+pub use callback::SharedPollSignatureContext;
+pub use callback::{
+    ConnectionDataContext, ConnectionTokenContext, GetStateContext, SubscriptionDataContext,
+    SubscriptionTokenContext,
 };
 pub use config::{Config, Protocol};
 pub use event::{
     ClientError, ClientEvent, ConnectedContext, ConnectingContext, DisconnectedContext, ErrorKind,
-    ServerSubscriptionEvent, State,
+    MessageContext, ServerSubscriptionEvent, State,
 };
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]

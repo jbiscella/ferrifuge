@@ -1394,7 +1394,7 @@ fn a_map_subscription_with_tokens(world: &mut ClientWorld, channel: String, life
     let subscription = world
         .client()
         .map_subscription_builder(channel, MapKind::Map)
-        .get_token(move |channel| {
+        .get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 Ok(subscription_token(

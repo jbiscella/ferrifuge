@@ -715,7 +715,7 @@ fn child_client(
                     ferrifuge::Protocol::Json
                 }),
         )
-        .get_token(move || {
+        .get_token(move |_| {
             token_writer.write(Record::Token {
                 of: "connection".to_owned(),
                 refresh: connection_established(&token_slot),
@@ -819,7 +819,7 @@ fn child_subscriptions(
         let subscription = client
             .subscription_builder(channel.clone())
             .max_resubscribe_delay(MAX_DELAY)
-            .get_token(move |channel| {
+            .get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
                 token_writer.write(Record::Token {
                     of: "subscription".to_owned(),
                     refresh: subscription_established(&token_slot),
@@ -2481,7 +2481,7 @@ async fn second_connection(
     let token_user = user.to_owned();
     let subscription = client
         .subscription_builder(canary.to_owned())
-        .get_token(move |channel| {
+        .get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
             let token = support::token::subscription_token(
                 &token_user,
                 &channel,

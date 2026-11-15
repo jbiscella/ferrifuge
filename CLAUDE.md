@@ -9865,6 +9865,7 @@ This block amends Block 0's "Core design" row: the core is public under `unstabl
   - `ClientError.transport` becomes `Option<TransportKind>` (F14);
   - `ConnectedContext`'s `Debug` shows data as its length (Block 21);
   - test-util gains `new` constructors for each context, and `ClientEvent::connected` takes a `TransportKind`.
+  - The client's `message` event follows: `ClientEvent::Message(MessageContext { data })` and `on_message(&mut self, ctx: MessageContext)`. `MessageContext`'s `Debug` shows data as its length (Block 21).
 - **D5 Names.**
   - `get_token`, `get_data`, `get_state` and `get_signature` stay: they are the spec's and centrifuge-js's names (F11).
   - `TransportKind::name` becomes `as_str`, without a deprecation; `State` and `SubscriptionState` keep `as_str`, and events keep `name()` (F12).
@@ -9876,7 +9877,18 @@ This block amends Block 0's "Core design" row: the core is public under `unstabl
   - `test_util::Server::disconnect` takes `code: u32`, and panics naming the code above `u16::MAX`, the bound of a websocket close code.
 - **D7 Traits applications implement.** `Connector` and `CookieJar` stay unsealed. The handler traits keep only provided methods. A method added to any of them has a default; a required one is a major release.
 - **D8 Android.** `ferrifuge::android` gets `cfg_attr(docsrs, doc(cfg(target_os = "android")))`. It stays exempt from semver (Block 24 D4).
-- **D9 Version.** 54a is 0.23.0 (D1), 54b is 0.24.0 (D2, D3, D6–D8) and 54c is 0.25.0 (D4, D5). Each gets a changelog section and its preamble update, as in Block 53 D7.
+- **D9 Version.** 54a is 0.23.0 (D1), 54b is 0.24.0 (D2, D3, D6–D8) and 54c is 0.25.0 (D4, D5, D10). Each gets a changelog section and its preamble update, as in Block 53 D7.
+- **D10 Callback contexts and call results.**
+  - Each callback takes one `#[non_exhaustive]` context, so a later argument becomes a field. These are centrifuge-js's `ConnectionTokenContext`, `SubscriptionTokenContext`, `SubscriptionDataContext` and `SharedPollSignatureContext`, and centrifuge-go's `ConnectionTokenEvent` and `SubscriptionTokenEvent`:
+    - `ClientBuilder::get_token` takes `Fn(ConnectionTokenContext)`, and `get_data` takes `Fn(ConnectionDataContext)`; both contexts are empty;
+    - the subscription and map subscription `get_token` take `Fn(SubscriptionTokenContext { channel })`;
+    - `get_data` takes `Fn(SubscriptionDataContext { channel })`;
+    - `get_state` takes `Fn(GetStateContext { channel })`, a name that avoids centrifuge-js's `SubscriptionStateContext`, the state-change event;
+    - `get_signature` takes `Fn(SharedPollSignatureContext { keys })`.
+  - `Client::publish` and `Subscription::publish` return `Result<PublishResult, CallError>`, where `PublishResult {}` stands in for `client.proto`'s empty result. `Client::rpc` returns `Result<RpcResult, CallError>`, with `RpcResult { data: Vec<u8> }`. Both are `#[non_exhaustive]`, as `HistoryResult` is.
+  - What stays as it is: `publish_json` and `rpc_json`, `send` (it gets no reply), and the unstable map calls.
+  - test-util gains a `new` for each context and result.
+  - The README, examples and doc examples follow.
 
 Value clause: As a team shipping Ferrifuge to a large fleet, I want the 1.0 API to gain fields, variants, events and transports in minor releases, with the experimental core opt-in, so that no 1.x upgrade breaks a build or silently drops a case.
 
@@ -9897,7 +9909,8 @@ Value clause: As a team shipping Ferrifuge to a large fleet, I want the 1.0 API 
   - removed from `SubscriptionError::AlreadyExists` (the source test);
   - `machine` made `pub` without the feature (the doc check);
   - the default limit set to `None`;
-  - the `i32::MAX` clamp dropped.
+  - the `i32::MAX` clamp dropped;
+  - `#[non_exhaustive]` removed from `RpcResult` or `SubscriptionTokenContext` (clippy).
 
 No new scenarios: the existing ones pass, rewritten to the new types.
 

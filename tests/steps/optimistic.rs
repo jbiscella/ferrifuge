@@ -523,18 +523,30 @@ fn private_with_a_callback(world: &mut ClientWorld, callback: String) {
     };
     let builder = world.client().subscription_builder("private");
     let builder = match callback.as_str() {
-        "a token callback and no token" => builder.get_token(move |_channel| {
-            note();
-            async { Ok("token".to_owned()) }
-        }),
-        "a data callback" => builder.get_data(move |_channel| {
-            note();
-            async { Ok(b"{}".to_vec()) }
-        }),
-        _ => builder.get_state(move |_channel| {
-            note();
-            async { Ok(StreamPosition::new(0, "e")) }
-        }),
+        "a token callback and no token" => builder.get_token(
+            move |ferrifuge::SubscriptionTokenContext {
+                      channel: _channel, ..
+                  }| {
+                note();
+                async { Ok("token".to_owned()) }
+            },
+        ),
+        "a data callback" => builder.get_data(
+            move |ferrifuge::SubscriptionDataContext {
+                      channel: _channel, ..
+                  }| {
+                note();
+                async { Ok(b"{}".to_vec()) }
+            },
+        ),
+        _ => builder.get_state(
+            move |ferrifuge::GetStateContext {
+                      channel: _channel, ..
+                  }| {
+                note();
+                async { Ok(StreamPosition::new(0, "e")) }
+            },
+        ),
     };
     let private = builder.build().expect("a new channel");
     private.subscribe();

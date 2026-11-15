@@ -570,8 +570,11 @@ fn token_callback_not_called(world: &mut ClientWorld) {
 /// asked, recording each call, until the scenario denies access.
 fn token_callback(
     world: &ClientWorld,
-) -> impl Fn(String) -> std::future::Ready<Result<String, TokenError>> + Clone + Send + Sync + 'static
-{
+) -> impl Fn(ferrifuge::SubscriptionTokenContext) -> std::future::Ready<Result<String, TokenError>>
++ Clone
++ Send
++ Sync
++ 'static {
     token_callback_for(world, TOKEN_LIFETIME)
 }
 
@@ -579,11 +582,14 @@ fn token_callback(
 fn token_callback_for(
     world: &ClientWorld,
     lifetime: Duration,
-) -> impl Fn(String) -> std::future::Ready<Result<String, TokenError>> + Clone + Send + Sync + 'static
-{
+) -> impl Fn(ferrifuge::SubscriptionTokenContext) -> std::future::Ready<Result<String, TokenError>>
++ Clone
++ Send
++ Sync
++ 'static {
     let calls = Arc::clone(&world.token_calls);
     let denied = Arc::clone(&world.token_denied);
-    move |channel: String| {
+    move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
         calls.lock().unwrap().push(channel.clone());
         std::future::ready(if denied.load(Ordering::SeqCst) {
             Err(TokenError::Unauthorized)

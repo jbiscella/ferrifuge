@@ -69,7 +69,7 @@ pub trait ClientHandler: MaybeSend + 'static {
             ClientEvent::ServerSubscription { channel, event } => {
                 self.on_server_subscription(channel, event);
             }
-            ClientEvent::Message(data) => self.on_message(data),
+            ClientEvent::Message(context) => self.on_message(context),
         }
     }
 
@@ -89,7 +89,7 @@ pub trait ClientHandler: MaybeSend + 'static {
     fn on_server_subscription(&mut self, channel: String, event: ServerSubscriptionEvent) {}
 
     /// [`ClientEvent::Message`].
-    fn on_message(&mut self, data: Vec<u8>) {}
+    fn on_message(&mut self, context: crate::MessageContext) {}
 }
 
 impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {

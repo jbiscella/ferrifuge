@@ -190,12 +190,14 @@ fn json_of(data: &[u8]) -> Value {
 fn signing_with(
     calls: &Signed,
     signature: &'static str,
-) -> impl Fn(Vec<String>) -> std::future::Ready<Result<SharedPollSignature, TokenError>>
+) -> impl Fn(
+    ferrifuge::SharedPollSignatureContext,
+) -> std::future::Ready<Result<SharedPollSignature, TokenError>>
 + Send
 + Sync
 + 'static {
     let calls = calls.clone();
-    move |keys: Vec<String>| {
+    move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
         calls.push(keys.clone());
         std::future::ready(Ok(SharedPollSignature::new(keys, signature)))
     }
@@ -207,12 +209,14 @@ fn answering(
     calls: &Signed,
     keys: &'static [&'static str],
     signature: &'static str,
-) -> impl Fn(Vec<String>) -> std::future::Ready<Result<SharedPollSignature, TokenError>>
+) -> impl Fn(
+    ferrifuge::SharedPollSignatureContext,
+) -> std::future::Ready<Result<SharedPollSignature, TokenError>>
 + Send
 + Sync
 + 'static {
     let calls = calls.clone();
-    move |asked: Vec<String>| {
+    move |ferrifuge::SharedPollSignatureContext { keys: asked, .. }| {
         calls.push(asked);
         std::future::ready(Ok(SharedPollSignature::new(
             keys.iter().map(|key| (*key).to_owned()).collect(),
@@ -486,17 +490,19 @@ async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &st
         {
             let gate = Arc::clone(&world.shared_polls.gate);
             a_shared_poll_subscription(world, channel, move |builder| {
-                builder.get_signature(move |keys| {
-                    calls.push(keys);
-                    let gate = Arc::clone(&gate);
-                    async move {
-                        gate.notified().await;
-                        Ok(SharedPollSignature::new(
-                            vec!["a".to_owned(), "b".to_owned()],
-                            "sig1",
-                        ))
-                    }
-                })
+                builder.get_signature(
+                    move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
+                        calls.push(keys);
+                        let gate = Arc::clone(&gate);
+                        async move {
+                            gate.notified().await;
+                            Ok(SharedPollSignature::new(
+                                vec!["a".to_owned(), "b".to_owned()],
+                                "sig1",
+                            ))
+                        }
+                    },
+                )
             });
             subscribed(world).await;
         }
@@ -507,24 +513,28 @@ async fn a_signing_subscription(world: &mut ClientWorld, channel: &str, how: &st
         " subscribed, whose stream was taken, with a get_signature callback that fails once and then answers" =>
         {
             a_shared_poll_subscription(world, channel, move |builder| {
-                builder.get_signature(move |keys: Vec<String>| {
-                    let count = calls.push(keys.clone());
-                    std::future::ready(if count == 1 {
-                        Err(TokenError::Failed("backend down".to_owned()))
-                    } else {
-                        Ok(SharedPollSignature::new(keys, "sig1"))
-                    })
-                })
+                builder.get_signature(
+                    move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
+                        let count = calls.push(keys.clone());
+                        std::future::ready(if count == 1 {
+                            Err(TokenError::Failed("backend down".to_owned()))
+                        } else {
+                            Ok(SharedPollSignature::new(keys, "sig1"))
+                        })
+                    },
+                )
             });
             subscribed(world).await;
         }
         " subscribed, whose stream was taken, with a get_signature callback answering unauthorized" =>
         {
             a_shared_poll_subscription(world, channel, move |builder| {
-                builder.get_signature(move |keys| {
-                    calls.push(keys);
-                    std::future::ready(Err(TokenError::Unauthorized))
-                })
+                builder.get_signature(
+                    move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
+                        calls.push(keys);
+                        std::future::ready(Err(TokenError::Unauthorized))
+                    },
+                )
             });
             subscribed(world).await;
         }
@@ -1134,7 +1144,7 @@ async fn with_a_token_callback(world: &mut ClientWorld, channel: String, lifetim
     a_connected_client(world).await;
     let calls = Arc::clone(&world.shared_polls.token_calls);
     a_shared_poll_subscription(world, &channel, move |builder| {
-        builder.get_token(move |channel| {
+        builder.get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 Ok(subscription_token(
@@ -1527,7 +1537,7 @@ async fn a_connected_client_signing(
     let user = world.shared_poll_user();
     let signed_channel = channel.clone();
     a_shared_poll_subscription(world, &channel, move |builder| {
-        builder.get_signature(move |keys: Vec<String>| {
+        builder.get_signature(move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
             calls.push(keys.clone());
             let names: Vec<&str> = keys.iter().map(String::as_str).collect();
             let signature = shared_poll_signature(&signed_channel, user, &names, lifetime);

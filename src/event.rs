@@ -36,6 +36,10 @@ impl State {
 /// logged (Block 21).
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a server-side subscription's event is as large as a client-side one; the contexts made the others smaller (Block 54, D4)"
+)]
 pub enum ClientEvent {
     /// The client moved to [`State::Connecting`].
     Connecting(ConnectingContext),
@@ -59,7 +63,7 @@ pub enum ClientEvent {
     /// An asynchronous message from the server (`client.proto`,
     /// `Message.data`): raw JSON with the JSON protocol, any bytes with
     /// Protobuf, exactly as received.
-    Message(Vec<u8>),
+    Message(MessageContext),
 }
 
 /// Something that happened to a server-side subscription, as for a
@@ -112,7 +116,7 @@ impl std::fmt::Debug for ClientEvent {
                 .field("channel", channel)
                 .field("event", event)
                 .finish(),
-            Self::Message(data) => f.debug_tuple("Message").field(&Bytes(data)).finish(),
+            Self::Message(context) => f.debug_tuple("Message").field(context).finish(),
         }
     }
 }
@@ -164,6 +168,24 @@ impl std::fmt::Debug for ConnectedContext {
             .field("client_id", &self.client_id)
             .field("transport", &self.transport)
             .field("data", &optional_bytes(self.data.as_ref()))
+            .finish()
+    }
+}
+
+/// Details of a [`ClientEvent::Message`] (Block 54, D4). Its `Debug`
+/// output shows the data as its length (Block 21).
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MessageContext {
+    /// The message's data (`client.proto`, `Message.data`): raw JSON with
+    /// the JSON protocol, any bytes with Protobuf, exactly as received.
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for MessageContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageContext")
+            .field("data", &Bytes(&self.data))
             .finish()
     }
 }
@@ -328,7 +350,9 @@ mod tests {
                 transport: crate::TransportKind::WebSocket,
                 data: Some(secret()),
             })),
-            Box::new(ClientEvent::Message(secret())),
+            Box::new(ClientEvent::Message(crate::MessageContext {
+                data: secret(),
+            })),
             Box::new(ClientEvent::ServerSubscription {
                 channel: "alerts".to_owned(),
                 event: ServerSubscriptionEvent::Publication(publication()),

@@ -128,7 +128,7 @@ sequenceDiagram
         Server-->>Client: subscribe error 112
         Note over Sub: no Error event, the position is dropped, the subscription stays Subscribing
         Note over Client: waits the resubscribe backoff, min_resubscribe_delay (default 500 ms), max_resubscribe_delay (default 20 s)
-        Client->>App: get_state(channel)
+        Client->>App: get_state(GetStateContext { channel })
         App-->>Client: the stream position the state was loaded at
         Client->>Server: subscribe from that position
         Server-->>Client: subscribe reply
@@ -150,7 +150,7 @@ sequenceDiagram
     participant Client
     participant Server
     Note over App,Server: connection token
-    Client->>App: get_token(), before a connect without a token
+    Client->>App: get_token(ConnectionTokenContext), before a connect without a token
     alt the callback fails
         Client-->>App: Error event, error 5, the attempt retried after the reconnect backoff
     else it denies: Unauthorized, or an empty token
@@ -159,7 +159,7 @@ sequenceDiagram
         Client->>Server: connect command with the token
         Server-->>Client: connect reply with expires and ttl
         Note over Client: refresh at a random point between 80% and 90% of the ttl
-        Client->>App: get_token()
+        Client->>App: get_token(ConnectionTokenContext)
         App-->>Client: a new token
         Client->>Server: refresh command
         alt the callback fails (error 6), or refresh error, temporary or below 100
@@ -178,7 +178,7 @@ sequenceDiagram
         end
     end
     Note over App,Server: subscription token, one per channel
-    Client->>App: the subscription's get_token(channel), before a subscribe without a token
+    Client->>App: the subscription's get_token(SubscriptionTokenContext { channel }), before a subscribe without a token
     alt the callback fails
         Client-->>App: Error event, error 8, the subscribe retried after the resubscribe backoff
     else it denies: Unauthorized, or an empty token

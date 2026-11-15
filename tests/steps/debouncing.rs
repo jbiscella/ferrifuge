@@ -707,7 +707,8 @@ fn data_list(text: &str) -> Vec<Value> {
 
 /// Makes a publish of `data` on the world's subscription, kept in a task.
 fn start_publish(world: &mut ClientWorld, data: Value) {
-    let future = world.subscription().publish(data.to_string().into_bytes());
+    let publish = world.subscription().publish(data.to_string().into_bytes());
+    let future = async move { publish.await.map(|_| ()) };
     world
         .debouncing
         .publishes
@@ -1055,9 +1056,10 @@ async fn the_publish_succeeds_after_the_interval(world: &mut ClientWorld, data: 
 fn the_client_publishes(world: &mut ClientWorld, first: String, second: String) {
     for data in [first, second] {
         let data = data_list(&data).remove(0);
-        let future = world
+        let publish = world
             .client()
             .publish(CHANNEL, data.to_string().into_bytes());
+        let future = async move { publish.await.map(|_| ()) };
         world
             .debouncing
             .publishes
@@ -1215,7 +1217,7 @@ async fn a_client_with_a_thread_handler(world: &mut ClientWorld, interval: u32) 
                 .unwrap()
                 .clone()
                 .expect("the subscription");
-            let result = block_on(subscription.publish(format!("{{\"n\":{offset}}}")));
+            let result = block_on(subscription.publish(format!("{{\"n\":{offset}}}"))).map(|_| ());
             record.results.lock().unwrap().push((offset, result));
         })
         .build()

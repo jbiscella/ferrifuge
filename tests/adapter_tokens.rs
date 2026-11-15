@@ -29,7 +29,7 @@ async fn a_late_refresh_denial_disconnects_after_the_new_connection_refreshed() 
         .config(Config::default().token("t0"))
         .get_token({
             let calls = Arc::clone(&calls);
-            move || {
+            move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 // The first call, the old connection's refresh, waits for
                 // the test and then denies; later ones give a token.

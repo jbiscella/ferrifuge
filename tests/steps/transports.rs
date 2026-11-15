@@ -647,7 +647,7 @@ async fn the_fake_server_stops_reading(world: &mut ClientWorld) {
         let subscription = world
             .client()
             .subscription_builder(channel)
-            .get_token(move |channel: String| {
+            .get_token(move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
                 let mut calls = calls.lock().unwrap();
                 let first = !calls.contains(&channel);
                 calls.push(channel);
