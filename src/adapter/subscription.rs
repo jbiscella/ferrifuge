@@ -197,9 +197,8 @@ impl Subscription {
     /// A loop over the stream gives its runtime a turn: once the reading
     /// task has spent its tokio budget, `next()` returns `Pending` and takes
     /// nothing, as tokio's own channels do, so a large recovery does not hold
-    /// up the task's other work. In the browser, with no tokio runtime, the
-    /// budget never runs out, and `next()` returns events as long as some
-    /// are queued.
+    /// up the task's other work. In the browser no budget is taken, and
+    /// `next()` returns events as long as some are queued.
     // Block 15; Block 63, D1, D3.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + MaybeSend + Unpin + use<> {
         self.handle.events::<SubscriptionEvent>()
