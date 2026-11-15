@@ -1,0 +1,66 @@
+name: mutants
+
+# Every mutant in the library's core, weekly and on demand (Block 60, D5):
+# the scope, tests and features of `.cargo/mutants.toml`, in 16 shards.
+# Report-only: the missed mutants are listed in each shard's summary and
+# artifact, and a later block triages the first report and makes this run
+# fail on them.
+on:
+  schedule:
+    - cron: "41 3 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Mutants
+        run: |
+          status=0
+          cargo mutants --in-place --no-shuffle \
+            --shard "$SHARD/16" --sharding round-robin \
+            --timeout-multiplier 5 || status=$?
+          # 0: every mutant caught; 2: some missed; 3: some timed out. Any
+          # other status is an error, which fails the shard.
+          case "$status" in
+            0|2|3) ;;
+            *) echo "cargo-mutants failed with exit status $status"; exit 1 ;;
+          esac
+          {
+            echo "### Mutants, shard $SHARD of 16"
+            for outcome in caught missed timeout unviable; do
+              echo "- $outcome: $(wc -l < "mutants.out/$outcome.txt" 2>/dev/null || echo 0)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutants.out
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-weekly-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
