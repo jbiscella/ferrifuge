@@ -18,6 +18,11 @@ repository held while it carried that version, from the blocks of
   (RFC 9110, section 15); the browser transports already failed it (Block
   61, D7).
 
+- `Machine::subscription_kind` gives the `SubscriptionKind` of a
+  subscription in the registry, `#[non_exhaustive]`: `Stream`, and with
+  `unstable` `Map(MapKind)` and `SharedPoll`. It replaces
+  `Machine::map_subscription_kind` (`unstable-machine`; Block 61, D3).
+
 ## [0.25.0] - 2026-11-15
 
 ### Added
