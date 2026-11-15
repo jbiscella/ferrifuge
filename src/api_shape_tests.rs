@@ -32,7 +32,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Every `.rs` file under `src/`, as a path relative to the crate root,
 /// with its text.
 fn files() -> Vec<(String, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate::source_root();
     let mut paths = Vec::new();
     sources(&root.join("src"), &mut paths);
     paths.sort();
@@ -40,7 +40,7 @@ fn files() -> Vec<(String, String)> {
         .into_iter()
         .map(|path| {
             let relative = path
-                .strip_prefix(root)
+                .strip_prefix(&root)
                 .expect("under the crate")
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -190,4 +190,30 @@ fn the_scan_finds_a_variant_without_the_attribute() {
     ];
     assert_eq!(named_field_variants(&marked), [("A {", true)]);
     assert_eq!(named_field_variants(&unmarked), [("B {", false)]);
+}
+
+/// The source checks read the checkout only through `crate::source_root()`:
+/// no other run-time use of the crate's directory, which a device lacks.
+/// `include_str!` and `include_bytes!` read at compile time, and are fine.
+#[test]
+fn only_source_root_reads_the_crate_directory() {
+    let name = concat!("CARGO_", "MANIFEST_DIR");
+    let found: Vec<String> = files()
+        .into_iter()
+        .flat_map(|(path, text)| {
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| {
+                    line.contains(name)
+                        && !line.contains("include_str!")
+                        && !line.contains("include_bytes!")
+                })
+                .map(|(number, _)| format!("{path}:{}", number + 1))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        found.len() == 1 && found[0].starts_with("src/lib.rs:"),
+        "a run-time read of the crate's directory outside source_root: {found:?}"
+    );
 }

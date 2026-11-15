@@ -165,7 +165,7 @@ mod tests {
     // Block 26, D3: the machine names no codec module (Block 5c).
     #[test]
     fn the_machine_reaches_the_encodings_only_through_the_codec() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = crate::source_root().join("src");
         let mut files = vec![root.join("sans_io.rs")];
         let mut directories = vec![root.join("sans_io")];
         while let Some(directory) = directories.pop() {

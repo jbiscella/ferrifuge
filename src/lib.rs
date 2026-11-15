@@ -231,6 +231,28 @@ pub mod test_util;
 mod token;
 mod wire;
 
+/// The checkout's root, which the source checks read `src/` under: the
+/// crate's directory where it exists, on the host and on the iOS
+/// simulator, which shares the host's file system; otherwise the directory
+/// the test binary runs in, where the Android emulator's script pushes
+/// `src/`. A missing `src/` fails the check that asked.
+// Block 58, D4.
+#[cfg(test)]
+pub(crate) fn source_root() -> std::path::PathBuf {
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = if crate_dir.is_dir() {
+        crate_dir.to_path_buf()
+    } else {
+        std::env::current_dir().expect("the directory the tests run in")
+    };
+    assert!(
+        root.join("src").is_dir(),
+        "no src/ under {}: the source checks read it",
+        root.display()
+    );
+    root
+}
+
 /// Slots a queue of the client keeps once it is empty: what a burst grew is
 /// released, so that a client at rest holds the same memory whatever bursts
 /// it went through.

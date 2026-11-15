@@ -756,7 +756,7 @@ async fn no_builder_or_handle_shows_a_secret() {
     let mut s = Sentinels::default();
     let password = s.text("endpoint-password");
     let query = s.text("endpoint-query");
-    let endpoint = format!("wss://user:{password}@example.com/connection/websocket?token={query}");
+    let endpoint = format!("ws://user:{password}@example.com/connection/websocket?token={query}");
     let proxy_password = s.text("proxy-password");
     let target = ProxyTarget::new(&format!("http://user:{proxy_password}@proxy.invalid:3128"))
         .expect("a proxy target");
@@ -1015,7 +1015,7 @@ fn debug_impls() -> Vec<(String, String)> {
             }
         }
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = crate::source_root();
     let mut files = Vec::new();
     walk(&root.join("src"), &mut files);
     let mut found = Vec::new();
@@ -1028,7 +1028,7 @@ fn debug_impls() -> Vec<(String, String)> {
             continue;
         }
         let relative = path
-            .strip_prefix(root)
+            .strip_prefix(&root)
             .expect("under the manifest directory")
             .to_string_lossy()
             .replace('\\', "/");

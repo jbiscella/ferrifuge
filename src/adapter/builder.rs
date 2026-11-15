@@ -1138,13 +1138,9 @@ mod tests {
     #[test]
     fn the_builder_the_shared_layer_the_driver_and_start_name_no_target() {
         let read = |file: &str| {
-            std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("src/adapter")
-                    .join(file),
-            )
-            .expect("a source file")
-            .replace("\r\n", "\n")
+            std::fs::read_to_string(crate::source_root().join("src/adapter").join(file))
+                .expect("a source file")
+                .replace("\r\n", "\n")
         };
         // From `start` to the first `end` after it.
         let item = |text: &str, start: &str, end: &str| -> String {

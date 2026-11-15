@@ -647,7 +647,7 @@ mod tests {
     /// path.
     #[cfg(adapter_tokio)]
     fn transport_path() -> Vec<(String, String)> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        let root = crate::source_root().join("src/adapter");
         let mut files = vec![root.join("body.rs")];
         for dir in ["tokio", "browser"] {
             for entry in std::fs::read_dir(root.join(dir)).expect("a source directory") {

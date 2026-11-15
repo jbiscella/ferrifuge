@@ -2132,7 +2132,7 @@ mod tests {
                 }
             }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
+        let root = crate::source_root().join("src/adapter");
         let mut out = Vec::new();
         visit(&root, &root, &mut out);
         out
