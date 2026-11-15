@@ -257,6 +257,7 @@ impl Client {
             emulated_headers,
             endpoints.iter().map(|(kind, _)| *kind).collect(),
         )?;
+        let runtime = runtime.resolve()?;
         let shared = Arc::new_cyclic(|weak| Shared {
             core: Mutex::new(Core::new(machine)),
             outboxes: Mutex::new(Outboxes::default()),
@@ -1119,6 +1120,24 @@ mod tests {
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth(),
         )
+    }
+
+    // Block 61, D2 (reviewer, 2026-11-15): the runtime is checked last, as
+    // before the backend held it: a builder with no runtime and another
+    // fault reports the other fault.
+    #[test]
+    fn with_no_runtime_and_a_bad_limit_the_limit_is_reported() {
+        let config = Config {
+            write_queue_bytes: 0,
+            ..Config::default()
+        };
+
+        let error = Client::new("ws://127.0.0.1:1/connection/websocket", config).unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Configuration);
+        assert_eq!(error.code, codes::error::BAD_CONFIGURATION);
+        assert_eq!(error.message, "the write queue limit must be at least 1");
+        assert_eq!(error.transport, None);
     }
 
     // Block 61, D2: each backend holds its options, so the builder, the

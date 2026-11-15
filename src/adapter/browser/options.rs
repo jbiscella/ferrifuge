@@ -75,9 +75,24 @@ pub(in crate::adapter) struct DriverPart {
 pub(in crate::adapter) struct Started {
     pub(in crate::adapter) shared: SharedSeed,
     pub(in crate::adapter) driver: DriverPart,
-    /// The page's event loop, which needs no handle.
-    // Block 44, D4.
-    pub(in crate::adapter) runtime: Handle,
+    /// The page's event loop.
+    pub(in crate::adapter) runtime: Runtime,
+}
+
+/// The page's event loop, which needs no handle.
+// Block 44, D4.
+pub(in crate::adapter) struct Runtime;
+
+impl Runtime {
+    /// The page's event loop, always there.
+    #[expect(
+        clippy::unnecessary_wraps,
+        clippy::unused_self,
+        reason = "the native runtime's check can fail"
+    )]
+    pub(in crate::adapter) const fn resolve(self) -> Result<Handle, ClientError> {
+        Ok(Handle)
+    }
 }
 
 impl Options {
@@ -120,7 +135,7 @@ impl Options {
                 shims,
                 include_credentials,
             },
-            runtime: Handle,
+            runtime: Runtime,
         })
     }
 }

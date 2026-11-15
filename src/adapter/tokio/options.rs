@@ -77,8 +77,18 @@ pub(in crate::adapter) struct DriverPart {
 pub(in crate::adapter) struct Started {
     pub(in crate::adapter) shared: SharedSeed,
     pub(in crate::adapter) driver: DriverPart,
-    /// The runtime the client runs on.
-    pub(in crate::adapter) runtime: Handle,
+    /// The runtime the client runs on, checked last.
+    pub(in crate::adapter) runtime: Runtime,
+}
+
+/// The runtime given, if any, checked by [`Runtime::resolve`].
+pub(in crate::adapter) struct Runtime(Option<Handle>);
+
+impl Runtime {
+    /// The runtime given, else the current one: an error without either.
+    pub(in crate::adapter) fn resolve(self) -> Result<Handle, ClientError> {
+        builder::runtime_or_current(self.0)
+    }
 }
 
 impl Options {
@@ -98,7 +108,8 @@ impl Options {
 
     /// Runs the native checks, for `endpoints` and `emulation_endpoint`:
     /// the endpoints and the connector, the trust, WebTransport's, the
-    /// Android gate, the HTTP headers and the runtime.
+    /// Android gate and the HTTP headers; the runtime's is left to
+    /// [`Runtime::resolve`], after the client's own checks, as before.
     pub(in crate::adapter) fn start(
         self,
         endpoints: &[(TransportKind, String)],
@@ -128,7 +139,6 @@ impl Options {
             &proxy,
         )?;
         let http_headers = HeaderSet::new(http_header_map(&http_headers)?);
-        let runtime = builder::runtime_or_current(runtime)?;
         let network = Arc::new(
             Network::new(Tls::new(trust), proxy)
                 .with_connector(connector)
@@ -143,7 +153,7 @@ impl Options {
                 network,
                 http_headers,
             }),
-            runtime,
+            runtime: Runtime(runtime),
         })
     }
 }
