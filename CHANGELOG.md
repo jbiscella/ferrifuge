@@ -11,7 +11,7 @@ repository held while it carried that version, from the blocks of
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-11-14
+## [0.22.0] - 2026-11-15
 
 ### Added
 
