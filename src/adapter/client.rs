@@ -361,15 +361,6 @@ impl Client {
         }
     }
 
-    /// Whether the client is closed: by [`Client::close`], its runtime shut
-    /// down or its driver panicked. A closed client reports `disconnected`
-    /// from [`Client::state`].
-    // Block 33.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        self.shared.closed.load(Ordering::Acquire)
-    }
-
     /// A snapshot of the client's connection and traffic counters since it
     /// was built, never a round trip. A closed client keeps its last
     /// counters.
