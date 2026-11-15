@@ -26,6 +26,27 @@ repository held while it carried that version, from the blocks of
   `Machine::map_subscription_kind`, which needed `unstable` too: its
   `Some(kind)` is now `Some(SubscriptionKind::Map(kind))`.
 
+- The core's timer actions and firings take one key (`unstable-machine`;
+  Block 61, D4). `machine::TimerKey`, now public and `#[non_exhaustive]`,
+  names a timer of any family: `Client`, `Subscription`, `Call`,
+  `Debounce`, and with `unstable` `SharedPoll` and `SharedPollRefresh`.
+  `machine::Action::SetTimer(TimerKey, Duration, TimerSetting)`,
+  `CancelTimer(TimerKey)` and `ShortenTimer(TimerKey, Duration)` replace
+  the 14 timer variants of `Action`, and
+  `machine::Input::TimerFired(TimerKey, TimerSetting)` the 6 firing
+  variants of `Input`. Debounce and shared poll timers carry a
+  `TimerSetting` too, so a firing of a setting no longer running is
+  ignored in every family. A `SetTimer` for a running `SharedPollRefresh`
+  keeps the earlier of the two deadlines and takes the new setting.
+
+- The tokio and browser adapters fire timers due at one poll earliest
+  deadline first (Block 61, D4). Ties go by family, in
+  `machine::TimerKey`'s variant order, the client's timers in
+  `machine::Timer::ALL` order; within another family they come in any
+  order. Before, the order of the driver's arms decided between families,
+  `Timer::ALL` order within the client's, and a map's order within the
+  subscription and call families, whatever the deadlines.
+
 ## [0.25.0] - 2026-11-15
 
 ### Added
