@@ -1006,7 +1006,7 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       indices: ${{ steps.plan.outputs.indices }}
     env:
-      MUTANT_SECONDS: 90
+      MUTANT_SECONDS: 65
     steps:
       # The merge commit and its first parent, the base: their diff is the
       # pull request's change.

@@ -27,8 +27,9 @@ exclude_globs = [
 
 exclude_re = [
     # `__test-hooks` code: test support compiled only for the crate's own
-    # tests, not part of the library.
-    'src/fossil\.rs:.*(replace (write|len|number) ->| in (write|len|number)$)',
-    'src/machine\.rs:.*(replace Machine::(with_seed|set_last_command_id|call_registries|codec_protocol|running_settings|timer_setting) ->| in Machine::(with_seed|set_last_command_id|call_registries|codec_protocol|running_settings|timer_setting)$)',
-    'src/machine/calls\.rs:.*(replace Calls::registries ->| in Calls::registries$)',
+    # tests, not part of the library. A mutant names its function after
+    # "replace" (the function's body replaced) or "in" (an operator in it).
+    'src/fossil\.rs:.* (replace|in) (write|len|number)\b',
+    'src/machine\.rs:.* (replace|in) Machine::(with_seed|set_last_command_id|call_registries|codec_protocol|running_settings|timer_setting|subscription_timer_setting|call_timer_setting)\b',
+    'src/machine/calls\.rs:.* (replace|in) Calls::registries\b',
 ]

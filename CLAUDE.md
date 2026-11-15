@@ -10255,7 +10255,7 @@ This block amends Block 0's "Code hygiene" row: library-only lints are set in `s
   - **Diff and shards.**
     - It mutates the diff `git diff HEAD^1 HEAD` of the pull request's merge commit (`--in-diff`, `--in-place`, `--no-shuffle`), with the `test` job's features.
     - A planning step lists the mutants and sizes a matrix of 1 to 8 shards (`--shard k/n`, `--sharding round-robin`), about 15 minutes of mutants each, using the per-mutant time measured in 60c.
-    - Each shard keeps its baseline. It runs with an explicit `--timeout` of 5 times the baseline's test time and `timeout-minutes: 60`.
+    - Each shard keeps its baseline. It runs with `--timeout-multiplier 5`, a test timeout of 5 times that shard's baseline test time and at least cargo-mutants' minimum, and with `timeout-minutes: 60`.
   - **Tests and scope.**
     - Tests: the library's unit tests (`--lib`), set in `.cargo/mutants.toml`.
     - Examined: `src/` except `src/adapter/**`, `src/test_util/**`, `src/protocol/**` and the `__test-hooks` code.
