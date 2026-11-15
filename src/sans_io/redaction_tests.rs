@@ -847,23 +847,18 @@ const INVENTORY: &[(&str, &str, Covered)] = &[
         "Shims",
         Covered::NoSecret("prints whether each shim is set, never the shim"),
     ),
-    ("src/adapter/client.rs", "ClientBuilder", Covered::Sampled),
-    ("src/adapter/client.rs", "Client", Covered::Sampled),
+    ("src/adapter/builder.rs", "ClientBuilder", Covered::Sampled),
     (
-        "src/adapter/client.rs",
+        "src/adapter/builder.rs",
         "Endpoints<'_>",
         Covered::Inside("ClientBuilder"),
     ),
     (
-        "src/adapter/client.rs",
+        "src/adapter/builder.rs",
         "HeaderNames<'_>",
         Covered::Inside("ClientBuilder"),
     ),
-    (
-        "src/adapter/client.rs",
-        "SubscriptionCallbacks",
-        Covered::NoSecret("prints the subscription ids only, never the callbacks"),
-    ),
+    ("src/adapter/client.rs", "Client", Covered::Sampled),
     ("src/adapter/client.rs", "WeakClient", Covered::Sampled),
     (
         "src/adapter/handler.rs",
@@ -881,6 +876,11 @@ const INVENTORY: &[(&str, &str, Covered)] = &[
         "src/adapter/map_subscription.rs",
         "MapSubscriptionBuilder",
         Covered::Sampled,
+    ),
+    (
+        "src/adapter/shared.rs",
+        "SubscriptionCallbacks",
+        Covered::NoSecret("prints the subscription ids only, never the callbacks"),
     ),
     (
         "src/adapter/shared_poll_subscription.rs",
