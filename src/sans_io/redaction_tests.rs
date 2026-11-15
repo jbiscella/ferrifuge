@@ -528,7 +528,9 @@ fn action_name(action: &Action) -> &'static str {
 /// The variant names of `pub enum <name>` in the core's root file, those
 /// compiled out of this build left out.
 fn declared_variants(name: &str) -> Vec<String> {
-    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", core_path!(".rs")));
+    // Line endings normalised: a Windows checkout has CRLF.
+    let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", core_path!(".rs")))
+        .replace("\r\n", "\n");
     let start = source
         .find(&format!("\npub enum {name} {{\n"))
         .unwrap_or_else(|| panic!("pub enum {name} in {}", core_path!(".rs")));
