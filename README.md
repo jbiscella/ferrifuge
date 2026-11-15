@@ -41,8 +41,8 @@ does next.
 
 ## Status
 
-Before 1.0, a minor version may break the API; [CHANGELOG.md](CHANGELOG.md)
-says what each version changes. Work is organised in blocks specified in
+[Stability](#stability) says what the version promises;
+[CHANGELOG.md](CHANGELOG.md) says what each version changes. Work is organised in blocks specified in
 [CLAUDE.md](CLAUDE.md). Vulnerabilities are reported privately, as
 [SECURITY.md](SECURITY.md) explains.
 
@@ -102,17 +102,80 @@ Available now:
 - join and leave events of the clients of a channel;
 - a seeded chaos harness checking the client's invariants.
 
-Planned next, in this order: connect data and headers, `setToken` and
-`setData`; batching several commands in one frame.
+## Stability
+
+Ferrifuge follows [Semantic Versioning](https://semver.org/). This section
+says what that promise covers.
+
+**Covered**, with the features `tokio`, `ring` and `browser` (the
+defaults), `aws-lc-rs`, `fips`, `cookies` and `test-util`:
+
+- the paths and signatures of the public items, and their documented
+  behaviour;
+- the codes in [Codes](#codes): a code's value and meaning never change,
+  and a value is never reused. Their reasons and messages are for people
+  and logs, and may be reworded;
+- the futures and streams: every call, `ready()` and `close()` returns a
+  future that borrows nothing from the client, and `events()` and
+  `publications()` return such a stream. Natively they are `Send`; on the
+  browser target their `MaybeSend` bound asks nothing, as JavaScript
+  handles are not `Send`;
+- the minimum Rust version, `rust-version` in `Cargo.toml`: it is raised
+  only when a dependency or a language feature needs it, never in a patch
+  release, and the changelog says so.
+
+**Not covered:**
+
+- the features `unstable`, `unstable-webtransport` and `unstable-machine`
+  (`ferrifuge::machine`): what they enable may change in any minor
+  release. Cargo unifies features across a build, so a library that
+  depends on Ferrifuge leaves them to the application;
+- `__test-hooks`: private, for Ferrifuge's own tests, never for
+  applications;
+- `ferrifuge::android`, which re-exports `jni` 0.22 and the `Runtime`
+  trait of `rustls-platform-verifier` 0.7, both before 1.0. docs.rs builds
+  no Android target, so this module is documented in the source only;
+- the text of `Debug` output and of log records.
+
+**Growing without breaking.** Every public enum, and every public struct
+whose fields are all public, is `#[non_exhaustive]`, except
+`SubscriptionState`, the spec's closed set of three states. Events and
+callbacks take context structs. So fields, variants, events, transports
+and codes come in minor releases: match them with a wildcard arm. A
+method added to a trait an application implements (`Connector`,
+`CookieJar`, the handler traits) comes with a default. The codes of the
+unstable features are listed with the others and mean something only
+with their feature.
+
+**Public dependencies.** The covered API names types of these crates.
+Moving to a new major version of one, or to a new 0.x line, is a major
+release of Ferrifuge:
+
+- `rustls` 0.23, with the `pki_types` it re-exports;
+- `futures-core` 0.3, whose `Stream` the streams implement;
+- `http` 1, `url` 2 (with `cookies`) and `tokio` 1;
+- `js-sys` 0.3 and `web-sys` 0.3, on the browser target;
+- `serde` 1 and `serde_json` 1.
+
+**Fixes.** Bringing behaviour back to what its documentation says is a
+fix, released as a patch. So is adapting to an upstream fix that
+[Known upstream issues](#known-upstream-issues) lists.
+
+**Pre-releases.** Until 1.0.0, a `1.0.0-alpha.N` release may break the
+covered API in the next one, and the changelog lists each break. Cargo
+never picks a pre-release for a `"1.0"` requirement, so the dependency
+lines in [Usage](#usage) name the whole version. On `cargo update`, it
+does move that requirement to a later pre-release of 1.0.0 and to
+1.0.0: an application that must not move pins it with an `=`
+requirement. From 1.0.0, only a major version breaks the covered API.
 
 ## Usage
 
-Add it to `Cargo.toml` (until the first release reaches crates.io, use
-`ferrifuge = { git = "https://github.com/jbiscella/ferrifuge" }`):
+Add it to `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrifuge = "0.25"
+ferrifuge = "1.0.0-alpha.1"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -1334,7 +1397,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.25", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "1.0.0-alpha.1", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1409,7 +1472,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.25", features = ["test-util"] }
+ferrifuge = { version = "1.0.0-alpha.1", features = ["test-util"] }
 ```
 
 ```rust

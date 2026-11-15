@@ -1151,12 +1151,25 @@ jobs:
 
       - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
-          tool: cargo-semver-checks
+          tool: cargo-semver-checks@0.51.0
+
+      # cargo-semver-checks 0.51.0 counts any change between pre-releases as
+      # major: while the manifest keeps the base's pre-release version, a
+      # break must fail as for a minor release (Block 55, D5).
+      - name: Release type
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          base=$(git show "$BASE:Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          case "$version" in
+            *-*) if [ "$version" = "$base" ]; then echo "RELEASE_TYPE=--release-type=minor" >> "$GITHUB_ENV"; fi ;;
+          esac
 
       # Default features and test-util: the public API. The private
       # __test-hooks are not part of it (Block 37, D7).
       - name: cargo semver-checks
-        run: cargo semver-checks --default-features --features test-util,cookies --baseline-rev "$BASE"
+        run: |
+          # shellcheck disable=SC2086 # $RELEASE_TYPE is empty or one flag
+          cargo semver-checks --default-features --features test-util,cookies --baseline-rev "$BASE" $RELEASE_TYPE
 
       # The browser target's API too (Block 44, D19), once the base has the
       # browser adapter: before it, the base does not build there.
@@ -1185,9 +1198,11 @@ jobs:
           rustdoc_json "$RUNNER_TEMP/current"
           git worktree add "$RUNNER_TEMP/base" "$BASE"
           (cd "$RUNNER_TEMP/base" && rustdoc_json "$RUNNER_TEMP/baseline")
+          # shellcheck disable=SC2086 # $RELEASE_TYPE is empty or one flag
           cargo semver-checks \
             --current-rustdoc "$RUNNER_TEMP/current/wasm32-unknown-unknown/doc/ferrifuge.json" \
-            --baseline-rustdoc "$RUNNER_TEMP/baseline/wasm32-unknown-unknown/doc/ferrifuge.json"
+            --baseline-rustdoc "$RUNNER_TEMP/baseline/wasm32-unknown-unknown/doc/ferrifuge.json" \
+            $RELEASE_TYPE
 
   # Coverage-guided fuzzing of the decoders with cargo-bolero (Block 14e):
   # 30 s per target on every change, longer in the nightly fuzz workflow.

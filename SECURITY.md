@@ -12,7 +12,7 @@ attacker can do, and how to reproduce it.
 
 ## Supported versions
 
-Fixes go to the latest minor release, as a patch release of it.
+Fixes go to the latest release: while it is a 1.0.0 pre-release, as the next pre-release; from 1.0.0, as a patch release of the latest minor. 0.21.0 gets no fixes.
 
 ## Disclosure
 

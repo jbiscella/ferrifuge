@@ -1,17 +1,37 @@
 # Changelog
 
 All notable changes to Ferrifuge are recorded here, in the form of
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project
-follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
-version may break the public API, a patch version does not.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project follows
+[Semantic Versioning](https://semver.org/) for the API that the README's
+Stability section names: before 1.0, a minor version could break it; a
+1.0.0 pre-release may break it in the next pre-release, each break
+listed here; from 1.0.0, only a major version breaks it.
 
-No version up to 0.25.0 was published: each section records what the
-repository held while it carried that version, from the blocks of
-`CLAUDE.md` that landed then.
+Of the versions up to 0.25.0, only 0.21.0 was published, to crates.io
+and untagged; each section records what the repository held while it
+carried that version, from the blocks of `CLAUDE.md` that landed then.
+1.0.0-alpha.1 is the first tagged release.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.1] - 2026-11-15
+
+Changes since 0.21.0, the last version on crates.io, are this section's
+and those of 0.22.0 to 0.25.0 below.
+
+### Added
+
+- The README's Stability section says what the version promises: the API
+  that Semantic Versioning covers, the features and modules it leaves out,
+  the public dependencies, each moved to a new major version or 0.x line
+  only in a major release of Ferrifuge, and what a pre-release may break
+  (Block 55, D1).
+
 ### Changed
+
+- The version is 1.0.0-alpha.1, the first tagged release (Block 55, D2). A
+  `"1.0"` requirement does not match a pre-release: depend on
+  `ferrifuge = "1.0.0-alpha.1"`.
 
 - An emulation request answered with an invalid HTTP status of 600 to 999
   now fails the native `http_stream` or `sse` transport, as a 5xx does
