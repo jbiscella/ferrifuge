@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
-use super::client::{Core, Outboxes, Shared, lock};
 use super::outbox::{Head, Outbox};
+use super::shared::{Core, Outboxes, Shared, lock};
 use crate::sans_io::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, MaybeSend, Publication, ServerSubscriptionEvent,

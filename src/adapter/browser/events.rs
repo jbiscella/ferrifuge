@@ -11,7 +11,7 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{Event, EventTarget};
 
 use crate::State;
-use crate::adapter::client::Shared;
+use crate::adapter::shared::Shared;
 use crate::sans_io::Input;
 
 /// What a listener heard.

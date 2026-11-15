@@ -11,10 +11,8 @@ use std::time::Duration;
 
 use futures_core::Stream;
 
-use super::client::{
-    Callbacks, Client, EventStream, GetSubscriptionToken, Shared, lock, presence_of,
-    presence_stats_of, reply_of,
-};
+use super::client::{Client, presence_of, presence_stats_of, reply_of};
+use super::shared::{Callbacks, EventStream, GetSubscriptionToken, Shared, lock};
 use crate::sans_io::{Input, MapSubscriptionOptions, SubscriptionId};
 use crate::{
     CallError, CallReply, CallRequest, JsonCallError, MapKind, MapSubscriptionEvent, MaybeSend,
