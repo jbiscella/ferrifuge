@@ -4719,6 +4719,8 @@ This block reverses no exclusion.
   - the client's logs show the state, code and reason (Block 21);
   - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 8 (5 and 6: Block 45 D12; 7 and 8: Block 47 D14), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code (Block 47).
 
+  The module documentation states these without citing a block (amended by Block 60 D3).
+
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
   - Cause: from the constant's documentation, stating its cause without citing a block (amended by Block 60 D3);
