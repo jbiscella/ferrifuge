@@ -12,6 +12,8 @@ mod batching;
 #[cfg(test)]
 mod buffer_tests;
 mod calls;
+#[cfg(test)]
+mod redaction_tests;
 #[cfg(any(adapter_tokio, adapter_browser))]
 pub(crate) use calls::CallWait;
 mod call;
@@ -929,7 +931,13 @@ pub enum Input {
     CallAbandoned(CallId),
     /// The system slept for `gap`: the wall clock moved that much further
     /// than the monotonic one, whose timers resume with the time they had
-    /// left (Block 25, D1). A gap under 2 s is ignored.
+    /// left. A gap under 2 s is ignored.
+    ///
+    /// The owner detects the sleep, orders this input around the one that
+    /// revealed it, feeds the token refreshes the sleep made due, and drops
+    /// the shortening of timers the revealing input just set: see the
+    /// "System sleep" section of the `ferrifuge::machine` documentation.
+    // Block 25, D1; Block 60, D1.
     Slept {
         /// How long the system slept.
         gap: Duration,

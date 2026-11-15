@@ -114,6 +114,41 @@ pub mod machine {
     //! [`Input`]s and performs the returned [`Action`]s in order. The tokio
     //! adapter is one such owner; any other runtime can drive it the same way.
     //!
+    //! # System sleep
+    //!
+    //! The owner tells the machine that the system slept with
+    //! [`Input::Slept`], and applies four rules around it, as the tokio and
+    //! browser adapters do:
+    //!
+    //! 1. **Detection.** At each input it gives, the owner compares how far the
+    //!    wall clock and the monotonic clock moved since the previous one. When
+    //!    the wall clock moved further by at least 2 s, it feeds
+    //!    `Input::Slept { gap }` with the difference. A wall clock set back
+    //!    gives no gap, and the machine ignores gaps under 2 s.
+    //! 2. **Ordering.** [`Input::Close`] and [`Input::DriverDropped`] are fed
+    //!    alone, without `Slept`. While connected, [`Input::EventTaken`],
+    //!    [`Input::EventHanded`], [`Input::HandlerPanicked`], [`Input::Frame`],
+    //!    [`Input::TransportClosed`] and [`Input::Reconnect`] are fed in this
+    //!    order: the due refresh firings (rule 3), then the input, then
+    //!    `Slept`. Every other input, and those six while not connected, are
+    //!    fed in this order: `Slept`, then the due refresh firings, then the
+    //!    input. The owner performs the actions of `Slept`'s answer even when
+    //!    an application call revealed the sleep.
+    //! 3. **Refresh deadlines.** The owner records each token refresh timer's
+    //!    deadline and setting from the [`Action::SetTimer`] and
+    //!    [`Action::SetSubscriptionTimer`] refresh actions, and forgets them on
+    //!    [`Action::CancelTimer`] and [`Action::CancelSubscriptionTimer`]. On a
+    //!    sleep it moves all of them earlier by the gap. It feeds the ones now
+    //!    due as [`Input::TimerFired`] or [`Input::SubscriptionTimerFired`] with
+    //!    their setting, the connection's first, then by subscription, and
+    //!    cancels its own timers for them. Each refresh is fed once: a refresh
+    //!    firing the machine is given removes that deadline.
+    //! 4. **Shorten filter.** When the input goes before `Slept`, the owner
+    //!    drops from `Slept`'s answer every [`Action::ShortenTimer`] and
+    //!    [`Action::ShortenSubscriptionTimer`] for a timer that the input's
+    //!    answer just set, including the answers to the event takes the input
+    //!    caused: those timers lost no time to the sleep.
+    //!
     //! Behaviour follows the Client SDK spec, with centrifuge-js as the
     //! implementation reference (`src/centrifuge.ts`).
 
