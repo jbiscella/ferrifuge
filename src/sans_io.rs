@@ -165,17 +165,13 @@ pub struct FetchId(u64);
 pub struct EventId(u64);
 
 impl EventId {
-    /// No event: for a handler failure that has none, as an events thread
-    /// that could not start.
-    // Block 41, D2.
+    /// No event of the machine's, which never gives this id: for a handler
+    /// failure that has none, as an events thread that could not start,
+    /// and for the `disconnected` event a client emits without the machine
+    /// once a panic poisoned its core.
+    // Block 41, D2; Block 61, D6.
     #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) const NONE: Self = Self(u64::MAX);
-
-    /// The id of the `disconnected` event a client emits without the
-    /// machine, once a panic poisoned its core; the machine never gives it.
-    // Block 61, D6.
-    #[cfg(any(adapter_tokio, adapter_browser))]
-    pub(crate) const POISONED: Self = Self(u64::MAX - 1);
 
     /// An id for the adapter's unit tests.
     #[cfg(test)]
