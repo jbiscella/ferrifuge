@@ -2020,7 +2020,7 @@ imports nothing but wasm-bindgen's glue, and runs the `@W` tests in headless
 Chrome and Firefox (`browser` job; Safari on `main` and nightly), the
 interop test, each fuzz target for
 30 s (10 min nightly) and the semver check, natively and for the browser
-target. The perf, wall-clock, fuzz and long chaos jobs
+target. The wall-clock, fuzz and long chaos jobs
 run on merges to `main`, nightly and on demand (`workflow_dispatch`), not
 on pull requests. cargo-deny also runs daily.
 
