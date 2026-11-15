@@ -2,8 +2,8 @@
 //! `sub_refresh`, and the failures of both. Behaviour follows centrifuge-js
 //! `subscription.ts` (`_subscribe`, `_handleTokenResponse`,
 //! `_handleTokenError`, `_refresh`, `_refreshResponse`, `_refreshError`,
-//! `_subscribeError`), with one difference: the refresh starts at 80–90% of
-//! the ttl.
+//! `_subscribeError`), with some differences of its own, such as the
+//! refresh starting at 80–90% of the ttl.
 // Block 10b; Block 14.
 
 use std::time::Duration;

@@ -3,7 +3,7 @@
 //! refresh at the earliest deadline, and the retries with their backoffs.
 //! centrifuge-js 63ed73e `track`, `_sharedPollRefreshSignature` and
 //! `_sharedPollReplayTrack` (`src/subscription.ts:1973-2245`,
-//! `:2934-3047`), except where noted.
+//! `:2934-3047`), with some differences of its own.
 // Block 47, D6, D7; Block 47.
 
 use std::collections::{HashSet, VecDeque};
@@ -207,8 +207,8 @@ impl Machine {
 
     /// The callback answered `request`. An answer to a request of an
     /// earlier `subscribed` period, or while not subscribed, changes
-    /// nothing (I13).
-    // D6.
+    /// nothing.
+    // D6; I13.
     pub(super) fn signature_fetched(
         &mut self,
         id: SubscriptionId,

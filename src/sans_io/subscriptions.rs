@@ -860,11 +860,11 @@ impl Machine {
     /// 413). A subscribe or `sub_refresh` would be refused again, so it is
     /// not retried: its subscription goes to unsubscribed with
     /// [`codes::unsubscribed::MESSAGE_SIZE_LIMIT`], after an unsubscribe
-    /// command when the server holds the subscription (owner decision,
-    /// 2026-11-04). Whether `command` was one of them. Whether `command` is
-    /// a subscription's command still awaiting its reply: a current
-    /// subscribe, an unsubscribe or a `sub_refresh`.
-    // Block 18, D6.
+    /// command when the server holds the subscription. Whether `command` was
+    /// one of them. Whether `command` is a subscription's command still
+    /// awaiting its reply: a current subscribe, an unsubscribe or a
+    /// `sub_refresh`.
+    // Block 18, D6; owner decision, 2026-11-04.
     pub(in crate::sans_io) fn awaits_subscription_reply(&self, command: u32) -> bool {
         let subscriptions = &self.subscriptions;
         // A shared poll track or untrack request (Block 47, D7).

@@ -38,8 +38,9 @@ use crate::{
 /// returns.
 ///
 /// In the browser they run on the page's event loop, which they block while
-/// they run, and a panic aborts: wasm32-unknown-unknown builds with `panic
-/// = "abort"`, so the module traps and its later calls are undefined.
+/// they run, and a panic aborts: wasm32-unknown-unknown builds with
+/// `panic = "abort"`, so the module traps and its later calls are
+/// undefined.
 ///
 /// ```no_run
 /// # fn run(client: ferrifuge::Client) {

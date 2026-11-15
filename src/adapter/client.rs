@@ -3710,10 +3710,6 @@ async fn opened(
 }
 
 #[cfg(adapter_tokio)]
-/// Refuses an endpoint the transport cannot use: an empty one, or an
-/// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
-/// `http(s)://` is right for `http_stream` and sse (owner decision,
-/// 2026-11-04). The message leaves the endpoint out: it may carry a token.
 /// An error of building a client without a runtime to run on. The runtime
 /// given, else the current one.
 // Block 28; Block 28, D1.
@@ -3913,6 +3909,11 @@ fn check_webtransport(
     }
 }
 
+/// Refuses an endpoint the transport cannot use: an empty one, or an
+/// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
+/// `http(s)://` is right for `http_stream` and sse. The message leaves the
+/// endpoint out: it may carry a token.
+// Owner decision, 2026-11-04.
 fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
     let endpoint = endpoint.trim();
     let http = endpoint.split_once("://").is_some_and(|(scheme, _)| {

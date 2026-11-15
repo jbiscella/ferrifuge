@@ -84,8 +84,19 @@ fn only_the_unstable_modules_allow_the_exhaustive_lints() {
     let mut found: Vec<String> = files()
         .into_iter()
         .filter(|(_, text)| {
-            text.lines().any(|line| {
-                line.trim_start().starts_with("#![allow(") && line.contains("clippy::exhaustive_")
+            let lines: Vec<&str> = text.lines().collect();
+            // Each allow read up to its `)]`, so that one over several
+            // lines is seen too.
+            lines.iter().enumerate().any(|(index, line)| {
+                line.trim_start().starts_with("#![allow(") && {
+                    let end = lines[index..]
+                        .iter()
+                        .position(|line| line.contains(")]"))
+                        .map_or(lines.len(), |end| index + end + 1);
+                    lines[index..end]
+                        .iter()
+                        .any(|line| line.contains("clippy::exhaustive_"))
+                }
             })
         })
         .map(|(path, _)| path)

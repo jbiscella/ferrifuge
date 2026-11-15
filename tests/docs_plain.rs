@@ -32,6 +32,15 @@ fn doc_text(source: &str) -> Vec<(usize, String)> {
     while i < lines.len() {
         let line = lines[i].trim_start();
         if line == "#[cfg(test)]" {
+            // The item's own doc, above its attributes, is test code too.
+            let mut top = i;
+            while top > 0 && {
+                let above = lines[top - 1].trim_start();
+                above.starts_with("///") || above.starts_with("#[") || above.starts_with("//")
+            } {
+                top -= 1;
+            }
+            found.retain(|(number, _)| *number <= top);
             i = after_item(&lines, i + 1);
             continue;
         }
@@ -72,8 +81,8 @@ fn after_item(lines: &[&str], start: usize) -> usize {
         .map_or(lines.len(), |i| i + 1)
 }
 
-/// Whether `path` is a test file: `*_tests.rs`, `tests.rs`, or under a
-/// `tests` directory.
+/// Whether `path`, relative to the crate, is a test file: `*_tests.rs`,
+/// `tests.rs`, or under a `tests` directory.
 fn is_test_file(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -122,7 +131,10 @@ fn the_crate_documentation_cites_no_block() {
     rust_sources(&root.join("src"), &mut files);
     files.sort();
     let mut found = Vec::new();
-    for path in files.iter().filter(|path| !is_test_file(path)) {
+    for path in files
+        .iter()
+        .filter(|path| !is_test_file(path.strip_prefix(root).expect("under the crate")))
+    {
         let source = std::fs::read_to_string(path)
             .expect("a source file")
             .replace("\r\n", "\n");
@@ -175,5 +187,9 @@ fn planted_citations_are_reported() {
     assert_eq!(
         citations("#[cfg(test)]\nfn f() {}\n/// Cited (Block 5).\nfn g() {\n}\n").len(),
         1
+    );
+    assert_eq!(
+        citations("/// Tests of Block 4.\n#[cfg(test)]\nmod tests {\n    fn f() {}\n}\n"),
+        Vec::<String>::new()
     );
 }

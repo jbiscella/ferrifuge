@@ -181,9 +181,10 @@ fn verified_config(extra: &[CertificateDer<'static>]) -> Result<(ClientConfig, b
 /// trusting `extra`, and whether to keep them.
 ///
 /// Webpki over the platform's root certificates: on Linux this is what the
-/// platform verifier does, but the read's errors must be seen to keep C7;
-/// in the fips build, on every platform.
-// Block 22, D1.
+/// platform verifier does, but the read's errors must be seen, so that a
+/// read with errors is tried again at the next attempt; in the fips build,
+/// on every platform.
+// Block 22, D1; C7.
 #[cfg(not(all(
     not(feature = "fips"),
     any(

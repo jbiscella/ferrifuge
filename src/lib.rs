@@ -47,8 +47,10 @@
 //! two ways:
 //!
 //! - as a stream, from `events()`: an event counts as delivered when the
-//!   stream yields it, and a reader that falls behind holds the server back
-//!   instead of growing the client's memory;
+//!   stream yields it. Natively, a reader that falls behind makes the client
+//!   stop reading the connection, holding the server back instead of growing
+//!   the client's memory; in the browser, a client that falls too far behind
+//!   reconnects with `connecting` code 7 "read-ahead overflow";
 //! - to a handler, a closure or a [`ClientHandler`] or
 //!   [`SubscriptionHandler`], set with [`ClientBuilder::handler`],
 //!   [`Client::set_handler`], [`SubscriptionBuilder::handler`] or
@@ -58,7 +60,7 @@
 //! A handler takes over its object's stream. [`EventDelivery`], set with
 //! [`ClientBuilder::event_delivery`], chooses where a client's handlers run:
 //! on a task of its runtime (the default), on the client's own driver, or,
-//! natively, on a thread of their own for handlers that block.
+//! natively, on a thread of the client's own, for handlers that block.
 //!
 //! # Cargo features
 //!
@@ -69,7 +71,7 @@
 //! | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider |
 //! | `fips` | no | aws-lc-rs in FIPS mode; building it needs `CMake` and Go |
 //! | `browser` | yes | the browser adapter on `wasm32-unknown-unknown`; nothing on other targets |
-//! | `cookies` | no | a cookie jar for the native client |
+//! | `cookies` | no | a cookie jar for the native client; implies `tokio` |
 //! | `test-util` | no | constructors of the events and results the client yields, and natively an in-memory server double, for an application's tests |
 //! | `unstable` | no | map and shared poll subscriptions, and the browser's WebTransport |
 //! | `unstable-webtransport` | no | the native WebTransport transport; implies `unstable` |
@@ -81,8 +83,9 @@
 //!
 //! The three `unstable` features are outside the semver promise: what they
 //! enable may change in any minor release. `unstable` and
-//! `unstable-webtransport` follow centrifuge-js 63ed73e and Centrifugo's
-//! experimental features; `unstable-machine` exposes the core's own API.
+//! `unstable-webtransport` cover features that Centrifugo and its
+//! JavaScript client still mark experimental; `unstable-machine` exposes
+//! the core's own API.
 //!
 //! # Guides
 //!

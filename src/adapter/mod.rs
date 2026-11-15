@@ -24,7 +24,8 @@ mod shared_poll_subscription;
 mod subscription;
 #[cfg(adapter_tokio)]
 mod tokio;
-#[cfg(all(test, adapter_tokio))]
+#[cfg(test)]
+#[cfg(adapter_tokio)]
 pub(crate) use self::tokio::http::header_set_sample;
 
 /// The transports of this build's target.
