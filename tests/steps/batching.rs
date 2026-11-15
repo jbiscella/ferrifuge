@@ -98,7 +98,7 @@ impl BatchRun {
                 }
                 Action::CancelTimer(TimerKey::Client(timer)) => self.cancel(Key::Client(*timer)),
                 Action::ShortenTimer(TimerKey::Client(timer), by) => {
-                    self.shorten(Key::Client(*timer), *by)
+                    self.shorten(Key::Client(*timer), *by);
                 }
                 Action::ShortenTimer(TimerKey::Subscription(id, timer), by) => {
                     self.shorten(Key::Subscription(*id, *timer), *by);
@@ -107,7 +107,7 @@ impl BatchRun {
                     self.set(Key::Call(*call, *timer), *delay, *setting);
                 }
                 Action::CancelTimer(TimerKey::Call(call, timer)) => {
-                    self.cancel(Key::Call(*call, *timer))
+                    self.cancel(Key::Call(*call, *timer));
                 }
                 Action::SetTimer(TimerKey::Subscription(id, timer), delay, setting) => {
                     self.set(Key::Subscription(*id, *timer), *delay, *setting);

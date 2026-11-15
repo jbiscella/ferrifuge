@@ -208,7 +208,7 @@ impl Refreshes {
     fn note(&mut self, action: &Action) {
         match action {
             Action::SetTimer(TimerKey::Client(Timer::Refresh), delay, setting) => {
-                self.set(None, *delay, *setting)
+                self.set(None, *delay, *setting);
             }
             Action::SetTimer(
                 TimerKey::Subscription(id, SubscriptionTimer::Refresh),

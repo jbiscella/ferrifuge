@@ -129,7 +129,7 @@ fn open_timers(world: &mut ClientWorld) -> Vec<DebounceTimer> {
         match action {
             Action::SetTimer(TimerKey::Debounce(timer), _, _) => open.push(*timer),
             Action::CancelTimer(TimerKey::Debounce(timer)) => {
-                open.retain(|running| running != timer)
+                open.retain(|running| running != timer);
             }
             _ => {}
         }

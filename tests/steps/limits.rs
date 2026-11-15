@@ -196,7 +196,7 @@ impl OpenRun {
                     self.timers.push((timer, self.now + after, setting));
                 }
                 Action::CancelTimer(TimerKey::Client(timer)) => {
-                    self.timers.retain(|(set, _, _)| *set != timer)
+                    self.timers.retain(|(set, _, _)| *set != timer);
                 }
                 Action::OpenTransport {
                     transport, kind, ..
