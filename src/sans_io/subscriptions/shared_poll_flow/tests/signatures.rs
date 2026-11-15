@@ -73,7 +73,7 @@ impl RefreshTimer {
                     self.deadline = Some(self.deadline.map_or(at, |set| set.min(at)));
                 }
                 Action::CancelTimer(TimerKey::SharedPollRefresh(of)) if *of == id => {
-                    self.deadline = None
+                    self.deadline = None;
                 }
                 _ => {}
             }

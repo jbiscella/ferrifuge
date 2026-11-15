@@ -1003,10 +1003,10 @@ impl<'a> Replay<'a> {
                     }
                 }
                 Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..) => {
-                    self.reconnect_armed = true
+                    self.reconnect_armed = true;
                 }
                 Action::CancelTimer(TimerKey::Client(Timer::Reconnect)) => {
-                    self.reconnect_armed = false
+                    self.reconnect_armed = false;
                 }
                 Action::SetTimer(
                     TimerKey::Subscription(id, SubscriptionTimer::Resubscribe),

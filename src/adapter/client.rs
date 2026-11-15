@@ -11,6 +11,7 @@
     )
 )]
 
+#[cfg(feature = "__test-hooks")]
 use crate::sans_io::TimerKey;
 use std::collections::VecDeque;
 use std::future::Future;

@@ -152,6 +152,7 @@ impl KeyedTimers {
 
     /// The number of timers running.
     #[cfg(test)]
+    #[cfg(feature = "unstable")]
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -526,7 +527,6 @@ impl Driver {
         lock(&self.shared.records.driver).observe(running);
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per action")]
     fn perform(&mut self, action: Action) {
         match action {
             Action::OpenTransport {

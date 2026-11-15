@@ -41,9 +41,11 @@ fn last_setting(actions: &[Action], pick: impl Fn(&Action) -> bool) -> TimerSett
         .rev()
         .filter(|action| pick(action))
         .find_map(|action| match action {
-            Action::SetTimer(TimerKey::Client(_), _, setting)
-            | Action::SetTimer(TimerKey::Subscription(_, _), _, setting)
-            | Action::SetTimer(TimerKey::Call(_, _), _, setting) => Some(*setting),
+            Action::SetTimer(
+                TimerKey::Client(_) | TimerKey::Subscription(_, _) | TimerKey::Call(_, _),
+                _,
+                setting,
+            ) => Some(*setting),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no such setting in {actions:?}"))

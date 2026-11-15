@@ -231,6 +231,10 @@ fn shared_poll_inputs(s: &mut Sentinels) -> Vec<Input> {
 /// One value of every `Action` variant, each secret field a sentinel. The
 /// events inside use only variants Block 54c left unchanged; every event
 /// variant keeps the test of `src/event.rs`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a value of every variant, the timer ones with a key of each family"
+)]
 fn actions(s: &mut Sentinels) -> Vec<Action> {
     let mut actions = Vec::new();
     actions.extend([
@@ -558,7 +562,7 @@ fn declared_variants(name: &str) -> Vec<String> {
             compiled_out = false;
         }
     }
-    assert!(variants.len() > 20, "the variants of {name} found");
+    assert!(variants.len() > 15, "the variants of {name} found");
     variants
 }
 

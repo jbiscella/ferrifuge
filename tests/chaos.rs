@@ -1988,7 +1988,7 @@ impl Run {
                 self.schedule(delay, Due::Timer(Key::Client(timer), Some(setting)));
             }
             Action::ShortenTimer(TimerKey::Client(timer), by) => {
-                self.shorten(Key::Client(timer), by)
+                self.shorten(Key::Client(timer), by);
             }
             Action::ShortenTimer(TimerKey::Subscription(id, timer), by) => {
                 self.shorten(Key::Subscription(id, timer), by);
