@@ -1116,9 +1116,9 @@ pub enum Action {
         frame_type: FrameType,
     },
     /// Start the timer of a key, replacing its running one, as the setting
-    /// given: its firing returns it. For [`TimerKey::SharedPollRefresh`], a
-    /// running timer with an earlier deadline keeps that deadline and takes
-    /// the setting.
+    /// given: its firing returns it. For `TimerKey::SharedPollRefresh`
+    /// (`unstable`), a running timer with an earlier deadline keeps that
+    /// deadline and takes the setting.
     // Block 61, D4.
     SetTimer(TimerKey, Duration, TimerSetting),
     /// Stop the timer of a key if it runs.
