@@ -287,7 +287,11 @@ pub enum TimerKey {
 #[derive(Debug, Default)]
 struct TimerSettings {
     next: u64,
+    /// Every timer's but the debounce windows'.
     running: HashMap<TimerKey, TimerSetting>,
+    /// The debounce windows', numbered afresh for each window: freed once
+    /// none runs, as the windows' own table (Block 46, D15).
+    windows: HashMap<DebounceTimer, TimerSetting>,
 }
 
 impl TimerSettings {
@@ -301,14 +305,59 @@ impl TimerSettings {
     /// cancel ends it.
     fn follow(&mut self, action: &Action) {
         match action {
-            Action::SetTimer(key, _, setting) => {
-                self.running.insert(*key, *setting);
-            }
-            Action::CancelTimer(key) => {
-                self.running.remove(key);
-            }
+            Action::SetTimer(key, _, setting) => self.insert(*key, *setting),
+            Action::CancelTimer(key) => self.remove(*key),
             _ => {}
         }
+    }
+
+    /// The setting running for `key`'s timer.
+    fn get(&self, key: TimerKey) -> Option<TimerSetting> {
+        match key {
+            TimerKey::Debounce(timer) => self.windows.get(&timer).copied(),
+            key => self.running.get(&key).copied(),
+        }
+    }
+
+    fn insert(&mut self, key: TimerKey, setting: TimerSetting) {
+        match key {
+            TimerKey::Debounce(timer) => {
+                self.windows.insert(timer, setting);
+            }
+            key => {
+                self.running.insert(key, setting);
+            }
+        }
+    }
+
+    fn remove(&mut self, key: TimerKey) {
+        match key {
+            TimerKey::Debounce(timer) => {
+                self.windows.remove(&timer);
+                if self.windows.is_empty() {
+                    self.windows = HashMap::new();
+                }
+            }
+            key => {
+                self.running.remove(&key);
+            }
+        }
+    }
+
+    /// Every timer running, with its setting.
+    #[cfg(any(
+        test,
+        all(feature = "__test-hooks", any(adapter_tokio, adapter_browser))
+    ))]
+    fn iter(&self) -> impl Iterator<Item = (TimerKey, TimerSetting)> + '_ {
+        self.running
+            .iter()
+            .map(|(key, setting)| (*key, *setting))
+            .chain(
+                self.windows
+                    .iter()
+                    .map(|(timer, setting)| (TimerKey::Debounce(*timer), *setting)),
+            )
     }
 }
 
@@ -2034,10 +2083,10 @@ impl Machine {
         // A firing of a setting no longer running changes nothing; taken,
         // it no longer runs (Block 53 D2).
         if let Input::TimerFired(key, setting) = &input {
-            if self.timer_settings.running.get(key) != Some(setting) {
+            if self.timer_settings.get(*key) != Some(*setting) {
                 return Vec::new();
             }
-            self.timer_settings.running.remove(key);
+            self.timer_settings.remove(*key);
         }
         self.batching.application_unsubscribe =
             matches!(input, Input::Unsubscribe(_) | Input::RemoveSubscription(_));
@@ -2206,11 +2255,7 @@ impl Machine {
     // Block 52 D8.
     #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     pub(crate) fn running_settings(&self) -> Vec<(TimerKey, TimerSetting)> {
-        self.timer_settings
-            .running
-            .iter()
-            .map(|(key, setting)| (*key, *setting))
-            .collect()
+        self.timer_settings.iter().collect()
     }
 
     /// The setting running for `timer`, for tests driving the machine.
@@ -2218,10 +2263,7 @@ impl Machine {
     #[doc(hidden)]
     #[must_use]
     pub fn timer_setting(&self, timer: Timer) -> Option<TimerSetting> {
-        self.timer_settings
-            .running
-            .get(&TimerKey::Client(timer))
-            .copied()
+        self.timer_settings.get(TimerKey::Client(timer))
     }
 
     /// The setting running for a subscription's `timer`, for tests.
@@ -2233,10 +2275,7 @@ impl Machine {
         id: SubscriptionId,
         timer: SubscriptionTimer,
     ) -> Option<TimerSetting> {
-        self.timer_settings
-            .running
-            .get(&TimerKey::Subscription(id, timer))
-            .copied()
+        self.timer_settings.get(TimerKey::Subscription(id, timer))
     }
 
     /// The setting running for a call's `timer`, for tests.
@@ -2244,10 +2283,7 @@ impl Machine {
     #[doc(hidden)]
     #[must_use]
     pub fn call_timer_setting(&self, id: CallId, timer: CallTimer) -> Option<TimerSetting> {
-        self.timer_settings
-            .running
-            .get(&TimerKey::Call(id, timer))
-            .copied()
+        self.timer_settings.get(TimerKey::Call(id, timer))
     }
 
     /// The firing of `timer`'s running setting, or, when none runs, of a
@@ -2263,7 +2299,7 @@ impl Machine {
     #[doc(hidden)]
     #[must_use]
     pub fn key_setting(&self, key: TimerKey) -> Option<TimerSetting> {
-        self.timer_settings.running.get(&key).copied()
+        self.timer_settings.get(key)
     }
 
     /// The firing of the running setting of `key`'s timer, as
