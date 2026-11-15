@@ -2093,6 +2093,39 @@ mod tests {
     /// The code lines of every source file under `src/adapter`, before its
     /// test module, comments left out, with the file's path relative to
     /// `src/adapter` (`/`-separated) and the line's number.
+    /// Whether the module of the file at `path` is declared under
+    /// `#[cfg(test)]` by its parent module: `mod.rs` beside it, or the file
+    /// named after its directory.
+    fn declared_for_tests(path: &std::path::Path) -> bool {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("a file name");
+        let dir = path.parent().expect("a directory");
+        let parents = [dir.join("mod.rs"), dir.with_extension("rs")];
+        let Some(parent) = parents
+            .iter()
+            .find_map(|parent| std::fs::read_to_string(parent).ok())
+        else {
+            return false;
+        };
+        let parent = parent.replace("\r\n", "\n");
+        let lines: Vec<&str> = parent.lines().map(str::trim).collect();
+        lines.iter().enumerate().any(|(index, line)| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let declared = words.len() >= 2
+                && words[words.len() - 2] == "mod"
+                && words[words.len() - 1].strip_suffix(';') == Some(name);
+            // The attributes above the declaration, up to the item before.
+            declared
+                && lines[..index]
+                    .iter()
+                    .rev()
+                    .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+                    .any(|line| *line == "#[cfg(test)]")
+        })
+    }
+
     fn adapter_code() -> Vec<(String, usize, String)> {
         fn visit(
             dir: &std::path::Path,
@@ -2129,9 +2162,15 @@ mod tests {
                     .map(|component| component.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                // Test code whole: `mod.rs` declares these `#[cfg(test)]`
-                // (Block 61, D1; Block 63).
+                // Test code whole, declared `#[cfg(test)]` by its parent
+                // module, which is checked so that no production file is
+                // skipped (Block 61, D1; Block 63).
                 if relative == "test_support.rs" || relative.ends_with("_tests.rs") {
+                    assert!(
+                        declared_for_tests(&path),
+                        "src/adapter/{relative}: skipped as test code, but its parent module \
+                         does not declare it under #[cfg(test)]"
+                    );
                     continue;
                 }
                 for (number, line) in code.lines().enumerate() {
