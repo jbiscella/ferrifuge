@@ -996,7 +996,9 @@ jobs:
   # the pull request changes in the library's core are mutated, and its unit
   # tests must catch every mutant (`.cargo/mutants.toml` sets the tests, the
   # features and the scope). This job sizes the shards: about 15 minutes of
-  # mutants each, at the time per mutant measured in 60c (MUTANT_SECONDS).
+  # mutants each, at the time per mutant measured in 60c (MUTANT_SECONDS):
+  # about 105 s for a mutant in the core, which most pull requests touch
+  # (96 to 109 s on CI; the whole scope's mean was 92 s).
   mutants-plan:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -1006,7 +1008,7 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
       indices: ${{ steps.plan.outputs.indices }}
     env:
-      MUTANT_SECONDS: 65
+      MUTANT_SECONDS: 105
     steps:
       # The merge commit and its first parent, the base: their diff is the
       # pull request's change.

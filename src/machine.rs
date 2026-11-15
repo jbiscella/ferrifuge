@@ -1716,13 +1716,6 @@ const SLEEP_THRESHOLD: Duration = Duration::from_secs(2);
 /// The reason of the `unsubscribed` events of a closed client (Block 33).
 const CLIENT_CLOSED_REASON: &str = "client closed";
 
-// TEMPORARY mutation (Block 60c): a tested change, which the mutants job
-// must pass.
-#[allow(dead_code)]
-pub(crate) fn planted_tested(attempts: u32) -> u32 {
-    attempts.saturating_mul(2) + 1
-}
-
 /// Websocket close code "message too big" (RFC 6455).
 const MESSAGE_TOO_BIG: u32 = 1009;
 
