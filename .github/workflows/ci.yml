@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The jobs pull requests skip (chaos, chaos-adapter, perf, wall-clock,
-  # fuzz) also run nightly.
+  # The jobs pull requests skip (chaos, chaos-adapter, wall-clock,
+  # browser-safari, mobile-android, mobile-ios, fuzz) also run nightly.
   schedule:
     - cron: "23 2 * * *"
   # Runs every job on any branch, on demand.
@@ -459,8 +459,8 @@ jobs:
   # Deterministic @P metrics of Block 14: instruction counts, with gungraun
   # on Valgrind.
   perf:
-    # Heavy: on main (merges and nightly) and on demand, not on pull requests.
-    if: github.event_name != 'pull_request'
+    # On pull requests too: its gates compare instruction counts within one
+    # run and count allocations and live bytes, so no runner changes them.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
