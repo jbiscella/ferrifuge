@@ -10293,3 +10293,250 @@ Each of these mutations is seen red once, recorded in the PR:
 - a dependency used only by tests placed in `[dependencies]`.
 
 **Exceptions introduced:** no scenario: documentation, unit and source tests, and CI checks, verified by the mutations above.
+
+---
+
+## Block 61 — SOLID refactors before 1.0.0-alpha
+
+**Goal:** before 1.0.0-alpha:
+- each file of the client's adapter has one reason to change;
+- the invariants the subscription kinds share are written once;
+- the core has one timer family;
+- transport failures are typed inside the crate;
+- a panic while the client's state is locked closes the client visibly.
+
+No public behaviour changes, apart from D6's closing and D4's order among timers due together.
+
+Source: code quality report of 2026-11-15, findings 2, 3, 4, 7, 8 and 10; owner requests of 2026-11-15 ("solid problems should be fixed", before 1.0.0-alpha; "code quality should run at push time"); the second SOLID review's constraints.
+
+**Dependencies:** Blocks 14 (footprint gates), 15 (outboxes, exactly-once delivery), 25 (sleep, `Refreshes`), 28 (D3, D4: the driver's end, codes 2 and 4), 33 (closing), 34 (codes tables), 41 (handlers), 44 (browser adapter, `backend`), 45, 46 and 47 (map, debounce and shared poll timers, `Routed`), 49 (rows 19/70, 28/55, 80, S14, C6), 53 (numbered settings, `TimerKey`, the core runner), 54 (`unstable-machine`, the `sans_io` core), 60 (D1's sleep contract, D2's redaction test, D3's documentation rule).
+
+**Out of scope:**
+- findings 1 (the sleep policy into the core) and 5 (redacting newtypes): after 1.0.0-alpha, as Block 60 says;
+- findings 11 and 12: later blocks;
+- making the failure kind of D5 public: after the alpha, through `ClientError`'s reserved `source()` (Block 54 D3);
+- new public API on the stable surface.
+
+This block amends Blocks 28, 33, 46, 49, 53 and 60 (see "Amendments to earlier blocks"). Block 0's "Reversed exclusions" gains the row | Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |.
+
+**Decisions** (reviewer, 2026-11-15, delegated by the owner):
+
+- **D1 The split (finding 3).**
+  - **Move only.** No logic changes. An item private to `client.rs` becomes at most `pub(super)`.
+  - **The files.** `src/adapter/client.rs` becomes four files of `adapter`:
+    - `client.rs`: `Client` and its methods, `Owner`, `WeakClient`, `Batch`, `PendingCall`, `reply_of`, `client_closed`, `history_of`, `presence_of`, `presence_stats_of`, `perform_batches`;
+    - `builder.rs`: `ClientBuilder` and its `Debug` helpers, `Client::start`, `machine_for`, `runtime_or_current`, the `check_*` validators, the header and trust helpers, `android_gate`;
+    - `driver.rs`: `Driver`, `Timers`, `KeyedTimers`, `shortened`, the shared poll timer types, `perform`, the `select!` loop, the callback fetches, `guarded` and its panic errors, `Ending`, `UPPER_STREAK`;
+    - `shared.rs`: `Shared`, `Core`, `Outboxes`, `Clock`, `sleep_gap`, `Refreshes`, the callback types, `EventStream`, `Routed`, `lock`.
+  - **Items not named.** Each goes with its callers. When its callers are in several files, it goes to `shared.rs`.
+  - **Tests.** Inline tests follow the code they test. A helper that the tests of several files use goes to one `#[cfg(test)]` module of `adapter`.
+  - **Unchanged.** Public paths, signatures and doc text.
+  - **Catalogue.** The Block 49 rows naming a moved test follow it (see "Amendments to earlier blocks").
+
+- **D2 Backend options (finding 3).**
+  - **Term.** A *backend option* is a `ClientBuilder` option that only one target has:
+    - natively: `root_certificates`, `tls_config`, `proxy`, `connector`, `cookie_jar`, `http_headers` and `runtime`;
+    - in the browser: `network_event_target`, `page_event_target`, `websocket`, `fetch`, `readable_stream`, `event_source` and `include_credentials`.
+  - **Options and setters.** Each backend (`adapter::tokio`, `adapter::browser`) defines `backend::Options` with its fields. In a module of its own it holds:
+    - the `impl ClientBuilder` block of its setters, with their docs and `doc(cfg)`;
+    - its target's `Client` methods (`set_http_headers`, `set_proxy`).
+  - **One field each.** `ClientBuilder`, `Shared` and `Driver` each hold one backend field:
+    - `ClientBuilder` holds the `Options`;
+    - `Shared` and `Driver` hold what `Options::start` gives them: natively the network and the HTTP headers; in the browser the listeners, the constructors, the credentials flag and the inbox bound.
+  - **`Options::start`.** It runs the target's checks (trust, the Android gate, the connector, the endpoints, the runtime). It fails with today's `ClientError`s.
+  - **`Debug`.** `ClientBuilder`'s `Debug` output is unchanged, field for field: the backend writes its fields into the builder's `debug_struct`.
+  - **Effect.** `ClientBuilder`, `Shared`, `Driver` and `Client::start` name no `cfg(adapter_tokio)` and no `cfg(adapter_browser)`.
+
+- **D3 Subscription kinds (finding 2).**
+  - **Term.** A *kind* is a stream, map or shared poll subscription.
+  - **Adapter.**
+    - **`Routed`.** For each kind, it gives the kind's outbox map, its handler slot and its handler installation.
+    - **Written once, as private generic helpers:**
+      - opening a stream (`events()`);
+      - `held_events()`;
+      - removal (`remove_*`);
+      - the registration in `build()`;
+      - installing and setting a handler;
+      - `deliver`'s arms for the three kinds.
+    - **Methods several kinds share** are written once on one private handle (`shared`, `id`, `channel`), and the three types delegate to it: `channel`, `state`, `set_data`, `set_tag_filter`, `ready`, `subscribe`, `unsubscribe`, `publish`, `presence`, `presence_stats`, `PartialEq` and `Debug`.
+    - **Public methods stay.** Every public method of `Subscription`, `MapSubscription`, `SharedPollSubscription`, their builders, and `Client`'s methods for each kind stays. Its body is one call. No public signature or doc text changes.
+    - **The helpers keep today's locked sections and their order:**
+      - the registry check, opening the outbox and `StreamOpened` happen in one section under the core lock;
+      - in `build()`, the client-closed check, adding to the registry, the callbacks and the handler happen under the core lock;
+      - a replaced handler is dropped after the core lock is released;
+      - removal feeds `RemoveSubscription`, then closes the kind's outbox after its final events.
+    - **One list of kinds.** `Outboxes::withdraw` and `Ending`'s closing go through one list of the kinds.
+  - **Core (`src/sans_io/subscriptions.rs`).**
+    - **`Flavor`.** `map` and `shared_poll` become `flavor: Flavor`, where `enum Flavor { Stream, Map(Box<MapFlow>), SharedPoll(Box<SharedPollFlow>) }`. The last two variants are under `unstable`. A subscription holding both flows cannot be written.
+    - **`subscription_kind`.** `Machine::subscription_kind(id) -> Option<SubscriptionKind>` replaces `map_subscription_kind` and `is_shared_poll` (`unstable-machine`).
+    - **`SubscriptionKind`.** It is `#[non_exhaustive] enum SubscriptionKind { Stream, Map(MapKind), SharedPoll }`, the last two under `unstable`. Since a feature adds variants, an owner's `match` must build with and without that feature.
+    - **Registry.** `Client::get_subscription` and `subscriptions()` keep `SubscriptionKind::Stream` subscriptions. They no longer exclude a list of the other kinds.
+    - **Footprint.** A stream subscription's footprint does not change (Block 14's gates).
+
+- **D4 One timer family (finding 4; `unstable-machine`).**
+  - **Term.** A *family* is the timers of one key kind: client, subscription, call, debounce, shared poll request or shared poll refresh.
+  - **Key.** `machine::TimerKey` becomes public and `#[non_exhaustive]`, with the variants `Client(Timer)`, `Subscription(SubscriptionId, SubscriptionTimer)`, `Call(CallId, CallTimer)`, `Debounce(DebounceTimer)`, `SharedPoll(SharedPollTimer)` and `SharedPollRefresh(SubscriptionId)`. The last two are under `unstable`.
+  - **Variants.**
+    - `Action::SetTimer(TimerKey, Duration, TimerSetting)`, `Action::CancelTimer(TimerKey)` and `Action::ShortenTimer(TimerKey, Duration)` replace the 14 timer variants of `Action`.
+    - `Input::TimerFired(TimerKey, TimerSetting)` replaces the 6 firing variants of `Input`.
+    - The core shortens only client and subscription keys, as today.
+  - **Settings for every family.**
+    - Block 53 D1's counter numbers every `SetTimer`, and Block 53 D2's rule for stale firings covers every family.
+    - `DebounceTimer` and `SharedPollTimer` stay, as the identities of a window and of a request.
+    - The core forgets a key's running setting when the key is cancelled, set again or fires.
+    - Effect: a shared poll refresh is keyed by its subscription alone. Today, a firing that the driver took before the core set the refresh again acts on the new setting. Numbered, that firing is ignored.
+  - **What two keys ask of an owner** (stated on their variants):
+    - `Debounce`: the windows due at one poll are fed together, before the next flush, so that windows ending together share a frame;
+    - `SharedPollRefresh`: a `SetTimer` for a key that runs with an earlier deadline keeps that deadline and takes the new setting. This keeps today's one refresh at the earliest deadline asked for. With the old setting kept, the core would ignore the firing.
+  - **Driver.**
+    - **One map.** One `KeyedTimers<TimerKey, TimerSetting>`; `Timers` goes.
+    - **One arm.** The biased `select!` has one timer arm, where the six are today: after the transport and the actions' wake.
+    - **Order.** Of the timers ready at one poll, the arm gives the one with the earliest deadline. Ties follow `TimerKey`'s variant order, client keys in `Timer::ALL` order; ties within another family come in any order.
+    - **Debounce.** When the arm's timer is a debounce window, it gives every debounce window ready at that poll.
+    - **Why the order changes.** Today the arm order decides between families, and a `HashMap`'s order decides within the subscription and call families.
+  - **Documentation.** In the module documentation of `ferrifuge::machine`, the paragraph on numbered timers reads:
+    ```rust
+    //! Timers are numbered by setting: each [`Action::SetTimer`] carries a
+    //! [`TimerKey`], naming a timer of any family, and a [`TimerSetting`] the
+    //! machine never gives again. The owner returns both unchanged in the
+    //! [`Input::TimerFired`] of that setting; a timer shortened by
+    //! [`Action::ShortenTimer`] keeps its setting. The machine ignores a firing
+    //! whose setting no longer runs, because it cancelled that timer, set it
+    //! again or already took its firing: the step returns no action. The owner
+    //! need not drop a late firing, whatever it fed in between, [`Input::Slept`]
+    //! included.
+    ```
+    `Input::TimerFired` says: "The timer of this key and setting, set by [`Action::SetTimer`], fired; a firing of a setting no longer running is ignored (see the module documentation)." This replaces Block 53 D3's texts.
+  - **What follows the new shape:** `Refreshes`, `Client::armed_timers`, the soak's `TimerRecord`, the debounce test hooks, the log records, and the core runner, whose continuity mode keeps late firings of debounce keys too (Block 53 D5).
+
+- **D5 Typed transport failures (finding 7; crate-private).**
+  - **Term.** A *transport failure* is why a transport failed to open, read or write.
+  - **Types.**
+    - `TransportFailure { kind: FailureKind, message: String }` is `pub(in crate::adapter)` and derives `Clone`, `PartialEq`, `Eq` and `Debug`.
+    - `FailureKind` is `TooLarge`, `Http(u16)`, `CaptivePortal(u16)`, `ProxyAuthentication`, `Timeout`, `Io(io::ErrorKind)`, `Tls` or `Other`.
+    - It holds only `u16`, `String` and `io::ErrorKind`, never an `io::Error`.
+  - **Messages.** A failure is built where it happens, with today's message, which `Display` writes. No message changes.
+  - **Signatures.** Each function of the transport path in `src/adapter/tokio/`, `src/adapter/browser/` and `src/adapter/body.rs` that returns `Result<_, String>` returns `Result<_, TransportFailure>`. The checks at build, which end in a `ClientError`, keep theirs.
+  - **Control flow.** Code branches on `kind`, never on `message`. The three `TOO_LARGE` compares become matches on `FailureKind::TooLarge`, and `TOO_LARGE` goes.
+  - **Unchanged.** `Input::TransportFailed { message }` carries the message, and `ClientError.message` stays as it is. Nothing public changes.
+
+- **D6 A poisoned core closes the client (finding 8).**
+  - **Term.** The *core is poisoned* when code panics while holding its lock, on any thread: an application's call, a stream's poll, a handler's consumer, or the driver.
+  - **Access.** `Shared` reaches the core through one accessor. Once the core is poisoned, the accessor returns no guard, and its caller acts as on a closed client. The other locks keep today's recovery.
+  - **Closing.** The client closes once, at once:
+    - **The driver ends.** Dropping the core's guard while panicking wakes the driver, which ends.
+    - **The client is closed, as after Block 28 D3's end:**
+      - calls, pending or later, and `ready()` fail with code 4;
+      - `connect()` does nothing;
+      - `new_subscription` returns `SubscriptionError::ClientClosed`;
+      - every stream yields what is queued, then ends;
+      - `close()` resolves.
+    - **The machine is never fed again.**
+    - **One event.** `ClientEvent::Disconnected` with code 2 "exception during message handling" goes to the client's stream or handler without the machine, delivered as the events of Block 28 D3's end are. It is emitted only when the client's state after the last input the machine finished was not `disconnected`; the adapter keeps that state beside the core.
+    - **No subscription event**, since their states are unknown.
+    - **State reads.** `Client::state()` reads `disconnected`, and each subscription's `state()` reads `unsubscribed`. `statistics()` may read the poisoned core, since it changes nothing.
+  - **The driver's guard.** Finding the core poisoned (Block 28 D4), it takes this path.
+  - **Scope.** In the browser a panic traps (`panic = "abort"`) before any of this runs, so D6 applies natively.
+  - **Codes table.**
+    - The Cause of `disconnected` 2 reads "the client panicked, in its task or while holding its state, or an event handler did".
+    - The Cause of `error` 4 reads "the client is closed: `close()`, dropped, its runtime shut down, or it panicked".
+    - The README follows.
+
+- **D7 The emulation policy shared (finding 10).**
+  - **Shared by both targets, in `src/adapter/body.rs`:**
+    - **`classify_emulation`.** `classify_emulation(status: u16, redirected: bool) -> Emulated`, where `Emulated` is `Accepted`, `Rejected` or `Failed`:
+      - 404, 5xx, 3xx and a redirect fail the transport;
+      - 413 rejects only the frame;
+      - any other status accepts.
+
+      407 stays on the native path, ahead of it. The caller writes the failure's message as today.
+    - **`Sent` and `report`.**
+    - **`emulation_url` and `EMULATION_PATH`.** `emulation_url` is generic over a crate-private trait with the three operations it needs (parse, set the path, clear the query and fragment), implemented for `reqwest::Url` and `web_sys::Url`. Each target keeps its URL parser and its error message, and no dependency is added.
+  - **The browser's loop.** `http_stream` and `sse` take turns between written reports and messages through one `poll_emulated` helper. The browser's websocket and the native loop keep theirs: they have no emulation requests, and the native one is a `select!`.
+
+- **D8 Version.**
+  - **No bump.** D1, D2, D3's adapter half, D5 and D7 change no public API. D3's core half and D4 change `unstable-machine` only, which is outside semver (Block 54 D1). D6 is a fix.
+  - **Changelog.** Entries go under `Unreleased`:
+    - "Changed": the timer variants and `TimerKey`, `Machine::subscription_kind` (`unstable-machine`), and the order of timers due together;
+    - "Fixed": a panic while the client's state is locked closes the client with `disconnected` 2.
+
+**Sub-increments**, one pull request each, in this order:
+- **61a:** D1. It starts once #298 (the `sans_io` rename) and 60a and 60b have merged, and while no other PR touching `src/adapter/client.rs` is open.
+- **61b:** D2.
+- **61c:** D5, then D7.
+- **61d:** D3.
+- **61e:** D4.
+- **61f:** D6.
+
+Value clause: As a team shipping Ferrifuge to a large fleet, I want each concern of the client written once, in the module that owns it, and a client whose state a bug corrupted to close visibly, so that a fix lands in one place, a new kind, timer or backend option touches one module, and no device runs a client in an undefined state.
+
+**Structural acceptance:**
+
+The source and unit tests below run in the `test` job, on every push and pull request.
+- **61a:**
+  - `cargo test --lib -- --list`, with the `test` job's features, lists the same test names, compared by their last path segment;
+  - cargo-public-api, pinned to a release at least 7 days old, shows no difference with the default features or with `unstable-machine,unstable,test-util,cookies`;
+  - `git diff --color-moved=plain --color-moved-ws=allow-indentation-change` shows no doc line that is not a moved one, and no other line that is not moved, apart from `use`, `mod` and visibility;
+  - each is run on the PR's head and recorded in the PR.
+- **61b:** a source test finds no `cfg(adapter_tokio)` and no `cfg(adapter_browser)` in `ClientBuilder`, `Shared`, `Driver` or `Client::start`. `ClientBuilder`'s `Debug` tests pass unchanged.
+- **61c:**
+  - a unit test of `classify_emulation` covers 200, 204, 302, a redirect, 404, 413, 429 and 503;
+  - a source test finds no `TOO_LARGE`, and no `Result<_, String>` on the transport path of D5, apart from the build checks it names with their reasons.
+- **61d:**
+  - unit tests check that the removal of a subscription of each kind ends its stream after its final events;
+  - `Outboxes::withdraw` drops an event from an outbox of each kind;
+  - `get_subscription` and `subscriptions()` leave out map and shared poll subscriptions.
+- **61e:**
+  - **Core unit tests,** for each of the six families: a second firing of a setting already taken returns no action, and a firing carrying another timer's setting returns no action while its own timer runs.
+  - **Driver unit tests:**
+    - of two families ready at one poll, the earlier deadline is given first, and ties follow the variant order;
+    - every debounce window due comes in one take;
+    - a refresh set again while it runs fires at the earlier deadline, and the core acts on it.
+  - **Source test.** `src/sans_io.rs` gives `Action` exactly the timer variants `SetTimer`, `CancelTimer` and `ShortenTimer`, and `Input` exactly `TimerFired`.
+  - **Still green:** Block 49 rows 28/55 (the suspension probe and `tests/suspension.rs::a_due_refresh_fires_within_33_inputs_of_a_flood`), row 80 and C6; Block 53's @E scenarios; the sleep scenarios; Block 60 D2's redaction test.
+- **61f:**
+  - **Application thread.** With a panic planted (`cfg(test)`) in the machine's step on an application thread, the client:
+    - emits `Disconnected` 2 once;
+    - fails a pending call with code 4;
+    - ends every stream;
+    - ends its driver with no further input: `close()` resolves within 1 s on an otherwise idle runtime;
+    - reads `disconnected` from `state()`;
+    - emits nothing on `connect()`;
+    - refuses `new_subscription`.
+  - **With a handler,** `on_disconnected` gets code 2.
+  - **Poisoned while `disconnected`,** the client emits nothing.
+  - **The driver's guard,** dropped with the core poisoned, emits `Disconnected` 2.
+  - **Source test.** Nothing locks the core outside the accessor and the readers it names.
+
+Each of these mutations is seen red once, recorded in the PR:
+- 61b: a `cfg(adapter_tokio)` field put back in `Driver`;
+- 61c: `classify_emulation` treating 413 as fatal; a decoder's size failure built as `FailureKind::Other` (the over-limit tests of http_stream and WebTransport);
+- 61d: the generic removal not closing the kind's outbox; `withdraw` skipping one kind; `subscription_kind` giving `Stream` for a map subscription;
+- 61e: the stale-firing check skipped for debounce keys; the refresh keeping its old setting at the earlier deadline; the arm ordering by key alone;
+- 61f: the accessor recovering a poisoned core; the guard not waking the driver; the event emitted when the client was already `disconnected`.
+
+**Exceptions introduced:** no new scenario. These are refactors verified by the unit and source tests and the mutations above. The existing scenarios pass unchanged.
+
+**Amendments to earlier blocks** (line numbers on b3fdf7e; #298 keeps them). Each "before" string appears once.
+- **Block 60, "Out of scope"** (61a):
+  - line 10183: "- the `client.rs` split and the subscription-kind generics (findings 2 and 3): Block 61;" becomes "- findings 2, 3, 4, 7, 8 and 10: Block 61;";
+  - line 10184: "- findings 4, 7, 8 and 10–12: later blocks;" becomes "- findings 11 and 12: later blocks;".
+- **Block 0, "Reversed exclusions"** (61e), line 92: "| Block 24, out of scope | emulator and simulator CI running a client against Centrifugo (design C) | reviewer, 2026-11-14, delegated by the owner | 58 |" followed by an empty line and "### Test layers" gains, between them, the row "| Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |". The row alone also appears at line 10020, so the anchor is that row followed by "### Test layers".
+- **Block 49** (61a):
+  - line 9110: "`src/adapter/client.rs::panicking_token_callback_is_reported_as_a_failed_fetch`" becomes "`src/adapter/driver.rs::panicking_token_callback_is_reported_as_a_failed_fetch`";
+  - line 9153: "| 80 | R | A timer that fires late after being replaced still acts | §9.7 | covered | "A firing of a replaced setting changes nothing"; `src/adapter/client.rs::a_firing_superseded_by_another_tasks_sleep_handling_is_ignored` |" becomes the same row with `src/adapter/shared.rs::`;
+  - line 9194: "`src/adapter/client.rs::a_panicking_subscription_token_callback_is_retried`" becomes "`src/adapter/driver.rs::a_panicking_subscription_token_callback_is_retried`";
+  - line 9218: "`src/adapter/client.rs::timers_fire_in_deadline_order_and_cancelled_ones_never`" becomes "`src/adapter/driver.rs::timers_fire_in_deadline_order_and_cancelled_ones_never`".
+- **Block 49** (61f), line 9110: "| 19, 70 | R, F | A panic in the core step or driver leaves the client connected and deaf | §9.2 | gap | handler and callback halves covered by" becomes "| 19, 70 | R, F | A panic in the core step or driver leaves the client connected and deaf | §9.2 | covered | the core step's half: `src/adapter/shared.rs::a_panic_holding_the_core_on_an_application_thread_closes_the_client` (Block 61 D6); handler and callback halves covered by".
+- **Block 46 D5** (61e), line 7559: "No `TimerKey` variant for Block 25's setting bookkeeping: a number is never set twice, and the machine ignores a number it no longer knows." becomes "No `TimerKey` variant for Block 25's setting bookkeeping: a number is never set twice, and the machine ignores a number it no longer knows (Block 61 D4 later adds `TimerKey::Debounce`, numbered by setting as every timer)."
+- **Block 53** (61e):
+  - line 9738: "**Out of scope:** debounce and shared poll timers, which already carry a number of their own (`DebounceTimer`, `SharedPollTimer`) that the core ignores once unknown (Blocks 46, 47); " becomes "**Out of scope:** debounce and shared poll timers, which already carry a number of their own (`DebounceTimer`, `SharedPollTimer`) that the core ignores once unknown (Blocks 46, 47), until Block 61 D4 numbers them by setting too; ";
+  - line 9741: "One `u64` counter, shared by the three timer families, counts up by one for the machine's lifetime" becomes "One `u64` counter, shared by every timer family (three here, all six since Block 61 D4), counts up by one for the machine's lifetime";
+  - line 9743: "- **D3 Owners.** The `src/machine.rs` module documentation, in place of its first paragraph, says:" becomes "- **D3 Owners.** The `src/machine.rs` module documentation, in place of its first paragraph, says (replaced by Block 61 D4):".
+- **Block 60 D1** (61e):
+  - line 10204: "from the `SetTimer`/`SetSubscriptionTimer` and `CancelTimer`/`CancelSubscriptionTimer` refresh actions the core returns." becomes "from the `SetTimer` and `CancelTimer` actions the core returns for the refresh keys, `TimerKey::Client(Timer::Refresh)` and `TimerKey::Subscription(_, SubscriptionTimer::Refresh)`.";
+  - line 10206: "It feeds the ones now due as `TimerFired` or `SubscriptionTimerFired` with their setting, the connection's first, then by subscription. It cancels its own timers for them." becomes "It feeds the ones now due as `TimerFired` with their key and setting, the connection's first, then by subscription. It cancels its own timers for them.";
+  - line 10210: "every `ShortenTimer` and `ShortenSubscriptionTimer` for a timer that the input's answer just set" becomes "every `ShortenTimer` for a key that the input's answer just set".
+- **Block 28 D4** (61f), line 4000: "When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed and no event is emitted, while the calls and streams still end." becomes "When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed, and the client closes by Block 61 D6, emitting `disconnected` code 2 without the machine, while the calls and streams still end."
+- **Block 28, structural acceptance** (61f), line 4006: "the guard dropped during a panic with the core's lock poisoned emits nothing and still ends the calls and streams;" becomes "the guard dropped during a panic with the core's lock poisoned emits `disconnected` code 2 once and still ends the calls and streams (Block 61 D6);".
+- **Block 33 D4** (61f), line 4602: "When the poisoned core lock leaves the machine unfed (Block 28 D4), no event is emitted, and the guard still fails calls and waiters with code 4." becomes "When the poisoned core lock leaves the machine unfed (Block 28 D4), the client emits `disconnected` code 2 without the machine and no subscription event (Block 61 D6), and the guard still fails calls and waiters with code 4."
