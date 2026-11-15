@@ -396,7 +396,7 @@ impl Shared {
             });
             let _ = lock(&self.outboxes)
                 .client
-                .offer(crate::sans_io::EventId::POISONED, event);
+                .offer(crate::sans_io::EventId::NONE, event);
         }
         super::handler::wake_consumer(self);
     }
