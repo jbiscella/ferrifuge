@@ -12,10 +12,8 @@ use std::time::Duration;
 
 use futures_core::Stream;
 
-use super::client::{
-    Callbacks, Client, EventStream, GetSignature, GetSubscriptionToken, Shared, lock, presence_of,
-    presence_stats_of, reply_of,
-};
+use super::client::{Client, presence_of, presence_stats_of, reply_of};
+use super::shared::{Callbacks, EventStream, GetSignature, GetSubscriptionToken, Shared, lock};
 use crate::sans_io::{Input, SharedPollSubscriptionOptions, SubscriptionId};
 use crate::{
     CallError, CallReply, CallRequest, MaybeSend, MaybeSync, PresenceResult, PresenceStatsResult,

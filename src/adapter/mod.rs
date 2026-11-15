@@ -9,7 +9,9 @@
 mod body;
 #[cfg(adapter_browser)]
 mod browser;
+mod builder;
 mod client;
+mod driver;
 mod handler;
 #[cfg(feature = "__test-hooks")]
 mod hooks;
@@ -19,9 +21,13 @@ mod map_subscription;
 mod outbox;
 mod platform;
 mod ready;
+mod shared;
 #[cfg(feature = "unstable")]
 mod shared_poll_subscription;
 mod subscription;
+#[cfg(test)]
+#[cfg(adapter_tokio)]
+mod test_support;
 #[cfg(adapter_tokio)]
 mod tokio;
 #[cfg(test)]
@@ -47,7 +53,8 @@ pub use self::tokio::cookies::{CookieJar, MemoryJar};
 pub use self::tokio::proxy::{Proxy, ProxyTarget};
 #[cfg(all(adapter_tokio, feature = "__test-hooks"))]
 pub use self::tokio::transport::stalled_websocket_writes;
-pub use client::{Batch, Client, ClientBuilder, WeakClient};
+pub use builder::ClientBuilder;
+pub use client::{Batch, Client, WeakClient};
 pub use handler::{ClientHandler, EventDelivery, SubscriptionHandler};
 #[cfg(feature = "unstable")]
 pub use handler::{MapSubscriptionHandler, SharedPollSubscriptionHandler};

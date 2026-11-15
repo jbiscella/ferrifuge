@@ -20,7 +20,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
 #[cfg(test)]
 use super::super::body::CAPTIVE_PORTAL;
 use super::super::body::{Decoder, TOO_LARGE, captive_portal, is_media_type, with_portal};
-use super::super::client::lock;
+use super::super::shared::lock;
 use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;

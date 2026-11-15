@@ -10,7 +10,7 @@ use hyper_util::client::proxy::matcher::Matcher;
 use reqwest::Url;
 use rustls::ClientConfig;
 
-use super::super::client::lock;
+use super::super::shared::lock;
 use super::connector::Shared;
 use super::proxy::{self, Proxy, ProxyTarget};
 use super::tls::{BuildOnce, Tls, plain_tls_config};

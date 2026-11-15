@@ -12,7 +12,8 @@ use std::task::Poll;
 
 use tokio::sync::oneshot;
 
-use super::client::{Core, Shared, client_closed, lock};
+use super::client::client_closed;
+use super::shared::{Core, Shared, lock};
 use crate::sans_io::SubscriptionId;
 use crate::{CallError, MaybeSend, State, SubscriptionState, codes};
 
@@ -260,7 +261,8 @@ mod tests {
 
     use futures_util::FutureExt as _;
 
-    use super::super::client::{Ending, lock};
+    use super::super::driver::Ending;
+    use super::super::shared::lock;
     use crate::sans_io::{Action, Input, TransportId};
     use crate::{Client, SubscriptionState, codes};
 

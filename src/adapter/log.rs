@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::{Span, debug, debug_span, trace, warn};
 
-use super::client::lock;
+use super::shared::lock;
 #[cfg(adapter_tokio)]
 use super::tokio::proxy::ProxyTarget;
 use crate::sans_io::{

@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use futures_core::Stream;
 
-use super::client::{
-    Callbacks, Client, EventStream, GetData, GetState, GetSubscriptionToken, Shared, history_of,
-    lock, presence_of, presence_stats_of, reply_of,
+use super::client::{Client, history_of, presence_of, presence_stats_of, reply_of};
+use super::shared::{
+    Callbacks, EventStream, GetData, GetState, GetSubscriptionToken, Shared, lock,
 };
 use crate::sans_io::{Input, SubscriptionId, SubscriptionOptions};
 use crate::{
