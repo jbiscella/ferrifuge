@@ -27,6 +27,8 @@
 //! `FERRIFUGE_TRUST_TEST_CA` set, the harness trusts the test CA in the
 //! System keychain first (`sudo security add-trusted-cert`).
 
+#[path = "support/browser_output.rs"]
+mod browser_output;
 mod support;
 
 use std::env;
@@ -330,8 +332,46 @@ struct WebTransportRun {
     capabilities: Option<PathBuf>,
 }
 
-/// Runs the wasm tests in `browser`; whether they passed.
-fn run_in(browser: &Browser, server: &str, relay: &str, webtransport: &WebTransportRun) -> bool {
+/// Prints the machine's load and memory, for a run that fails to start
+/// its browser (`uptime` and `free -m`, where they exist).
+fn print_load(when: &str) {
+    eprintln!("-- load {when}");
+    for (program, args) in [("uptime", &[][..]), ("free", &["-m"][..])] {
+        if let Ok(output) = Command::new(program).args(args).output() {
+            eprint!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+    }
+}
+
+/// Copies `from` to `to` as it comes, keeping a copy in `kept`.
+fn tee(
+    mut from: impl std::io::Read + Send + 'static,
+    mut to: impl std::io::Write + Send + 'static,
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buffer = [0; 8192];
+        while let Ok(read) = from.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            let _ = to.write_all(&buffer[..read]);
+            let _ = to.flush();
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(&buffer[..read]);
+        }
+    })
+}
+
+/// Runs the wasm tests in `browser`; whether they passed, and the runner's
+/// output, teed as it comes.
+fn run_in(
+    browser: &Browser,
+    server: &str,
+    relay: &str,
+    webtransport: &WebTransportRun,
+) -> (bool, String) {
     let root = env!("CARGO_MANIFEST_DIR");
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -373,20 +413,49 @@ fn run_in(browser: &Browser, server: &str, relay: &str, webtransport: &WebTransp
         command.env_remove(other.variable);
     }
     command.env(browser.variable, browser.driver());
+    // Geckodriver gives Firefox a fixed 60 s to start Marionette, and the
+    // runner drops the body of its refusal: its trace says why.
+    if browser.name == "firefox" && env::var_os("GECKODRIVER_ARGS").is_none() {
+        command.env("GECKODRIVER_ARGS", "--log trace");
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().expect("run cargo test");
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let copies = [
+        tee(
+            child.stdout.take().expect("its stdout"),
+            std::io::stdout(),
+            std::sync::Arc::clone(&kept),
+        ),
+        tee(
+            child.stderr.take().expect("its stderr"),
+            std::io::stderr(),
+            std::sync::Arc::clone(&kept),
+        ),
+    ];
     let started = Instant::now();
-    loop {
+    let passed = loop {
         if let Some(status) = child.try_wait().expect("the run's status") {
-            return status.success();
+            break status.success();
         }
         if started.elapsed() > RUN_LIMIT {
             eprintln!("{}: no result within {RUN_LIMIT:?}", browser.name);
             let _ = child.kill();
             let _ = child.wait();
-            return false;
+            break false;
         }
         std::thread::sleep(Duration::from_millis(500));
+    };
+    for copy in copies {
+        let _ = copy.join();
     }
+    let output = String::from_utf8_lossy(
+        &kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+    .into_owned();
+    (passed, output)
 }
 
 fn main() -> ExitCode {
@@ -419,7 +488,13 @@ fn main() -> ExitCode {
             endpoint: Some(webtransport.relay.url()),
             capabilities: webtransport.capabilities(browser),
         };
-        if !run_in(browser, server.address(), &relay.address(), &run) {
+        print_load("before");
+        let passed = browser_output::with_one_retry(
+            || run_in(browser, server.address(), &relay.address(), &run),
+            |why| eprintln!("{}: {why}", browser.name),
+        );
+        print_load("after");
+        if !passed {
             failed.push(browser.name);
         }
     }
