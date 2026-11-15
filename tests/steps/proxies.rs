@@ -34,6 +34,10 @@ pub(crate) struct Proxies {
     made: Option<Result<ProxyTarget, ClientError>>,
     /// The error event of a failed attempt.
     error: Option<ClientError>,
+    /// A TCP socket bound and not listening, held for the scenario: its
+    /// port refuses connections, and no other listener can be given it
+    /// meanwhile.
+    held: Option<tokio::net::TcpSocket>,
 }
 
 fn proxies(world: &mut ClientWorld) -> &mut Proxies {
@@ -126,9 +130,18 @@ fn build(world: &mut ClientWorld, endpoints: Vec<(TransportKind, String)>, proxy
 /// port of 127.0.0.1 where nothing listens.
 fn unreachable_endpoint(world: &mut ClientWorld, scheme: &str, path: &str) -> String {
     let host = if world.proxies.kind == "socks5" {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
-        let port = listener.local_addr().expect("address").port();
-        drop(listener);
+        // Held, not closed: a port bound and closed could be given to
+        // another scenario's listener before the client connects.
+        let socket = tokio::net::TcpSocket::new_v4().expect("a TCP socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("an address"))
+            .expect("a free port");
+        let port = socket.local_addr().expect("address").port();
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "port {port} is held"
+        );
+        world.proxies.held = Some(socket);
         format!("127.0.0.1:{port}")
     } else {
         format!("{UNREACHABLE_HOST}:{}", port_of(&server_address(world)))

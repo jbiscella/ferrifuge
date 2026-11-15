@@ -34,6 +34,9 @@ pub(crate) struct WebTransportWorld {
     pub(super) fake: Option<FakeWebTransport>,
     /// The client of the @E scenario and how its connections end (48b).
     pub(super) plan: super::webtransport_fake::NoCodePlan,
+    /// A UDP socket bound and never read, held for the scenario: its port
+    /// answers nothing, and no other endpoint can be given it meanwhile.
+    held: Option<std::net::UdpSocket>,
 }
 
 /// Starts the scenario's server over TLS with HTTP/3, WebTransport on or
@@ -144,12 +147,19 @@ fn a_client_with_an_invalid_token(world: &mut ClientWorld) {
     world.build_client(Client::builder_with_transports(endpoints).config(config));
 }
 
-/// A port of 127.0.0.1 bound and closed: nothing listens on it.
-fn closed_udp_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|socket| socket.local_addr())
-        .expect("a UDP port")
-        .port()
+/// A UDP socket of 127.0.0.1 bound and never read: a QUIC handshake to its
+/// port gets no answer. Held, not closed: a port bound and closed could be
+/// given to another scenario's QUIC endpoint before the client dials it,
+/// whose certificate the client then refuses (`UnknownIssuer`, main run on
+/// 9ea928a), where the scenario wants the handshake timeout.
+fn unanswering_udp_socket() -> (std::net::UdpSocket, u16) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a UDP port");
+    let port = socket.local_addr().expect("its address").port();
+    assert!(
+        std::net::UdpSocket::bind(("127.0.0.1", port)).is_err(),
+        "port {port} is held"
+    );
+    (socket, port)
 }
 
 #[given(
@@ -157,7 +167,8 @@ fn closed_udp_port() -> u16 {
 )]
 fn a_client_with_an_unreachable_webtransport(world: &mut ClientWorld) {
     world.limits.handshake_timeout = Some(Duration::from_secs(2));
-    let port = closed_udp_port();
+    let (socket, port) = unanswering_udp_socket();
+    world.webtransport.held = Some(socket);
     let endpoints = vec![
         (
             TransportKind::WebTransport,
