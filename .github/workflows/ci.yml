@@ -78,6 +78,15 @@ jobs:
       - name: clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
 
+      # `--all-targets` leaves out `test = false` targets; cargo metadata names them.
+      - name: clippy (test = false targets)
+        run: |
+          targets=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[].targets[] | select(.kind == ["test"] and .test == false) | "--test=\(.name)"')
+          test -n "$targets" || { echo "no test = false target found"; exit 1; }
+          # shellcheck disable=SC2086 # one word per target
+          cargo clippy $targets -- -D warnings
+
       # The tests' dev-dependency turns `unstable-machine` on, so only the
       # library alone builds the core crate-private (Block 54, D1).
       - name: clippy (the library without unstable-machine)
