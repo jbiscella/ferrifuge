@@ -30,10 +30,13 @@ use crate::support::relay::CountingRelay;
 pub(crate) const STALL_PROOF_STEPS: &[&str] = &[
     calls::PENDING_CALL_STEP,
     batching::HELD_STEP,
+    #[cfg(feature = "unstable")]
     shared_polls::HELD_TRACK_STEP,
+    #[cfg(feature = "unstable")]
     shared_polls::EXPIRING_ANSWER_STEP,
     debouncing::BOTH_ANSWERED_STEP,
     debouncing::HANDLER_ANSWERED_STEP,
+    #[cfg(feature = "unstable")]
     maps::REMOVE_ANSWERED_STEP,
 ];
 
