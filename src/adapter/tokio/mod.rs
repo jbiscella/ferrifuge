@@ -31,7 +31,7 @@ use self::transport::WebSocket;
 #[cfg(feature = "unstable-webtransport")]
 use self::webtransport::WebTransport;
 use super::log::Log;
-use crate::machine::{FrameId, FrameType, TransportKind};
+use crate::sans_io::{FrameId, FrameType, TransportKind};
 
 /// A transport being opened.
 pub(in crate::adapter) type Opening =

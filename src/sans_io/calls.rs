@@ -921,7 +921,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::machine::{Input, TransportId};
+    use crate::sans_io::{Input, TransportId};
     use crate::{ClientEvent, Config};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -1346,7 +1346,7 @@ mod tests {
         let subscription = machine
             .add_subscription(
                 "news".into(),
-                crate::machine::SubscriptionOptions::default(),
+                crate::sans_io::SubscriptionOptions::default(),
             )
             .unwrap();
         machine.handle(Input::Subscribe(subscription));
@@ -1388,7 +1388,7 @@ mod tests {
         let subscription = machine
             .add_subscription(
                 "news".into(),
-                crate::machine::SubscriptionOptions::default(),
+                crate::sans_io::SubscriptionOptions::default(),
             )
             .unwrap();
 
@@ -1457,7 +1457,7 @@ mod tests {
         let subscription = machine
             .add_subscription(
                 "news".into(),
-                crate::machine::SubscriptionOptions::default(),
+                crate::sans_io::SubscriptionOptions::default(),
             )
             .unwrap();
         // A stream that takes nothing: the `subscribed` event, not taken,

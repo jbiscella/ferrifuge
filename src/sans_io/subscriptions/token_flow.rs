@@ -43,7 +43,7 @@ impl Machine {
 
     /// The token callback answered. An answer no longer wanted, e.g. after
     /// `unsubscribe()` or a reconnect, changes nothing.
-    pub(in crate::machine) fn subscription_token_fetched(
+    pub(in crate::sans_io) fn subscription_token_fetched(
         &mut self,
         fetch: FetchId,
         result: Result<String, TokenError>,

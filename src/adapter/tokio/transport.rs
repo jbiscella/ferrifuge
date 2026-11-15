@@ -12,7 +12,7 @@ use tokio::time::{Instant, Sleep};
 use super::head::HeadReader;
 use super::net::Network;
 use super::proxy::{Stream, dial};
-use crate::machine::{FrameId, FrameType};
+use crate::sans_io::{FrameId, FrameType};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{TlsError, UrlError};
 use tokio_tungstenite::tungstenite::http::HeaderValue;

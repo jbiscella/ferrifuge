@@ -416,7 +416,7 @@ pub enum SubscriptionError {
 /// The resubscribe delays of `options`, each more than 0 (Block 53 D6).
 #[cfg(any(adapter_tokio, adapter_browser))]
 pub(crate) fn check_resubscribe_delays(
-    options: &crate::machine::SubscriptionOptions,
+    options: &crate::sans_io::SubscriptionOptions,
 ) -> Result<(), SubscriptionError> {
     if options.min_resubscribe_delay.is_zero() {
         return Err(SubscriptionError::ZeroDelay {

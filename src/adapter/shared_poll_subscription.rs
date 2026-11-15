@@ -16,7 +16,7 @@ use super::client::{
     Callbacks, Client, EventStream, GetSignature, GetSubscriptionToken, Shared, lock, presence_of,
     presence_stats_of, reply_of,
 };
-use crate::machine::{Input, SharedPollSubscriptionOptions, SubscriptionId};
+use crate::sans_io::{Input, SharedPollSubscriptionOptions, SubscriptionId};
 use crate::{
     CallError, CallReply, CallRequest, MaybeSend, MaybeSync, PresenceResult, PresenceStatsResult,
     SharedPollSignature, SharedPollSubscriptionEvent, SharedPollTrackItem, SubscriptionError,

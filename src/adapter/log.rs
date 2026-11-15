@@ -11,7 +11,7 @@ use tracing::{Span, debug, debug_span, trace, warn};
 use super::client::lock;
 #[cfg(adapter_tokio)]
 use super::tokio::proxy::ProxyTarget;
-use crate::machine::{
+use crate::sans_io::{
     Action, Anomaly, CallId, FetchId, Input, SubscriptionId, SubscriptionTimer, Timer,
     TransportKind,
 };
@@ -437,7 +437,7 @@ pub(super) fn endpoint(url: &str) -> String {
 #[cfg(all(test, adapter_tokio))]
 mod tests {
     use super::{Log, endpoint};
-    use crate::machine::{Input, Machine};
+    use crate::sans_io::{Input, Machine};
     use crate::{CallRequest, Config};
 
     /// A call the application drops is forgotten by the machine without a

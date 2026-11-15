@@ -29,7 +29,7 @@ use web_sys::{AbortController, ReadableStreamDefaultReader, Response, ResponseTy
 use super::websocket::{Bound, Inbound, Inbox, js_message};
 use crate::adapter::body::{CAPTIVE_PORTAL, Decoder, TOO_LARGE, captive_portal, with_portal};
 use crate::adapter::platform;
-use crate::machine::FrameId;
+use crate::sans_io::FrameId;
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
@@ -643,7 +643,7 @@ mod tests {
     use crate::adapter::body::CAPTIVE_PORTAL;
     use crate::adapter::browser::websocket::{Bound, Inbound};
     use crate::adapter::platform;
-    use crate::machine::{FrameId, TransportKind};
+    use crate::sans_io::{FrameId, TransportKind};
     use crate::{Client, ClientEvent, Config, SubscriptionEvent};
 
     const URL: &str = "http://127.0.0.1:8000/connection/http_stream";

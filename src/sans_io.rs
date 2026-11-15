@@ -1,26 +1,5 @@
-//! Unstable: requires the `unstable-machine` feature. The API by which
-//! another runtime drives the core may change in any minor release; the
-//! `Client` of the `tokio` and `browser` features is the stable API.
-//!
-//! Sans-IO core: the client connection state machine.
-//!
-//! Timers are numbered by setting: each [`Action::SetTimer`],
-//! [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] carries a
-//! [`TimerSetting`] the machine never gives again. The owner returns it
-//! unchanged in the [`Input::TimerFired`], [`Input::SubscriptionTimerFired`]
-//! or [`Input::CallTimerFired`] of that setting; a timer shortened by
-//! [`Action::ShortenTimer`] or [`Action::ShortenSubscriptionTimer`] keeps
-//! its setting. The machine ignores a firing whose setting no longer runs,
-//! because it cancelled that timer, set it again or already took its
-//! firing: the step returns no action. The owner need not drop a late
-//! firing, whatever it fed in between, [`Input::Slept`] included.
-//!
-//! A [`Machine`] owns no sockets, timers or tasks. Its owner feeds it
-//! [`Input`]s and performs the returned [`Action`]s in order. The tokio
-//! adapter is one such owner; any other runtime can drive it the same way.
-//!
-//! Behaviour follows the Client SDK spec, with centrifuge-js as the
-//! implementation reference (`src/centrifuge.ts`).
+//! The sans-IO core, declared once and public as `ferrifuge::machine` with
+//! the `unstable-machine` feature (Block 54, D1), where it is documented.
 
 // Outside semver with `unstable-machine` (Block 54, D1), so its types need
 // not be `#[non_exhaustive]` (Block 54, D2).

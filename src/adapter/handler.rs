@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 
 use super::client::{Core, Outboxes, Shared, lock};
 use super::outbox::{Head, Outbox};
-use crate::machine::{CallId, CallWait, EventId, Input, SubscriptionId};
+use crate::sans_io::{CallId, CallWait, EventId, Input, SubscriptionId};
 use crate::{
     ClientError, ClientEvent, ClientInfo, MaybeSend, Publication, ServerSubscriptionEvent,
     SubscribedContext, SubscriptionEvent,
@@ -2131,7 +2131,7 @@ mod tests {
     /// was set, subscribed by hand and tracking "a" at version 1, its
     /// runtime entered and not running.
     #[cfg(feature = "unstable")]
-    fn tracking_by_hand(client: &Client) -> (crate::machine::TransportId, SubscriptionId) {
+    fn tracking_by_hand(client: &Client) -> (crate::sans_io::TransportId, SubscriptionId) {
         let poll = client.new_shared_poll_subscription("poll:a").unwrap();
         poll.set_handler(|_: crate::SharedPollSubscriptionEvent| {});
         poll.subscribe();
@@ -2586,7 +2586,7 @@ mod tests {
     }
 
     /// Opens `client`'s transport by hand: its connect command is sent.
-    fn opened_by_hand(client: &Client) -> crate::machine::TransportId {
+    fn opened_by_hand(client: &Client) -> crate::sans_io::TransportId {
         let shared = client.shared();
         let mut core = lock(&shared.core);
         shared.handle(&mut core, Input::Connect);
@@ -2594,7 +2594,7 @@ mod tests {
             .actions
             .iter()
             .find_map(|action| match action {
-                crate::machine::Action::OpenTransport { transport, .. } => Some(*transport),
+                crate::sans_io::Action::OpenTransport { transport, .. } => Some(*transport),
                 _ => None,
             })
             .expect("an attempt");
@@ -2604,7 +2604,7 @@ mod tests {
     }
 
     /// Reads `reply` from `transport` by hand.
-    fn replied_by_hand(client: &Client, transport: crate::machine::TransportId, reply: &str) {
+    fn replied_by_hand(client: &Client, transport: crate::sans_io::TransportId, reply: &str) {
         let shared = client.shared();
         let mut core = lock(&shared.core);
         shared.handle(
@@ -2735,7 +2735,7 @@ mod tests {
     /// hand, its runtime entered and not running.
     fn subscribing_by_hand(
         runtime: &tokio::runtime::Runtime,
-    ) -> (Client, crate::Subscription, crate::machine::TransportId) {
+    ) -> (Client, crate::Subscription, crate::sans_io::TransportId) {
         let client = connected_with_a_held_event(runtime);
         let _context = runtime.enter();
         let subscription = client.new_subscription("news").unwrap();
@@ -2890,7 +2890,7 @@ mod tests {
         // The reply, handed over as the driver would.
         replied_by_hand(&client, transport, r#"{"id":2,"rpc":{"data":{}}}"#);
         while let Some(action) = shared.next_action_for_tests() {
-            if let crate::machine::Action::CallSettled { call, result } = action {
+            if let crate::sans_io::Action::CallSettled { call, result } = action {
                 shared.settle_call_now(call, result);
             }
         }

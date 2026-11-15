@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::JsValue;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent};
 
 use crate::adapter::platform;
-use crate::machine::{FrameId, FrameType};
+use crate::sans_io::{FrameId, FrameType};
 
 /// What the server sent, as far as the client protocol is concerned.
 #[derive(Debug, PartialEq, Eq)]

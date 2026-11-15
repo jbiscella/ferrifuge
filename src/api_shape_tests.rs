@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 
 /// The modules outside semver, which allow the lints at module level: the
 /// sans-IO core (`unstable-machine`, D1) and the `__test-hooks` module.
-const ALLOWING: [&str; 2] = ["src/adapter/hooks.rs", "src/machine.rs"];
+const ALLOWING: [&str; 2] = ["src/adapter/hooks.rs", "src/sans_io.rs"];
 
 /// Source files whose enums are not public API: the core's submodules
-/// (under `ALLOWING`'s `machine`) and the generated Protobuf code, which is
+/// (under `ALLOWING`'s `sans_io`) and the generated Protobuf code, which is
 /// crate-private.
 fn exempt(path: &str) -> bool {
-    ALLOWING.contains(&path) || path.starts_with("src/machine/") || path.starts_with("src/protocol")
+    ALLOWING.contains(&path) || path.starts_with("src/sans_io/") || path.starts_with("src/protocol")
 }
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {

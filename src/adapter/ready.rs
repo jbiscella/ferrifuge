@@ -12,7 +12,7 @@ use std::task::Poll;
 use tokio::sync::oneshot;
 
 use super::client::{Core, Shared, client_closed, lock};
-use crate::machine::SubscriptionId;
+use crate::sans_io::SubscriptionId;
 use crate::{CallError, MaybeSend, State, SubscriptionState, codes};
 
 type Waiter = oneshot::Sender<Result<(), CallError>>;
@@ -254,7 +254,7 @@ mod tests {
     use futures_util::FutureExt as _;
 
     use super::super::client::{Ending, lock};
-    use crate::machine::{Action, Input, TransportId};
+    use crate::sans_io::{Action, Input, TransportId};
     use crate::{Client, SubscriptionState, codes};
 
     const UNREACHABLE: &str = "ws://127.0.0.1:1/connection/websocket";

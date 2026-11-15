@@ -29,7 +29,7 @@ use super::http_stream::{Reading, State, read_body};
 use super::websocket::{Bound, Inbound, js_message};
 use crate::adapter::body::Decoder;
 use crate::adapter::platform::{self, Instant, Sleep};
-use crate::machine::FrameId;
+use crate::sans_io::FrameId;
 
 #[wasm_bindgen]
 extern "C" {
@@ -310,7 +310,7 @@ mod tests {
     use super::{WebTransport, session_url};
     use crate::adapter::browser::websocket::{Bound, Inbound};
     use crate::adapter::platform;
-    use crate::machine::FrameId;
+    use crate::sans_io::FrameId;
 
     const URL: &str = "https://127.0.0.1:8443/connection/webtransport";
     const LIMIT: usize = 1 << 20;

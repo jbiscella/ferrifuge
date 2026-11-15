@@ -845,7 +845,7 @@ impl Machine {
     /// Whether `command` is a subscription's command still awaiting its
     /// reply: a current subscribe, an unsubscribe or a `sub_refresh`
     /// (Block 18, D6).
-    pub(in crate::machine) fn awaits_subscription_reply(&self, command: u32) -> bool {
+    pub(in crate::sans_io) fn awaits_subscription_reply(&self, command: u32) -> bool {
         let subscriptions = &self.subscriptions;
         // A shared poll track or untrack request (Block 47, D7).
         #[cfg(feature = "unstable")]
@@ -865,7 +865,7 @@ impl Machine {
                 })
     }
 
-    pub(in crate::machine) fn subscription_command_too_large(&mut self, command: u32) -> bool {
+    pub(in crate::sans_io) fn subscription_command_too_large(&mut self, command: u32) -> bool {
         #[cfg(feature = "unstable")]
         if self.track_command_too_large(command) {
             return true;
@@ -1748,7 +1748,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::machine::{EventId, Input, Timer, TransportId, TransportKind};
+    use crate::sans_io::{EventId, Input, Timer, TransportId, TransportKind};
     use crate::{Config, StateError, TokenError};
 
     /// `actions` with every event id 0, to compare emitted events by value.

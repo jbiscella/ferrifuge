@@ -79,14 +79,46 @@ mod config;
 mod event;
 mod fossil;
 mod json;
+// The core is declared once (Block 54, D1), so that every tool walking the
+// module tree, cargo-mutants among them, sees it once.
+#[cfg_attr(
+    not(feature = "unstable-machine"),
+    allow(
+        unreachable_pub,
+        dead_code,
+        reason = "crate-private without the feature: its pub items are unreachable, and those only an owner of the machine uses are unused"
+    )
+)]
+mod sans_io;
 #[cfg(feature = "unstable-machine")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable-machine")))]
-pub mod machine;
-// Crate-private without the feature (Block 54, D1): its `pub` items are
-// then unreachable, and those only an owner of the machine uses are unused.
-#[cfg(not(feature = "unstable-machine"))]
-#[allow(unreachable_pub, dead_code)]
-pub(crate) mod machine;
+pub mod machine {
+    //! Unstable: requires the `unstable-machine` feature. The API by which
+    //! another runtime drives the core may change in any minor release; the
+    //! `Client` of the `tokio` and `browser` features is the stable API.
+    //!
+    //! Sans-IO core: the client connection state machine.
+    //!
+    //! Timers are numbered by setting: each [`Action::SetTimer`],
+    //! [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] carries a
+    //! [`TimerSetting`] the machine never gives again. The owner returns it
+    //! unchanged in the [`Input::TimerFired`], [`Input::SubscriptionTimerFired`]
+    //! or [`Input::CallTimerFired`] of that setting; a timer shortened by
+    //! [`Action::ShortenTimer`] or [`Action::ShortenSubscriptionTimer`] keeps
+    //! its setting. The machine ignores a firing whose setting no longer runs,
+    //! because it cancelled that timer, set it again or already took its
+    //! firing: the step returns no action. The owner need not drop a late
+    //! firing, whatever it fed in between, [`Input::Slept`] included.
+    //!
+    //! A [`Machine`] owns no sockets, timers or tasks. Its owner feeds it
+    //! [`Input`]s and performs the returned [`Action`]s in order. The tokio
+    //! adapter is one such owner; any other runtime can drive it the same way.
+    //!
+    //! Behaviour follows the Client SDK spec, with centrifuge-js as the
+    //! implementation reference (`src/centrifuge.ts`).
+
+    pub use crate::sans_io::*;
+}
 #[cfg(feature = "unstable")]
 mod map;
 mod maybe_send;
@@ -165,8 +197,6 @@ pub use fossil::write as write_fossil_delta;
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
-pub use machine::TransportKind;
-pub(crate) use machine::{CallReply, CallRequest};
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 pub use map::{MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, UnrecoverableStrategy};
@@ -177,6 +207,8 @@ pub use maybe_send::{MaybeSend, MaybeSync};
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use rustls;
+pub use sans_io::TransportKind;
+pub(crate) use sans_io::{CallReply, CallRequest};
 #[cfg(feature = "unstable")]
 #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
 pub use shared_poll::{

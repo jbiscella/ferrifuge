@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use crate::State;
-use crate::machine::{FrameId, TransportKind};
+use crate::sans_io::{FrameId, TransportKind};
 
 /// A snapshot of a client's counters since it was built (Block 31), read
 /// without a round trip: for status displays, logs, support tickets and

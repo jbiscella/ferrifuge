@@ -12,7 +12,7 @@ use web_sys::{Event, EventTarget};
 
 use crate::State;
 use crate::adapter::client::Shared;
-use crate::machine::Input;
+use crate::sans_io::Input;
 
 /// What a listener heard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

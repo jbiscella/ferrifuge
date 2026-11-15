@@ -406,7 +406,7 @@ fn bases_past_their_bound_end_the_subscription() {
     assert!(
         !past.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, crate::machine::SubscriptionTimer::Resubscribe, ..)
+            Action::SetSubscriptionTimer(_, crate::sans_io::SubscriptionTimer::Resubscribe, ..)
         )),
         "no resubscribe: {past:?}"
     );

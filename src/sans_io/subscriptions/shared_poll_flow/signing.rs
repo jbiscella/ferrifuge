@@ -13,7 +13,7 @@ use super::{
     BATCH_COST, BATCH_TOO_LARGE, Purpose, SharedPollFlow, Signed, distinct, escaped_twice,
 };
 use crate::backoff;
-use crate::machine::{Action, FetchId, Machine, SharedPollTimer, SubscriptionId};
+use crate::sans_io::{Action, FetchId, Machine, SharedPollTimer, SubscriptionId};
 use crate::token::Secret;
 use crate::wire::{KeyedItem, TrackBatch};
 use crate::{ErrorKind, SharedPollSignature, SharedPollUpdate, TokenError, codes};
@@ -47,7 +47,7 @@ const GRACE_MAX: Duration = Duration::from_secs(15);
 
 /// Why the callback is asked to sign keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::machine) enum Origin {
+pub(in crate::sans_io) enum Origin {
     /// Keys given to `track(keys)` while subscribed.
     Track,
     /// Keys tracked without a signature: after a subscribe, or retried
@@ -60,7 +60,7 @@ pub(in crate::machine) enum Origin {
 
 /// A request to the callback, asked for in chunks, one at a time (D6).
 #[derive(Debug)]
-pub(in crate::machine) struct Signing {
+pub(in crate::sans_io) struct Signing {
     origin: Origin,
     /// Every key asked for, in order.
     keys: Vec<String>,
@@ -77,7 +77,7 @@ pub(in crate::machine) struct Signing {
 /// an expiry is the owner's timer of the subscription
 /// ([`Action::SetSharedPollRefresh`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::machine) enum Retry {
+pub(in crate::sans_io) enum Retry {
     /// The refresh of every signature failed.
     Refresh,
     /// Signing the keys tracked without a signature failed.

@@ -2,7 +2,7 @@
 //! goes through to encode commands and decode frames.
 
 use crate::config::Protocol;
-use crate::machine::FrameType;
+use crate::sans_io::FrameType;
 use crate::wire::{Command, Reply};
 use crate::{json, protobuf};
 
@@ -166,10 +166,10 @@ mod tests {
     #[test]
     fn the_machine_reaches_the_encodings_only_through_the_codec() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = vec![root.join("machine.rs")];
-        let mut directories = vec![root.join("machine")];
+        let mut files = vec![root.join("sans_io.rs")];
+        let mut directories = vec![root.join("sans_io")];
         while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(&directory).expect("src/machine") {
+            for entry in std::fs::read_dir(&directory).expect("src/sans_io") {
                 let path = entry.expect("an entry").path();
                 if path.is_dir() {
                     directories.push(path);

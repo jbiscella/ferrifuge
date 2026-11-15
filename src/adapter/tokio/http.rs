@@ -23,7 +23,7 @@ use super::super::client::lock;
 use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
 use super::transport::Inbound;
-use crate::machine::{FrameId, TransportKind};
+use crate::sans_io::{FrameId, TransportKind};
 
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";

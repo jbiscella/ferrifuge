@@ -14,7 +14,7 @@ use super::client::{
     Callbacks, Client, EventStream, GetSubscriptionToken, Shared, lock, presence_of,
     presence_stats_of, reply_of,
 };
-use crate::machine::{Input, MapSubscriptionOptions, SubscriptionId};
+use crate::sans_io::{Input, MapSubscriptionOptions, SubscriptionId};
 use crate::{
     CallError, CallReply, CallRequest, JsonCallError, MapKind, MapSubscriptionEvent, MaybeSend,
     MaybeSync, PresenceResult, PresenceStatsResult, SubscriptionError, SubscriptionState,

@@ -18,7 +18,7 @@ use web_sys::{Event, EventSourceInit, MessageEvent};
 
 use super::http_stream::{Emulation, JSON, report};
 use super::websocket::{Bound, Inbound, Inbox, Listener, js_message};
-use crate::machine::FrameId;
+use crate::sans_io::FrameId;
 
 /// Why the stream ended: `EventSource` tells no more (D9).
 const ENDED: &str = "event stream ended";
@@ -330,7 +330,7 @@ mod tests {
     use super::{ENDED, Sse};
     use crate::adapter::browser::websocket::{Bound, Inbound};
     use crate::adapter::platform;
-    use crate::machine::FrameId;
+    use crate::sans_io::FrameId;
 
     const URL: &str = "http://127.0.0.1:8000/connection/sse";
     const LIMIT: usize = 100;

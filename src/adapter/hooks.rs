@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::platform;
-use crate::machine::{
+use crate::sans_io::{
     Action, CallId, CallTimer, DebounceTimer, Input, SubscriptionId, SubscriptionTimer, Timer,
     TimerKey, TimerSetting,
 };
@@ -108,7 +108,7 @@ pub(super) fn debounce(timer: DebounceTimer) -> String {
 }
 
 #[cfg(feature = "unstable")]
-pub(super) fn shared_poll(timer: crate::machine::SharedPollTimer) -> String {
+pub(super) fn shared_poll(timer: crate::sans_io::SharedPollTimer) -> String {
     format!("shared poll {timer:?}")
 }
 
