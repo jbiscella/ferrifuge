@@ -41,7 +41,7 @@ mod tests {
                 }
             }
         }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = crate::source_root().join("src");
         let mut out = Vec::new();
         walk(&root, &root, &mut out);
         out
