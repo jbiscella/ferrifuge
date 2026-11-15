@@ -1497,6 +1497,17 @@ share one `tls_config` instead. `ferrifuge::rustls` re-exports the rustls
 version Ferrifuge uses: moving to another rustls 0.x line is a breaking
 release of Ferrifuge. No setting accepts invalid certificates.
 
+**Verification can block.** On macOS, iOS, Windows and Android the operating
+system's verifier runs inside the TLS handshake and returns only once the
+system has decided, which can include fetching intermediate certificates or
+revocation data over the network (on Windows, up to 10 s per fetch). Until
+it returns, the client waits on its runtime's thread and its timers,
+`handshake_timeout` included, do not fire. On a current-thread runtime
+nothing else on that runtime runs meanwhile; on a multi-thread runtime its
+timers and sockets can wait too. reqwest and hyper-rustls with the same
+verifier behave the same. Give the client a runtime of its own with
+`ClientBuilder::runtime` where that matters.
+
 ### Proxies
 
 Every transport takes the same proxy decision for each URL it opens. By

@@ -54,6 +54,9 @@ pub struct Config {
     /// takes longer fails the attempt with "handshake timeout", and the
     /// next transport is tried. Default 5 s.
     ///
+    /// The operating system's certificate verification is not interrupted:
+    /// the timeout is checked once it returns.
+    ///
     /// More than 0, or building the client fails.
     // Block 53.
     pub handshake_timeout: Duration,
