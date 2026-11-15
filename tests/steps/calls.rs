@@ -387,6 +387,10 @@ async fn the_call_times_out(world: &mut ClientWorld) {
                 fake.connections(),
                 fake.closed_connections(),
                 fake.last_closed_at().map(|at| at.elapsed()),
+                fake.end_reasons(),
+                fake.received()
+                    .iter()
+                    .any(|message| message["rpc"].is_object()),
             )
         });
         let relay = world
@@ -394,7 +398,7 @@ async fn the_call_times_out(world: &mut ClientWorld) {
             .as_ref()
             .map(crate::support::relay::CountingRelay::connections);
         panic!(
-            "{error:?} after {after:?}; client events since: {:?}; fake server (connections, closed, last closed ago): {fake:?}; relay connections: {relay:?}",
+            "{error:?} after {after:?}; client events since: {:?}; fake server (connections, closed, last closed ago, why each ended, RPC received): {fake:?}; relay connections: {relay:?}",
             world.queued_events()
         );
     }
