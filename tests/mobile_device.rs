@@ -1,20 +1,25 @@
 //! The program a mobile device runs (Block 58, D1): one client with default
 //! options apart from its endpoint connects, subscribes, receives the
 //! publication the host harness (`tests/mobile.rs`) makes on `ready`, and
-//! disconnects. Each step is bounded and prints one line, `step <name> ok`
-//! or `step <name> failed: <reason>`; the program exits 1 at the first
+//! disconnects. Its first line, printed before the client is built, is
+//! `start`, so that the job log's timestamps separate the simulator's
+//! launch from the run. Each step is bounded and prints one line,
+//! `step <name> ok at <t> s` or `step <name> failed at <t> s: <reason>`,
+//! `<t>` being the seconds since `start`; the program exits 1 at the first
 //! failure. After the last step it holds its client for 15 s, for the
 //! harness's `channels` check, then prints `done` and exits 0.
 //!
 //! `FERRIFUGE_MOBILE_URL` is the endpoint, `FERRIFUGE_MOBILE_CHANNEL` the
 //! channel and `FERRIFUGE_MOBILE_NONCE` what the publication's data
 //! carries. With `FERRIFUGE_MOBILE_EXPECT=untrusted` only `connect` runs,
-//! and it passes only on an `error` event naming rustls's invalid peer
-//! certificate while the client is still connecting. The program uses no
-//! server API.
+//! and it passes on an `error` event naming rustls's invalid peer
+//! certificate while the client is still connecting; the error of another
+//! failed attempt, such as a handshake timeout, does not end it, and is
+//! named if the step runs out of time. The program uses no server API.
 
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use ferrifuge::{Client, ClientEvent, Config, State, SubscriptionEvent};
 use futures_util::{Stream, StreamExt};
@@ -57,25 +62,60 @@ where
     waited.unwrap_or_else(|_| Err(format!("nothing within {STEP:?}{}", last())))
 }
 
-/// Prints the step's line; whether it passed.
+/// When `start` was printed.
+static START: OnceLock<Instant> = OnceLock::new();
+
+/// Prints `start`, from which the steps' times count.
+fn start() {
+    START.get_or_init(Instant::now);
+    println!("start");
+}
+
+/// Prints the step's line, with the seconds since `start`; whether it
+/// passed.
 fn report(name: &str, outcome: Result<(), String>) -> bool {
+    let at = START
+        .get()
+        .map_or(0.0, |start| start.elapsed().as_secs_f64());
     match outcome {
         Ok(()) => {
-            println!("step {name} ok");
+            println!("step {name} ok at {at:.1} s");
             true
         }
         Err(reason) => {
-            println!("step {name} failed: {reason}");
+            println!("step {name} failed at {at:.1} s: {reason}");
             false
         }
     }
 }
 
-/// `untrusted`: refused by the verifier while still connecting.
+/// The last error a step saw, named when it runs out of time.
+#[derive(Default)]
+struct LastError(std::cell::RefCell<String>);
+
+impl LastError {
+    fn set(&self, message: String) {
+        *self.0.borrow_mut() = message;
+    }
+
+    fn named(&self) -> String {
+        let last = self.0.borrow();
+        if last.is_empty() {
+            String::new()
+        } else {
+            format!(", last error: {last}")
+        }
+    }
+}
+
+/// `untrusted`: refused by the verifier while still connecting. The error
+/// of another failed attempt, such as a handshake timeout, does not end the
+/// step: the client tries again.
 async fn refused<S>(client: &Client, events: &mut S) -> Result<(), String>
 where
     S: Stream<Item = ClientEvent> + Unpin,
 {
+    let last_error = LastError::default();
     step(
         events,
         |event| match event {
@@ -86,14 +126,17 @@ where
                     Err(format!("refused, in state {:?}", client.state()))
                 })
             }
-            ClientEvent::Error(error) => Some(Err(format!("another error: {}", error.message))),
+            ClientEvent::Error(error) => {
+                last_error.set(error.message);
+                None
+            }
             ClientEvent::Connected(_) => Some(Err("connected to an untrusted server".to_owned())),
             ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
             _ => None,
         },
-        String::new,
+        || last_error.named(),
     )
     .await
 }
@@ -104,7 +147,7 @@ where
     S: Stream<Item = ClientEvent> + Unpin,
 {
     // The last transport error, named when the step runs out of time.
-    let last_error = std::cell::RefCell::new(String::new());
+    let last_error = LastError::default();
     step(
         events,
         |event| match event {
@@ -113,19 +156,12 @@ where
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
             ClientEvent::Error(error) => {
-                *last_error.borrow_mut() = error.message;
+                last_error.set(error.message);
                 None
             }
             _ => None,
         },
-        || {
-            let last_error = last_error.borrow();
-            if last_error.is_empty() {
-                String::new()
-            } else {
-                format!(", last error: {last_error}")
-            }
-        },
+        || last_error.named(),
     )
     .await
 }
@@ -254,6 +290,7 @@ async fn run() -> bool {
 }
 
 fn main() -> ExitCode {
+    start();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
