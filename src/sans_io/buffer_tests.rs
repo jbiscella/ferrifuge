@@ -350,11 +350,3 @@ fn a_computed_frame_size_is_the_encoded_length() {
             );
         });
 }
-
-// TEMPORARY (Block 60c): the test that catches every mutant of
-// `planted_tested`.
-#[test]
-fn planted_tested_doubles_and_adds_one() {
-    assert_eq!(super::planted_tested(0), 1);
-    assert_eq!(super::planted_tested(3), 7);
-}
