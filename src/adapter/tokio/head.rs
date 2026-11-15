@@ -1,5 +1,5 @@
 //! The upgrade response's HTTP head, read whole before tungstenite parses
-//! it (Block 50b's finding).
+//! it.
 //!
 //! tungstenite's handshake counts its reads of the head and fails one taking
 //! more than 64 reads that average under 128 bytes ("Attack attempt
@@ -7,6 +7,7 @@
 //! client in many small reads, from a network that fragments, or a server
 //! writing tiny TLS records, would fail every handshake. [`HeadReader`]
 //! reads the head itself, bounded, and hands it to tungstenite in one read.
+// Block 50b.
 
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};

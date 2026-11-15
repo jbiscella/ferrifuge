@@ -1,6 +1,7 @@
 //! What the tokio driver needs beyond the shared adapter layer: its
 //! transports, TLS, proxies, HTTP clients, connector, cookies and Android
-//! support (Block 44, D2).
+//! support.
+// Block 44, D2.
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -137,7 +138,8 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
 }
 
 /// The message of a WebTransport endpoint in a build without the native
-/// transport (Block 48, D1).
+/// transport.
+// Block 48, D1.
 #[cfg(all(feature = "unstable", not(feature = "unstable-webtransport")))]
 pub(in crate::adapter) const NO_WEBTRANSPORT: &str =
     "the webtransport transport needs the `unstable-webtransport` feature";
@@ -175,8 +177,9 @@ impl Transport {
         }
     }
 
-    /// Cancel-safe. Without `reading`, only writes, as Block 15's full
-    /// read-ahead requires.
+    /// Cancel-safe. Without `reading`, only writes, as a full read-ahead
+    /// requires.
+    // Block 15.
     pub(in crate::adapter) async fn recv(&mut self, reading: bool) -> Inbound {
         match self {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
@@ -187,8 +190,8 @@ impl Transport {
     }
 
     /// Closes the transport on a task of its own, bounded by
-    /// `Config::timeout` (Block 8); the task, which the driver awaits when it
-    /// stops (Block 33, D1).
+    /// `Config::timeout`; the task, which the driver awaits when it stops.
+    // Block 8; Block 33, D1.
     pub(in crate::adapter) fn close(self, runtime: &Handle) -> JoinHandle<()> {
         match self {
             Self::WebSocket(websocket) => runtime.spawn(websocket.close()),

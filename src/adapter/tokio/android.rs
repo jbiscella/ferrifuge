@@ -1,7 +1,7 @@
-//! Android setup (Block 24): the one call that lets the operating system's
-//! certificate verifier work, made through Ferrifuge so that it reaches the
-//! copy of `rustls-platform-verifier` Ferrifuge links, and so that
-//! Ferrifuge knows it ran.
+//! Android setup: the one call that lets the operating system's certificate
+//! verifier work, made through Ferrifuge so that it reaches the copy of
+//! `rustls-platform-verifier` Ferrifuge links, and so that Ferrifuge knows
+//! it ran.
 //!
 //! **Exempt from semver:** this module exposes `jni` 0.22, which is before
 //! 1.0; a minor release of Ferrifuge may follow a new `jni` line.
@@ -11,6 +11,7 @@
 //! by the `ProGuard` rule of the verifier's README. Call one of these once per
 //! process, before building a client that uses TLS: until then such a
 //! client fails `build()`, or its handshakes fail, naming this call.
+// Block 24.
 
 pub use jni;
 pub use rustls_platform_verifier::android::Runtime;

@@ -1,12 +1,13 @@
 //! `http_stream` transport of the browser adapter, over the browser's
-//! `fetch` or the application's shim of it (Block 44, D8, D12), with
-//! bidirectional emulation as natively (Block 8): the response to the
-//! request opening the stream carries the replies; commands go in requests
-//! to the emulation endpoint of the same server, as they do over sse (D9).
-//! A task of the transport's own reads the body with wasm-streams,
-//! continuously, into the bounded inbox (D7, D8): Safari stops delivering a
-//! body left unread, so this transport never stops reading, also through a
-//! stream built with the application's `ReadableStream` (D12).
+//! `fetch` or the application's shim of it, with bidirectional emulation as
+//! natively: the response to the request opening the stream carries the
+//! replies; commands go in requests to the emulation endpoint of the same
+//! server, as they do over sse. A task of the transport's own reads the
+//! body with wasm-streams, continuously, into the bounded inbox: Safari
+//! stops delivering a body left unread, so this transport never stops
+//! reading, also through a stream built with the application's
+//! `ReadableStream`.
+// Block 44, D8, D12; Block 8; D9; D7, D8; D12.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -34,11 +35,13 @@ use crate::sans_io::FrameId;
 /// Path of the emulation endpoint (centrifuge-js `emulationEndpoint`).
 const EMULATION_PATH: &str = "/emulation";
 pub(super) const JSON: &str = "application/json";
-/// The media type of Protobuf requests and streams, exactly (Block 27, D3).
+/// The media type of Protobuf requests and streams, exactly.
+// Block 27, D3.
 const PROTOBUF: &str = "application/octet-stream";
 
 /// Aborts its request when dropped, as reqwest's `AbortGuard`: a request
-/// ends with the transport that made it (D8).
+/// ends with the transport that made it.
+// D8.
 struct Abort(AbortController);
 
 impl Drop for Abort {
@@ -47,18 +50,20 @@ impl Drop for Abort {
     }
 }
 
-/// The `credentials` of a request (D13): `include` sends the cookies of
-/// another origin too, and stores its `Set-Cookie`; `same-origin`, as
-/// centrifuge-js 63ed73e always does, only those of the page's own.
+/// The `credentials` of a request: `include` sends the cookies of another
+/// origin too, and stores its `Set-Cookie`; `same-origin`, as centrifuge-js
+/// 63ed73e always does, only those of the page's own.
+// D13.
 fn credentials(include: bool) -> &'static str {
     if include { "include" } else { "same-origin" }
 }
 
 /// Starts `fetch(url, init)` as centrifuge-js calls it, `init` a plain
-/// object, so that no global `Request` or `Headers` is needed (D8): a POST
-/// of `body` with `headers`, the credentials of the origin only unless
-/// `include_credentials` (D13), and redirects not followed. The guard
-/// aborting it, and its response.
+/// object, so that no global `Request` or `Headers` is needed: a POST of
+/// `body` with `headers`, the credentials of the origin only unless
+/// `include_credentials`, and redirects not followed. The guard aborting
+/// it, and its response.
+// D8; D13.
 fn start(
     fetch: &Function,
     url: &str,
@@ -129,8 +134,9 @@ pub(super) enum Sent {
     Rejected(Vec<u8>),
 }
 
-/// The emulation requests of an emulated transport (Block 8), each a
-/// `fetch` of its own (D8, D9).
+/// The emulation requests of an emulated transport, each a `fetch` of its
+/// own.
+// Block 8; D8, D9.
 pub(super) struct Emulation {
     fetch: Function,
     url: String,
@@ -138,17 +144,20 @@ pub(super) struct Emulation {
     timeout: Duration,
     /// The media type of the requests: JSON's or Protobuf's.
     content_type: &'static str,
-    /// Whether requests carry the cookies of another origin (D13).
+    /// Whether requests carry the cookies of another origin.
+    // D13.
     include_credentials: bool,
     /// Each holds its request's guard: dropped with the transport, it
-    /// aborts the request (D8).
+    /// aborts the request.
+    // D8.
     requests: FuturesUnordered<Request>,
 }
 
 impl Emulation {
     /// Requests to `configured`, or to `/emulation` on the server of
     /// `stream`, with `fetch`, including credentials when
-    /// `include_credentials` (D13).
+    /// `include_credentials`.
+    // D13.
     pub(super) fn new(
         fetch: Function,
         stream: &str,
@@ -229,8 +238,9 @@ impl Emulation {
     }
 }
 
-/// What the transport reports of request `id`: a failure ends it (Block
-/// 8); a 413 fails its commands, then counts as written, in `written`.
+/// What the transport reports of request `id`: a failure ends it; a 413
+/// fails its commands, then counts as written, in `written`.
+// Block 8.
 pub(super) fn report(
     id: FrameId,
     answered: Result<Sent, String>,
@@ -246,20 +256,21 @@ pub(super) fn report(
     }
 }
 
-/// The listeners of a stream built with the application's `ReadableStream`
-/// (D12), alive while it is read.
+/// The listeners of a stream built with the application's `ReadableStream`,
+/// alive while it is read.
+// D12.
 pub(super) struct Through {
     _pull: Closure<dyn FnMut(JsValue) -> Promise>,
     _cancel: Closure<dyn FnMut(JsValue) -> Promise>,
 }
 
 /// `body` read through a stream built with `shim`, the application's
-/// `ReadableStream` (D12), as centrifuge-js reads it with the constructor it
+/// `ReadableStream`, as centrifuge-js reads it with the constructor it
 /// resolved (`transport_http_stream.ts:34-91`): an underlying source whose
 /// `pull` reads one chunk from the body's reader and enqueues that chunk
 /// unchanged, with `highWaterMark` 0, so the shim's stream reads one chunk
-/// for each read of the transport's task (D8). Its `cancel` cancels the
-/// body.
+/// for each read of the transport's task. Its `cancel` cancels the body.
+// D12; D8.
 fn through(
     shim: &Function,
     body: &web_sys::ReadableStream,
@@ -308,8 +319,9 @@ fn through(
     ))
 }
 
-/// What the task reading the body and the transport share (D7, D8); also
-/// WebTransport's stream (Block 48, D17).
+/// What the task reading the body and the transport share; also
+/// WebTransport's stream.
+// D7, D8; Block 48, D17.
 #[derive(Default)]
 pub(super) struct State {
     pub(super) inbox: Inbox,
@@ -328,7 +340,8 @@ impl State {
 }
 
 /// Stops the task reading the body when dropped, also when a fetch shim's
-/// body ignores the abort (D8).
+/// body ignores the abort.
+// D8.
 pub(super) struct Reading(pub(super) AbortHandle);
 
 impl Drop for Reading {
@@ -370,16 +383,17 @@ async fn admit(state: &Rc<RefCell<State>>, mut message: Vec<u8>, bound: Bound) -
 }
 
 /// Reads `body` until it ends, one chunk after another whether or not the
-/// driver polls the transport (D8), and admits each message to the inbox.
-/// The stream's end, a failure or a message over the size limit is queued
+/// driver polls the transport, and admits each message to the inbox. The
+/// stream's end, a failure or a message over the size limit is queued
 /// behind the messages before it; an overflow ends the reading, holding
-/// nothing, since recovery brings those messages back (D7).
+/// nothing, since recovery brings those messages back.
 ///
 /// With `closed`, its settling ends the reading too, queued behind the
-/// messages decoded before it (WebTransport's session, Block 48 D17).
+/// messages decoded before it (WebTransport's session).
 ///
 /// `through` comes before `body`, so that `body`, which cancels it when
 /// dropped, is dropped first.
+// D8; D7; Block 48 D17.
 pub(super) async fn read_body(
     _through: Option<Through>,
     mut body: IntoStream<'static>,
@@ -455,8 +469,9 @@ pub(super) async fn read_body(
 
 /// An open `http_stream` connection.
 ///
-/// Its messages wait in the inbox until the client reads them (D7);
-/// commands go in emulation requests, written once answered (D8).
+/// Its messages wait in the inbox until the client reads them; commands go
+/// in emulation requests, written once answered.
+// D7; D8.
 pub(in crate::adapter) struct HttpStream {
     state: Rc<RefCell<State>>,
     emulation: Emulation,
@@ -475,12 +490,13 @@ pub(in crate::adapter) struct HttpStream {
 impl HttpStream {
     /// Opens the stream at `url` with `fetch`, sending `initial_frame`, the
     /// encoded connect command, with the request, its body read through a
-    /// stream built with `readable_stream` when given (D12). Commands then
-    /// go to `emulation_endpoint`, by default `/emulation` on the stream's
+    /// stream built with `readable_stream` when given. Commands then go to
+    /// `emulation_endpoint`, by default `/emulation` on the stream's
     /// server. A message over `max_message` bytes ends it, reported as
     /// [`Inbound::TooLarge`]; one that would take the inbox past `bound`
     /// ends it too, reported as [`Inbound::Overflow`]. Requests include
-    /// credentials when `include_credentials` (D13).
+    /// credentials when `include_credentials`.
+    // D12; D13.
     #[expect(clippy::too_many_arguments, reason = "each is the transport's own")]
     pub(in crate::adapter) async fn open(
         fetch: Function,
@@ -585,7 +601,8 @@ impl HttpStream {
     }
 
     /// Closes the transport: its stream and every emulation request in
-    /// flight are aborted (D8).
+    /// flight are aborted.
+    // D8.
     pub(in crate::adapter) fn close(self) {
         drop(self);
     }

@@ -1,11 +1,11 @@
-//! Shared poll subscriptions (Block 47): the events and types of a
-//! subscription on which the application names keys, each tracked under a
-//! signature its backend issued, and gets every new version of each key's
-//! value once.
+//! Shared poll subscriptions: the events and types of a subscription on
+//! which the application names keys, each tracked under a signature its
+//! backend issued, and gets every new version of each key's value once.
 //!
 //! Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 //! and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 //! later), and may change in any minor release.
+// Block 47.
 
 use crate::token::{Bytes, Secret};
 use crate::{ClientError, SubscribedContext};
@@ -41,11 +41,12 @@ impl SharedPollTrackItem {
 /// A signature the application's backend issued for exactly `keys`, in that
 /// order, as a `get_signature` callback returns it (centrifuge-js
 /// `SharedPollSignatureResult`). The signature is a credential: its `Debug`
-/// output shows its length only (Block 47, D16).
+/// output shows its length only.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 47, D16.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SharedPollSignature {
@@ -79,11 +80,12 @@ impl std::fmt::Debug for SharedPollSignature {
 /// [`SharedPollSubscriptionEvent::Update`] (centrifuge-js
 /// `SharedPollUpdateContext`).
 ///
-/// Its `Debug` output shows the data as its length (Block 21).
+/// Its `Debug` output shows the data as its length.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SharedPollUpdate {
@@ -125,13 +127,14 @@ impl SharedPollUpdate {
 
 impl SharedPollUpdate {
     /// The value decoded as JSON into `T`, as [`crate::Publication::json`]
-    /// does (Block 38, Block 47 D15).
+    /// does.
     ///
     /// # Errors
     ///
     /// The data is not JSON, or not JSON that `T` accepts; empty data, as a
     /// removal's, is not JSON. `serde_json`'s message may quote fragments of
     /// the data.
+    // Block 38, Block 47 D15.
     pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }
@@ -156,13 +159,14 @@ impl From<crate::Publication> for SharedPollUpdate {
     }
 }
 
-/// Something that happened to a shared poll subscription (Block 47, D2):
-/// its lifecycle as a stream subscription's, then one [`Self::Update`] per
-/// new version of a tracked key's value, and per key that ends.
+/// Something that happened to a shared poll subscription: its lifecycle as
+/// a stream subscription's, then one [`Self::Update`] per new version of a
+/// tracked key's value, and per key that ends.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental shared poll subscriptions (v6.8.0 and
 /// later), and may change in any minor release.
+// Block 47, D2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SharedPollSubscriptionEvent {

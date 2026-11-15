@@ -33,7 +33,8 @@ impl State {
 /// add events.
 ///
 /// Its `Debug` output shows data as its length, so that events can be
-/// logged (Block 21).
+/// logged.
+// Block 21.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 // Not `expect`: on 32-bit targets the variants are closer in size.
@@ -137,7 +138,8 @@ impl ClientEvent {
     }
 }
 
-/// Details of a [`ClientEvent::Connecting`] (Block 54, D4).
+/// Details of a [`ClientEvent::Connecting`].
+// Block 54, D4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConnectingContext {
@@ -148,8 +150,9 @@ pub struct ConnectingContext {
     pub reason: String,
 }
 
-/// Details of a [`ClientEvent::Connected`] (Block 54, D4). Its `Debug`
-/// output shows the data as its length (Block 21).
+/// Details of a [`ClientEvent::Connected`]. Its `Debug` output shows the
+/// data as its length.
+// Block 54, D4; Block 21.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConnectedContext {
@@ -173,8 +176,9 @@ impl std::fmt::Debug for ConnectedContext {
     }
 }
 
-/// Details of a [`ClientEvent::Message`] (Block 54, D4). Its `Debug`
-/// output shows the data as its length (Block 21).
+/// Details of a [`ClientEvent::Message`]. Its `Debug` output shows the data
+/// as its length.
+// Block 54, D4; Block 21.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MessageContext {
@@ -191,7 +195,8 @@ impl std::fmt::Debug for MessageContext {
     }
 }
 
-/// Details of a [`ClientEvent::Disconnected`] (Block 54, D4).
+/// Details of a [`ClientEvent::Disconnected`].
+// Block 54, D4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DisconnectedContext {
@@ -236,15 +241,17 @@ pub enum ErrorKind {
     /// centrifuge-js, a transport that opened and then closed before the
     /// connect reply is not reported as an error: the client, still
     /// connecting, schedules the next attempt without an event. A
-    /// WebTransport stream that ends before the server answered is reported
-    /// (Block 48, D9).
+    /// WebTransport stream that ends before the server answered is
+    /// reported.
+    // Block 48, D9.
     Transport,
     /// The server answered the connect command with a temporary error.
     Connect,
     /// The token callback failed while getting a token to connect with.
     ConnectToken,
     /// The connect data callback failed; the client retries after the
-    /// reconnect backoff (Block 17).
+    /// reconnect backoff.
+    // Block 17.
     ConnectData,
     /// The token callback failed while getting a token to refresh with.
     RefreshToken,
@@ -269,35 +276,38 @@ pub enum ErrorKind {
     SubscriptionRefresh,
     /// A delta publication could not be applied: the subscription
     /// subscribes again, or, for a server-side subscription, the client
-    /// reconnects (Block 19, D8).
+    /// reconnects.
+    // Block 19, D8.
     Delta,
-    /// A shared poll subscription's track request failed: the server refused
-    /// it, or the `get_signature` callback failed for the keys given to
-    /// `track`, or there is none (Block 47, D7, D6).
+    /// A shared poll subscription's track request failed: the server
+    /// refused it, or the `get_signature` callback failed for the keys
+    /// given to `track`, or there is none.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7, D6.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     Track,
-    /// The server refused a shared poll subscription's untrack request
-    /// (Block 47, D7); the keys stay untracked on the client.
+    /// The server refused a shared poll subscription's untrack request; the
+    /// keys stay untracked on the client.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D7.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     Untrack,
     /// A shared poll subscription's `get_signature` callback failed while
     /// refreshing the signatures held, or while signing the keys tracked
-    /// without one after a subscribe; it is retried after 5 s to 30 s
-    /// (Block 47, D6, D7).
+    /// without one after a subscribe; it is retried after 5 s to 30 s.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental shared poll subscriptions
     /// (v6.8.0 and later), and may change in any minor release.
+    // Block 47, D6, D7.
     #[cfg(feature = "unstable")]
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     SignatureRefresh,

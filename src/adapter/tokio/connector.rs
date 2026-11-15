@@ -1,5 +1,6 @@
-//! An application's connector: the stream the websocket runs over, from
-//! the application's own networking (Block 37b, D3, D4).
+//! An application's connector: the stream the websocket runs over, from the
+//! application's own networking.
+// Block 37b, D3, D4.
 
 use std::fmt;
 use std::future::Future;
@@ -42,7 +43,8 @@ pub type Connecting = Pin<Box<dyn Future<Output = Result<ConnectedStream, BoxErr
 /// ```
 ///
 /// A method added to this trait has a default; a new required method is a
-/// major release (Block 54, D7).
+/// major release.
+// Block 54, D7.
 pub trait Connector: Send + Sync {
     /// Opens the stream to `endpoint`.
     fn connect(&self, endpoint: http::Uri) -> Connecting;
@@ -105,8 +107,8 @@ impl fmt::Debug for ConnectedStream {
 }
 
 /// The endpoint given to a connector: `url` with its port always written,
-/// path and query kept (Block 37, D3; as Block 23 D1 gives
-/// `Proxy::custom`).
+/// path and query kept (as `Proxy::custom` gets it).
+// Block 37, D3; Block 23, D1.
 pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, String> {
     let host = url.host_str().ok_or("an endpoint without a host")?;
     let port = url
@@ -122,7 +124,8 @@ pub(in crate::adapter) fn endpoint(url: &reqwest::Url) -> Result<http::Uri, Stri
 }
 
 /// Opens the stream through `connector`, failing as a refused connection
-/// does on its error or its panic (Block 37, D4).
+/// does on its error or its panic.
+// Block 37, D4.
 pub(in crate::adapter) async fn connect(
     connector: &Shared,
     url: &reqwest::Url,

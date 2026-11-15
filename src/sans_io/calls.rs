@@ -1,12 +1,13 @@
-//! Block 13: calls the application awaits. A call made while not
-//! connected waits for the connection, then for its reply, each phase
-//! bounded by `Config::timeout`. A reply settles its call when it is read,
-//! ahead of the messages Block 15 holds. Losing the transport fails the
+//! Calls the application awaits. A call made while not connected waits for
+//! the connection, then for its reply, each phase bounded by
+//! `Config::timeout`. A reply settles its call when it is read, ahead of
+//! the messages held for the application. Losing the transport fails the
 //! calls sent on it with "connection closed"; entering `disconnected` fails
 //! every call with "disconnected". A subscription-level call first waits
 //! for its subscription to be subscribed, and fails with "subscription
 //! unsubscribed" when it is not or stops being (centrifuge-js
 //! `subscription.ts` `_methodCall`).
+// Block 13; Block 15.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -30,17 +31,20 @@ enum Phase {
     Queued,
     /// Waiting for room in the write queue.
     Room,
-    /// Held by an open batch (Block 18): it counts as waiting for room, its
-    /// deadline running from when it was held.
+    /// Held by an open batch: it counts as waiting for room, its deadline
+    /// running from when it was held.
+    // Block 18.
     Held,
     /// Sent as the command with this id, waiting for its reply.
     Sent(u32),
-    /// Waiting in a debounce window, by its timer (Block 46, D3, D6): bounded
-    /// by the window, so with no timer of its own; its data is the window's
-    /// latest, or was replaced by it.
+    /// Waiting in a debounce window, by its timer: bounded by the window,
+    /// so with no timer of its own; its data is the window's latest, or was
+    /// replaced by it.
+    // Block 46, D3, D6.
     Debounced(DebounceTimer),
     /// Replaced in a window now ended: it settles with the result of the
-    /// trailing send with this id (Block 46, D4).
+    /// trailing send with this id.
+    // Block 46, D4.
     Following(CallId),
 }
 
@@ -50,12 +54,14 @@ struct Call {
     /// The subscription of a subscription-level call.
     subscription: Option<SubscriptionId>,
     phase: Phase,
-    /// The calls that follow its result, in the order they were made (Block
-    /// 46, D4, D12): those of a trailing send, or of a remove that closed
-    /// their window; empty for any other call.
+    /// The calls that follow its result, in the order they were made: those
+    /// of a trailing send, or of a remove that closed their window; empty
+    /// for any other call.
+    // Block 46, D4, D12.
     followers: Vec<CallId>,
-    /// No owner awaits it (Block 46, D4): a trailing send, or a remove whose
-    /// owner dropped it while publishes still follow it (D11).
+    /// No owner awaits it: a trailing send, or a remove whose owner dropped
+    /// it while publishes still follow it.
+    // Block 46, D4; D11.
     internal: bool,
 }
 
@@ -89,7 +95,8 @@ impl Phase {
 
 impl Calls {
     /// Every call any registry holds, with the registries holding it, for
-    /// the soak (Block 52, D8).
+    /// the soak.
+    // Block 52, D8.
     #[cfg(all(feature = "__test-hooks", any(adapter_tokio, adapter_browser)))]
     pub(super) fn registries(&self) -> BTreeMap<CallId, Vec<&'static str>> {
         let mut held: BTreeMap<CallId, Vec<&'static str>> = BTreeMap::new();
@@ -117,7 +124,8 @@ impl Calls {
 }
 
 /// What a call not yet settled waits for, for the adapter's deadlock
-/// detection (Block 41, D6).
+/// detection.
+// Block 41, D6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(any(adapter_tokio, adapter_browser)),
@@ -127,7 +135,8 @@ pub(crate) enum CallWait {
     /// A message from the server before it is sent: the connect reply, or
     /// the subscribe reply of its subscription.
     Message,
-    /// Its own reply, matched when it is read (Block 13).
+    /// Its own reply, matched when it is read.
+    // Block 13.
     Reply,
     /// Its start, an open batch or room in the write queue.
     Other,
@@ -204,8 +213,9 @@ impl Machine {
         id
     }
 
-    /// The internal call of a trailing send (Block 46, D3, D4), past the
-    /// gate: no owner awaits it, `waiters` settle with its result.
+    /// The internal call of a trailing send, past the gate: no owner awaits
+    /// it, `waiters` settle with its result.
+    // Block 46, D3, D4.
     pub(super) fn start_trailing_send(
         &mut self,
         subscription: SubscriptionId,
@@ -220,8 +230,8 @@ impl Machine {
         self.hand_off(id);
     }
 
-    /// `waiters` settle with the result of call `id` from now on (Block 46,
-    /// D4, D12).
+    /// `waiters` settle with the result of call `id` from now on.
+    // Block 46, D4, D12.
     pub(super) fn follow_call(&mut self, id: CallId, waiters: Vec<CallId>) {
         for waiter in &waiters {
             if let Some(call) = self.calls.by_id.get_mut(waiter) {
@@ -233,17 +243,18 @@ impl Machine {
         }
     }
 
-    /// The subscription of call `id` when it has a debounce interval (Block
-    /// 46, D3): nothing else is looked at for the others.
+    /// The subscription of call `id` when it has a debounce interval:
+    /// nothing else is looked at for the others.
+    // Block 46, D3.
     pub(super) fn debounced_subscription(&self, id: CallId) -> Option<SubscriptionId> {
         let subscription = self.calls.by_id.get(&id)?.subscription?;
         self.has_debounce_interval(subscription)
             .then_some(subscription)
     }
 
-    /// The key of a publish that meets the gate (Block 46, D3, D12): the
-    /// map key, or `""` on a stream subscription; `None` for any other
-    /// request.
+    /// The key of a publish that meets the gate: the map key, or `""` on a
+    /// stream subscription; `None` for any other request.
+    // Block 46, D3, D12.
     pub(super) fn debounce_key(&self, id: CallId) -> Option<String> {
         match &self.calls.by_id.get(&id)?.request {
             CallRequest::Publish { .. } => Some(String::new()),
@@ -253,8 +264,9 @@ impl Machine {
         }
     }
 
-    /// The key of a remove that meets the gate (Block 46, D12), `None` for
-    /// any other request.
+    /// The key of a remove that meets the gate, `None` for any other
+    /// request.
+    // Block 46, D12.
     #[cfg(feature = "unstable")]
     pub(super) fn map_remove_key(&self, id: CallId) -> Option<String> {
         match &self.calls.by_id.get(&id)?.request {
@@ -263,9 +275,10 @@ impl Machine {
         }
     }
 
-    /// Call `id` waits in the window of `timer` (Block 46, D3): its
-    /// subscription deadline ends, the window bounds it, and its request, as
-    /// the window's latest, is taken from it.
+    /// Call `id` waits in the window of `timer`: its subscription deadline
+    /// ends, the window bounds it, and its request, as the window's latest,
+    /// is taken from it.
+    // Block 46, D3.
     pub(super) fn park_call(&mut self, id: CallId, timer: DebounceTimer) -> Option<CallRequest> {
         let call = self.calls.by_id.get_mut(&id)?;
         if matches!(call.phase, Phase::Subscribing) {
@@ -284,7 +297,8 @@ impl Machine {
 
     /// Follower `id` of `send`, a trailing send or a remove, was abandoned:
     /// with none left and no owner, so is the send, never written when it
-    /// was not yet (Block 46, D11).
+    /// was not yet.
+    // Block 46, D11.
     fn follower_abandoned(&mut self, send: CallId, id: CallId) {
         let Some(call) = self.calls.by_id.get_mut(&send) else {
             return;
@@ -321,12 +335,13 @@ impl Machine {
         }
     }
 
-    /// Starts call `id` as a client-level call: sent at once when
-    /// connected and it fits the write queue, otherwise waiting for the
-    /// connection (centrifuge-js `_methodCall`) or for room. A transport
-    /// whose close is read but not yet handled counts as gone: the call
-    /// waits for the next one. A debounced publish that meets its open
-    /// window waits there instead (Block 46, D3).
+    /// Starts call `id` as a client-level call: sent at once when connected
+    /// and it fits the write queue, otherwise waiting for the connection
+    /// (centrifuge-js `_methodCall`) or for room. A transport whose close
+    /// is read but not yet handled counts as gone: the call waits for the
+    /// next one. A debounced publish that meets its open window waits there
+    /// instead.
+    // Block 46, D3.
     fn start_call(&mut self, id: CallId) {
         if self.debounce_gate(id) {
             return;
@@ -334,7 +349,9 @@ impl Machine {
         self.hand_off(id);
     }
 
-    /// Hands call `id`, past the debounce gate, to Block 13's path.
+    /// Hands call `id`, past the debounce gate, to the path every call
+    /// takes.
+    // Block 13.
     fn hand_off(&mut self, id: CallId) {
         let connected = self.can_send();
         let Some(call) = self.calls.by_id.get_mut(&id) else {
@@ -356,8 +373,9 @@ impl Machine {
         }
     }
 
-    /// Whether an open batch holds call `id` (Block 18): every call but a
-    /// `send` would be held.
+    /// Whether an open batch holds call `id`: every call but a `send` would
+    /// be held.
+    // Block 18.
     fn holds(&self, id: CallId) -> bool {
         self.holding()
             && self
@@ -368,7 +386,8 @@ impl Machine {
     }
 
     /// Call `id` is held by an open batch: it waits for the batch to stop,
-    /// as for room, for at most `Config::timeout` (Block 18, D3).
+    /// as for room, for at most `Config::timeout`.
+    // Block 18, D3.
     fn hold_call(&mut self, id: CallId) {
         let Some(call) = self.calls.by_id.get_mut(&id) else {
             return;
@@ -392,9 +411,10 @@ impl Machine {
 
     /// Held call `id` joins a frame of its stopped batch when it fits the
     /// write queue with what is unwritten and the calls of the frame being
-    /// built (`batch_bytes`), which are not counted yet,
-    /// the first fitting alone when nothing is unwritten (Block 18, D4);
-    /// its command and size, or `None` when it waits for room.
+    /// built (`batch_bytes`), which are not counted yet, the first fitting
+    /// alone when nothing is unwritten; its command and size, or `None`
+    /// when it waits for room.
+    // Block 18, D4.
     pub(super) fn release_held(
         &mut self,
         id: CallId,
@@ -419,7 +439,8 @@ impl Machine {
     }
 
     /// Call `id` is being sent: its command, numbered now, and its reply
-    /// deadline (Block 13). Not for a `send`, which a batch never holds.
+    /// deadline. Not for a `send`, which a batch never holds.
+    // Block 13.
     fn call_command(&mut self, id: CallId) -> Option<Command> {
         let command_id = self.command_id();
         let call = self.calls.by_id.get_mut(&id)?;
@@ -443,7 +464,8 @@ impl Machine {
     }
 
     /// `bytes` of calls in the output buffer count against the write queue
-    /// from now (Block 36, D1).
+    /// from now.
+    // Block 36, D1.
     pub(super) fn queue_bytes(&mut self, bytes: usize) {
         self.calls.unwritten_bytes += bytes;
     }
@@ -472,9 +494,10 @@ impl Machine {
         !self.calls.room.is_empty()
     }
 
-    /// Whether call `id` fits the write queue now: alone when nothing
-    /// waits to be written, else within `Config::write_queue_bytes` with
-    /// what does (Block 13).
+    /// Whether call `id` fits the write queue now: alone when nothing waits
+    /// to be written, else within `Config::write_queue_bytes` with what
+    /// does.
+    // Block 13.
     fn fits(&self, id: CallId) -> bool {
         let unwritten = self.calls.unwritten_bytes;
         unwritten == 0
@@ -697,7 +720,8 @@ impl Machine {
 
     /// The owner gave up on call `id`, e.g. its future was dropped: it is
     /// forgotten, and never sent if it was queued. A remove that publishes
-    /// follow loses only its owner and goes on for them (Block 46, D11).
+    /// follow loses only its owner and goes on for them.
+    // Block 46, D11.
     pub(super) fn call_abandoned(&mut self, id: CallId) {
         // A remove's owner dropped it: the publishes it replaced still wait
         // for its result, so it goes on without an owner (Block 46, D11, D12).
@@ -804,9 +828,9 @@ impl Machine {
     }
 
     /// The client is entering, or stays in, `disconnected`: every call
-    /// started, waiting or sent, fails with "disconnected" (Block 13,
-    /// exceptions for sent calls and calls waiting for their
-    /// subscription).
+    /// started, waiting or sent, fails with "disconnected" (exceptions for
+    /// sent calls and calls waiting for their subscription).
+    // Block 13.
     pub(super) fn fail_calls_disconnected(&mut self) {
         let started: Vec<CallId> = self
             .calls
@@ -823,8 +847,9 @@ impl Machine {
         }
     }
 
-    /// The client is closed (Block 33, D2): every call not settled, added,
-    /// waiting or sent, fails with "client closed".
+    /// The client is closed: every call not settled, added, waiting or
+    /// sent, fails with "client closed".
+    // Block 33, D2.
     pub(super) fn fail_calls_closed(&mut self) {
         let calls: Vec<CallId> = self.calls.by_id.keys().copied().collect();
         for id in calls {

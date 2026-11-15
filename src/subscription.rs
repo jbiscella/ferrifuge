@@ -1,5 +1,6 @@
-//! Client-side subscriptions: their states, events and publications
-//! (Block 9; spec, "Subscription states", "Listen to channel publications").
+//! Client-side subscriptions: their states, events and publications (spec,
+//! "Subscription states", "Listen to channel publications").
+// Block 9.
 
 use std::collections::HashMap;
 
@@ -75,8 +76,9 @@ impl SubscriptionEvent {
     }
 }
 
-/// Details of a [`SubscriptionEvent::Subscribing`] and of the
-/// `Subscribing` event of map and shared poll subscriptions (Block 54, D4).
+/// Details of a [`SubscriptionEvent::Subscribing`] and of the `Subscribing`
+/// event of map and shared poll subscriptions.
+// Block 54, D4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscribingContext {
@@ -88,7 +90,8 @@ pub struct SubscribingContext {
 
 /// Details of a [`SubscriptionEvent::Unsubscribed`], of a server-side
 /// subscription's, and of the `Unsubscribed` event of map and shared poll
-/// subscriptions (Block 54, D4).
+/// subscriptions.
+// Block 54, D4.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UnsubscribedContext {
@@ -102,7 +105,8 @@ pub struct UnsubscribedContext {
 /// Details of a [`SubscriptionEvent::Subscribed`] (spec, "Subscription
 /// recovery state"; centrifuge-js `SubscribedContext`).
 ///
-/// Its `Debug` output shows the data as its length (Block 21).
+/// Its `Debug` output shows the data as its length.
+// Block 21.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "the flags of the spec's subscribed context"
@@ -135,14 +139,16 @@ pub struct SubscribedContext {
     /// the recovered publications follow.
     pub stream_position: Option<StreamPosition>,
     /// The server sends this subscription's publications as deltas until
-    /// its next subscribe, as the [`delta`] option asked (Block 19). The
-    /// client rebuilds them: the application gets whole payloads.
+    /// its next subscribe, as the [`delta`] option asked. The client
+    /// rebuilds them: the application gets whole payloads.
     ///
     /// [`delta`]: crate::SubscriptionBuilder::delta
+    // Block 19.
     pub delta: bool,
     /// Publications follow this event, recovered or initial ones, unless
-    /// they are withdrawn (Block 15); for metrics and logging (Block 35c,
-    /// centrifuge-js `hasRecoveredPublications`).
+    /// they are withdrawn; for metrics and logging (centrifuge-js
+    /// `hasRecoveredPublications`).
+    // Block 15; Block 35c.
     pub has_recovered_publications: bool,
 }
 
@@ -180,8 +186,8 @@ impl StreamPosition {
 
 /// A publication of a channel (`client.proto`, `Publication`).
 ///
-/// Its `Debug` output shows the data as its length and the tags by name
-/// (Block 21).
+/// Its `Debug` output shows the data as its length and the tags by name.
+// Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Publication {
@@ -202,15 +208,17 @@ pub struct Publication {
     /// from the subscription's, as for a wildcard subscription
     /// (`client.proto`, `Publication.channel`). Such a publication belongs
     /// to another stream: it moves neither the offset nor the epoch of its
-    /// subscription (Block 35c).
+    /// subscription.
+    // Block 35c.
     pub channel: Option<String>,
     /// The wire's `Publication.delta`: `data` is a Fossil delta against the
     /// previous publication. Cleared once the delta is applied, so a
-    /// publication the application takes never has it (Block 19, D4).
+    /// publication the application takes never has it.
+    // Block 19, D4.
     pub(crate) delta: bool,
     /// A map or shared poll publication's key, whether it removes the key,
-    /// and its version (Blocks 45, 47, D3); boxed, as a stream publication
-    /// has none.
+    /// and its version; boxed, as a stream publication has none.
+    // Blocks 45, 47, D3.
     pub(crate) map: Option<Box<MapPart>>,
 }
 
@@ -221,7 +229,8 @@ pub struct Publication {
 pub(crate) struct MapPart {
     pub(crate) key: String,
     pub(crate) removed: bool,
-    /// A shared poll value's version; 0 when none is known (Block 47, D3).
+    /// A shared poll value's version; 0 when none is known.
+    // Block 47, D3.
     pub(crate) version: u64,
 }
 
@@ -243,7 +252,8 @@ impl MapPart {
 /// `ClientInfo`).
 ///
 /// Its `Debug` output shows the connection and channel info as their
-/// length (Block 21).
+/// length.
+// Block 21.
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ClientInfo {
@@ -276,7 +286,7 @@ impl std::fmt::Debug for SubscribedContext {
 }
 
 impl Publication {
-    /// Decodes [`data`](Self::data) as JSON into `T` (Block 38): the JSON a
+    /// Decodes [`data`](Self::data) as JSON into `T`: the JSON a
     /// publisher's [`Client::publish_json`](crate::Client::publish_json)
     /// encoded, or any JSON published, under either protocol. `T` may
     /// borrow from the data, e.g. a `&str` or a
@@ -301,6 +311,7 @@ impl Publication {
     ///
     /// The data is not JSON, or not JSON that `T` accepts; empty data is not
     /// JSON. `serde_json`'s message may quote fragments of the data.
+    // Block 38.
     pub fn json<'de, T: serde::Deserialize<'de>>(&'de self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.data)
     }
@@ -394,21 +405,25 @@ pub enum SubscriptionError {
         /// The channel.
         channel: String,
     },
-    /// The client is closed, dropped or its runtime shut down (Block 28):
-    /// it can no longer subscribe.
+    /// The client is closed, dropped or its runtime shut down: it can no
+    /// longer subscribe.
+    // Block 28.
     ClientClosed,
-    /// A tag filter the server would refuse: a comparison with an empty key,
-    /// or a set comparison with no value (Block 35a).
+    /// A tag filter the server would refuse: a comparison with an empty
+    /// key, or a set comparison with no value.
+    // Block 35a.
     #[non_exhaustive]
     InvalidTagFilter {
         /// What is wrong, naming the key, never a value.
         reason: String,
     },
-    /// A tag filter cannot go with delta compression (Block 35a;
-    /// `client.proto`: a filter "disables delta compression").
+    /// A tag filter cannot go with delta compression (`client.proto`: a
+    /// filter "disables delta compression").
+    // Block 35a.
     TagFilterWithDelta,
     /// A resubscribe delay of 0, which would resubscribe with no wait for
-    /// as long as a failure lasts (Block 53 D6).
+    /// as long as a failure lasts.
+    // Block 53 D6.
     #[non_exhaustive]
     ZeroDelay {
         /// The option: `min_resubscribe_delay` or `max_resubscribe_delay`.
@@ -416,7 +431,8 @@ pub enum SubscriptionError {
     },
 }
 
-/// The resubscribe delays of `options`, each more than 0 (Block 53 D6).
+/// The resubscribe delays of `options`, each more than 0.
+// Block 53 D6.
 #[cfg(any(adapter_tokio, adapter_browser))]
 pub(crate) fn check_resubscribe_delays(
     options: &crate::sans_io::SubscriptionOptions,

@@ -1,6 +1,7 @@
-//! Client-side subscriptions of a [`Machine`] (Block 9): the registry, each
+//! Client-side subscriptions of a [`Machine`]: the registry, each
 //! subscription's state and commands in flight, and how the machine reacts
 //! to them. Behaviour follows centrifuge-js `subscription.ts`.
+// Block 9.
 
 #[cfg(feature = "unstable")]
 mod map_flow;
@@ -32,12 +33,13 @@ use crate::{
 pub(super) struct Subscriptions {
     by_id: BTreeMap<SubscriptionId, Subscription>,
     /// The subscription to each channel in `by_id`: lookups by channel,
-    /// publications among them, cost the same however many there are
-    /// (Block 14, "O(1) dispatch").
+    /// publications among them, cost the same however many there are.
+    // Block 14, "O(1) dispatch".
     by_channel: HashMap<String, SubscriptionId>,
-    /// The subscription each numeric channel id of this connection names
-    /// (Block 35b, D2): a subscription is found by it only while
-    /// subscribed with that id, so an entry left behind names nobody.
+    /// The subscription each numeric channel id of this connection names: a
+    /// subscription is found by it only while subscribed with that id, so
+    /// an entry left behind names nobody.
+    // Block 35b, D2.
     by_compact_id: HashMap<i64, SubscriptionId>,
     next_id: u64,
     next_fetch: u64,
@@ -50,25 +52,29 @@ pub(super) struct Subscriptions {
     /// `sub_refresh` commands awaiting their reply, and whose.
     sub_refreshes: HashMap<u32, SubscriptionId>,
     /// Subscribe commands sent with the connect command whose reply is not
-    /// read yet: their deadline starts when the connect reply is read
-    /// (Block 36, D6).
+    /// read yet: their deadline starts when the connect reply is read.
+    // Block 36, D6.
     optimistic: Vec<(u32, SubscriptionId)>,
     /// Abandoned subscribe commands of map loads that had read a page: the
-    /// server holds a reservation, so any reply to them, an error
-    /// included, is followed by an unsubscribe (Block 45, D6).
+    /// server holds a reservation, so any reply to them, an error included,
+    /// is followed by an unsubscribe.
+    // Block 45, D6.
     #[cfg(feature = "unstable")]
     reserved: std::collections::HashSet<u32>,
     /// Track and untrack requests of shared poll subscriptions awaiting
-    /// their reply (Block 47, D7).
+    /// their reply.
+    // Block 47, D7.
     #[cfg(feature = "unstable")]
     track_commands: HashMap<u32, shared_poll_flow::TrackCommand>,
-    /// The number of the next reply deadline of such a request (Block 47,
-    /// D12): never reused.
+    /// The number of the next reply deadline of such a request: never
+    /// reused.
+    // Block 47, D12.
     #[cfg(feature = "unstable")]
     next_track_timer: u64,
 }
 
-/// Who started a subscribe (Block 18, D2).
+/// Who started a subscribe.
+// Block 18, D2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartedBy {
     /// The application's `subscribe()`.
@@ -97,10 +103,12 @@ struct Subscription {
     /// `_resubscribeTimeout`).
     resubscribe_pending: bool,
     /// Who started the subscribe in progress: an open batch holds the
-    /// command of one the application started (Block 18, D2).
+    /// command of one the application started.
+    // Block 18, D2.
     started_by: StartedBy,
     /// Its subscription token, the fetch of a new one and the refresh
-    /// command in flight (Block 5's token component).
+    /// command in flight.
+    // Block 5.
     tokens: Tokens,
     /// Position in the channel's stream: of the last publication received,
     /// or given by the subscribe reply or the `since` option. Kept across
@@ -112,30 +120,33 @@ struct Subscription {
     recover: bool,
     /// Delta compression as the last subscribe reply set it.
     delta: DeltaChain,
-    /// What delta did since the subscription was created (Block 31);
-    /// boxed at the first payload counted, so that a subscription without
-    /// delta pays a pointer (Block 14, "Marginal cost of a subscription").
+    /// What delta did since the subscription was created; boxed at the
+    /// first payload counted, so that a subscription without delta pays a
+    /// pointer.
+    // Block 31; Block 14, "Marginal cost of a subscription".
     delta_statistics: Option<Box<crate::DeltaStatistics>>,
     /// The numeric channel id its last subscribe reply on this connection
-    /// gave, 0 for none (Block 35b).
+    /// gave, 0 for none.
+    // Block 35b.
     compact_id: i64,
-    /// Its debounce interval and open windows (Block 46, D15), `None`
-    /// without an interval: a subscription that never debounces pays a
-    /// pointer (Block 14, "Marginal cost of a subscription").
+    /// Its debounce interval and open windows, `None` without an interval:
+    /// a subscription that never debounces pays a pointer.
+    // Block 46, D15; Block 14, "Marginal cost of a subscription".
     debounce: Option<Box<Windows>>,
-    /// What makes a map subscription one (Block 45); `None` for a stream
-    /// subscription.
+    /// What makes a map subscription one; `None` for a stream subscription.
+    // Block 45.
     #[cfg(feature = "unstable")]
     map: Option<Box<map_flow::MapFlow>>,
-    /// What makes a shared poll subscription one (Block 47, D3); `None` for
-    /// the other kinds.
+    /// What makes a shared poll subscription one; `None` for the other
+    /// kinds.
+    // Block 47, D3.
     #[cfg(feature = "unstable")]
     shared_poll: Option<Box<shared_poll_flow::SharedPollFlow>>,
 }
 
-/// Whether a subscribe reply turned delta on (Block 19, D4), and what the
-/// next delta applies to: the data of the last publication handled since
-/// that reply (D5).
+/// Whether a subscribe reply turned delta on, and what the next delta
+/// applies to: the data of the last publication handled since that reply.
+// Block 19, D4; D5.
 #[derive(Debug, Default)]
 enum DeltaChain {
     #[default]
@@ -177,9 +188,10 @@ impl Subscription {
     }
 
     /// What disconnect code 3014 does to the position: a map subscription
-    /// drops it, so that the next subscribe loads the state (Block 45, D6;
-    /// centrifuge-js `src/subscription.ts:519-527`); a stream subscription
-    /// keeps one the server cannot match.
+    /// drops it, so that the next subscribe loads the state (centrifuge-js
+    /// `src/subscription.ts:519-527`); a stream subscription keeps one the
+    /// server cannot match.
+    // Block 45, D6.
     fn invalidate_position_or_forget(&mut self) {
         #[cfg(feature = "unstable")]
         if self.map.is_some() {
@@ -346,23 +358,25 @@ impl Machine {
             .collect()
     }
 
-    /// `Subscription::set_data` (Block 32): the data of every subscribe
-    /// command built from now on. A data callback keeps replacing it, as it
-    /// is never turned off here, unlike [`SubscriptionOptions::data`].
+    /// `Subscription::set_data`: the data of every subscribe command built
+    /// from now on. A data callback keeps replacing it, as it is never
+    /// turned off here, unlike [`SubscriptionOptions::data`].
+    // Block 32.
     pub(super) fn set_subscription_data(&mut self, id: SubscriptionId, data: Vec<u8>) {
         if let Some(sub) = self.subscriptions.by_id.get_mut(&id) {
             sub.options.data = Some(data);
         }
     }
 
-    /// Whether `filter` may be attached to subscription `id` (Block 35,
-    /// D1): what the server refuses, and a filter with delta. `Ok` for an id
-    /// not in the registry, which ignores the filter.
+    /// Whether `filter` may be attached to subscription `id`: what the
+    /// server refuses, and a filter with delta. `Ok` for an id not in the
+    /// registry, which ignores the filter.
     ///
     /// # Errors
     ///
     /// [`SubscriptionError::InvalidTagFilter`] or
     /// [`SubscriptionError::TagFilterWithDelta`].
+    // Block 35, D1.
     pub fn check_subscription_tag_filter(
         &self,
         id: SubscriptionId,
@@ -374,8 +388,9 @@ impl Machine {
         }
     }
 
-    /// `Subscription::set_tag_filter` (Block 35, D1): the filter of every
-    /// subscribe command built from now on, checked by the owner first.
+    /// `Subscription::set_tag_filter`: the filter of every subscribe
+    /// command built from now on, checked by the owner first.
+    // Block 35, D1.
     pub(super) fn set_subscription_tag_filter(
         &mut self,
         id: SubscriptionId,
@@ -392,13 +407,15 @@ impl Machine {
         }
     }
 
-    /// How many subscriptions the registry holds (Block 31).
+    /// How many subscriptions the registry holds.
+    // Block 31.
     pub(super) fn subscription_count(&self) -> usize {
         self.subscriptions.by_id.len()
     }
 
     /// What delta compression did on subscription `id` since it was
-    /// created (Block 31, D3); `None` for an id not in the registry.
+    /// created; `None` for an id not in the registry.
+    // Block 31, D3.
     #[must_use]
     pub fn delta_statistics(&self, id: SubscriptionId) -> Option<crate::DeltaStatistics> {
         self.subscriptions
@@ -407,7 +424,8 @@ impl Machine {
             .map(|sub| sub.delta_statistics.as_deref().copied().unwrap_or_default())
     }
 
-    /// Its debounce windows, when the server advised an interval (Block 46).
+    /// Its debounce windows, when the server advised an interval.
+    // Block 46.
     pub(super) fn subscription_windows(&mut self, id: SubscriptionId) -> Option<&mut Windows> {
         self.subscriptions
             .by_id
@@ -416,7 +434,8 @@ impl Machine {
             .as_deref_mut()
     }
 
-    /// Whether subscription `id` has a debounce interval (Block 46).
+    /// Whether subscription `id` has a debounce interval.
+    // Block 46.
     pub(super) fn has_debounce_interval(&self, id: SubscriptionId) -> bool {
         self.subscriptions
             .by_id
@@ -611,10 +630,11 @@ impl Machine {
     }
 
     /// The subscribe commands that go in the frame of `connect`, sent over
-    /// websocket (Block 36, D5): of the subscriptions a connect reply would
-    /// subscribe at once, needing no callback first, in registry order,
-    /// while the frame stays within `batch_frame_bytes`. Their deadline
-    /// waits for the connect reply (D6).
+    /// websocket: of the subscriptions a connect reply would subscribe at
+    /// once, needing no callback first, in registry order, while the frame
+    /// stays within `batch_frame_bytes`. Their deadline waits for the
+    /// connect reply.
+    // Block 36, D5; D6.
     pub(super) fn optimistic_subscribes(&mut self, connect: &Command) -> Vec<Command> {
         let cap = self.config.batch_frame_bytes.max(1);
         let mut size = self.piece_size(&self.codec.encode(std::slice::from_ref(connect)));
@@ -665,8 +685,8 @@ impl Machine {
     }
 
     /// The connect reply was read: the subscribe commands sent with the
-    /// connect command whose reply is not read yet have `timeout` from now
-    /// (Block 36, D6).
+    /// connect command whose reply is not read yet have `timeout` from now.
+    // Block 36, D6.
     pub(super) fn start_optimistic_deadlines(&mut self) {
         for (command, id) in std::mem::take(&mut self.subscriptions.optimistic) {
             if self.subscriptions.subscribes.contains_key(&command) {
@@ -835,16 +855,16 @@ impl Machine {
     }
 
     /// Handles the reply to a subscribe or unsubscribe command
-    /// ([`Subscriptions::owns_command`]).
-    /// The server refused command `command` as too large (an emulation
-    /// request answered with HTTP 413). A subscribe or `sub_refresh` would be
-    /// refused again, so it is not retried: its subscription goes to
-    /// unsubscribed with [`codes::unsubscribed::MESSAGE_SIZE_LIMIT`],
-    /// after an unsubscribe command when the server holds the subscription
-    /// (owner decision, 2026-11-04). Whether `command` was one of them.
-    /// Whether `command` is a subscription's command still awaiting its
-    /// reply: a current subscribe, an unsubscribe or a `sub_refresh`
-    /// (Block 18, D6).
+    /// ([`Subscriptions::owns_command`]). The server refused command
+    /// `command` as too large (an emulation request answered with HTTP
+    /// 413). A subscribe or `sub_refresh` would be refused again, so it is
+    /// not retried: its subscription goes to unsubscribed with
+    /// [`codes::unsubscribed::MESSAGE_SIZE_LIMIT`], after an unsubscribe
+    /// command when the server holds the subscription (owner decision,
+    /// 2026-11-04). Whether `command` was one of them. Whether `command` is
+    /// a subscription's command still awaiting its reply: a current
+    /// subscribe, an unsubscribe or a `sub_refresh`.
+    // Block 18, D6.
     pub(in crate::sans_io) fn awaits_subscription_reply(&self, command: u32) -> bool {
         let subscriptions = &self.subscriptions;
         // A shared poll track or untrack request (Block 47, D7).
@@ -1288,11 +1308,11 @@ impl Machine {
     /// "State invalidated" (disconnect code 3014): every subscription keeps
     /// a stream position the server can never match, so that its next
     /// recovery fails. A token a token callback can fetch again is dropped
-    /// after ending its refresh, as for code 2502, so the callback gives the
-    /// resubscribe a new one; a fixed token without one is kept and sent
-    /// again, its refresh timer running on, as after any other reconnect
-    /// (Block 11, owner decision, 2026-11-12; centrifuge-js
-    /// `_invalidateState`).
+    /// after ending its refresh, as for code 2502, so the callback gives
+    /// the resubscribe a new one; a fixed token without one is kept and
+    /// sent again, its refresh timer running on, as after any other
+    /// reconnect (centrifuge-js `_invalidateState`).
+    // Block 11, owner decision, 2026-11-12.
     pub(super) fn invalidate_subscriptions(&mut self) {
         let ids: Vec<SubscriptionId> = self.subscriptions.by_id.keys().copied().collect();
         for id in ids {
@@ -1308,10 +1328,11 @@ impl Machine {
     }
 
     /// The subscribed subscription a push names: by `channel`, or by its
-    /// numeric channel id `compact_id` when the channel is empty (Block
-    /// 35b, D2). `Err(true)` when the push names a channel no subscribed
-    /// subscription holds, for server-side subscriptions to take; `Err(false)`
-    /// when it names an id none holds, and is dropped.
+    /// numeric channel id `compact_id` when the channel is empty.
+    /// `Err(true)` when the push names a channel no subscribed subscription
+    /// holds, for server-side subscriptions to take; `Err(false)` when it
+    /// names an id none holds, and is dropped.
+    // Block 35b, D2.
     fn subscribed_target(&self, channel: &str, compact_id: i64) -> Result<SubscriptionId, bool> {
         // Only a subscribed handle receives pushes (Block 9).
         let subscribed = |id: &SubscriptionId| {
@@ -1361,8 +1382,8 @@ impl Machine {
     }
 
     /// The publications of one subscribe reply of `id`, rebuilt in order;
-    /// together they cannot build more than one message could carry whole
-    /// (Block 19, D6).
+    /// together they cannot build more than one message could carry whole.
+    // Block 19, D6.
     fn apply_deltas(
         &mut self,
         id: SubscriptionId,
@@ -1384,7 +1405,8 @@ impl Machine {
     }
 
     /// The whole payload of a publication of `id`, rebuilt from a delta
-    /// against the previous one when it carries one (Block 19, D5, D7).
+    /// against the previous one when it carries one.
+    // Block 19, D5, D7.
     fn apply_delta(
         &mut self,
         id: SubscriptionId,
@@ -1426,7 +1448,8 @@ impl Machine {
     /// A delta publication of `id` could not be applied: an error event,
     /// then the subscription subscribes again after the resubscribe
     /// backoff, recovering from its last publication taken; the backoff
-    /// reset of the subscribe that failed is taken back (Block 19, D8).
+    /// reset of the subscribe that failed is taken back.
+    // Block 19, D8.
     fn delta_failed(&mut self, id: SubscriptionId, error: DeltaError) {
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
@@ -1515,7 +1538,8 @@ impl Machine {
     }
 
     /// A subscribe reply sets the subscription's refresh timer, or cancels
-    /// one kept from the last connection (Block 25, D3).
+    /// one kept from the last connection.
+    // Block 25, D3.
     fn rearm_subscription_refresh(&mut self, id: SubscriptionId, expires: bool, ttl: u32) {
         if expires {
             self.schedule_subscription_refresh(id, ttl);
@@ -1528,7 +1552,8 @@ impl Machine {
     }
 
     /// Every subscription using a token has its refresh timer shortened by
-    /// a sleep's `gap` (Block 25, D3); the owner ignores one not running.
+    /// a sleep's `gap`; the owner ignores one not running.
+    // Block 25, D3.
     pub(super) fn shorten_subscription_refreshes(&mut self, gap: Duration) {
         let ids: Vec<SubscriptionId> = self
             .subscriptions
@@ -1549,11 +1574,12 @@ impl Machine {
     /// The connection is torn down: commands in flight will get no reply,
     /// and subscribed subscriptions subscribe again on the next connection
     /// (spec, "Subscription states"); `reconnect` when the client
-    /// reconnects, which keeps each subscription's refresh timer (Block 25,
-    /// D3). A subscribe flow waiting for its data, token or getState
-    /// callback stays in flight, and the answer is used (Block 42, D11),
-    /// unless `invalidated` (disconnect code 3014): what was asked before
-    /// the invalidation is not used (Block 11).
+    /// reconnects, which keeps each subscription's refresh timer. A
+    /// subscribe flow waiting for its data, token or getState callback
+    /// stays in flight, and the answer is used, unless `invalidated`
+    /// (disconnect code 3014): what was asked before the invalidation is
+    /// not used.
+    // Block 25, D3; Block 42, D11; Block 11.
     pub(super) fn subscriptions_disconnected(&mut self, reconnect: bool, invalidated: bool) {
         // A lost connection takes the server's reservations with it.
         #[cfg(feature = "unstable")]
@@ -1730,7 +1756,8 @@ impl Machine {
     }
 }
 
-/// Block 35, D1: a filter the server would refuse, or one with delta.
+/// A filter the server would refuse, or one with delta.
+// Block 35, D1.
 fn check_tag_filter(
     options: &SubscriptionOptions,
     filter: Option<&crate::TagFilter>,

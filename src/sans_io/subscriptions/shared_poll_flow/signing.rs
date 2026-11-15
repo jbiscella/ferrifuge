@@ -1,10 +1,10 @@
 //! Signatures the client asks the `get_signature` callback for, and
-//! refreshes (Block 47, D6, D7): requests in chunks within the frame
-//! budget, revocations, the refresh at the earliest deadline, and the
-//! retries with their backoffs. centrifuge-js 63ed73e `track`,
-//! `_sharedPollRefreshSignature` and `_sharedPollReplayTrack`
-//! (`src/subscription.ts:1973-2245`, `:2934-3047`), except where Block 47
-//! decides otherwise.
+//! refreshes: requests in chunks within the frame budget, revocations, the
+//! refresh at the earliest deadline, and the retries with their backoffs.
+//! centrifuge-js 63ed73e `track`, `_sharedPollRefreshSignature` and
+//! `_sharedPollReplayTrack` (`src/subscription.ts:1973-2245`,
+//! `:2934-3047`), except where noted.
+// Block 47, D6, D7; Block 47.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
@@ -18,30 +18,36 @@ use crate::token::Secret;
 use crate::wire::{KeyedItem, TrackBatch};
 use crate::{ErrorKind, SharedPollSignature, SharedPollUpdate, TokenError, codes};
 
-/// The message of error 14 when no callback can sign keys (D6).
+/// The message of error 14 when no callback can sign keys.
+// D6.
 const CALLBACK_MISSING: &str = "get_signature callback required for track(keys)";
 
-/// The length a signature not known yet is counted at when sizing a chunk
-/// (D6).
+/// The length a signature not known yet is counted at when sizing a chunk.
+// D6.
 const UNKNOWN_SIGNATURE_LENGTH: usize = 128;
 
-/// The worst-case cost of a signature not known yet (D6, D7).
+/// The worst-case cost of a signature not known yet.
+// D6, D7.
 pub(super) fn unknown_signature_cost() -> usize {
     escaped_twice(&"0".repeat(UNKNOWN_SIGNATURE_LENGTH))
 }
 
-/// The bounds of the retries of a refresh and of signing the keys without
-/// a signature (D7, `src/subscription.ts:2091`, `:2240-2245`).
+/// The bounds of the retries of a refresh and of signing the keys without a
+/// signature (`src/subscription.ts:2091`, `:2240-2245`).
+// D7.
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// The bounds of the replay after a track request failed with a temporary
-/// error, one below 100 or no reply in time (D7, `src/subscription.ts:1926-1929`).
+/// error, one below 100 or no reply in time
+/// (`src/subscription.ts:1926-1929`).
+// D7.
 const REPLAY_MIN: Duration = Duration::from_secs(1);
 const REPLAY_MAX: Duration = Duration::from_secs(15);
 
-/// The bounds of the refresh after replies with `expires` and no `ttl`:
-/// a signature accepted within the server's grace period (D7).
+/// The bounds of the refresh after replies with `expires` and no `ttl`: a
+/// signature accepted within the server's grace period.
+// D7.
 const GRACE_MIN: Duration = Duration::from_secs(1);
 const GRACE_MAX: Duration = Duration::from_secs(15);
 
@@ -51,14 +57,16 @@ pub(in crate::sans_io) enum Origin {
     /// Keys given to `track(keys)` while subscribed.
     Track,
     /// Keys tracked without a signature: after a subscribe, or retried
-    /// after a failure (D8, phase 2).
+    /// after a failure (phase 2).
+    // D8.
     Replay,
-    /// Every key tracked, as a signature expires or was refused with 109
-    /// (D7).
+    /// Every key tracked, as a signature expires or was refused with 109.
+    // D7.
     Refresh,
 }
 
-/// A request to the callback, asked for in chunks, one at a time (D6).
+/// A request to the callback, asked for in chunks, one at a time.
+// D6.
 #[derive(Debug)]
 pub(in crate::sans_io) struct Signing {
     origin: Origin,
@@ -72,10 +80,11 @@ pub(in crate::sans_io) struct Signing {
     signed: Vec<Signed>,
 }
 
-/// What runs again after a failure (D7): a retry timer of a
-/// subscription's `subscribed` period, one of each at most; the refresh at
-/// an expiry is the owner's timer of the subscription
+/// What runs again after a failure: a retry timer of a subscription's
+/// `subscribed` period, one of each at most; the refresh at an expiry is
+/// the owner's timer of the subscription
 /// ([`Action::SetSharedPollRefresh`]).
+// D7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::sans_io) enum Retry {
     /// The refresh of every signature failed.
@@ -89,9 +98,11 @@ pub(in crate::sans_io) enum Retry {
 
 impl SharedPollFlow {
     /// `keys` in chunks, in order, each a batch within the frame budget by
-    /// D7's worst-case cost whatever versions it later holds, its signature
-    /// counted as the longest received, at least [`UNKNOWN_SIGNATURE_LENGTH`]
-    /// bytes (D6); a key too large for any goes alone.
+    /// its worst-case cost whatever versions it later holds, its signature
+    /// counted as the longest received, at least
+    /// [`UNKNOWN_SIGNATURE_LENGTH`] bytes; a key too large for any goes
+    /// alone.
+    // D7; D6.
     fn chunks(&self, channel: &str, keys: Vec<String>) -> VecDeque<Vec<String>> {
         let budget = self.max_track_frame_bytes;
         let base = Self::track_cost(channel, []) + BATCH_COST + self.signature_cost;
@@ -143,7 +154,8 @@ impl SharedPollFlow {
 }
 
 impl Machine {
-    /// Error 14: keys need a signature, and no callback can sign them (D6).
+    /// Error 14: keys need a signature, and no callback can sign them.
+    // D6.
     pub(super) fn signature_callback_missing(&mut self, id: SubscriptionId) {
         self.emit_shared_poll_error(
             id,
@@ -154,7 +166,8 @@ impl Machine {
     }
 
     /// Asks the callback to sign `keys`, in chunks when one batch of them
-    /// would pass the frame budget (D6).
+    /// would pass the frame budget.
+    // D6.
     pub(super) fn request_signature(
         &mut self,
         id: SubscriptionId,
@@ -192,9 +205,10 @@ impl Machine {
         });
     }
 
-    /// The callback answered `request` (D6). An answer to a request of an
+    /// The callback answered `request`. An answer to a request of an
     /// earlier `subscribed` period, or while not subscribed, changes
     /// nothing (I13).
+    // D6.
     pub(super) fn signature_fetched(
         &mut self,
         id: SubscriptionId,
@@ -288,8 +302,9 @@ impl Machine {
         self.signing_done(id, signing);
     }
 
-    /// A request to the callback failed, or returned a signature too large
-    /// (D6): an `Error`, then a retry after the backoff (D7).
+    /// A request to the callback failed, or returned a signature too large:
+    /// an `Error`, then a retry after the backoff.
+    // D6; D7.
     fn signing_failed(&mut self, id: SubscriptionId, origin: Origin, code: u32, message: String) {
         let kind = if origin == Origin::Track {
             ErrorKind::Track
@@ -308,10 +323,11 @@ impl Machine {
         }
     }
 
-    /// Every chunk of `signing` answered (D6): the keys asked for and not
+    /// Every chunk of `signing` answered: the keys asked for and not
     /// returned are revoked; those returned are tracked under their
     /// signatures, a key untracked meanwhile in the request's `untrack`;
-    /// for a refresh the signatures replace those they cover (D7).
+    /// for a refresh the signatures replace those they cover.
+    // D6; D7.
     fn signing_done(&mut self, id: SubscriptionId, signing: Signing) {
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
@@ -394,8 +410,9 @@ impl Machine {
         }
     }
 
-    /// Signs the keys tracked without a signature held (D8, phase 2; the
-    /// retry of a failure).
+    /// Signs the keys tracked without a signature held (phase 2; the retry
+    /// of a failure).
+    // D8.
     pub(super) fn sign_unsigned(&mut self, id: SubscriptionId) {
         let Some(flow) = self.shared_poll_flow(id) else {
             return;
@@ -407,9 +424,10 @@ impl Machine {
     }
 
     /// Refreshes the signatures of every key tracked, one refresh at a
-    /// time (D7): a key the refresh in flight does not cover runs another
-    /// once it ends. The timers pointing at now end: the refresh's reply
-    /// sets the next deadline.
+    /// time: a key the refresh in flight does not cover runs another once
+    /// it ends. The timers pointing at now end: the refresh's reply sets
+    /// the next deadline.
+    // D7.
     pub(super) fn start_refresh(&mut self, id: SubscriptionId) {
         if !self.subscribed_now(id) {
             return;
@@ -446,22 +464,25 @@ impl Machine {
         }
     }
 
-    /// The refresh failed: it runs again after the backoff (D7).
+    /// The refresh failed: it runs again after the backoff.
+    // D7.
     pub(super) fn refresh_failed(&mut self, id: SubscriptionId) {
         self.schedule_retry(id, Retry::Refresh);
     }
 
     /// A track request failed with a temporary error, one below 100 or no
-    /// reply in time: the replay runs again after the backoff (D7).
+    /// reply in time: the replay runs again after the backoff.
+    // D7.
     pub(super) fn replay_failed(&mut self, id: SubscriptionId) {
         self.schedule_retry(id, Retry::Replay);
     }
 
     /// A track reply with `expires`: the refresh runs at the earliest
-    /// deadline seen (D7), `ttl` seconds from now, or, for a signature
-    /// accepted within the server's grace period (`ttl` 0), 1 s from now,
-    /// backing off between 1 s and 15 s while such replies come in a row.
-    /// Without a callback, refreshing is the application's (D6).
+    /// deadline seen, `ttl` seconds from now, or, for a signature accepted
+    /// within the server's grace period (`ttl` 0), 1 s from now, backing
+    /// off between 1 s and 15 s while such replies come in a row. Without a
+    /// callback, refreshing is the application's.
+    // D7; D6.
     pub(super) fn refresh_deadline(&mut self, id: SubscriptionId, ttl: u32) {
         let Some(flow) = self
             .subscriptions
@@ -492,8 +513,9 @@ impl Machine {
         self.actions.push(Action::SetSharedPollRefresh(id, delay));
     }
 
-    /// The refresh timer of `id` fired (D7); one not armed, cancelled or of
-    /// a subscription no longer subscribed does nothing.
+    /// The refresh timer of `id` fired; one not armed, cancelled or of a
+    /// subscription no longer subscribed does nothing.
+    // D7.
     pub(super) fn refresh_fired(&mut self, id: SubscriptionId) {
         let armed = self
             .shared_poll_flow(id)
@@ -503,9 +525,10 @@ impl Machine {
         }
     }
 
-    /// Schedules `retry` after Block 2's backoff, between 5 s and 30 s, or
-    /// 1 s and 15 s for the replay, its step counting the failures in a row
-    /// (D7), replacing one scheduled.
+    /// Schedules `retry` after a backoff, between 5 s and 30 s, or 1 s and
+    /// 15 s for the replay, its step counting the failures in a row,
+    /// replacing one scheduled.
+    // Block 2; D7.
     fn schedule_retry(&mut self, id: SubscriptionId, retry: Retry) {
         let Some(flow) = self
             .subscriptions
@@ -533,8 +556,9 @@ impl Machine {
         self.actions.push(Action::SetSharedPollTimer(timer, delay));
     }
 
-    /// A refresh or retry timer of a subscription fired (D7); one of a
+    /// A refresh or retry timer of a subscription fired; one of a
     /// subscription not subscribed now does nothing.
+    // D7.
     pub(super) fn flow_timer_fired(&mut self, timer: SharedPollTimer) {
         let found = self.subscriptions.by_id.iter_mut().find_map(|(id, sub)| {
             let flow = sub.shared_poll.as_deref_mut()?;

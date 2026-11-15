@@ -1,8 +1,9 @@
-//! The constructors and functions the browser transports use (Block 44,
-//! D12; centrifuge-js 63ed73e `_resolveTransportDeps`, `centrifuge.ts:1020-
-//! 1066`): the application's shim, else the global of that name on
-//! `globalThis`, looked up at each attempt, so a global removed under a
-//! running client is missed at the next one.
+//! The constructors and functions the browser transports use (centrifuge-js
+//! 63ed73e `_resolveTransportDeps`, `centrifuge.ts:1020- 1066`): the
+//! application's shim, else the global of that name on `globalThis`, looked
+//! up at each attempt, so a global removed under a running client is missed
+//! at the next one.
+// Block 44, D12.
 
 use js_sys::{Function, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
@@ -35,16 +36,17 @@ impl std::fmt::Debug for Shims {
 pub(in crate::adapter) struct Found {
     pub(in crate::adapter) websocket: Option<Function>,
     pub(in crate::adapter) fetch: Option<Function>,
-    /// The application's `ReadableStream`: the body is read through a stream
-    /// built with it; without one, directly (D12).
+    /// The application's `ReadableStream`: the body is read through a
+    /// stream built with it; without one, directly.
+    // D12.
     pub(in crate::adapter) readable_stream: Option<Function>,
     /// Whether a `ReadableStream` can be had, the shim's or the page's.
     has_readable_stream: bool,
     /// Whether the page has `AbortController`, which has no shim.
     has_abort_controller: bool,
     pub(in crate::adapter) event_source: Option<Function>,
-    /// Whether the page has `WebTransport`, which has no shim (Block 48,
-    /// D17).
+    /// Whether the page has `WebTransport`, which has no shim.
+    // Block 48, D17.
     #[cfg(feature = "unstable")]
     pub(in crate::adapter) webtransport: bool,
 }

@@ -79,8 +79,8 @@ pub(crate) fn decode_sized(frame: &[u8]) -> Result<Vec<(Reply, usize)>, DecodeEr
 }
 
 /// The value of `data` when it is a JSON string: a publication of a
-/// subscription with delta on (`client.proto`, `Publication.data`; Block 19,
-/// D7).
+/// subscription with delta on (`client.proto`, `Publication.data`).
+// Block 19, D7.
 pub(crate) fn string_value(data: &[u8]) -> Option<Vec<u8>> {
     serde_json::from_slice::<String>(data)
         .ok()
@@ -108,7 +108,8 @@ pub(crate) fn emulation_request(session: &str, node: &str, frame: &[u8]) -> Vec<
 }
 
 /// The length of `frame` as the string value of an [`emulation_request`]
-/// carries it, escaped, without its quotes (Block 36, D1).
+/// carries it, escaped, without its quotes.
+// Block 36, D1.
 pub(crate) fn escaped_len(frame: &[u8]) -> usize {
     serde_json::to_string(&String::from_utf8_lossy(frame))
         .expect("serializing a string cannot fail")
@@ -236,7 +237,8 @@ struct JsonSubscribeRequest<'a> {
     limit: i32,
 }
 
-/// A tag filter as `client.proto` `FilterNode` in JSON (Block 35a).
+/// A tag filter as `client.proto` `FilterNode` in JSON.
+// Block 35a.
 struct JsonFilter<'a>(&'a crate::tag_filter::Node);
 
 impl Serialize for JsonFilter<'_> {
@@ -277,7 +279,8 @@ struct JsonSubRefreshRequest<'a> {
     channel: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     token: &'a str,
-    /// A shared poll track (1) or untrack (2) request (Block 47, D3).
+    /// A shared poll track (1) or untrack (2) request.
+    // Block 47, D3.
     #[serde(rename = "type", skip_serializing_if = "is_zero_i32")]
     kind: i32,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
@@ -292,7 +295,8 @@ struct JsonTrackBatch<'a> {
     items: Vec<JsonKeyedItem<'a>>,
 }
 
-/// A key at version 0 goes as `{"key":"k"}` (Block 47, D3).
+/// A key at version 0 goes as `{"key":"k"}`.
+// Block 47, D3.
 #[derive(Serialize)]
 struct JsonKeyedItem<'a> {
     key: &'a str,
@@ -326,7 +330,8 @@ struct JsonRpcRequest<'a> {
 #[derive(Serialize)]
 struct JsonPublishRequest<'a> {
     channel: &'a str,
-    /// Absent only from a map removal, which carries none (Block 45, D8).
+    /// Absent only from a map removal, which carries none.
+    // Block 45, D8.
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<JsonData<'a>>,
     #[serde(rename = "type", skip_serializing_if = "is_zero_i32")]
@@ -744,7 +749,8 @@ struct JsonRefreshResult {
 struct JsonSubRefreshResult {
     expires: bool,
     ttl: u32,
-    /// A shared poll track reply's values (Block 47, D7).
+    /// A shared poll track reply's values.
+    // Block 47, D7.
     items: Vec<JsonPublication>,
 }
 
@@ -935,7 +941,8 @@ struct JsonPublication {
     key: String,
     #[serde(default)]
     removed: bool,
-    /// A shared poll value's version (Block 47, D3).
+    /// A shared poll value's version.
+    // Block 47, D3.
     #[serde(default)]
     version: u64,
 }

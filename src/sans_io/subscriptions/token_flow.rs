@@ -1,10 +1,10 @@
-//! Subscription tokens (Block 10b): fetching one before subscribing,
-//! refreshing it with `sub_refresh`, and the failures of both. Behaviour
-//! follows centrifuge-js `subscription.ts` (`_subscribe`,
-//! `_handleTokenResponse`, `_handleTokenError`, `_refresh`,
-//! `_refreshResponse`, `_refreshError`, `_subscribeError`), except where
-//! CLAUDE.md decides otherwise: the refresh starts at 80–90% of the ttl
-//! (Block 14).
+//! Subscription tokens: fetching one before subscribing, refreshing it with
+//! `sub_refresh`, and the failures of both. Behaviour follows centrifuge-js
+//! `subscription.ts` (`_subscribe`, `_handleTokenResponse`,
+//! `_handleTokenError`, `_refresh`, `_refreshResponse`, `_refreshError`,
+//! `_subscribeError`), with one difference: the refresh starts at 80–90% of
+//! the ttl.
+// Block 10b; Block 14.
 
 use std::time::Duration;
 

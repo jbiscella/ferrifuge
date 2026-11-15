@@ -1,6 +1,7 @@
-//! Waiting until the client is connected or a subscription subscribed
-//! (Block 30): waiters registered under the core lock, settled on the
-//! states the machine reports after each input, never on the events taken.
+//! Waiting until the client is connected or a subscription subscribed:
+//! waiters registered under the core lock, settled on the states the
+//! machine reports after each input, never on the events taken.
+// Block 30.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,15 +49,16 @@ impl Default for Waiters {
 }
 
 impl Waiters {
-    /// Fails every waiter with "client closed": the driver stopped (Block
-    /// 28, D3, D4; Block 33, D4), the dropped senders mapping to it.
+    /// Fails every waiter with "client closed": the driver stopped, the
+    /// dropped senders mapping to it.
+    // Block 28, D3, D4; Block 33, D4.
     pub(super) fn clear(&mut self) {
         self.client.clear();
         self.subscriptions.clear();
     }
 
-    /// Fails every waiter with "client closed": the client is closing
-    /// (Block 33, D3).
+    /// Fails every waiter with "client closed": the client is closing.
+    // Block 33, D3.
     pub(super) fn close(&mut self) {
         send_all(&mut self.client, &Err(client_closed()));
         for mut subscription in std::mem::take(&mut self.subscriptions).into_values() {
@@ -88,8 +90,9 @@ impl Waiters {
     }
 }
 
-/// Settles the waiters the states of `core` now decide (D1, D2, D4).
-/// Subscription states are read only for subscriptions with a waiter.
+/// Settles the waiters the states of `core` now decide. Subscription states
+/// are read only for subscriptions with a waiter.
+// D1, D2, D4.
 pub(super) fn settle(core: &Core, waiters: &mut Waiters) {
     let state = core.machine.state();
     let entered_disconnected = state == State::Disconnected && waiters.state != State::Disconnected;
@@ -140,7 +143,8 @@ enum Start {
 }
 
 /// A waiter of a `ready()` future still pending: dropped unsettled, it is
-/// removed (D5).
+/// removed.
+// D5.
 struct Registered {
     shared: Arc<Shared>,
     of: Of,
@@ -154,7 +158,8 @@ impl Drop for Registered {
 }
 
 /// Starts waiting until `of` is ready: judged, and the waiter registered,
-/// under the core lock (D1, D2). The future borrows nothing.
+/// under the core lock. The future borrows nothing.
+// D1, D2.
 pub(super) fn ready(
     shared: &Arc<Shared>,
     of: Of,

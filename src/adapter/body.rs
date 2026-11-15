@@ -1,6 +1,6 @@
-//! What the HTTP-streaming transports of both adapters share (Block 44,
-//! D8): the decoders of a response body (Block 27) and the captive-portal
-//! check of an open (Block 25, D8).
+//! What the HTTP-streaming transports of both adapters share: the decoders
+//! of a response body and the captive-portal check of an open.
+// Block 44, D8; Block 27; Block 25, D8.
 
 use std::collections::VecDeque;
 #[cfg(adapter_tokio)]
@@ -11,9 +11,9 @@ use mediatype::{MediaType, Name, names};
 use tokio_util::codec::{AnyDelimiterCodec, Decoder as _};
 
 /// What a decoder keeps between messages once a large reply, or a large
-/// chunk, grew its buffer (Block 49d, row 71). It releases the rest only
-/// when it holds no more than this, so a stream of messages below it never
-/// pays for a release.
+/// chunk, grew its buffer. It releases the rest only when it holds no more
+/// than this, so a stream of messages below it never pays for a release.
+// Block 49d, row 71.
 const KEPT: usize = 64 * 1024;
 
 /// The error of an HTTP transport's decoder when the server sent a message
@@ -21,13 +21,14 @@ const KEPT: usize = 64 * 1024;
 pub(in crate::adapter) const TOO_LARGE: &str = "message larger than the size limit";
 
 /// What an error message about an open ends with when a captive portal may
-/// have answered it (Block 25, D8).
+/// have answered it.
+// Block 25, D8.
 pub(in crate::adapter) const CAPTIVE_PORTAL: &str = "; a captive portal may be answering";
 
 /// Whether an open answered with `status` and `content_type`, instead of
-/// the transport's, looks like a captive portal's web page (Block 25, D8):
-/// a redirect, 511 "Network Authentication Required", or a page served as
-/// a success.
+/// the transport's, looks like a captive portal's web page: a redirect, 511
+/// "Network Authentication Required", or a page served as a success.
+// Block 25, D8.
 pub(in crate::adapter) fn captive_portal(status: u16, content_type: &str) -> bool {
     (300..400).contains(&status)
         || status == 511
@@ -44,8 +45,9 @@ pub(in crate::adapter) fn with_portal(message: String, portal: bool) -> String {
 }
 
 /// Whether `content_type` parses as a media type of type `ty` and subtype
-/// `subty`, whatever their case and parameters (Block 27, D4: mediatype,
-/// RFC 9110 section 8.3); a value that does not parse is neither.
+/// `subty`, whatever their case and parameters (mediatype, RFC 9110 section
+/// 8.3); a value that does not parse is neither.
+// Block 27, D4.
 pub(in crate::adapter) fn is_media_type(content_type: &str, ty: Name<'_>, subty: Name<'_>) -> bool {
     MediaType::parse(content_type.trim()).is_ok_and(|media_type| {
         // `text/event-stream+json` is another media type (Codex, #127).
@@ -55,11 +57,11 @@ pub(in crate::adapter) fn is_media_type(content_type: &str, ty: Name<'_>, subty:
 
 /// Splits a response body into the messages it carries: one JSON reply per
 /// line for `http_stream`, the data of each event for sse (natively only:
-/// in the browser, `EventSource` splits its own, Block 44 D9). Network chunks
-/// do not follow message boundaries, so a partial line waits for the next.
-/// Both are maintained components, bounded by the largest message (Block
-/// 27, D1, D2); their first error ends the transport, as they are not asked
-/// to resynchronise.
+/// in the browser, `EventSource` splits its own). Network chunks do not
+/// follow message boundaries, so a partial line waits for the next. Both
+/// are maintained components, bounded by the largest message; their first
+/// error ends the transport, as they are not asked to resynchronise.
+// Block 44 D9; Block 27, D1, D2.
 pub(in crate::adapter) enum Decoder {
     /// sse-core: events with data, of the default type, reach the client
     /// (centrifuge-js `onmessage`, WHATWG "dispatch the event").
@@ -67,9 +69,10 @@ pub(in crate::adapter) enum Decoder {
     Sse(Sse),
     /// tokio-util's lines, bounded, and the bytes not yet split.
     Lines(AnyDelimiterCodec, BytesMut),
-    /// Protobuf replies, each after its uvarint length (Block 27, D3): the
-    /// bytes not yet split, and the largest reply. In-house, as no
-    /// maintained component splits uvarint-delimited streams (Block 0).
+    /// Protobuf replies, each after its uvarint length: the bytes not yet
+    /// split, and the largest reply. In-house, as no maintained component
+    /// splits uvarint-delimited streams.
+    // Block 27, D3; Block 0.
     Varint(Vec<u8>, usize),
 }
 
@@ -236,7 +239,8 @@ impl Decoder {
     }
 }
 
-/// The formats of a stream body, for tests only (Block 50, D3).
+/// The formats of a stream body, for tests only.
+// Block 50, D3.
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,13 +256,14 @@ pub enum StreamFormat {
     HttpStreamProtobuf,
 }
 
-/// Feeds `chunks` in turn to a new decoder of `format` at the default
-/// size limit, returning the messages it yielded, as the transport takes
-/// them: a Protobuf reply with its length prefix (Block 50, D3).
+/// Feeds `chunks` in turn to a new decoder of `format` at the default size
+/// limit, returning the messages it yielded, as the transport takes them: a
+/// Protobuf reply with its length prefix.
 ///
 /// # Errors
 ///
 /// The decoder's first error, as the transport would end with it.
+// Block 50, D3.
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub fn decode_stream<C: AsRef<[u8]>>(
@@ -280,7 +285,8 @@ pub fn decode_stream<C: AsRef<[u8]>>(
 }
 
 /// A stream decoder of the HTTP-streaming and WebTransport transports, for
-/// tests only (Block 49d, row 71): the decoders of both adapters are these.
+/// tests only: the decoders of both adapters are these.
+// Block 49d, row 71.
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 #[derive(Debug)]
@@ -380,12 +386,13 @@ fn released() {
 }
 
 /// Where the first reply of `bytes`, a Protobuf stream, ends, its uvarint
-/// length prefix included; `None` while more bytes are needed (Block 27,
-/// D3). A zero length is an empty reply, the server's ping.
+/// length prefix included; `None` while more bytes are needed. A zero
+/// length is an empty reply, the server's ping.
 ///
 /// # Errors
 ///
 /// When the prefix is not a uvarint, or announces more than `limit` bytes.
+// Block 27, D3.
 fn next_reply(bytes: &[u8], limit: usize) -> Result<Option<usize>, String> {
     // At most 10 bytes; all but the last have the continuation bit.
     let Some(last) = bytes.iter().take(10).position(|byte| byte & 0x80 == 0) else {

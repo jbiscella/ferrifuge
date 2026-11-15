@@ -1,7 +1,7 @@
-//! The browser's network and page events (Block 44, D10, D11; centrifuge-js
-//! 63ed73e `_setNetworkEvents`, `_setPageEvents`): `offline`, `online`,
-//! `pagehide` and `pageshow`, listened to while the client is not
-//! disconnected.
+//! The browser's network and page events (centrifuge-js 63ed73e
+//! `_setNetworkEvents`, `_setPageEvents`): `offline`, `online`, `pagehide`
+//! and `pageshow`, listened to while the client is not disconnected.
+// Block 44, D10, D11.
 
 use std::sync::Weak;
 
@@ -29,17 +29,20 @@ pub(in crate::adapter) enum Heard {
 /// A listener on its target, by the event's name.
 type Listener = (EventTarget, &'static str, Closure<dyn FnMut(Event)>);
 
-/// The client's network and page listeners: on its targets while the
-/// client is not disconnected, removed before their closures are dropped,
-/// so that the browser never calls a dropped one (D6).
+/// The client's network and page listeners: on its targets while the client
+/// is not disconnected, removed before their closures are dropped, so that
+/// the browser never calls a dropped one.
+// D6.
 pub(in crate::adapter) struct Events {
     /// The given target, else `globalThis` when it has `addEventListener`.
     network: Option<EventTarget>,
     page: Option<EventTarget>,
-    /// The listeners do not keep the client alive (D10).
+    /// The listeners do not keep the client alive.
+    // D10.
     client: Weak<Shared>,
     listeners: Vec<Listener>,
-    /// The client cached the page and has not reconnected since (D11).
+    /// The client cached the page and has not reconnected since.
+    // D11.
     cached: bool,
 }
 
@@ -69,7 +72,8 @@ impl Events {
     }
 
     /// Follows the client's `state`: listening unless disconnected, and
-    /// forgetting a cached page once connected or disconnected (D11).
+    /// forgetting a cached page once connected or disconnected.
+    // D11.
     pub(in crate::adapter) fn follow(&mut self, state: State) {
         if state != State::Connecting {
             self.cached = false;
@@ -81,7 +85,8 @@ impl Events {
         }
     }
 
-    /// The input `heard` gives a client in `state`, if any (D10, D11).
+    /// The input `heard` gives a client in `state`, if any.
+    // D10, D11.
     pub(in crate::adapter) fn input(&mut self, heard: Heard, state: State) -> Option<Input> {
         match (heard, state) {
             (_, State::Disconnected) => None,

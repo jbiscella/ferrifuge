@@ -1,6 +1,7 @@
-//! Logging of the adapters (Block 21): a span per client and per
-//! subscription, and records of what the machine is given and does. Every
-//! value goes through a redacting `Debug`, or is a code, a name or a length.
+//! Logging of the adapters: a span per client and per subscription, and
+//! records of what the machine is given and does. Every value goes through
+//! a redacting `Debug`, or is a code, a name or a length.
+// Block 21.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -48,8 +49,8 @@ struct State {
 }
 
 impl Log {
-    /// The calls the log knows not yet settled, for the soak (Block 52,
-    /// D8).
+    /// The calls the log knows not yet settled, for the soak.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     pub(super) fn calls(&self) -> Vec<CallId> {
         lock(&self.state).calls.keys().copied().collect()
@@ -189,9 +190,10 @@ impl Log {
         lock(&self.state).fetches.remove(&fetch);
     }
 
-    /// The record of a transport attempt (Block 21), made where it opens:
-    /// its endpoint and its proxy, as scheme, host and port, `direct`, or
-    /// `connector` for a client given one (Block 23, D7; Block 37, D4).
+    /// The record of a transport attempt, made where it opens: its endpoint
+    /// and its proxy, as scheme, host and port, `direct`, or `connector`
+    /// for a client given one.
+    // Block 21; Block 23, D7; Block 37, D4.
     #[cfg(adapter_tokio)]
     pub(super) fn attempt(
         &self,
@@ -223,7 +225,8 @@ impl Log {
     }
 
     /// The record of a transport attempt in the browser, whose own proxy
-    /// settings apply (Block 44, D14).
+    /// settings apply.
+    // Block 44, D14.
     #[cfg(adapter_browser)]
     pub(super) fn attempt(&self, kind: TransportKind, endpoint: usize) {
         let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
@@ -403,7 +406,8 @@ fn data_outcome<T>(result: &Result<T, DataError>) -> &'static str {
 }
 
 /// An endpoint as it may be logged: scheme, host, port and path, without
-/// the userinfo, query and fragment, which may hold a credential (D5).
+/// the userinfo, query and fragment, which may hold a credential.
+// D5.
 #[cfg(adapter_tokio)]
 pub(super) fn endpoint(url: &str) -> String {
     match reqwest::Url::parse(url) {

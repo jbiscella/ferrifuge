@@ -4,14 +4,13 @@
 //! uses the same field names but carries `bytes` fields as raw embedded JSON,
 //! so it needs its own codec rather than a serde derive on these types.
 //!
-//! The code is committed (Block 56):
-//! `src/protocol/centrifugal.centrifuge.protocol.rs` is what the locked
-//! prost-build writes from `proto/client.proto`, the copy of
-//! centrifugal/protocol at the commit `proto/README.md` names, with the
-//! locked `protoc-bin-vendored` as protoc. `tests/protocol_codegen.rs` fails
-//! when it drifts, and
-//! `FERRIFUGE_REGENERATE_PROTOCOL=1 cargo test --test protocol_codegen`
-//! rewrites it.
+//! The code is committed: `src/protocol/centrifugal.centrifuge.protocol.rs`
+//! is what the locked prost-build writes from `proto/client.proto`, the
+//! copy of centrifugal/protocol at the commit `proto/README.md` names, with
+//! the locked `protoc-bin-vendored` as protoc. `tests/protocol_codegen.rs`
+//! fails when it drifts, and `FERRIFUGE_REGENERATE_PROTOCOL=1 cargo test
+//! --test protocol_codegen` rewrites it.
+// Block 56.
 
 #![expect(
     dead_code,

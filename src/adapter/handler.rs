@@ -1,8 +1,9 @@
-//! Event handlers (Block 41b): one more consumer of the client's and its
-//! subscriptions' events, beside the streams, taking over as a stream does
-//! (Block 15). One consumer per client runs every handler of the client and
-//! of its subscriptions, one at a time, in the order the events were
-//! emitted. An event counts as taken when its handler returns (D3).
+//! Event handlers: one more consumer of the client's and its subscriptions'
+//! events, beside the streams, taking over as a stream does. One consumer
+//! per client runs every handler of the client and of its subscriptions,
+//! one at a time, in the order the events were emitted. An event counts as
+//! taken when its handler returns.
+// Block 41b; Block 15; D3.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -18,8 +19,8 @@ use crate::{
     SubscribedContext, SubscriptionEvent,
 };
 
-/// Receives a client's events, one at a time, in order (Block 41, D1): the
-/// client's own and those of its server-side subscriptions. Set with
+/// Receives a client's events, one at a time, in order: the client's own
+/// and those of its server-side subscriptions. Set with
 /// [`ClientBuilder::handler`](crate::ClientBuilder::handler) or
 /// [`Client::set_handler`](crate::Client::set_handler); it takes over the
 /// client's stream, as a second `events()` call does.
@@ -27,19 +28,18 @@ use crate::{
 /// [`on_event`](Self::on_event) is called for each event, and by default
 /// calls the method of its kind, which does nothing unless overridden. A
 /// closure `FnMut(ClientEvent)` is a handler too. An event counts as
-/// delivered when the method returns (Block 15); a method that panics
-/// disconnects the client with code 2 and its event is not taken, so
-/// recovery brings it back (D4).
+/// delivered when the method returns; a method that panics disconnects the
+/// client with code 2 and its event is not taken, so recovery brings it
+/// back.
 ///
-/// Methods are called on a task of the client's runtime (D2): one that
-/// blocks holds a worker of the runtime, and on a current-thread runtime
-/// nothing else of it runs, the client's timers and pongs included, until
-/// it returns.
+/// Methods are called on a task of the client's runtime: one that blocks
+/// holds a worker of the runtime, and on a current-thread runtime nothing
+/// else of it runs, the client's timers and pongs included, until it
+/// returns.
 ///
-/// In the browser they run on the page's event loop, which they block
-/// while they run, and a panic aborts: wasm32-unknown-unknown builds with
-/// `panic = "abort"`, so the module traps and its later calls are
-/// undefined (Block 44, D15).
+/// In the browser they run on the page's event loop, which they block while
+/// they run, and a panic aborts: wasm32-unknown-unknown builds with `panic
+/// = "abort"`, so the module traps and its later calls are undefined.
 ///
 /// ```no_run
 /// # fn run(client: ferrifuge::Client) {
@@ -56,7 +56,8 @@ use crate::{
 /// ```
 ///
 /// Every method has a default, and a method added to this trait has one
-/// too; a new required method is a major release (Block 54, D7).
+/// too; a new required method is a major release.
+// Block 41, D1; Block 15; D4; D2; Block 44, D15; Block 54, D7.
 #[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait ClientHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
@@ -99,11 +100,11 @@ impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
 }
 
 /// Receives a subscription's events, one at a time, in order, as
-/// [`ClientHandler`] does the client's (Block 41, D1). Set with
+/// [`ClientHandler`] does the client's. Set with
 /// [`SubscriptionBuilder::handler`](crate::SubscriptionBuilder::handler) or
 /// [`Subscription::set_handler`](crate::Subscription::set_handler); it
 /// takes over the subscription's stream. In the browser a panic aborts, as
-/// for [`ClientHandler`] (Block 44, D15).
+/// for [`ClientHandler`].
 ///
 /// ```no_run
 /// # fn run(subscription: ferrifuge::Subscription) {
@@ -117,7 +118,8 @@ impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
 /// ```
 ///
 /// Every method has a default, and a method added to this trait has one
-/// too; a new required method is a major release (Block 54, D7).
+/// too; a new required method is a major release.
+// Block 41, D1; Block 44, D15; Block 54, D7.
 #[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait SubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
@@ -162,9 +164,10 @@ impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for 
 }
 
 /// Receives a map subscription's events, one at a time, in order, as
-/// [`SubscriptionHandler`] does a subscription's (Block 45, D13). Set with
+/// [`SubscriptionHandler`] does a subscription's. Set with
 /// [`MapSubscriptionBuilder::handler`](crate::MapSubscriptionBuilder::handler)
-/// or [`MapSubscription::set_handler`](crate::MapSubscription::set_handler);
+/// or
+/// [`MapSubscription::set_handler`](crate::MapSubscription::set_handler);
 /// it takes over the map subscription's stream.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
@@ -172,7 +175,8 @@ impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for 
 /// may change in any minor release.
 ///
 /// Every method has a default, and a method added to this trait has one
-/// too; a new required method is a major release (Block 54, D7).
+/// too; a new required method is a major release.
+// Block 45, D13; Block 54, D7.
 #[cfg(feature = "unstable")]
 #[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait MapSubscriptionHandler: MaybeSend + 'static {
@@ -216,8 +220,7 @@ impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptio
 }
 
 /// Receives a shared poll subscription's events, one at a time, in order,
-/// as [`SubscriptionHandler`] does a subscription's (Block 47, D15). Set
-/// with
+/// as [`SubscriptionHandler`] does a subscription's. Set with
 /// [`SharedPollSubscriptionBuilder::handler`](crate::SharedPollSubscriptionBuilder::handler)
 /// or
 /// [`SharedPollSubscription::set_handler`](crate::SharedPollSubscription::set_handler);
@@ -246,7 +249,8 @@ impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptio
 /// ```
 ///
 /// Every method has a default, and a method added to this trait has one
-/// too; a new required method is a major release (Block 54, D7).
+/// too; a new required method is a major release.
+// Block 47, D15; Block 54, D7.
 #[cfg(feature = "unstable")]
 #[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait SharedPollSubscriptionHandler: MaybeSend + 'static {
@@ -287,7 +291,8 @@ impl<F: FnMut(crate::SharedPollSubscriptionEvent) + MaybeSend + 'static>
     }
 }
 
-/// Where a client's handlers run (Block 41, D2).
+/// Where a client's handlers run.
+// Block 41, D2.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EventDelivery {
@@ -295,13 +300,15 @@ pub enum EventDelivery {
     #[default]
     Task,
     /// On the client's driver, adding no task or thread per client. Gives
-    /// up Block 15's "timers keep running": while a handler runs, no timer
-    /// fires, nothing is read and no ping is answered.
+    /// up "timers keep running": while a handler runs, no timer fires,
+    /// nothing is read and no ping is answered.
+    // Block 15.
     Inline,
     /// On a thread of the client's own, named `ferrifuge-events` and
     /// started at the first handler, for handlers that block: the runtime
     /// and the driver go on while one runs. Absent on the browser target,
-    /// which has no threads (Block 44, D15).
+    /// which has no threads.
+    // Block 44, D15.
     #[cfg(adapter_tokio)]
     #[cfg_attr(
         docsrs,
@@ -327,7 +334,8 @@ impl EventDelivery {
 
 thread_local! {
     /// The client whose handler this thread runs, by the address of its
-    /// `Shared`, 0 when none, and whether under `Thread` (Block 41, D6).
+    /// `Shared`, 0 when none, and whether under `Thread`.
+    // Block 41, D6.
     static RUNNING: std::cell::Cell<(usize, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
@@ -358,11 +366,12 @@ pub(super) enum Wait {
     Close,
 }
 
-/// Whether `wait`, of `shared` and polled now, would never end (Block 41,
-/// D6). Under `Task` the handler holds a worker its client's driver may
-/// need, and under `Inline` the driver itself, so any such wait fails at
-/// once. Under `Thread` it fails when only a message that the running
-/// handler's event holds back could end it.
+/// Whether `wait`, of `shared` and polled now, would never end. Under
+/// `Task` the handler holds a worker its client's driver may need, and
+/// under `Inline` the driver itself, so any such wait fails at once. Under
+/// `Thread` it fails when only a message that the running handler's event
+/// holds back could end it.
+// Block 41, D6.
 pub(super) fn would_deadlock(shared: &Shared, wait: Wait) -> bool {
     let (running, thread) = RUNNING.get();
     if running != std::ptr::from_ref(shared) as usize {
@@ -401,9 +410,10 @@ fn held_back(shared: &Shared, call: Option<CallId>) -> bool {
 }
 
 /// Whether the messages read next wait for an event only this client's
-/// handler consumer can take: the one its running handler was given, or
-/// one queued for a handler, which the consumer reaches only after the
-/// running one returns (Codex, #171).
+/// handler consumer can take: the one its running handler was given, or one
+/// queued for a handler, which the consumer reaches only after the running
+/// one returns.
+// Codex, #171.
 fn consumer_holds_messages(core: &Core, outboxes: &Outboxes, handlers: &Handlers) -> bool {
     if handlers
         .running
@@ -426,8 +436,8 @@ fn consumer_holds_messages(core: &Core, outboxes: &Outboxes, handlers: &Handlers
     })
 }
 
-/// Whether a map or shared poll subscription's handler has `event` queued
-/// (Block 45, D13; Block 47, D15).
+/// Whether a map or shared poll subscription's handler has `event` queued.
+// Block 45, D13; Block 47, D15.
 #[cfg(feature = "unstable")]
 fn unstable_slot_holds(outboxes: &Outboxes, handlers: &Handlers, event: EventId) -> bool {
     handlers.maps.iter().any(|(of, slot)| {
@@ -449,7 +459,8 @@ fn unstable_slot_holds(_: &Outboxes, _: &Handlers, _: EventId) -> bool {
 }
 
 /// No handler call waits on the call `id` anymore: it settled or was
-/// dropped (Codex, #171).
+/// dropped.
+// Codex, #171.
 pub(super) fn unwatch(shared: &Shared, id: CallId) {
     lock(&shared.handlers).watched.remove(&id);
 }
@@ -458,7 +469,8 @@ pub(super) fn unwatch(shared: &Shared, id: CallId) {
 /// messages back, fails with error 16 the calls a handler waits on that
 /// only a held message could end, waiting for the connection or a
 /// subscription, or for a reply a full read-ahead keeps unread, and wakes
-/// the handler's pending `ready()` waits to check again (D6; Codex, #171).
+/// the handler's pending `ready()` waits to check again.
+// D6; Codex, #171.
 pub(super) fn check_thread_waits(shared: &Shared) {
     {
         let handlers = lock(&shared.handlers);
@@ -554,7 +566,8 @@ impl std::fmt::Debug for Handlers {
 }
 
 impl Handlers {
-    /// The calls a `Thread` handler waits on, for the soak (Block 52, D8).
+    /// The calls a `Thread` handler waits on, for the soak.
+    // Block 52, D8.
     #[cfg(feature = "__test-hooks")]
     pub(super) fn watched_calls(&self) -> Vec<CallId> {
         self.watched.iter().copied().collect()
@@ -583,7 +596,8 @@ impl Handlers {
     }
 }
 
-/// Wakes the consumer, to see the client closed (Codex, #169).
+/// Wakes the consumer, to see the client closed.
+// Codex, #169.
 pub(super) fn wake_consumer(shared: &Shared) {
     lock(&shared.handlers).wake();
 }
@@ -599,9 +613,9 @@ pub(super) enum Dropped {
     SharedPoll(Box<dyn SharedPollSubscriptionHandler>),
 }
 
-/// Sets the client's handler, which takes over its stream (D1, D3); none
-/// once the client is closed, when nothing would call or drop it (Codex,
-/// #169).
+/// Sets the client's handler, which takes over its stream; none once the
+/// client is closed, when nothing would call or drop it.
+// D1, D3; Codex, #169.
 pub(super) fn set_client_handler(shared: &Arc<Shared>, handler: Box<dyn ClientHandler>) {
     let mut core = lock(&shared.core);
     if shared.closed.load(Ordering::Acquire) {
@@ -637,11 +651,11 @@ pub(super) fn set_subscription_handler(
     drop(old);
 }
 
-/// Sets the handler of the subscription `of` under the core lock, so that
-/// a subscription being built gets it before another thread can subscribe
-/// it (Codex, #169). Gives the handler to drop with no lock held: the one
-/// replaced, or this one for a subscription no longer in the registry or a
-/// closed client.
+/// Sets the handler of the subscription `of` under the core lock, so that a
+/// subscription being built gets it before another thread can subscribe it.
+/// Gives the handler to drop with no lock held: the one replaced, or this
+/// one for a subscription no longer in the registry or a closed client.
+// Codex, #169.
 pub(super) fn install_subscription_handler(
     shared: &Arc<Shared>,
     core: &mut Core,
@@ -673,7 +687,8 @@ pub(super) fn install_subscription_handler(
 }
 
 /// Sets the handler of the map subscription `of` under the core lock, as
-/// [`install_subscription_handler`] does a subscription's (Block 45, D13).
+/// [`install_subscription_handler`] does a subscription's.
+// Block 45, D13.
 #[cfg(feature = "unstable")]
 pub(super) fn install_map_handler(
     shared: &Arc<Shared>,
@@ -706,7 +721,8 @@ pub(super) fn install_map_handler(
 }
 
 /// Sets the handler of the map subscription `of`, which takes over its
-/// stream (Block 45, D13).
+/// stream.
+// Block 45, D13.
 #[cfg(feature = "unstable")]
 pub(super) fn set_map_handler(
     shared: &Arc<Shared>,
@@ -720,8 +736,8 @@ pub(super) fn set_map_handler(
 }
 
 /// Sets the handler of the shared poll subscription `of` under the core
-/// lock, as [`install_subscription_handler`] does a subscription's (Block
-/// 47, D15).
+/// lock, as [`install_subscription_handler`] does a subscription's.
+// Block 47, D15.
 #[cfg(feature = "unstable")]
 pub(super) fn install_shared_poll_handler(
     shared: &Arc<Shared>,
@@ -754,7 +770,8 @@ pub(super) fn install_shared_poll_handler(
 }
 
 /// Sets the handler of the shared poll subscription `of`, which takes over
-/// its stream (Block 47, D15).
+/// its stream.
+// Block 47, D15.
 #[cfg(feature = "unstable")]
 pub(super) fn set_shared_poll_handler(
     shared: &Arc<Shared>,
@@ -785,7 +802,8 @@ fn install(
 }
 
 /// Starts the consumer unless it runs. An events thread that could not
-/// start gives its error and is tried again at the next start (D2).
+/// start gives its error and is tried again at the next start.
+// D2.
 fn start(shared: &Arc<Shared>, handlers: &mut Handlers) -> Option<std::io::Error> {
     if handlers.started {
         return None;
@@ -828,9 +846,10 @@ fn spawn_thread(run: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
         .map(drop)
 }
 
-/// At `connect()`: under `Thread`, an events thread that could not start
-/// is tried again, so that the connection's events reach the handlers;
-/// failing again, the connection fails as for a panic (D2, D4).
+/// At `connect()`: under `Thread`, an events thread that could not start is
+/// tried again, so that the connection's events reach the handlers; failing
+/// again, the connection fails as for a panic.
+// D2, D4.
 pub(super) fn start_again(shared: &Arc<Shared>, core: &mut Core) {
     let mut handlers = lock(&shared.handlers);
     let unstarted = handlers.delivery.is_thread()
@@ -847,8 +866,9 @@ pub(super) fn start_again(shared: &Arc<Shared>, core: &mut Core) {
     }
 }
 
-/// The events thread could not start: the client fails as for a panic,
-/// with no event of its own (D2, D4).
+/// The events thread could not start: the client fails as for a panic, with
+/// no event of its own.
+// D2, D4.
 fn thread_failed(shared: &Shared, core: &mut Core, error: &std::io::Error) {
     let message = format!("the events thread could not start: {error}");
     shared.log.span.in_scope(|| {
@@ -899,7 +919,8 @@ pub(super) enum Handed {
     },
 }
 
-/// The consumer of a client's handlers (D2: `Task`).
+/// The consumer of a client's handlers (`Task`).
+// D2.
 async fn consume(shared: Arc<Shared>) {
     let _release = Release(&shared);
     while let Some(handed) = std::future::poll_fn(|cx| next(&shared, cx)).await {
@@ -909,8 +930,9 @@ async fn consume(shared: Arc<Shared>) {
     }
 }
 
-/// The consumer of a client's handlers on its own thread (D2: `Thread`),
-/// ending after close once its events are delivered.
+/// The consumer of a client's handlers on its own thread (`Thread`), ending
+/// after close once its events are delivered.
+// D2.
 #[cfg(adapter_tokio)]
 fn consume_on_thread(shared: &Arc<Shared>) {
     /// Wakes the thread parked for the next event.
@@ -934,9 +956,10 @@ fn consume_on_thread(shared: &Arc<Shared>) {
     }
 }
 
-/// Drops the handlers after close, once their events are delivered (D5),
-/// or when a runtime shutting down drops the consumer, which a handler
-/// holding a clone of its client would otherwise keep alive (Codex, #169).
+/// Drops the handlers after close, once their events are delivered, or when
+/// a runtime shutting down drops the consumer, which a handler holding a
+/// clone of its client would otherwise keep alive.
+// D5; Codex, #169.
 struct Release<'a>(&'a Shared);
 
 impl Drop for Release<'_> {
@@ -946,7 +969,8 @@ impl Drop for Release<'_> {
 }
 
 /// Under `Inline`, delivers the events left at close; the driver then
-/// stops (D2).
+/// stops.
+// D2.
 pub(super) fn deliver_remaining(shared: &Shared) {
     let mut cx = Context::from_waker(Waker::noop());
     while let Poll::Ready(Some(handed)) = next(shared, &mut cx) {
@@ -958,7 +982,8 @@ pub(super) fn deliver_remaining(shared: &Shared) {
 /// When the driver ends, drops the handlers no consumer will drop: under
 /// `Inline`, even when a runtime shutting down drops the driver before
 /// [`deliver_remaining`], and under `Thread` when the events thread never
-/// started (Codex, #171).
+/// started.
+// Codex, #171.
 pub(super) fn release_unconsumed(shared: &Shared) {
     let unconsumed = {
         let handlers = lock(&shared.handlers);
@@ -1203,14 +1228,16 @@ fn earliest_of<H: ?Sized, E>(
 }
 
 /// Removes the outbox of a removed subscription once its last event is
-/// taken, as its stream does (Codex, #169).
+/// taken, as its stream does.
+// Codex, #169.
 fn remove_finished<E>(outboxes: &mut HashMap<SubscriptionId, Outbox<E>>, of: SubscriptionId) {
     if outboxes.get(&of).is_some_and(Outbox::is_finished) {
         outboxes.remove(&of);
     }
 }
 
-/// Calls the handler with no lock held, then reports its outcome (D3, D4).
+/// Calls the handler with no lock held, then reports its outcome.
+// D3, D4.
 pub(super) fn deliver(shared: &Shared, handed: Handed) {
     let thread = lock(&shared.handlers).delivery.is_thread();
     let (id, outcome) = match handed {
@@ -1314,7 +1341,8 @@ pub(super) fn deliver(shared: &Shared, handed: Handed) {
 /// Calls `handler` with `call`, marked as running a handler of `shared`,
 /// then gives it back with `back`, which returns it to drop when its slot
 /// has another stream or handler now; the handler's waits are watched only
-/// while it runs (Codex, #171).
+/// while it runs.
+// Codex, #171.
 fn run_handler<H: ?Sized>(
     shared: &Shared,
     thread: bool,
@@ -1353,12 +1381,12 @@ fn give_back<H: ?Sized>(
     }
 }
 
-/// Runs a handler call, catching its panic (D4). On a worker of a
-/// multi-thread runtime the worker hands its other tasks over first
-/// (`block_in_place`), so that a handler that blocks holds no task woken
-/// before it behind it (D6: the driver among them); on a current-thread
-/// runtime nothing else runs until it returns. The events thread of
-/// `Thread` is no worker.
+/// Runs a handler call, catching its panic. On a worker of a multi-thread
+/// runtime the worker hands its other tasks over first (`block_in_place`),
+/// so that a handler that blocks holds no task woken before it behind it
+/// (the driver among them); on a current-thread runtime nothing else runs
+/// until it returns. The events thread of `Thread` is no worker.
+// D4; D6.
 fn run(call: impl FnOnce(), thread: bool) -> std::thread::Result<()> {
     let call = AssertUnwindSafe(call);
     if thread {

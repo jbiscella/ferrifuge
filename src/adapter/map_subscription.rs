@@ -1,6 +1,7 @@
-//! Map subscriptions of the client (Block 45): a subscription to a keyed
-//! collection that Centrifugo owns, loaded page by page, then kept current
-//! per key. They share the client's registry with stream subscriptions.
+//! Map subscriptions of the client: a subscription to a keyed collection
+//! that Centrifugo owns, loaded page by page, then kept current per key.
+//! They share the client's registry with stream subscriptions.
+// Block 45.
 
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -21,11 +22,10 @@ use crate::{
     TokenError, UnrecoverableStrategy,
 };
 
-/// A map subscription to a channel, in its client's registry (Block 45):
-/// its stream yields its lifecycle events, one
-/// [`MapSubscriptionEvent::Sync`] with the whole state once loaded, then a
-/// [`MapSubscriptionEvent::Update`] per change. Clones are handles to the
-/// same subscription.
+/// A map subscription to a channel, in its client's registry: its stream
+/// yields its lifecycle events, one [`MapSubscriptionEvent::Sync`] with the
+/// whole state once loaded, then a [`MapSubscriptionEvent::Update`] per
+/// change. Clones are handles to the same subscription.
 ///
 /// The client loads the state page by page, `page_size` entries at a time,
 /// then the changes made meanwhile, as Centrifugo's map subscriptions
@@ -34,12 +34,13 @@ use crate::{
 /// they are read, ahead of the events the application has not taken, as
 /// Centrifugo closes a load that takes longer than the namespace's
 /// `map.subscribe_catch_up_timeout` (5 s by default) with 3008 "slow". A
-/// full read-ahead still stops the reading, pages included (Block 15), so
-/// an application that does not read its streams can make loads time out.
+/// full read-ahead still stops the reading, pages included, so an
+/// application that does not read its streams can make loads time out.
 ///
 /// Unstable: requires the `unstable` feature, follows centrifuge-js 63ed73e
 /// and Centrifugo's experimental map subscriptions (v6.8.0 and later), and
 /// may change in any minor release.
+// Block 45; Block 15.
 #[derive(Clone)]
 pub struct MapSubscription {
     shared: Arc<Shared>,
@@ -71,13 +72,14 @@ impl MapSubscription {
     /// Sets the tag filter sent in every subscribe command built from now
     /// on, `None` to remove it, sending nothing now. The position is
     /// dropped, so the next subscribe loads the state through the new
-    /// filter (Block 45, D6).
+    /// filter.
     ///
     /// # Errors
     ///
     /// [`SubscriptionError::InvalidTagFilter`] for a filter the server
     /// would refuse, [`SubscriptionError::TagFilterWithDelta`] on a map
     /// subscription with delta; the filter is then left as it was.
+    // Block 45, D6.
     pub fn set_tag_filter(
         &self,
         filter: Option<crate::TagFilter>,
@@ -91,9 +93,10 @@ impl MapSubscription {
     }
 
     /// What delta compression did on the map subscription since it was
-    /// created: state entries and catch-up publications received with
-    /// delta on count as full payloads, each live or recovered delta as a
-    /// delta (Block 45, D11). Zeros without negotiated delta.
+    /// created: state entries and catch-up publications received with delta
+    /// on count as full payloads, each live or recovered delta as a delta.
+    /// Zeros without negotiated delta.
+    // Block 45, D11.
     #[must_use]
     pub fn delta_statistics(&self) -> crate::DeltaStatistics {
         lock(&self.shared.core)
@@ -123,8 +126,9 @@ impl MapSubscription {
             .unwrap_or(SubscriptionState::Unsubscribed)
     }
 
-    /// Sets the data sent with the first request of every load from now on
-    /// (Block 32), sending nothing now.
+    /// Sets the data sent with the first request of every load from now on,
+    /// sending nothing now.
+    // Block 32.
     pub fn set_data(&self, data: impl Into<Vec<u8>>) {
         self.shared
             .apply(Input::SetSubscriptionData(self.id, data.into()));
@@ -153,11 +157,12 @@ impl MapSubscription {
             .map_or(0, super::outbox::Outbox::held)
     }
 
-    /// Sets the map subscription's handler (Block 45, D13), as
+    /// Sets the map subscription's handler, as
     /// [`crate::Subscription::set_handler`] does a subscription's: from now
     /// on it takes the events, one at a time, in order with those of the
     /// client's other handlers; its events count as delivered when its
     /// method returns.
+    // Block 45, D13.
     pub fn set_handler(&self, handler: impl super::MapSubscriptionHandler) {
         super::handler::set_map_handler(&self.shared, self.id, Box::new(handler));
     }
@@ -165,7 +170,8 @@ impl MapSubscription {
     /// Events from now on, as [`crate::Subscription::events`] gives a
     /// subscription's: an event counts as delivered once this stream yields
     /// it, so take it before calling [`MapSubscription::subscribe`] to get
-    /// every one; a later call takes over (Block 15).
+    /// every one; a later call takes over.
+    // Block 15.
     pub fn events(&self) -> impl Stream<Item = MapSubscriptionEvent> + MaybeSend + Unpin + use<> {
         let mut core = lock(&self.shared.core);
         let number = if core.machine.subscription_state(self.id).is_some()
@@ -199,15 +205,15 @@ impl MapSubscription {
     }
 
     /// Sets `key` of the map to `data`, once the subscription is
-    /// subscribed, as [`Client::map_publish`] does (Block 45, D8). The
-    /// subscription gets its own change as an update, as every subscriber.
+    /// subscribed, as [`Client::map_publish`] does. The subscription gets
+    /// its own change as an update, as every subscriber.
     ///
     /// On a namespace where the server advises a debounce interval
-    /// (Centrifugo PRO, `publish_debounce`, Block 46) the first value of a
-    /// key is sent at once and the latest one per interval, each key with
-    /// its own window, so that a chatty key cannot delay a quiet one, and
-    /// this future resolves with the result of the send that carried later
-    /// data for its key, as [`crate::Subscription::publish`] does. Use
+    /// (Centrifugo PRO, `publish_debounce`) the first value of a key is
+    /// sent at once and the latest one per interval, each key with its own
+    /// window, so that a chatty key cannot delay a quiet one, and this
+    /// future resolves with the result of the send that carried later data
+    /// for its key, as [`crate::Subscription::publish`] does. Use
     /// [`Client::map_publish`] for data that must arrive: it is never
     /// debounced.
     ///
@@ -217,6 +223,7 @@ impl MapSubscription {
     /// code (103 without permission, 107 for an empty key). A publish made
     /// while a window of its key is open fails with the error of the send
     /// or the [`MapSubscription::remove`] that replaced it.
+    // Block 45, D8; Block 46.
     pub fn publish(
         &self,
         key: impl Into<String>,
@@ -232,7 +239,7 @@ impl MapSubscription {
         })
     }
 
-    /// Sets `key` of the map to `data` encoded as JSON (Block 38), as
+    /// Sets `key` of the map to `data` encoded as JSON, as
     /// [`MapSubscription::publish`] does.
     ///
     /// # Errors
@@ -240,6 +247,7 @@ impl MapSubscription {
     /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
     /// sent; [`JsonCallError::Call`] with the errors of
     /// [`MapSubscription::publish`].
+    // Block 38.
     pub fn publish_json<T: serde::Serialize + ?Sized>(
         &self,
         key: impl Into<String>,
@@ -252,14 +260,15 @@ impl MapSubscription {
     /// Removes `key` from the map, once the subscription is subscribed;
     /// removing a key the map does not hold succeeds.
     ///
-    /// The remove is sent at once and opens no debounce window (Block 46):
-    /// if the key has one open, it closes and its pending value is never
-    /// sent, so a publish made after it is sent at once, and the publishes
-    /// waiting in the window settle with the result of this remove.
+    /// The remove is sent at once and opens no debounce window: if the key
+    /// has one open, it closes and its pending value is never sent, so a
+    /// publish made after it is sent at once, and the publishes waiting in
+    /// the window settle with the result of this remove.
     ///
     /// # Errors
     ///
     /// As [`MapSubscription::publish`].
+    // Block 46.
     pub fn remove(
         &self,
         key: impl Into<String>,
@@ -397,11 +406,11 @@ impl MapSubscriptionBuilder {
         self
     }
 
-    /// Bytes of page replies one load may read, 64 MiB by default: past
-    /// it the subscription sends an unsubscribe command and ends with
+    /// Bytes of page replies one load may read, 64 MiB by default: past it
+    /// the subscription sends an unsubscribe command and ends with
     /// `unsubscribed` 5 "map state too large", without subscribing again by
-    /// itself (Block 45, D5). The application holds the state it gets, and
-    /// its own copy.
+    /// itself. The application holds the state it gets, and its own copy.
+    // Block 45, D5.
     #[must_use]
     pub fn max_state_bytes(mut self, max_state_bytes: NonZeroUsize) -> Self {
         self.options.max_state_bytes = max_state_bytes;
@@ -417,9 +426,10 @@ impl MapSubscriptionBuilder {
     }
 
     /// Asks the server to send changes as deltas in `format` against each
-    /// key's previous value, on namespaces that allow it (Block 45, D9).
-    /// The client then holds one copy of every key's value, each within
+    /// key's previous value, on namespaces that allow it. The client then
+    /// holds one copy of every key's value, each within
     /// [`crate::Config::max_message_bytes`], for as long as delta is on.
+    // Block 45, D9.
     #[must_use]
     pub fn delta(mut self, format: crate::DeltaFormat) -> Self {
         self.options.common = self.options.common.delta(format);
@@ -445,8 +455,8 @@ impl MapSubscriptionBuilder {
     }
 
     /// The map subscription's handler, which takes its events from the
-    /// start instead of a stream (Block 45, D13); see
-    /// [`MapSubscription::set_handler`].
+    /// start instead of a stream; see [`MapSubscription::set_handler`].
+    // Block 45, D13.
     #[must_use]
     pub fn handler(mut self, handler: impl super::MapSubscriptionHandler) -> Self {
         self.handler = Some(std::sync::Mutex::new(Box::new(handler)));
@@ -501,12 +511,12 @@ impl MapSubscriptionBuilder {
 }
 
 impl Client {
-    /// Starts building a map subscription of `kind` to `channel` (Block
-    /// 45).
+    /// Starts building a map subscription of `kind` to `channel`.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and
     /// later), and may change in any minor release.
+    // Block 45.
     #[cfg_attr(docsrs, doc(cfg(feature = "unstable")))]
     pub fn map_subscription_builder(
         &self,

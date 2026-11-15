@@ -7,13 +7,19 @@
 //! publications, calls (RPC, publish, history, presence), batching and
 //! Fossil delta compression.
 //!
-//! [`Client`] runs on tokio (the default `tokio` feature). Its events, and
-//! each [`Subscription`]'s, come as a stream: a publication counts as
-//! delivered when the stream yields it, and a reader that falls behind
-//! holds the server back instead of growing the client's memory. The
-//! `machine` module is the sans-IO core the adapters drive, for other
-//! runtimes: public with the `unstable-machine` feature, outside the semver
-//! promise.
+//! # Adapters
+//!
+//! One [`Client`] API runs on two adapters, chosen by target:
+//!
+//! - natively, on tokio (the `tokio` feature), over websocket,
+//!   `http_stream` and sse through rustls;
+//! - in the browser, on `wasm32-unknown-unknown` (the `browser` feature),
+//!   over the browser's `WebSocket`, `fetch` and `EventSource`, on the
+//!   page's event loop.
+//!
+//! Both drive the same sans-IO core, which turns inputs (calls, frames,
+//! timers) into actions. Another runtime can drive it too: it is the
+//! `machine` module, public with the `unstable-machine` feature.
 //!
 //! ```no_run
 //! use ferrifuge::{Client, Config, SubscriptionEvent};
@@ -35,9 +41,55 @@
 //! # }
 //! ```
 //!
-//! The TLS crypto provider is chosen at build time: `ring` (default),
-//! `aws-lc-rs`, or `fips`. The repository's README covers configuration,
-//! tokens, transports, recovery and the examples.
+//! # Streams and handlers
+//!
+//! A [`Client`] and each [`Subscription`] deliver their events in one of
+//! two ways:
+//!
+//! - as a stream, from `events()`: an event counts as delivered when the
+//!   stream yields it, and a reader that falls behind holds the server back
+//!   instead of growing the client's memory;
+//! - to a handler, a closure or a [`ClientHandler`] or
+//!   [`SubscriptionHandler`], set with [`ClientBuilder::handler`],
+//!   [`Client::set_handler`], [`SubscriptionBuilder::handler`] or
+//!   [`Subscription::set_handler`]: an event counts as delivered when its
+//!   handler returns.
+//!
+//! A handler takes over its object's stream. [`EventDelivery`], set with
+//! [`ClientBuilder::event_delivery`], chooses where a client's handlers run:
+//! on a task of its runtime (the default), on the client's own driver, or,
+//! natively, on a thread of their own for handlers that block.
+//!
+//! # Cargo features
+//!
+//! | Feature | Default | Adds |
+//! |---|---|---|
+//! | `tokio` | yes | the native adapter: [`Client`] over websocket, `http_stream` and sse |
+//! | `ring` | yes | ring as the TLS crypto provider |
+//! | `aws-lc-rs` | no | aws-lc-rs as the TLS crypto provider |
+//! | `fips` | no | aws-lc-rs in FIPS mode; building it needs `CMake` and Go |
+//! | `browser` | yes | the browser adapter on `wasm32-unknown-unknown`; nothing on other targets |
+//! | `cookies` | no | a cookie jar for the native client |
+//! | `test-util` | no | constructors of the events and results the client yields, and natively an in-memory server double, for an application's tests |
+//! | `unstable` | no | map and shared poll subscriptions, and the browser's WebTransport |
+//! | `unstable-webtransport` | no | the native WebTransport transport; implies `unstable` |
+//! | `unstable-machine` | no | the sans-IO core, `ferrifuge::machine` |
+//!
+//! `tokio` needs one TLS provider. When several are enabled the strongest
+//! is used: `fips`, then `aws-lc-rs`, then `ring`. A build without ring
+//! turns default features off.
+//!
+//! The three `unstable` features are outside the semver promise: what they
+//! enable may change in any minor release. `unstable` and
+//! `unstable-webtransport` follow centrifuge-js 63ed73e and Centrifugo's
+//! experimental features; `unstable-machine` exposes the core's own API.
+//!
+//! # Guides
+//!
+//! The [README](https://github.com/jbiscella/ferrifuge#readme) covers
+//! configuration, tokens, subscriptions and recovery, calls, transports and
+//! fallback, codes, TLS, proxies, mobile and browser builds, testing an
+//! application, and the examples.
 //!
 //! # Logging
 //!
@@ -180,7 +232,8 @@ mod wire;
 
 /// Slots a queue of the client keeps once it is empty: what a burst grew is
 /// released, so that a client at rest holds the same memory whatever bursts
-/// it went through (Block 14, "Memory stays flat across reconnects").
+/// it went through.
+// Block 14, "Memory stays flat across reconnects".
 pub(crate) const RESTING_SLOTS: usize = 4;
 
 #[cfg(all(adapter_tokio, target_os = "android"))]
@@ -234,9 +287,9 @@ pub use event::{
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub use fossil::write as write_fossil_delta;
-/// The `http` crate, whose `Uri` a [`Connector`] is given (Block 37b).
-/// Moving to another major version of it is a breaking change of
-/// ferrifuge's.
+/// The `http` crate, whose `Uri` a [`Connector`] is given. Moving to
+/// another major version of it is a breaking change of ferrifuge's.
+// Block 37b.
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use http;
@@ -245,8 +298,9 @@ pub use http;
 pub use map::{MapEntry, MapKind, MapSubscriptionEvent, MapUpdate, UnrecoverableStrategy};
 pub use maybe_send::{MaybeSend, MaybeSync};
 /// rustls, whose types [`ClientBuilder::root_certificates`] and
-/// [`ClientBuilder::tls_config`] take (Block 22). Moving to another rustls
-/// 0.x line is a breaking release of Ferrifuge.
+/// [`ClientBuilder::tls_config`] take. Moving to another rustls 0.x line is
+/// a breaking release of Ferrifuge.
+// Block 22.
 #[cfg(adapter_tokio)]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub use rustls;
@@ -265,9 +319,9 @@ pub use subscription::{
 };
 pub use tag_filter::TagFilter;
 pub use token::TokenError;
-/// The `url` crate, whose `Url` a [`CookieJar`] is given (Block 43, D1).
-/// Moving to another major version of it is a breaking change of
-/// ferrifuge's.
+/// The `url` crate, whose `Url` a [`CookieJar`] is given. Moving to another
+/// major version of it is a breaking change of ferrifuge's.
+// Block 43, D1.
 #[cfg(all(adapter_tokio, feature = "cookies"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
 pub use url;

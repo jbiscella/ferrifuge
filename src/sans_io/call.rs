@@ -1,5 +1,6 @@
 //! The calls an owner of the machine adds, and the replies they settle
-//! with (Block 13; moved into the core's API by Block 54, D1).
+//! with.
+// Block 13; Block 54, D1.
 
 use crate::{HistoryOptions, HistoryResult, PresenceResult, PresenceStatsResult};
 

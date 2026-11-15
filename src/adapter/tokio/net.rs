@@ -1,6 +1,6 @@
-//! How one client reaches the server (Blocks 22 and 23): its TLS settings,
-//! its proxy setting, and the HTTP clients of `http_stream` and sse built
-//! from both.
+//! How one client reaches the server: its TLS settings, its proxy setting,
+//! and the HTTP clients of `http_stream` and sse built from both.
+// Blocks 22 and 23.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -19,16 +19,18 @@ use super::tls::{BuildOnce, Tls, plain_tls_config};
 #[derive(Debug, Default)]
 pub(in crate::adapter) struct Network {
     pub(in crate::adapter) tls: Tls,
-    /// The application's connector, which replaces every proxy setting
-    /// (Block 37, D4).
+    /// The application's connector, which replaces every proxy setting.
+    // Block 37, D4.
     connector: Option<Shared>,
     /// A setting given by `set_proxy`, applied at the next attempt.
     pending: Mutex<Option<Proxy>>,
     current: Mutex<Current>,
-    /// The application's cookie jar (Block 43).
+    /// The application's cookie jar.
+    // Block 43.
     cookie_jar: Jar,
-    /// The WebTransport endpoints found to take no ALPN (Block 48, D5).
-    /// Upstream: <https://github.com/centrifugal/centrifugo/issues/1322>.
+    /// The WebTransport endpoints found to take no ALPN. Upstream:
+    /// <https://github.com/centrifugal/centrifugo/issues/1322>.
+    // Block 48, D5.
     #[cfg(feature = "unstable-webtransport")]
     pub(in crate::adapter) alpn: super::webtransport::AlpnMemory,
 }
@@ -48,7 +50,8 @@ pub(in crate::adapter) struct Jar(());
 impl Jar {
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
-    /// jar (Block 43, D2, D3).
+    /// jar.
+    // Block 43, D2, D3.
     #[cfg_attr(
         not(feature = "cookies"),
         allow(clippy::unused_self, reason = "the jar is read only with `cookies`")
@@ -63,7 +66,8 @@ impl Jar {
     }
 
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
-    /// a request to `url`; nothing without a jar (Block 43, D2, D5).
+    /// a request to `url`; nothing without a jar.
+    // Block 43, D2, D5.
     #[cfg_attr(
         not(feature = "cookies"),
         allow(clippy::unused_self, reason = "the jar is read only with `cookies`")
@@ -87,16 +91,18 @@ impl std::fmt::Debug for Jar {
 
 /// The proxy setting in use, its decisions and the HTTP clients built on
 /// them. A transport keeps the decisions it was opened with, so a setting
-/// changed while it runs applies from the next attempt (Block 23, D1).
+/// changed while it runs applies from the next attempt.
+// Block 23, D1.
 #[derive(Debug, Default)]
 struct Current {
     decisions: Arc<Mutex<Decisions>>,
     /// The client's own HTTP clients. Kept apart from the decisions their
     /// proxy function holds, which would otherwise own them in a cycle.
     clients: Arc<Clients>,
-    /// The process-wide HTTP clients this attempt took first, kept for
-    /// all its requests, whoever asks for the proxy settings to be read
-    /// again meanwhile (Block 25, D7).
+    /// The process-wide HTTP clients this attempt took first, kept for all
+    /// its requests, whoever asks for the proxy settings to be read again
+    /// meanwhile.
+    // Block 25, D7.
     shared: Arc<OnceLock<Arc<Clients>>>,
 }
 
@@ -104,8 +110,9 @@ struct Current {
 struct Decisions {
     proxy: Proxy,
     /// The decisions of the current attempt, by endpoint: a proxy function
-    /// is asked once per endpoint per attempt (Block 23, D1), though the
-    /// HTTP client asks for each request.
+    /// is asked once per endpoint per attempt, though the HTTP client asks
+    /// for each request.
+    // Block 23, D1.
     decided: HashMap<String, Option<ProxyTarget>>,
     /// The environment's or the system's settings, read once per attempt.
     pinned: Arc<OnceLock<Arc<Matcher>>>,
@@ -149,7 +156,8 @@ impl Network {
         self.connector.as_ref()
     }
 
-    /// The network of a client given the cookie jar `jar` (Block 43).
+    /// The network of a client given the cookie jar `jar`.
+    // Block 43.
     pub(in crate::adapter) fn with_cookie_jar(mut self, jar: Jar) -> Self {
         self.cookie_jar = jar;
         self
@@ -157,13 +165,15 @@ impl Network {
 
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
-    /// jar (Block 43, D2, D3).
+    /// jar.
+    // Block 43, D2, D3.
     pub(in crate::adapter) fn add_cookies(&self, url: &str, headers: &mut http::HeaderMap) {
         self.cookie_jar.add(url, headers);
     }
 
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
-    /// a request to `url`; nothing without a jar (Block 43, D2, D5).
+    /// a request to `url`; nothing without a jar.
+    // Block 43, D2, D5.
     pub(in crate::adapter) fn store_cookies(
         &self,
         url: &str,
@@ -173,14 +183,15 @@ impl Network {
         self.cookie_jar.store(url, status, headers);
     }
 
-    /// The cookie jar, for the requests of an open HTTP transport (Block 43).
+    /// The cookie jar, for the requests of an open HTTP transport.
+    // Block 43.
     pub(in crate::adapter) fn jar(&self) -> Jar {
         self.cookie_jar.clone()
     }
 
-    /// Replaces the proxy setting from the next connection attempt
-    /// (Block 23, D1); with a connector, which is the route, nothing
-    /// (Block 37, D4).
+    /// Replaces the proxy setting from the next connection attempt; with a
+    /// connector, which is the route, nothing.
+    // Block 23, D1; Block 37, D4.
     pub(in crate::adapter) fn set_proxy(&self, proxy: Proxy) {
         if self.connector.is_none() {
             *lock(&self.pending) = Some(proxy);
@@ -189,9 +200,10 @@ impl Network {
 
     /// A new connection attempt starts: a setting given since the last one
     /// takes effect, endpoints are decided again, and the client's own HTTP
-    /// clients are built again. Their pools are keyed by destination, not by
-    /// proxy, so a connection through the last attempt's proxy would be
-    /// reused when a proxy function now chooses another (Codex, #115).
+    /// clients are built again. Their pools are keyed by destination, not
+    /// by proxy, so a connection through the last attempt's proxy would be
+    /// reused when a proxy function now chooses another.
+    // Codex, #115.
     pub(in crate::adapter) fn new_attempt(&self) {
         let pending = lock(&self.pending).take();
         let mut current = lock(&self.current);
@@ -207,8 +219,9 @@ impl Network {
         };
     }
 
-    /// The proxy for `url` under the setting in use (Block 23, D2),
-    /// decided once per endpoint per attempt.
+    /// The proxy for `url` under the setting in use, decided once per
+    /// endpoint per attempt.
+    // Block 23, D2.
     pub(in crate::adapter) fn decide(&self, url: &Url) -> Result<Option<ProxyTarget>, String> {
         // A connector reads no proxy setting (Block 37, D4).
         if self.connector.is_some() {
@@ -221,7 +234,8 @@ impl Network {
     /// The HTTP client of `https://` or plain requests: built once, per
     /// process for a client with the default proxy setting and the
     /// platform's trust, per client and per proxy setting otherwise; not
-    /// kept when its TLS settings are not (Block 6, C7).
+    /// kept when its TLS settings are not.
+    // Block 6, C7.
     pub(in crate::adapter) fn http_client(&self, secure: bool) -> Result<reqwest::Client, String> {
         // Built again once the system's proxy settings are read again
         // (Block 25, D7).
@@ -308,8 +322,8 @@ fn decide_once(decisions: &Mutex<Decisions>, url: &Url) -> Result<Option<ProxyTa
 }
 
 /// An HTTP client with `tls`, sending each request through the proxy
-/// `decide` gives, and only through it: reqwest reads no proxy of its own
-/// (Block 23, D4).
+/// `decide` gives, and only through it: reqwest reads no proxy of its own.
+// Block 23, D4.
 fn build(tls: ClientConfig, decide: Decide) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls)

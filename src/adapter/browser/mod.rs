@@ -1,7 +1,8 @@
 //! What the browser driver needs beyond the shared adapter layer: the
 //! browser's WebSocket and the inbox that bounds what it holds,
 //! `http_stream` over fetch, sse over `EventSource`, and the application's
-//! shims of them (Block 44, D2, D6 to D9, D12).
+//! shims of them.
+// Block 44, D2, D6 to D9, D12.
 
 pub(super) mod events;
 pub(super) mod http_stream;
@@ -37,15 +38,18 @@ pub(in crate::adapter) struct Open {
     pub(in crate::adapter) subprotocol: Option<&'static str>,
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) max_message: usize,
-    /// The bound of the inbox: the read-ahead's own (Block 44, D7).
+    /// The bound of the inbox: the read-ahead's own.
+    // Block 44, D7.
     pub(in crate::adapter) read_ahead: websocket::Bound,
     /// Where commands over emulated transports go, when not the default.
     pub(in crate::adapter) emulation: Option<String>,
     /// The commands an emulated transport's stream request carries.
     pub(in crate::adapter) initial_frame: Option<Vec<u8>>,
-    /// The constructors this attempt found, which can open `kind` (D12).
+    /// The constructors this attempt found, which can open `kind`.
+    // D12.
     pub(in crate::adapter) found: Found,
-    /// Whether HTTP requests carry the credentials of another origin (D13).
+    /// Whether HTTP requests carry the credentials of another origin.
+    // D13.
     pub(in crate::adapter) include_credentials: bool,
 }
 
@@ -148,9 +152,9 @@ pub(in crate::adapter) enum Transport {
 }
 
 impl Transport {
-    /// Sends `frame`: over websocket it counts as written at once (Block
-    /// 44, D6), over `http_stream` and sse once its emulation request is
-    /// answered.
+    /// Sends `frame`: over websocket it counts as written at once, over
+    /// `http_stream` and sse once its emulation request is answered.
+    // Block 44, D6.
     pub(in crate::adapter) fn send(
         &mut self,
         id: FrameId,
@@ -177,7 +181,8 @@ impl Transport {
     }
 
     /// Cancel-safe. Without `reading`, only writes and an overflow of the
-    /// inbox are reported (Block 44, D7).
+    /// inbox are reported.
+    // Block 44, D7.
     pub(in crate::adapter) async fn recv(&mut self, reading: bool) -> Inbound {
         match self {
             Self::WebSocket(websocket) => websocket.recv(reading).await,
@@ -189,8 +194,8 @@ impl Transport {
     }
 
     /// Closes the transport on a task of its own, bounded by
-    /// `Config::timeout` (Block 8); the task, which the driver awaits when it
-    /// stops (Block 33, D1).
+    /// `Config::timeout`; the task, which the driver awaits when it stops.
+    // Block 8; Block 33, D1.
     pub(in crate::adapter) fn close(self, runtime: &Handle) -> JoinHandle<()> {
         match self {
             Self::WebSocket(websocket) => super::platform::spawn(runtime, websocket.close()),
