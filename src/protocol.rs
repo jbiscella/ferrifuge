@@ -13,8 +13,14 @@
 //! `FERRIFUGE_REGENERATE_PROTOCOL=1 cargo test --test protocol_codegen`
 //! rewrites it.
 
-#![allow(dead_code)] // Consumed as blocks are implemented.
-// Generated code: its style is prost's, not ours.
-#![allow(missing_docs, unreachable_pub, clippy::pedantic)]
+#![expect(
+    dead_code,
+    reason = "generated from client.proto: the client uses only some of its messages"
+)]
+#![expect(
+    unreachable_pub,
+    clippy::pedantic,
+    reason = "generated code: its style is prost's, not ours"
+)]
 
 include!("protocol/centrifugal.centrifuge.protocol.rs");

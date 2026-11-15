@@ -754,8 +754,11 @@ impl crate::SharedPollUpdate {
 }
 
 #[cfg(test)]
-// Each setter is compared with assigning its field (Block 37, D2).
-#[allow(clippy::field_reassign_with_default)]
+// Block 37, D2.
+#[expect(
+    clippy::field_reassign_with_default,
+    reason = "each setter is compared with assigning its field"
+)]
 mod tests {
     use super::*;
 

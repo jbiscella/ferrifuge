@@ -230,7 +230,10 @@ pub(crate) fn android_ready() -> bool {
     ANDROID_READY.load(Ordering::Acquire)
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code, reason = "the guard of the Android verifier")
+)]
 pub(crate) fn set_android_ready() {
     ANDROID_READY.store(true, Ordering::Release);
 }
@@ -242,13 +245,19 @@ pub(crate) const ANDROID_SETUP_MISSING: &str = "the Android certificate verifier
 /// the one it wraps into an error (Block 24, D5): Android's panics at its
 /// first check without the setup, and with a Kotlin component of another
 /// version, inside the client's task.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code, reason = "the guard of the Android verifier")
+)]
 struct Guarded<V> {
     inner: V,
     ready: fn() -> bool,
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code, reason = "the guard of the Android verifier")
+)]
 impl<V> Guarded<V> {
     fn new(inner: V, ready: fn() -> bool) -> Self {
         Self { inner, ready }
@@ -262,7 +271,10 @@ impl<V> std::fmt::Debug for Guarded<V> {
 }
 
 /// Runs `check` unless it panics, which becomes an error.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code, reason = "the guard of the Android verifier")
+)]
 fn unpanicked<T>(check: impl FnOnce() -> Result<T, rustls::Error>) -> Result<T, rustls::Error> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).unwrap_or_else(|_| {
         Err(rustls::Error::General(
@@ -330,7 +342,10 @@ impl<V: ServerCertVerifier> ServerCertVerifier for Guarded<V> {
             target_os = "android"
         )
     ),
-    allow(dead_code)
+    allow(
+        dead_code,
+        reason = "these targets verify through the platform verifier, without these settings"
+    )
 )]
 fn roots_config(
     platform: Vec<CertificateDer<'static>>,
