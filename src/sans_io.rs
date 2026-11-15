@@ -290,7 +290,8 @@ struct TimerSettings {
     /// Every timer's but the debounce windows'.
     running: HashMap<TimerKey, TimerSetting>,
     /// The debounce windows', numbered afresh for each window: freed once
-    /// none runs, as the windows' own table (Block 46, D15).
+    /// none runs, as the windows' own table.
+    // Block 46, D15.
     windows: HashMap<DebounceTimer, TimerSetting>,
 }
 
