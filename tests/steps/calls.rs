@@ -379,7 +379,25 @@ async fn the_call_times_out(world: &mut ClientWorld) {
     let timeout = test_config().timeout;
     let (result, after) = outcome(world, None, timeout + TOLERANCE).await;
     let error = error(result);
-    assert_eq!(error.code, codes::error::TIMEOUT, "{error:?}");
+    if error.code != codes::error::TIMEOUT {
+        // What ended the connection: the client's events, and what the
+        // fake server and the relay saw.
+        let fake = world.fake.as_ref().map(|fake| {
+            (
+                fake.connections(),
+                fake.closed_connections(),
+                fake.last_closed_at().map(|at| at.elapsed()),
+            )
+        });
+        let relay = world
+            .relay
+            .as_ref()
+            .map(crate::support::relay::CountingRelay::connections);
+        panic!(
+            "{error:?} after {after:?}; client events since: {:?}; fake server (connections, closed, last closed ago): {fake:?}; relay connections: {relay:?}",
+            world.queued_events()
+        );
+    }
     assert!(
         after >= timeout,
         "timed out after {after:?}, before {timeout:?}"
