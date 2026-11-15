@@ -2733,7 +2733,9 @@ impl Machine {
                     self.server_subscription_pushed(&channel, result);
                 }
                 // centrifuge-js `_handleMessage`.
-                ReplyResult::Push(Push::Message(data)) => self.emit(ClientEvent::Message(data)),
+                ReplyResult::Push(Push::Message(data)) => {
+                    self.emit(ClientEvent::Message(crate::MessageContext { data }));
+                }
                 ReplyResult::Push(Push::Join { channel, id, info }) => {
                     self.join_or_leave(&channel, id, info, true);
                 }

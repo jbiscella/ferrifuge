@@ -220,7 +220,7 @@ mod tests {
     fn a_token_callback_holding_an_rc_may_await_a_js_future() {
         let token = Rc::new("t".to_owned());
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
-            .get_token(move || {
+            .get_token(move |_| {
                 let token = Rc::clone(&token);
                 async move {
                     JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))

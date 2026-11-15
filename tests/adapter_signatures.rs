@@ -32,7 +32,7 @@ async fn a_handler_s_track_is_signed(delivery: EventDelivery) {
         .get_signature({
             let items = Arc::clone(&items);
             let seen = Arc::clone(&seen_by_callback);
-            move |keys: Vec<String>| {
+            move |ferrifuge::SharedPollSignatureContext { keys, .. }| {
                 let subscription = items.lock().unwrap().clone().expect("set");
                 seen.lock().unwrap().push(subscription.tracked_keys());
                 async move {

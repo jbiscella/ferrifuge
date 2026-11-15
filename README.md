@@ -112,7 +112,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.24"
+ferrifuge = "0.25"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -254,13 +254,13 @@ For channels that need a subscription token, give an initial token, a
 callback, or both:
 
 ```rust
-use ferrifuge::TokenError;
+use ferrifuge::{SubscriptionTokenContext, TokenError};
 
 let subscription = client
     .subscription_builder("private:news")
-    .get_token(|channel| async move {
-        // Ask your backend for a token for `channel`.
-        fetch_subscription_token(&channel)
+    .get_token(|context: SubscriptionTokenContext| async move {
+        // Ask your backend for a token for the channel.
+        fetch_subscription_token(&context.channel)
             .await
             .map_err(|e| TokenError::Failed(e.to_string()))
     })
@@ -344,15 +344,17 @@ reloaded, and continues from the new position. A failed load is reported as
 an `error` event and retried after the resubscribe backoff.
 
 ```rust
-use ferrifuge::StateError;
+use ferrifuge::{GetStateContext, StateError};
 
 let subscription = client
     .subscription_builder("news")
-    .get_state(|channel| async move {
+    .get_state(|context: GetStateContext| async move {
         // Read the stream position first, then the state: publications made
         // meanwhile are then recovered rather than missed.
-        let position = stream_position(&channel).await;
-        load_state(&channel).await.map_err(|e| StateError::new(e.to_string()))?;
+        let position = stream_position(&context.channel).await;
+        load_state(&context.channel)
+            .await
+            .map_err(|e| StateError::new(e.to_string()))?;
         Ok(position)
     })
     .build()?;
@@ -786,8 +788,8 @@ The client's calls:
 
 | Call | Returns |
 |---|---|
-| `client.rpc(method, data)` | the result data of the server's RPC handler (with Centrifugo, its RPC proxy) |
-| `client.publish(channel, data)` | `()` once the server accepted the publication |
+| `client.rpc(method, data)` | an `RpcResult`: the `data` of the server's RPC handler (with Centrifugo, its RPC proxy) |
+| `client.publish(channel, data)` | a `PublishResult` once the server accepted the publication |
 | `client.history(channel, options)` | a `HistoryResult`: the publications `HistoryOptions` select (`limit`, `since`, `reverse`), and the stream's current `epoch` and `offset` |
 | `client.presence(channel)` | a `PresenceResult`: the subscribed clients by client id, with their user, connection info and channel info |
 | `client.presence_stats(channel)` | a `PresenceStatsResult`: `num_clients` and `num_users` |
@@ -800,7 +802,7 @@ client, so it can be spawned.
 ```rust
 use ferrifuge::HistoryOptions;
 
-let result = client.rpc("echo", br#"{"n":1}"#.to_vec()).await?;
+let result = client.rpc("echo", br#"{"n":1}"#.to_vec()).await?.data;
 client.publish("news", br#"{"text":"hi"}"#.to_vec()).await?;
 let history = client.history("news", HistoryOptions::default().limit(10)).await?;
 ```
@@ -1039,11 +1041,11 @@ Set the initial token in `Config::token`, and give the builder a callback
 that returns a new one:
 
 ```rust
-use ferrifuge::{Client, Config, TokenError};
+use ferrifuge::{Client, Config, ConnectionTokenContext, TokenError};
 
 let client = Client::builder("ws://localhost:8000/connection/websocket")
     .config(Config::default().token(initial_token))
-    .get_token(|| async {
+    .get_token(|_: ConnectionTokenContext| async {
         // Ask your backend for a new token.
         fetch_token().await.map_err(|e| TokenError::Failed(e.to_string()))
     })
@@ -1331,7 +1333,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.24", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.25", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1406,7 +1408,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.24", features = ["test-util"] }
+ferrifuge = { version = "0.25", features = ["test-util"] }
 ```
 
 ```rust

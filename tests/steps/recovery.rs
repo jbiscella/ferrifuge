@@ -572,16 +572,20 @@ fn a_subscription_with_get_state(world: &mut ClientWorld) {
     let subscription = world
         .client()
         .subscription_builder(RECOVERABLE)
-        .get_state(move |_channel| {
-            let (calls, answer, gate) =
-                (Arc::clone(&calls), Arc::clone(&answer), Arc::clone(&gate));
-            async move {
-                calls.lock().unwrap().push(Instant::now());
-                gate.acquire().await.expect("the gate stays open").forget();
-                let answer = answer.lock().unwrap().clone();
-                answer.ok_or_else(|| StateError::new("no position to answer".to_owned()))
-            }
-        })
+        .get_state(
+            move |ferrifuge::GetStateContext {
+                      channel: _channel, ..
+                  }| {
+                let (calls, answer, gate) =
+                    (Arc::clone(&calls), Arc::clone(&answer), Arc::clone(&gate));
+                async move {
+                    calls.lock().unwrap().push(Instant::now());
+                    gate.acquire().await.expect("the gate stays open").forget();
+                    let answer = answer.lock().unwrap().clone();
+                    answer.ok_or_else(|| StateError::new("no position to answer".to_owned()))
+                }
+            },
+        )
         .build()
         .expect("no subscription to the channel yet");
     world.track_subscription(subscription);
@@ -794,17 +798,16 @@ async fn subscribed_on_the_fake_server_with(
 async fn subscribed_with_a_token_callback(world: &mut ClientWorld) {
     a_connected_client(world).await;
     let calls = Arc::clone(&world.token_calls);
-    let builder = world
-        .client()
-        .subscription_builder(CHANNEL)
-        .get_token(move |channel| {
+    let builder = world.client().subscription_builder(CHANNEL).get_token(
+        move |ferrifuge::SubscriptionTokenContext { channel, .. }| {
             let calls = Arc::clone(&calls);
             async move {
                 let mut calls = calls.lock().unwrap();
                 calls.push(channel);
                 Ok(format!("t{}", calls.len()))
             }
-        });
+        },
+    );
     subscribed_on_the_fake_server_with(world, builder).await;
 }
 

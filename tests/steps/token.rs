@@ -35,7 +35,7 @@ pub(super) fn with_expiring_token(world: &ClientWorld, builder: ClientBuilder) -
     let denied = Arc::clone(&world.token_denied);
     builder
         .config(test_config().token(connection_token(USER, TOKEN_LIFETIME)))
-        .get_token(move || {
+        .get_token(move |_| {
             let denied = denied.load(Ordering::SeqCst);
             async move {
                 if denied {

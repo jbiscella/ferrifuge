@@ -1647,7 +1647,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            result.ok().and_then(Result::ok),
+            result.ok().and_then(Result::ok).map(|result| result.data),
             Some(br#"{"z":1, "a":2}"#.to_vec())
         );
         assert_eq!(*seen.lock().unwrap(), [sent]);

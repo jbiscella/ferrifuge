@@ -486,7 +486,7 @@ async fn client_with_token_callback(world: &mut ClientWorld) {
     let calls = Arc::clone(&world.server_side.token_calls);
     let builder = ferrifuge::Client::builder(endpoint)
         .config(super::test_config())
-        .get_token(move || {
+        .get_token(move |_| {
             let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
             async move { Ok(format!("token-{call}")) }
         });

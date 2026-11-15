@@ -5,11 +5,59 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-No version up to 0.24.0 was published: each section records what the
+No version up to 0.25.0 was published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.25.0] - 2026-11-15
+
+### Added
+
+- Event contexts (Block 54c, D4): `ConnectingContext`, `ConnectedContext`,
+  `DisconnectedContext`, `MessageContext`, `SubscribingContext` and
+  `UnsubscribedContext`, each `#[non_exhaustive]`, with a `new`
+  constructor under `test-util`.
+
+- Callback contexts (Block 54c, D10): `ConnectionTokenContext`,
+  `ConnectionDataContext`, `SubscriptionTokenContext { channel }`,
+  `SubscriptionDataContext { channel }`, `GetStateContext { channel }` and,
+  unstable, `SharedPollSignatureContext { keys }`; and the call results
+  `PublishResult` and `RpcResult { data }`. Each is `#[non_exhaustive]`,
+  with a `new` constructor under `test-util`.
+
+### Changed
+
+- The state events carry a context (Block 54c, D4):
+  `ClientEvent::Connecting(ConnectingContext)`,
+  `Connected(ConnectedContext)`, `Disconnected(DisconnectedContext)` and
+  `Message(MessageContext)`; `SubscriptionEvent::Subscribing(SubscribingContext)`
+  and `Unsubscribed(UnsubscribedContext)`, the same for
+  `ServerSubscriptionEvent::Unsubscribed` and the map and shared poll
+  events. `Subscribed` is renamed `SubscribedContext`. Each handler method
+  takes its context, e.g. `on_connected(&mut self, context:
+  ConnectedContext)`. A context can gain a field in a minor release.
+
+- The transport is a `TransportKind`: in `ConnectedContext::transport`,
+  `ClientError::transport` (`Option<TransportKind>`) and
+  `ClientEvent::connected` under `test-util` (Block 54c, D4).
+
+- `TransportKind::name` is renamed `as_str`, and
+  `ErrorKind::SubscriptionData` is renamed `SubscribeData`, after
+  centrifuge-js's `subscribeData` (Block 54c, D5).
+
+- Each callback takes one context (Block 54c, D10): `ClientBuilder::get_token`
+  takes `Fn(ConnectionTokenContext)` and `get_data` `Fn(ConnectionDataContext)`;
+  the subscription, map subscription and shared poll subscription
+  `get_token` take `Fn(SubscriptionTokenContext)`; `get_data`
+  `Fn(SubscriptionDataContext)`; `get_state` `Fn(GetStateContext)`;
+  `get_signature` `Fn(SharedPollSignatureContext)`.
+
+- `Client::publish` and `Subscription::publish` return a `PublishResult`,
+  and `Client::rpc` an `RpcResult`, whose `data` is what it returned
+  before (Block 54c, D10). `publish_json`, `rpc_json`, `send` and the map
+  calls are unchanged.
 
 ## [0.24.0] - 2026-11-15
 

@@ -1085,10 +1085,12 @@ impl ClientBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn() -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::ConnectionTokenContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
-        self.get_token = Some(Arc::new(move || Box::pin(get_token())));
+        self.get_token = Some(Arc::new(move || {
+            Box::pin(get_token(crate::ConnectionTokenContext {}))
+        }));
         self
     }
 
@@ -1100,10 +1102,12 @@ impl ClientBuilder {
     #[must_use]
     pub fn get_data<F, Fut>(mut self, get_data: F) -> Self
     where
-        F: Fn() -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::ConnectionDataContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<Vec<u8>, DataError>> + MaybeSend + 'static,
     {
-        self.get_data = Some(Arc::new(move || Box::pin(get_data())));
+        self.get_data = Some(Arc::new(move || {
+            Box::pin(get_data(crate::ConnectionDataContext {}))
+        }));
         self
     }
 
@@ -2207,7 +2211,7 @@ impl Client {
         &self,
         method: impl Into<String>,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<Vec<u8>, CallError>> + MaybeSend + 'static {
+    ) -> impl Future<Output = Result<crate::RpcResult, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::Rpc {
@@ -2216,7 +2220,7 @@ impl Client {
             },
         );
         reply_of(call, |reply| match reply {
-            CallReply::Rpc(data) => Some(data),
+            CallReply::Rpc(data) => Some(crate::RpcResult { data }),
             _ => None,
         })
     }
@@ -2264,7 +2268,7 @@ impl Client {
     {
         let call = serde_json::to_vec(data).map(|data| self.rpc(method, data));
         async move {
-            let data = call.map_err(JsonCallError::Encode)?.await?;
+            let data = call.map_err(JsonCallError::Encode)?.await?.data;
             match serde_json::from_slice(&data) {
                 Ok(result) => Ok(result),
                 Err(error) => Err(JsonCallError::Decode { error, data }),
@@ -2282,7 +2286,7 @@ impl Client {
         &self,
         channel: impl Into<String>,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
+    ) -> impl Future<Output = Result<crate::PublishResult, CallError>> + MaybeSend + 'static {
         let call = self.shared.call(
             None,
             CallRequest::Publish {
@@ -2291,7 +2295,7 @@ impl Client {
             },
         );
         reply_of(call, |reply| {
-            matches!(reply, CallReply::Publish).then_some(())
+            matches!(reply, CallReply::Publish).then_some(crate::PublishResult {})
         })
     }
 
@@ -2322,7 +2326,10 @@ impl Client {
         data: &T,
     ) -> impl Future<Output = Result<(), JsonCallError>> + MaybeSend + 'static {
         let call = serde_json::to_vec(data).map(|data| self.publish(channel, data));
-        async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
+        async move {
+            call.map_err(JsonCallError::Encode)?.await?;
+            Ok(())
+        }
     }
 
     /// Sets `key` of the map channel `channel` to `data`: raw JSON with the
@@ -5654,7 +5661,7 @@ mod tests {
                 token: "t".to_owned(),
                 ..Config::default()
             })
-            .get_token(|| async { Ok("t2".to_owned()) })
+            .get_token(|_| async { Ok("t2".to_owned()) })
             .build()
             .unwrap();
         let mut core = connected_core(
@@ -5756,7 +5763,7 @@ mod tests {
                 token: "t".to_owned(),
                 ..Config::default()
             })
-            .get_token(|| async { Ok("t2".to_owned()) })
+            .get_token(|_| async { Ok("t2".to_owned()) })
             .build()
             .unwrap();
         let (mut core, transport) = connected_core_over(
@@ -6543,7 +6550,7 @@ mod tests {
     #[tokio::test]
     async fn callbacks_the_driver_drops_leave_the_log() {
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
-            .get_token(std::future::pending::<Result<String, TokenError>>)
+            .get_token(|_| std::future::pending::<Result<String, TokenError>>())
             .build()
             .unwrap();
         for _ in 0..10 {
@@ -6559,7 +6566,7 @@ mod tests {
     #[tokio::test]
     async fn panicking_token_callback_is_reported_as_a_failed_fetch() {
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
-            .get_token(|| async { panic!("callback bug") })
+            .get_token(|_| async { panic!("callback bug") })
             .build()
             .unwrap();
         let mut events = client.events();
@@ -6589,7 +6596,7 @@ mod tests {
     #[tokio::test]
     async fn token_callback_panicking_before_its_future_is_a_failed_fetch() {
         let client = Client::builder("ws://127.0.0.1:1/connection/websocket")
-            .get_token(|| -> std::future::Ready<Result<String, TokenError>> {
+            .get_token(|_| -> std::future::Ready<Result<String, TokenError>> {
                 panic!("callback bug")
             })
             .build()

@@ -86,6 +86,31 @@ pub struct HistoryResult {
     pub offset: u64,
 }
 
+/// What a publish returned: nothing yet, standing in for `client.proto`'s
+/// empty `PublishResult` so that a field can come in a minor release
+/// (Block 54, D10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PublishResult {}
+
+/// What an RPC returned (`client.proto`, `RPCResult`; Block 54, D10). Its
+/// `Debug` output shows the data as its length (Block 21).
+#[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RpcResult {
+    /// The result data, exactly as received: raw JSON with the JSON
+    /// protocol, any bytes with Protobuf.
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for RpcResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcResult")
+            .field("data", &format_args!("<{} bytes>", self.data.len()))
+            .finish()
+    }
+}
+
 /// The clients subscribed to a channel (`client.proto`, `PresenceResult`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]

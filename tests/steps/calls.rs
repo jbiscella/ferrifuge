@@ -111,7 +111,7 @@ pub(super) fn call(world: &mut ClientWorld, method: &str, data: Vec<u8>) {
     let made_at = Instant::now();
     let future = world.client().rpc(method, data);
     track(world, method, made_at, async move {
-        future.await.map(Returned::Data)
+        future.await.map(|result| Returned::Data(result.data))
     });
 }
 
@@ -276,7 +276,7 @@ fn the_client_calls_map_publish(
     let made_at = Instant::now();
     let future = world.client().map_publish(channel, key, data.into_bytes());
     track(world, "map_publish", made_at, async move {
-        future.await.map(|()| Returned::Published)
+        future.await.map(|_| Returned::Published)
     });
 }
 
@@ -286,7 +286,7 @@ fn the_client_calls_map_remove(world: &mut ClientWorld, channel: String, key: St
     let made_at = Instant::now();
     let future = world.client().map_remove(channel, key);
     track(world, "map_remove", made_at, async move {
-        future.await.map(|()| Returned::Published)
+        future.await.map(|_| Returned::Published)
     });
 }
 
@@ -682,7 +682,7 @@ async fn the_client_publishes(world: &mut ClientWorld, data: String, channel: St
     let made_at = Instant::now();
     let publish = world.client().publish(channel, data.into_bytes());
     track(world, "publish", made_at, async move {
-        publish.await.map(|()| Returned::Published)
+        publish.await.map(|_| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     assert!(matches!(result, Ok(Returned::Published)), "{result:?}");
@@ -693,7 +693,7 @@ async fn the_subscription_publishes(world: &mut ClientWorld, data: String) {
     let made_at = Instant::now();
     let publish = world.subscription().publish(data.into_bytes());
     track(world, "publish", made_at, async move {
-        publish.await.map(|()| Returned::Published)
+        publish.await.map(|_| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     assert!(matches!(result, Ok(Returned::Published)), "{result:?}");
@@ -1134,7 +1134,7 @@ async fn the_first_client_publishes_bytes(world: &mut ClientWorld, bytes: String
     let made_at = Instant::now();
     let publish = world.client().publish(channel, hex_bytes(&bytes));
     track(world, "publish", made_at, async move {
-        publish.await.map(|()| Returned::Published)
+        publish.await.map(|_| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     assert!(matches!(result, Ok(Returned::Published)), "{result:?}");
@@ -1172,7 +1172,7 @@ fn the_fake_server_sends_a_protobuf_message(world: &mut ClientWorld, bytes: Stri
 /// The data of the client's next "message" event.
 async fn next_message(world: &mut ClientWorld) -> Vec<u8> {
     match world.next_event().await {
-        ClientEvent::Message(data) => data,
+        ClientEvent::Message(context) => context.data,
         event => panic!("expected a message event, got {event:?}"),
     }
 }
@@ -1199,7 +1199,7 @@ async fn the_client_sends(world: &mut ClientWorld, bytes: String, json: String) 
     let made_at = Instant::now();
     let send = world.client().send(data);
     track(world, "send", made_at, async move {
-        send.await.map(|()| Returned::Published)
+        send.await.map(|_| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     assert!(result.is_ok(), "{result:?}");
@@ -1243,7 +1243,7 @@ fn the_client_calls(world: &mut ClientWorld, command: String) {
     let call: Pin<Box<dyn Future<Output = Settled> + Send>> = match command.as_str() {
         "rpc" => {
             let call = client.rpc("bin", vec![0xff, 0x00, 0xfe]);
-            Box::pin(async move { call.await.map(Returned::Data) })
+            Box::pin(async move { call.await.map(|result| Returned::Data(result.data)) })
         }
         "history" => {
             let call = client.history(CHANNEL, HistoryOptions::default().limit(1));
@@ -1696,7 +1696,7 @@ fn the_client_sends_three(world: &mut ClientWorld) {
             .client()
             .send(json!({"n": n}).to_string().into_bytes());
         track(world, &format!("send {n}"), made_at, async move {
-            send.await.map(|()| Returned::Published)
+            send.await.map(|_| Returned::Published)
         });
     }
 }

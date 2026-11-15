@@ -75,7 +75,7 @@ impl ConnectData {
         let Some(answers) = self.callback.clone() else {
             return builder;
         };
-        builder.get_data(move || {
+        builder.get_data(move |_| {
             let data = answers
                 .lock()
                 .unwrap()

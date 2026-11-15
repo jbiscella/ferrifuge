@@ -359,11 +359,13 @@ impl MapSubscriptionBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::SubscriptionTokenContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
         self.options.common = self.options.common.token_source();
-        self.get_token = Some(Arc::new(move |channel| Box::pin(get_token(channel))));
+        self.get_token = Some(Arc::new(move |channel| {
+            Box::pin(get_token(crate::SubscriptionTokenContext { channel }))
+        }));
         self
     }
 

@@ -328,11 +328,13 @@ impl SharedPollSubscriptionBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::SubscriptionTokenContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
         self.options.common = self.options.common.token_source();
-        self.get_token = Some(Arc::new(move |channel| Box::pin(get_token(channel))));
+        self.get_token = Some(Arc::new(move |channel| {
+            Box::pin(get_token(crate::SubscriptionTokenContext { channel }))
+        }));
         self
     }
 
@@ -354,11 +356,13 @@ impl SharedPollSubscriptionBuilder {
     #[must_use]
     pub fn get_signature<F, Fut>(mut self, get_signature: F) -> Self
     where
-        F: Fn(Vec<String>) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::SharedPollSignatureContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<SharedPollSignature, TokenError>> + MaybeSend + 'static,
     {
         self.options.signature_source = true;
-        self.get_signature = Some(Arc::new(move |keys| Box::pin(get_signature(keys))));
+        self.get_signature = Some(Arc::new(move |keys| {
+            Box::pin(get_signature(crate::SharedPollSignatureContext { keys }))
+        }));
         self
     }
 

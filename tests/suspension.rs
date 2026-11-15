@@ -235,7 +235,7 @@ async fn a_due_refresh_fires_within_33_inputs_of_a_flood() {
                 std::sync::Arc::clone(&client_slot),
                 std::sync::Arc::clone(&read_at_refresh),
             );
-            move || {
+            move |_| {
                 let read = client_slot
                     .lock()
                     .unwrap()

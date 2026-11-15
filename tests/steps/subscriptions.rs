@@ -601,7 +601,7 @@ fn the_proxy_recorded_data_in_order(world: &mut ClientWorld, first: String, then
 async fn subscriptions_with_one_data_callback(world: &mut ClientWorld, a: String, b: String) {
     a_connected_client(world).await;
     let calls = Arc::clone(&world.data_calls);
-    let callback = move |channel: String| {
+    let callback = move |ferrifuge::SubscriptionDataContext { channel, .. }| {
         calls.lock().unwrap().push(channel);
         async { Ok(b"{}".to_vec()) }
     };

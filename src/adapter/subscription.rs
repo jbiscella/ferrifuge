@@ -268,13 +268,13 @@ impl Subscription {
     pub fn publish(
         &self,
         data: impl Into<Vec<u8>>,
-    ) -> impl Future<Output = Result<(), CallError>> + MaybeSend + 'static {
+    ) -> impl Future<Output = Result<crate::PublishResult, CallError>> + MaybeSend + 'static {
         let call = self.call(CallRequest::Publish {
             channel: self.channel.to_string(),
             data: data.into(),
         });
         reply_of(call, |reply| {
-            matches!(reply, CallReply::Publish).then_some(())
+            matches!(reply, CallReply::Publish).then_some(crate::PublishResult {})
         })
     }
 
@@ -299,7 +299,10 @@ impl Subscription {
         data: &T,
     ) -> impl Future<Output = Result<(), JsonCallError>> + MaybeSend + 'static {
         let call = serde_json::to_vec(data).map(|data| self.publish(data));
-        async move { Ok(call.map_err(JsonCallError::Encode)?.await?) }
+        async move {
+            call.map_err(JsonCallError::Encode)?.await?;
+            Ok(())
+        }
     }
 
     /// The history of the subscription's channel, as [`Client::history`]
@@ -402,11 +405,13 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_data<F, Fut>(mut self, get_data: F) -> Self
     where
-        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::SubscriptionDataContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<Vec<u8>, DataError>> + MaybeSend + 'static,
     {
         self.options = self.options.data_source();
-        self.get_data = Some(Arc::new(move |channel| Box::pin(get_data(channel))));
+        self.get_data = Some(Arc::new(move |channel| {
+            Box::pin(get_data(crate::SubscriptionDataContext { channel }))
+        }));
         self
     }
 
@@ -512,11 +517,13 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_token<F, Fut>(mut self, get_token: F) -> Self
     where
-        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::SubscriptionTokenContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<String, TokenError>> + MaybeSend + 'static,
     {
         self.options = self.options.token_source();
-        self.get_token = Some(Arc::new(move |channel| Box::pin(get_token(channel))));
+        self.get_token = Some(Arc::new(move |channel| {
+            Box::pin(get_token(crate::SubscriptionTokenContext { channel }))
+        }));
         self
     }
 
@@ -533,11 +540,13 @@ impl SubscriptionBuilder {
     #[must_use]
     pub fn get_state<F, Fut>(mut self, get_state: F) -> Self
     where
-        F: Fn(String) -> Fut + MaybeSend + MaybeSync + 'static,
+        F: Fn(crate::GetStateContext) -> Fut + MaybeSend + MaybeSync + 'static,
         Fut: Future<Output = Result<StreamPosition, StateError>> + MaybeSend + 'static,
     {
         self.options = self.options.state_source();
-        self.get_state = Some(Arc::new(move |channel| Box::pin(get_state(channel))));
+        self.get_state = Some(Arc::new(move |channel| {
+            Box::pin(get_state(crate::GetStateContext { channel }))
+        }));
         self
     }
 

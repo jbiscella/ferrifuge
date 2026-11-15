@@ -1702,7 +1702,7 @@ mod tests {
 
         assert!(actions.iter().any(|action| matches!(
             action,
-            Action::Emit(_, ClientEvent::Message(data)) if data == br#"{"b": 1.0,  "a":2}"#
+            Action::Emit(_, ClientEvent::Message(crate::MessageContext { data })) if data == br#"{"b": 1.0,  "a":2}"#
         )));
     }
 

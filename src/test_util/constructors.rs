@@ -50,6 +50,97 @@ impl ClientEvent {
 }
 
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::MessageContext {
+    /// The details of a `message` event carrying `data` (Block 54, D4).
+    #[must_use]
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self { data: data.into() }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::ConnectionTokenContext {
+    /// What the connection token callback is given (Block 54, D10).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::ConnectionDataContext {
+    /// What the connection data callback is given (Block 54, D10).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::SubscriptionTokenContext {
+    /// What a subscription token callback for `channel` is given (Block
+    /// 54, D10).
+    #[must_use]
+    pub fn new(channel: impl Into<String>) -> Self {
+        Self {
+            channel: channel.into(),
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::SubscriptionDataContext {
+    /// What a subscription data callback for `channel` is given (Block 54,
+    /// D10).
+    #[must_use]
+    pub fn new(channel: impl Into<String>) -> Self {
+        Self {
+            channel: channel.into(),
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::GetStateContext {
+    /// What a getState callback for `channel` is given (Block 54, D10).
+    #[must_use]
+    pub fn new(channel: impl Into<String>) -> Self {
+        Self {
+            channel: channel.into(),
+        }
+    }
+}
+
+#[cfg(feature = "unstable")]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "test-util", feature = "unstable"))))]
+impl crate::SharedPollSignatureContext {
+    /// What a shared poll signature callback for `keys` is given (Block 54,
+    /// D10).
+    #[must_use]
+    pub fn new(keys: Vec<String>) -> Self {
+        Self { keys }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::PublishResult {
+    /// What a publish returns (Block 54, D10).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl crate::RpcResult {
+    /// What an RPC returning `data` returns (Block 54, D10).
+    #[must_use]
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self { data: data.into() }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl ConnectingContext {
     /// The details of a `connecting` event with `code` and `reason`
     /// (Block 54, D4).
