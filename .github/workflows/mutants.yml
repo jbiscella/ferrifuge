@@ -9,10 +9,6 @@ on:
   schedule:
     - cron: "41 3 * * 6"
   workflow_dispatch:
-  # TEMPORARY, removed before merge: a run of this workflow on the pull
-  # request's branch (workflow_dispatch fires only for a file on main).
-  push:
-    branches: [ci/block-60c-mutants-shear]
 
 permissions:
   contents: read
