@@ -57,6 +57,7 @@ jobs:
               echo "- Pinned: \`${JS_PIN:0:7}\`. Now: \`${js_head:0:7}\` on \`$js_branch\`, $ahead commits ahead. Latest release: \`$js_release\`."
               echo "- Compare: https://github.com/$JS_REPO/compare/${JS_PIN:0:7}...${js_head:0:7}"
               echo "- Commits:"
+              # shellcheck disable=SC2016 # a jq program, not shell
               gh api "repos/$JS_REPO/compare/$JS_PIN...$js_head" \
                 --jq '.commits[-20:][] | "  - `\(.sha[0:7])` \(.commit.message | split("\n")[0])"'
               echo
@@ -66,6 +67,7 @@ jobs:
           rs_branch=$(gh api "repos/$RS_REPO" --jq .default_branch)
           rs_head=$(gh api "repos/$RS_REPO/commits/$rs_branch" --jq .sha)
           rs_release=$(gh api "repos/$RS_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo none)
+          # shellcheck disable=SC2016 # a jq program, not shell
           rs_docs=$(gh api "repos/$RS_REPO/compare/$RS_PIN...$rs_head" \
             --jq '[.files[]? | select(.filename == "docs/spec.md" or .filename == "docs/api.md" or .filename == "README.md" or .filename == "CHANGELOG.md") | "  - `\(.filename)` (+\(.additions) -\(.deletions))"] | join("\n")')
           if [ -n "$rs_docs" ]; then
