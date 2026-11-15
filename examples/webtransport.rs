@@ -36,8 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             Some(event) = client_events.next() => {
-                if let ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) = &event {
-                    println!("connected over {transport}");
+                if let ClientEvent::Connected(context) = &event {
+                    println!("connected over {}", context.transport.as_str());
                 }
             }
             Some(event) = events.next() => match event {

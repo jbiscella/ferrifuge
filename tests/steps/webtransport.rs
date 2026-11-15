@@ -183,7 +183,7 @@ async fn a_failed_attempt_over(world: &mut ClientWorld, transport: String) {
     };
     assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
     assert_eq!(
-        error.transport.as_deref(),
+        error.transport.map(ferrifuge::TransportKind::as_str),
         Some(transport.as_str()),
         "{error:?}"
     );
@@ -209,7 +209,7 @@ async fn refused_whichever_transport(world: &mut ClientWorld) {
             ClientEvent::Error(error)
                 if !reported
                     && error.kind == ErrorKind::Transport
-                    && error.transport.as_deref() == Some("webtransport") =>
+                    && error.transport == Some(ferrifuge::TransportKind::WebTransport) =>
             {
                 reported = true;
             }
