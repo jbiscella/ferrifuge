@@ -2243,6 +2243,29 @@ mod tests {
 
     const UNREACHABLE_ENDPOINT: &str = "ws://127.0.0.1:1/connection/websocket";
 
+    /// A server that takes the connection and never answers, so the
+    /// driver waits on nothing due for 5 s.
+    async fn silent_endpoint() -> (String, tokio::net::TcpListener) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "ws://{}/connection/websocket",
+            listener.local_addr().unwrap()
+        );
+        (endpoint, listener)
+    }
+
+    /// Waits until the driver has opened its connection to `listener` and
+    /// gone idle, with no wake stored, so only the core's guard can wake
+    /// it.
+    async fn driver_idle(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+        let (tcp, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the driver connects")
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tcp
+    }
+
     /// Poisons `client`'s core: its next input panics in the machine's
     /// step, on this thread, an application's call (Block 61, D6).
     fn poison(client: &Client, call: impl FnOnce(&Client)) {
@@ -2273,13 +2296,15 @@ mod tests {
     // thread closes the client, once, at once, without the machine.
     #[tokio::test]
     async fn a_panic_holding_the_core_on_an_application_thread_closes_the_client() {
-        let client = Client::new(UNREACHABLE_ENDPOINT, Config::default()).unwrap();
+        let (endpoint, listener) = silent_endpoint().await;
+        let client = Client::new(&endpoint, Config::default()).unwrap();
         let mut events = client.events();
         let subscription = client.new_subscription("news").unwrap();
         let subscription_events = subscription.events();
         client.connect();
         let (before, _) = queued(&mut events);
         let call = client.rpc("echo", b"{}".to_vec());
+        let _tcp = driver_idle(&listener).await;
 
         poison(&client, Client::disconnect);
 
@@ -2318,10 +2343,12 @@ mod tests {
     // Block 61, D6: a handler gets the `disconnected` 2, as a stream does.
     #[tokio::test]
     async fn a_poisoned_core_gives_the_client_handler_code_2() {
-        let client = Client::new(UNREACHABLE_ENDPOINT, Config::default()).unwrap();
+        let (endpoint, listener) = silent_endpoint().await;
+        let client = Client::new(&endpoint, Config::default()).unwrap();
         let codes = Codes::default();
         client.set_handler(codes.clone());
         client.connect();
+        let _tcp = driver_idle(&listener).await;
 
         poison(&client, Client::disconnect);
 
