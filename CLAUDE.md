@@ -4717,7 +4717,7 @@ This block reverses no exclusion.
   - a code means something only with the event or error that carries it: 1 is "transport closed" in `connecting` and "timeout" in an error;
   - the same field also carries server codes, in their own ranges (the last table);
   - the client's logs show the state, code and reason (Block 21);
-  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `subscribing` 2, `unsubscribed` 3 to 8 (5 and 6: Block 45 D12; 7 and 8: Block 47 D14), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code (Block 47).
+  - values follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5, 6 and 7 (7: Block 44 D7), `disconnected` 4 (Block 28 D3), `subscribing` 2, `unsubscribed` 3 to 8 (5 and 6: Block 45 D12; 7 and 8: Block 47 D14), and errors 15, 16 and 17 (16: Block 41 D6; 17: Block 46 D10); error 14 is centrifuge-js's shared-poll code (Block 47); centrifuge-js's `disconnected` 3014 and `unsubscribed` 2502, which the server sends, are rows of the server codes table.
 
   The module documentation states these without citing a block (amended by Block 60 D3).
 

@@ -1174,8 +1174,10 @@ carries it: 1 is "transport closed" in `Connecting` and "timeout" in an
 error. The same fields also carry server codes, in their own ranges (the
 last table). The client's logs show the state, code and reason. Values
 follow centrifuge-js 63ed73e `src/codes.ts`; Ferrifuge adds `connecting` 5,
-6 and 7, `subscribing` 2, `unsubscribed` 3 to 8 (7 and 8 with `unstable`),
-and errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code.
+6 and 7, `disconnected` 4, `subscribing` 2, `unsubscribed` 3 to 8, and
+errors 15, 16 and 17; error 14 is centrifuge-js's shared-poll code, and
+centrifuge-js's `disconnected` 3014 and `unsubscribed` 2502, which the
+server sends, are in the last table.
 
 #### `connecting`
 
