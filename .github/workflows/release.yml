@@ -124,8 +124,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # The version's changelog section as the notes; re-running this job
-      # never publishes again.
+      # The version's changelog section as the notes, marked as a
+      # pre-release for a version with a pre-release part (Block 55, D4);
+      # re-running this job never publishes again.
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -136,5 +137,9 @@ jobs:
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > notes.md
+          prerelease=()
+          case "$version" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
           gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md "${prerelease[@]}"

@@ -68,17 +68,13 @@ fn changelog_headings() -> Vec<String> {
         .collect()
 }
 
-/// `x.y.z` as numbers, for ordering.
-fn version(text: &str) -> (u64, u64, u64) {
-    let mut parts = text
-        .split('.')
-        .map(|part| part.parse().expect("a version number"));
-    let mut next = || parts.next().expect("three version numbers");
-    (next(), next(), next())
-}
+#[path = "../support/versions.rs"]
+mod versions;
+
+use versions::version;
 
 /// The versions of the changelog's sections, checking their headings.
-fn changelog_versions() -> Vec<(u64, u64, u64)> {
+fn changelog_versions() -> Vec<semver::Version> {
     let headings = changelog_headings();
     assert_eq!(
         headings.first().map(String::as_str),
@@ -120,8 +116,8 @@ fn changelog_in_order(_world: &mut ClientWorld) {
 
 #[then("the manifest's version is the newest of those versions, or above it")]
 fn manifest_is_newest(_world: &mut ClientWorld) {
-    let newest = changelog_versions()[0];
-    assert!(version(VERSION) >= newest, "{VERSION} below {newest:?}");
+    let newest = changelog_versions().swap_remove(0);
+    assert!(version(VERSION) >= newest, "{VERSION} below {newest}");
 }
 
 /// The bash that runs the release check: Git's on Windows, where `bash`

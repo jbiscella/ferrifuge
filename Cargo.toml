@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "0.25.0"
+version = "1.0.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"
@@ -243,6 +243,9 @@ cucumber = "0.23"
 dhat = "0.3.3"
 gungraun = "0.20.0"
 hmac = "0.13.0"
+# Orders the changelog's versions by SemVer precedence in the release
+# scenarios (Block 55, D4); already in the lock file.
+semver = "1.0.28"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
 serde_json = "1.0.154"

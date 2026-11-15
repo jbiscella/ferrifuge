@@ -7,6 +7,10 @@
 //! publications, calls (RPC, publish, history, presence), batching and
 //! Fossil delta compression.
 //!
+//! What the version promises, and what it leaves out, is stated in the
+//! README's [Stability](https://github.com/jbiscella/ferrifuge#stability)
+//! section.
+//!
 //! # Adapters
 //!
 //! One [`Client`] API runs on two adapters, chosen by target:
