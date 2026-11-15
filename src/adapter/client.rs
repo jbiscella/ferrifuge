@@ -56,7 +56,7 @@ pub struct Client {
 /// What the clones of a client own together: the last one dropped shuts the
 /// client down. The driver and the subscriptions hold `Shared`, not this.
 struct Owner {
-    pub(super) shared: Arc<Shared>,
+    shared: Arc<Shared>,
 }
 
 impl Drop for Owner {
@@ -1037,7 +1037,7 @@ impl Client {
 /// borrows nothing from the client.
 #[derive(Debug)]
 pub struct Batch {
-    pub(super) shared: Arc<Shared>,
+    shared: Arc<Shared>,
     stopped: bool,
 }
 

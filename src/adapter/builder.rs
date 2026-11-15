@@ -1,12 +1,3 @@
-// Neither `Send` nor `Sync` on the browser target (Block 44, D3).
-#![cfg_attr(
-    adapter_browser,
-    allow(
-        clippy::arc_with_non_send_sync,
-        reason = "neither `Send` nor `Sync` on the browser target"
-    )
-)]
-
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};

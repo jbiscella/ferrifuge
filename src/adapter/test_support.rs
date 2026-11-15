@@ -1,5 +1,3 @@
-// Test helpers the tests of several adapter files use (Block 61, D1).
-
 use std::sync::Arc;
 
 use futures_core::Stream;
@@ -8,8 +6,9 @@ use futures_util::{FutureExt, StreamExt};
 use crate::sans_io::{Action, Input, TransportId};
 use crate::{ClientEvent, State};
 
-use super::client::*;
-use super::shared::*;
+use super::client::Client;
+use super::shared::Core;
+use super::shared::lock;
 
 /// A current-thread runtime nothing drives, so that its client's
 /// driver never runs until the runtime is dropped.
