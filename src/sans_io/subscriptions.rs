@@ -1164,7 +1164,10 @@ impl Machine {
             || matches!(sub.tokens.pending_fetch(), Some((_, FetchPurpose::Connect)));
         // A subscribe in flight stays in `subscribes`, with its reply
         // deadline: its reply undoes it, its timeout starts over.
-        #[cfg_attr(not(feature = "unstable"), allow(unused_variables))]
+        #[cfg_attr(
+            not(feature = "unstable"),
+            allow(unused_variables, reason = "read only by map subscriptions")
+        )]
         let abandoned = sub.subscribe_command.take();
         if let Some(fetch) = sub.fetch.take() {
             self.actions.push(Action::CancelSubscriptionData(fetch));

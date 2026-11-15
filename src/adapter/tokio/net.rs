@@ -49,7 +49,10 @@ impl Jar {
     /// Sets the `Cookie` header of a request to `url`, from the jar and the
     /// application's own `Cookie` already in `headers`; nothing without a
     /// jar (Block 43, D2, D3).
-    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    #[cfg_attr(
+        not(feature = "cookies"),
+        allow(clippy::unused_self, reason = "the jar is read only with `cookies`")
+    )]
     pub(in crate::adapter) fn add(&self, url: &str, headers: &mut http::HeaderMap) {
         #[cfg(feature = "cookies")]
         if let Some(jar) = &self.0 {
@@ -61,7 +64,10 @@ impl Jar {
 
     /// Gives the jar the `Set-Cookie` values of a response with `status` to
     /// a request to `url`; nothing without a jar (Block 43, D2, D5).
-    #[cfg_attr(not(feature = "cookies"), allow(clippy::unused_self))]
+    #[cfg_attr(
+        not(feature = "cookies"),
+        allow(clippy::unused_self, reason = "the jar is read only with `cookies`")
+    )]
     pub(in crate::adapter) fn store(&self, url: &str, status: u16, headers: &http::HeaderMap) {
         #[cfg(feature = "cookies")]
         if let Some(jar) = &self.0 {

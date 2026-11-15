@@ -225,7 +225,8 @@ fn checksum(target: &[u8]) -> u32 {
 
 /// A delta writing `base` out `times` times with copies only: a few bytes
 /// that rebuild far more than they carry.
-#[cfg(all(test, feature = "unstable"))]
+#[cfg(test)]
+#[cfg(feature = "unstable")]
 pub(crate) fn write_repeats(base: &[u8], times: usize) -> Vec<u8> {
     let target = base.repeat(times);
     let mut delta = number(len(target.len()));

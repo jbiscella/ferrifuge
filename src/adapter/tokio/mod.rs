@@ -148,7 +148,7 @@ pub(in crate::adapter) enum Transport {
     WebSocket(Box<WebSocket>),
     Http(Box<HttpTransport>),
     #[cfg(feature = "unstable-webtransport")]
-    #[allow(clippy::enum_variant_names)] // The transport's name.
+    #[expect(clippy::enum_variant_names, reason = "the transport's name")]
     WebTransport(Box<WebTransport>),
 }
 

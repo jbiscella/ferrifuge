@@ -114,7 +114,7 @@ impl HttpTransport {
     /// Opens the stream at `url`, sending `initial_frame`, the encoded
     /// connect command, with the request. Commands then go to
     /// `emulation_endpoint`, by default `/emulation` on the stream's server.
-    #[allow(clippy::too_many_arguments)] // Each is the transport's own.
+    #[expect(clippy::too_many_arguments, reason = "each is the transport's own")]
     pub(crate) async fn open(
         kind: TransportKind,
         url: &str,

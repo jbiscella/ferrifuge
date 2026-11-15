@@ -103,7 +103,10 @@ pub struct UnsubscribedContext {
 /// recovery state"; centrifuge-js `SubscribedContext`).
 ///
 /// Its `Debug` output shows the data as its length (Block 21).
-#[allow(clippy::struct_excessive_bools)] // The flags of the spec's subscribed context.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of the spec's subscribed context"
+)]
 #[derive(Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscribedContext {

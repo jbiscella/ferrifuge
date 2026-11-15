@@ -6,7 +6,11 @@
 //!
 //! A `__test-hooks` module: outside semver, so its types need not be
 //! `#[non_exhaustive]` (Block 54, D2).
-#![allow(clippy::exhaustive_enums, clippy::exhaustive_structs)]
+#![allow(
+    clippy::exhaustive_enums,
+    clippy::exhaustive_structs,
+    reason = "outside semver"
+)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;

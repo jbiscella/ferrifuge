@@ -57,7 +57,7 @@ use crate::{
 ///
 /// Every method has a default, and a method added to this trait has one
 /// too; a new required method is a major release (Block 54, D7).
-#[allow(unused_variables)] // The defaults ignore their event.
+#[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait ClientHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: ClientEvent) {
@@ -118,7 +118,7 @@ impl<F: FnMut(ClientEvent) + MaybeSend + 'static> ClientHandler for F {
 ///
 /// Every method has a default, and a method added to this trait has one
 /// too; a new required method is a major release (Block 54, D7).
-#[allow(unused_variables)] // The defaults ignore their event.
+#[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait SubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: SubscriptionEvent) {
@@ -174,7 +174,7 @@ impl<F: FnMut(SubscriptionEvent) + MaybeSend + 'static> SubscriptionHandler for 
 /// Every method has a default, and a method added to this trait has one
 /// too; a new required method is a major release (Block 54, D7).
 #[cfg(feature = "unstable")]
-#[allow(unused_variables)] // The defaults ignore their event.
+#[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait MapSubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: crate::MapSubscriptionEvent) {
@@ -248,7 +248,7 @@ impl<F: FnMut(crate::MapSubscriptionEvent) + MaybeSend + 'static> MapSubscriptio
 /// Every method has a default, and a method added to this trait has one
 /// too; a new required method is a major release (Block 54, D7).
 #[cfg(feature = "unstable")]
-#[allow(unused_variables)] // The defaults ignore their event.
+#[expect(unused_variables, reason = "the defaults ignore their event")]
 pub trait SharedPollSubscriptionHandler: MaybeSend + 'static {
     /// Called for each event, in order; by default, the method of its kind.
     fn on_event(&mut self, event: crate::SharedPollSubscriptionEvent) {
@@ -319,7 +319,7 @@ impl EventDelivery {
 
     /// Never: the browser target has no threads.
     #[cfg(adapter_browser)]
-    #[allow(clippy::unused_self)] // As natively.
+    #[expect(clippy::unused_self, reason = "the signature it has on native targets")]
     pub(super) fn is_thread(self) -> bool {
         false
     }
@@ -589,7 +589,7 @@ pub(super) fn wake_consumer(shared: &Shared) {
 }
 
 /// A handler the client no longer calls, dropped once no lock is held.
-#[allow(dead_code)] // Held only to be dropped.
+#[expect(dead_code, reason = "held only to be dropped")]
 pub(super) enum Dropped {
     Client(Box<dyn ClientHandler>),
     Subscription(Box<dyn SubscriptionHandler>),
@@ -1380,7 +1380,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 // On tokio; the browser client is tested in a browser (Block 44, D18).
-#[cfg(all(test, adapter_tokio))]
+#[cfg(test)]
+#[cfg(adapter_tokio)]
 mod tests {
     use std::future::Future;
     use std::pin::Pin;

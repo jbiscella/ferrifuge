@@ -177,7 +177,8 @@ impl Log {
     }
 
     /// How many callbacks the log tracks, for tests.
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(test)]
+    #[cfg(adapter_tokio)]
     pub(super) fn tracked_fetches(&self) -> usize {
         lock(&self.state).fetches.len()
     }
@@ -434,7 +435,8 @@ pub(super) fn endpoint(url: &str) -> String {
     }
 }
 
-#[cfg(all(test, adapter_tokio))]
+#[cfg(test)]
+#[cfg(adapter_tokio)]
 mod tests {
     use super::{Log, endpoint};
     use crate::sans_io::{Input, Machine};

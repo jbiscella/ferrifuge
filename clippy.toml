@@ -20,3 +20,6 @@ disallowed-methods = [
   { path = "wtransport::tls::Certificate::serial", reason = "x509-parser, which Ferrifuge does not use (Block 48, D3)" },
   { path = "wtransport::Connection::peer_identity", reason = "parses the server's certificate with x509-parser, which expects (Block 48, D3)" },
 ]
+
+# `unwrap` in test code: the library denies it in `src/lib.rs` (Block 60, D4).
+allow-unwrap-in-tests = true

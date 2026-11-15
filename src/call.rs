@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn a_decode_error_shows_its_data_only_by_length() {
         #[derive(Debug, serde::Deserialize)]
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "its field is read only through `Debug`")]
         struct Sum {
             sum: u32,
         }

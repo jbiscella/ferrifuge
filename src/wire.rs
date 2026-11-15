@@ -58,7 +58,10 @@ pub(crate) struct RefreshRequest {
 }
 
 /// `SubscribeRequest` of `client.proto`, for the options implemented so far.
-#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeRequest.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of client.proto's SubscribeRequest"
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeRequest {
     pub(crate) channel: String,
@@ -148,10 +151,16 @@ pub(crate) struct KeyedItem {
 }
 
 /// `SubRefreshRequest.type` of a shared poll track request.
-#[cfg_attr(not(feature = "unstable"), allow(dead_code))] // Shared poll only.
+#[cfg_attr(
+    not(feature = "unstable"),
+    allow(dead_code, reason = "shared poll only")
+)]
 pub(crate) const TRACK: i32 = 1;
 /// `SubRefreshRequest.type` of a shared poll untrack request.
-#[cfg_attr(not(feature = "unstable"), allow(dead_code))] // Shared poll only.
+#[cfg_attr(
+    not(feature = "unstable"),
+    allow(dead_code, reason = "shared poll only")
+)]
 pub(crate) const UNTRACK: i32 = 2;
 
 /// `RPCRequest` of `client.proto`.
@@ -294,7 +303,10 @@ pub(crate) struct SubRefreshResult {
 }
 
 /// `SubscribeResult` of `client.proto`, for the fields implemented so far.
-#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeResult.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of client.proto's SubscribeResult"
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubscribeResult {
     /// The subscription token expires, in `ttl` seconds.

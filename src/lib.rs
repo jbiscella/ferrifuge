@@ -59,11 +59,19 @@
 //! or above in production, e.g. `RUST_LOG=info,ferrifuge=trace`.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Library-only lints (Block 60, D4): crate attributes, so `tests/`,
+// `benches/` and `examples/` keep their own. `clippy.toml` allows `unwrap`
+// in test code.
+#![deny(clippy::unwrap_used)]
+#![warn(clippy::allow_attributes_without_reason)]
 // Without an adapter and without `unstable-machine` nothing drives the
 // core, so most of it is unused in that build (Block 54, D1).
 #![cfg_attr(
     not(any(feature = "unstable-machine", adapter_tokio, adapter_browser)),
-    allow(dead_code)
+    allow(
+        dead_code,
+        reason = "nothing drives the core without an adapter or `unstable-machine`"
+    )
 )]
 
 #[cfg(any(adapter_tokio, adapter_browser))]

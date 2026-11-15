@@ -2,7 +2,13 @@
 //! browser's event loop on the browser target (Block 44, D2).
 
 // Neither `Send` nor `Sync` on the browser target (Block 44, D3).
-#![cfg_attr(adapter_browser, allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+    adapter_browser,
+    allow(
+        clippy::arc_with_non_send_sync,
+        reason = "neither `Send` nor `Sync` on the browser target"
+    )
+)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -454,13 +460,15 @@ impl Shared {
     }
 
     /// The next action queued for the driver, for tests.
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(test)]
+    #[cfg(adapter_tokio)]
     pub(super) fn next_action_for_tests(&self) -> Option<Action> {
         self.next_action()
     }
 
     /// Whether the driver was woken since this was last asked, for tests.
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(test)]
+    #[cfg(adapter_tokio)]
     pub(super) fn woken(&self) -> bool {
         use futures_util::FutureExt as _;
         self.actions_queued.notified().now_or_never().is_some()
@@ -716,7 +724,8 @@ impl Shared {
         }
     }
 
-    #[cfg(all(test, adapter_tokio))]
+    #[cfg(test)]
+    #[cfg(adapter_tokio)]
     fn next_action(&self) -> Option<Action> {
         lock(&self.core).actions.pop_front()
     }
@@ -1532,7 +1541,7 @@ impl Client {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // The settings of both adapters.
+    #[expect(clippy::too_many_lines, reason = "the settings of both adapters")]
     fn start(builder: ClientBuilder) -> Result<Self, ClientError> {
         let ClientBuilder {
             endpoints,
@@ -2663,7 +2672,13 @@ impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
 
     /// Arms `key`'s timer to fire `delay` from now, unless it runs and
     /// fires sooner: one timer at the earliest deadline asked for.
-    #[cfg_attr(not(feature = "unstable"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "unstable"),
+        allow(
+            dead_code,
+            reason = "only shared poll subscriptions ask for the earliest deadline"
+        )
+    )]
     fn set_earliest(&mut self, key: K, delay: Duration)
     where
         V: Default,
@@ -2680,7 +2695,8 @@ impl<K: Copy + Eq + std::hash::Hash, V: Copy> KeyedTimers<K, V> {
     }
 
     /// The number of timers running.
-    #[cfg(all(test, feature = "unstable"))]
+    #[cfg(test)]
+    #[cfg(feature = "unstable")]
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -2904,7 +2920,7 @@ impl Driver {
         self.shared.apply(input);
     }
 
-    #[allow(clippy::too_many_lines)] // One arm per source of input.
+    #[expect(clippy::too_many_lines, reason = "one arm per source of input")]
     async fn run(mut self) {
         // Set when the select! waited: every branch was pending once. Kept
         // across turns, for the yield at the top of the next one; the first
@@ -3151,7 +3167,7 @@ impl Driver {
         lock(&self.shared.records.driver).observe(running);
     }
 
-    #[allow(clippy::too_many_lines)] // One arm per action.
+    #[expect(clippy::too_many_lines, reason = "one arm per action")]
     fn perform(&mut self, action: Action) {
         match action {
             Action::OpenTransport {
@@ -3748,7 +3764,13 @@ fn check_usable(
 }
 
 /// Whether `kind` is WebTransport (Block 48).
-#[cfg_attr(not(feature = "unstable"), allow(clippy::missing_const_for_fn))]
+#[cfg_attr(
+    not(feature = "unstable"),
+    allow(
+        clippy::missing_const_for_fn,
+        reason = "a constant `false` without WebTransport"
+    )
+)]
 fn is_webtransport(kind: TransportKind) -> bool {
     #[cfg(feature = "unstable")]
     {
@@ -4098,7 +4120,10 @@ pub(super) fn presence_of(reply: CallReply) -> Option<PresenceResult> {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // The signature `reply_of` takes.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the signature `reply_of` takes"
+)]
 pub(super) fn presence_stats_of(reply: CallReply) -> Option<PresenceStatsResult> {
     match reply {
         CallReply::PresenceStats(stats) => Some(stats),
@@ -4107,7 +4132,8 @@ pub(super) fn presence_stats_of(reply: CallReply) -> Option<PresenceStatsResult>
 }
 
 // On tokio; the browser client is tested in a browser (Block 44, D18).
-#[cfg(all(test, adapter_tokio))]
+#[cfg(test)]
+#[cfg(adapter_tokio)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -5139,7 +5165,7 @@ mod tests {
                 // tests included (Block 44, D18).
                 let code = [
                     "#[cfg(test)]\nmod tests",
-                    "#[cfg(all(test, adapter_tokio))]\nmod tests",
+                    "#[cfg(test)]\n#[cfg(adapter_tokio)]\nmod tests",
                 ]
                 .iter()
                 .filter_map(|marker| text.find(marker))

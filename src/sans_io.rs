@@ -3,7 +3,11 @@
 
 // Outside semver with `unstable-machine` (Block 54, D1), so its types need
 // not be `#[non_exhaustive]` (Block 54, D2).
-#![allow(clippy::exhaustive_enums, clippy::exhaustive_structs)]
+#![allow(
+    clippy::exhaustive_enums,
+    clippy::exhaustive_structs,
+    reason = "outside semver"
+)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -46,7 +50,8 @@ mod tokens;
 mod transports;
 #[cfg(test)]
 mod unsupported_tests;
-#[cfg(all(test, feature = "unstable"))]
+#[cfg(test)]
+#[cfg(feature = "unstable")]
 mod webtransport_tests;
 
 use tokens::{
@@ -118,7 +123,13 @@ impl TransportKind {
 }
 
 /// Whether `kind` is WebTransport (Block 48).
-#[cfg_attr(not(feature = "unstable"), allow(clippy::missing_const_for_fn))]
+#[cfg_attr(
+    not(feature = "unstable"),
+    allow(
+        clippy::missing_const_for_fn,
+        reason = "a constant `false` without WebTransport"
+    )
+)]
 fn is_webtransport(kind: TransportKind) -> bool {
     #[cfg(feature = "unstable")]
     {
@@ -159,7 +170,8 @@ impl EventId {
     pub(crate) const NONE: Self = Self(u64::MAX);
 
     /// An id for the adapter's unit tests.
-    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
+    #[cfg(test)]
+    #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
@@ -172,7 +184,8 @@ pub struct FrameId(u64);
 
 impl FrameId {
     /// An id for the adapter's unit tests.
-    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
+    #[cfg(test)]
+    #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
@@ -214,7 +227,8 @@ pub struct TimerSetting(u64);
 
 impl TimerSetting {
     /// A setting for the adapter's unit tests.
-    #[cfg(all(test, any(adapter_tokio, adapter_browser)))]
+    #[cfg(test)]
+    #[cfg(any(adapter_tokio, adapter_browser))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
@@ -297,7 +311,8 @@ pub struct SubscriptionId(u64);
 
 impl SubscriptionId {
     /// An id for the adapter's unit tests.
-    #[cfg(all(test, feature = "unstable", any(adapter_tokio, adapter_browser)))]
+    #[cfg(test)]
+    #[cfg(all(feature = "unstable", any(adapter_tokio, adapter_browser)))]
     pub(crate) fn for_tests(n: u64) -> Self {
         Self(n)
     }
@@ -306,7 +321,10 @@ impl SubscriptionId {
 /// Options of a subscription (spec, "Subscription common options").
 ///
 /// Its `Debug` output redacts the token.
-#[allow(clippy::struct_excessive_bools)] // Independent options of the spec.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent options of the spec"
+)]
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SubscriptionOptions {
@@ -1314,7 +1332,7 @@ impl Input {
 }
 
 impl std::fmt::Debug for Input {
-    #[allow(clippy::too_many_lines)] // One arm per variant.
+    #[expect(clippy::too_many_lines, reason = "one arm per variant")]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect => f.write_str("Connect"),
@@ -1487,7 +1505,7 @@ impl std::fmt::Debug for Input {
 }
 
 impl std::fmt::Debug for Action {
-    #[allow(clippy::too_many_lines)] // One arm per variant.
+    #[expect(clippy::too_many_lines, reason = "one arm per variant")]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OpenTransport {
@@ -1763,7 +1781,10 @@ const SLOW: u32 = 3008;
 
 /// The client connection state machine.
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools)] // Independent facts of the connection.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts of the connection"
+)]
 pub struct Machine {
     config: Config,
     state: State,
@@ -2059,7 +2080,7 @@ impl Machine {
     }
 
     /// Reacts to `input`; the owner performs the returned actions in order.
-    #[allow(clippy::too_many_lines)] // One arm per variant.
+    #[expect(clippy::too_many_lines, reason = "one arm per variant")]
     pub fn handle(&mut self, input: Input) -> Vec<Action> {
         // A firing of a setting no longer running changes nothing; taken,
         // it no longer runs (Block 53 D2).
