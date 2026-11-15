@@ -10717,7 +10717,7 @@ Each of these mutations is seen red once, recorded in the PR:
 
 ## Block 62 — Certificate verification off the runtime's thread
 
-**Goal:** the operating system's certificate verifier never stalls the client's runtime, and `handshake_timeout` bounds it. Until that fix ships, the README states the behaviour. The fix does not gate 1.0.0-alpha.1; the statement does.
+**Goal:** the operating system's certificate verifier never stalls a multi-thread runtime, holds a current-thread runtime's thread at most until the attempt's handshake deadline, and `handshake_timeout` bounds it. Until that fix ships, the README states the behaviour. The fix does not gate 1.0.0-alpha.1; the statement does.
 
 Source: the reviewer's review of run 43702627832 (2026-11-15). That run's failure turned out to be the simulator's, but the review found this. Upstream: rustls-platform-verifier#237 (Windows, up to 10 s) and #256 (Android).
 
@@ -10733,8 +10733,8 @@ This block amends Block 55 D8. It reverses no exclusion.
 **Decisions** (reviewer, 2026-11-15, delegated by the owner):
 - **D1 The wrapper.** On macOS, iOS, Windows and Android, the platform verifier (on Android, behind `Guarded`) is wrapped once, in `tls.rs`.
   - `verify_server_cert` takes owned copies of its arguments and runs the inner call on a thread of its own.
-  - It waits for that thread: inside `tokio::task::block_in_place` when the current runtime is multi-thread, so that its timers and sockets move to another worker; plainly otherwise.
-  - The driver sets a thread-local deadline, the attempt's handshake deadline, while it polls the opening. The wait ends there. Without a deadline, the wait is unbounded.
+  - It waits for that thread: inside `tokio::task::block_in_place` when the current runtime is multi-thread, so that its timers and sockets move to another worker; plainly otherwise, so a current-thread runtime is held until the verification ends or the deadline passes. rustls calls the verifier synchronously and cannot resume a failed handshake, so nothing can wait on the verifier asynchronously, and a second handshake per new chain is not worth its cost. 62b's README text says so and recommends a multi-thread runtime.
+  - The driver sets a thread-local deadline, the attempt's handshake deadline, while it polls the opening. WebTransport's handshake runs in quinn's own task, so the deadline travels instead in the verifier wrapper of the TLS copy `quic_tls` makes for each handshake. The wait ends at the deadline. Without one, the wait is unbounded.
   - Past the deadline, verification fails with "handshake timeout: certificate verification did not finish". A thread whose verification outlasts its deadline runs until the verification returns; at most 8 such threads per process, past which a verification fails at once with the same error.
 - **D2 The statement (62a).**
   - The README's "TLS verification" gains, after "No setting accepts invalid certificates.", the reviewer's paragraph of 2026-11-15, beginning "**Verification can block.**".
@@ -10742,7 +10742,7 @@ This block amends Block 55 D8. It reverses no exclusion.
   - 62b replaces both with the fixed behaviour.
 - **D3 Version.** 62a: none. 62b: the next pre-release, with a "Fixed" entry. Bringing behaviour back to the documentation is a fix (Block 55, Stability).
 
-`VERIFY:` that `block_in_place` works inside tokio-rustls's poll inside the driver's `select!`, and that the Android verifier attaches a new thread to the JVM itself.
+`VERIFY:` that `block_in_place` works inside tokio-rustls's poll inside the driver's `select!`, and that the Android verifier attaches a new thread to the JVM itself; and that reqwest polls the handshakes of http_stream and sse inside the driver's poll, where the thread-local deadline is set.
 
 **Sub-increments:**
 - the spec PR: this text, the D8 amendment and line 3;
@@ -10753,7 +10753,8 @@ Value clause: As an app developer on a fleet whose networks block revocation ser
 
 **Structural acceptance (62b):**
 - Each test uses a stub verifier sleeping 2 s and `handshake_timeout` 1 s:
-  - on a current-thread runtime, the attempt fails with D1's message within 1.5 s;
+  - on a current-thread runtime, the attempt fails with D1's message within 1.5 s, and another task's 100 ms timer fires within 1.5 s too, bounded by the deadline;
+  - with `unstable-webtransport`, a WebTransport attempt against the local QUIC test server fails with D1's message within 1.5 s;
   - on a multi-thread runtime with two workers, another task's 100 ms timer fires during the verification;
   - a ninth verification past its deadline fails at once.
 - The verifier-kind unit test reports the wrapper on macOS, iOS, Windows and Android.
@@ -10761,6 +10762,7 @@ Value clause: As an app developer on a fleet whose networks block revocation ser
 Each of these mutations is seen red once, recorded in the PR:
 - `block_in_place` removed;
 - the deadline ignored;
+- the WebTransport copy built without its deadline;
 - the cap removed;
 - the wrapper skipped on Windows.
 
