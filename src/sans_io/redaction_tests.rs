@@ -226,8 +226,8 @@ fn shared_poll_inputs(s: &mut Sentinels) -> Vec<Input> {
 }
 
 /// One value of every `Action` variant, each secret field a sentinel. The
-/// events inside carry sentinels too; every event variant keeps the test of
-/// `src/event.rs`.
+/// events inside use only variants Block 54c left unchanged; every event
+/// variant keeps the test of `src/event.rs`.
 fn actions(s: &mut Sentinels) -> Vec<Action> {
     let mut actions = Vec::new();
     actions.extend([
@@ -248,9 +248,10 @@ fn actions(s: &mut Sentinels) -> Vec<Action> {
         Action::CancelTimer(Timer::Refresh),
         Action::Emit(
             EVENT,
-            ClientEvent::Message(crate::MessageContext {
-                data: s.bytes("message"),
-            }),
+            ClientEvent::ServerSubscription {
+                channel: "alerts".to_owned(),
+                event: crate::ServerSubscriptionEvent::Publication(publication(s)),
+            },
         ),
         Action::FetchToken(FETCH),
         Action::FetchConnectData(FETCH),
