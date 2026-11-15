@@ -1872,6 +1872,11 @@ mod tests {
                     .map(|component| component.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
+                // Test code whole: `mod.rs` declares it `#[cfg(test)]`
+                // (Block 61, D1).
+                if relative == "test_support.rs" {
+                    continue;
+                }
                 for (number, line) in code.lines().enumerate() {
                     if !line.trim_start().starts_with("//") {
                         out.push((relative.clone(), number + 1, line.to_owned()));
