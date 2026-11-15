@@ -197,7 +197,10 @@ struct JsonConnectSub<'a> {
     offset: u64,
 }
 
-#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeRequest.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of client.proto's SubscribeRequest"
+)]
 #[derive(Serialize)]
 struct JsonSubscribeRequest<'a> {
     channel: &'a str,
@@ -380,7 +383,7 @@ impl<'a> JsonData<'a> {
 }
 
 impl<'a> From<&'a Command> for JsonCommand<'a> {
-    #[allow(clippy::too_many_lines)] // One arm per method.
+    #[expect(clippy::too_many_lines, reason = "one arm per method")]
     fn from(command: &'a Command) -> Self {
         let mut json = Self {
             id: command.id,
@@ -529,27 +532,44 @@ impl<'a> From<&'a Command> for JsonCommand<'a> {
     }
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature required by skip_serializing_if"
+)]
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature required by skip_serializing_if"
+)]
 fn is_zero_i32(n: &i32) -> bool {
     *n == 0
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+// Not `expect`: on 32-bit targets 8 bytes are past the lint's limit.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature required by skip_serializing_if"
+)]
 fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+// Not `expect`: on 32-bit targets 8 bytes are past the lint's limit.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature required by skip_serializing_if"
+)]
 fn is_zero_i64(n: &i64) -> bool {
     *n == 0
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // Signature required by skip_serializing_if.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "signature required by skip_serializing_if"
+)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -728,7 +748,10 @@ struct JsonSubRefreshResult {
     items: Vec<JsonPublication>,
 }
 
-#[allow(clippy::struct_excessive_bools)] // The flags of client.proto's SubscribeResult.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of client.proto's SubscribeResult"
+)]
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct JsonSubscribeResult {

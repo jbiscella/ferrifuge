@@ -384,8 +384,10 @@ impl Connector for DoubleConnector {
 /// Serves one connection: the handshake, then its commands in order.
 async fn serve(state: Weak<Mutex<State>>, stream: tokio::io::DuplexStream) {
     let mut protobuf = false;
-    // The callback's error type is tungstenite's.
-    #[allow(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the callback's error type is tungstenite's"
+    )]
     let accepted =
         tokio_tungstenite::accept_hdr_async(stream, |request: &Request, mut response: Response| {
             protobuf = request

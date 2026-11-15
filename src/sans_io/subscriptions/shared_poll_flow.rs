@@ -571,7 +571,10 @@ impl Machine {
 
     /// The keys shared poll subscription `id` tracks, in the order they
     /// were tracked; `None` for another kind or an id not in the registry.
-    #[cfg_attr(not(any(adapter_tokio, adapter_browser)), allow(dead_code))] // Read by the adapters.
+    #[cfg_attr(
+        not(any(adapter_tokio, adapter_browser)),
+        allow(dead_code, reason = "read by the adapters")
+    )]
     pub(crate) fn shared_poll_tracked_keys(&self, id: SubscriptionId) -> Option<Vec<String>> {
         self.subscriptions
             .by_id

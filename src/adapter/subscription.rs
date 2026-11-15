@@ -713,7 +713,8 @@ impl Client {
 }
 
 // On tokio; the browser client is tested in a browser (Block 44, D18).
-#[cfg(all(test, adapter_tokio))]
+#[cfg(test)]
+#[cfg(adapter_tokio)]
 mod tests {
     use futures_util::StreamExt;
 

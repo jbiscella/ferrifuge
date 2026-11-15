@@ -11,3 +11,6 @@ disallowed-methods = [
 disallowed-types = [
   { path = "std::time::Instant", reason = "cannot be created on wasm32-unknown-unknown" },
 ]
+
+# `unwrap` in test code: the library denies it in `src/lib.rs` (Block 60, D4).
+allow-unwrap-in-tests = true

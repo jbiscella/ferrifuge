@@ -86,7 +86,10 @@ impl Owner {
 
 impl Commit {
     /// Never withdrawn (Block 47, D9).
-    #[cfg_attr(not(feature = "unstable"), allow(clippy::unused_self))]
+    #[cfg_attr(
+        not(feature = "unstable"),
+        allow(clippy::unused_self, reason = "only shared poll commits are kept")
+    )]
     fn kept(&self) -> bool {
         #[cfg(feature = "unstable")]
         return self.keep;
@@ -448,7 +451,10 @@ impl Machine {
         }
     }
 
-    fn move_position(&mut self, #[allow(unused_mut)] mut commit: Commit) {
+    fn move_position(
+        &mut self,
+        #[allow(unused_mut, reason = "changed only with `unstable`")] mut commit: Commit,
+    ) {
         #[cfg(feature = "unstable")]
         if let (Owner::Client(of), Some(taken)) = (&commit.owner, commit.key_version.take()) {
             let of = *of;

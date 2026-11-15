@@ -455,7 +455,10 @@ impl ProxyTarget {
     }
 }
 
-#[allow(clippy::missing_fields_in_debug)] // The credentials, on purpose.
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the credentials, on purpose"
+)]
 impl fmt::Debug for ProxyTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProxyTarget")

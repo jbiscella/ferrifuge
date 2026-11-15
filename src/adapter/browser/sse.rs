@@ -205,7 +205,7 @@ impl Sse {
     /// that would take the inbox past `bound` ends it too, reported as
     /// [`Inbound::Overflow`]. The source and the requests include
     /// credentials when `include_credentials` (D13).
-    #[allow(clippy::too_many_arguments)] // Each is the transport's own.
+    #[expect(clippy::too_many_arguments, reason = "each is the transport's own")]
     pub(in crate::adapter) async fn open(
         event_source: &Function,
         fetch: Function,

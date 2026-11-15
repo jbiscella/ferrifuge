@@ -143,7 +143,7 @@ pub(in crate::adapter) enum Transport {
     HttpStream(Box<HttpStream>),
     Sse(Box<Sse>),
     #[cfg(feature = "unstable")]
-    #[allow(clippy::enum_variant_names)] // The transport's name.
+    #[expect(clippy::enum_variant_names, reason = "the transport's name")]
     WebTransport(Box<webtransport::WebTransport>),
 }
 
