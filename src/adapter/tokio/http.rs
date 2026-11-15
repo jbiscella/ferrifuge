@@ -1425,4 +1425,173 @@ mod tests {
         assert_eq!(decode(false, &[b"{\"id\":1}"]), Vec::<String>::new());
         assert_eq!(decode(true, &[b"data: {}\n"]), Vec::<String>::new());
     }
+
+    /// The message of the failure `answer` gives an open of `kind`, or,
+    /// with `emulation`, the emulation request it answers.
+    async fn failure_of(kind: TransportKind, answer: &'static [u8], emulation: bool) -> String {
+        const STREAM: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n";
+        let (stream, configured) = if emulation {
+            let configured = serve_once(answer, "/emulation", Duration::ZERO).await;
+            (
+                serve_once(STREAM, "/connection/http_stream", Duration::ZERO).await,
+                Some(configured),
+            )
+        } else {
+            (
+                serve_once(answer, "/connection/stream", Duration::ZERO).await,
+                None,
+            )
+        };
+        let opened = HttpTransport::open(
+            kind,
+            &stream,
+            b"{}".to_vec(),
+            configured.as_deref(),
+            TIMEOUT,
+            HeaderSet::default(),
+            &Network::default(),
+            false,
+            LIMIT,
+        )
+        .await;
+        if !emulation {
+            let Err(failure) = opened else {
+                panic!("opened on {}", String::from_utf8_lossy(answer));
+            };
+            return failure.to_string();
+        }
+        let mut transport = opened.expect("an open stream");
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
+        match tokio::time::timeout(TIMEOUT, transport.recv(true)).await {
+            Ok(Inbound::Closed { reason, .. }) => reason,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Block 61, D5: the failures typed, their messages are today's. Each
+    // row pins the exact message of a representative failure.
+    #[tokio::test]
+    async fn the_messages_of_transport_failures_are_unchanged() {
+        let over_limit = |mut decoder: Decoder, chunk: &[u8]| {
+            decoder
+                .push(chunk, &mut VecDeque::new())
+                .unwrap_err()
+                .to_string()
+        };
+        let bad_url = HttpTransport::open(
+            TransportKind::HttpStream,
+            "not a url",
+            Vec::new(),
+            None,
+            TIMEOUT,
+            HeaderSet::default(),
+            &Network::default(),
+            false,
+            LIMIT,
+        )
+        .await;
+        let bad_emulation_url = HttpTransport::open(
+            TransportKind::HttpStream,
+            "http://127.0.0.1:1/connection/http_stream",
+            Vec::new(),
+            Some("not a url"),
+            TIMEOUT,
+            HeaderSet::default(),
+            &Network::default(),
+            false,
+            LIMIT,
+        )
+        .await;
+        let rows: [(&str, String, &str); 11] = [
+            (
+                "a line over the limit",
+                over_limit(Decoder::lines(4), b"12345\n"),
+                "message larger than the size limit",
+            ),
+            (
+                "a Protobuf reply over the limit",
+                over_limit(Decoder::protobuf(4), &[5]),
+                "message larger than the size limit",
+            ),
+            (
+                "an sse event over the limit",
+                over_limit(Decoder::new(true, 4), b"data: 12345\n\n"),
+                "message larger than the size limit",
+            ),
+            (
+                "an endpoint that is not a URL",
+                bad_url.err().expect("a failure").to_string(),
+                "relative URL without a base",
+            ),
+            (
+                "an emulation endpoint that is not a URL",
+                bad_emulation_url.err().expect("a failure").to_string(),
+                "relative URL without a base",
+            ),
+            (
+                "an open answered 404",
+                failure_of(
+                    TransportKind::HttpStream,
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n",
+                    false,
+                )
+                .await,
+                "HTTP status 404 Not Found",
+            ),
+            (
+                "an open answered by a web page",
+                failure_of(
+                    TransportKind::HttpStream,
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 0\r\n\r\n",
+                    false,
+                )
+                .await,
+                "HTTP status 200 OK, content type \"text/html\"; a captive portal may be answering",
+            ),
+            (
+                "an open redirected",
+                failure_of(
+                    TransportKind::HttpStream,
+                    b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://example.com/\r\ncontent-length: 0\r\n\r\n",
+                    false,
+                )
+                .await,
+                "HTTP status 307 Temporary Redirect; a captive portal may be answering",
+            ),
+            (
+                "an sse open answered with JSON",
+                failure_of(
+                    TransportKind::Sse,
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                    false,
+                )
+                .await,
+                "not an event stream: HTTP status 200 OK, content type \"application/json\"",
+            ),
+            (
+                "an open answered 407",
+                failure_of(
+                    TransportKind::HttpStream,
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\ncontent-length: 0\r\n\r\n",
+                    false,
+                )
+                .await,
+                "proxy authentication required",
+            ),
+            (
+                "an emulation request answered 503",
+                failure_of(
+                    TransportKind::HttpStream,
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+                    true,
+                )
+                .await,
+                "emulation request failed: HTTP status 503 Service Unavailable",
+            ),
+        ];
+
+        for (name, message, expected) in rows {
+            assert_eq!(message, expected, "{name}");
+        }
+    }
 }
