@@ -181,10 +181,12 @@ async fn forward_one_byte_per_write(inbound: TcpStream, outbound: TcpStream, sin
                 for byte in &buffer[..read] {
                     to.write_all(std::slice::from_ref(byte)).await?;
                     single.writes.fetch_add(1, Ordering::SeqCst);
-                    // Paced, so that the peer reads each byte on its own
-                    // rather than as many as its kernel merged: about 1 s
-                    // a scenario (reviewer, #251).
-                    tokio::time::sleep(PACE).await;
+                    // Paced on the monotonic clock: tokio's sleep lasts a timer tick,
+                    // about 15.6 ms on Windows (reviewer, #308).
+                    let next = std::time::Instant::now() + PACE;
+                    while std::time::Instant::now() < next {
+                        tokio::task::yield_now().await;
+                    }
                 }
             }
         }
