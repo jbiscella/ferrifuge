@@ -385,12 +385,18 @@ fn a_core_with_a_publish_in_a_window(world: &mut ClientWorld, interval: u32) {
 
 #[when("the subscription is unsubscribed and the window's timer then fires")]
 fn unsubscribed_then_fired(world: &mut ClientWorld) {
-    let timer = open_timers(world)[0];
+    let key = TimerKey::Debounce(open_timers(world)[0]);
     let run = run(world);
     let id = run.subscriptions[0];
+    // The setting the window's timer runs, which the unsubscribe cancels:
+    // its late firing is the owner's.
+    let setting = run
+        .machine
+        .key_setting(key)
+        .expect("the window's timer runs");
     run.handle(Input::Unsubscribe(id));
     run.mark = run.actions.len();
-    run.fire_key(TimerKey::Debounce(timer));
+    run.handle(Input::TimerFired(key, setting));
 }
 
 #[then("the firing produces no action")]
