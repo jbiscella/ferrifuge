@@ -1174,11 +1174,16 @@ mod tests {
             ),
         ];
 
+        let mut found = Vec::new();
         for (name, text) in items {
             assert!(text.contains("backend"), "{name}: {text}");
             for target in ["adapter_tokio", "adapter_browser"] {
-                assert!(!text.contains(target), "{name} names {target}");
+                if text.contains(target) {
+                    found.push(format!("{name} names {target}"));
+                }
             }
         }
+
+        assert!(found.is_empty(), "{found:#?}");
     }
 }
