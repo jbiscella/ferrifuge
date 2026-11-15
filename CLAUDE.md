@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–61 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–62 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -10046,7 +10046,7 @@ This block amends Block 20 D1, D2, D5 and D9 (see "Amendments to earlier blocks"
 
 - **D8 The status line.**
   - **The rule.** Block 55's spec PR writes CLAUDE.md line 3 once, under the coordination rule of 2026-11-14 ("block PRs leave line 3 alone; line 3 is written once, in Block 55's PR").
-  - **Template.** It follows the template of the Blocks 56–57 ruling: `Status: DRAFT — blocks <present> of N[; <gaps> reserved for blocks in progress]. Further blocks to be appended.` Runs are written `a–b`, separated by ", ", with " and " before the last. It counts the blocks in the file at that PR's merge.
+  - **Template.** It follows the template of the Blocks 56–57 ruling: `Status: DRAFT — blocks <present> of N[; <gaps> reserved for blocks in progress]. Further blocks to be appended.` Runs are written `a–b`, separated by ", ", with " and " before the last. It counts the blocks in the file at that PR's merge. A block appended after that PR rewrites line 3 in its own spec PR, by the same template.
   - **Line 3 then.** With Blocks 0–61 present: `Status: DRAFT — blocks 0–61 of N. Further blocks to be appended.`
 
 - **D9 Releasing** (process, after 55a merges):
@@ -10712,3 +10712,59 @@ Each of these mutations is seen red once, recorded in the PR:
 - **Block 28 D4** (61f), line 4000: "When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed and no event is emitted, while the calls and streams still end." becomes "When the panic poisoned the core's lock the machine may be inconsistent, and a second panic would abort the process: it is not fed, and the client closes by Block 61 D6, emitting `disconnected` code 2 without the machine, while the calls and streams still end."
 - **Block 28, structural acceptance** (61f), line 4006: "the guard dropped during a panic with the core's lock poisoned emits nothing and still ends the calls and streams;" becomes "the guard dropped during a panic with the core's lock poisoned emits `disconnected` code 2 once and still ends the calls and streams (Block 61 D6);".
 - **Block 33 D4** (61f), line 4602: "When the poisoned core lock leaves the machine unfed (Block 28 D4), no event is emitted, and the guard still fails calls and waiters with code 4." becomes "When the poisoned core lock leaves the machine unfed (Block 28 D4), the client emits `disconnected` code 2 without the machine and no subscription event (Block 61 D6), and the guard still fails calls and waiters with code 4."
+
+---
+
+## Block 62 — Certificate verification off the runtime's thread
+
+**Goal:** the operating system's certificate verifier never stalls the client's runtime, and `handshake_timeout` bounds it. Until that fix ships, the README states the behaviour. The fix does not gate 1.0.0-alpha.1; the statement does.
+
+Source: the reviewer's review of run 43702627832 (2026-11-15). That run's failure turned out to be the simulator's, but the review found this. Upstream: rustls-platform-verifier#237 (Windows, up to 10 s) and #256 (Android).
+
+**Dependencies:** Blocks 22 (the verifier per platform), 24 (Android's gate), 28 (the runtime handle), 29 (`handshake_timeout`), 55 (Stability, "Fixes"), 60 D3 (no block citations in docs), 61 D5 (typed failures).
+
+**Out of scope:**
+- the webpki path (Linux, fips): it does no I/O;
+- a raw `tls_config`'s verifier: the application's;
+- asynchronous verification inside rustls, which rustls 0.23 does not offer.
+
+This block amends Block 55 D8. It reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-15, delegated by the owner):
+- **D1 The wrapper.** On macOS, iOS, Windows and Android, the platform verifier (on Android, behind `Guarded`) is wrapped once, in `tls.rs`.
+  - `verify_server_cert` takes owned copies of its arguments and runs the inner call on a thread of its own.
+  - It waits for that thread: inside `tokio::task::block_in_place` when the current runtime is multi-thread, so that its timers and sockets move to another worker; plainly otherwise.
+  - The driver sets a thread-local deadline, the attempt's handshake deadline, while it polls the opening. The wait ends there. Without a deadline, the wait is unbounded.
+  - Past the deadline, verification fails with "handshake timeout: certificate verification did not finish". A thread whose verification outlasts its deadline runs until the verification returns; at most 8 such threads per process, past which a verification fails at once with the same error.
+- **D2 The statement (62a).**
+  - The README's "TLS verification" gains, after "No setting accepts invalid certificates.", the reviewer's paragraph of 2026-11-15, beginning "**Verification can block.**".
+  - `Config::handshake_timeout`'s documentation gains "The operating system's certificate verification is not interrupted: the timeout is checked once it returns."
+  - 62b replaces both with the fixed behaviour.
+- **D3 Version.** 62a: none. 62b: the next pre-release, with a "Fixed" entry. Bringing behaviour back to the documentation is a fix (Block 55, Stability).
+
+`VERIFY:` that `block_in_place` works inside tokio-rustls's poll inside the driver's `select!`, and that the Android verifier attaches a new thread to the JVM itself.
+
+**Sub-increments:**
+- the spec PR: this text, the D8 amendment and line 3;
+- **62a:** D2, merged before 55a;
+- **62b:** D1 and D3, after 1.0.0-alpha.1.
+
+Value clause: As an app developer on a fleet whose networks block revocation servers, I want certificate verification to keep within the handshake timeout and leave my runtime running, so that one slow check does not freeze the app's other work.
+
+**Structural acceptance (62b):**
+- Each test uses a stub verifier sleeping 2 s and `handshake_timeout` 1 s:
+  - on a current-thread runtime, the attempt fails with D1's message within 1.5 s;
+  - on a multi-thread runtime with two workers, another task's 100 ms timer fires during the verification;
+  - a ninth verification past its deadline fails at once.
+- The verifier-kind unit test reports the wrapper on macOS, iOS, Windows and Android.
+
+Each of these mutations is seen red once, recorded in the PR:
+- `block_in_place` removed;
+- the deadline ignored;
+- the cap removed;
+- the wrapper skipped on Windows.
+
+**Exceptions introduced:** no scenario. The operating system's timing cannot be staged against a server, so the stub verifier stands in for it.
+
+**Amendments to earlier blocks:**
+- **Block 55 D8:** after "It counts the blocks in the file at that PR's merge." add "A block appended after that PR rewrites line 3 in its own spec PR, by the same template."
