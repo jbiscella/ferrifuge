@@ -7,7 +7,7 @@
 
 use std::time::SystemTime;
 
-use crate::machine::TransportKind;
+use crate::sans_io::TransportKind;
 use crate::{
     ClientError, ClientEvent, ClientInfo, ConnectedContext, ConnectingContext, DeltaStatistics,
     DisconnectedContext, ErrorKind, HistoryResult, PresenceResult, PresenceStatsResult,

@@ -1,6 +1,6 @@
 //! Client state and the events reporting its changes.
 
-use crate::machine::TransportKind;
+use crate::sans_io::TransportKind;
 use crate::token::{Bytes, optional_bytes};
 use crate::{ClientInfo, Publication, SubscribedContext, UnsubscribedContext};
 

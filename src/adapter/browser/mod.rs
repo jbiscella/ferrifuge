@@ -22,7 +22,7 @@ pub(in crate::adapter) use self::websocket::Inbound;
 use self::websocket::WebSocket;
 use super::log::Log;
 use super::platform::{Handle, JoinHandle};
-use crate::machine::{FrameId, FrameType, TransportKind};
+use crate::sans_io::{FrameId, FrameType, TransportKind};
 
 /// A transport being opened.
 pub(in crate::adapter) type Opening = Pin<Box<dyn Future<Output = Result<Transport, String>>>>;

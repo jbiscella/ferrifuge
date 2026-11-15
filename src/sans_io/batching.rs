@@ -352,7 +352,7 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
-    use crate::machine::{
+    use crate::sans_io::{
         Action, FrameId, Input, Machine, SubscriptionOptions, SubscriptionTimer, TransportId,
         TransportKind,
     };

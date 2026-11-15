@@ -385,7 +385,7 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::Config;
-    use crate::machine::{Action, EventId, Input, Timer, TransportId};
+    use crate::sans_io::{Action, EventId, Input, Timer, TransportId};
 
     /// A machine over a websocket that opened; the connect command is 1.
     fn opened() -> (Machine, TransportId) {
@@ -507,7 +507,7 @@ mod tests {
         let id = machine
             .add_subscription(
                 "alerts".into(),
-                crate::machine::SubscriptionOptions::default(),
+                crate::sans_io::SubscriptionOptions::default(),
             )
             .unwrap();
         machine.handle(Input::Subscribe(id));

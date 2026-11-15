@@ -42,7 +42,7 @@ fn session(kind: TransportKind) -> Vec<String> {
     let id = machine
         .add_subscription(
             "news".to_owned(),
-            crate::machine::SubscriptionOptions::default(),
+            crate::sans_io::SubscriptionOptions::default(),
         )
         .expect("a new channel");
     let mut log = Vec::new();

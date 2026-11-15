@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::Config;
-use crate::machine::{EventId, Input, SubscriptionOptions, SubscriptionTimer, TransportId};
+use crate::sans_io::{EventId, Input, SubscriptionOptions, SubscriptionTimer, TransportId};
 
 /// A machine connected over a transport.
 fn connected() -> (Machine, TransportId) {
@@ -832,7 +832,7 @@ fn a_lost_connection_ends_the_load_and_the_next_one_starts_from_scratch() {
         code: None,
         reason: String::new(),
     });
-    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
+    let transport = opened(&machine.fire(crate::sans_io::Timer::Reconnect)).unwrap();
 
     let opened_again = machine.handle(Input::TransportOpened(transport));
 
@@ -863,7 +863,7 @@ fn reconnect_after(
         code,
         reason: String::new(),
     });
-    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
+    let transport = opened(&machine.fire(crate::sans_io::Timer::Reconnect)).unwrap();
     let mut actions = machine.handle(Input::TransportOpened(transport));
     let connect = sent(&actions)
         .into_iter()
@@ -1803,7 +1803,7 @@ fn disconnect_3014_makes_the_next_load_start_with_no_base() {
         code: Some(3014),
         reason: "state invalidated".into(),
     });
-    let transport = opened(&machine.fire(crate::machine::Timer::Reconnect)).unwrap();
+    let transport = opened(&machine.fire(crate::sans_io::Timer::Reconnect)).unwrap();
     let mut actions = machine.handle(Input::TransportOpened(transport));
     let connect = sent(&actions)
         .into_iter()

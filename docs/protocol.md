@@ -52,7 +52,7 @@ sequenceDiagram
     end
 ```
 
-Sources: Block 1 "Successful connect"; Block 2; Block 4 "Client answers ping with pong", "Client does not answer when pong is not expected", "Missing pings trigger reconnect", "Regular pings keep the connection alive"; Block 8 "Every transport unreachable"; Block 14 "Reconnect jitter window"; Block 15 "In order, one message at a time"; Block 29 D1; `src/machine.rs::timer_fired`
+Sources: Block 1 "Successful connect"; Block 2; Block 4 "Client answers ping with pong", "Client does not answer when pong is not expected", "Missing pings trigger reconnect", "Regular pings keep the connection alive"; Block 8 "Every transport unreachable"; Block 14 "Reconnect jitter window"; Block 15 "In order, one message at a time"; Block 29 D1; `src/sans_io.rs::timer_fired`
 
 ## Disconnect and reconnect
 
@@ -94,7 +94,7 @@ sequenceDiagram
     Note over App,Client: connect() and reconnect() restart the counter, with no backoff before their first attempt
 ```
 
-Sources: Block 1 "Temporary connection loss then successful reconnect", "Connection loss then terminal error on reconnect"; Block 2 "Delay upper bound per attempt", "Delays are jittered"; Block 3 "Application disconnect codes sent via server API", "Protocol-range disconnect codes", "Close code 1009 stops the client"; Block 14 "Reconnect jitter window", "Without a jitter window the first reconnect follows the backoff"; Block 15 "Backoff after 3008", "Reconnect delays keep growing while the server closes each connection with 3008", "A server ping read before 3008 lets the reset stand"; Block 19 D8; Block 25 D5; Block 44 D7; Block 48 D9; `src/machine.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff`
+Sources: Block 1 "Temporary connection loss then successful reconnect", "Connection loss then terminal error on reconnect"; Block 2 "Delay upper bound per attempt", "Delays are jittered"; Block 3 "Application disconnect codes sent via server API", "Protocol-range disconnect codes", "Close code 1009 stops the client"; Block 14 "Reconnect jitter window", "Without a jitter window the first reconnect follows the backoff"; Block 15 "Backoff after 3008", "Reconnect delays keep growing while the server closes each connection with 3008", "A server ping read before 3008 lets the reset stand"; Block 19 D8; Block 25 D5; Block 44 D7; Block 48 D9; `src/sans_io.rs::an_emulated_connect_reply_alone_does_not_reset_the_backoff`
 
 ## Subscription and recovery
 
@@ -201,7 +201,7 @@ sequenceDiagram
     Note over Client: a refresh that fell due during a system sleep runs at the wake, or before the next connect or subscribe
 ```
 
-Sources: Block 1 "Terminal condition while connected"; Block 5 "Token refreshed before expiry keeps the connection"; Block 10 "Subscription token refreshed before expiry keeps the subscription", "A failing first subscription token fetch is retried before subscribing", "A failing subscription token callback is retried", "A temporary sub_refresh error is retried", "Subscription token denied", "Subscribe error 109 fetches a new token and resubscribes", "A subscribe rejected for an expired token without a callback unsubscribes"; Block 14 "Token refresh jitter"; Block 17; Block 25 D3 "A refresh due during a short sleep starts at the wake", "A token due during a long sleep is fetched before the next connect"; `src/machine.rs::failed_connect_fetch_is_reported_and_retried_with_backoff`; `src/machine.rs::failed_refresh_fetch_is_reported_and_retried_in_5_to_10_s`; `src/machine.rs::refresh_reply_errors_retry_when_temporary_and_disconnect_otherwise`; `src/machine.rs::connect_error`
+Sources: Block 1 "Terminal condition while connected"; Block 5 "Token refreshed before expiry keeps the connection"; Block 10 "Subscription token refreshed before expiry keeps the subscription", "A failing first subscription token fetch is retried before subscribing", "A failing subscription token callback is retried", "A temporary sub_refresh error is retried", "Subscription token denied", "Subscribe error 109 fetches a new token and resubscribes", "A subscribe rejected for an expired token without a callback unsubscribes"; Block 14 "Token refresh jitter"; Block 17; Block 25 D3 "A refresh due during a short sleep starts at the wake", "A token due during a long sleep is fetched before the next connect"; `src/sans_io.rs::failed_connect_fetch_is_reported_and_retried_with_backoff`; `src/sans_io.rs::failed_refresh_fetch_is_reported_and_retried_in_5_to_10_s`; `src/sans_io.rs::refresh_reply_errors_retry_when_temporary_and_disconnect_otherwise`; `src/sans_io.rs::connect_error`
 
 ## Calls and timeouts
 

@@ -485,20 +485,20 @@ fn the_catalogue_reports_a_scenario_that_does_not_exist() {
 #[test]
 fn the_catalogue_reports_a_function_that_does_not_exist() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let cited = "`src/machine.rs::token_fetched_after_disconnect_is_ignored`";
+    let cited = "`src/sans_io.rs::token_fetched_after_disconnect_is_ignored`";
     let renamed = planted(
         cited,
-        "`src/machine.rs::token_fetched_after_disconnect_is_ignored_now`",
+        "`src/sans_io.rs::token_fetched_after_disconnect_is_ignored_now`",
     );
     reports(
         &renamed.missing_functions(root),
-        "src/machine.rs has no fn token_fetched_after_disconnect_is_ignored_now",
+        "src/sans_io.rs has no fn token_fetched_after_disconnect_is_ignored_now",
     );
     let moved = planted(
         cited,
-        "`src/machine_now.rs::token_fetched_after_disconnect_is_ignored`",
+        "`src/sans_io_now.rs::token_fetched_after_disconnect_is_ignored`",
     );
-    reports(&moved.missing_functions(root), "src/machine_now.rs:");
+    reports(&moved.missing_functions(root), "src/sans_io_now.rs:");
     let outside = planted(
         cited,
         "`machine.rs::token_fetched_after_disconnect_is_ignored`",
@@ -569,7 +569,7 @@ fn planted_all(pairs: &[(&str, &str)]) -> bug_catalogue::Catalogue {
 #[test]
 fn the_catalogue_reports_a_covered_row_without_evidence() {
     let cleared = planted(
-        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
+        "reported to the app | §6.5 | covered | `src/sans_io.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
         "reported to the app | §6.5 | covered |  |",
     );
     reports(
@@ -586,7 +586,7 @@ fn the_catalogue_reports_a_covered_row_without_evidence() {
     );
     // An invariant is evidence for our own classes only.
     let invariant_only = planted(
-        "reported to the app | §6.5 | covered | `src/machine.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
+        "reported to the app | §6.5 | covered | `src/sans_io.rs::inputs_about_an_abandoned_transport_are_ignored` (its reply); \"A transport the client closed reports no error\" (its close) |",
         "reported to the app | §6.5 | covered | I13 |",
     );
     reports(

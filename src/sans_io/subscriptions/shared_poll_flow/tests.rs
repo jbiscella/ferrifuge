@@ -6,7 +6,7 @@ use super::*;
 use crate::Config;
 use crate::TokenError;
 use crate::codec::Codec;
-use crate::machine::{EventId, FetchId, Input, SubscriptionOptions, TransportId};
+use crate::sans_io::{EventId, FetchId, Input, SubscriptionOptions, TransportId};
 
 /// A machine connected over a transport.
 fn connected() -> (Machine, TransportId) {
@@ -738,7 +738,7 @@ fn no_debug_output_shows_a_signature() {
 /// A machine connected over an emulated transport (`http_stream`).
 fn connected_emulated() -> (Machine, TransportId) {
     let mut machine = Machine::new(Config::default())
-        .with_transports(vec![crate::machine::TransportKind::HttpStream])
+        .with_transports(vec![crate::sans_io::TransportKind::HttpStream])
         .expect("an emulated transport");
     let transport = opened(&machine.handle(Input::Connect)).expect("a transport");
     machine.handle(Input::TransportOpened(transport));

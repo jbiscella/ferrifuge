@@ -42,7 +42,7 @@ const UNRECOVERABLE_POSITION_REASON: &str = "unrecoverable position";
 /// in progress. Boxed in the subscription, so a stream subscription pays a
 /// pointer (Block 14, "Marginal cost of a subscription").
 #[derive(Debug)]
-pub(in crate::machine) struct MapFlow {
+pub(in crate::sans_io) struct MapFlow {
     pub(super) kind: MapKind,
     page_size: u32,
     max_state_bytes: usize,
@@ -532,7 +532,7 @@ impl Machine {
     }
 
     /// Whether `id` is a map subscription.
-    pub(in crate::machine) fn is_map(&self, id: SubscriptionId) -> bool {
+    pub(in crate::sans_io) fn is_map(&self, id: SubscriptionId) -> bool {
         self.subscriptions
             .by_id
             .get(&id)
@@ -930,7 +930,7 @@ impl Machine {
     /// Whether `reply`, `size` bytes as read, is a page of a map
     /// subscription's load that makes no event and can be handled at once,
     /// ahead of messages held behind events not taken (D5).
-    pub(in crate::machine) fn map_page_early(&self, reply: &Reply, size: usize) -> bool {
+    pub(in crate::sans_io) fn map_page_early(&self, reply: &Reply, size: usize) -> bool {
         if self.state != State::Connected || reply.id == 0 || reply.error.is_some() {
             return false;
         }

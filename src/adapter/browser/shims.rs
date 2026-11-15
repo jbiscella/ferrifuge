@@ -7,7 +7,7 @@
 use js_sys::{Function, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::machine::TransportKind;
+use crate::sans_io::TransportKind;
 
 /// The shims the application gave ([`crate::ClientBuilder::websocket`],
 /// [`crate::ClientBuilder::fetch`], [`crate::ClientBuilder::readable_stream`],
@@ -129,7 +129,7 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::{Shims, none_usable};
-    use crate::machine::TransportKind;
+    use crate::sans_io::TransportKind;
 
     /// Removes the global `name` while `body` runs, then puts it back.
     fn without<T>(name: &str, body: impl FnOnce() -> T) -> T {

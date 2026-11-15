@@ -148,7 +148,7 @@ Sources: Block 13 "A call that timed out while queued is never sent", "A call wi
   disconnect 3005 "connection expired", and the client reconnects, fetching
   a new token first.
 
-Sources: Block 1 "Terminal condition while connected"; Block 5 "Token refreshed before expiry keeps the connection"; Block 10 "A failing subscription token callback is retried", "A failing first subscription token fetch is retried before subscribing", "Subscribe error 109 fetches a new token and resubscribes", "Subscription token denied"; Block 14 "Token refresh jitter"; Block 25 D3; `src/machine.rs::failed_refresh_fetch_is_reported_and_retried_in_5_to_10_s`; `src/machine.rs::failed_connect_fetch_is_reported_and_retried_with_backoff`
+Sources: Block 1 "Terminal condition while connected"; Block 5 "Token refreshed before expiry keeps the connection"; Block 10 "A failing subscription token callback is retried", "A failing first subscription token fetch is retried before subscribing", "Subscribe error 109 fetches a new token and resubscribes", "Subscription token denied"; Block 14 "Token refresh jitter"; Block 25 D3; `src/sans_io.rs::failed_refresh_fetch_is_reported_and_retried_in_5_to_10_s`; `src/sans_io.rs::failed_connect_fetch_is_reported_and_retried_with_backoff`
 
 ### Backpressure
 

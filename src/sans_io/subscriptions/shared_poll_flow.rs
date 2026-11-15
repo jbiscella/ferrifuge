@@ -64,7 +64,7 @@ const BATCH_TOO_LARGE: &str = "track batch over max_track_frame_bytes";
 /// Boxed in the subscription, so a stream subscription pays a pointer (Block
 /// 14, "Marginal cost of a subscription").
 #[derive(Debug)]
-pub(in crate::machine) struct SharedPollFlow {
+pub(in crate::sans_io) struct SharedPollFlow {
     signature_source: bool,
     max_track_frame_bytes: usize,
     /// Each tracked key, with the version of its value the application took
@@ -124,7 +124,7 @@ pub(in crate::machine) struct SharedPollFlow {
 
 /// What a track or untrack request is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::machine) enum Purpose {
+pub(in crate::sans_io) enum Purpose {
     /// Tracks keys: an application's call, a signature fetched for it, or
     /// the replay of a subscribe.
     Track,
@@ -178,7 +178,7 @@ struct Signed {
 
 /// A track or untrack request awaiting its reply.
 #[derive(Debug)]
-pub(in crate::machine) struct TrackCommand {
+pub(in crate::sans_io) struct TrackCommand {
     subscription: SubscriptionId,
     /// Its channel: a subscription recreated there after a removal waits
     /// for it too (D12).
@@ -196,7 +196,7 @@ pub(in crate::machine) struct TrackCommand {
 
 impl TrackCommand {
     /// Its reply deadline, if it has one.
-    pub(in crate::machine) fn timer(&self) -> Option<SharedPollTimer> {
+    pub(in crate::sans_io) fn timer(&self) -> Option<SharedPollTimer> {
         self.timer
     }
 }
@@ -300,7 +300,7 @@ impl SharedPollFlow {
     }
 
     /// The tracked keys, in the order they were tracked.
-    pub(in crate::machine) fn keys(&self) -> Vec<String> {
+    pub(in crate::sans_io) fn keys(&self) -> Vec<String> {
         let mut keys: Vec<(&String, u64)> = self
             .tracked
             .iter()
@@ -335,7 +335,7 @@ impl SharedPollFlow {
     /// `set_unsubscribed`); what it asked for and scheduled ends. The
     /// actions cancelling its timers.
     #[must_use]
-    pub(in crate::machine) fn forget(&mut self, id: SubscriptionId) -> Vec<Action> {
+    pub(in crate::sans_io) fn forget(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.tracked.clear();
         self.library.clear();
         self.queue.clear();
@@ -377,7 +377,7 @@ impl SharedPollFlow {
     /// next subscribe, its answer then changing nothing (I13). The actions
     /// cancelling the timers.
     #[must_use]
-    pub(in crate::machine) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
+    pub(in crate::sans_io) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
         for tracked in self.tracked.values_mut() {
             tracked.base = None;
         }
@@ -400,7 +400,7 @@ impl SharedPollFlow {
     }
 
     /// The connection is gone: nothing queued for it is sent.
-    pub(in crate::machine) fn connection_lost(&mut self) {
+    pub(in crate::sans_io) fn connection_lost(&mut self) {
         self.queue.clear();
     }
 
@@ -599,7 +599,7 @@ impl Machine {
 
     /// An application call or a callback answer of a shared poll
     /// subscription (Block 47, D6).
-    pub(in crate::machine) fn shared_poll_input(&mut self, input: super::super::Input) {
+    pub(in crate::sans_io) fn shared_poll_input(&mut self, input: super::super::Input) {
         use super::super::Input;
         match input {
             Input::TrackKeys(id, keys) => self.track_keys(id, keys),
@@ -992,7 +992,7 @@ impl Machine {
     /// The reply to track or untrack request `command` was read: its
     /// deadline stops, also when the reply waits behind events not taken
     /// (Block 15), and a firing already on its way is ignored.
-    pub(in crate::machine) fn track_command_read(&mut self, command: u32) {
+    pub(in crate::sans_io) fn track_command_read(&mut self, command: u32) {
         if let Some(timer) = self
             .subscriptions
             .track_commands
@@ -1006,7 +1006,7 @@ impl Machine {
     /// Whether the next subscribe of `id` waits for the requests in flight
     /// on its channel, of `id` or of a subscription removed from it: over
     /// an emulated transport they could be handled after it (D12).
-    pub(in crate::machine) fn shared_poll_requests_pending(&self, id: SubscriptionId) -> bool {
+    pub(in crate::sans_io) fn shared_poll_requests_pending(&self, id: SubscriptionId) -> bool {
         let Some(channel) = self.subscription_channel(id) else {
             return false;
         };
@@ -1128,7 +1128,7 @@ impl Machine {
     }
 
     /// Whether `command` is a track or untrack request awaiting its reply.
-    pub(in crate::machine) fn owns_track_command(&self, command: u32) -> bool {
+    pub(in crate::sans_io) fn owns_track_command(&self, command: u32) -> bool {
         self.subscriptions.track_commands.contains_key(&command)
     }
 
@@ -1334,7 +1334,7 @@ impl Machine {
     /// As any `sub_refresh` (Block 8): the subscription ends with
     /// `unsubscribed` 3, after an unsubscribe command, since the same
     /// request would be refused again.
-    pub(in crate::machine) fn track_command_too_large(&mut self, command: u32) -> bool {
+    pub(in crate::sans_io) fn track_command_too_large(&mut self, command: u32) -> bool {
         let Some(command) = self.subscriptions.track_commands.remove(&command) else {
             return false;
         };
@@ -1569,7 +1569,7 @@ impl Machine {
 
     /// The application took an update of `key` at `version` (D5): the
     /// version held moves to it, unless the key is no longer tracked.
-    pub(in crate::machine) fn shared_poll_version_taken(
+    pub(in crate::sans_io) fn shared_poll_version_taken(
         &mut self,
         id: SubscriptionId,
         key: &str,
@@ -1585,7 +1585,7 @@ impl Machine {
 
     /// The version held for `key` of the shared poll subscription `id`, if
     /// tracked.
-    pub(in crate::machine) fn shared_poll_key_version(
+    pub(in crate::sans_io) fn shared_poll_key_version(
         &mut self,
         id: SubscriptionId,
         key: &str,
@@ -1609,7 +1609,7 @@ impl Machine {
     /// The handler of an update that moved `key` from `before` to `after`
     /// panicked (Block 41 D4, Block 47 D15): the version goes back unless
     /// another step moved it since.
-    pub(in crate::machine) fn shared_poll_version_voided(
+    pub(in crate::sans_io) fn shared_poll_version_voided(
         &mut self,
         id: SubscriptionId,
         key: &str,

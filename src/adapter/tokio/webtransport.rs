@@ -26,7 +26,7 @@ use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, Var
 use super::super::body::{Decoder, TOO_LARGE};
 use super::net::Network;
 use super::transport::Inbound;
-use crate::machine::FrameId;
+use crate::sans_io::FrameId;
 
 /// QUIC settings of every WebTransport connection (D12), read back by a
 /// unit test: about 4 MiB of buffers per connection at most.

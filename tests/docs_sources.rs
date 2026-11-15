@@ -941,12 +941,12 @@ fn a_d_item_the_block_lacks_is_reported() {
 fn a_renamed_function_is_reported() {
     let texts = Texts::load().planted(
         PROTOCOL,
-        "`src/machine.rs::timer_fired`",
-        "`src/machine.rs::timer_fired_now`",
+        "`src/sans_io.rs::timer_fired`",
+        "`src/sans_io.rs::timer_fired_now`",
     );
     reports(
         &texts.problems(),
-        "src/machine.rs has no fn timer_fired_now",
+        "src/sans_io.rs has no fn timer_fired_now",
     );
 }
 

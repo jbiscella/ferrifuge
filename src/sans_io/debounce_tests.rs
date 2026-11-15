@@ -1002,7 +1002,7 @@ mod maps {
         frame, settled, timers_cancelled, timers_set,
     };
     use crate::MapKind;
-    use crate::machine::{MapSubscriptionOptions, Timer};
+    use crate::sans_io::{MapSubscriptionOptions, Timer};
 
     fn map_options() -> MapSubscriptionOptions {
         MapSubscriptionOptions::new(MapKind::Map)

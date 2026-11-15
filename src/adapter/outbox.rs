@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::task::{Context, Poll, Waker};
 
-use crate::machine::EventId;
+use crate::sans_io::EventId;
 
 /// What comes next for a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +164,7 @@ mod tests {
     use super::*;
 
     fn id(n: u64) -> EventId {
-        crate::machine::EventId::for_tests(n)
+        crate::sans_io::EventId::for_tests(n)
     }
 
     fn take(

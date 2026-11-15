@@ -39,7 +39,7 @@ use super::tokio::net::Network;
 use super::tokio::proxy::Proxy;
 #[cfg(adapter_tokio)]
 use super::tokio::tls::{self, Tls, Trust, unparsable_root};
-use crate::machine::{
+use crate::sans_io::{
     Action, CallId, CallTimer, DebounceTimer, FetchId, FrameType, Input, Machine, SubscriptionId,
     SubscriptionTimer, Timer, TimerKey, TimerSetting, TransportId, TransportKind,
 };
@@ -193,7 +193,7 @@ pub(super) struct Outboxes {
 }
 
 impl Outboxes {
-    fn withdraw(&mut self, ids: &[crate::machine::EventId]) {
+    fn withdraw(&mut self, ids: &[crate::sans_io::EventId]) {
         self.client.withdraw(ids);
         for outbox in self.subscriptions.values_mut() {
             outbox.withdraw(ids);
@@ -3281,7 +3281,7 @@ impl Driver {
 
 /// The reply deadlines of shared poll requests (Block 47, D12).
 #[cfg(feature = "unstable")]
-type SharedPollTimers = KeyedTimers<crate::machine::SharedPollTimer>;
+type SharedPollTimers = KeyedTimers<crate::sans_io::SharedPollTimer>;
 
 #[cfg(feature = "unstable")]
 impl SharedPollTimers {
