@@ -23,6 +23,8 @@ mod shared_poll_subscription;
 mod subscription;
 #[cfg(adapter_tokio)]
 mod tokio;
+#[cfg(all(test, adapter_tokio))]
+pub(crate) use self::tokio::http::header_set_sample;
 
 /// The transports of this build's target (Block 44, D2).
 #[cfg(adapter_browser)]

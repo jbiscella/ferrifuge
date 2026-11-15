@@ -55,6 +55,15 @@ impl HeaderSet {
     }
 }
 
+/// A header set holding `name: value`, for the redaction test (Block 60,
+/// D2): its values are secrets its `Debug` must not show.
+#[cfg(test)]
+pub(crate) fn header_set_sample(name: &'static str, value: &str) -> HeaderSet {
+    let mut headers = HeaderMap::new();
+    headers.insert(name, value.parse().expect("a header value"));
+    HeaderSet::new(headers)
+}
+
 impl std::fmt::Debug for HeaderSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let headers = Arc::clone(&lock(&self.0));
