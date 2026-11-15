@@ -15,6 +15,7 @@ mod driver;
 mod handler;
 #[cfg(feature = "__test-hooks")]
 mod hooks;
+mod kind;
 mod log;
 #[cfg(feature = "unstable")]
 mod map_subscription;

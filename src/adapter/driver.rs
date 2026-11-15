@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use super::outbox::Outbox;
 use futures_util::future::{self, AbortHandle};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
@@ -1110,14 +1109,7 @@ impl Drop for Ending {
         // Handles of subscriptions may outlive the client: end every event
         // stream rather than leave it pending forever, and release the data
         // callbacks nothing can call anymore.
-        let mut outboxes = lock(&shared.outboxes);
-        outboxes.client.close();
-        outboxes.subscriptions.values_mut().for_each(Outbox::close);
-        #[cfg(feature = "unstable")]
-        outboxes.maps.values_mut().for_each(Outbox::close);
-        #[cfg(feature = "unstable")]
-        outboxes.shared_polls.values_mut().for_each(Outbox::close);
-        drop(outboxes);
+        lock(&shared.outboxes).every(|outbox| outbox.close());
         lock(&shared.callbacks).0.clear();
         super::handler::wake_consumer(shared);
         super::handler::release_unconsumed(shared);

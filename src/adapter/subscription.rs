@@ -3,44 +3,38 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_core::Stream;
 
-use super::client::{Client, history_of, presence_of, presence_stats_of, reply_of};
-use super::shared::{
-    Callbacks, EventStream, GetData, GetState, GetSubscriptionToken, Shared, lock,
-};
-use crate::sans_io::{Input, SubscriptionId, SubscriptionOptions};
+use super::client::{Client, history_of, reply_of};
+use super::kind::SubscriptionHandle;
+use super::shared::{Callbacks, GetData, GetState, GetSubscriptionToken, Shared, lock};
+use crate::sans_io::SubscriptionKind;
+use crate::sans_io::SubscriptionOptions;
 use crate::{
-    CallError, CallReply, CallRequest, DataError, HistoryOptions, HistoryResult, JsonCallError,
-    MaybeSend, MaybeSync, PresenceResult, PresenceStatsResult, Publication, StateError,
-    StreamPosition, SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
+    CallError, CallRequest, DataError, HistoryOptions, HistoryResult, JsonCallError, MaybeSend,
+    MaybeSync, PresenceResult, PresenceStatsResult, Publication, StateError, StreamPosition,
+    SubscriptionError, SubscriptionEvent, SubscriptionState, TokenError,
 };
 
 /// A subscription to a channel, in its client's registry. Clones are
 /// handles to the same subscription.
 #[derive(Clone)]
 pub struct Subscription {
-    shared: Arc<Shared>,
-    id: SubscriptionId,
-    channel: Arc<str>,
+    pub(super) handle: SubscriptionHandle,
 }
 
 impl std::fmt::Debug for Subscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Subscription")
-            .field("channel", &self.channel)
-            .field("state", &self.state())
-            .finish_non_exhaustive()
+        self.handle.fmt(f, "Subscription", &[])
     }
 }
 
 /// Handles to the same subscription are equal.
 impl PartialEq for Subscription {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared) && self.id == other.id
+        self.handle.same(&other.handle)
     }
 }
 
@@ -50,16 +44,13 @@ impl Subscription {
     /// The channel subscribed to.
     #[must_use]
     pub fn channel(&self) -> &str {
-        &self.channel
+        self.handle.channel()
     }
 
     /// Current state.
     #[must_use]
     pub fn state(&self) -> SubscriptionState {
-        lock(&self.shared.core)
-            .machine
-            .subscription_state(self.id)
-            .unwrap_or(SubscriptionState::Unsubscribed)
+        self.handle.state()
     }
 
     /// Sets the tag filter sent in every subscribe command built from now
@@ -76,12 +67,7 @@ impl Subscription {
         &self,
         filter: Option<crate::TagFilter>,
     ) -> Result<(), SubscriptionError> {
-        lock(&self.shared.core)
-            .machine
-            .check_subscription_tag_filter(self.id, filter.as_ref())?;
-        self.shared
-            .apply(Input::SetSubscriptionTagFilter(self.id, filter));
-        Ok(())
+        self.handle.set_tag_filter(filter)
     }
 
     /// Sets the data sent in every subscribe command built from now on: the
@@ -92,8 +78,7 @@ impl Subscription {
     /// every attempt (centrifuge-js `setData`).
     // Block 32.
     pub fn set_data(&self, data: impl Into<Vec<u8>>) {
-        self.shared
-            .apply(Input::SetSubscriptionData(self.id, data.into()));
+        self.handle.set_data(data.into());
     }
 
     /// What delta compression did on the subscription since it was created:
@@ -109,10 +94,7 @@ impl Subscription {
     // Block 31.
     #[must_use]
     pub fn delta_statistics(&self) -> crate::DeltaStatistics {
-        lock(&self.shared.core)
-            .machine
-            .delta_statistics(self.id)
-            .unwrap_or_default()
+        self.handle.delta_statistics()
     }
 
     /// Waits until the subscription is subscribed, without taking an event
@@ -138,7 +120,7 @@ impl Subscription {
     /// it do.
     // Block 30; Block 15.
     pub fn ready(&self) -> impl Future<Output = Result<(), CallError>> + MaybeSend + use<> {
-        super::ready::ready(&self.shared, super::ready::Of::Subscription(self.id))
+        self.handle.ready()
     }
 
     /// Events of the subscription queued for its streams and not yet
@@ -148,10 +130,7 @@ impl Subscription {
     #[doc(hidden)]
     #[must_use]
     pub fn held_events(&self) -> usize {
-        lock(&self.shared.outboxes)
-            .subscriptions
-            .get(&self.id)
-            .map_or(0, super::outbox::Outbox::held)
+        self.handle.held_events::<SubscriptionEvent>()
     }
 
     /// This subscription's publications from now on, and nothing else: a
@@ -203,7 +182,8 @@ impl Subscription {
     /// as delivered when its method returns.
     // Block 41, D1.
     pub fn set_handler(&self, handler: impl super::SubscriptionHandler) {
-        super::handler::set_subscription_handler(&self.shared, self.id, Box::new(handler));
+        self.handle
+            .set_handler::<SubscriptionEvent>(Box::new(handler));
     }
 
     /// Events from now on. An event counts as delivered once this stream
@@ -215,39 +195,20 @@ impl Subscription {
     /// ends once the subscription is removed or its client dropped.
     // Block 15.
     pub fn events(&self) -> impl Stream<Item = SubscriptionEvent> + MaybeSend + Unpin + use<> {
-        // Checked against the registry under the core lock: removal leaves
-        // the registry first, then closes the outbox, so a removed
-        // subscription's stream ends at once.
-        let mut core = lock(&self.shared.core);
-        let number = if core.machine.subscription_state(self.id).is_some()
-            && !self.shared.closed.load(Ordering::Acquire)
-        {
-            let number = lock(&self.shared.outboxes)
-                .subscriptions
-                .entry(self.id)
-                .or_default()
-                .open_stream();
-            self.shared
-                .handle(&mut core, Input::StreamOpened(Some(self.id)));
-            number
-        } else {
-            0
-        };
-        drop(core);
-        EventStream::new(Arc::clone(&self.shared), Some(self.id), number)
+        self.handle.events::<SubscriptionEvent>()
     }
 
     /// Starts subscribing: at once when the client is connected, otherwise
     /// once it is. The state is [`SubscriptionState::Subscribing`] when this
     /// returns, unless already subscribed.
     pub fn subscribe(&self) {
-        self.shared.apply(Input::Subscribe(self.id));
+        self.handle.subscribe();
     }
 
     /// Unsubscribes. The state is [`SubscriptionState::Unsubscribed`] when
     /// this returns.
     pub fn unsubscribe(&self) {
-        self.shared.apply(Input::Unsubscribe(self.id));
+        self.handle.unsubscribe();
     }
 
     /// Publishes `data` to the subscription's channel, as
@@ -278,13 +239,7 @@ impl Subscription {
         &self,
         data: impl Into<Vec<u8>>,
     ) -> impl Future<Output = Result<crate::PublishResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::Publish {
-            channel: self.channel.to_string(),
-            data: data.into(),
-        });
-        reply_of(call, |reply| {
-            matches!(reply, CallReply::Publish).then_some(crate::PublishResult {})
-        })
+        self.handle.publish(data.into())
     }
 
     /// Publishes `data` encoded as JSON to the subscription's channel, as
@@ -325,8 +280,8 @@ impl Subscription {
         &self,
         options: HistoryOptions,
     ) -> impl Future<Output = Result<HistoryResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::History {
-            channel: self.channel.to_string(),
+        let call = self.handle.call(CallRequest::History {
+            channel: self.handle.channel.to_string(),
             options,
         });
         reply_of(call, history_of)
@@ -341,10 +296,7 @@ impl Subscription {
     pub fn presence(
         &self,
     ) -> impl Future<Output = Result<PresenceResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::Presence {
-            channel: self.channel.to_string(),
-        });
-        reply_of(call, presence_of)
+        self.handle.presence()
     }
 
     /// How many clients and users are subscribed to the subscription's
@@ -356,17 +308,7 @@ impl Subscription {
     pub fn presence_stats(
         &self,
     ) -> impl Future<Output = Result<PresenceStatsResult, CallError>> + MaybeSend + 'static {
-        let call = self.call(CallRequest::PresenceStats {
-            channel: self.channel.to_string(),
-        });
-        reply_of(call, presence_stats_of)
-    }
-
-    fn call(
-        &self,
-        request: CallRequest,
-    ) -> impl Future<Output = Result<CallReply, CallError>> + MaybeSend + 'static {
-        self.shared.call(Some(self.id), request)
+        self.handle.presence_stats()
     }
 }
 
@@ -570,44 +512,7 @@ impl SubscriptionBuilder {
     ///
     /// When the registry holds a subscription to the channel already.
     pub fn build(self) -> Result<Subscription, SubscriptionError> {
-        crate::subscription::check_resubscribe_delays(&self.options)?;
-        // Registered with its callback under the core lock: no other thread
-        // can find and subscribe it before the callback is there.
-        let mut core = lock(&self.shared.core);
-        // After shutdown nothing could ever subscribe it, and a callback
-        // registered now would outlive the driver's cleanup.
-        if self.shared.closed.load(Ordering::Acquire) {
-            return Err(SubscriptionError::ClientClosed);
-        }
-        let id = core
-            .machine
-            .add_subscription(self.channel.clone(), self.options)?;
-        self.shared.log.subscription(id, &self.channel);
-        if self.get_data.is_some() || self.get_token.is_some() || self.get_state.is_some() {
-            lock(&self.shared.callbacks).0.insert(
-                id,
-                Callbacks {
-                    data: self.get_data,
-                    token: self.get_token,
-                    state: self.get_state,
-                    #[cfg(feature = "unstable")]
-                    signature: None,
-                },
-            );
-        }
-        let replaced = self.handler.and_then(|handler| {
-            let handler = handler
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            super::handler::install_subscription_handler(&self.shared, &mut core, id, handler)
-        });
-        drop(core);
-        drop(replaced);
-        Ok(Subscription {
-            shared: self.shared,
-            id,
-            channel: self.channel.into(),
-        })
+        self.register()
     }
 
     /// The subscription's handler, which takes its events from the start
@@ -649,44 +554,15 @@ impl Client {
     /// The subscription to `channel` in the registry, if any.
     #[must_use]
     pub fn get_subscription(&self, channel: &str) -> Option<Subscription> {
-        let core = lock(&self.shared().core);
-        let id = core.machine.find_subscription(channel)?;
-        // A map or shared poll subscription is not one (Blocks 45, 47, D2).
-        #[cfg(feature = "unstable")]
-        if core.machine.map_subscription_kind(id).is_some() || core.machine.is_shared_poll(id) {
-            return None;
-        }
-        drop(core);
-        Some(Subscription {
-            shared: Arc::clone(self.shared()),
-            id,
-            channel: channel.into(),
-        })
+        super::kind::find(self, channel, stream_only).map(|(handle, ())| Subscription { handle })
     }
 
     /// Every subscription in the registry.
     #[must_use]
     pub fn subscriptions(&self) -> Vec<Subscription> {
-        let core = lock(&self.shared().core);
-        let subscriptions = core.machine.subscriptions();
-        // Map and shared poll subscriptions are listed apart (Blocks 45, 47,
-        // D2).
-        #[cfg(feature = "unstable")]
-        let subscriptions: Vec<_> = subscriptions
+        super::kind::list(self, stream_only)
             .into_iter()
-            .filter(|(id, _)| {
-                core.machine.map_subscription_kind(*id).is_none()
-                    && !core.machine.is_shared_poll(*id)
-            })
-            .collect();
-        drop(core);
-        subscriptions
-            .into_iter()
-            .map(|(id, channel)| Subscription {
-                shared: Arc::clone(self.shared()),
-                id,
-                channel: channel.into(),
-            })
+            .map(|(handle, ())| Subscription { handle })
             .collect()
     }
 
@@ -708,26 +584,46 @@ impl Client {
     /// end after the final "unsubscribed". A subscription of another client
     /// is left alone.
     pub fn remove_subscription(&self, subscription: &Subscription) {
-        if !Arc::ptr_eq(&subscription.shared, self.shared()) {
-            return;
-        }
-        self.shared()
-            .apply(Input::RemoveSubscription(subscription.id));
-        lock(&self.shared().callbacks).0.remove(&subscription.id);
-        self.shared().log.subscription_removed(subscription.id);
-        // The final events were queued by the call above: its streams end
-        // once they have yielded them.
-        let mut outboxes = lock(&self.shared().outboxes);
-        if let Some(outbox) = outboxes.subscriptions.get_mut(&subscription.id) {
-            outbox.close();
-            if outbox.is_finished() {
-                outboxes.subscriptions.remove(&subscription.id);
-            }
-        }
+        super::kind::remove::<SubscriptionEvent>(self, &subscription.handle);
     }
 }
 
 // On tokio; the browser client is tested in a browser (Block 44, D18).
+
+impl SubscriptionBuilder {
+    /// Registers the subscription, its callbacks and its handler.
+    // Block 61, D3.
+    fn register(self) -> Result<Subscription, SubscriptionError> {
+        crate::subscription::check_resubscribe_delays(&self.options)?;
+        let callbacks = (self.get_data.is_some()
+            || self.get_token.is_some()
+            || self.get_state.is_some())
+        .then(|| Callbacks {
+            data: self.get_data,
+            token: self.get_token,
+            state: self.get_state,
+            #[cfg(feature = "unstable")]
+            signature: None,
+        });
+        let options = self.options;
+        super::kind::register::<SubscriptionEvent>(
+            self.shared,
+            self.channel,
+            |machine, channel| machine.add_subscription(channel, options),
+            callbacks,
+            self.handler,
+        )
+        .map(|handle| Subscription { handle })
+    }
+}
+
+/// What a stream subscription's lookup takes: map and shared poll
+/// subscriptions are listed apart.
+// Blocks 45, 47, D2.
+fn stream_only(kind: SubscriptionKind) -> Option<()> {
+    (kind == SubscriptionKind::Stream).then_some(())
+}
+
 #[cfg(test)]
 #[cfg(adapter_tokio)]
 mod tests {
@@ -809,7 +705,7 @@ mod tests {
             "streams still open after the client was dropped"
         );
         assert_eq!(subscription.events().next().await, None);
-        assert!(lock(&subscription.shared.callbacks).0.is_empty());
+        assert!(lock(&subscription.handle.shared.callbacks).0.is_empty());
     }
 
     #[tokio::test]
@@ -818,9 +714,9 @@ mod tests {
         let subscription = client.new_subscription("news").unwrap();
         drop(client);
         let before = {
-            let core = lock(&subscription.shared.core);
+            let core = lock(&subscription.handle.shared.core);
             (
-                core.machine.subscription_state(subscription.id),
+                core.machine.subscription_state(subscription.handle.id),
                 core.actions.len(),
             )
         };
@@ -830,10 +726,10 @@ mod tests {
             subscription.unsubscribe();
         }
 
-        let core = lock(&subscription.shared.core);
+        let core = lock(&subscription.handle.shared.core);
         assert_eq!(
             (
-                core.machine.subscription_state(subscription.id),
+                core.machine.subscription_state(subscription.handle.id),
                 core.actions.len()
             ),
             before
