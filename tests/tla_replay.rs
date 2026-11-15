@@ -1041,7 +1041,7 @@ impl<'a> Replay<'a> {
                 Action::FetchSubscriptionData { channel, .. } => {
                     self.started.push(("data".to_owned(), channel));
                 }
-                Action::Emit(_, ClientEvent::ServerSubscription { channel, event }) => {
+                Action::Emit(_, ClientEvent::ServerSubscription { channel, event, .. }) => {
                     self.server_event(&channel, &event);
                 }
                 Action::EmitSubscription(_, id, event) => {
@@ -1313,13 +1313,12 @@ impl<'a> Replay<'a> {
                     self.stale_answers += usize::from(stale);
                 } else {
                     let result = if sub_after["tmr"] == true && sub_before["tmr"] == false {
-                        Err(StateError("model".to_owned()))
+                        Err(StateError::new("model".to_owned()))
                     } else {
-                        let position = StreamPosition {
-                            offset: sub_after["pos"].as_u64().unwrap_or(0),
-                            epoch: epoch(sub_after["ep"].as_i64().unwrap_or(-1))
-                                .unwrap_or_default(),
-                        };
+                        let position = StreamPosition::new(
+                            sub_after["pos"].as_u64().unwrap_or(0),
+                            epoch(sub_after["ep"].as_i64().unwrap_or(-1)).unwrap_or_default(),
+                        );
                         // The application loaded its state at this position.
                         self.position(&channel, &position);
                         Ok(position)

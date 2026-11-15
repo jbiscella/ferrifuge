@@ -429,7 +429,7 @@ fn building_fails_naming(world: &mut ClientWorld, duration: String) {
         }
         Err(BuildError::Subscription(error)) => {
             assert!(
-                matches!(&error, SubscriptionError::ZeroDelay { option } if *option == duration),
+                matches!(&error, SubscriptionError::ZeroDelay { option, .. } if *option == duration),
                 "{error:?}"
             );
             assert!(error.to_string().contains(&duration), "{error}");

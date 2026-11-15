@@ -240,6 +240,7 @@ impl Decoder {
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamFormat {
     /// `http_stream` with the JSON codec: one reply per line.
     HttpStreamJson,

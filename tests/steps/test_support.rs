@@ -122,7 +122,7 @@ fn a_history(world: &mut ClientWorld) {
         run,
         CallRequest::History {
             channel: "news".to_owned(),
-            options: HistoryOptions::default().limit(-1),
+            options: HistoryOptions::default().all(),
         },
         "history",
         &json!({
@@ -218,10 +218,7 @@ fn built(kind: &str) -> Yielded {
             Subscribed::default()
                 .recoverable(true)
                 .positioned(true)
-                .stream_position(StreamPosition {
-                    offset: 3,
-                    epoch: "e".to_owned(),
-                }),
+                .stream_position(StreamPosition::new(3, "e".to_owned())),
         ),
         "publication" => Yielded::Publication(
             Publication::new(br#"{"n":1}"#.to_vec())
@@ -284,10 +281,7 @@ fn built_holds_the_row(world: &mut ClientWorld) {
             );
             assert_eq!(
                 subscribed.stream_position,
-                Some(StreamPosition {
-                    offset: 3,
-                    epoch: "e".to_owned()
-                })
+                Some(StreamPosition::new(3, "e".to_owned()))
             );
         }
         Yielded::Publication(publication) => {

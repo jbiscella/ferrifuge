@@ -2,6 +2,7 @@
 
 /// Why a token callback could not provide a token.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TokenError {
     /// The user may not connect anymore: the client disconnects for good.
     Unauthorized,
@@ -13,7 +14,7 @@ impl std::fmt::Display for TokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unauthorized => f.write_str("unauthorized"),
-            Self::Failed(message) => f.write_str(message),
+            Self::Failed(message) => write!(f, "token callback failed: {message}"),
         }
     }
 }

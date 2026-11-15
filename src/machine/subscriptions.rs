@@ -4264,7 +4264,7 @@ mod tests {
         for attempt in 0..3 {
             let failed = machine.handle(Input::SubscriptionStateFetched {
                 fetch,
-                result: Err(StateError("always fails".into())),
+                result: Err(StateError::new("always fails")),
             });
             let retried = machine.fire_subscription(id, SubscriptionTimer::Resubscribe);
 

@@ -9,8 +9,9 @@ use std::time::SystemTime;
 
 use crate::machine::TransportKind;
 use crate::{
-    ClientEvent, ClientInfo, DeltaStatistics, HistoryResult, PresenceResult, PresenceStatsResult,
-    Publication, State, Statistics, StreamPosition, Subscribed,
+    ClientError, ClientEvent, ClientInfo, DeltaStatistics, ErrorKind, HistoryResult,
+    PresenceResult, PresenceStatsResult, Publication, State, Statistics, StreamPosition,
+    Subscribed,
 };
 
 /// A setter of a field holding the value it is given.
@@ -268,6 +269,36 @@ impl PresenceResult {
 /// let stats = PresenceStatsResult::default().num_clients(2).num_users(1);
 /// assert_eq!((stats.num_clients, stats.num_users), (2, 1));
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl ClientError {
+    /// An error of `kind` with `code` and `message`, on no transport
+    /// (Block 54, D3).
+    ///
+    /// ```
+    /// use ferrifuge::{ClientError, ErrorKind, codes};
+    ///
+    /// let error = ClientError::new(ErrorKind::Transport, codes::error::TIMEOUT, "timeout")
+    ///     .transport("websocket");
+    /// assert_eq!(error.transport.as_deref(), Some("websocket"));
+    /// ```
+    #[must_use]
+    pub fn new(kind: ErrorKind, code: u32, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            code,
+            message: message.into(),
+            transport: None,
+        }
+    }
+
+    /// Sets the transport the error happened on.
+    #[must_use]
+    pub fn transport(mut self, transport: impl Into<String>) -> Self {
+        self.transport = Some(transport.into());
+        self
+    }
+}
+
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl PresenceStatsResult {
     setter!(

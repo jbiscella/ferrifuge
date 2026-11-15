@@ -13,10 +13,7 @@ const CHANNEL: &str = "news";
 fn load(path: &str) -> Option<StreamPosition> {
     let saved = std::fs::read_to_string(path).ok()?;
     let (offset, epoch) = saved.trim().split_once(' ')?;
-    Some(StreamPosition {
-        offset: offset.parse().ok()?,
-        epoch: epoch.to_owned(),
-    })
+    Some(StreamPosition::new(offset.parse().ok()?, epoch.to_owned()))
 }
 
 #[tokio::main]

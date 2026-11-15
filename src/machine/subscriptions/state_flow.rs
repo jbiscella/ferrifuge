@@ -69,11 +69,11 @@ impl Machine {
             }
             // A temporary subscribe error: reported, then retried after the
             // resubscribe backoff.
-            Err(StateError(message)) => self.subscribe_error(
+            Err(error) => self.subscribe_error(
                 id,
                 &Error {
                     code: codes::error::SUBSCRIPTION_GET_STATE,
-                    message,
+                    message: error.message().to_owned(),
                     temporary: true,
                 },
             ),

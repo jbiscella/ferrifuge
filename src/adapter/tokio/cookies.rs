@@ -39,6 +39,9 @@ use url::Url;
 /// (unstable) the request carries the jar's cookies, but the response's
 /// `Set-Cookie` is not read: wtransport 0.7.2 keeps only its status (Block
 /// 48, D14).
+///
+/// A method added to this trait has a default; a new required method is a
+/// major release (Block 54, D7).
 pub trait CookieJar: Send + Sync {
     /// Stores the cookies of `cookie_headers`, the `Set-Cookie` values of a
     /// response to a request for `url`.

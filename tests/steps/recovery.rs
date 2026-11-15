@@ -87,10 +87,7 @@ impl Default for Recovery {
 }
 
 pub(super) fn position(offset: u64, epoch: &str) -> StreamPosition {
-    StreamPosition {
-        offset,
-        epoch: epoch.to_owned(),
-    }
+    StreamPosition::new(offset, epoch)
 }
 
 /// Publishes `count` publications to the recoverable channel through the
@@ -578,7 +575,7 @@ fn a_subscription_with_get_state(world: &mut ClientWorld) {
                 calls.lock().unwrap().push(Instant::now());
                 gate.acquire().await.expect("the gate stays open").forget();
                 let answer = answer.lock().unwrap().clone();
-                answer.ok_or_else(|| StateError("no position to answer".to_owned()))
+                answer.ok_or_else(|| StateError::new("no position to answer".to_owned()))
             }
         })
         .build()
@@ -747,7 +744,7 @@ fn a_machine_with_get_state_failing_once(world: &mut ClientWorld) {
     let options = SubscriptionOptions::default().state_source();
     let mut run = MachineRun::with(options, Vec::new(), Vec::new());
     run.state_answers.extend([
-        Err(StateError("backend down".to_owned())),
+        Err(StateError::new("backend down".to_owned())),
         Ok(position(9, "state-epoch")),
     ]);
     world.subscription_machine = Some(run);

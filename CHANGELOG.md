@@ -5,11 +5,49 @@ All notable changes to Ferrifuge are recorded here, in the form of
 follows [Semantic Versioning](https://semver.org/): before 1.0, a minor
 version may break the public API, a patch version does not.
 
-No version up to 0.23.0 was published: each section records what the
+No version up to 0.24.0 was published: each section records what the
 repository held while it carried that version, from the blocks of
 `CLAUDE.md` that landed then.
 
 ## [Unreleased]
+
+## [0.24.0] - 2026-11-15
+
+### Added
+
+- `StreamPosition::new(offset, epoch)`, `StateError::new` and
+  `StateError::message`, `HistoryOptions::all` (Block 54b, D2, D6).
+
+- With `test-util`, `ClientError::new(kind, code, message)` and its
+  `transport` setter, for an application's tests (Block 54b, D3).
+
+### Changed
+
+- `#[non_exhaustive]` by default (Block 54b, D2): `State`, `Protocol`,
+  `ClientError`, `StreamPosition`, `TokenError` and `DataError` are now
+  `#[non_exhaustive]`, and so are the variants
+  `ClientEvent::ServerSubscription`, `SubscriptionError::AlreadyExists`,
+  `InvalidTagFilter` and `ZeroDelay`. A `match` on them needs a wildcard
+  arm, a pattern of those variants a `..`, and a `StreamPosition` is built
+  with `StreamPosition::new`. `SubscriptionState`, the spec's closed set,
+  stays exhaustive. Clippy's `exhaustive_enums` and `exhaustive_structs`
+  lints keep it so.
+
+- `StateError`'s message is private: build it with `StateError::new` and
+  read it with `StateError::message` (Block 54b, D2).
+
+- `TokenError::Failed` displays "token callback failed: {message}", as
+  `DataError` and `StateError` name their callbacks (Block 54b, D3).
+
+- `HistoryOptions::limit` is an `Option<u32>`: `Some(0)` by default, only
+  the stream position, and `None` for every publication, sent as -1; a
+  count above `i32::MAX` is sent as `i32::MAX` (Block 54b, D6).
+  `HistoryOptions::limit(u32)` takes a count, and `all()` replaces
+  `limit(-1)`.
+
+- With `test-util`, `Server::disconnect` takes a `u32` code, as every other
+  code is, and panics naming a code above `u16::MAX`, the bound of a
+  websocket close code (Block 54b, D6).
 
 ## [0.23.0] - 2026-11-15
 

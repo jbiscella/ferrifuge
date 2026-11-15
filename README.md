@@ -112,7 +112,7 @@ Add it to `Cargo.toml` (until the first release reaches crates.io, use
 
 ```toml
 [dependencies]
-ferrifuge = "0.23"
+ferrifuge = "0.24"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -350,7 +350,7 @@ let subscription = client
         // Read the stream position first, then the state: publications made
         // meanwhile are then recovered rather than missed.
         let position = stream_position(&channel).await;
-        load_state(&channel).await.map_err(|e| StateError(e.to_string()))?;
+        load_state(&channel).await.map_err(|e| StateError::new(e.to_string()))?;
         Ok(position)
     })
     .build()?;
@@ -1328,7 +1328,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "0.23", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "0.24", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1403,7 +1403,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "0.23", features = ["test-util"] }
+ferrifuge = { version = "0.24", features = ["test-util"] }
 ```
 
 ```rust

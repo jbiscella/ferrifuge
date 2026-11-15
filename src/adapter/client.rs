@@ -3586,7 +3586,7 @@ fn data_callback_panicked() -> DataError {
 }
 
 fn state_callback_panicked() -> StateError {
-    StateError("subscription getState callback panicked".to_owned())
+    StateError::new("subscription getState callback panicked")
 }
 
 fn callback_panicked() -> TokenError {

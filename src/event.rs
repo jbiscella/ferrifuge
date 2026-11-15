@@ -5,6 +5,7 @@ use crate::{ClientInfo, Publication, Subscribed};
 
 /// Connection state of a client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum State {
     /// Not connected and not trying to connect: initial state, after
     /// `disconnect()`, or after a terminal condition.
@@ -69,6 +70,7 @@ pub enum ClientEvent {
     /// Something happened to the server-side subscription to `channel`: one
     /// the server made, which the client tracks but does not control (spec,
     /// "Server-side subscriptions").
+    #[non_exhaustive]
     ServerSubscription {
         /// The channel subscribed by the server.
         channel: String,
@@ -175,6 +177,7 @@ impl ClientEvent {
 
 /// Details of a [`ClientEvent::Error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClientError {
     /// Where the error happened.
     pub kind: ErrorKind,

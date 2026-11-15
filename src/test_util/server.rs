@@ -332,7 +332,14 @@ impl Server {
 
     /// Closes every open connection with `code` and `reason`: from then on
     /// it gets nothing, and later publications go to the history only.
-    pub fn disconnect(&self, code: u16, reason: &str) {
+    ///
+    /// # Panics
+    ///
+    /// When `code` is above `u16::MAX`, the bound of a websocket close code
+    /// (Block 54, D6).
+    pub fn disconnect(&self, code: u32, reason: &str) {
+        let code = u16::try_from(code)
+            .unwrap_or_else(|_| panic!("close code {code} is above u16::MAX, a websocket's bound"));
         let connections = std::mem::take(&mut lock(&self.state).connections);
         for connection in connections.into_values() {
             let _ = connection.out.send(Message::Close(Some(CloseFrame {
@@ -1439,6 +1446,12 @@ fn protobuf_reply(answer: Answer, sub_refresh: bool) -> pb::Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "close code 70000 is above u16::MAX")]
+    fn a_close_code_above_u16_max_panics_naming_it() {
+        Server::new().disconnect(70_000, "too large");
+    }
 
     #[test]
     fn the_debug_of_a_command_shows_no_token_and_no_data() {

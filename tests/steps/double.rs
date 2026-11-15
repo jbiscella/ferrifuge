@@ -245,7 +245,7 @@ async fn published_and_received(world: &mut ClientWorld, data: String) {
 
 #[when(regex = r#"^the double disconnects the client with code (\d+) "([^"]+)"$"#)]
 fn the_double_disconnects(world: &mut ClientWorld, code: u16, reason: String) {
-    server(world).disconnect(code, &reason);
+    server(world).disconnect(u32::from(code), &reason);
 }
 
 #[when(
@@ -355,10 +355,7 @@ async fn a_publish(world: &mut ClientWorld, data: String) {
 
 #[when(regex = r#"^the application requests the history of "news" with limit (-?\d+)$"#)]
 async fn a_history(world: &mut ClientWorld, limit: i32) {
-    let history = world
-        .client()
-        .history("news", HistoryOptions::default().limit(limit))
-        .await;
+    let history = world.client().history("news", history_options(limit)).await;
     world.doubles.outcome = Some(Outcome::History(history));
 }
 
@@ -569,6 +566,7 @@ async fn server_side_subscribed(world: &mut ClientWorld) {
             ClientEvent::ServerSubscription {
                 channel,
                 event: ServerSubscriptionEvent::Subscribed(_),
+                ..
             } if channel == "personal:1" => return,
             other => panic!("{other:?}"),
         }
@@ -583,6 +581,7 @@ async fn server_side_publication(world: &mut ClientWorld, data: String, offset: 
     let ClientEvent::ServerSubscription {
         channel,
         event: ServerSubscriptionEvent::Publication(publication),
+        ..
     } = &event
     else {
         panic!("a server-side publication: {event:?}");
@@ -835,7 +834,7 @@ async fn each_requests_history(world: &mut ClientWorld, limit: i32) {
     for side in sides(world) {
         side.history = Some(
             side.client
-                .history("news", HistoryOptions::default().limit(limit))
+                .history("news", history_options(limit))
                 .await
                 .expect("a history"),
         );
@@ -876,7 +875,7 @@ async fn each_server_disconnects(world: &mut ClientWorld, code: u16, reason: Str
         )
         .await
         .expect("server API disconnect");
-    server(world).disconnect(code, &reason);
+    server(world).disconnect(u32::from(code), &reason);
 }
 
 #[when(
@@ -974,4 +973,12 @@ fn both_histories(
         assert_eq!(got, [(json(&first), Some(a)), (json(&second), Some(b))]);
         assert_eq!(history.offset, offset);
     }
+}
+
+/// The options of a history with `limit` as a step writes it: -1 for all.
+fn history_options(limit: i32) -> HistoryOptions {
+    u32::try_from(limit).map_or_else(
+        |_| HistoryOptions::default().all(),
+        |limit| HistoryOptions::default().limit(limit),
+    )
 }

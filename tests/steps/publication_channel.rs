@@ -89,6 +89,7 @@ async fn server_side_subscribed_with_the_flag(
         if let ClientEvent::ServerSubscription {
             channel: got,
             event: ServerSubscriptionEvent::Subscribed(subscribed),
+            ..
         } = world.next_event().await
             && got == channel
         {

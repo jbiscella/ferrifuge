@@ -740,7 +740,7 @@ async fn ask(world: &mut ClientWorld, kind: &str, on_client: bool) -> Returned {
         ("history", false) => {
             let call = world
                 .subscription()
-                .history(HistoryOptions::default().limit(-1));
+                .history(HistoryOptions::default().all());
             Box::pin(async move { call.await.map(Returned::History) })
         }
         ("presence", false) => {
@@ -855,10 +855,10 @@ async fn a_channel_with_history(world: &mut ClientWorld, count: u64) {
             .call("publish", json!({"channel": CHANNEL, "data": {"n": n}}))
             .await
             .expect("publish");
-        world.calls.published.push(StreamPosition {
-            offset: result["offset"].as_u64().expect("an offset"),
-            epoch: result["epoch"].as_str().expect("an epoch").to_owned(),
-        });
+        world.calls.published.push(StreamPosition::new(
+            result["offset"].as_u64().expect("an offset"),
+            result["epoch"].as_str().expect("an epoch").to_owned(),
+        ));
     }
 }
 
@@ -876,7 +876,7 @@ async fn request_history(world: &mut ClientWorld, options: HistoryOptions) {
     regex = r"^a connected client requests the last (\d+) publications of the channel( in reverse order)?$"
 )]
 async fn requests_the_last(world: &mut ClientWorld, count: usize, reverse: String) {
-    let limit = i32::try_from(count).unwrap();
+    let limit = u32::try_from(count).unwrap();
     let options = if reverse.is_empty() {
         // Forward, the first publications come first (verified on
         // Centrifugo v6.10.1): the last ones follow the one before them.
@@ -892,7 +892,7 @@ async fn requests_the_last(world: &mut ClientWorld, count: usize, reverse: Strin
 #[when("a connected client requests the channel's history since the position of the first one")]
 async fn requests_since_the_first(world: &mut ClientWorld) {
     let first = world.calls.published[0].clone();
-    request_history(world, HistoryOptions::default().limit(-1).since(first)).await;
+    request_history(world, HistoryOptions::default().all().since(first)).await;
 }
 
 #[when("a connected client requests the channel's history with limit 0")]
@@ -1928,6 +1928,7 @@ async fn the_client_emits_a_server_side_join_or_leave(
         if let ClientEvent::ServerSubscription {
             channel: got,
             event,
+            ..
         } = world.next_event().await
             && got == channel
             && matches!(

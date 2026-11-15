@@ -468,9 +468,9 @@ async fn no_more_server_side_events(world: &mut ClientWorld, which: String, chan
     let unexpected: Vec<_> = events
         .iter()
         .filter(|event| match event {
-            ClientEvent::ServerSubscription { channel: of, event } => {
-                *of == channel && (!only_unsubscribed || event.name() == "unsubscribed")
-            }
+            ClientEvent::ServerSubscription {
+                channel: of, event, ..
+            } => *of == channel && (!only_unsubscribed || event.name() == "unsubscribed"),
             _ => false,
         })
         .collect();
@@ -662,7 +662,9 @@ async fn next_server_side_event(
 ) -> ServerSubscriptionEvent {
     tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
-            if let ClientEvent::ServerSubscription { channel: of, event } = world.next_event().await
+            if let ClientEvent::ServerSubscription {
+                channel: of, event, ..
+            } = world.next_event().await
                 && of == channel
                 && wanted(&event)
             {
