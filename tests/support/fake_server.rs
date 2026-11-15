@@ -84,6 +84,8 @@ struct State {
     closed: usize,
     /// When the server saw the last of them end.
     last_closed_at: Option<std::time::Instant>,
+    /// Why each connection ended, in order ([`Connection::serve`]).
+    end_reasons: Vec<&'static str>,
     /// Answers the next connect command with this text frame instead of a
     /// connect reply (Block 49).
     connect_frame: Option<String>,
@@ -272,6 +274,15 @@ impl Publisher {
     }
 }
 
+impl State {
+    /// A connection ended, for `reason`.
+    fn ended(&mut self, reason: &'static str) {
+        self.closed += 1;
+        self.last_closed_at = Some(std::time::Instant::now());
+        self.end_reasons.push(reason);
+    }
+}
+
 impl FakeServer {
     pub(crate) async fn start(announce: Announce) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -366,10 +377,8 @@ impl FakeServer {
                 };
                 let closed = Arc::clone(&shared);
                 tokio::spawn(async move {
-                    connection.serve(commands).await;
-                    let mut state = closed.lock().unwrap();
-                    state.closed += 1;
-                    state.last_closed_at = Some(std::time::Instant::now());
+                    let reason = connection.serve(commands).await;
+                    closed.lock().unwrap().ended(reason);
                 });
             }
         });
@@ -674,6 +683,11 @@ impl FakeServer {
     /// When the server saw the last connection end, if one did.
     pub(crate) fn last_closed_at(&self) -> Option<std::time::Instant> {
         self.state.lock().unwrap().last_closed_at
+    }
+
+    /// Why each connection that ended did, in order.
+    pub(crate) fn end_reasons(&self) -> Vec<&'static str> {
+        self.state.lock().unwrap().end_reasons.clone()
     }
 
     /// Stops reading from the current connection; it sends a ping every
@@ -1052,7 +1066,8 @@ impl Connection {
     /// Reads the client's commands and the test's controls, while a writer
     /// task sends the replies and pushes in order: a client that stops
     /// reading blocks the writer, never the reading of its commands.
-    async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) {
+    /// Returns why the connection ended.
+    async fn serve(mut self, mut commands: mpsc::UnboundedReceiver<Control>) -> &'static str {
         let (mut sink, mut stream) = self.ws.take().expect("not served yet").split();
         let out = self.out.clone();
         let mut queue = self.queue.take().expect("not served yet");
@@ -1093,13 +1108,16 @@ impl Connection {
                     let replies = match message {
                         Some(Ok(Message::Text(text))) => self.json_commands(&text),
                         Some(Ok(Message::Binary(frame))) => self.protobuf_commands(&frame),
-                        _ => return,
+                        Some(Ok(Message::Close(_))) => return "the client's close frame",
+                        Some(Ok(_)) => return "a websocket control frame from the client",
+                        Some(Err(_)) => return "a read error",
+                        None => return "the client's stream ended",
                     };
                     if replies
                         .into_iter()
                         .any(|reply| out.send(Outgoing::Message(reply)).is_err())
                     {
-                        return;
+                        return "the writer had ended, at a reply";
                     }
                     continue;
                 }
@@ -1116,18 +1134,18 @@ impl Connection {
                             reason: reason.into(),
                         }));
                         let _ = (&mut writer.0).await;
-                        return;
+                        return "closed by the test";
                     }
-                    None => return,
+                    None => return "its control was dropped: a newer connection, or the server",
                 },
                 // Without reading, only a failing write tells that the
                 // client has gone.
                 _ = probes.tick(), if !reading => Outgoing::Message(self.ping()),
                 // The writer failed: the client has gone.
-                () = out.closed() => return,
+                () = out.closed() => return "the writer failed",
             };
             if out.send(outgoing).is_err() {
-                return;
+                return "the writer had ended, at a push";
             }
         }
     }
