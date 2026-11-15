@@ -20,6 +20,7 @@
 // @P scenario: The core runner reports a planted continuity fault
 // @P scenario: Seeded chaos on the core leaks no secret
 
+use ferrifuge::machine::TimerKey;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::ops::Range;
@@ -455,8 +456,7 @@ fn target(rng: &mut fastrand::Rng, subscriptions: bool) -> Target {
 /// Something the simulated world does at a point of simulated time.
 #[derive(Debug)]
 enum Due {
-    /// A timer of the core, with the setting it was set as (none for a
-    /// debounce timer, numbered by its key).
+    /// A timer of the core, with the setting it was set as.
     Timer(Key, Option<TimerSetting>),
     /// A late firing of a setting the core cancelled or set again, kept
     /// apart from the timers the clock runs, so that neither `cancel` nor
@@ -495,14 +495,15 @@ enum Key {
     Debounce(DebounceTimer),
 }
 
-/// The firing input of `key`'s timer, of `setting` (a debounce timer's
-/// firing carries none).
+/// The firing input of `key`'s timer, of `setting`.
 fn firing(key: Key, setting: TimerSetting) -> Input {
     match key {
-        Key::Client(timer) => Input::TimerFired(timer, setting),
-        Key::Call(call, timer) => Input::CallTimerFired(call, timer, setting),
-        Key::Subscription(id, timer) => Input::SubscriptionTimerFired(id, timer, setting),
-        Key::Debounce(timer) => Input::DebounceTimerFired(timer),
+        Key::Client(timer) => Input::TimerFired(TimerKey::Client(timer), setting),
+        Key::Call(call, timer) => Input::TimerFired(TimerKey::Call(call, timer), setting),
+        Key::Subscription(id, timer) => {
+            Input::TimerFired(TimerKey::Subscription(id, timer), setting)
+        }
+        Key::Debounce(timer) => Input::TimerFired(TimerKey::Debounce(timer), setting),
     }
 }
 
@@ -1454,7 +1455,6 @@ impl Run {
 
     fn happen(&mut self, due: Due) -> Step {
         match due {
-            Due::Timer(Key::Debounce(timer), _) => self.feed(Input::DebounceTimerFired(timer)),
             Due::Timer(key, setting) => {
                 let setting = setting.expect("a numbered timer");
                 self.feed(firing(key, setting))
@@ -1775,7 +1775,7 @@ impl Run {
         let rendered = format!("in {input:?}");
         self.record(rendered)?;
         let fired = match &input {
-            Input::DebounceTimerFired(timer) => Some(*timer),
+            Input::TimerFired(TimerKey::Debounce(timer), _) => Some(*timer),
             _ => None,
         };
         let machine = &mut self.machine;
@@ -1837,7 +1837,7 @@ impl Run {
         let fired_owner = fired.and_then(|timer| self.checker.debounce_owners.remove(&timer));
         let mut owners = VecDeque::new();
         for (at, action) in actions.iter().enumerate() {
-            if !matches!(action, Action::SetDebounceTimer(..)) {
+            if !matches!(action, Action::SetTimer(TimerKey::Debounce(..), ..)) {
                 continue;
             }
             owners.push_back(if fired.is_some() {
@@ -1845,8 +1845,8 @@ impl Run {
                 fired_owner
             } else {
                 actions[at + 1..].iter().find_map(|next| match next {
-                    Action::SetCallTimer(call, ..)
-                    | Action::CancelCallTimer(call, _)
+                    Action::SetTimer(TimerKey::Call(call, _), ..)
+                    | Action::CancelTimer(TimerKey::Call(call, _))
                     | Action::CallSettled { call, .. } => self.checker.publishes.get(call).copied(),
                     _ => None,
                 })
@@ -1881,7 +1881,12 @@ impl Run {
     }
 
     /// A debounced publish was handed off: I5 and I12 (Block 46, D16).
-    fn debounce_timer_set(&mut self, timer: DebounceTimer, delay: Duration) -> Step {
+    fn debounce_timer_set(
+        &mut self,
+        timer: DebounceTimer,
+        delay: Duration,
+        setting: TimerSetting,
+    ) -> Step {
         if self.checker.disconnected {
             return Err(self.violation("I5", format!("{timer:?} set after disconnect()")));
         }
@@ -1916,7 +1921,7 @@ impl Run {
         } else {
             delay
         };
-        self.schedule(after, Due::Timer(Key::Debounce(timer), None));
+        self.schedule(after, Due::Timer(Key::Debounce(timer), Some(setting)));
         Ok(())
     }
 
@@ -1975,25 +1980,27 @@ impl Run {
                     self.answer_frame(transport, &text);
                 }
             }
-            Action::SetTimer(timer, delay, setting) => {
+            Action::SetTimer(TimerKey::Client(timer), delay, setting) => {
                 if self.checker.disconnected {
                     return Err(self.violation("I5", format!("{timer:?} set after disconnect()")));
                 }
                 self.cancel(Key::Client(timer));
                 self.schedule(delay, Due::Timer(Key::Client(timer), Some(setting)));
             }
-            Action::ShortenTimer(timer, by) => self.shorten(Key::Client(timer), by),
-            Action::ShortenSubscriptionTimer(id, timer, by) => {
+            Action::ShortenTimer(TimerKey::Client(timer), by) => {
+                self.shorten(Key::Client(timer), by)
+            }
+            Action::ShortenTimer(TimerKey::Subscription(id, timer), by) => {
                 self.shorten(Key::Subscription(id, timer), by);
             }
-            Action::CancelTimer(timer) => {
+            Action::CancelTimer(TimerKey::Client(timer)) => {
                 let kept =
                     self.fault == Some(Fault::KeepCancelledTimer) && self.checker.disconnected;
                 if !kept {
                     self.cancel(Key::Client(timer));
                 }
             }
-            Action::SetCallTimer(call, timer, delay, setting) => {
+            Action::SetTimer(TimerKey::Call(call, timer), delay, setting) => {
                 if matches!(timer, CallTimer::Subscription) {
                     self.checker.waited_for_subscription.insert(call);
                 }
@@ -2001,8 +2008,8 @@ impl Run {
                 self.cancel(Key::Call(call, timer));
                 self.schedule(delay, Due::Timer(Key::Call(call, timer), Some(setting)));
             }
-            Action::CancelCallTimer(call, timer) => self.cancel(Key::Call(call, timer)),
-            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
+            Action::CancelTimer(TimerKey::Call(call, timer)) => self.cancel(Key::Call(call, timer)),
+            Action::SetTimer(TimerKey::Subscription(id, timer), delay, setting) => {
                 // Only the backoff a kept callback's failure arms (D11).
                 let continuing = self.checker.continuing && timer == SubscriptionTimer::Resubscribe;
                 if self.checker.disconnected && !continuing {
@@ -2016,11 +2023,13 @@ impl Run {
                     Due::Timer(Key::Subscription(id, timer), Some(setting)),
                 );
             }
-            Action::CancelSubscriptionTimer(id, timer) => {
+            Action::CancelTimer(TimerKey::Subscription(id, timer)) => {
                 self.cancel(Key::Subscription(id, timer));
             }
-            Action::SetDebounceTimer(timer, delay) => self.debounce_timer_set(timer, delay)?,
-            Action::CancelDebounceTimer(timer) => {
+            Action::SetTimer(TimerKey::Debounce(timer), delay, setting) => {
+                self.debounce_timer_set(timer, delay, setting)?;
+            }
+            Action::CancelTimer(TimerKey::Debounce(timer)) => {
                 self.checker.debounce_owners.remove(&timer);
                 self.cancel(Key::Debounce(timer));
             }
@@ -2200,7 +2209,7 @@ impl Run {
                 Key::Client(timer) => self.machine.timer_setting(timer),
                 Key::Call(call, timer) => self.machine.call_timer_setting(call, timer),
                 Key::Subscription(id, timer) => self.machine.subscription_timer_setting(id, timer),
-                Key::Debounce(_) => None,
+                Key::Debounce(timer) => self.machine.key_setting(TimerKey::Debounce(timer)),
             };
             running.unwrap_or(setting)
         } else {

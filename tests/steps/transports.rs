@@ -3,6 +3,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -451,10 +452,12 @@ fn websocket_opens_without_reply(world: &mut ClientWorld) {
                 machine.handle(Input::TransportOpened(transport));
                 actions = machine.fire(Timer::ConnectTimeout);
             }
-        } else if actions
-            .iter()
-            .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..)))
-        {
+        } else if actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+            )
+        }) {
             actions = machine.fire(Timer::Reconnect);
         } else {
             panic!("no further attempt after {:?}: {actions:?}", world.opened);
@@ -500,7 +503,7 @@ fn every_attempt_fails(world: &mut ClientWorld) {
             _ => None,
         });
         let reconnect = actions.iter().find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
             _ => None,
         });
         if let Some((transport, kind)) = open {
@@ -587,7 +590,7 @@ fn the_server_answers_with_a_temporary_error(world: &mut ClientWorld) {
         delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no further attempt: {actions:?}"));

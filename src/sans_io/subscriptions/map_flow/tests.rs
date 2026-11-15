@@ -1,5 +1,6 @@
 //! Block 45: map subscriptions on the core (@E).
 
+use crate::sans_io::TimerKey;
 use std::num::NonZeroUsize;
 
 use serde_json::Value;
@@ -293,7 +294,7 @@ fn each_request_has_the_reply_deadline_of_a_subscribe() {
     assert!(
         actions.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::SubscribeReply, after, _)
+            Action::SetTimer(TimerKey::Subscription(of, SubscriptionTimer::SubscribeReply), after, _)
                 if *of == id && *after == Config::default().timeout
         )),
         "{actions:?}"
@@ -366,7 +367,10 @@ fn a_reply_without_the_map_type_ends_the_subscription_with_code_6() {
     );
     assert!(!actions.iter().any(|action| matches!(
         action,
-        Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
+        Action::SetTimer(
+            TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+            ..
+        )
     )));
 }
 
@@ -1075,7 +1079,7 @@ fn error_112_from_scratch_drops_the_position_and_loads_after_the_backoff() {
     assert!(
         failed.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, ..) if *of == id
+            Action::SetTimer(TimerKey::Subscription(of, SubscriptionTimer::Resubscribe), ..) if *of == id
         )),
         "{failed:?}"
     );
@@ -1120,7 +1124,10 @@ fn error_112_with_the_fatal_strategy_unsubscribes_with_its_code() {
     assert!(
         !failed.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
+            Action::SetTimer(
+                TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                ..
+            )
         )),
         "{failed:?}"
     );

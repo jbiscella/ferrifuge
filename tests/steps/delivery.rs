@@ -5,6 +5,7 @@
 // Cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::collections::HashMap;
 use std::task::Poll;
 use std::time::Duration;
@@ -1245,7 +1246,10 @@ impl UnreadCore {
     /// Fires the client timer `timer`, which the machine must have set.
     fn fire(&mut self, timer: ferrifuge::machine::Timer) {
         let setting = self.machine.timer_setting(timer).expect("timer set");
-        self.handle(ferrifuge::machine::Input::TimerFired(timer, setting));
+        self.handle(ferrifuge::machine::Input::TimerFired(
+            TimerKey::Client(timer),
+            setting,
+        ));
     }
 
     /// Fires the timer `timer` of `id`, which the machine must have set.
@@ -1258,8 +1262,9 @@ impl UnreadCore {
             .machine
             .subscription_timer_setting(id, timer)
             .expect("subscription timer set");
-        self.handle(ferrifuge::machine::Input::SubscriptionTimerFired(
-            id, timer, setting,
+        self.handle(ferrifuge::machine::Input::TimerFired(
+            TimerKey::Subscription(id, timer),
+            setting,
         ));
     }
 

@@ -7,6 +7,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -113,7 +114,7 @@ fn timers_set(run: &BatchRun, from: usize) -> Vec<(DebounceTimer, Duration)> {
     run.actions[from..]
         .iter()
         .filter_map(|action| match action {
-            Action::SetDebounceTimer(timer, delay) => Some((*timer, *delay)),
+            Action::SetTimer(TimerKey::Debounce(timer), delay, _) => Some((*timer, *delay)),
             _ => None,
         })
         .collect()
@@ -126,8 +127,10 @@ fn open_timers(world: &mut ClientWorld) -> Vec<DebounceTimer> {
     let mut open: Vec<DebounceTimer> = Vec::new();
     for action in &run.actions {
         match action {
-            Action::SetDebounceTimer(timer, _) => open.push(*timer),
-            Action::CancelDebounceTimer(timer) => open.retain(|running| running != timer),
+            Action::SetTimer(TimerKey::Debounce(timer), _, _) => open.push(*timer),
+            Action::CancelTimer(TimerKey::Debounce(timer)) => {
+                open.retain(|running| running != timer)
+            }
             _ => {}
         }
     }
@@ -224,7 +227,7 @@ fn fire(world: &mut ClientWorld) {
     let open = open_timers(world);
     let timer = *open.first().expect("a running debounce timer");
     world.debouncing.fired.push(timer);
-    run(world).handle(Input::DebounceTimerFired(timer));
+    run(world).fire_key(TimerKey::Debounce(timer));
 }
 
 fn mark(world: &mut ClientWorld) {
@@ -387,7 +390,7 @@ fn unsubscribed_then_fired(world: &mut ClientWorld) {
     let id = run.subscriptions[0];
     run.handle(Input::Unsubscribe(id));
     run.mark = run.actions.len();
-    run.handle(Input::DebounceTimerFired(timer));
+    run.fire_key(TimerKey::Debounce(timer));
 }
 
 #[then("the firing produces no action")]
@@ -584,7 +587,7 @@ fn both_timers_fire(world: &mut ClientWorld) {
     mark(world);
     for timer in open {
         world.debouncing.fired.push(timer);
-        run(world).handle(Input::DebounceTimerFired(timer));
+        run(world).fire_key(TimerKey::Debounce(timer));
     }
 }
 

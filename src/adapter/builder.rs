@@ -15,9 +15,6 @@ use super::client::Client;
 use super::driver::Driver;
 use super::driver::Ending;
 use super::driver::KeyedTimers;
-use super::driver::SharedPollRefreshes;
-use super::driver::SharedPollTimers;
-use super::driver::Timers;
 use super::log::{self, Log};
 use super::platform;
 #[cfg(adapter_tokio)]
@@ -305,12 +302,7 @@ impl Client {
             get_data,
             fetching: None,
             stale_fetching: None,
-            timers: Timers::default(),
-            subscription_timers: KeyedTimers::default(),
-            call_timers: KeyedTimers::default(),
-            debounce_timers: KeyedTimers::default(),
-            shared_poll_timers: SharedPollTimers::default(),
-            shared_poll_refreshes: SharedPollRefreshes::default(),
+            timers: KeyedTimers::default(),
             callback_fetches: FuturesUnordered::new(),
             callback_aborts: HashMap::new(),
             taken: VecDeque::new(),

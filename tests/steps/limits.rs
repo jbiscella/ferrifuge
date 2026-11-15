@@ -1,6 +1,7 @@
 //! Steps of Block 29: the handshake timeout and the maximum incoming
 //! message size.
 
+use ferrifuge::machine::TimerKey;
 use std::time::Duration;
 
 use cucumber::{given, then, when};
@@ -190,11 +191,13 @@ impl OpenRun {
     fn handle(&mut self, input: Input) {
         for action in self.machine.handle(input) {
             match action {
-                Action::SetTimer(timer, after, setting) => {
+                Action::SetTimer(TimerKey::Client(timer), after, setting) => {
                     self.timers.retain(|(set, _, _)| *set != timer);
                     self.timers.push((timer, self.now + after, setting));
                 }
-                Action::CancelTimer(timer) => self.timers.retain(|(set, _, _)| *set != timer),
+                Action::CancelTimer(TimerKey::Client(timer)) => {
+                    self.timers.retain(|(set, _, _)| *set != timer)
+                }
                 Action::OpenTransport {
                     transport, kind, ..
                 } => self.opened.push((transport, kind)),
@@ -218,7 +221,7 @@ impl OpenRun {
             };
             self.timers.retain(|(set, _, _)| *set != timer);
             self.now = at;
-            self.handle(Input::TimerFired(timer, setting));
+            self.handle(Input::TimerFired(TimerKey::Client(timer), setting));
         }
         self.now = until;
     }

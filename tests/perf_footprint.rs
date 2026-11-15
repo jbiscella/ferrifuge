@@ -20,6 +20,7 @@
 
 mod support;
 
+use ferrifuge::machine::TimerKey;
 use std::env;
 use std::time::Duration;
 
@@ -403,7 +404,7 @@ fn answer_publishes(
     for action in actions {
         match action {
             Action::Send { id, frame, .. } => frames.push((id, frame)),
-            Action::SetDebounceTimer(timer, _) => timers.push(timer),
+            Action::SetTimer(TimerKey::Debounce(timer), _, _) => timers.push(timer),
             _ => {}
         }
     }
@@ -446,12 +447,12 @@ fn open_and_close_windows(
     }
     let fired = std::mem::take(&mut timers);
     for timer in fired {
-        let actions = machine.handle(Input::DebounceTimerFired(timer));
+        let actions = machine.fire_key(TimerKey::Debounce(timer));
         answer_publishes(machine, transport, actions, &mut timers);
     }
     let fired = std::mem::take(&mut timers);
     for timer in fired {
-        let actions = machine.handle(Input::DebounceTimerFired(timer));
+        let actions = machine.fire_key(TimerKey::Debounce(timer));
         assert!(
             !actions
                 .iter()

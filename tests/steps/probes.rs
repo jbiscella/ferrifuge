@@ -4,6 +4,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
@@ -118,7 +119,10 @@ fn a_machine_opening_the_next_transport(world: &mut ClientWorld) {
         .machine
         .timer_setting(Timer::ConnectTimeout)
         .expect("timeout set");
-    run.handle(Input::TimerFired(Timer::ConnectTimeout, setting));
+    run.handle(Input::TimerFired(
+        TimerKey::Client(Timer::ConnectTimeout),
+        setting,
+    ));
     run.advance(Duration::ZERO);
     assert!(
         run.actions.contains(&Action::CloseTransport(closed)),

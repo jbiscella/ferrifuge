@@ -5,6 +5,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when};
@@ -317,7 +318,7 @@ fn reconnect_delay(actions: &[Action]) -> Duration {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect is scheduled")

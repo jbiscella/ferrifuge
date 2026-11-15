@@ -833,13 +833,13 @@ fn an_emulated_request_without_a_reply_reconnects_with_code_3() {
     let timer = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetSharedPollTimer(timer, delay) => Some((*timer, *delay)),
+            Action::SetTimer(TimerKey::SharedPoll(timer), delay, _) => Some((*timer, *delay)),
             _ => None,
         })
         .expect("a reply deadline");
     assert_eq!(timer.1, Config::default().timeout);
 
-    let fired = machine.handle(Input::SharedPollTimerFired(timer.0));
+    let fired = machine.fire_key(TimerKey::SharedPoll(timer.0));
 
     assert!(
         fired.iter().any(|action| matches!(
@@ -857,12 +857,12 @@ fn an_emulated_request_without_a_reply_reconnects_with_code_3() {
     let timer = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetSharedPollTimer(timer, _) => Some(*timer),
+            Action::SetTimer(TimerKey::SharedPoll(timer), _, _) => Some(*timer),
             _ => None,
         })
         .unwrap();
     machine.handle(reply_to(transport2, &request));
-    let late = machine.handle(Input::SharedPollTimerFired(timer));
+    let late = machine.fire_key(TimerKey::SharedPoll(timer));
     assert!(
         !late
             .iter()
@@ -1126,7 +1126,7 @@ fn a_reply_read_behind_an_event_not_taken_stops_the_deadline() {
     let timer = actions
         .iter()
         .find_map(|action| match action {
-            Action::SetSharedPollTimer(timer, _) => Some(*timer),
+            Action::SetTimer(TimerKey::SharedPoll(timer), _, _) => Some(*timer),
             _ => None,
         })
         .unwrap();
@@ -1135,10 +1135,10 @@ fn a_reply_read_behind_an_event_not_taken_stops_the_deadline() {
     assert_eq!(pushed.len(), 1);
 
     let read = machine.handle(reply_to(transport, &request));
-    let fired = machine.handle(Input::SharedPollTimerFired(timer));
+    let fired = machine.fire_key(TimerKey::SharedPoll(timer));
 
     assert!(
-        read.contains(&Action::CancelSharedPollTimer(timer)),
+        read.contains(&Action::CancelTimer(TimerKey::SharedPoll(timer))),
         "{read:?}"
     );
     assert!(

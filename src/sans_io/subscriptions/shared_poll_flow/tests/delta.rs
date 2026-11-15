@@ -406,7 +406,10 @@ fn bases_past_their_bound_end_the_subscription() {
     assert!(
         !past.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, crate::sans_io::SubscriptionTimer::Resubscribe, ..)
+            Action::SetTimer(
+                TimerKey::Subscription(_, crate::sans_io::SubscriptionTimer::Resubscribe),
+                ..
+            )
         )),
         "no resubscribe: {past:?}"
     );
@@ -986,7 +989,7 @@ fn a_failed_track_keeps_the_inline_untrack() {
             let deadline = again
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetSharedPollTimer(timer, delay)
+                    Action::SetTimer(TimerKey::SharedPoll(timer), delay, _)
                         if *delay == Config::default().timeout =>
                     {
                         Some(*timer)
@@ -994,7 +997,7 @@ fn a_failed_track_keeps_the_inline_untrack() {
                     _ => None,
                 })
                 .expect("a reply deadline");
-            machine.handle(Input::SharedPollTimerFired(deadline))
+            machine.fire_key(TimerKey::SharedPoll(deadline))
         };
         take_all(&mut machine, &failed);
 

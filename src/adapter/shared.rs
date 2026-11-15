@@ -51,7 +51,7 @@ pub(super) struct Shared {
     /// first; `None` while it arms them.
     // Block 46.
     #[cfg(feature = "__test-hooks")]
-    pub(super) held_debounce_timers: Mutex<Option<Vec<DebounceTimer>>>,
+    pub(super) held_debounce_timers: Mutex<Option<Vec<(DebounceTimer, TimerSetting)>>>,
     /// The driver panics before handling its next input, for a test.
     // Block 49.
     #[cfg(feature = "__test-hooks")]
@@ -207,14 +207,20 @@ impl Refreshes {
     /// Follows `action`, which the driver will perform.
     fn note(&mut self, action: &Action) {
         match action {
-            Action::SetTimer(Timer::Refresh, delay, setting) => self.set(None, *delay, *setting),
-            Action::SetSubscriptionTimer(id, SubscriptionTimer::Refresh, delay, setting) => {
+            Action::SetTimer(TimerKey::Client(Timer::Refresh), delay, setting) => {
+                self.set(None, *delay, *setting)
+            }
+            Action::SetTimer(
+                TimerKey::Subscription(id, SubscriptionTimer::Refresh),
+                delay,
+                setting,
+            ) => {
                 self.set(Some(*id), *delay, *setting);
             }
-            Action::CancelTimer(Timer::Refresh) => {
+            Action::CancelTimer(TimerKey::Client(Timer::Refresh)) => {
                 self.0.remove(&None);
             }
-            Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh) => {
+            Action::CancelTimer(TimerKey::Subscription(id, SubscriptionTimer::Refresh)) => {
                 self.0.remove(&Some(*id));
             }
             _ => {}
@@ -241,8 +247,8 @@ impl Refreshes {
     // Block 53 D4.
     fn fired(&mut self, input: &Input) {
         let (key, setting) = match input {
-            Input::TimerFired(Timer::Refresh, setting) => (None, *setting),
-            Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh, setting) => {
+            Input::TimerFired(TimerKey::Client(Timer::Refresh), setting) => (None, *setting),
+            Input::TimerFired(TimerKey::Subscription(id, SubscriptionTimer::Refresh), setting) => {
                 (Some(*id), *setting)
             }
             _ => return,
@@ -471,11 +477,13 @@ impl Shared {
             .actions
             .range(before..)
             .filter_map(|action| match action {
-                Action::SetTimer(timer, ..) => Some(TimerKey::Client(*timer)),
-                Action::SetSubscriptionTimer(id, timer, ..) => {
+                Action::SetTimer(TimerKey::Client(timer), ..) => Some(TimerKey::Client(*timer)),
+                Action::SetTimer(TimerKey::Subscription(id, timer), ..) => {
                     Some(TimerKey::Subscription(*id, *timer))
                 }
-                Action::SetCallTimer(id, timer, ..) => Some(TimerKey::Call(*id, *timer)),
+                Action::SetTimer(TimerKey::Call(id, timer), ..) => {
+                    Some(TimerKey::Call(*id, *timer))
+                }
                 _ => None,
             })
             .collect();
@@ -504,8 +512,8 @@ impl Shared {
         let answer: Vec<Action> = core.actions.drain(from..).collect();
         core.actions.extend(answer.into_iter().filter(|action| {
             let shortened = match action {
-                Action::ShortenTimer(timer, _) => TimerKey::Client(*timer),
-                Action::ShortenSubscriptionTimer(id, timer, _) => {
+                Action::ShortenTimer(TimerKey::Client(timer), _) => TimerKey::Client(*timer),
+                Action::ShortenTimer(TimerKey::Subscription(id, timer), _) => {
                     TimerKey::Subscription(*id, *timer)
                 }
                 _ => return true,
@@ -529,12 +537,15 @@ impl Shared {
         for (of, setting) in core.refreshes.due() {
             let (cancel, fired) = match of {
                 None => (
-                    Action::CancelTimer(Timer::Refresh),
-                    Input::TimerFired(Timer::Refresh, setting),
+                    Action::CancelTimer(TimerKey::Client(Timer::Refresh)),
+                    Input::TimerFired(TimerKey::Client(Timer::Refresh), setting),
                 ),
                 Some(id) => (
-                    Action::CancelSubscriptionTimer(id, SubscriptionTimer::Refresh),
-                    Input::SubscriptionTimerFired(id, SubscriptionTimer::Refresh, setting),
+                    Action::CancelTimer(TimerKey::Subscription(id, SubscriptionTimer::Refresh)),
+                    Input::TimerFired(
+                        TimerKey::Subscription(id, SubscriptionTimer::Refresh),
+                        setting,
+                    ),
                 ),
             };
             #[cfg(feature = "__test-hooks")]
@@ -1064,9 +1075,10 @@ mod tests {
         client
             .shared()
             .handle(&mut core, Input::SetData(b"{}".to_vec()));
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::ServerPing), set),
+        );
 
         assert_eq!(core.machine.state(), State::Connected);
     }
@@ -1079,9 +1091,10 @@ mod tests {
         let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
         let set = setting(&core, Timer::ServerPing);
 
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::ServerPing), set),
+        );
 
         assert_eq!(core.machine.state(), State::Connecting);
     }
@@ -1135,15 +1148,17 @@ mod tests {
         let set = setting(&core, Timer::ServerPing);
 
         slept(&mut core, Duration::from_secs(30));
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::ServerPing, set));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::ServerPing), set),
+        );
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
-            core.actions
-                .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::ServerPing, ..))),
+            core.actions.iter().any(|action| matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::ServerPing), ..)
+            )),
             "{:?}",
             core.actions
         );
@@ -1175,9 +1190,10 @@ mod tests {
 
         slept(&mut core, Duration::from_secs(30));
         let fired = setting(&core, Timer::Refresh);
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::Refresh, fired));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::Refresh), fired),
+        );
 
         assert_eq!(core.machine.state(), State::Connected);
         assert!(
@@ -1210,9 +1226,10 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             slept(&mut core, Duration::from_secs(30));
             let fired = setting(&core, Timer::ServerPing);
-            client
-                .shared()
-                .handle(&mut core, Input::TimerFired(Timer::ServerPing, fired));
+            client.shared().handle(
+                &mut core,
+                Input::TimerFired(TimerKey::Client(Timer::ServerPing), fired),
+            );
         });
 
         let records = lock(&records.0);
@@ -1257,9 +1274,10 @@ mod tests {
 
         slept(&mut core, Duration::from_secs(70));
         let fired = setting(&core, Timer::Reconnect);
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::Reconnect), fired),
+        );
 
         let fetch = core
             .actions
@@ -1272,9 +1290,10 @@ mod tests {
         assert!(fetch.is_some(), "{:?}", core.actions);
         // The driver's timer for that refresh would fire it a second time.
         assert!(
-            core.actions
-                .iter()
-                .any(|action| matches!(action, Action::CancelTimer(Timer::Refresh))),
+            core.actions.iter().any(|action| matches!(
+                action,
+                Action::CancelTimer(TimerKey::Client(Timer::Refresh))
+            )),
             "{:?}",
             core.actions
         );
@@ -1339,7 +1358,10 @@ mod tests {
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
         let fired = setting(&core, Timer::Reconnect);
-        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
+        shared.handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::Reconnect), fired),
+        );
         let again = core
             .actions
             .iter()
@@ -1435,7 +1457,10 @@ mod tests {
         assert_eq!(core.machine.state(), State::Connecting);
         let shared = client.shared();
         let fired = setting(&core, Timer::Reconnect);
-        shared.handle(&mut core, Input::TimerFired(Timer::Reconnect, fired));
+        shared.handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::Reconnect), fired),
+        );
         let again = core
             .actions
             .iter()
@@ -1567,7 +1592,7 @@ mod tests {
         assert!(
             core.actions.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Refresh, ..)
+                Action::SetTimer(TimerKey::Subscription(_, SubscriptionTimer::Refresh), ..)
             )),
             "{:?}",
             core.actions
@@ -1575,7 +1600,7 @@ mod tests {
         assert!(
             !core.actions.iter().any(|action| matches!(
                 action,
-                Action::ShortenSubscriptionTimer(_, SubscriptionTimer::Refresh, _)
+                Action::ShortenTimer(TimerKey::Subscription(_, SubscriptionTimer::Refresh), _)
             )),
             "{:?}",
             core.actions
@@ -1823,7 +1848,10 @@ mod tests {
         assert_eq!(
             core.actions
                 .iter()
-                .filter(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..)))
+                .filter(|action| matches!(
+                    action,
+                    Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+                ))
                 .count(),
             1,
             "{:?}",
@@ -1848,9 +1876,10 @@ mod tests {
         let mut core = connected_core(&client, r#"{"id":1,"connect":{"client":"c","ping":25}}"#);
 
         let fired = setting(&core, Timer::ServerPing);
-        client
-            .shared()
-            .handle(&mut core, Input::TimerFired(Timer::ServerPing, fired));
+        client.shared().handle(
+            &mut core,
+            Input::TimerFired(TimerKey::Client(Timer::ServerPing), fired),
+        );
 
         assert_eq!(core.machine.state(), State::Connecting);
     }

@@ -103,6 +103,11 @@ pub(super) fn name(key: TimerKey) -> String {
         TimerKey::Client(timer) => client(timer),
         TimerKey::Subscription(id, timer) => subscription(id, timer),
         TimerKey::Call(id, timer) => call(id, timer),
+        TimerKey::Debounce(timer) => debounce(timer),
+        #[cfg(feature = "unstable")]
+        TimerKey::SharedPoll(timer) => shared_poll(timer),
+        #[cfg(feature = "unstable")]
+        TimerKey::SharedPollRefresh(id) => shared_poll_refresh(id),
     }
 }
 
@@ -137,78 +142,39 @@ impl TimerRecord {
     pub(super) fn action(&mut self, action: &Action) {
         let now = platform::Instant::now();
         match action {
-            Action::SetTimer(timer, delay, setting) => {
-                self.set_numbered(client(*timer), now, *delay, *setting);
-            }
-            Action::CancelTimer(timer) => self.cancel(&client(*timer)),
-            Action::ShortenTimer(timer, by) => self.shorten(&client(*timer), *by, now),
-            Action::SetSubscriptionTimer(id, timer, delay, setting) => {
-                self.set_numbered(subscription(*id, *timer), now, *delay, *setting);
-            }
-            Action::CancelSubscriptionTimer(id, timer) => self.cancel(&subscription(*id, *timer)),
-            Action::ShortenSubscriptionTimer(id, timer, by) => {
-                self.shorten(&subscription(*id, *timer), *by, now);
-            }
-            Action::SetCallTimer(id, timer, delay, setting) => {
-                self.set_numbered(call(*id, *timer), now, *delay, *setting);
-            }
-            Action::CancelCallTimer(id, timer) => self.cancel(&call(*id, *timer)),
-            Action::SetDebounceTimer(timer, delay) => self.set(debounce(*timer), now, *delay),
-            Action::CancelDebounceTimer(timer) => self.cancel(&debounce(*timer)),
+            // The driver keeps one at the earliest deadline asked for, with
+            // the latest setting (Block 61, D4).
             #[cfg(feature = "unstable")]
-            Action::SetSharedPollTimer(timer, delay) => {
-                self.set(shared_poll(*timer), now, *delay);
-            }
-            #[cfg(feature = "unstable")]
-            Action::CancelSharedPollTimer(timer) => self.cancel(&shared_poll(*timer)),
-            // The driver keeps one at the earliest deadline asked for.
-            #[cfg(feature = "unstable")]
-            Action::SetSharedPollRefresh(id, delay) => {
+            Action::SetTimer(key @ TimerKey::SharedPollRefresh(_), delay, setting) => {
+                let name = name(*key);
                 let deadline = now + *delay;
-                match self.0.get_mut(&shared_poll_refresh(*id)) {
+                self.1.insert(name.clone(), *setting);
+                match self.0.get_mut(&name) {
                     Some((Some(running), _)) if *running <= deadline => {}
                     Some((running, _)) => *running = Some(deadline),
                     None => {
-                        self.0
-                            .insert(shared_poll_refresh(*id), (Some(deadline), now));
+                        self.0.insert(name, (Some(deadline), now));
                     }
                 }
             }
-            #[cfg(feature = "unstable")]
-            Action::CancelSharedPollRefresh(id) => self.cancel(&shared_poll_refresh(*id)),
+            Action::SetTimer(key, delay, setting) => {
+                self.set_numbered(name(*key), now, *delay, *setting);
+            }
+            Action::CancelTimer(key) => self.cancel(&name(*key)),
+            Action::ShortenTimer(key, by) => self.shorten(&name(*key), *by, now),
             _ => {}
         }
     }
 
-    /// Follows an input the core takes: a firing ends its timer, one of a
-    /// client, subscription or call timer only when it carries the setting
-    /// recorded.
-    // Block 53 D4.
+    // Block 53 D4; Block 61, D4.
     pub(super) fn input(&mut self, input: &Input) {
-        let numbered = match input {
-            Input::TimerFired(timer, setting) => Some((client(*timer), *setting)),
-            Input::SubscriptionTimerFired(id, timer, setting) => {
-                Some((subscription(*id, *timer), *setting))
-            }
-            Input::CallTimerFired(id, timer, setting) => Some((call(*id, *timer), *setting)),
-            _ => None,
-        };
-        if let Some((name, setting)) = numbered {
-            if self.1.get(&name) == Some(&setting) {
+        if let Input::TimerFired(key, setting) = input {
+            let name = name(*key);
+            if self.1.get(&name) == Some(setting) {
                 self.0.remove(&name);
                 self.1.remove(&name);
             }
-            return;
         }
-        let name = match input {
-            Input::DebounceTimerFired(timer) => debounce(*timer),
-            #[cfg(feature = "unstable")]
-            Input::SharedPollTimerFired(timer) => shared_poll(*timer),
-            #[cfg(feature = "unstable")]
-            Input::SharedPollRefreshFired(id) => shared_poll_refresh(*id),
-            _ => return,
-        };
-        self.0.remove(&name);
     }
 
     fn set(&mut self, name: String, now: platform::Instant, delay: Duration) {
@@ -303,13 +269,7 @@ impl TimerRecord {
         armed: impl IntoIterator<Item = String>,
     ) -> Vec<ArmedTimer> {
         let now = platform::Instant::now();
-        let mut names: std::collections::BTreeSet<String> = armed.into_iter().collect();
-        names.extend(
-            self.0
-                .keys()
-                .filter(|name| name.starts_with("debounce ") || name.starts_with("shared poll "))
-                .cloned(),
-        );
+        let names: std::collections::BTreeSet<String> = armed.into_iter().collect();
         names
             .into_iter()
             .map(|name| {

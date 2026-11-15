@@ -1,6 +1,7 @@
 //! Unit tests of Block 46's core: windows, followers and every way out of
 //! them.
 
+use crate::sans_io::TimerKey;
 use std::time::Duration;
 
 use super::calls::CallWait;
@@ -130,7 +131,7 @@ fn timer_of(actions: &[Action]) -> DebounceTimer {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetDebounceTimer(timer, _) => Some(*timer),
+            Action::SetTimer(TimerKey::Debounce(timer), _, _) => Some(*timer),
             _ => None,
         })
         .expect("a debounce timer")
@@ -140,7 +141,7 @@ fn timers_set(actions: &[Action]) -> Vec<(DebounceTimer, Duration)> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetDebounceTimer(timer, delay) => Some((*timer, *delay)),
+            Action::SetTimer(TimerKey::Debounce(timer), delay, _) => Some((*timer, *delay)),
             _ => None,
         })
         .collect()
@@ -150,7 +151,7 @@ fn timers_cancelled(actions: &[Action]) -> Vec<DebounceTimer> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::CancelDebounceTimer(timer) => Some(*timer),
+            Action::CancelTimer(TimerKey::Debounce(timer)) => Some(*timer),
             _ => None,
         })
         .collect()
@@ -262,7 +263,7 @@ fn the_timer_is_not_reset_by_later_publishes() {
     assert_eq!(timers_set(&third), []);
     assert_eq!(timers_cancelled(&second), []);
     assert_eq!(timers_cancelled(&third), []);
-    let fired = machine.handle(Input::DebounceTimerFired(timer));
+    let fired = machine.fire_key(TimerKey::Debounce(timer));
     assert_eq!(sent(&fired), [publish_frame(4, "3")]);
 }
 
@@ -273,7 +274,7 @@ fn the_window_keeps_only_the_latest_value() {
     let (a, _) = publish(&mut machine, subscription, "2");
     let (b, _) = publish(&mut machine, subscription, "3");
 
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     // The earlier latest was freed at once, its publish waits with the rest.
     assert_eq!(sent(&fired), [publish_frame(4, "3")]);
@@ -287,7 +288,7 @@ fn an_empty_window_closes_and_leaves_no_timer() {
     let (_, first) = publish(&mut machine, subscription, "1");
     machine.handle(frame(transport, &publish_reply(3)));
 
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     assert_eq!(fired, []);
     let (_, next) = publish(&mut machine, subscription, "2");
@@ -301,7 +302,7 @@ fn a_trailing_send_goes_past_the_gate_and_opens_a_new_window() {
     let (_, first) = publish(&mut machine, subscription, "1");
     publish(&mut machine, subscription, "2");
 
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     assert_eq!(sent(&fired), [publish_frame(4, "2")]);
     let timers = timers_set(&fired);
@@ -316,9 +317,9 @@ fn a_fired_timer_number_is_never_reused() {
     let (_, first) = publish(&mut machine, subscription, "1");
     let (_, _) = publish(&mut machine, subscription, "2");
     let original = timer_of(&first);
-    machine.handle(Input::DebounceTimerFired(original));
+    machine.fire_key(TimerKey::Debounce(original));
 
-    assert_eq!(machine.handle(Input::DebounceTimerFired(original)), []);
+    assert_eq!(machine.fire_key(TimerKey::Debounce(original)), []);
 }
 
 #[test]
@@ -326,7 +327,7 @@ fn a_debounce_timer_the_machine_does_not_know_does_nothing() {
     let (mut machine, _, _) = subscribed(100);
 
     assert_eq!(
-        machine.handle(Input::DebounceTimerFired(DebounceTimer(1234))),
+        machine.fire_key(TimerKey::Debounce(DebounceTimer(1234))),
         []
     );
 }
@@ -336,10 +337,10 @@ fn set_debounce_timers_count_the_hand_offs() {
     let (mut machine, transport, subscription) = subscribed(100);
     let (_, first) = publish(&mut machine, subscription, "1");
     publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     machine.handle(frame(transport, &publish_reply(3)));
     machine.handle(frame(transport, &publish_reply(4)));
-    let closed = machine.handle(Input::DebounceTimerFired(timer_of(&fired)));
+    let closed = machine.fire_key(TimerKey::Debounce(timer_of(&fired)));
 
     assert_eq!(timers_set(&first).len(), 1);
     assert_eq!(timers_set(&fired).len(), 1);
@@ -405,14 +406,14 @@ fn publishes_made_while_subscribing_meet_the_gate_when_subscribed() {
     assert_eq!(sent(&actions), [publish_frame(3, "1")]);
     assert_eq!(timers_set(&actions).len(), 1);
     // Their Subscription deadlines end: the window bounds them now.
-    assert!(actions.contains(&Action::CancelCallTimer(
+    assert!(actions.contains(&Action::CancelTimer(TimerKey::Call(
         second,
         super::CallTimer::Subscription
-    )));
-    assert!(actions.contains(&Action::CancelCallTimer(
+    ))));
+    assert!(actions.contains(&Action::CancelTimer(TimerKey::Call(
         third,
         super::CallTimer::Subscription
-    )));
+    ))));
     assert_eq!(machine.call_wait(first), Some(CallWait::Reply));
     assert_eq!(machine.call_wait(second), Some(CallWait::Other));
 }
@@ -455,7 +456,7 @@ fn the_replies_settle_the_leading_and_the_waiting_publishes_in_order() {
     let (a, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
     let (c, _) = publish(&mut machine, subscription, "3");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     let replied_leading = machine.handle(frame(transport, &publish_reply(3)));
     let replied_trailing = machine.handle(frame(transport, &publish_reply(4)));
@@ -473,7 +474,7 @@ fn the_trailing_error_reaches_every_waiter_with_its_code_message_and_temporary_f
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
     let (c, _) = publish(&mut machine, subscription, "3");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     let replied = machine.handle(frame(
         transport,
@@ -494,7 +495,7 @@ fn a_leading_publish_keeps_its_own_error() {
     let (mut machine, transport, subscription) = subscribed(100);
     let (a, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     let refused = machine.handle(frame(
         transport,
@@ -510,12 +511,12 @@ fn a_trailing_send_never_settles_under_its_own_id() {
     let (mut machine, transport, subscription) = subscribed(100);
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     // Its own timer, fed back as for any call.
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
+            Action::SetTimer(TimerKey::Call(id, super::CallTimer::Reply), ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
@@ -523,7 +524,10 @@ fn a_trailing_send_never_settles_under_its_own_id() {
     let replied = machine.handle(frame(transport, &publish_reply(4)));
 
     assert_ne!(trailing, b);
-    assert!(replied.contains(&Action::CancelCallTimer(trailing, super::CallTimer::Reply)));
+    assert!(replied.contains(&Action::CancelTimer(TimerKey::Call(
+        trailing,
+        super::CallTimer::Reply
+    ))));
     assert_eq!(settled(&replied), [(b, Ok(CallReply::Publish))]);
 }
 
@@ -532,11 +536,11 @@ fn a_trailing_deadline_fails_its_followers() {
     let (mut machine, _, subscription) = subscribed(100);
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
+            Action::SetTimer(TimerKey::Call(id, super::CallTimer::Reply), ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
@@ -713,10 +717,7 @@ fn no_timer_of_a_window_survives_its_subscription_leaving_subscribed() {
 
     machine.handle(Input::Unsubscribe(subscription));
 
-    assert_eq!(
-        machine.handle(Input::DebounceTimerFired(timer_of(&first))),
-        []
-    );
+    assert_eq!(machine.fire_key(TimerKey::Debounce(timer_of(&first))), []);
 }
 
 /// A window whose trailing send was handed over: the trailing send's
@@ -732,11 +733,11 @@ fn handed_over() -> (
     let (mut machine, transport, subscription) = subscribed(100);
     let (_, first) = publish(&mut machine, subscription, "1");
     let (follower, _) = publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     let trailing = fired
         .iter()
         .find_map(|action| match action {
-            Action::SetCallTimer(id, super::CallTimer::Reply, ..) => Some(*id),
+            Action::SetTimer(TimerKey::Call(id, super::CallTimer::Reply), ..) => Some(*id),
             _ => None,
         })
         .expect("the trailing send's deadline");
@@ -773,7 +774,7 @@ fn a_follower_of_a_trailing_send_waiting_for_the_connection_waits_for_a_message(
     });
 
     // The close is held: the timer fires with the transport closing.
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     assert_eq!(sent(&fired), Vec::<String>::new());
     assert_eq!(machine.call_wait(follower), Some(CallWait::Message));
@@ -787,7 +788,7 @@ fn a_follower_of_a_trailing_send_waiting_for_room_is_other() {
     let (_, first) = publish(&mut machine, subscription, "1");
     let (follower, _) = publish(&mut machine, subscription, "2");
 
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     assert_eq!(machine.call_wait(follower), Some(CallWait::Other));
 }
@@ -818,7 +819,7 @@ fn a_trailing_send_waiting_for_room_fails_with_code_7_on_unsubscribe() {
     machine.handle(Input::Call(filler));
     let (_, first) = publish(&mut machine, subscription, "1");
     let (follower, _) = publish(&mut machine, subscription, "2");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     let unsubscribed = machine.handle(Input::Unsubscribe(subscription));
 
@@ -838,9 +839,9 @@ fn a_window_ending_while_the_previous_trailing_send_waits_for_room_makes_one_mor
     let filled = machine.handle(Input::Call(filling_call));
     let (_, first) = publish(&mut machine, subscription, "1");
     publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     publish(&mut machine, subscription, "3");
-    let fired_again = machine.handle(Input::DebounceTimerFired(timer_of(&fired)));
+    let fired_again = machine.fire_key(TimerKey::Debounce(timer_of(&fired)));
 
     // Two trailing sends waiting for room, the window keeps its own timing.
     assert_eq!(sent(&fired_again), Vec::<String>::new());
@@ -879,7 +880,7 @@ fn abandoning_the_only_waiter_of_a_window_drops_its_data() {
     let (waiter, _) = publish(&mut machine, subscription, "2");
 
     let abandoned = machine.handle(Input::CallAbandoned(waiter));
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     assert_eq!(abandoned, []);
     assert_eq!(fired, [], "the window goes on with nothing to send");
@@ -894,7 +895,7 @@ fn abandoning_the_last_of_several_waiters_still_sends_its_value_for_the_others()
     let (c, _) = publish(&mut machine, subscription, "3");
 
     machine.handle(Input::CallAbandoned(c));
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     let replied = machine.handle(frame(transport, &publish_reply(4)));
 
     assert_eq!(sent(&fired), [publish_frame(4, "3")]);
@@ -910,7 +911,7 @@ fn abandoning_an_earlier_waiter_keeps_the_latest_for_the_others() {
     let (c, _) = publish(&mut machine, subscription, "3");
 
     machine.handle(Input::CallAbandoned(b));
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     let replied = machine.handle(frame(transport, &publish_reply(4)));
 
     assert_eq!(sent(&fired), [publish_frame(4, "3")]);
@@ -923,7 +924,7 @@ fn abandoning_a_follower_keeps_the_trailing_send_for_the_others() {
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
     let (c, _) = publish(&mut machine, subscription, "3");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     machine.handle(Input::CallAbandoned(b));
     let replied = machine.handle(frame(transport, &publish_reply(4)));
@@ -938,7 +939,7 @@ fn abandoning_every_follower_of_a_trailing_send_not_yet_out_withdraws_it() {
     let filled = machine.handle(Input::Call(filling_call));
     let (_, first) = publish(&mut machine, subscription, "1");
     let (b, _) = publish(&mut machine, subscription, "2");
-    machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&first)));
 
     let abandoned = machine.handle(Input::CallAbandoned(b));
     let Action::Send {
@@ -982,10 +983,10 @@ fn closed_windows_leave_nothing_behind() {
     let (mut machine, transport, subscription) = subscribed(100);
     let (_, first) = publish(&mut machine, subscription, "1");
     publish(&mut machine, subscription, "2");
-    let fired = machine.handle(Input::DebounceTimerFired(timer_of(&first)));
+    let fired = machine.fire_key(TimerKey::Debounce(timer_of(&first)));
     machine.handle(frame(transport, &publish_reply(3)));
     machine.handle(frame(transport, &publish_reply(4)));
-    machine.handle(Input::DebounceTimerFired(timer_of(&fired)));
+    machine.fire_key(TimerKey::Debounce(timer_of(&fired)));
 
     assert_eq!(machine.debounce_window_count(), 0);
     assert_eq!(machine.subscription_debounce_windows(subscription), 0);
@@ -994,6 +995,7 @@ fn closed_windows_leave_nothing_behind() {
 /// Block 46b: map keys (`unstable`, D12).
 #[cfg(feature = "unstable")]
 mod maps {
+    use crate::sans_io::TimerKey;
     use serde_json::Value;
 
     use super::{
@@ -1309,10 +1311,10 @@ mod maps {
         assert_ne!(timer(&a1), timer(&b1));
         assert_eq!(machine.subscription_debounce_windows(subscription), 2);
 
-        let fired = machine.handle(Input::DebounceTimerFired(timer(&a1)));
+        let fired = machine.fire_key(TimerKey::Debounce(timer(&a1)));
 
         assert_eq!(map_writes(&fired), [("a".into(), Some(2))]);
-        let fired = machine.handle(Input::DebounceTimerFired(timer(&b1)));
+        let fired = machine.fire_key(TimerKey::Debounce(timer(&b1)));
         assert_eq!(map_writes(&fired), [("b".into(), Some(2))]);
     }
 
@@ -1335,7 +1337,7 @@ mod maps {
         let (_, first) = publish(&mut machine, subscription, "a", "1");
         publish(&mut machine, subscription, "a", "2");
 
-        let fired = machine.handle(Input::DebounceTimerFired(timer(&first)));
+        let fired = machine.fire_key(TimerKey::Debounce(timer(&first)));
 
         assert_eq!(map_writes(&fired), [("a".into(), Some(2))]);
         assert_eq!(timers_set(&fired).len(), 1);
@@ -1348,12 +1350,12 @@ mod maps {
         let (_, b1) = publish(&mut machine, subscription, "b", "1");
         publish(&mut machine, subscription, "b", "2");
 
-        let fired = machine.handle(Input::DebounceTimerFired(timer(&a1)));
+        let fired = machine.fire_key(TimerKey::Debounce(timer(&a1)));
         assert_eq!(map_writes(&fired), []);
         assert_eq!(timers_set(&fired), []);
         assert_eq!(machine.subscription_debounce_windows(subscription), 1);
 
-        let fired = machine.handle(Input::DebounceTimerFired(timer(&b1)));
+        let fired = machine.fire_key(TimerKey::Debounce(timer(&b1)));
         assert_eq!(map_writes(&fired), [("b".into(), Some(2))]);
     }
 
@@ -1406,7 +1408,7 @@ mod maps {
         let (mut machine, _, subscription, _, window) = window_on_k();
         remove(&mut machine, subscription, "k");
 
-        let fired = machine.handle(Input::DebounceTimerFired(window));
+        let fired = machine.fire_key(TimerKey::Debounce(window));
 
         assert_eq!(fired, []);
     }
@@ -1487,7 +1489,7 @@ mod maps {
 
         assert_eq!(timers_cancelled(&removed), []);
         assert_eq!(machine.debounce_window_count(), 1);
-        let fired = machine.handle(Input::DebounceTimerFired(window));
+        let fired = machine.fire_key(TimerKey::Debounce(window));
         assert_eq!(map_writes(&fired), [("k".into(), Some(2))]);
         assert!(machine.call_wait(waiter).is_some());
     }
@@ -1508,7 +1510,7 @@ mod maps {
     #[test]
     fn a_trailing_send_handed_over_keeps_its_followers_as_a_remove_follows() {
         let (mut machine, transport, subscription, waiter, window) = window_on_k();
-        let fired = machine.handle(Input::DebounceTimerFired(window));
+        let fired = machine.fire_key(TimerKey::Debounce(window));
         let trailing = command_id(&commands(&fired)[0]);
         // The window the trailing send opened has nothing in it.
         let (remove_id, removed) = remove(&mut machine, subscription, "k");
@@ -1741,4 +1743,30 @@ mod maps {
             Some(codes::error::SUBSCRIPTION_UNSUBSCRIBED)
         );
     }
+}
+
+// Block 61, D4: a debounce window's timer is numbered by setting: a firing
+// of another timer's setting, or of one taken already, is ignored.
+#[test]
+fn a_debounce_firing_of_a_taken_or_another_timers_setting_returns_no_action() {
+    let (mut machine, _, subscription) = subscribed(100);
+    let (_, opened) = publish(&mut machine, subscription, "1");
+    let key = TimerKey::Debounce(timer_of(&opened));
+    // Held in the window: the window's end sends it.
+    publish(&mut machine, subscription, "2");
+    let running = machine.key_setting(key).expect("the window's timer runs");
+    let other = machine
+        .timer_settings
+        .running
+        .iter()
+        .find_map(|(other, setting)| (*other != key).then_some(*setting))
+        .expect("another timer running");
+
+    let stale = machine.handle(Input::TimerFired(key, other));
+    assert!(stale.is_empty(), "{stale:?}");
+    assert_eq!(machine.key_setting(key), Some(running));
+    let first = machine.handle(Input::TimerFired(key, running));
+    assert_eq!(sent(&first).len(), 1, "{first:?}");
+    let second = machine.handle(Input::TimerFired(key, running));
+    assert!(second.is_empty(), "{second:?}");
 }

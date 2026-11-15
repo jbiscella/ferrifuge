@@ -4,6 +4,7 @@
 //! connection ends, and the sampling step plays the plan on fresh machines,
 //! reading the reconnect delay scheduled after the last connection.
 
+use ferrifuge::machine::TimerKey;
 use std::time::Duration;
 
 use cucumber::{given, then, when};
@@ -149,7 +150,7 @@ fn reconnect_delay(actions: &[Action]) -> Duration {
     actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
             _ => None,
         })
         .expect("a reconnect is scheduled")

@@ -10,6 +10,7 @@ mod shared_poll_flow;
 mod state_flow;
 mod token_flow;
 
+use crate::sans_io::TimerKey;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
@@ -957,10 +958,11 @@ impl Machine {
             return true;
         }
         if let Some(id) = self.subscriptions.sub_refreshes.remove(&command) {
-            self.actions.push(Action::CancelSubscriptionTimer(
-                id,
-                SubscriptionTimer::RefreshReply,
-            ));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    id,
+                    SubscriptionTimer::RefreshReply,
+                )));
             let current = self.subscriptions.by_id.get_mut(&id).is_some_and(|sub| {
                 sub.tokens.take_refresh_reply(command) && sub.state == SubscriptionState::Subscribed
             });
@@ -977,10 +979,11 @@ impl Machine {
         let Some((id, channel)) = self.subscriptions.subscribes.remove(&command) else {
             return false;
         };
-        self.actions.push(Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-        ));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Subscription(
+                id,
+                SubscriptionTimer::SubscribeReply,
+            )));
         let current = self
             .subscriptions
             .by_id
@@ -1018,10 +1021,11 @@ impl Machine {
             return;
         }
         if let Some((id, channel)) = self.subscriptions.unsubscribes.remove(&reply.id) {
-            self.actions.push(Action::CancelSubscriptionTimer(
-                id,
-                SubscriptionTimer::UnsubscribeReply,
-            ));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    id,
+                    SubscriptionTimer::UnsubscribeReply,
+                )));
             // Without its result the server-side state is unknown too.
             if reply.error.is_some() || reply.result != ReplyResult::Unsubscribe {
                 self.unsubscribe_error();
@@ -1034,10 +1038,11 @@ impl Machine {
         let Some((id, channel)) = self.subscriptions.subscribes.remove(&reply.id) else {
             return;
         };
-        self.actions.push(Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::SubscribeReply,
-        ));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Subscription(
+                id,
+                SubscriptionTimer::SubscribeReply,
+            )));
         let current = self
             .subscriptions
             .by_id
@@ -1289,10 +1294,11 @@ impl Machine {
         sub.backoff.reset();
         sub.resubscribe_pending = false;
         let channel = sub.channel.clone();
-        self.actions.push(Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::Resubscribe,
-        ));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Subscription(
+                id,
+                SubscriptionTimer::Resubscribe,
+            )));
         // A token being fetched, a refresh scheduled or in flight end too
         // (centrifuge-js `_setUnsubscribed`).
         self.end_token_refresh(id);
@@ -1610,10 +1616,11 @@ impl Machine {
         if expires {
             self.schedule_subscription_refresh(id, ttl);
         } else {
-            self.actions.push(Action::CancelSubscriptionTimer(
-                id,
-                SubscriptionTimer::Refresh,
-            ));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    id,
+                    SubscriptionTimer::Refresh,
+                )));
         }
     }
 
@@ -1629,9 +1636,8 @@ impl Machine {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.actions.push(Action::ShortenSubscriptionTimer(
-                id,
-                SubscriptionTimer::Refresh,
+            self.actions.push(Action::ShortenTimer(
+                TimerKey::Subscription(id, SubscriptionTimer::Refresh),
                 gap,
             ));
         }
@@ -1653,7 +1659,8 @@ impl Machine {
         #[cfg(feature = "unstable")]
         for (_, command) in self.subscriptions.track_commands.drain() {
             if let Some(timer) = command.timer() {
-                self.actions.push(Action::CancelSharedPollTimer(timer));
+                self.actions
+                    .push(Action::CancelTimer(TimerKey::SharedPoll(timer)));
             }
         }
         for (id, _) in self
@@ -1662,10 +1669,11 @@ impl Machine {
             .drain()
             .map(|(_, pending)| pending)
         {
-            self.actions.push(Action::CancelSubscriptionTimer(
-                id,
-                SubscriptionTimer::SubscribeReply,
-            ));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    id,
+                    SubscriptionTimer::SubscribeReply,
+                )));
         }
         for (id, _) in self
             .subscriptions
@@ -1673,10 +1681,11 @@ impl Machine {
             .drain()
             .map(|(_, pending)| pending)
         {
-            self.actions.push(Action::CancelSubscriptionTimer(
-                id,
-                SubscriptionTimer::UnsubscribeReply,
-            ));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Subscription(
+                    id,
+                    SubscriptionTimer::UnsubscribeReply,
+                )));
         }
         self.subscriptions.sub_refreshes.clear();
         self.subscriptions.optimistic.clear();
@@ -1720,7 +1729,7 @@ impl Machine {
                 for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
                     if !(reconnect && timer == SubscriptionTimer::Refresh) {
                         self.actions
-                            .push(Action::CancelSubscriptionTimer(*id, timer));
+                            .push(Action::CancelTimer(TimerKey::Subscription(*id, timer)));
                     }
                 }
             }
@@ -2230,9 +2239,10 @@ mod tests {
             "{panicked:?}"
         );
         assert!(
-            !panicked
-                .iter()
-                .any(|action| matches!(action, Action::SetTimer(Timer::Reconnect, ..))),
+            !panicked.iter().any(|action| matches!(
+                action,
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..)
+            )),
             "{panicked:?}"
         );
         assert_eq!(machine.statistics().publications_delivered, 0);
@@ -2312,7 +2322,7 @@ mod tests {
 
         assert_eq!(machine.state(), State::Connected);
         assert!(
-            closed.contains(&Action::CancelTimer(Timer::ServerPing)),
+            closed.contains(&Action::CancelTimer(TimerKey::Client(Timer::ServerPing))),
             "{closed:?}"
         );
     }
@@ -2757,7 +2767,7 @@ mod tests {
             assert!(
                 closed.iter().any(|action| matches!(
                     action,
-                    Action::CancelSubscriptionTimer(of, t) if *of == id && *t == timer
+                    Action::CancelTimer(TimerKey::Subscription(of, t)) if *of == id && *t == timer
                 )),
                 "{timer:?} not cancelled: {closed:?}"
             );
@@ -2799,7 +2809,7 @@ mod tests {
         actions.iter().any(|action| {
             matches!(
                 action,
-                Action::CancelSubscriptionTimer(of, SubscriptionTimer::Refresh) if *of == id
+                Action::CancelTimer(TimerKey::Subscription(of, SubscriptionTimer::Refresh)) if *of == id
             )
         })
     }
@@ -3267,10 +3277,12 @@ mod tests {
             sent(&refresh),
             [r#"{"id":3,"sub_refresh":{"channel":"news","token":"u"}}"#]
         );
-        assert!(actions.contains(&Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::RefreshReply
-        )));
+        assert!(
+            actions.contains(&Action::CancelTimer(TimerKey::Subscription(
+                id,
+                SubscriptionTimer::RefreshReply
+            )))
+        );
         assert_eq!(
             sent(&actions),
             [r#"{"id":4,"subscribe":{"channel":"news","token":"u"}}"#]
@@ -3320,7 +3332,7 @@ mod tests {
         assert!(
             !unsubscribed.iter().any(|action| matches!(
                 action,
-                Action::CancelSubscriptionTimer(_, SubscriptionTimer::SubscribeReply)
+                Action::CancelTimer(TimerKey::Subscription(_, SubscriptionTimer::SubscribeReply))
             )),
             "{unsubscribed:?}"
         );
@@ -3349,7 +3361,10 @@ mod tests {
             assert!(
                 unsubscribe.iter().any(|action| matches!(
                     action,
-                    Action::SetSubscriptionTimer(_, SubscriptionTimer::UnsubscribeReply, ..)
+                    Action::SetTimer(
+                        TimerKey::Subscription(_, SubscriptionTimer::UnsubscribeReply),
+                        ..
+                    )
                 )),
                 "{unsubscribe:?}"
             );
@@ -3482,8 +3497,10 @@ mod tests {
         assert!(
             !rejected.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
-                    | Action::CloseTransport(_)
+                Action::SetTimer(
+                    TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                    ..
+                ) | Action::CloseTransport(_)
             )),
             "{rejected:?}"
         );
@@ -3676,7 +3693,10 @@ mod tests {
         assert!(
             actions.iter().any(|action| matches!(
                 action,
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
+                Action::SetTimer(
+                    TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                    ..
+                )
             )),
             "{actions:?}"
         );
@@ -3722,9 +3742,11 @@ mod tests {
         let delay = retry
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
-                    Some(*delay)
-                }
+                Action::SetTimer(
+                    TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                    delay,
+                    ..,
+                ) => Some(*delay),
                 _ => None,
             })
             .expect("a retry");
@@ -3928,9 +3950,11 @@ mod tests {
 
     fn resubscribe_delay(actions: &[Action]) -> Option<Duration> {
         actions.iter().find_map(|action| match action {
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
-                Some(*delay)
-            }
+            Action::SetTimer(
+                TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                delay,
+                ..,
+            ) => Some(*delay),
             _ => None,
         })
     }
@@ -4141,7 +4165,7 @@ mod tests {
         )));
         assert!(answered.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, ..) if *of == id
+            Action::SetTimer(TimerKey::Subscription(of, SubscriptionTimer::Resubscribe), ..) if *of == id
         )));
     }
 

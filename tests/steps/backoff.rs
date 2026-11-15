@@ -5,6 +5,7 @@
 //! subscribe attempts and reads the delays the machine schedules, without
 //! network or real time.
 
+use ferrifuge::machine::TimerKey;
 use std::time::Duration;
 
 use cucumber::{given, then, when};
@@ -55,7 +56,7 @@ fn reconnect_delays(config: &Config, attempts: usize) -> Vec<Duration> {
             actions
                 .iter()
                 .find_map(|action| match action {
-                    Action::SetTimer(Timer::Reconnect, delay, ..) => Some(*delay),
+                    Action::SetTimer(TimerKey::Client(Timer::Reconnect), delay, ..) => Some(*delay),
                     _ => None,
                 })
                 .expect("a failed attempt schedules a reconnect"),
@@ -176,9 +177,11 @@ impl ResubscribeRun {
         let delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
-                    Some(*delay)
-                }
+                Action::SetTimer(
+                    TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                    delay,
+                    ..,
+                ) => Some(*delay),
                 _ => None,
             })
             .expect("a failed subscribe schedules a resubscribe");
@@ -202,9 +205,11 @@ impl ResubscribeRun {
         let delay = actions
             .iter()
             .find_map(|action| match action {
-                Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, delay, ..) => {
-                    Some(*delay)
-                }
+                Action::SetTimer(
+                    TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                    delay,
+                    ..,
+                ) => Some(*delay),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("a broken delta schedules a resubscribe: {actions:?}"));

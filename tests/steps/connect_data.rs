@@ -5,6 +5,7 @@
 //! fetches the machine asks for, and the transports it opens. @B and @D
 //! scenarios configure the scenario's client.
 
+use ferrifuge::machine::TimerKey;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -318,7 +319,9 @@ fn the_data_callback_is_called_again(world: &mut ClientWorld) {
         .actions
         .iter()
         .find_map(|action| match action {
-            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, delay, ..) => Some(*delay),
+            Action::SetTimer(TimerKey::Client(ferrifuge::machine::Timer::Reconnect), delay, ..) => {
+                Some(*delay)
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("no reconnect scheduled: {:?}", run.actions));
@@ -327,7 +330,7 @@ fn the_data_callback_is_called_again(world: &mut ClientWorld) {
     assert_eq!(run.data_calls(), 1, "called again before the delay");
     let reconnect = ferrifuge::machine::Timer::Reconnect;
     let setting = run.machine.timer_setting(reconnect).expect("reconnect set");
-    run.handle(Input::TimerFired(reconnect, setting));
+    run.handle(Input::TimerFired(TimerKey::Client(reconnect), setting));
     assert_eq!(run.data_calls(), 2, "{:?}", run.actions);
 }
 
@@ -353,7 +356,7 @@ fn no_reconnect_is_scheduled(world: &mut ClientWorld) {
     assert!(
         !run.actions.iter().any(|action| matches!(
             action,
-            Action::SetTimer(ferrifuge::machine::Timer::Reconnect, ..)
+            Action::SetTimer(TimerKey::Client(ferrifuge::machine::Timer::Reconnect), ..)
         )),
         "{:?}",
         run.actions
@@ -927,7 +930,7 @@ fn the_token_callback_is_called_first(world: &mut ClientWorld) {
     let from = run.actions.len();
     let reconnect = ferrifuge::machine::Timer::Reconnect;
     let setting = run.machine.timer_setting(reconnect).expect("reconnect set");
-    let transport = run.handle(Input::TimerFired(reconnect, setting));
+    let transport = run.handle(Input::TimerFired(TimerKey::Client(reconnect), setting));
     let fetch = run.actions[from..]
         .iter()
         .find_map(|action| match action {

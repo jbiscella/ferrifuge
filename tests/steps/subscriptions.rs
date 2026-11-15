@@ -3,6 +3,7 @@
 // cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1028,9 +1029,8 @@ impl MachineRun {
                             });
                         }
                     }
-                    Action::SetSubscriptionTimer(
-                        id,
-                        SubscriptionTimer::Resubscribe,
+                    Action::SetTimer(
+                        TimerKey::Subscription(id, SubscriptionTimer::Resubscribe),
                         delay,
                         setting,
                     ) if !self.answers.is_empty()
@@ -1038,9 +1038,8 @@ impl MachineRun {
                         || !self.state_answers.is_empty() =>
                     {
                         self.delay_before_fetch = Some(*delay);
-                        pending.push_back(Input::SubscriptionTimerFired(
-                            *id,
-                            SubscriptionTimer::Resubscribe,
+                        pending.push_back(Input::TimerFired(
+                            TimerKey::Subscription(*id, SubscriptionTimer::Resubscribe),
                             *setting,
                         ));
                     }
@@ -1097,7 +1096,7 @@ impl MachineRun {
             .subscription_timer_setting(subscription, timer)
             .or_else(|| {
                 self.actions.iter().rev().find_map(|action| match action {
-                    Action::SetSubscriptionTimer(id, of, _, setting)
+                    Action::SetTimer(TimerKey::Subscription(id, of), _, setting)
                         if *id == subscription && *of == timer =>
                     {
                         Some(*setting)
@@ -1106,7 +1105,10 @@ impl MachineRun {
                 })
             })
             .expect("subscription timer set once");
-        self.handle(Input::SubscriptionTimerFired(subscription, timer, setting));
+        self.handle(Input::TimerFired(
+            TimerKey::Subscription(subscription, timer),
+            setting,
+        ));
     }
 
     /// Connects the machine over a transport answering connect at once.
@@ -1171,7 +1173,9 @@ impl MachineRun {
         self.actions[from..]
             .iter()
             .filter_map(|action| match action {
-                Action::SetSubscriptionTimer(_, timer, delay, ..) if *timer == kind => Some(*delay),
+                Action::SetTimer(TimerKey::Subscription(_, timer), delay, ..) if *timer == kind => {
+                    Some(*delay)
+                }
                 _ => None,
             })
             .collect()
@@ -1304,7 +1308,10 @@ fn no_resubscribe_is_scheduled(world: &mut ClientWorld) {
     assert!(
         !run.actions.iter().any(|action| matches!(
             action,
-            Action::SetSubscriptionTimer(_, SubscriptionTimer::Resubscribe, ..)
+            Action::SetTimer(
+                TimerKey::Subscription(_, SubscriptionTimer::Resubscribe),
+                ..
+            )
         )),
         "{:?}",
         run.actions

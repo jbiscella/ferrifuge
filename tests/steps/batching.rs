@@ -1,6 +1,7 @@
 //! Steps of Block 18: batches. @E scenarios drive the sans-IO core on a
 //! simulated clock; @D scenarios run a tokio client against the fake server.
 
+use ferrifuge::machine::TimerKey;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -82,26 +83,36 @@ impl BatchRun {
         }
     }
 
+    /// Feeds the firing of the running setting of `key`'s timer.
+    pub(super) fn fire_key(&mut self, key: TimerKey) {
+        let setting = self.machine.key_setting(key).expect("a running timer");
+        self.handle(Input::TimerFired(key, setting));
+    }
+
     pub(super) fn handle(&mut self, input: Input) {
         for action in self.machine.handle(input) {
             match &action {
                 Action::OpenTransport { transport, .. } => self.transport = Some(*transport),
-                Action::SetTimer(timer, delay, setting) => {
+                Action::SetTimer(TimerKey::Client(timer), delay, setting) => {
                     self.set(Key::Client(*timer), *delay, *setting);
                 }
-                Action::CancelTimer(timer) => self.cancel(Key::Client(*timer)),
-                Action::ShortenTimer(timer, by) => self.shorten(Key::Client(*timer), *by),
-                Action::ShortenSubscriptionTimer(id, timer, by) => {
+                Action::CancelTimer(TimerKey::Client(timer)) => self.cancel(Key::Client(*timer)),
+                Action::ShortenTimer(TimerKey::Client(timer), by) => {
+                    self.shorten(Key::Client(*timer), *by)
+                }
+                Action::ShortenTimer(TimerKey::Subscription(id, timer), by) => {
                     self.shorten(Key::Subscription(*id, *timer), *by);
                 }
-                Action::SetCallTimer(call, timer, delay, setting) => {
+                Action::SetTimer(TimerKey::Call(call, timer), delay, setting) => {
                     self.set(Key::Call(*call, *timer), *delay, *setting);
                 }
-                Action::CancelCallTimer(call, timer) => self.cancel(Key::Call(*call, *timer)),
-                Action::SetSubscriptionTimer(id, timer, delay, setting) => {
+                Action::CancelTimer(TimerKey::Call(call, timer)) => {
+                    self.cancel(Key::Call(*call, *timer))
+                }
+                Action::SetTimer(TimerKey::Subscription(id, timer), delay, setting) => {
                     self.set(Key::Subscription(*id, *timer), *delay, *setting);
                 }
-                Action::CancelSubscriptionTimer(id, timer) => {
+                Action::CancelTimer(TimerKey::Subscription(id, timer)) => {
                     self.cancel(Key::Subscription(*id, *timer));
                 }
                 Action::CallSettled { call, result } => {
@@ -152,9 +163,11 @@ impl BatchRun {
             self.timers.remove(index);
             self.now = at;
             self.handle(match key {
-                Key::Client(timer) => Input::TimerFired(timer, setting),
-                Key::Call(call, timer) => Input::CallTimerFired(call, timer, setting),
-                Key::Subscription(id, timer) => Input::SubscriptionTimerFired(id, timer, setting),
+                Key::Client(timer) => Input::TimerFired(TimerKey::Client(timer), setting),
+                Key::Call(call, timer) => Input::TimerFired(TimerKey::Call(call, timer), setting),
+                Key::Subscription(id, timer) => {
+                    Input::TimerFired(TimerKey::Subscription(id, timer), setting)
+                }
             });
         }
         self.now = until;
@@ -1250,7 +1263,10 @@ fn the_server_closes_the_transport(world: &mut ClientWorld) {
         .machine
         .timer_setting(Timer::Reconnect)
         .expect("reconnect set");
-    run.handle(Input::TimerFired(Timer::Reconnect, setting));
+    run.handle(Input::TimerFired(
+        TimerKey::Client(Timer::Reconnect),
+        setting,
+    ));
 }
 
 #[then(

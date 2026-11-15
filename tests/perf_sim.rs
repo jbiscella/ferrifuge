@@ -5,6 +5,7 @@
 // @P scenario: Reconnects of a fleet are spread over the jitter window
 // @P scenario: Token refreshes of a fleet are spread
 
+use ferrifuge::machine::TimerKey;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -77,12 +78,12 @@ impl Simulation {
                     self.answer(command);
                 }
             }
-            Action::SetTimer(timer, delay, setting) => {
+            Action::SetTimer(TimerKey::Client(timer), delay, setting) => {
                 self.timers[timer.index()] = Some((self.now + delay, setting));
                 self.set.push((self.now, timer));
             }
-            Action::CancelTimer(timer) => self.timers[timer.index()] = None,
-            Action::SetSubscriptionTimer(..) => self.subscription_timers_set += 1,
+            Action::CancelTimer(TimerKey::Client(timer)) => self.timers[timer.index()] = None,
+            Action::SetTimer(TimerKey::Subscription(..), ..) => self.subscription_timers_set += 1,
             Action::FetchToken(fetch) => self.pending.push_back(Input::TokenFetched {
                 fetch,
                 result: Ok("token".to_owned()),
@@ -145,7 +146,7 @@ impl Simulation {
                 Some((at, timer, setting)) if at == next => {
                     self.timers[timer.index()] = None;
                     self.fired.push((self.now, timer));
-                    self.handle(Input::TimerFired(timer, setting));
+                    self.handle(Input::TimerFired(TimerKey::Client(timer), setting));
                 }
                 _ => {
                     next_ping += interval;

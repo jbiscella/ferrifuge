@@ -162,16 +162,15 @@ pub mod machine {
     //!
     //! Sans-IO core: the client connection state machine.
     //!
-    //! Timers are numbered by setting: each [`Action::SetTimer`],
-    //! [`Action::SetSubscriptionTimer`] and [`Action::SetCallTimer`] carries a
-    //! [`TimerSetting`] the machine never gives again. The owner returns it
-    //! unchanged in the [`Input::TimerFired`], [`Input::SubscriptionTimerFired`]
-    //! or [`Input::CallTimerFired`] of that setting; a timer shortened by
-    //! [`Action::ShortenTimer`] or [`Action::ShortenSubscriptionTimer`] keeps
-    //! its setting. The machine ignores a firing whose setting no longer runs,
-    //! because it cancelled that timer, set it again or already took its
-    //! firing: the step returns no action. The owner need not drop a late
-    //! firing, whatever it fed in between, [`Input::Slept`] included.
+    //! Timers are numbered by setting: each [`Action::SetTimer`] carries a
+    //! [`TimerKey`], naming a timer of any family, and a [`TimerSetting`] the
+    //! machine never gives again. The owner returns both unchanged in the
+    //! [`Input::TimerFired`] of that setting; a timer shortened by
+    //! [`Action::ShortenTimer`] keeps its setting. The machine ignores a firing
+    //! whose setting no longer runs, because it cancelled that timer, set it
+    //! again or already took its firing: the step returns no action. The owner
+    //! need not drop a late firing, whatever it fed in between, [`Input::Slept`]
+    //! included.
     //!
     //! A [`Machine`] owns no sockets, timers or tasks. Its owner feeds it
     //! [`Input`]s and performs the returned [`Action`]s in order. The tokio
@@ -199,18 +198,17 @@ pub mod machine {
     //!    an application call revealed the sleep.
     //! 3. **Refresh deadlines.** The owner records each token refresh timer's
     //!    deadline and setting from the [`Action::SetTimer`] and
-    //!    [`Action::SetSubscriptionTimer`] refresh actions, and forgets them on
-    //!    [`Action::CancelTimer`] and [`Action::CancelSubscriptionTimer`]. On a
-    //!    sleep it moves all of them earlier by the gap. It feeds the ones now
-    //!    due as [`Input::TimerFired`] or [`Input::SubscriptionTimerFired`] with
-    //!    their setting, the connection's first, then by subscription, and
-    //!    cancels its own timers for them. Each refresh is fed once: a refresh
+    //!    [`Action::CancelTimer`] actions for the refresh keys,
+    //!    `TimerKey::Client(Timer::Refresh)` and
+    //!    `TimerKey::Subscription(_, SubscriptionTimer::Refresh)`. On a sleep it
+    //!    moves all of them earlier by the gap. It feeds the ones now due as
+    //!    [`Input::TimerFired`] with their key and setting, the connection's
+    //!    first, then by subscription, and cancels its own timers for them. Each refresh is fed once: a refresh
     //!    firing the machine is given removes that deadline.
     //! 4. **Shorten filter.** When the input goes before `Slept`, the owner
-    //!    drops from `Slept`'s answer every [`Action::ShortenTimer`] and
-    //!    [`Action::ShortenSubscriptionTimer`] for a timer that the input's
-    //!    answer just set, including the answers to the event takes the input
-    //!    caused: those timers lost no time to the sleep.
+    //!    drops from `Slept`'s answer every [`Action::ShortenTimer`] for a key
+    //!    that the input's answer just set, including the answers to the event
+    //!    takes the input caused: those timers lost no time to the sleep.
     //!
     //! Behaviour follows the Client SDK spec, with centrifuge-js as the
     //! implementation reference (`src/centrifuge.ts`).

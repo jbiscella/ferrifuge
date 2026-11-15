@@ -20,6 +20,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ferrifuge::machine::CallRequest;
+use ferrifuge::machine::TimerKey;
 use ferrifuge::machine::{
     Action, CallId, FetchId, Input, Machine, SubscriptionId, SubscriptionOptions,
     SubscriptionTimer, Timer, TransportId, TransportKind,
@@ -1001,12 +1002,19 @@ impl<'a> Replay<'a> {
                         self.sent.push(Sent::of_core(&command));
                     }
                 }
-                Action::SetTimer(Timer::Reconnect, ..) => self.reconnect_armed = true,
-                Action::CancelTimer(Timer::Reconnect) => self.reconnect_armed = false,
-                Action::SetSubscriptionTimer(id, SubscriptionTimer::Resubscribe, ..) => {
+                Action::SetTimer(TimerKey::Client(Timer::Reconnect), ..) => {
+                    self.reconnect_armed = true
+                }
+                Action::CancelTimer(TimerKey::Client(Timer::Reconnect)) => {
+                    self.reconnect_armed = false
+                }
+                Action::SetTimer(
+                    TimerKey::Subscription(id, SubscriptionTimer::Resubscribe),
+                    ..,
+                ) => {
                     self.resubscribe_armed.insert(id);
                 }
-                Action::CancelSubscriptionTimer(id, SubscriptionTimer::Resubscribe) => {
+                Action::CancelTimer(TimerKey::Subscription(id, SubscriptionTimer::Resubscribe)) => {
                     self.resubscribe_armed.remove(&id);
                 }
                 Action::FetchToken(fetch) => {

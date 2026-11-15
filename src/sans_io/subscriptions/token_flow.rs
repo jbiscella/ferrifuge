@@ -6,6 +6,7 @@
 //! refresh starting at 80–90% of the ttl.
 // Block 10b; Block 14.
 
+use crate::sans_io::TimerKey;
 use std::time::Duration;
 
 use super::super::tokens::{FetchPurpose, TOKEN_EXPIRED, refresh_delay};
@@ -138,7 +139,7 @@ impl Machine {
         }
         for timer in [SubscriptionTimer::Refresh, SubscriptionTimer::RefreshReply] {
             self.actions
-                .push(Action::CancelSubscriptionTimer(id, timer));
+                .push(Action::CancelTimer(TimerKey::Subscription(id, timer)));
         }
         self.subscriptions.sub_refreshes.retain(|_, of| *of != id);
     }
@@ -228,10 +229,11 @@ impl Machine {
 
     /// The reply to a `sub_refresh` command of subscription `id`.
     pub(super) fn sub_refresh_reply(&mut self, id: SubscriptionId, reply: Reply) {
-        self.actions.push(Action::CancelSubscriptionTimer(
-            id,
-            SubscriptionTimer::RefreshReply,
-        ));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Subscription(
+                id,
+                SubscriptionTimer::RefreshReply,
+            )));
         let Some(sub) = self.subscriptions.by_id.get_mut(&id) else {
             return;
         };

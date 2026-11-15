@@ -3,6 +3,7 @@
 // Cucumber passes captures by value.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2209,11 +2210,11 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
         .actions
         .iter()
         .find_map(|action| match action {
-            Action::SetSubscriptionTimer(of, SubscriptionTimer::Resubscribe, delay, ..)
-                if *of == id =>
-            {
-                Some(*delay)
-            }
+            Action::SetTimer(
+                TimerKey::Subscription(of, SubscriptionTimer::Resubscribe),
+                delay,
+                ..,
+            ) if *of == id => Some(*delay),
             _ => None,
         })
         .expect("a resubscribe delay");
@@ -2226,9 +2227,8 @@ fn resyncs_after_the_backoff(world: &mut ClientWorld, channel: String, min: u64,
         .machine
         .subscription_timer_setting(id, SubscriptionTimer::Resubscribe)
         .expect("resubscribe set");
-    core.handle(Input::SubscriptionTimerFired(
-        id,
-        SubscriptionTimer::Resubscribe,
+    core.handle(Input::TimerFired(
+        TimerKey::Subscription(id, SubscriptionTimer::Resubscribe),
         setting,
     ));
     let [again] = &core.subscribes()[..] else {

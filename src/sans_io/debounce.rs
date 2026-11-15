@@ -5,6 +5,7 @@
 //! server answered it. Without an interval, nothing here runs.
 // Block 46.
 
+use crate::sans_io::TimerKey;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -119,7 +120,8 @@ impl Machine {
         let Some(timer) = windows.by_key.remove(key) else {
             return;
         };
-        self.actions.push(Action::CancelDebounceTimer(timer));
+        self.actions
+            .push(Action::CancelTimer(TimerKey::Debounce(timer)));
         if let Some(window) = self.debouncing.windows.remove(&timer) {
             self.follow_call(remove, window.waiters);
         }
@@ -142,7 +144,7 @@ impl Machine {
                 waiters: Vec::new(),
             },
         );
-        self.actions.push(Action::SetDebounceTimer(timer, interval));
+        self.set_key_timer(TimerKey::Debounce(timer), interval);
     }
 
     /// A window's timer fired: the latest value goes out as a trailing send
@@ -184,7 +186,8 @@ impl Machine {
             windows.by_key.drain().map(|(_, timer)| timer).collect();
         timers.sort_unstable_by_key(|timer| timer.0);
         for timer in timers {
-            self.actions.push(Action::CancelDebounceTimer(timer));
+            self.actions
+                .push(Action::CancelTimer(TimerKey::Debounce(timer)));
             let Some(window) = self.debouncing.windows.remove(&timer) else {
                 continue;
             };

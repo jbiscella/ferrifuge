@@ -250,7 +250,7 @@ fn ids_are_forgotten_when_the_connection_ends() {
         .expect("a reconnect timer");
     let transport = connect(
         &mut machine,
-        Input::TimerFired(Timer::Reconnect, setting),
+        Input::TimerFired(TimerKey::Client(Timer::Reconnect), setting),
         3,
     );
     // The resubscribe, answered without an id.

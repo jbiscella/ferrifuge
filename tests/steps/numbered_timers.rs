@@ -8,6 +8,7 @@
 // Cucumber hands each capture over as an owned `String`.
 #![allow(clippy::needless_pass_by_value)]
 
+use ferrifuge::machine::TimerKey;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -73,7 +74,7 @@ fn client_settings(actions: &[Action], timer: Timer) -> Vec<TimerSetting> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetTimer(of, _, setting) if *of == timer => Some(*setting),
+            Action::SetTimer(TimerKey::Client(of), _, setting) if *of == timer => Some(*setting),
             _ => None,
         })
         .collect()
@@ -89,7 +90,9 @@ fn subscription_settings(
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::SetSubscriptionTimer(of, kind, _, setting) if *of == id && *kind == timer => {
+            Action::SetTimer(TimerKey::Subscription(of, kind), _, setting)
+                if *of == id && *kind == timer =>
+            {
                 Some(*setting)
             }
             _ => None,
@@ -134,7 +137,7 @@ fn a_timer_set_twice(world: &mut ClientWorld, timer: String) {
             run.frame(&json!({}));
             let settings = client_settings(&run.actions, Timer::ServerPing)
                 .into_iter()
-                .map(|setting| Input::TimerFired(Timer::ServerPing, setting))
+                .map(|setting| Input::TimerFired(TimerKey::Client(Timer::ServerPing), setting))
                 .collect::<Vec<_>>();
             (run, settings)
         }
@@ -147,7 +150,7 @@ fn a_timer_set_twice(world: &mut ClientWorld, timer: String) {
             run.handle(Input::TransportOpened(transport));
             let settings = client_settings(&run.actions, Timer::ConnectTimeout)
                 .into_iter()
-                .map(|setting| Input::TimerFired(Timer::ConnectTimeout, setting))
+                .map(|setting| Input::TimerFired(TimerKey::Client(Timer::ConnectTimeout), setting))
                 .collect::<Vec<_>>();
             (run, settings)
         }
@@ -171,16 +174,18 @@ fn a_timer_set_twice(world: &mut ClientWorld, timer: String) {
                 .machine
                 .timer_setting(Timer::Reconnect)
                 .expect("a reconnect set");
-            run.handle(Input::TimerFired(Timer::Reconnect, setting));
+            run.handle(Input::TimerFired(
+                TimerKey::Client(Timer::Reconnect),
+                setting,
+            ));
             run.connect(&json!({"client": "c", "ping": 25}));
             run.handle(Input::Flush);
             let settings =
                 subscription_settings(&run.actions, id, SubscriptionTimer::SubscribeReply)
                     .into_iter()
                     .map(|setting| {
-                        Input::SubscriptionTimerFired(
-                            id,
-                            SubscriptionTimer::SubscribeReply,
+                        Input::TimerFired(
+                            TimerKey::Subscription(id, SubscriptionTimer::SubscribeReply),
                             setting,
                         )
                     })
@@ -253,13 +258,16 @@ fn the_close_is_read(world: &mut ClientWorld) {
     });
     let closed = &run.actions[from..];
     assert!(
-        closed.contains(&Action::CancelTimer(Timer::ServerPing)),
+        closed.contains(&Action::CancelTimer(TimerKey::Client(Timer::ServerPing))),
         "{closed:?}"
     );
     // The close waits behind the held message: still connected.
     assert_eq!(run.machine.state(), State::Connected);
     let setting = *before.last().expect("a no-ping deadline set");
-    state(world).first = Some(Input::TimerFired(Timer::ServerPing, setting));
+    state(world).first = Some(Input::TimerFired(
+        TimerKey::Client(Timer::ServerPing),
+        setting,
+    ));
 }
 
 #[when("the firing of the no-ping deadline set before the close is fed")]
@@ -284,7 +292,10 @@ fn a_short_sleep(world: &mut ClientWorld) {
     assert_eq!(again.len(), 1, "{:?}", &run.actions[from..]);
     let setting = *before.last().expect("a no-ping deadline set");
     assert_ne!(again[0], setting);
-    state(world).first = Some(Input::TimerFired(Timer::ServerPing, setting));
+    state(world).first = Some(Input::TimerFired(
+        TimerKey::Client(Timer::ServerPing),
+        setting,
+    ));
 }
 
 #[when("the firing of the no-ping deadline set before the sleep is fed")]
@@ -358,9 +369,9 @@ fn every_setting_is_new(world: &mut ClientWorld) {
     let mut families = [0; 3];
     for action in &run.actions {
         let (setting, family) = match action {
-            Action::SetTimer(_, _, setting) => (setting, 0),
-            Action::SetSubscriptionTimer(_, _, _, setting) => (setting, 1),
-            Action::SetCallTimer(_, _, _, setting) => (setting, 2),
+            Action::SetTimer(TimerKey::Client(_), _, setting) => (setting, 0),
+            Action::SetTimer(TimerKey::Subscription(_, _), _, setting) => (setting, 1),
+            Action::SetTimer(TimerKey::Call(_, _), _, setting) => (setting, 2),
             _ => continue,
         };
         families[family] += 1;
