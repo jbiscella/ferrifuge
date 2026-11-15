@@ -3,7 +3,8 @@
 //! polls the backend once per key for every client and sends each new
 //! version of a key's value. Behaviour follows centrifuge-js 63ed73e
 //! `SharedPollSubscription` and its track handlers
-//! (`src/subscription.ts:1109-2245`, `:2915-3084`), except where noted.
+//! (`src/subscription.ts:1109-2245`, `:2915-3084`), with some differences
+//! of its own.
 // Block 47.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -81,7 +82,8 @@ pub(in crate::sans_io) struct SharedPollFlow {
     // D5.
     library: Vec<Signed>,
     /// Counts the times the subscription became `subscribed`: a request of
-    /// an earlier count was abandoned, and its answer changes nothing (I13).
+    /// an earlier count was abandoned, and its answer changes nothing.
+    // I13.
     generation: u64,
     /// Requests not sent yet: over an emulated transport each waits for the
     /// reply of the one before, and a request's frames each wait for the
@@ -391,9 +393,9 @@ impl SharedPollFlow {
     }
 
     /// Subscription `id` became `subscribed` again: what an earlier period
-    /// asked for or scheduled is abandoned, and the retries start over
-    /// (I13). The actions cancelling its timers.
-    // D7.
+    /// asked for or scheduled is abandoned, and the retries start over.
+    /// The actions cancelling its timers.
+    // D7; I13.
     #[must_use]
     fn restart(&mut self, id: SubscriptionId) -> Vec<Action> {
         self.generation += 1;
@@ -409,9 +411,9 @@ impl SharedPollFlow {
     /// stop, and the retries and the refresh guard start over; every delta
     /// base goes, as the server sends each key whole after the next
     /// subscribe. A request to the callback in flight stays until the next
-    /// subscribe, its answer then changing nothing (I13). The actions
-    /// cancelling the timers.
-    // D7; D10.
+    /// subscribe, its answer then changing nothing. The actions cancelling
+    /// the timers.
+    // D7; D10; I13.
     #[must_use]
     pub(in crate::sans_io) fn left_subscribed(&mut self, id: SubscriptionId) -> Vec<Action> {
         for tracked in self.tracked.values_mut() {
@@ -1196,8 +1198,8 @@ impl Machine {
 
     /// The reply to a track or untrack request. One made before the
     /// subscription last became `subscribed`, or while it is not, changes
-    /// nothing (I13).
-    // D7.
+    /// nothing.
+    // D7; I13.
     pub(super) fn track_command_reply(&mut self, reply: Reply) {
         let Some(command) = self.subscriptions.track_commands.remove(&reply.id) else {
             return;

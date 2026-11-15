@@ -363,7 +363,8 @@ impl StreamDecoder {
 /// A new sse-core decoder for a stream already past its start: fed one
 /// blank line, which dispatches nothing, it leaves its byte-order-mark
 /// state, so that a U+FEFF after the boundary stays part of a field name
-/// as mid-stream (row 71).
+/// as mid-stream.
+// Row 71.
 #[cfg(adapter_tokio)]
 fn fresh_sse(limit: NonZeroUsize) -> sse_core::SseDecoder {
     let mut decoder = sse_core::SseDecoder::with_limit(limit);
@@ -375,7 +376,8 @@ fn fresh_sse(limit: NonZeroUsize) -> sse_core::SseDecoder {
 
 #[cfg(test)]
 thread_local! {
-    /// The buffers released on this thread (row 71's unit tests).
+    /// The buffers released on this thread, for the unit tests.
+    // Row 71.
     static RELEASED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

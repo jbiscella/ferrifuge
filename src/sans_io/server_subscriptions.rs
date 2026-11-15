@@ -242,7 +242,8 @@ impl Machine {
     /// "State invalidated" (disconnect code 3014): a server-side
     /// subscription with a position keeps one the server can never match, so
     /// its recovery at the next connect fails and its `subscribed` event says
-    /// so (owner decision, 2026-11-04; centrifuge-js `_disconnect`).
+    /// so (centrifuge-js `_disconnect`).
+    // Owner decision, 2026-11-04.
     pub(super) fn invalidate_server_subscriptions(&mut self) {
         let mut channels = Vec::new();
         for (channel, sub) in &mut self.server_subscriptions.by_channel {

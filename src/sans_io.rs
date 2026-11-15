@@ -1902,9 +1902,8 @@ pub struct Machine {
     // Block 48, D9.
     answered: bool,
     /// The connection over WebTransport ended with no code: before a server
-    /// ping, the backoff keeps growing, as after a 3008 close ("Backoff
-    /// after 3008" extended).
-    // Block 48, D9.
+    /// ping, the backoff keeps growing, as after a 3008 close.
+    // Block 48, D9 ("Backoff after 3008" extended).
     ended_without_code: bool,
     /// Pings announced by the server for the current connection.
     pings: Option<Pings>,
@@ -3049,9 +3048,8 @@ impl Machine {
     /// the connect, a `Disconnect` push or, over websocket, a close code
     /// from 3000 (the connect reply chooses it too, in `connected`). The
     /// transport is kept then, and only then: one that opens but never
-    /// answers falls back (owner decision Q8; review items C2 and C3;
-    /// centrifuge-js 63ed73e `_transportWasOpen`).
-    // Block 8.
+    /// answers falls back (centrifuge-js 63ed73e `_transportWasOpen`).
+    // Block 8; owner decision Q8; review items C2 and C3.
     fn server_answered(&mut self) {
         self.transports.choose();
         self.answered = true;
@@ -3399,8 +3397,9 @@ impl Machine {
 
     /// The answer to a refresh fetch of a connection that is gone: a denial
     /// still disconnects (spec: the client "will be disconnected"), a token
-    /// is not used (owner decision, 2026-11-04; centrifuge-js `_refresh`),
-    /// a failure is dropped. The new connection refreshes on its own.
+    /// is not used (centrifuge-js `_refresh`), a failure is dropped. The new
+    /// connection refreshes on its own.
+    // Owner decision, 2026-11-04.
     fn stale_token_fetched(&mut self, result: &Result<String, TokenError>) {
         if matches!(result, Ok(token) if token.is_empty())
             || matches!(result, Err(TokenError::Unauthorized))
@@ -3613,7 +3612,8 @@ impl Machine {
 
 /// Spec, "Disconnect codes": 3000-3499 and 4000-4499 advise a reconnect,
 /// 3500-3999 and 4500-4999 are terminal. Codes from 5000 are reserved by
-/// Centrifuge and reconnect (`client.proto`, `Disconnect`; owner decision).
+/// Centrifuge and reconnect (`client.proto`, `Disconnect`).
+// Owner decision.
 fn reconnect_advised(code: u32) -> bool {
     !matches!(code, 3500..=3999 | 4500..=4999)
 }

@@ -274,7 +274,8 @@ impl TimerRecord {
     }
 
     /// Ages from now the timers `running` names that are not recorded yet:
-    /// those set before the records started (reviewer, 52a).
+    /// those set before the records started.
+    // Reviewer, 52a.
     pub(super) fn seed(&mut self, running: impl IntoIterator<Item = (String, TimerSetting)>) {
         let now = platform::Instant::now();
         for (name, setting) in running {
