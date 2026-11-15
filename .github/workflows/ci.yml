@@ -1349,5 +1349,8 @@ jobs:
             (cd ../base && api $set) > base-api.txt
             echo "== ${set:-default features, natively}"
             wc -l head-api.txt base-api.txt
-            diff base-api.txt head-api.txt
+            # The setters' own impl blocks repeat `impl ferrifuge::X` and
+            # reorder the items: compare the lines as sets.
+            diff base-api.txt head-api.txt | grep -c '^[<>]' || true
+            diff <(sort -u base-api.txt) <(sort -u head-api.txt)
           done
