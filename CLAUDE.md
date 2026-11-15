@@ -10476,7 +10476,7 @@ Each of these mutations is seen red once, recorded in the PR:
 - transport failures are typed inside the crate;
 - a panic while the client's state is locked closes the client visibly.
 
-No public behaviour changes, apart from D6's closing and D4's order among timers due together.
+No public behaviour changes, apart from D6's closing, D4's order among timers due together, and D7's native emulation answers of 600–999, which now fail the transport.
 
 Source: code quality report of 2026-11-15, findings 2, 3, 4, 7, 8 and 10; owner requests of 2026-11-15 ("solid problems should be fixed", before 1.0.0-alpha; "code quality should run at push time"); the second SOLID review's constraints.
 
@@ -10616,7 +10616,7 @@ This block amends Blocks 28, 33, 46, 49, 53 and 60 (see "Amendments to earlier b
 - **D7 The emulation policy shared (finding 10).**
   - **Shared by both targets, in `src/adapter/body.rs`:**
     - **`classify_emulation`.** `classify_emulation(status: u16, redirected: bool) -> Emulated`, where `Emulated` is `Accepted`, `Rejected` or `Failed`:
-      - 404, 5xx, 3xx and a redirect fail the transport;
+      - 404, 5xx, an invalid status of 600–999, 3xx and a redirect fail the transport. RFC 9110 §15 treats an invalid status as 5xx. The browser already failed it; natively it was accepted;
       - 413 rejects only the frame;
       - any other status accepts.
 

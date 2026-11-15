@@ -33,13 +33,6 @@ pub(in crate::adapter) struct TransportFailure {
 /// The kinds of [`TransportFailure`].
 // Block 61, D5.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(
-    adapter_browser,
-    allow(
-        dead_code,
-        reason = "proxies, I/O and TLS fail the native transports only"
-    )
-)]
 pub(in crate::adapter) enum FailureKind {
     /// A message from the server over the size limit, reported as
     /// `Inbound::TooLarge`.
@@ -49,9 +42,12 @@ pub(in crate::adapter) enum FailureKind {
     /// An HTTP status that a captive portal's page may have answered.
     CaptivePortal(u16),
     /// A proxy refused the credentials, or asked for some.
+    #[cfg(adapter_tokio)]
     ProxyAuthentication,
     Timeout,
+    #[cfg(adapter_tokio)]
     Io(std::io::ErrorKind),
+    #[cfg(adapter_tokio)]
     Tls,
     Other,
 }
@@ -145,13 +141,14 @@ pub(in crate::adapter) enum Emulated {
 
 /// What an answer of HTTP `status`, `redirected` or not, to an emulation
 /// request means. A server without the session's node (404) or failing
-/// (5xx) cannot answer the command; other statuses reject only it
+/// (5xx, and an invalid status of 600 to 999, as RFC 9110 section 15 has
+/// it) cannot answer the command; other statuses reject only it
 /// (centrifuge-js `send`). A redirect is not followed, so its command
 /// never arrived either. A proxy's 407 is the native transport's, before
 /// this.
 // Block 8; Block 61, D7.
 pub(in crate::adapter) fn classify_emulation(status: u16, redirected: bool) -> Emulated {
-    if redirected || status == 404 || (500..600).contains(&status) || (300..400).contains(&status) {
+    if redirected || status == 404 || status >= 500 || (300..400).contains(&status) {
         Emulated::Failed
     } else if status == 413 {
         // Its commands fail at once (owner decision, 2026-11-04).
@@ -632,6 +629,8 @@ mod tests {
             (413, false, Emulated::Rejected),
             (429, false, Emulated::Accepted),
             (503, false, Emulated::Failed),
+            (600, false, Emulated::Failed),
+            (999, false, Emulated::Failed),
         ];
 
         for (status, redirected, expected) in cases {
