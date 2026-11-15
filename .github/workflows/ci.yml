@@ -1350,7 +1350,7 @@ jobs:
           rustup toolchain install "$PUBLIC_API_NIGHTLY" --profile minimal
           cargo install cargo-public-api --version 0.52.0 --locked
           api() {
-            cargo public-api --toolchain "$PUBLIC_API_NIGHTLY" --simplified "$@"
+            cargo +"$PUBLIC_API_NIGHTLY" public-api --simplified "$@"
           }
           for features in "" "unstable-machine,unstable,test-util,cookies"; do
             if [ -z "$features" ]; then set --; else set -- --features "$features"; fi
