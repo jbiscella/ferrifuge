@@ -19,7 +19,9 @@ use super::driver::SharedPollRefreshes;
 use super::driver::SharedPollTimers;
 use super::driver::Timers;
 use super::log::{self, Log};
-use super::platform::{self, Handle};
+use super::platform;
+#[cfg(adapter_tokio)]
+use super::platform::Handle;
 use super::ready::Waiters;
 use super::shared::Core;
 use super::shared::GetConnectData;
@@ -28,15 +30,9 @@ use super::shared::Outboxes;
 use super::shared::Shared;
 use super::shared::SubscriptionCallbacks;
 #[cfg(adapter_tokio)]
-use super::tokio::connector::{self, Connector};
-#[cfg(adapter_tokio)]
-use super::tokio::http::HeaderSet;
-#[cfg(adapter_tokio)]
-use super::tokio::net::Network;
-#[cfg(adapter_tokio)]
 use super::tokio::proxy::Proxy;
 #[cfg(adapter_tokio)]
-use super::tokio::tls::{self, Tls, Trust, unparsable_root};
+use super::tokio::tls::{self, Trust, unparsable_root};
 use crate::sans_io::{Machine, TransportKind};
 use crate::{ClientError, Config, DataError, ErrorKind, MaybeSend, MaybeSync, TokenError, codes};
 
@@ -48,30 +44,8 @@ pub struct ClientBuilder {
     pub(super) get_token: Option<GetToken>,
     pub(super) get_data: Option<GetConnectData>,
     pub(super) emulation_endpoint: Option<String>,
-    #[cfg(adapter_tokio)]
-    /// Real HTTP headers, as given; checked by [`ClientBuilder::build`].
-    pub(super) http_headers: Vec<(String, String)>,
     /// Emulated headers, as given; checked by [`ClientBuilder::build`].
     pub(super) emulated_headers: Vec<(String, String)>,
-    #[cfg(adapter_tokio)]
-    /// Extra root certificates, as given; checked by [`ClientBuilder::build`].
-    pub(super) root_certificates: Vec<CertificateDer<'static>>,
-    #[cfg(adapter_tokio)]
-    /// The application's TLS configuration, if any.
-    pub(super) tls_config: Option<Arc<rustls::ClientConfig>>,
-    #[cfg(adapter_tokio)]
-    pub(super) proxy: Proxy,
-    #[cfg(adapter_tokio)]
-    /// Whether [`ClientBuilder::proxy`] was called: a connector replaces
-    /// any proxy setting.
-    // Block 37, D4.
-    pub(super) proxy_set: bool,
-    #[cfg(adapter_tokio)]
-    /// The application's connector for the websocket, if any.
-    pub(super) connector: Option<connector::Shared>,
-    #[cfg(adapter_tokio)]
-    /// The runtime the client runs on; the current one otherwise.
-    pub(super) runtime: Option<Handle>,
     /// The client's handler, set once it is built; behind a mutex so that
     /// the builder stays `Sync` for a handler that is only `Send`.
     // Block 41b.
@@ -79,26 +53,9 @@ pub struct ClientBuilder {
     /// Where its handlers run.
     // Block 41, D2.
     pub(super) event_delivery: super::EventDelivery,
-    #[cfg(adapter_tokio)]
-    /// The application's cookie jar.
-    // Block 43.
-    pub(super) cookie_jar: super::tokio::net::Jar,
-    #[cfg(adapter_browser)]
-    /// Where `offline` and `online` are listened to.
-    // Block 44, D10.
-    pub(super) network_event_target: Option<web_sys::EventTarget>,
-    #[cfg(adapter_browser)]
-    /// Where `pagehide` and `pageshow` are listened to.
-    // Block 44, D11.
-    pub(super) page_event_target: Option<web_sys::EventTarget>,
-    #[cfg(adapter_browser)]
-    /// The application's constructors in place of the page's.
-    // Block 44, D12.
-    pub(super) shims: super::backend::shims::Shims,
-    #[cfg(adapter_browser)]
-    /// Whether HTTP requests carry credentials to other origins.
-    // Block 44, D13.
-    pub(super) include_credentials: bool,
+    /// The options only this target has.
+    // Block 61, D2.
+    pub(super) backend: super::backend::Options,
 }
 
 /// Endpoints as they may be logged.
@@ -118,7 +75,7 @@ impl std::fmt::Debug for Endpoints<'_> {
 }
 
 /// Header names, without their values, which may be secrets.
-struct HeaderNames<'a>(&'a [(String, String)]);
+pub(super) struct HeaderNames<'a>(pub(super) &'a [(String, String)]);
 
 impl std::fmt::Debug for HeaderNames<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,24 +99,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
             .field("handler", &self.handler.is_some())
             .field("event_delivery", &self.event_delivery);
-        #[cfg(adapter_tokio)]
-        {
-            f.field("http_headers", &HeaderNames(&self.http_headers))
-                // Their number, and whether one is set: never their content.
-                .field("root_certificates", &self.root_certificates.len())
-                .field("tls_config", &self.tls_config.is_some())
-                .field("proxy", &self.proxy)
-                .field("proxy_set", &self.proxy_set)
-                .field("connector", &self.connector.is_some())
-                .field("runtime", &self.runtime.is_some());
-            // Whether one is set: never its cookies (Block 43, D6).
-            f.field("cookie_jar", &self.cookie_jar);
-        }
-        #[cfg(adapter_browser)]
-        f.field("network_event_target", &self.network_event_target.is_some())
-            .field("page_event_target", &self.page_event_target.is_some())
-            .field("shims", &self.shims)
-            .field("include_credentials", &self.include_credentials);
+        self.backend.fields(&mut f);
         f.finish()
     }
 }
@@ -204,261 +144,6 @@ impl ClientBuilder {
         self
     }
 
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Listens to `offline` and `online` on `target` instead of
-    /// `globalThis` (centrifuge-js `networkEventTarget`): while the client
-    /// is not disconnected, `offline` closes its connection, which then
-    /// waits the reconnect delay, and `online` while connecting reconnects
-    /// it at once, or after a draw from [`Config::reconnect_jitter_window`]
-    /// when it lost its connection. A target that never fires,
-    /// `EventTarget::new()`, turns this off.
-    // Block 44, D10.
-    #[must_use]
-    pub fn network_event_target(mut self, target: web_sys::EventTarget) -> Self {
-        self.network_event_target = Some(target);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Listens to `pagehide` and `pageshow` on `target` instead of
-    /// `globalThis`: a `pagehide` whose `persisted` is true, the page
-    /// entering the back/forward cache, closes the connection with the
-    /// reason "page entered back/forward cache", and the `pageshow` that
-    /// restores the page reconnects as `online` does. Events whose
-    /// `persisted` is false change nothing. A target that never fires turns
-    /// this off.
-    // Block 44, D11.
-    #[must_use]
-    pub fn page_event_target(mut self, target: web_sys::EventTarget) -> Self {
-        self.page_event_target = Some(target);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Opens websocket connections with `constructor`, called as one with
-    /// the URL and the subprotocol, in place of the page's `WebSocket`
-    /// (centrifuge-js `websocket`). The object it returns is used through
-    /// its `WebSocket` methods and properties, by name.
-    // Block 44, D12.
-    #[must_use]
-    pub fn websocket(mut self, constructor: js_sys::Function) -> Self {
-        self.shims.websocket = Some(constructor);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Makes the `http_stream` and sse transports' HTTP requests with
-    /// `fetch`, called as the page's `fetch` is, `fetch(url, init)` with a
-    /// plain `init`, in its place (centrifuge-js `fetch`).
-    // Block 44, D12.
-    #[must_use]
-    pub fn fetch(mut self, fetch: js_sys::Function) -> Self {
-        self.shims.fetch = Some(fetch);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Reads the `http_stream` response through a stream built with
-    /// `constructor`, called as `new ReadableStream(source, strategy)` is,
-    /// in place of reading the body directly (centrifuge-js
-    /// `readableStream`): its source's `pull` enqueues each chunk of the
-    /// body unchanged, with `highWaterMark` 0, so the body is still read
-    /// only when the client wants messages. With it the page needs no
-    /// global `ReadableStream` for `http_stream`.
-    // Block 44, D12.
-    #[must_use]
-    pub fn readable_stream(mut self, constructor: js_sys::Function) -> Self {
-        self.shims.readable_stream = Some(constructor);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Opens sse streams with `constructor`, called as one with the URL and
-    /// `{ withCredentials }`, in place of the page's `EventSource`
-    /// (centrifuge-js `eventsource`). The object it returns is used through
-    /// its `EventSource` methods and properties, by name.
-    ///
-    /// Each attempt uses the shim given, else the page's global of that
-    /// name; a transport whose constructors neither provides is skipped,
-    /// and [`ClientBuilder::build`] fails when no configured transport can
-    /// be used: websocket needs `WebSocket`, `http_stream` `fetch`,
-    /// `ReadableStream` and `AbortController`, sse `EventSource` and
-    /// `fetch`.
-    // Block 44, D12.
-    #[must_use]
-    pub fn event_source(mut self, constructor: js_sys::Function) -> Self {
-        self.shims.event_source = Some(constructor);
-        self
-    }
-
-    #[cfg(adapter_browser)]
-    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
-    /// Whether the `http_stream` and sse transports' requests carry the
-    /// page's cookies and HTTP authentication to a server on another
-    /// origin, false by default: true sends fetch's `credentials:
-    /// "include"` and `EventSource`'s `withCredentials: true`, so the
-    /// server's `Set-Cookie` is stored too; false sends `credentials:
-    /// "same-origin"` and `withCredentials: false`, as centrifuge-js does.
-    /// The server must allow credentialed CORS requests from the page's
-    /// origin, as Centrifugo's `allowed_origins` does.
-    ///
-    /// The websocket upgrade is unaffected: the browser sends its cookies
-    /// by their `SameSite` rules whatever this says, and so is a
-    /// WebTransport session (unstable), whose cookies the browser decides.
-    // Block 44, D13; Block 48, D17.
-    #[must_use]
-    pub fn include_credentials(mut self, include: bool) -> Self {
-        self.include_credentials = include;
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Trusts `roots`, certificate authorities, in addition to the
-    /// platform's, for `wss://` and every `https://` request; they add to
-    /// the roots of earlier calls. A certificate that is not a valid root
-    /// makes [`ClientBuilder::build`] fail, naming its index.
-    ///
-    /// PEM files parse with [`rustls::pki_types::pem::PemObject`]:
-    ///
-    /// ```no_run
-    /// use ferrifuge::Client;
-    /// use ferrifuge::rustls::pki_types::CertificateDer;
-    /// use ferrifuge::rustls::pki_types::pem::PemObject;
-    ///
-    /// # fn run(pem: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    /// let roots = CertificateDer::pem_slice_iter(pem).collect::<Result<Vec<_>, _>>()?;
-    /// let client = Client::builder("wss://example.com/connection/websocket")
-    ///     .root_certificates(roots)
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// Each client given extra roots holds its own TLS settings: many
-    /// clients should rather share one [`ClientBuilder::tls_config`].
-    // Block 22.
-    #[must_use]
-    pub fn root_certificates(
-        mut self,
-        roots: impl IntoIterator<Item = CertificateDer<'static>>,
-    ) -> Self {
-        self.root_certificates.extend(roots);
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Uses `config` for `wss://` and every `https://` request, instead of
-    /// the platform's trust: its roots, verifier, provider and client
-    /// certificates are the application's. Ferrifuge only replaces its ALPN
-    /// list with `http/1.1`, the one protocol of its transports.
-    /// [`ClientBuilder::build`] fails when extra root certificates are also
-    /// given, and, in the `fips` build, when `config.fips()` is false.
-    ///
-    /// The configuration is shared as given, so many clients can use one.
-    // Block 22.
-    #[must_use]
-    pub fn tls_config(mut self, config: Arc<rustls::ClientConfig>) -> Self {
-        self.tls_config = Some(config);
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Sets how the client reaches the server's hosts: through the system's
-    /// proxy by default ([`Proxy::system`]), the environment's, none, one
-    /// proxy, or one chosen per endpoint. Every transport takes the same
-    /// decision for each URL it opens.
-    // Block 23.
-    #[must_use]
-    pub fn proxy(mut self, proxy: Proxy) -> Self {
-        self.proxy = proxy;
-        self.proxy_set = true;
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Sets the connector that gives the websocket its stream, for
-    /// networking the client does not have: a VPN tunnel, a custom proxy,
-    /// an in-process transport. Over its stream the client runs TLS, for
-    /// `wss://`, and the websocket upgrade, as over a stream it dials. With
-    /// a connector the client reads no proxy setting, the environment's and
-    /// the system's included. A connector carries the websocket only:
-    /// [`ClientBuilder::build`] fails with an `http_stream` or sse
-    /// endpoint, or after [`ClientBuilder::proxy`].
-    // Block 37.
-    #[must_use]
-    pub fn connector(mut self, connector: impl Connector + 'static) -> Self {
-        self.connector = Some(connector::Shared(Arc::new(connector)));
-        self
-    }
-
-    /// Sets the cookie jar that keeps the cookies servers set and sends
-    /// them back on the later requests they match: the websocket upgrade, a
-    /// refused one's response included. A later call replaces an earlier
-    /// one; the application keeps its own `Arc` to look into the jar or
-    /// seed it. The cookies merge with a `Cookie` header of
-    /// [`ClientBuilder::http_headers`] into one header, the application's
-    /// first. No proxy is sent them. Without a jar, no cookie is kept.
-    // Block 43.
-    #[cfg(all(adapter_tokio, feature = "cookies"))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cookies")))]
-    #[must_use]
-    pub fn cookie_jar(mut self, jar: Arc<dyn super::CookieJar>) -> Self {
-        self.cookie_jar = super::tokio::net::Jar(Some(jar));
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Adds real HTTP headers to the websocket upgrade request and to every
-    /// request of `http_stream` and sse, so that a gateway checking one
-    /// still admits a client that fell back. Names are case-insensitive, a
-    /// later value replacing an earlier one. A name or value that is not
-    /// valid HTTP, or a header the transport sets itself (`Host`,
-    /// `Connection`, `Upgrade`, `Content-Length`, `Transfer-Encoding`,
-    /// `Content-Type`, `Accept`, `Sec-WebSocket-*`, `Proxy-Authorization`),
-    /// makes [`ClientBuilder::build`] fail. [`Client::set_http_headers`]
-    /// replaces them on a built client.
-    // Block 17.
-    #[must_use]
-    pub fn http_headers<I, K, V>(mut self, headers: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.http_headers.extend(
-            headers
-                .into_iter()
-                .map(|(name, value)| (name.into(), value.into())),
-        );
-        self
-    }
-
     /// Adds emulated headers, sent in every connect command
     /// (`ConnectRequest.headers`), which the server forwards to its proxies
     /// as HTTP headers when its `emulated_headers` lists them (centrifuge-js
@@ -486,40 +171,6 @@ impl ClientBuilder {
     #[must_use]
     pub fn emulation_endpoint(mut self, url: impl Into<String>) -> Self {
         self.emulation_endpoint = Some(url.into());
-        self
-    }
-
-    #[cfg(adapter_tokio)]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(not(all(target_arch = "wasm32", target_os = "unknown"))))
-    )]
-    /// Runs the client on `runtime`, e.g. when building it where no tokio
-    /// runtime is current, as in a Tauri setup hook:
-    ///
-    /// ```no_run
-    /// # fn run(handle: tokio::runtime::Handle) -> Result<(), ferrifuge::ClientError> {
-    /// // In Tauri: `tauri::async_runtime::handle().inner().clone()`.
-    /// let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
-    ///     .runtime(handle)
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// By default the client runs on the runtime current when it is built.
-    /// The runtime needs time and I/O enabled (`enable_all`). A
-    /// current-thread runtime runs the client only while a thread is inside
-    /// its `Runtime::block_on`: meanwhile calls and streams wait, and no
-    /// timeout runs. When the runtime shuts down, the client emits
-    /// `disconnected` with code 4 "runtime shut down"
-    /// ([`crate::codes::disconnected::RUNTIME_SHUT_DOWN`]), its calls fail
-    /// and its streams end; the client's futures and streams themselves need
-    /// no runtime, so any executor can await them.
-    // Block 28.
-    #[must_use]
-    pub fn runtime(mut self, runtime: Handle) -> Self {
-        self.runtime = Some(runtime);
         self
     }
 
@@ -577,7 +228,6 @@ impl ClientBuilder {
 }
 
 impl Client {
-    #[expect(clippy::too_many_lines, reason = "the settings of both adapters")]
     fn start(builder: ClientBuilder) -> Result<Self, ClientError> {
         let ClientBuilder {
             endpoints,
@@ -585,68 +235,21 @@ impl Client {
             get_token,
             get_data,
             emulation_endpoint,
-            #[cfg(adapter_tokio)]
-            http_headers,
             emulated_headers,
-            #[cfg(adapter_tokio)]
-            root_certificates,
-            #[cfg(adapter_tokio)]
-            tls_config,
-            #[cfg(adapter_tokio)]
-            proxy,
-            #[cfg(adapter_tokio)]
-            proxy_set,
-            #[cfg(adapter_tokio)]
-            connector,
-            #[cfg(adapter_tokio)]
-            runtime,
             handler: _,
             event_delivery,
-            #[cfg(adapter_tokio)]
-            cookie_jar,
-            #[cfg(adapter_browser)]
-            network_event_target,
-            #[cfg(adapter_browser)]
-            page_event_target,
-            #[cfg(adapter_browser)]
-            shims,
-            #[cfg(adapter_browser)]
-            include_credentials,
+            backend,
         } = builder;
-        #[cfg(adapter_tokio)]
-        check_endpoints(&endpoints, connector.is_some(), proxy_set)?;
-        #[cfg(adapter_browser)]
-        for (kind, endpoint) in &endpoints {
-            check_endpoint(*kind, endpoint)?;
-        }
-        #[cfg(adapter_browser)]
-        check_usable(&endpoints, &shims)?;
-        #[cfg(adapter_tokio)]
-        let android = cfg!(target_os = "android");
-        #[cfg(adapter_tokio)]
-        let trust = trust(root_certificates, tls_config, android)?;
-        #[cfg(all(adapter_tokio, feature = "unstable"))]
-        check_webtransport(&endpoints, &trust)?;
-        #[cfg(adapter_tokio)]
-        android_gate(
-            android && !tls::android_ready(),
-            &trust,
-            &endpoints,
-            emulation_endpoint.as_deref(),
-            &proxy,
-        )?;
-        #[cfg(adapter_tokio)]
-        let http_headers = HeaderSet::new(http_header_map(&http_headers)?);
+        let super::backend::Started {
+            shared: backend_shared,
+            driver: backend_driver,
+            runtime,
+        } = backend.start(&endpoints, emulation_endpoint.as_deref(), &config)?;
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
         let subprotocol = config.protocol.websocket_subprotocol();
         let timeout = config.timeout;
         let max_message = config.max_message_bytes;
-        #[cfg(adapter_browser)]
-        let read_ahead = super::backend::websocket::Bound {
-            messages: config.read_ahead_messages,
-            bytes: config.read_ahead_bytes,
-        };
         let machine = machine_for(
             config,
             get_token.is_some(),
@@ -654,50 +257,28 @@ impl Client {
             emulated_headers,
             endpoints.iter().map(|(kind, _)| *kind).collect(),
         )?;
-        #[cfg(adapter_tokio)]
-        let runtime = runtime_or_current(runtime)?;
-        // The page's event loop needs no handle (Block 44, D4).
-        #[cfg(adapter_browser)]
-        let runtime = Handle;
-        let shared = Arc::new_cyclic(|weak| {
-            #[cfg(not(adapter_browser))]
-            let _ = weak;
-            Shared {
-                core: Mutex::new(Core::new(machine)),
-                outboxes: Mutex::new(Outboxes::default()),
-                callbacks: Mutex::new(SubscriptionCallbacks::default()),
-                calls: Mutex::new(HashMap::new()),
-                ready: Mutex::new(Waiters::default()),
-                driver_gone: AtomicBool::new(false),
-                driver_ended: Notify::new(),
-                actions_queued: Notify::new(),
-                #[cfg(feature = "__test-hooks")]
-                held_debounce_timers: Mutex::new(None),
-                #[cfg(feature = "__test-hooks")]
-                driver_panic_planted: AtomicBool::new(false),
-                #[cfg(feature = "__test-hooks")]
-                awaiting_earlier_close: Notify::new(),
-                #[cfg(feature = "__test-hooks")]
-                records: super::hooks::Records::default(),
-                closed: AtomicBool::new(false),
-                log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
-                #[cfg(adapter_tokio)]
-                network: Arc::new(
-                    Network::new(Tls::new(trust), proxy)
-                        .with_connector(connector)
-                        .with_cookie_jar(cookie_jar),
-                ),
-                #[cfg(adapter_tokio)]
-                http_headers,
-                handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
-                runtime: runtime.clone(),
-                #[cfg(adapter_browser)]
-                events: Mutex::new(super::backend::events::Events::new(
-                    network_event_target,
-                    page_event_target,
-                    std::sync::Weak::clone(weak),
-                )),
-            }
+        let shared = Arc::new_cyclic(|weak| Shared {
+            core: Mutex::new(Core::new(machine)),
+            outboxes: Mutex::new(Outboxes::default()),
+            callbacks: Mutex::new(SubscriptionCallbacks::default()),
+            calls: Mutex::new(HashMap::new()),
+            ready: Mutex::new(Waiters::default()),
+            driver_gone: AtomicBool::new(false),
+            driver_ended: Notify::new(),
+            actions_queued: Notify::new(),
+            #[cfg(feature = "__test-hooks")]
+            held_debounce_timers: Mutex::new(None),
+            #[cfg(feature = "__test-hooks")]
+            driver_panic_planted: AtomicBool::new(false),
+            #[cfg(feature = "__test-hooks")]
+            awaiting_earlier_close: Notify::new(),
+            #[cfg(feature = "__test-hooks")]
+            records: super::hooks::Records::default(),
+            closed: AtomicBool::new(false),
+            log: Log::new(endpoints.iter().map(|(_, endpoint)| endpoint.as_str())),
+            backend: backend_shared.into_part(weak),
+            handlers: Mutex::new(super::handler::Handlers::new(event_delivery)),
+            runtime: runtime.clone(),
         });
         let driver = Driver {
             endpoints: endpoints
@@ -708,12 +289,7 @@ impl Client {
             emulation_endpoint,
             timeout,
             max_message,
-            #[cfg(adapter_browser)]
-            read_ahead,
-            #[cfg(adapter_browser)]
-            shims,
-            #[cfg(adapter_browser)]
-            include_credentials,
+            backend: backend_driver,
             shared: Arc::clone(&shared),
             runtime: runtime.clone(),
             _ending: Ending(Arc::clone(&shared)),
@@ -755,7 +331,7 @@ impl Client {
 /// endpoints, and the connector's limits when one is given.
 // Block 36, D3; Block 37, D4.
 #[cfg(adapter_tokio)]
-fn check_endpoints(
+pub(super) fn check_endpoints(
     endpoints: &[(TransportKind, String)],
     connector: bool,
     proxy_set: bool,
@@ -797,7 +373,7 @@ fn machine_for(
 /// An error of building a client without a runtime to run on. The runtime
 /// given, else the current one.
 // Block 28; Block 28, D1.
-fn runtime_or_current(runtime: Option<Handle>) -> Result<Handle, ClientError> {
+pub(super) fn runtime_or_current(runtime: Option<Handle>) -> Result<Handle, ClientError> {
     match runtime {
         Some(runtime) => Ok(runtime),
         None => platform::current_runtime().ok_or_else(|| {
@@ -856,7 +432,7 @@ fn check_connector(
 /// can open is refused (centrifuge-js 63ed73e `_validateTransportConfig`,
 /// "no supported transport found").
 // Block 44, D12.
-fn check_usable(
+pub(super) fn check_usable(
     endpoints: &[(TransportKind, String)],
     shims: &super::backend::shims::Shims,
 ) -> Result<(), ClientError> {
@@ -899,7 +475,7 @@ fn is_webtransport(kind: TransportKind) -> bool {
 /// `unstable-webtransport` feature, or with a raw TLS configuration QUIC
 /// cannot use.
 // Block 48, D1; D4.
-fn check_webtransport(
+pub(super) fn check_webtransport(
     endpoints: &[(TransportKind, String)],
     trust: &Trust,
 ) -> Result<(), ClientError> {
@@ -941,7 +517,7 @@ fn check_webtransport(
 /// `http(s)://` is right for `http_stream` and sse. The message leaves the
 /// endpoint out: it may carry a token.
 // Owner decision, 2026-11-04.
-fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
+pub(super) fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError> {
     let endpoint = endpoint.trim();
     let http = endpoint.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
@@ -1072,7 +648,7 @@ fn header_value_valid(value: &str) -> bool {
 /// Whom the client trusts, from its extra roots and raw configuration,
 /// checked.
 // Block 22, D2 and D3.
-fn trust(
+pub(super) fn trust(
     roots: Vec<CertificateDer<'static>>,
     raw: Option<Arc<rustls::ClientConfig>>,
     android: bool,
@@ -1116,7 +692,7 @@ fn trust(
 /// transport, an `https://` proxy for every endpoint. Any other TLS use
 /// fails its handshake instead; a raw configuration is the application's.
 // Block 24, D5.
-fn android_gate(
+pub(super) fn android_gate(
     unready: bool,
     trust: &Trust,
     endpoints: &[(TransportKind, String)],
@@ -1543,5 +1119,66 @@ mod tests {
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth(),
         )
+    }
+
+    // Block 61, D2: each backend holds its options, so the builder, the
+    // shared layer, the driver and the client's start name no target.
+    #[test]
+    fn the_builder_the_shared_layer_the_driver_and_start_name_no_target() {
+        let read = |file: &str| {
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/adapter")
+                    .join(file),
+            )
+            .expect("a source file")
+            .replace("\r\n", "\n")
+        };
+        // From `start` to the first `end` after it.
+        let item = |text: &str, start: &str, end: &str| -> String {
+            let from = text.find(start).unwrap_or_else(|| panic!("{start}"));
+            let length = text[from..]
+                .find(end)
+                .unwrap_or_else(|| panic!("the end of {start}"));
+            text[from..from + length].to_owned()
+        };
+        let builder = read("builder.rs");
+        let items = [
+            (
+                "ClientBuilder",
+                item(&builder, "\npub struct ClientBuilder {\n", "\n}\n"),
+            ),
+            (
+                "Client::start",
+                item(
+                    &builder,
+                    "\n    fn start(builder: ClientBuilder)",
+                    "\n    }\n",
+                ),
+            ),
+            (
+                "Shared",
+                item(
+                    &read("shared.rs"),
+                    "\npub(super) struct Shared {\n",
+                    "\n}\n",
+                ),
+            ),
+            (
+                "Driver",
+                item(
+                    &read("driver.rs"),
+                    "\npub(super) struct Driver {\n",
+                    "\n}\n",
+                ),
+            ),
+        ];
+
+        for (name, text) in items {
+            assert!(text.contains("backend"), "{name}: {text}");
+            for target in ["adapter_tokio", "adapter_browser"] {
+                assert!(!text.contains(target), "{name} names {target}");
+            }
+        }
     }
 }

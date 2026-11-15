@@ -11,6 +11,7 @@ pub(super) mod cookies;
 mod head;
 pub(super) mod http;
 pub(super) mod net;
+pub(super) mod options;
 pub(super) mod proxy;
 pub(super) mod tls;
 pub(super) mod transport;
@@ -27,6 +28,7 @@ use ::tokio::task::JoinHandle;
 
 use self::http::{HeaderSet, HttpTransport};
 use self::net::Network;
+pub(in crate::adapter) use self::options::{DriverPart, Options, SharedPart, Started};
 pub(in crate::adapter) use self::transport::Inbound;
 use self::transport::WebSocket;
 #[cfg(feature = "unstable-webtransport")]

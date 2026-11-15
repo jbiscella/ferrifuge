@@ -6,6 +6,7 @@
 
 pub(super) mod events;
 pub(super) mod http_stream;
+pub(super) mod options;
 pub(super) mod shims;
 pub(super) mod sse;
 pub(super) mod websocket;
@@ -17,6 +18,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use self::http_stream::HttpStream;
+pub(in crate::adapter) use self::options::{DriverPart, Options, SharedPart, Started};
 use self::shims::Found;
 use self::sse::Sse;
 pub(in crate::adapter) use self::websocket::Inbound;
