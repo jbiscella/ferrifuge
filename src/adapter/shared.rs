@@ -1013,6 +1013,11 @@ impl<E: Routed> Stream for EventStream<E> {
     type Item = E;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<E>> {
+        // Once the task has spent its tokio budget, nothing is taken: the
+        // task is woken and gives its runtime a turn, and the read stays
+        // cancel-safe. A `Pending` with nothing queued gives the budget
+        // back (Block 63, D1).
+        let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         // A poisoned core leaves the stream what is queued (Block 61, D6).
         let mut core = self.shared.core();
         let mut outboxes = lock(&self.shared.outboxes);
@@ -1034,6 +1039,7 @@ impl<E: Routed> Stream for EventStream<E> {
         }
         drop(core);
         self.shared.actions_queued.notify_one();
+        coop.made_progress();
         Poll::Ready(Some(event))
     }
 }

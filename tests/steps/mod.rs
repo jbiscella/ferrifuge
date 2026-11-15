@@ -361,6 +361,22 @@ impl ClientWorld {
         self.build_client(builder);
     }
 
+    /// As [`Self::new_client`], the client running on `runtime` (Block 28).
+    fn new_client_on(&mut self, endpoint: String, runtime: tokio::runtime::Handle) {
+        let config = self.client_config();
+        let builder = self
+            .connect_data
+            .build(Client::builder(endpoint).config(config))
+            .runtime(runtime);
+        self.build_client(builder);
+    }
+
+    /// The runtime a step gave its client, to shut down after the scenario
+    /// (Block 63): dropping it inside the scenario's task would panic.
+    pub(crate) fn take_own_runtime(&mut self) -> Option<tokio::runtime::Runtime> {
+        self.delivery.runtime.take()
+    }
+
     /// Options of the clients the scenario creates.
     fn client_config(&self) -> Config {
         let mut config = test_config();

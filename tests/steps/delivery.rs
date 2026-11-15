@@ -55,6 +55,9 @@ pub(crate) struct Delivery {
     yielded: Vec<SubscriptionEvent>,
     /// The core of a 15c scenario.
     unread: Option<UnreadCore>,
+    /// The runtime of a client running on its own (Block 63), shut down
+    /// by the `after` hook.
+    pub(super) runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl Delivery {
@@ -1103,7 +1106,17 @@ async fn a_server_with_a_long_history(
     regex = r#"^a client subscribed to "(\w+)", whose subscription's stream has been read up to "subscribed" and is not read after$"#
 )]
 async fn a_client_subscribed_on_the_server(world: &mut ClientWorld, channel: String) {
-    a_connected_client(world).await;
+    // On a runtime of its own (Block 63): its 8000 events then cost
+    // cucumber's thread only the reads, not the client's own work.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let endpoint = world.server_endpoint();
+    world.new_client_on(endpoint, runtime.handle().clone());
+    world.delivery.runtime = Some(runtime);
+    super::connection::connects(world).await;
     the_client_is_subscribed(world, channel).await;
 }
 
