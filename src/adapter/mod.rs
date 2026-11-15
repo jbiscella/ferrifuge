@@ -11,6 +11,9 @@ mod body;
 mod browser;
 mod builder;
 mod client;
+#[cfg(test)]
+#[cfg(adapter_tokio)]
+mod coop_tests;
 mod driver;
 mod handler;
 #[cfg(feature = "__test-hooks")]

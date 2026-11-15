@@ -40,6 +40,11 @@ pub(super) async fn a_connected_client(world: &mut ClientWorld) {
     }
     let endpoint = world.server_endpoint();
     world.new_client(endpoint);
+    connects(world).await;
+}
+
+/// Connects the scenario's client and waits for `connected`.
+pub(super) async fn connects(world: &mut ClientWorld) {
     world.client().connect();
     expect_event(world, "connecting").await;
     let ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) =

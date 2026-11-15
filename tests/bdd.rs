@@ -1063,8 +1063,15 @@ async fn run_scenarios() {
         .after(|_, _, scenario, _, world| {
             Box::pin(async move {
                 // Removed here, awaited, rather than by the world's drop.
-                if let Some(server) = world.and_then(|world| world.server.take()) {
-                    server.stop().await;
+                if let Some(world) = world {
+                    if let Some(server) = world.server.take() {
+                        server.stop().await;
+                    }
+                    // A client's own runtime, which may not be dropped in
+                    // this task (Block 63).
+                    if let Some(runtime) = world.take_own_runtime() {
+                        runtime.shutdown_background();
+                    }
                 }
                 let key = scenario_key(scenario);
                 let mut running = running();
