@@ -14,9 +14,9 @@ repository held while it carried that version, from the blocks of
 ### Changed
 
 - An emulation request answered with an invalid HTTP status of 600 to 999
-  now fails the native `http_stream` or sse transport, as a 5xx does (RFC
-  9110, section 15); the browser transports already failed it (Block 61,
-  D7).
+  now fails the native `http_stream` or `sse` transport, as a 5xx does
+  (RFC 9110, section 15); the browser transports already failed it (Block
+  61, D7).
 
 ## [0.25.0] - 2026-11-15
 
