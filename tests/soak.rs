@@ -1493,6 +1493,8 @@ fn write_artifact(soak: &Soak<'_>, failure: Option<&Failure>) {
 }
 
 fn main() {
+    // TEMPORARY (planted): an unused variable, which the lint step must refuse.
+    let planted_unused = 1;
     if env::var(ROLE).as_deref() == Ok("client") {
         child();
         return;
