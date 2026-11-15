@@ -161,7 +161,7 @@ pub(super) async fn subscribed(
             .expect("the stream has not ended")
         {
             SubscriptionEvent::Subscribed(_) => break,
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SubscriptionEvent::Subscribing(_) => {}
             event => panic!("{event:?} before subscribed"),
         }
     }
@@ -484,10 +484,7 @@ async fn no_server_side_publication_before_connected(world: &mut ClientWorld) {
     let mut before = Vec::new();
     loop {
         let event = next_client_event(world).await;
-        if matches!(
-            event,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-        ) {
+        if matches!(event, ClientEvent::Connected(_)) {
             break;
         }
         before.push(event);
@@ -510,10 +507,7 @@ async fn no_server_side_publication_before_connected(world: &mut ClientWorld) {
 async fn yields_unsubscribed_and_no_publication(world: &mut ClientWorld) {
     let event = next_subscription_event(world).await;
     assert!(
-        matches!(
-            event,
-            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
-        ),
+        matches!(event, SubscriptionEvent::Unsubscribed(_)),
         "{event:?}"
     );
     let stream = world
@@ -991,7 +985,7 @@ async fn reading_one_releases_the_other(world: &mut ClientWorld, read: String, o
     loop {
         match next_of(stream).await.expect("the stream has not ended") {
             SubscriptionEvent::Subscribed(_) => return,
-            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SubscriptionEvent::Subscribing(_) => {}
             event => panic!("{event:?} before subscribed"),
         }
     }

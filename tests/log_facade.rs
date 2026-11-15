@@ -52,10 +52,7 @@ async fn records_reach_a_log_logger_without_the_token() {
     let mut events = client.events();
     client.connect();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !matches!(
-            events.next().await,
-            Some(ClientEvent::Connected(ferrifuge::ConnectedContext { .. }))
-        ) {}
+        while !matches!(events.next().await, Some(ClientEvent::Connected(_))) {}
     })
     .await
     .expect("connected in time");

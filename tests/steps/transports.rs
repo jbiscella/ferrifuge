@@ -86,7 +86,7 @@ pub(super) async fn connect_and_wait(world: &mut ClientWorld) {
     expect_event(world, "connecting").await;
     match next_event_after_transport_errors(world).await {
         ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) => {
-            world.client_id = Some(client_id)
+            world.client_id = Some(client_id);
         }
         other => panic!("expected connected, got {other:?}"),
     }
@@ -719,13 +719,7 @@ async fn disconnected_before_the_timeout(world: &mut ClientWorld) {
     let event = tokio::time::timeout(limit, world.next_event())
         .await
         .unwrap_or_else(|_| panic!("no event within {limit:?}"));
-    assert!(
-        matches!(
-            event,
-            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
-        ),
-        "{event:?}"
-    );
+    assert!(matches!(event, ClientEvent::Disconnected(_)), "{event:?}");
 }
 
 #[then("the fake server sees the connection closed within the configured timeout plus tolerance")]

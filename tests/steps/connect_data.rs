@@ -477,9 +477,7 @@ fn a_client_with_a_data_callback(
 async fn the_client_reaches_connected_again(world: &mut ClientWorld) {
     let reached = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) =
-                world.next_event().await
-            {
+            if let ClientEvent::Connected(_) = world.next_event().await {
                 return;
             }
         }

@@ -628,7 +628,7 @@ async fn client_emits_a_delta_error(world: &mut ClientWorld, code: u32) {
                 ..
             } => panic!("a server-side publication before the error: {publication:?}"),
             // Its connection was lost before the delta could reach it.
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
+            ClientEvent::Connecting(_) => {
                 panic!("the client reconnected before the delta error: {seen:?}, then {event:?}")
             }
             event => seen.push(event),

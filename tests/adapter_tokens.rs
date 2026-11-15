@@ -51,19 +51,13 @@ async fn a_late_refresh_denial_disconnects_after_the_new_connection_refreshed() 
 
     client.connect();
     wait_for(&mut events, |event| {
-        matches!(
-            event,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-        )
+        matches!(event, ClientEvent::Connected(_))
     })
     .await;
     wait_until(|| calls.load(Ordering::SeqCst) == 1).await;
     server.close(3001, "reconnect");
     wait_for(&mut events, |event| {
-        matches!(
-            event,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
-        )
+        matches!(event, ClientEvent::Connected(_))
     })
     .await;
     // Two refreshes of the new connection: the second fetch starts when no

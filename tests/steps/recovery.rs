@@ -143,10 +143,7 @@ pub(super) async fn disconnect_and_hold(world: &mut ClientWorld) {
         expect_subscription_event(world, "subscribing", false).await;
     } else {
         tokio::time::timeout(EVENT_TIMEOUT, async {
-            while !matches!(
-                world.next_event().await,
-                ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
-            ) {}
+            while !matches!(world.next_event().await, ClientEvent::Connecting(_)) {}
         })
         .await
         .expect("the client reconnecting in time");

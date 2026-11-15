@@ -187,9 +187,9 @@ impl SharedPollSubscriptionEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Subscribing(crate::SubscribingContext { .. }) => "subscribing",
+            Self::Subscribing(_) => "subscribing",
             Self::Subscribed(_) => "subscribed",
-            Self::Unsubscribed(crate::UnsubscribedContext { .. }) => "unsubscribed",
+            Self::Unsubscribed(_) => "unsubscribed",
             Self::Update(_) => "update",
             Self::Error(_) => "error",
         }

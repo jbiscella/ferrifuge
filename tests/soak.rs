@@ -386,9 +386,7 @@ fn forward_client_events(client: &ferrifuge::Client, writer: &Writer<Record>) {
                 ferrifuge::ClientEvent::Connecting(ferrifuge::ConnectingContext {
                     code, ..
                 }) => ("connecting", *code),
-                ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
-                    ("connected", 0)
-                }
+                ferrifuge::ClientEvent::Connected(_) => ("connected", 0),
                 ferrifuge::ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
                     code,
                     ..

@@ -68,10 +68,7 @@ fn allocations_per_publication(channels: usize) -> f64 {
             Client::new(server.websocket_url(), Config::default()).expect("a valid endpoint");
         let mut client_events = client.events();
         client.connect();
-        while !matches!(
-            client_events.next().await,
-            Some(ClientEvent::Connected(ferrifuge::ConnectedContext { .. }))
-        ) {}
+        while !matches!(client_events.next().await, Some(ClientEvent::Connected(_))) {}
         drop(client_events);
 
         let mut subscriptions = Vec::with_capacity(channels);
@@ -99,8 +96,7 @@ fn allocations_per_publication(channels: usize) -> f64 {
             match events.next().await.expect("the subscription's events") {
                 SubscriptionEvent::Publication(_) => received += 1,
                 // Queued while subscribing, before the count started.
-                SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
-                | SubscriptionEvent::Subscribed(_) => {}
+                SubscriptionEvent::Subscribing(_) | SubscriptionEvent::Subscribed(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }

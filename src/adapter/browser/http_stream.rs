@@ -1350,15 +1350,15 @@ mod tests {
         subscription.subscribe();
         loop {
             match next_within(&mut events, WAIT).await {
-                ClientEvent::Connected(crate::ConnectedContext { .. }) => break,
-                ClientEvent::Connecting(crate::ConnectingContext { .. }) => {}
+                ClientEvent::Connected(_) => break,
+                ClientEvent::Connecting(_) => {}
                 other => panic!("{other:?}"),
             }
         }
         loop {
             match next_within(&mut subscription_events, WAIT).await {
                 SubscriptionEvent::Subscribed(_) => break,
-                SubscriptionEvent::Subscribing(crate::SubscribingContext { .. }) => {}
+                SubscriptionEvent::Subscribing(_) => {}
                 other => panic!("{other:?}"),
             }
         }

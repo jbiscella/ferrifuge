@@ -1075,7 +1075,7 @@ impl<'a> Replay<'a> {
                     self.position(channel, position);
                 }
             }
-            ServerSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+            ServerSubscriptionEvent::Unsubscribed(_) => {
                 self.server.insert(channel.to_owned(), "unsubscribed");
             }
             ServerSubscriptionEvent::Publication(publication) => {

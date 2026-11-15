@@ -1651,8 +1651,7 @@ impl Machine {
         // Leaving subscribed withdraws the publications not yet taken.
         if matches!(
             event,
-            SubscriptionEvent::Subscribing(crate::SubscribingContext { .. })
-                | SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
+            SubscriptionEvent::Subscribing(_) | SubscriptionEvent::Unsubscribed(_)
         ) {
             self.withdraw(&Owner::Client(id));
             // A shared poll subscription's refresh and retries stop (Block
@@ -2139,13 +2138,9 @@ mod tests {
         );
         assert_eq!(read_ahead.0, 1);
         assert!(
-            taken.iter().any(|action| matches!(
-                action,
-                Action::Emit(
-                    _,
-                    crate::ClientEvent::Connecting(crate::ConnectingContext { .. })
-                )
-            )),
+            taken
+                .iter()
+                .any(|action| matches!(action, Action::Emit(_, crate::ClientEvent::Connecting(_)))),
             "{taken:?}"
         );
         let position = machine.subscriptions.by_id[&id].position.clone();

@@ -171,10 +171,9 @@ fn yielded(run: &BatchRun, kind: &str) -> Yielded {
     since
         .iter()
         .find_map(|action| match (kind, action) {
-            (
-                "connected",
-                Action::Emit(_, event @ ClientEvent::Connected(ferrifuge::ConnectedContext { .. })),
-            ) => Some(Yielded::Connected(event.clone())),
+            ("connected", Action::Emit(_, event @ ClientEvent::Connected(_))) => {
+                Some(Yielded::Connected(event.clone()))
+            }
             ("subscribed", Action::EmitSubscription(_, _, SubscriptionEvent::Subscribed(s))) => {
                 Some(Yielded::Subscribed(s.clone()))
             }

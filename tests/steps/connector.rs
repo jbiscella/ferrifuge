@@ -295,7 +295,7 @@ async fn error_within_the_handshake_timeout(world: &mut ClientWorld, message: St
     loop {
         let event = world.next_event().await;
         match &event {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             ClientEvent::Error(error) => {
                 assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
                 assert_eq!(error.message, message, "{error:?}");
@@ -335,7 +335,7 @@ async fn invalid_certificate(world: &mut ClientWorld) {
     loop {
         let event = world.next_event().await;
         match &event {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             ClientEvent::Error(error) => {
                 assert_eq!(error.kind, ErrorKind::Transport, "{error:?}");
                 assert!(

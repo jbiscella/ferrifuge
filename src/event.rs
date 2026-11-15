@@ -36,7 +36,8 @@ impl State {
 /// logged (Block 21).
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
-#[expect(
+// Not `expect`: on 32-bit targets the variants are closer in size.
+#[allow(
     clippy::large_enum_variant,
     reason = "a server-side subscription's event is as large as a client-side one; the contexts made the others smaller (Block 54, D4)"
 )]

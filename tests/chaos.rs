@@ -2220,10 +2220,10 @@ impl Run {
             ClientEvent::Connecting(ferrifuge::ConnectingContext { code, .. }) if *code == 3014 => {
                 (true, false)
             }
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
+            ClientEvent::Connecting(_) => {
                 (false, self.checker.last_state == Some(State::Connected))
             }
-            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => (true, false),
+            ClientEvent::Disconnected(_) => (true, false),
             _ => return,
         };
         let mut latest = None;
@@ -2496,9 +2496,9 @@ impl Run {
             self.tear_down_fetches(client_event);
         }
         let state = match client_event {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => State::Connecting,
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => State::Connected,
-            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => State::Disconnected,
+            ClientEvent::Connecting(_) => State::Connecting,
+            ClientEvent::Connected(_) => State::Connected,
+            ClientEvent::Disconnected(_) => State::Disconnected,
             ClientEvent::ServerSubscription {
                 channel,
                 event: server_event,
@@ -2560,7 +2560,7 @@ impl Run {
                     offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
-            ServerSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+            ServerSubscriptionEvent::Unsubscribed(_) => {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             ServerSubscriptionEvent::Publication(publication) => {
@@ -2614,7 +2614,7 @@ impl Run {
                     offset: subscribed.stream_position.as_ref().map(|at| at.offset),
                 },
             ),
-            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. }) => {
+            SubscriptionEvent::Unsubscribed(_) => {
                 (Some(SubscriptionState::Unsubscribed), Kind::Other)
             }
             SubscriptionEvent::Publication(publication) => {

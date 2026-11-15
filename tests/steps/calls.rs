@@ -276,7 +276,7 @@ fn the_client_calls_map_publish(
     let made_at = Instant::now();
     let future = world.client().map_publish(channel, key, data.into_bytes());
     track(world, "map_publish", made_at, async move {
-        future.await.map(|_| Returned::Published)
+        future.await.map(|()| Returned::Published)
     });
 }
 
@@ -286,7 +286,7 @@ fn the_client_calls_map_remove(world: &mut ClientWorld, channel: String, key: St
     let made_at = Instant::now();
     let future = world.client().map_remove(channel, key);
     track(world, "map_remove", made_at, async move {
-        future.await.map(|_| Returned::Published)
+        future.await.map(|()| Returned::Published)
     });
 }
 
@@ -339,9 +339,7 @@ async fn the_call_completes_once_connected(world: &mut ClientWorld) {
     assert_eq!(world.client().state(), State::Connected);
     let connected = tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
-            if let ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) =
-                world.next_event().await
-            {
+            if let ClientEvent::Connected(_) = world.next_event().await {
                 return;
             }
         }
@@ -525,7 +523,7 @@ fn the_connect_proxy_answers_after(world: &mut ClientWorld, seconds: u64, code: 
 async fn the_client_emits_disconnected_with(world: &mut ClientWorld, code: u32) {
     loop {
         match next_event_after_transport_errors(world).await {
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connecting(_) => {}
             ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: got, .. }) => {
                 assert_eq!(got, code);
                 return;
@@ -539,10 +537,7 @@ async fn the_client_emits_disconnected_with(world: &mut ClientWorld, code: u32) 
 async fn the_client_reconnects_over(world: &mut ClientWorld, transport: String) {
     let connecting = world.next_event().await;
     assert!(
-        matches!(
-            connecting,
-            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
-        ),
+        matches!(connecting, ClientEvent::Connecting(_)),
         "{connecting:?}"
     );
     loop {
@@ -596,7 +591,7 @@ async fn connected_as(
                 Some(ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. })) => {
                     return client_id;
                 }
-                Some(ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })) => {}
+                Some(ClientEvent::Connecting(_)) => {}
                 event => panic!("expected connected, got {event:?}"),
             }
         }
@@ -1199,7 +1194,7 @@ async fn the_client_sends(world: &mut ClientWorld, bytes: String, json: String) 
     let made_at = Instant::now();
     let send = world.client().send(data);
     track(world, "send", made_at, async move {
-        send.await.map(|_| Returned::Published)
+        send.await.map(|()| Returned::Published)
     });
     let (result, _) = outcome(world, None, EVENT_TIMEOUT).await;
     assert!(result.is_ok(), "{result:?}");
@@ -1696,7 +1691,7 @@ fn the_client_sends_three(world: &mut ClientWorld) {
             .client()
             .send(json!({"n": n}).to_string().into_bytes());
         track(world, &format!("send {n}"), made_at, async move {
-            send.await.map(|_| Returned::Published)
+            send.await.map(|()| Returned::Published)
         });
     }
 }

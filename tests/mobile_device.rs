@@ -87,9 +87,7 @@ where
                 })
             }
             ClientEvent::Error(error) => Some(Err(format!("another error: {}", error.message))),
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
-                Some(Err("connected to an untrusted server".to_owned()))
-            }
+            ClientEvent::Connected(_) => Some(Err("connected to an untrusted server".to_owned())),
             ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
@@ -110,7 +108,7 @@ where
     step(
         events,
         |event| match event {
-            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => Some(Ok(())),
+            ClientEvent::Connected(_) => Some(Ok(())),
             ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
                 Some(Err(format!("disconnected: {code} {reason}")))
             }
@@ -192,13 +190,11 @@ where
     step(
         events,
         |event| match event {
-            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. }) => {
-                Some(if client.state() == State::Disconnected {
-                    Ok(())
-                } else {
-                    Err(format!("disconnected, in state {:?}", client.state()))
-                })
-            }
+            ClientEvent::Disconnected(_) => Some(if client.state() == State::Disconnected {
+                Ok(())
+            } else {
+                Err(format!("disconnected, in state {:?}", client.state()))
+            }),
             _ => None,
         },
         String::new,

@@ -4251,10 +4251,7 @@ mod tests {
             .expect("an event");
 
         assert!(
-            matches!(
-                first,
-                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
-            ),
+            matches!(first, Some(ClientEvent::Connecting(_))),
             "{first:?}"
         );
     }
@@ -5276,10 +5273,7 @@ mod tests {
             .expect("an event");
 
         assert!(
-            matches!(
-                first,
-                Some(ClientEvent::Disconnected(crate::DisconnectedContext { .. }))
-            ),
+            matches!(first, Some(ClientEvent::Disconnected(_))),
             "{first:?}"
         );
     }
@@ -5611,12 +5605,7 @@ mod tests {
         let (taken, _) = queued(&mut events);
         let connecting = taken
             .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    ClientEvent::Connecting(crate::ConnectingContext { .. })
-                )
-            })
+            .filter(|event| matches!(event, ClientEvent::Connecting(_)))
             .count();
         assert_eq!(connecting, 1, "only the connect's: {taken:?}");
     }
@@ -6581,10 +6570,7 @@ mod tests {
         let error = next().await;
 
         assert!(
-            matches!(
-                connecting,
-                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
-            ),
+            matches!(connecting, Some(ClientEvent::Connecting(_))),
             "{connecting:?}"
         );
         assert!(
@@ -6960,18 +6946,12 @@ mod tests {
         let disconnected = next().await;
 
         assert!(
-            matches!(
-                connecting,
-                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
-            ),
+            matches!(connecting, Some(ClientEvent::Connecting(_))),
             "{connecting:?}"
         );
         assert!(matches!(error, Some(ClientEvent::Error(_))), "{error:?}");
         assert!(
-            matches!(
-                disconnected,
-                Some(ClientEvent::Disconnected(crate::DisconnectedContext { .. }))
-            ),
+            matches!(disconnected, Some(ClientEvent::Disconnected(_))),
             "{disconnected:?}"
         );
     }
