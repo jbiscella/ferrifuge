@@ -21,7 +21,9 @@ async fn a_connected_client_with_expiring_token(world: &mut ClientWorld) {
     world.build_client(builder);
     world.client().connect();
     expect_event(world, "connecting").await;
-    let ClientEvent::Connected { client_id, .. } = expect_event(world, "connected").await else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) =
+        expect_event(world, "connected").await
+    else {
         unreachable!("expect_event checked the name");
     };
     world.client_id = Some(client_id);

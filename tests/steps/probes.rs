@@ -212,7 +212,9 @@ async fn a_client_whose_handler_holds_it(world: &mut ClientWorld) {
                 .get_or_insert_with(|| OnThreadExit(Arc::clone(&returned)));
         });
         match event {
-            ClientEvent::Connected { .. } => connected.store(true, Ordering::SeqCst),
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {
+                connected.store(true, Ordering::SeqCst)
+            }
             ClientEvent::ServerSubscription {
                 event: ServerSubscriptionEvent::Publication(_),
                 ..
@@ -384,7 +386,7 @@ fn the_driver_takes_the_next_input(world: &mut ClientWorld) {
 async fn disconnected_with_code(world: &mut ClientWorld, code: u32) {
     loop {
         match world.next_event().await {
-            ClientEvent::Disconnected { code: got, .. } => {
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: got, .. }) => {
                 assert_eq!(got, code);
                 break;
             }
@@ -421,15 +423,17 @@ async fn disconnected_with_the_reason_sent(world: &mut ClientWorld, code: u32) {
     assert_eq!(sent, code);
     loop {
         match world.next_event().await {
-            ClientEvent::Disconnected {
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
                 code: got,
                 reason: got_reason,
-            } => {
+                ..
+            }) => {
                 assert_eq!((got, got_reason.as_str()), (code, reason.as_str()));
                 return;
             }
             // The push lost with the end of the stream: a reconnect.
-            event @ (ClientEvent::Connecting { .. } | ClientEvent::Connected { .. }) => {
+            event @ (ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. })) => {
                 panic!("expected disconnected, got {event:?}");
             }
             _ => {}
@@ -455,7 +459,9 @@ async fn a_client_behind_a_proxy_that_never_answers(world: &mut ClientWorld, sec
 #[then(regex = r#"^within (\d+) s the client emits "connecting" with code (\d+)$"#)]
 async fn within_connecting_with_code(world: &mut ClientWorld, seconds: u64, code: u32) {
     match world.next_event().await {
-        ClientEvent::Connecting { code: got, .. } => assert_eq!(got, code),
+        ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) => {
+            assert_eq!(got, code)
+        }
         event => panic!("expected connecting, got {event:?}"),
     }
     // From the request to its end, as the proxy saw them: the transport
@@ -479,8 +485,9 @@ async fn within_connecting_with_code(world: &mut ClientWorld, seconds: u64, code
 async fn it_connects_again_and_is_answered(world: &mut ClientWorld) {
     loop {
         match world.next_event().await {
-            ClientEvent::Connected { .. } => break,
-            ClientEvent::Error(_) | ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => break,
+            ClientEvent::Error(_)
+            | ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => panic!("expected connected, got {event:?}"),
         }
     }

@@ -272,7 +272,7 @@ fn a_reply_without_type_4_unsubscribes_with_code_8() {
     );
     assert!(events(&actions).iter().any(|(_, event)| matches!(
         event,
-        SharedPollSubscriptionEvent::Unsubscribed { code: 8, reason } if reason == NOT_SUPPORTED_REASON
+        SharedPollSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 8, reason }) if reason == NOT_SUPPORTED_REASON
     )));
     assert_eq!(
         machine.subscription_state(id),
@@ -844,7 +844,7 @@ fn an_emulated_request_without_a_reply_reconnects_with_code_3() {
     assert!(
         fired.iter().any(|action| matches!(
             action,
-            Action::Emit(_, crate::ClientEvent::Connecting { code: 3, reason })
+            Action::Emit(_, crate::ClientEvent::Connecting(crate::ConnectingContext { code: 3, reason }))
                 if reason == "shared poll request timeout"
         )),
         "{fired:?}"
@@ -1246,7 +1246,7 @@ fn a_track_request_refused_with_413_is_resent_alone_then_unsubscribes() {
     assert!(
         events(&refused).iter().any(|(_, event)| matches!(
             event,
-            SharedPollSubscriptionEvent::Unsubscribed { code: 3, .. }
+            SharedPollSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 3, .. })
         )),
         "{refused:?}"
     );

@@ -69,7 +69,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
     let missing = move || {
         format!(
             "the page has no constructor for the {} transport",
-            kind.name()
+            kind.as_str()
         )
     };
     match kind {

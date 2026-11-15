@@ -29,7 +29,10 @@ async fn connected(server: &FakeServer, config: Config, recorded: bool) -> Clien
     client.connect();
     let connected = tokio::time::timeout(WAIT, async {
         while let Some(event) = events.next().await {
-            if matches!(event, ClientEvent::Connected { .. }) {
+            if matches!(
+                event,
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+            ) {
                 return;
             }
         }
@@ -227,7 +230,7 @@ struct Waiting {
 }
 
 impl ferrifuge::ClientHandler for Waiting {
-    fn on_connected(&mut self, _client_id: String, _transport: String, _data: Option<Vec<u8>>) {
+    fn on_connected(&mut self, _context: ferrifuge::ConnectedContext) {
         if let Some(client) = self.client.get() {
             let _ = futures_executor::block_on(client.rpc("echo", b"{}".to_vec()));
         }

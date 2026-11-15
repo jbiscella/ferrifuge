@@ -1350,15 +1350,15 @@ mod tests {
         subscription.subscribe();
         loop {
             match next_within(&mut events, WAIT).await {
-                ClientEvent::Connected { .. } => break,
-                ClientEvent::Connecting { .. } => {}
+                ClientEvent::Connected(crate::ConnectedContext { .. }) => break,
+                ClientEvent::Connecting(crate::ConnectingContext { .. }) => {}
                 other => panic!("{other:?}"),
             }
         }
         loop {
             match next_within(&mut subscription_events, WAIT).await {
                 SubscriptionEvent::Subscribed(_) => break,
-                SubscriptionEvent::Subscribing { .. } => {}
+                SubscriptionEvent::Subscribing(crate::SubscribingContext { .. }) => {}
                 other => panic!("{other:?}"),
             }
         }
@@ -1414,7 +1414,9 @@ mod tests {
         }
 
         loop {
-            if let ClientEvent::Connecting { code, reason } = next_within(&mut events, WAIT).await {
+            if let ClientEvent::Connecting(crate::ConnectingContext { code, reason }) =
+                next_within(&mut events, WAIT).await
+            {
                 assert_eq!((code, reason.as_str()), (7, "read-ahead overflow"));
                 break;
             }

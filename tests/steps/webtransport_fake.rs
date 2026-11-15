@@ -116,7 +116,7 @@ async fn ends_the_session_with_a_reconnect_code(world: &mut ClientWorld) {
     // The client reconnects: its disconnect and the new attempt.
     let event = world.next_event().await;
     assert!(
-        matches!(&event, ClientEvent::Connecting { code: got, .. } if *got == code),
+        matches!(&event, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) if *got == code),
         "{event:?}"
     );
 }

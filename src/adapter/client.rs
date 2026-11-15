@@ -2965,12 +2965,12 @@ impl Driver {
                     self.opening = None;
                     match result {
                         Ok(transport) => {
-                            debug!(transport = self.kind.name(), "transport opened");
+                            debug!(transport = self.kind.as_str(), "transport opened");
                             self.transport = Some((id, transport));
                             Input::TransportOpened(id)
                         }
                         Err(message) => {
-                            debug!(transport = self.kind.name(), reason = %message, "transport failed");
+                            debug!(transport = self.kind.as_str(), reason = %message, "transport failed");
                             Input::TransportFailed { transport: id, message }
                         }
                     }
@@ -2980,7 +2980,7 @@ impl Driver {
                     match inbound {
                     Inbound::Frame(data) => {
                         trace!(
-                            transport = self.kind.name(),
+                            transport = self.kind.as_str(),
                             frame_type = ?self.frame_type(),
                             bytes = data.len(),
                             "frame received"
@@ -2998,7 +2998,7 @@ impl Driver {
                         self.transport = None;
                         warn!(
                             client = self.shared.log.number,
-                            transport = self.kind.name(),
+                            transport = self.kind.as_str(),
                             "a message from the server is larger than the size limit"
                         );
                         Input::MessageTooLarge(id)
@@ -3008,7 +3008,7 @@ impl Driver {
                         self.transport = None;
                         warn!(
                             client = self.shared.log.number,
-                            transport = self.kind.name(),
+                            transport = self.kind.as_str(),
                             "the inbox overflowed while the read-ahead was full"
                         );
                         Input::InboxOverflow(id)
@@ -3173,7 +3173,7 @@ impl Driver {
                 frame_type,
             } => {
                 trace!(
-                    transport = self.kind.name(),
+                    transport = self.kind.as_str(),
                     frame_type = ?frame_type,
                     bytes = frame.len(),
                     "frame sent"
@@ -3348,7 +3348,7 @@ impl Driver {
     /// the server is an anomaly (one too large for the client, see
     /// `Inbound::TooLarge`, too).
     fn closed(&self, code: Option<u16>, reason: &str) {
-        let transport = self.kind.name();
+        let transport = self.kind.as_str();
         if code == Some(MESSAGE_TOO_BIG) {
             warn!(
                 client = self.shared.log.number,
@@ -3388,7 +3388,7 @@ impl Driver {
         // skips a transport not supported (Block 44, D12).
         #[cfg(adapter_browser)]
         if !found.usable(kind) {
-            debug!(transport = kind.name(), "transport not available");
+            debug!(transport = kind.as_str(), "transport not available");
             self.feed(Input::TransportUnsupported(id));
             return;
         }
@@ -3703,9 +3703,9 @@ fn check_connector(
             code: codes::error::BAD_CONFIGURATION,
             message: format!(
                 "a connector carries the websocket only, not transport {}",
-                kind.name()
+                kind.as_str()
             ),
-            transport: Some(kind.name().to_owned()),
+            transport: Some(*kind),
         });
     }
     if proxy_set {
@@ -3769,7 +3769,7 @@ fn check_webtransport(
         kind: ErrorKind::Configuration,
         code: codes::error::BAD_CONFIGURATION,
         message,
-        transport: Some(kind.name().to_owned()),
+        transport: Some(*kind),
     };
     #[cfg(not(feature = "unstable-webtransport"))]
     {
@@ -3810,7 +3810,7 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
         }
         "the webtransport transport needs an https:// endpoint".to_owned()
     } else if endpoint.is_empty() {
-        format!("no endpoint given for the {} transport", kind.name())
+        format!("no endpoint given for the {} transport", kind.as_str())
     } else if kind == TransportKind::WebSocket && http {
         "the websocket transport needs a ws:// or wss:// endpoint, not http:// or https://"
             .to_owned()
@@ -3821,7 +3821,7 @@ fn check_endpoint(kind: TransportKind, endpoint: &str) -> Result<(), ClientError
         kind: ErrorKind::Configuration,
         code: codes::error::BAD_CONFIGURATION,
         message,
-        transport: Some(kind.name().to_owned()),
+        transport: Some(kind),
     })
 }
 
@@ -4244,7 +4244,10 @@ mod tests {
             .expect("an event");
 
         assert!(
-            matches!(first, Some(ClientEvent::Connecting { .. })),
+            matches!(
+                first,
+                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
+            ),
             "{first:?}"
         );
     }
@@ -4264,8 +4267,8 @@ mod tests {
             };
             assert_eq!(error.kind, crate::ErrorKind::Configuration, "{endpoint:?}");
             assert_eq!(
-                error.transport.as_deref(),
-                Some("websocket"),
+                error.transport,
+                Some(crate::TransportKind::WebSocket),
                 "{endpoint:?}"
             );
         }
@@ -4307,7 +4310,7 @@ mod tests {
         events
             .iter()
             .filter_map(|event| match event {
-                ClientEvent::Disconnected { code, .. } => Some(*code),
+                ClientEvent::Disconnected(crate::DisconnectedContext { code, .. }) => Some(*code),
                 _ => None,
             })
             .collect()
@@ -4374,7 +4377,7 @@ mod tests {
             [codes::disconnected::RUNTIME_SHUT_DOWN]
         );
         assert!(
-            matches!(taken.last(), Some(ClientEvent::Disconnected { reason, .. }) if reason == "runtime shut down"),
+            matches!(taken.last(), Some(ClientEvent::Disconnected(crate::DisconnectedContext { reason, .. })) if reason == "runtime shut down"),
             "{taken:?}"
         );
         assert!(ended, "the stream ends");
@@ -5266,7 +5269,10 @@ mod tests {
             .expect("an event");
 
         assert!(
-            matches!(first, Some(ClientEvent::Disconnected { .. })),
+            matches!(
+                first,
+                Some(ClientEvent::Disconnected(crate::DisconnectedContext { .. }))
+            ),
             "{first:?}"
         );
     }
@@ -5598,7 +5604,12 @@ mod tests {
         let (taken, _) = queued(&mut events);
         let connecting = taken
             .iter()
-            .filter(|event| matches!(event, ClientEvent::Connecting { .. }))
+            .filter(|event| {
+                matches!(
+                    event,
+                    ClientEvent::Connecting(crate::ConnectingContext { .. })
+                )
+            })
             .count();
         assert_eq!(connecting, 1, "only the connect's: {taken:?}");
     }
@@ -6339,7 +6350,7 @@ mod tests {
         drop(core);
         let mut codes = Vec::new();
         while let Some(Some(event)) = events.next().now_or_never() {
-            if let ClientEvent::Connecting { code, .. } = event {
+            if let ClientEvent::Connecting(crate::ConnectingContext { code, .. }) = event {
                 codes.push(code);
             }
         }
@@ -6563,7 +6574,10 @@ mod tests {
         let error = next().await;
 
         assert!(
-            matches!(connecting, Some(ClientEvent::Connecting { .. })),
+            matches!(
+                connecting,
+                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
+            ),
             "{connecting:?}"
         );
         assert!(
@@ -6939,12 +6953,18 @@ mod tests {
         let disconnected = next().await;
 
         assert!(
-            matches!(connecting, Some(ClientEvent::Connecting { .. })),
+            matches!(
+                connecting,
+                Some(ClientEvent::Connecting(crate::ConnectingContext { .. }))
+            ),
             "{connecting:?}"
         );
         assert!(matches!(error, Some(ClientEvent::Error(_))), "{error:?}");
         assert!(
-            matches!(disconnected, Some(ClientEvent::Disconnected { .. })),
+            matches!(
+                disconnected,
+                Some(ClientEvent::Disconnected(crate::DisconnectedContext { .. }))
+            ),
             "{disconnected:?}"
         );
     }

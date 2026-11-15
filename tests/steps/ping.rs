@@ -114,10 +114,10 @@ async fn within_the_client_emits_connecting(world: &mut ClientWorld, seconds: u6
         .unwrap_or_else(|_| panic!("no event within {limit:?}"));
     assert_eq!(
         event,
-        ClientEvent::Connecting {
-            code: codes::connecting::NO_PING,
-            reason: "no ping".into()
-        }
+        ClientEvent::Connecting(ferrifuge::ConnectingContext::new(
+            codes::connecting::NO_PING,
+            "no ping"
+        ))
     );
 }
 

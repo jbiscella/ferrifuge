@@ -93,8 +93,10 @@ async fn connected(server: &ChildServer, config: Config) -> Client {
 async fn wait_connected(events: &mut (impl Stream<Item = ClientEvent> + Unpin)) {
     loop {
         match events.next().await.expect("the client's events") {
-            ClientEvent::Connected { .. } => return,
-            ClientEvent::Disconnected { code, reason } => panic!("disconnected: {code} {reason}"),
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => return,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
+                panic!("disconnected: {code} {reason}")
+            }
             _ => {}
         }
     }

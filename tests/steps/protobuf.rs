@@ -84,7 +84,7 @@ async fn the_client_sends_two_protobuf_pongs(world: &mut ClientWorld) {
 #[then(regex = r#"^the client emits "connecting" with code (\d+)$"#)]
 async fn the_client_emits_connecting_with_code(world: &mut ClientWorld, code: u32) {
     let event = world.next_event().await;
-    let ClientEvent::Connecting { code: got, .. } = event else {
+    let ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, .. }) = event else {
         panic!("expected connecting, got {event:?}");
     };
     assert_eq!(got, code);

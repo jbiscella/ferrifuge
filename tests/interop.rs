@@ -97,8 +97,10 @@ async fn subscriber(
     client.connect();
     loop {
         match events.next().await.expect("the client's events") {
-            ClientEvent::Connected { .. } => break,
-            ClientEvent::Disconnected { code, reason } => panic!("disconnected: {code} {reason}"),
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => break,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, reason, .. }) => {
+                panic!("disconnected: {code} {reason}")
+            }
             _ => {}
         }
     }

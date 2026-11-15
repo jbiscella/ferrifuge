@@ -454,7 +454,7 @@ async fn unsubscribed_with(world: &mut ClientWorld, channel: String, code: u32, 
         next_server_side_event(world, &channel, |event| event.name() == "unsubscribed").await;
     assert_eq!(
         event,
-        ServerSubscriptionEvent::Unsubscribed { code, reason },
+        ServerSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext::new(code, reason)),
         "{event:?}"
     );
 }
@@ -640,7 +640,9 @@ fn expected(world: &ClientWorld) -> String {
 async fn connect(world: &mut ClientWorld) {
     world.client().connect();
     expect_event(world, "connecting").await;
-    let ClientEvent::Connected { client_id, .. } = expect_event(world, "connected").await else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) =
+        expect_event(world, "connected").await
+    else {
         unreachable!("expect_event checked the name");
     };
     world.client_id = Some(client_id);

@@ -131,8 +131,8 @@ fn subscribe(world: &mut ClientWorld, channel: &str, recoverable: bool) {
 async fn connected(world: &mut ClientWorld) -> String {
     loop {
         match world.next_event().await {
-            ClientEvent::Connecting { .. } => {}
-            ClientEvent::Connected { client_id, .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) => {
                 world.doubles.client_id = Some(client_id.clone());
                 return client_id;
             }
@@ -142,10 +142,10 @@ async fn connected(world: &mut ClientWorld) -> String {
 }
 
 /// Waits for the subscription's "subscribed" event.
-async fn subscribed(world: &mut ClientWorld) -> ferrifuge::Subscribed {
+async fn subscribed(world: &mut ClientWorld) -> ferrifuge::SubscribedContext {
     loop {
         match world.next_subscription_event(false).await {
-            SubscriptionEvent::Subscribing { .. } => {}
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             SubscriptionEvent::Subscribed(details) => return details,
             other => panic!("{other:?}"),
         }
@@ -497,8 +497,10 @@ async fn connected_and_unsubscribed(world: &mut ClientWorld, code: u32) {
     connected(world).await;
     loop {
         match world.next_subscription_event(false).await {
-            SubscriptionEvent::Subscribing { .. } => {}
-            SubscriptionEvent::Unsubscribed { code: got, .. } => {
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
+                code: got, ..
+            }) => {
                 assert_eq!(got, code);
                 return;
             }
@@ -562,7 +564,8 @@ fn a_double_granting(world: &mut ClientWorld, channel: String) {
 async fn server_side_subscribed(world: &mut ClientWorld) {
     loop {
         match world.next_event().await {
-            ClientEvent::Connecting { .. } | ClientEvent::Connected { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+            | ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => {}
             ClientEvent::ServerSubscription {
                 channel,
                 event: ServerSubscriptionEvent::Subscribed(_),
@@ -683,7 +686,12 @@ impl Side {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|event| matches!(event, ClientEvent::Connected { .. }))
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+                    )
+                })
                 .count()
         };
         let reached = tokio::time::timeout(EVENT_TIMEOUT, async {
@@ -717,8 +725,12 @@ impl Side {
             .unwrap()
             .iter()
             .map(|event| match event {
-                ClientEvent::Connecting { code, reason } => format!("connecting {code} {reason}"),
-                ClientEvent::Disconnected { code, reason } => {
+                ClientEvent::Connecting(ferrifuge::ConnectingContext { code, reason, .. }) => {
+                    format!("connecting {code} {reason}")
+                }
+                ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
+                    code, reason, ..
+                }) => {
                     format!("disconnected {code} {reason}")
                 }
                 ClientEvent::Error(error) => format!("error {:?} {}", error.kind, error.code),
@@ -731,7 +743,7 @@ impl Side {
             .unwrap()
             .iter()
             .map(|event| match event {
-                SubscriptionEvent::Subscribing { code, reason } => {
+                SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code, reason, .. }) => {
                     format!("subscribing {code} {reason}")
                 }
                 SubscriptionEvent::Subscribed(details) => format!(

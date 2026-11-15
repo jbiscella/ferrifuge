@@ -138,7 +138,7 @@ async fn a_client_behind_a_silent_relay(world: &mut ClientWorld, handshake: u64,
 pub(super) async fn failed_attempt_ending_with(world: &mut ClientWorld, ending: &str) {
     let event = loop {
         match world.next_event().await {
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => break event,
         }
     };

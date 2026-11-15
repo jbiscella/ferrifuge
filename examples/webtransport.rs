@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             Some(event) = client_events.next() => {
-                if let ClientEvent::Connected { transport, .. } = &event {
+                if let ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) = &event {
                     println!("connected over {transport}");
                 }
             }
@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SubscriptionEvent::Publication(publication) => {
                     println!("{}", String::from_utf8_lossy(&publication.data));
                 }
-                SubscriptionEvent::Unsubscribed { code, reason } => {
+                SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { code, reason, .. }) => {
                     println!("unsubscribed: {code} {reason}");
                     break;
                 }

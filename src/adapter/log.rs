@@ -133,7 +133,7 @@ impl Log {
             Action::OpenTransport { kind, .. } => {
                 let previous = lock(&self.state).attempt.replace(*kind);
                 if previous.is_some_and(|previous| previous != *kind) {
-                    debug!(transport = kind.name(), "trying the next transport");
+                    debug!(transport = kind.as_str(), "trying the next transport");
                 }
             }
             Action::SetTimer(Timer::Reconnect, delay, _) => {
@@ -210,13 +210,13 @@ impl Log {
         // WebTransport's first handshake offers `h3` (Block 48, D5).
         if let Some(alpn) = alpn {
             debug!(
-                transport = kind.name(),
+                transport = kind.as_str(),
                 endpoint, proxy, alpn, "opening transport"
             );
             return;
         }
         debug!(
-            transport = kind.name(),
+            transport = kind.as_str(),
             endpoint, proxy, "opening transport"
         );
     }
@@ -227,7 +227,7 @@ impl Log {
     pub(super) fn attempt(&self, kind: TransportKind, endpoint: usize) {
         let endpoint = self.endpoints.get(endpoint).map_or("", String::as_str);
         debug!(
-            transport = kind.name(),
+            transport = kind.as_str(),
             endpoint,
             proxy = "browser",
             "opening transport"
@@ -247,7 +247,7 @@ impl Log {
     }
 
     fn anomaly(&self, anomaly: &Anomaly) {
-        let transport = lock(&self.state).attempt.map_or("", TransportKind::name);
+        let transport = lock(&self.state).attempt.map_or("", TransportKind::as_str);
         match anomaly {
             Anomaly::UndecodableFrame { bytes, .. } => warn!(
                 client = self.number,
@@ -275,13 +275,17 @@ impl Log {
 
     fn client_event(&self, event: &ClientEvent) {
         match event {
-            ClientEvent::Connecting { code, reason } => {
+            ClientEvent::Connecting(crate::ConnectingContext { code, reason }) => {
                 debug!(state = "connecting", code, reason, "client state changed");
             }
-            ClientEvent::Connected { transport, .. } => {
-                debug!(state = "connected", transport, "client state changed");
+            ClientEvent::Connected(crate::ConnectedContext { transport, .. }) => {
+                debug!(
+                    state = "connected",
+                    transport = transport.as_str(),
+                    "client state changed"
+                );
             }
-            ClientEvent::Disconnected { code, reason } => {
+            ClientEvent::Disconnected(crate::DisconnectedContext { code, reason }) => {
                 debug!(state = "disconnected", code, reason, "client state changed");
             }
             ClientEvent::Error(error) => self.error(error, None),
@@ -297,7 +301,10 @@ impl Log {
                     recovered = subscribed.recovered,
                     "server-side subscription state changed"
                 ),
-                ServerSubscriptionEvent::Unsubscribed { code, reason } => debug!(
+                ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
+                    code,
+                    reason,
+                }) => debug!(
                     channel,
                     state = "unsubscribed",
                     code,
@@ -315,16 +322,16 @@ impl Log {
         // work for them here, logging off or on (D8).
         if !matches!(
             event,
-            SubscriptionEvent::Subscribing { .. }
+            SubscriptionEvent::Subscribing(crate::SubscribingContext { .. })
                 | SubscriptionEvent::Subscribed(_)
-                | SubscriptionEvent::Unsubscribed { .. }
+                | SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
                 | SubscriptionEvent::Error(_)
         ) {
             return;
         }
         let span = self.span_of(id);
         match event {
-            SubscriptionEvent::Subscribing { code, reason } => debug!(
+            SubscriptionEvent::Subscribing(crate::SubscribingContext { code, reason }) => debug!(
                 parent: &span,
                 state = "subscribing",
                 code,
@@ -337,7 +344,7 @@ impl Log {
                 recovered = subscribed.recovered,
                 "subscription state changed"
             ),
-            SubscriptionEvent::Unsubscribed { code, reason } => debug!(
+            SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, reason }) => debug!(
                 parent: &span,
                 state = "unsubscribed",
                 code,

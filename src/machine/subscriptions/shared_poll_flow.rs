@@ -23,7 +23,7 @@ use crate::wire::{
 };
 use crate::{
     ClientError, ErrorKind, Publication, SharedPollSubscriptionEvent, SharedPollTrackItem, State,
-    Subscribed, SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
+    SubscribedContext, SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
 };
 
 /// `type` of a shared poll subscription's subscribe command and reply
@@ -1085,7 +1085,7 @@ impl Machine {
         self.rearm_subscription_refresh(id, result.expires, result.ttl);
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribed(Subscribed {
+            SubscriptionEvent::Subscribed(SubscribedContext {
                 data: result.data,
                 positioned: false,
                 recoverable: false,
@@ -1651,14 +1651,17 @@ impl Machine {
         event: SubscriptionEvent,
     ) {
         let event = match event {
-            SubscriptionEvent::Subscribing { code, reason } => {
-                SharedPollSubscriptionEvent::Subscribing { code, reason }
+            SubscriptionEvent::Subscribing(crate::SubscribingContext { code, reason }) => {
+                SharedPollSubscriptionEvent::Subscribing(crate::SubscribingContext { code, reason })
             }
             SubscriptionEvent::Subscribed(subscribed) => {
                 SharedPollSubscriptionEvent::Subscribed(subscribed)
             }
-            SubscriptionEvent::Unsubscribed { code, reason } => {
-                SharedPollSubscriptionEvent::Unsubscribed { code, reason }
+            SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, reason }) => {
+                SharedPollSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
+                    code,
+                    reason,
+                })
             }
             SubscriptionEvent::Error(error) => SharedPollSubscriptionEvent::Error(error),
             _ => return,

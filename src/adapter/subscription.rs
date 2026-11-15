@@ -158,7 +158,7 @@ impl Subscription {
     /// (Block 15). It ends as `events()` does, not on `unsubscribed`.
     ///
     /// It hides what only the other events tell:
-    /// - a `Subscribed` reporting `was_recovering` true and `recovered`
+    /// - a `SubscribedContext` reporting `was_recovering` true and `recovered`
     ///   false, the one sign of a gap on a recoverable channel without
     ///   `get_state` (with `get_state`, a failed recovery reloads the state
     ///   instead, Block 11);
@@ -466,7 +466,7 @@ impl SubscriptionBuilder {
     /// the previous one, on channels that allow it (Centrifugo
     /// `allowed_delta_types`). The client rebuilds each one, so the
     /// application always gets whole payloads; whether the server agreed is
-    /// [`crate::Subscribed::delta`]. A delta that cannot be applied makes
+    /// [`crate::SubscribedContext::delta`]. A delta that cannot be applied makes
     /// the subscription subscribe again, recovering on channels with
     /// recovery (Block 19).
     #[must_use]

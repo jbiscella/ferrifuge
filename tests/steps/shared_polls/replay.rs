@@ -102,7 +102,9 @@ pub(super) async fn a_replaying_subscription(
 async fn subscribing(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
-            SharedPollSubscriptionEvent::Subscribing { .. } => return,
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {
+                return;
+            }
             SharedPollSubscriptionEvent::Update(_) => {}
             other => panic!("expected subscribing, got {other:?}"),
         }
@@ -114,7 +116,7 @@ async fn subscribed_again(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
             SharedPollSubscriptionEvent::Subscribed(_) => return,
-            SharedPollSubscriptionEvent::Subscribing { .. }
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
             | SharedPollSubscriptionEvent::Update(_) => {}
             other => panic!("expected subscribed, got {other:?}"),
         }
@@ -156,7 +158,7 @@ async fn reconnects_and_answered(world: &mut ClientWorld, epoch: String) {
     // only what follows.
     while !matches!(
         world.next_event().await,
-        ferrifuge::ClientEvent::Connected { .. }
+        ferrifuge::ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
     ) {}
 }
 
@@ -293,7 +295,7 @@ async fn unsubscribed_by_the_server(world: &mut ClientWorld, code: u32, epoch: S
     );
     let event = world.next_shared_poll_event().await;
     assert!(
-        matches!(event, SharedPollSubscriptionEvent::Subscribing { code: got, .. } if got == code),
+        matches!(event, SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code: got, .. }) if got == code),
         "expected subscribing with {code}, got {event:?}"
     );
     subscribed_again(world).await;
@@ -683,7 +685,10 @@ async fn tracking_at_an_epoch(
     let mut again = false;
     loop {
         match next_of(events).await {
-            SharedPollSubscriptionEvent::Subscribing { code: 2500, .. } => flipped = true,
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext {
+                code: 2500,
+                ..
+            }) => flipped = true,
             SharedPollSubscriptionEvent::Subscribed(_) if flipped => again = true,
             SharedPollSubscriptionEvent::Update(update)
                 if again && update.key == "a" && update.version == Some(version) =>
@@ -731,7 +736,7 @@ async fn subscribing_then_subscribed(world: &mut ClientWorld, code: u32) {
     let events = world.shared_polls.events.as_mut().expect("a stream");
     let first = next_of(events).await;
     assert!(
-        matches!(first, SharedPollSubscriptionEvent::Subscribing { code: got, .. } if got == code),
+        matches!(first, SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { code: got, .. }) if got == code),
         "{first:?}"
     );
     let second = next_of(events).await;

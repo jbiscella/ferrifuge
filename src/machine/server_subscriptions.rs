@@ -11,7 +11,7 @@ use super::subscriptions::UNMATCHABLE_EPOCH;
 use crate::wire::{SubscribeRequest, SubscribeResult};
 use crate::{
     ClientError, ClientEvent, ClientInfo, ErrorKind, Publication, ServerSubscriptionEvent,
-    StreamPosition, Subscribed, codes,
+    StreamPosition, SubscribedContext, codes,
 };
 
 /// Reason of [`codes::unsubscribed::NOT_GRANTED_ON_RECONNECT`].
@@ -93,10 +93,10 @@ impl Machine {
             self.server_subscriptions.by_channel.remove(&channel);
             self.emit_server_subscription(
                 &channel,
-                ServerSubscriptionEvent::Unsubscribed {
+                ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: codes::unsubscribed::NOT_GRANTED_ON_RECONNECT,
                     reason: NOT_GRANTED_REASON.to_owned(),
-                },
+                }),
             );
         }
         false
@@ -143,10 +143,10 @@ impl Machine {
         {
             self.emit_server_subscription(
                 channel,
-                ServerSubscriptionEvent::Unsubscribed {
+                ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code,
                     reason: reason.to_owned(),
-                },
+                }),
             );
         }
     }
@@ -189,7 +189,7 @@ impl Machine {
         });
         self.emit_server_subscription(
             channel,
-            ServerSubscriptionEvent::Subscribed(Subscribed {
+            ServerSubscriptionEvent::Subscribed(SubscribedContext {
                 data: result.data,
                 positioned: result.positioned,
                 recoverable: result.recoverable,
@@ -370,7 +370,8 @@ impl Machine {
         // Leaving subscribed withdraws the publications not yet taken.
         if matches!(
             event,
-            ServerSubscriptionEvent::Subscribing | ServerSubscriptionEvent::Unsubscribed { .. }
+            ServerSubscriptionEvent::Subscribing
+                | ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
         ) {
             self.withdraw(&Owner::Server(channel.to_owned()));
         }
@@ -557,10 +558,10 @@ mod tests {
             events(&actions),
             [&ClientEvent::ServerSubscription {
                 channel: "alerts".into(),
-                event: ServerSubscriptionEvent::Unsubscribed {
+                event: ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: 2000,
                     reason: "alerts closed".into(),
-                },
+                }),
             }]
         );
         assert_eq!(machine.server_subscriptions(), Vec::<String>::new());
@@ -593,10 +594,10 @@ mod tests {
         assert!(
             events(&actions).contains(&&ClientEvent::ServerSubscription {
                 channel: "alerts".into(),
-                event: ServerSubscriptionEvent::Unsubscribed {
+                event: ServerSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: codes::unsubscribed::NOT_GRANTED_ON_RECONNECT,
                     reason: "not subscribed by the server after reconnect".into(),
-                },
+                }),
             }),
             "{actions:?}"
         );

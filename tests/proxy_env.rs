@@ -157,7 +157,7 @@ async fn child(case: &str) -> ExitCode {
     let outcome = tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = events.next().await {
             match event {
-                ClientEvent::Connected { .. } => return Ok(()),
+                ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => return Ok(()),
                 ClientEvent::Error(error) => return Err(error.message),
                 _ => {}
             }

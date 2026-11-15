@@ -197,7 +197,10 @@ fn a_client_whose_handler_takes_200_ms(world: &mut ClientWorld, mode: String) {
         &mode,
         Some(Box::new(move |event: ClientEvent| {
             record(&shared, event.name().to_owned(), || {
-                if matches!(event, ClientEvent::Connected { .. }) {
+                if matches!(
+                    event,
+                    ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+                ) {
                     std::thread::sleep(Duration::from_millis(200));
                 }
             });
@@ -275,7 +278,10 @@ async fn subscribed_with_handler(
     client.connect();
     // The client's stream is read up to "connected", as a connected
     // client's is.
-    while !matches!(world.next_event().await, ClientEvent::Connected { .. }) {}
+    while !matches!(
+        world.next_event().await,
+        ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+    ) {}
     let subscription = client
         .subscription_builder(channel)
         .handler(subscription_handler(Arc::clone(&world.handlers.shared), on))
@@ -680,7 +686,9 @@ fn block_on<F: std::future::Future>(future: F) -> (F::Output, u32) {
 /// What a client event is for, as the steps name it.
 fn client_name_of(event: &ClientEvent) -> String {
     match event {
-        ClientEvent::Disconnected { code, .. } => format!("disconnected {code}"),
+        ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code, .. }) => {
+            format!("disconnected {code}")
+        }
         event => event.name().to_owned(),
     }
 }

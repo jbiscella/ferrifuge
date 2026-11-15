@@ -9,9 +9,10 @@ use std::time::SystemTime;
 
 use crate::machine::TransportKind;
 use crate::{
-    ClientError, ClientEvent, ClientInfo, DeltaStatistics, ErrorKind, HistoryResult,
-    PresenceResult, PresenceStatsResult, Publication, State, Statistics, StreamPosition,
-    Subscribed,
+    ClientError, ClientEvent, ClientInfo, ConnectedContext, ConnectingContext, DeltaStatistics,
+    DisconnectedContext, ErrorKind, HistoryResult, PresenceResult, PresenceStatsResult,
+    Publication, State, Statistics, StreamPosition, SubscribedContext, SubscribingContext,
+    UnsubscribedContext,
 };
 
 /// A setter of a field holding the value it is given.
@@ -29,25 +30,92 @@ macro_rules! setter {
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 impl ClientEvent {
     /// The `connected` event the client emits once connected over
-    /// `transport` (`"websocket"`, `"http_stream"`, `"sse"`), with the
-    /// client id the server assigned and the data of its connect reply.
+    /// `transport`, with the client id the server assigned and the data of
+    /// its connect reply.
     ///
     /// ```
-    /// use ferrifuge::ClientEvent;
+    /// use ferrifuge::{ClientEvent, TransportKind};
     ///
-    /// let event = ClientEvent::connected("c1", "websocket", Some(br#"{"a":1}"#.to_vec()));
-    /// assert!(matches!(event, ClientEvent::Connected { client_id, .. } if client_id == "c1"));
+    /// let event = ClientEvent::connected("c1", TransportKind::WebSocket, Some(br#"{"a":1}"#.to_vec()));
+    /// assert!(matches!(event, ClientEvent::Connected(context) if context.client_id == "c1"));
     /// ```
     #[must_use]
     pub fn connected(
         client_id: impl Into<String>,
-        transport: impl Into<String>,
+        transport: TransportKind,
         data: Option<Vec<u8>>,
     ) -> Self {
-        Self::Connected {
+        Self::Connected(ConnectedContext::new(client_id, transport, data))
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl ConnectingContext {
+    /// The details of a `connecting` event with `code` and `reason`
+    /// (Block 54, D4).
+    #[must_use]
+    pub fn new(code: u32, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl ConnectedContext {
+    /// The details of a `connected` event: the client id the server
+    /// assigned, the transport and the data of the connect reply (Block 54,
+    /// D4).
+    #[must_use]
+    pub fn new(
+        client_id: impl Into<String>,
+        transport: TransportKind,
+        data: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
             client_id: client_id.into(),
-            transport: transport.into(),
+            transport,
             data,
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl DisconnectedContext {
+    /// The details of a `disconnected` event with `code` and `reason`
+    /// (Block 54, D4).
+    #[must_use]
+    pub fn new(code: u32, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl SubscribingContext {
+    /// The details of a `subscribing` event with `code` and `reason`
+    /// (Block 54, D4).
+    #[must_use]
+    pub fn new(code: u32, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+impl UnsubscribedContext {
+    /// The details of an `unsubscribed` event with `code` and `reason`
+    /// (Block 54, D4).
+    #[must_use]
+    pub fn new(code: u32, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
         }
     }
 }
@@ -153,19 +221,19 @@ impl ClientInfo {
     }
 }
 
-/// The details of a `subscribed` event, from [`Subscribed::default`]:
+/// The details of a `subscribed` event, from [`SubscribedContext::default`]:
 ///
 /// ```
-/// use ferrifuge::{StreamPosition, Subscribed};
+/// use ferrifuge::{StreamPosition, SubscribedContext};
 ///
-/// let subscribed = Subscribed::default()
+/// let subscribed = SubscribedContext::default()
 ///     .recoverable(true)
 ///     .positioned(true)
 ///     .stream_position(StreamPosition::new(3, "e"));
 /// assert!(subscribed.recoverable);
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
-impl Subscribed {
+impl SubscribedContext {
     /// Sets the data the server attached to the subscribe reply.
     #[must_use]
     pub fn data(mut self, data: impl Into<Vec<u8>>) -> Self {
@@ -275,11 +343,11 @@ impl ClientError {
     /// (Block 54, D3).
     ///
     /// ```
-    /// use ferrifuge::{ClientError, ErrorKind, codes};
+    /// use ferrifuge::{ClientError, ErrorKind, TransportKind, codes};
     ///
     /// let error = ClientError::new(ErrorKind::Transport, codes::error::TIMEOUT, "timeout")
-    ///     .transport("websocket");
-    /// assert_eq!(error.transport.as_deref(), Some("websocket"));
+    ///     .transport(TransportKind::WebSocket);
+    /// assert_eq!(error.transport, Some(TransportKind::WebSocket));
     /// ```
     #[must_use]
     pub fn new(kind: ErrorKind, code: u32, message: impl Into<String>) -> Self {
@@ -293,8 +361,8 @@ impl ClientError {
 
     /// Sets the transport the error happened on.
     #[must_use]
-    pub fn transport(mut self, transport: impl Into<String>) -> Self {
-        self.transport = Some(transport.into());
+    pub fn transport(mut self, transport: TransportKind) -> Self {
+        self.transport = Some(transport);
         self
     }
 }
@@ -750,38 +818,41 @@ mod tests {
             offset: 3,
             epoch: "e".into(),
         };
-        let cases: [Case<Subscribed>; 8] = [
-            (Subscribed::default().data(b"x".to_vec()), |s| {
+        let cases: [Case<SubscribedContext>; 8] = [
+            (SubscribedContext::default().data(b"x".to_vec()), |s| {
                 s.data = Some(b"x".to_vec());
             }),
-            (Subscribed::default().positioned(true), |s| {
+            (SubscribedContext::default().positioned(true), |s| {
                 s.positioned = true;
             }),
-            (Subscribed::default().recoverable(true), |s| {
+            (SubscribedContext::default().recoverable(true), |s| {
                 s.recoverable = true;
             }),
-            (Subscribed::default().was_recovering(true), |s| {
+            (SubscribedContext::default().was_recovering(true), |s| {
                 s.was_recovering = true;
             }),
-            (Subscribed::default().recovered(true), |s| {
+            (SubscribedContext::default().recovered(true), |s| {
                 s.recovered = true;
             }),
-            (Subscribed::default().delta(true), |s| s.delta = true),
+            (SubscribedContext::default().delta(true), |s| s.delta = true),
             (
-                Subscribed::default().has_recovered_publications(true),
+                SubscribedContext::default().has_recovered_publications(true),
                 |s| {
                     s.has_recovered_publications = true;
                 },
             ),
-            (Subscribed::default().stream_position(position), |s| {
-                s.stream_position = Some(StreamPosition {
-                    offset: 3,
-                    epoch: "e".into(),
-                });
-            }),
+            (
+                SubscribedContext::default().stream_position(position),
+                |s| {
+                    s.stream_position = Some(StreamPosition {
+                        offset: 3,
+                        epoch: "e".into(),
+                    });
+                },
+            ),
         ];
         for (built, assign) in cases {
-            let mut expected = Subscribed::default();
+            let mut expected = SubscribedContext::default();
             assign(&mut expected);
             assert_eq!(built, expected);
         }
@@ -914,12 +985,12 @@ mod tests {
     #[test]
     fn the_connected_event_keeps_what_it_is_given() {
         assert_eq!(
-            ClientEvent::connected("c1", "websocket", Some(b"d".to_vec())),
-            ClientEvent::Connected {
+            ClientEvent::connected("c1", crate::TransportKind::WebSocket, Some(b"d".to_vec())),
+            ClientEvent::Connected(crate::ConnectedContext {
                 client_id: "c1".into(),
-                transport: "websocket".into(),
+                transport: crate::TransportKind::WebSocket,
                 data: Some(b"d".to_vec()),
-            }
+            })
         );
     }
 }

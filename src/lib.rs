@@ -143,7 +143,10 @@ pub use call::{
     CallError, HistoryOptions, HistoryResult, JsonCallError, PresenceResult, PresenceStatsResult,
 };
 pub use config::{Config, Protocol};
-pub use event::{ClientError, ClientEvent, ErrorKind, ServerSubscriptionEvent, State};
+pub use event::{
+    ClientError, ClientEvent, ConnectedContext, ConnectingContext, DisconnectedContext, ErrorKind,
+    ServerSubscriptionEvent, State,
+};
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub use fossil::write as write_fossil_delta;
@@ -172,8 +175,9 @@ pub use shared_poll::{
 };
 pub use statistics::{DeltaStatistics, Statistics};
 pub use subscription::{
-    ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, Subscribed,
-    SubscriptionError, SubscriptionEvent, SubscriptionState,
+    ClientInfo, DataError, DeltaFormat, Publication, StateError, StreamPosition, SubscribedContext,
+    SubscribingContext, SubscriptionError, SubscriptionEvent, SubscriptionState,
+    UnsubscribedContext,
 };
 pub use tag_filter::TagFilter;
 pub use token::TokenError;

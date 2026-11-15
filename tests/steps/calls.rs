@@ -339,7 +339,9 @@ async fn the_call_completes_once_connected(world: &mut ClientWorld) {
     assert_eq!(world.client().state(), State::Connected);
     let connected = tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
-            if let ClientEvent::Connected { .. } = world.next_event().await {
+            if let ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) =
+                world.next_event().await
+            {
                 return;
             }
         }
@@ -453,7 +455,8 @@ async fn the_relay_comes_up(world: &mut ClientWorld) {
         .set_mode(Mode::Forward);
     loop {
         match next_event_after_transport_errors(world).await {
-            ClientEvent::Connecting { code, .. } if code == codes::connecting::CONNECT_CALLED => {}
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { code, .. })
+                if code == codes::connecting::CONNECT_CALLED => {}
             event => {
                 world.put_back_events.push_back(event);
                 return;
@@ -522,8 +525,8 @@ fn the_connect_proxy_answers_after(world: &mut ClientWorld, seconds: u64, code: 
 async fn the_client_emits_disconnected_with(world: &mut ClientWorld, code: u32) {
     loop {
         match next_event_after_transport_errors(world).await {
-            ClientEvent::Connecting { .. } => {}
-            ClientEvent::Disconnected { code: got, .. } => {
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: got, .. }) => {
                 assert_eq!(got, code);
                 return;
             }
@@ -536,14 +539,17 @@ async fn the_client_emits_disconnected_with(world: &mut ClientWorld, code: u32) 
 async fn the_client_reconnects_over(world: &mut ClientWorld, transport: String) {
     let connecting = world.next_event().await;
     assert!(
-        matches!(connecting, ClientEvent::Connecting { .. }),
+        matches!(
+            connecting,
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+        ),
         "{connecting:?}"
     );
     loop {
         match world.next_event().await {
             ClientEvent::Error(error) if error.kind == ErrorKind::Transport => {}
-            ClientEvent::Connected { transport: got, .. } => {
-                assert_eq!(got, transport);
+            ClientEvent::Connected(ferrifuge::ConnectedContext { transport: got, .. }) => {
+                assert_eq!(got.as_str(), transport);
                 return;
             }
             event => panic!("expected connected, got {event:?}"),
@@ -587,8 +593,10 @@ async fn connected_as(
     let client_id = tokio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             match events.next().await {
-                Some(ClientEvent::Connected { client_id, .. }) => return client_id,
-                Some(ClientEvent::Connecting { .. }) => {}
+                Some(ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. })) => {
+                    return client_id;
+                }
+                Some(ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })) => {}
                 event => panic!("expected connected, got {event:?}"),
             }
         }

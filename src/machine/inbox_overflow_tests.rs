@@ -136,7 +136,9 @@ fn an_overflow_reconnects_with_code_7_and_withdraws_the_events_not_taken() {
 /// The code and reason of the `connecting` event among `actions`.
 fn connecting(actions: &[Action]) -> Option<(u32, &str)> {
     actions.iter().find_map(|action| match action {
-        Action::Emit(_, ClientEvent::Connecting { code, reason }) => Some((*code, reason.as_str())),
+        Action::Emit(_, ClientEvent::Connecting(crate::ConnectingContext { code, reason })) => {
+            Some((*code, reason.as_str()))
+        }
         _ => None,
     })
 }

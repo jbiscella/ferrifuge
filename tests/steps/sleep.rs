@@ -305,7 +305,7 @@ fn it_reconnects(world: &mut ClientWorld, code: u32, reason: String) {
     assert!(
         actions.iter().any(|action| matches!(
             action,
-            Action::Emit(_, ClientEvent::Connecting { code: c, reason: r }) if *c == code && *r == reason
+            Action::Emit(_, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: c, reason: r, .. })) if *c == code && *r == reason
         )),
         "{actions:?}"
     );
@@ -549,7 +549,7 @@ fn each_reconnects(world: &mut ClientWorld, code: u32, reason: String) {
         assert!(
             actions.iter().any(|action| matches!(
                 action,
-                Action::Emit(_, ClientEvent::Connecting { code: c, reason: r })
+                Action::Emit(_, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: c, reason: r, .. }))
                     if *c == code && *r == reason
             )),
             "{actions:?}"
@@ -652,16 +652,23 @@ async fn connected_within(world: &mut ClientWorld, seconds: u64) {
     let event = tokio::time::timeout(Duration::from_secs(seconds), world.next_event())
         .await
         .unwrap_or_else(|_| panic!("not connected within {seconds} s"));
-    assert!(matches!(event, ClientEvent::Connected { .. }), "{event:?}");
+    assert!(
+        matches!(
+            event,
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+        ),
+        "{event:?}"
+    );
 }
 
 #[then(r#"the client never emitted "disconnected""#)]
 async fn never_disconnected(world: &mut ClientWorld) {
     let later = world.events_during(super::QUIET_PERIOD).await;
     assert!(
-        !later
-            .iter()
-            .any(|event| matches!(event, ClientEvent::Disconnected { .. })),
+        !later.iter().any(|event| matches!(
+            event,
+            ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
+        )),
         "{later:?}"
     );
 }
@@ -684,7 +691,10 @@ fn a_portal(world: &mut ClientWorld, status: u16) {
 async fn a_portal_error(world: &mut ClientWorld, ending: String) {
     let connecting = world.next_event().await;
     assert!(
-        matches!(connecting, ClientEvent::Connecting { .. }),
+        matches!(
+            connecting,
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
+        ),
         "{connecting:?}"
     );
     let event = world.next_event().await;

@@ -357,10 +357,12 @@ fn a_reply_without_the_map_type_ends_the_subscription_with_code_6() {
             .into_iter()
             .map(|(_, event)| event)
             .collect::<Vec<_>>(),
-        [MapSubscriptionEvent::Unsubscribed {
-            code: codes::unsubscribed::MAP_NOT_SUPPORTED,
-            reason: "map subscriptions not supported".into()
-        }]
+        [MapSubscriptionEvent::Unsubscribed(
+            crate::UnsubscribedContext {
+                code: codes::unsubscribed::MAP_NOT_SUPPORTED,
+                reason: "map subscriptions not supported".into()
+            }
+        )]
     );
     assert!(!actions.iter().any(|action| matches!(
         action,
@@ -478,11 +480,10 @@ fn pages_past_the_bound_end_the_subscription_with_code_5() {
         machine.subscription_state(id),
         Some(SubscriptionState::Unsubscribed)
     );
-    assert!(
-        events(&ended)
-            .iter()
-            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. }))
-    );
+    assert!(events(&ended).iter().any(|(_, event)| matches!(
+        event,
+        MapSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 5, .. })
+    )));
 }
 
 // Codex, #198: a live reply's state goes into the same `Sync`.
@@ -512,9 +513,10 @@ fn a_live_reply_past_the_bound_ends_the_subscription_with_code_5() {
     );
     let events = events(&ended);
     assert!(
-        events
-            .iter()
-            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. })),
+        events.iter().any(|(_, event)| matches!(
+            event,
+            MapSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 5, .. })
+        )),
         "{events:?}"
     );
     assert!(
@@ -1108,10 +1110,12 @@ fn error_112_with_the_fatal_strategy_unsubscribes_with_its_code() {
 
     assert_eq!(
         events(&failed).pop().map(|(_, event)| event),
-        Some(MapSubscriptionEvent::Unsubscribed {
-            code: 112,
-            reason: "m".into()
-        })
+        Some(MapSubscriptionEvent::Unsubscribed(
+            crate::UnsubscribedContext {
+                code: 112,
+                reason: "m".into()
+            }
+        ))
     );
     assert!(
         !failed.iter().any(|action| matches!(
@@ -1181,10 +1185,12 @@ fn an_epoch_change_with_the_fatal_strategy_unsubscribes_with_112() {
     assert_eq!(unsubscribes(&changed), 1);
     assert_eq!(
         events(&changed).pop().map(|(_, event)| event),
-        Some(MapSubscriptionEvent::Unsubscribed {
-            code: 112,
-            reason: "unrecoverable position".into()
-        })
+        Some(MapSubscriptionEvent::Unsubscribed(
+            crate::UnsubscribedContext {
+                code: 112,
+                reason: "unrecoverable position".into()
+            }
+        ))
     );
     assert!(
         sent(&changed)
@@ -1608,7 +1614,7 @@ fn a_delta_after_a_removal_fails_and_keeps_the_other_keys_bases() {
     assert!(
         events(&failed).iter().any(|(_, event)| matches!(
             event,
-            MapSubscriptionEvent::Subscribing { code, .. }
+            MapSubscriptionEvent::Subscribing(crate::SubscribingContext { code, .. })
                 if *code == codes::subscribing::DELTA_ERROR
         )),
         "{failed:?}"
@@ -1969,9 +1975,10 @@ fn ended_with_code_5(actions: &[Action]) {
     assert_eq!(unsubscribes(actions), 1, "{actions:?}");
     let events = events(actions);
     assert!(
-        events
-            .iter()
-            .any(|(_, event)| matches!(event, MapSubscriptionEvent::Unsubscribed { code: 5, .. })),
+        events.iter().any(|(_, event)| matches!(
+            event,
+            MapSubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code: 5, .. })
+        )),
         "{events:?}"
     );
     assert!(

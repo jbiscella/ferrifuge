@@ -166,7 +166,7 @@ async fn next_update(events: &mut Events) -> SharedPollUpdate {
     loop {
         match next_of(events).await {
             SharedPollSubscriptionEvent::Update(update) => return update,
-            SharedPollSubscriptionEvent::Subscribing { .. }
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
             | SharedPollSubscriptionEvent::Subscribed(_) => {}
             other => panic!("expected an update, got {other:?}"),
         }
@@ -379,7 +379,7 @@ async fn subscribed(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
             SharedPollSubscriptionEvent::Subscribed(_) => return,
-            SharedPollSubscriptionEvent::Subscribing { .. } => {}
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             other => panic!("expected subscribed, got {other:?}"),
         }
     }
@@ -698,7 +698,7 @@ async fn the_transport_closes(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
             SharedPollSubscriptionEvent::Subscribed(_) => break,
-            SharedPollSubscriptionEvent::Subscribing { .. } => {}
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             other => panic!("expected a resubscribe, got {other:?}"),
         }
     }
@@ -908,17 +908,18 @@ fn answered_as_a_stream(world: &mut ClientWorld) {
 async fn yields_unsubscribed(world: &mut ClientWorld, code: u32, reason: String) {
     loop {
         match world.next_shared_poll_event().await {
-            SharedPollSubscriptionEvent::Unsubscribed {
+            SharedPollSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
                 code: got,
                 reason: why,
-            } => {
+                ..
+            }) => {
                 assert_eq!(got, code, "{why}");
                 if !reason.is_empty() {
                     assert_eq!(why, reason);
                 }
                 return;
             }
-            SharedPollSubscriptionEvent::Subscribing { .. } => {}
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             other => panic!("expected unsubscribed, got {other:?}"),
         }
     }
@@ -1152,7 +1153,7 @@ async fn becomes_subscribed(world: &mut ClientWorld) {
     loop {
         match world.next_shared_poll_event().await {
             SharedPollSubscriptionEvent::Subscribed(_) => break,
-            SharedPollSubscriptionEvent::Subscribing { .. } => {}
+            SharedPollSubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             other => panic!("expected subscribed, got {other:?}"),
         }
     }

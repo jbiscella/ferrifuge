@@ -42,7 +42,9 @@ pub(super) async fn a_connected_client(world: &mut ClientWorld) {
     world.new_client(endpoint);
     world.client().connect();
     expect_event(world, "connecting").await;
-    let ClientEvent::Connected { client_id, .. } = expect_event(world, "connected").await else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) =
+        expect_event(world, "connected").await
+    else {
         unreachable!("expect_event checked the name");
     };
     world.client_id = Some(client_id);
@@ -71,7 +73,9 @@ pub(super) async fn server_disconnects_with_reconnect_code(world: &mut ClientWor
     // After "connect is called", the connection to disconnect comes first.
     if world.client_id.is_none() {
         loop {
-            if let ClientEvent::Connected { client_id, .. } = world.next_event().await {
+            if let ClientEvent::Connected(ferrifuge::ConnectedContext { client_id, .. }) =
+                world.next_event().await
+            {
                 world.client_id = Some(client_id);
                 break;
             }
@@ -191,14 +195,16 @@ async fn the_client_emits_with_code_and_reason(
 
     let event = expect_event(world, &expected).await;
 
-    let (ClientEvent::Connecting {
+    let (ClientEvent::Connecting(ferrifuge::ConnectingContext {
         code: got_code,
         reason: got_reason,
-    }
-    | ClientEvent::Disconnected {
+        ..
+    })
+    | ClientEvent::Disconnected(ferrifuge::DisconnectedContext {
         code: got_code,
         reason: got_reason,
-    }) = &event
+        ..
+    })) = &event
     else {
         panic!("{event:?} carries no code and reason");
     };
@@ -265,7 +271,7 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
         events.push(world.next_event().await);
     }
     // The "connecting" that connect() itself emits (see "Successful connect").
-    if let Some(ClientEvent::Connecting { code, .. }) = events.first()
+    if let Some(ClientEvent::Connecting(ferrifuge::ConnectingContext { code, .. })) = events.first()
         && *code == codes::connecting::CONNECT_CALLED
     {
         events.remove(0);
@@ -286,21 +292,19 @@ async fn an_error_for_each_failed_attempt(world: &mut ClientWorld) {
     let reported: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            ClientEvent::Error(error) => error.transport.clone(),
+            ClientEvent::Error(error) => error.transport,
             _ => None,
         })
         .collect();
     for transport in &transports {
         assert!(
-            reported.iter().any(|name| name == transport.name()),
+            reported.contains(transport),
             "no error for {}: {events:?}",
-            transport.name()
+            transport.as_str()
         );
     }
     assert!(
-        reported
-            .iter()
-            .all(|name| transports.iter().any(|kind| kind.name() == name)),
+        reported.iter().all(|name| transports.contains(name)),
         "{events:?}"
     );
     assert_eq!(world.client().state(), State::Connecting);
@@ -317,8 +321,8 @@ async fn the_client_emits_connected_over(world: &mut ClientWorld, then: String, 
         event = next_event_after_transport_errors(world).await;
     }
     assert_eq!(event.name(), "connected", "{event:?}");
-    let ClientEvent::Connected { transport, .. } = &event else {
+    let ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) = &event else {
         unreachable!("expect_event checked the name");
     };
-    assert_eq!(transport, &expected, "{event:?}");
+    assert_eq!(transport.as_str(), expected, "{event:?}");
 }

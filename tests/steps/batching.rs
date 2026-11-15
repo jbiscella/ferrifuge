@@ -481,7 +481,7 @@ async fn connecting_with_reason(world: &mut ClientWorld, code: u32, reason: Stri
     if !drives_a_machine(world) {
         let event = world.next_event().await;
         assert!(
-            matches!(&event, ClientEvent::Connecting { code: got, reason: why }
+            matches!(&event, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, reason: why, .. })
                 if *got == code && *why == reason),
             "{event:?}"
         );
@@ -491,7 +491,7 @@ async fn connecting_with_reason(world: &mut ClientWorld, code: u32, reason: Stri
     assert!(
         run.actions.iter().any(|action| matches!(
             action,
-            Action::Emit(_, ClientEvent::Connecting { code: got, reason: why })
+            Action::Emit(_, ClientEvent::Connecting(ferrifuge::ConnectingContext { code: got, reason: why, .. }))
                 if *got == code && *why == reason
         )),
         "{:?}",
@@ -1089,7 +1089,11 @@ async fn a_client_behind_a_refusing_proxy(
     )
     .await;
     http_proxy.refuse_emulation_over(limit);
-    let url = format!("http://{}/connection/{}", http_proxy.address(), kind.name());
+    let url = format!(
+        "http://{}/connection/{}",
+        http_proxy.address(),
+        kind.as_str()
+    );
     super::transports::configure(world, vec![(kind, url)]);
     super::transports::connect_and_wait(world).await;
     world.http_proxy = Some(http_proxy);

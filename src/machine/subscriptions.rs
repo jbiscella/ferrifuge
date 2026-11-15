@@ -24,8 +24,8 @@ use crate::wire::{
     SubscribeRequest, UnsubscribeRequest,
 };
 use crate::{
-    ClientError, ClientInfo, DataError, ErrorKind, Publication, State, StreamPosition, Subscribed,
-    SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
+    ClientError, ClientInfo, DataError, ErrorKind, Publication, State, StreamPosition,
+    SubscribedContext, SubscriptionError, SubscriptionEvent, SubscriptionState, codes,
 };
 
 #[derive(Debug, Default)]
@@ -436,10 +436,10 @@ impl Machine {
         sub.started_by = StartedBy::Application;
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribing {
+            SubscriptionEvent::Subscribing(crate::SubscribingContext {
                 code: codes::subscribing::SUBSCRIBE_CALLED,
                 reason: "subscribe called".to_owned(),
-            },
+            }),
         );
         if self.state == State::Connected {
             self.start_subscribe(id);
@@ -767,7 +767,7 @@ impl Machine {
                 self.emit_subscription(
                     id,
                     SubscriptionEvent::Error(ClientError {
-                        kind: ErrorKind::SubscriptionData,
+                        kind: ErrorKind::SubscribeData,
                         code: codes::error::BAD_CONFIGURATION,
                         message,
                         transport: None,
@@ -1049,7 +1049,7 @@ impl Machine {
         let publications = self.apply_deltas(id, result.publications);
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribed(Subscribed {
+            SubscriptionEvent::Subscribed(SubscribedContext {
                 data: result.data,
                 positioned: result.positioned,
                 recoverable: result.recoverable,
@@ -1213,10 +1213,10 @@ impl Machine {
         }
         self.emit_subscription(
             id,
-            SubscriptionEvent::Unsubscribed {
+            SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                 code,
                 reason: reason.to_owned(),
-            },
+            }),
         );
         self.drop_debounce_windows(id, &super::calls::subscription_unsubscribed());
         self.subscription_calls_unsubscribed(id);
@@ -1260,10 +1260,10 @@ impl Machine {
         }
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribing {
+            SubscriptionEvent::Subscribing(crate::SubscribingContext {
                 code,
                 reason: reason.to_owned(),
-            },
+            }),
         );
         self.start_subscribe(id);
     }
@@ -1446,10 +1446,10 @@ impl Machine {
         // Leaving subscribed withdraws the publications not yet taken.
         self.emit_subscription(
             id,
-            SubscriptionEvent::Subscribing {
+            SubscriptionEvent::Subscribing(crate::SubscribingContext {
                 code: codes::subscribing::DELTA_ERROR,
                 reason: "delta error".to_owned(),
-            },
+            }),
         );
         // The server still holds the subscription: the next subscribe waits
         // until it is undone (Block 9).
@@ -1639,10 +1639,10 @@ impl Machine {
             self.drop_debounce_windows(id, &debounce::publish_dropped());
             self.emit_subscription(
                 id,
-                SubscriptionEvent::Subscribing {
+                SubscriptionEvent::Subscribing(crate::SubscribingContext {
                     code: codes::subscribing::TRANSPORT_CLOSED,
                     reason: "transport closed".to_owned(),
-                },
+                }),
             );
         }
     }
@@ -1651,7 +1651,8 @@ impl Machine {
         // Leaving subscribed withdraws the publications not yet taken.
         if matches!(
             event,
-            SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Unsubscribed { .. }
+            SubscriptionEvent::Subscribing(crate::SubscribingContext { .. })
+                | SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { .. })
         ) {
             self.withdraw(&Owner::Client(id));
             // A shared poll subscription's refresh and retries stop (Block
@@ -2084,7 +2085,7 @@ mod tests {
         assert!(
             panicked.iter().any(|action| matches!(
                 action,
-                Action::Emit(_, crate::ClientEvent::Disconnected { code: 2, reason })
+                Action::Emit(_, crate::ClientEvent::Disconnected(crate::DisconnectedContext { code: 2, reason }))
                     if reason == "exception in event handler: boom"
             )),
             "{panicked:?}"
@@ -2140,7 +2141,10 @@ mod tests {
         assert!(
             taken.iter().any(|action| matches!(
                 action,
-                Action::Emit(_, crate::ClientEvent::Connecting { .. })
+                Action::Emit(
+                    _,
+                    crate::ClientEvent::Connecting(crate::ConnectingContext { .. })
+                )
             )),
             "{taken:?}"
         );
@@ -3162,7 +3166,10 @@ mod tests {
 
     fn reconnect_code(actions: &[Action]) -> Option<u32> {
         actions.iter().find_map(|action| match action {
-            Action::Emit(_, crate::ClientEvent::Connecting { code, .. }) => Some(*code),
+            Action::Emit(
+                _,
+                crate::ClientEvent::Connecting(crate::ConnectingContext { code, .. }),
+            ) => Some(*code),
             _ => None,
         })
     }
@@ -3330,10 +3337,10 @@ mod tests {
             without_ids(&rejected).contains(&Action::EmitSubscription(
                 EventId(0),
                 id,
-                SubscriptionEvent::Unsubscribed {
+                SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
                     reason: "message size limit exceeded".into(),
-                }
+                })
             )),
             "{rejected:?}"
         );
@@ -3365,7 +3372,7 @@ mod tests {
         assert!(
             rejected.iter().any(|action| matches!(
                 action,
-                Action::Emit(_, crate::ClientEvent::Connecting { code, .. })
+                Action::Emit(_, crate::ClientEvent::Connecting(crate::ConnectingContext { code, .. }))
                     if *code == codes::connecting::UNSUBSCRIBE_ERROR
             )),
             "{rejected:?}"
@@ -3389,10 +3396,10 @@ mod tests {
             without_ids(&rejected).contains(&Action::EmitSubscription(
                 EventId(0),
                 id,
-                SubscriptionEvent::Unsubscribed {
+                SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: codes::unsubscribed::MESSAGE_SIZE_LIMIT,
                     reason: "message size limit exceeded".into(),
-                }
+                })
             )),
             "{rejected:?}"
         );
@@ -3479,7 +3486,7 @@ mod tests {
         assert!(
             rejected.iter().any(|action| matches!(
                 action,
-                Action::EmitSubscription(_, of, SubscriptionEvent::Unsubscribed { code, .. })
+                Action::EmitSubscription(_, of, SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, .. }))
                     if *of == id && *code == codes::unsubscribed::MESSAGE_SIZE_LIMIT
             )),
             "{rejected:?}"
@@ -3632,10 +3639,10 @@ mod tests {
             without_ids(&unsubscribed).contains(&Action::EmitSubscription(
                 EventId(0),
                 id,
-                SubscriptionEvent::Unsubscribed {
+                SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext {
                     code: codes::unsubscribed::UNSUBSCRIBE_CALLED,
                     reason: "unsubscribe called".into(),
-                }
+                })
             )),
             "{unsubscribed:?}"
         );
@@ -3896,9 +3903,11 @@ mod tests {
         actions
             .iter()
             .filter_map(|action| match action {
-                Action::EmitSubscription(_, _, SubscriptionEvent::Unsubscribed { code, .. }) => {
-                    Some(*code)
-                }
+                Action::EmitSubscription(
+                    _,
+                    _,
+                    SubscriptionEvent::Unsubscribed(crate::UnsubscribedContext { code, .. }),
+                ) => Some(*code),
                 _ => None,
             })
             .collect()

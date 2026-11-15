@@ -95,8 +95,10 @@ async fn next_event(stream: &mut (impl Stream<Item = ClientEvent> + Unpin)) -> C
 async fn connected_over(events: &mut (impl Stream<Item = ClientEvent> + Unpin)) -> String {
     loop {
         match next_event(events).await {
-            ClientEvent::Connected { transport, .. } => return transport,
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
+                return transport;
+            }
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     }
@@ -104,11 +106,12 @@ async fn connected_over(events: &mut (impl Stream<Item = ClientEvent> + Unpin)) 
 
 async fn subscribed(
     events: &mut (impl Stream<Item = SubscriptionEvent> + Unpin),
-) -> ferrifuge::Subscribed {
+) -> ferrifuge::SubscribedContext {
     loop {
         match next(events).await {
             SubscriptionEvent::Subscribed(subscribed) => return subscribed,
-            SubscriptionEvent::Subscribing { .. } | SubscriptionEvent::Error(_) => {}
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
+            | SubscriptionEvent::Error(_) => {}
             event => panic!("not subscribing or subscribed: {event:?}"),
         }
     }
@@ -150,12 +153,12 @@ async fn a_browser_client_connects_over_websocket_and_receives_a_publication() {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting { .. }
+        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
     ));
     assert_eq!(connected_over(&mut events).await, "websocket");
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing { .. }
+        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
     ));
     subscribed(&mut subscription_events).await;
     within(WAIT, client.publish("news", br#""hello""#.to_vec()))
@@ -219,7 +222,7 @@ async fn publications_not_taken_before_reconnect_are_recovered_once() {
 
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing { .. }
+        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -263,7 +266,9 @@ async fn an_unread_stream_overflows_the_inbox_and_loses_no_publication() {
     };
     let overflowed = async {
         loop {
-            if let ClientEvent::Connecting { code, reason } = next_event(&mut events).await {
+            if let ClientEvent::Connecting(ferrifuge::ConnectingContext { code, reason, .. }) =
+                next_event(&mut events).await
+            {
                 return (code, reason);
             }
         }
@@ -277,7 +282,7 @@ async fn an_unread_stream_overflows_the_inbox_and_loses_no_publication() {
     wasm_bindgen_futures::spawn_local(async move { while events.next().await.is_some() {} });
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing { .. }
+        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -317,8 +322,10 @@ struct Recording(Rc<Record>);
 impl ClientHandler for Recording {
     fn on_event(&mut self, event: ClientEvent) {
         match event {
-            ClientEvent::Connecting { .. } => self.0.add("connecting"),
-            ClientEvent::Connected { .. } => self.0.add("connected"),
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {
+                self.0.add("connecting")
+            }
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. }) => self.0.add("connected"),
             _ => {}
         }
     }
@@ -336,7 +343,9 @@ async fn handlers_receive_the_events_in_order(delivery: EventDelivery) {
     let subscription = client
         .subscription_builder("news")
         .handler(move |event: SubscriptionEvent| match event {
-            SubscriptionEvent::Subscribing { .. } => of_subscription.add("subscribing"),
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {
+                of_subscription.add("subscribing")
+            }
             SubscriptionEvent::Subscribed(_) => of_subscription.add("subscribed"),
             SubscriptionEvent::Publication(_) => of_subscription.add("publication"),
             _ => {}
@@ -410,7 +419,7 @@ async fn close_ends_a_browser_client() {
     assert!(took <= timeout + Duration::from_secs(1), "{took:?}");
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Disconnected { code: 0, .. }
+        ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: 0, .. })
     ));
     assert!(within(WAIT, events.next()).await.is_none());
     assert!(client.is_closed());
@@ -611,10 +620,11 @@ async fn connecting_with(
     reason: &str,
 ) {
     match next_event(events).await {
-        ClientEvent::Connecting {
+        ClientEvent::Connecting(ferrifuge::ConnectingContext {
             code: got,
             reason: why,
-        } => {
+            ..
+        }) => {
             assert_eq!((got, why.as_str()), (code, reason));
         }
         event => panic!("not connecting: {event:?}"),
@@ -798,7 +808,7 @@ async fn falls_back_to_http_stream(protocol: Protocol) {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting { .. }
+        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
     ));
     assert_eq!(connected_over(&mut events).await, "http_stream");
 }
@@ -973,7 +983,9 @@ async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publ
     };
     let overflowed = async {
         loop {
-            if let ClientEvent::Connecting { code, reason } = next_event(&mut events).await {
+            if let ClientEvent::Connecting(ferrifuge::ConnectingContext { code, reason, .. }) =
+                next_event(&mut events).await
+            {
                 return (code, reason);
             }
         }
@@ -987,7 +999,7 @@ async fn an_unread_stream_overflows_the_inbox_over_http_stream_and_loses_no_publ
     wasm_bindgen_futures::spawn_local(async move { while events.next().await.is_some() {} });
     assert!(matches!(
         next(&mut subscription_events).await,
-        SubscriptionEvent::Subscribing { .. }
+        SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. })
     ));
     let resubscribed = subscribed(&mut subscription_events).await;
     assert!(resubscribed.recovered, "{resubscribed:?}");
@@ -1099,7 +1111,7 @@ async fn a_browser_client_falls_back_to_sse() {
 
     assert!(matches!(
         next_event(&mut events).await,
-        ClientEvent::Connecting { .. }
+        ClientEvent::Connecting(ferrifuge::ConnectingContext { .. })
     ));
     assert_eq!(connected_over(&mut events).await, "sse");
 }
@@ -1231,7 +1243,7 @@ async fn a_shim_replaces_the_global(shim: &str, kind: TransportKind) {
 
     client.connect();
 
-    assert_eq!(connected_over(&mut events).await, kind.name());
+    assert_eq!(connected_over(&mut events).await, kind.as_str());
     assert!(calls(&count) >= 1.0, "the {shim} shim was not called");
 }
 
@@ -1272,11 +1284,17 @@ async fn a_transport_without_its_constructor_is_skipped() {
 
     let transport = loop {
         match next(&mut events).await {
-            ClientEvent::Connected { transport, .. } => break transport,
-            ClientEvent::Error(error) => {
-                assert_ne!(error.transport.as_deref(), Some("sse"), "{error:?}");
+            ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
+                break transport;
             }
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Error(error) => {
+                assert_ne!(
+                    error.transport,
+                    Some(ferrifuge::TransportKind::Sse),
+                    "{error:?}"
+                );
+            }
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };
@@ -1342,7 +1360,7 @@ async fn cookies_relayed(path: &str) -> Vec<String> {
 
 // @W scenario: With credentials included, a browser client's HTTP requests carry the page's cookies to the server's origin
 async fn credentials_carry_the_page_cookies(kind: TransportKind, include: bool) {
-    let stream = format!("/connection/{}", kind.name());
+    let stream = format!("/connection/{}", kind.as_str());
     let streams_before = cookies_relayed(&stream).await.len();
     let emulations_before = cookies_relayed("/emulation").await.len();
     let _cookie = page_cookie("affinity", "a1");
@@ -1354,7 +1372,7 @@ async fn credentials_carry_the_page_cookies(kind: TransportKind, include: bool) 
         .expect("a valid client");
     let mut events = client.events();
     client.connect();
-    assert_eq!(connected_over(&mut events).await, kind.name());
+    assert_eq!(connected_over(&mut events).await, kind.as_str());
 
     within(WAIT, client.publish(&unique("news"), br#""hi""#.to_vec()))
         .await
@@ -1481,8 +1499,10 @@ async fn a_browser_client_connects_over_webtransport_and_receives_a_publication(
                 ClientEvent::Error(error) => {
                     wasm_bindgen_test::console_log!("{protocol:?}: {error:?}");
                 }
-                ClientEvent::Connected { transport, .. } => break transport,
-                ClientEvent::Connecting { .. } => {}
+                ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
+                    break transport;
+                }
+                ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
                 event => panic!("not connecting or connected: {event:?}"),
             }
         };
@@ -1520,8 +1540,10 @@ async fn a_browser_without_webtransport_skips_the_transport() {
     let transport = loop {
         match next(&mut events).await {
             ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
-            ClientEvent::Connected { transport, .. } => break transport,
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
+                break transport;
+            }
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };
@@ -1551,8 +1573,10 @@ async fn a_browser_client_falls_back_from_webtransport_when_the_session_is_refus
     let transport = loop {
         match next(&mut events).await {
             ClientEvent::Error(error) => failed = failed.or(error.transport.clone()),
-            ClientEvent::Connected { transport, .. } => break transport,
-            ClientEvent::Connecting { .. } => {}
+            ClientEvent::Connected(ferrifuge::ConnectedContext { transport, .. }) => {
+                break transport;
+            }
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { .. }) => {}
             event => panic!("not connecting or connected: {event:?}"),
         }
     };

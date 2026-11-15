@@ -161,7 +161,7 @@ pub(super) async fn subscribed(
             .expect("the stream has not ended")
         {
             SubscriptionEvent::Subscribed(_) => break,
-            SubscriptionEvent::Subscribing { .. } => {}
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             event => panic!("{event:?} before subscribed"),
         }
     }
@@ -484,7 +484,10 @@ async fn no_server_side_publication_before_connected(world: &mut ClientWorld) {
     let mut before = Vec::new();
     loop {
         let event = next_client_event(world).await;
-        if matches!(event, ClientEvent::Connected { .. }) {
+        if matches!(
+            event,
+            ClientEvent::Connected(ferrifuge::ConnectedContext { .. })
+        ) {
             break;
         }
         before.push(event);
@@ -507,7 +510,10 @@ async fn no_server_side_publication_before_connected(world: &mut ClientWorld) {
 async fn yields_unsubscribed_and_no_publication(world: &mut ClientWorld) {
     let event = next_subscription_event(world).await;
     assert!(
-        matches!(event, SubscriptionEvent::Unsubscribed { .. }),
+        matches!(
+            event,
+            SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
+        ),
         "{event:?}"
     );
     let stream = world
@@ -790,7 +796,7 @@ fn not_connecting_with(world: &mut ClientWorld, code: u32) {
     assert!(
         !world.elapsed_events.iter().any(|event| matches!(
             event,
-            ClientEvent::Connecting { code: of, .. } if *of == code
+            ClientEvent::Connecting(ferrifuge::ConnectingContext { code: of, .. }) if *of == code
         )),
         // The new connections tell whether the reconnect happened in the
         // interval or before it, its events read only in the interval.
@@ -985,7 +991,7 @@ async fn reading_one_releases_the_other(world: &mut ClientWorld, read: String, o
     loop {
         match next_of(stream).await.expect("the stream has not ended") {
             SubscriptionEvent::Subscribed(_) => return,
-            SubscriptionEvent::Subscribing { .. } => {}
+            SubscriptionEvent::Subscribing(ferrifuge::SubscribingContext { .. }) => {}
             event => panic!("{event:?} before subscribed"),
         }
     }

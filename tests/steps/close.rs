@@ -55,7 +55,10 @@ async fn the_subscriptions_stream_ends(world: &mut ClientWorld) {
     // Events queued before the close come first.
     while let Some(event) = world.next_subscription_item().await {
         assert!(
-            matches!(event, SubscriptionEvent::Unsubscribed { .. }),
+            matches!(
+                event,
+                SubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext { .. })
+            ),
             "after the close: {event:?}"
         );
     }
@@ -81,7 +84,11 @@ async fn server_side_unsubscribed(world: &mut ClientWorld, channel: String, code
         match world.next_event().await {
             ClientEvent::ServerSubscription {
                 channel: got,
-                event: ServerSubscriptionEvent::Unsubscribed { code: got_code, .. },
+                event:
+                    ServerSubscriptionEvent::Unsubscribed(ferrifuge::UnsubscribedContext {
+                        code: got_code,
+                        ..
+                    }),
                 ..
             } if got == channel => {
                 assert_eq!(got_code, code);
@@ -98,7 +105,7 @@ async fn server_side_unsubscribed(world: &mut ClientWorld, channel: String, code
 async fn then_disconnected(world: &mut ClientWorld, code: u32) {
     let event = world.next_event().await;
     assert!(
-        matches!(event, ClientEvent::Disconnected { code: got, .. } if got == code),
+        matches!(event, ClientEvent::Disconnected(ferrifuge::DisconnectedContext { code: got, .. }) if got == code),
         "{event:?}"
     );
 }
@@ -140,7 +147,10 @@ async fn the_stream_ends_without_disconnected(world: &mut ClientWorld) {
     let ended = tokio::time::timeout(EVENT_TIMEOUT, async {
         while let Some(event) = events.next().await {
             assert!(
-                !matches!(event, ClientEvent::Disconnected { .. }),
+                !matches!(
+                    event,
+                    ClientEvent::Disconnected(ferrifuge::DisconnectedContext { .. })
+                ),
                 "{event:?}"
             );
         }
