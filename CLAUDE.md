@@ -33,7 +33,7 @@ Markers used below:
 | Crate layout | Single crate `ferrifuge`, edition 2024, license 0BSD; the crate's license expression is `0BSD AND MIT`, as it ships the MIT `proto/client.proto` and the code generated from it (Block 56). Every file not under 0BSD is listed under "Exceptions" in `LICENSE` and in `REUSE.toml` (owner request, 2026-11-07) | Split only when a second crate is justified |
 | Core design | Sans-IO: the core is a state machine turning inputs (API calls, frames, transport open/close, timer fired) into actions (open/close transport, send, set timer, emit event); the `tokio` and `browser` adapters perform the actions; `ferrifuge::machine` is public only with the `unstable-machine` feature, outside semver (Block 54 D1) | Runtime-agnostic without async traits; @E tests drive the clock directly |
 | Events API | `client.events()` returns a `futures::Stream` of a `ClientEvent` enum, one active stream per client, delivered by hand-off with a bounded read-ahead (Block 15); `client.state()` returns the current state | Idiomatic async Rust, runtime-neutral |
-| Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings | Quality gates hold from the first line of SDK code |
+| Code hygiene | Lint levels in `Cargo.toml` `[lints]`: no `unsafe`, clippy pedantic, every public item documented; CI denies warnings; the library-only lints (`clippy::unwrap_used` denied, `clippy::allow_attributes_without_reason` warned) are crate attributes in `src/lib.rs`, which leave `tests/`, `benches/` and `examples/` alone (Block 60 D4) | Quality gates hold from the first line of SDK code |
 | Dependency policy | `deny.toml` (cargo-deny): RustSec advisories, permissive licenses only, crates.io only; the OpenSSL license is allowed globally (owner decision: needed by aws-lc, no on/off variant to maintain) | New dependencies must pass it; an exception needs a reason in `deny.toml` |
 | Workflow security | Every action pinned by commit SHA with its release tag as a comment; checkouts without persisted credentials; no `${{ }}` inside `run:`; zizmor and actionlint in the `workflow-lint` job (Block 57) | zizmor's default policy and GitHub's hardening guide; the release path is only as safe as the CI that gates it |
 | Coverage | cargo-llvm-cov, line floor 70% on the library | Mirrors the owner's JVM projects |
@@ -4721,7 +4721,7 @@ This block reverses no exclusion.
 
   Then comes one table per kind, in module order: `connecting`, `disconnected`, `subscribing`, `unsubscribed` (also carried by server-side subscriptions), `error` (`ClientError`, `CallError`). Each table has a heading naming the event or error that carries its codes, and the columns Code | Constant | Reason or message | Cause | Then:
   - Reason or message: the text carried, as a string literal when it is fixed (`` `"transport closed"` ``), otherwise what it is made of;
-  - Cause: from the constant's documentation, with the block that decides it (blocks of the repository's `CLAUDE.md`);
+  - Cause: from the constant's documentation, stating its cause without citing a block (amended by Block 60 D3);
   - Then, for an event kind: whether and when the client tries again by itself. The options are: at once (`connecting` 0; 6, after the jitter window when it was connected); after the reconnect backoff; when the client connects (`subscribing` 1); after the resubscribe backoff (`subscribing` 2); never, until `connect()` or `subscribe()`;
   - Then, for `error`: what the client does (it keeps retrying, or the call fails), and whether a retry can succeed. It never can for 4 "client closed", only after `connect()` for 3, and never with the same data for 10.
 
@@ -10147,3 +10147,134 @@ Value clause: As an app developer or operator adopting Ferrifuge, I want diagram
 - each planted test of D6 is seen failing once with its check removed, recorded in the PR.
 
 **Exceptions introduced:** no scenario: documentation, verified by the drift test and its planted tests, as Block 34's tables are by their test.
+
+---
+
+## Block 60 — Pre-alpha code quality
+
+**Goal:** before 1.0.0-alpha, the code:
+- states the sleep contract other runtimes need;
+- cannot leak a secret through `Debug` unnoticed;
+- documents its API without pointing at an unshipped spec;
+- keeps lint, mutation and dependency hygiene from regressing, checked on every change.
+
+Source: code quality report of 2026-11-15, findings 1, 5, 6 and 9; owner requests of 2026-11-15.
+
+**Dependencies:** Blocks 0 (lints, dependency policy, test layers), 20 (package contents, docs.rs, changelog), 21 (redaction), 25 (system sleep), 34 (codes tables), 54 (`unstable-machine`, `non_exhaustive`, the module-level allows), 57 (pinning, cooldown), 59 (`docs/`).
+
+**Out of scope:**
+- moving the sleep policy into the core (finding 1's fix): after 1.0.0-alpha;
+- redacting newtypes with derived `Debug` (finding 5's fix): after 1.0.0-alpha;
+- the `client.rs` split and the subscription-kind generics (findings 2 and 3): Block 61;
+- findings 4, 7, 8 and 10–12: later blocks;
+- spec references in `docs/` (Block 59 cites by design) and in `CHANGELOG.md`;
+- cargo-udeps, cargo-machete, and nextest for mutants.
+
+This block amends Block 0's "Code hygiene" row: library-only lints are set in `src/lib.rs`. It amends Block 34 D1: the Cause column states its cause without citing a block. It reverses no exclusion.
+
+**Decisions** (reviewer, 2026-11-15, delegated by the owner):
+
+- **D1 The sleep-handling contract.**
+  - `Input::Slept`'s rustdoc, and a "System sleep" section of the `machine` module documentation, state what the owner does around it. These are the rules the tokio and browser adapters apply today. They are documented, not moved, and no behaviour changes.
+  1. **Detection.**
+     - At each input it gives, the owner compares how far the wall clock and the monotonic clock moved since the previous one.
+     - When the wall clock moved further by at least 2 s, it feeds `Input::Slept { gap }`.
+     - A wall clock set back gives no gap. The core ignores gaps under 2 s.
+  2. **Ordering.**
+     - `Close` and `DriverDropped` are fed alone, without `Slept`.
+     - While connected, `EventTaken`, `EventHanded`, `HandlerPanicked`, `Frame`, `TransportClosed` and `Reconnect` are fed in this order: the due refresh firings, then the input, then `Slept`.
+     - Every other input, and those six while not connected, are fed in this order: `Slept`, then the due refresh firings, then the input.
+     - The owner performs the actions of `Slept`'s answer even when an application call revealed the sleep.
+  3. **Refresh deadlines.**
+     - The owner records each token refresh timer's deadline and setting from the `SetTimer`/`SetSubscriptionTimer` and `CancelTimer`/`CancelSubscriptionTimer` refresh actions the core returns.
+     - On a sleep, it moves all of them earlier by the gap.
+     - It feeds the ones now due as `TimerFired` or `SubscriptionTimerFired` with their setting, the connection's first, then by subscription. It cancels its own timers for them.
+     - Each refresh is fed once: a refresh firing it is given removes that deadline.
+  4. **Shorten filter.**
+     - This applies when the input goes before `Slept`.
+     - The owner drops from `Slept`'s answer every `ShortenTimer` and `ShortenSubscriptionTimer` for a timer that the input's answer just set, including the answers to the event takes the input caused.
+     - Those timers lost no time to the sleep.
+
+  The text cites no block (D3).
+
+- **D2 A redaction test.**
+  - **What it formats.** A unit test, in a file of its own, formats with `{:?}` and `{:#?}`:
+    - one value of every `Input` and `Action` variant;
+    - every `CallRequest` and `CallReply`;
+    - `Config`, `SubscriptionOptions`, `ConnectData`, `EmulatedHeaders`;
+    - the map and shared poll values;
+    - `TagFilter`;
+    - `ClientBuilder` with headers, a proxy with credentials, a cookie jar holding cookies, and endpoints with userinfo and a query.
+
+    The events keep Block 21's test.
+  - **Sentinels.** Every token, signature, payload, data, header value, tag value, credential and cookie in the samples carries a distinct sentinel. The test fails when a sentinel appears as text or as the `Debug` list of its bytes.
+  - **Variant coverage.**
+    - An exhaustive `match` without a wildcard or `..` names every `Input` and `Action` variant and field.
+    - The test also reads the variant names of both enums from `src/machine.rs` and fails on any variant without a sample.
+    - It runs with the `test` job's features, which enable every variant.
+  - **`Debug` inventory.** A source test lists every hand-written `impl … Debug for` in `src/` outside test code. It fails on one the redaction test names neither as sampled nor as holding no secret, with its reason.
+  - Event samples inside actions use only variants that Block 54c leaves unchanged.
+
+- **D3 Documentation in plain terms.**
+  - **The rule.** Doc text describes behaviour. It cites no "Block N", "Blocks N", "Dn", "Codex" or `CLAUDE.md`. Doc text means `///`, `//!` and `doc = "…"`, inside `cfg_attr` too, in `src/` outside `#[cfg(test)]` code and test files.
+  - **The references move.** They go to `//` comments beside the text, so the developer trail stays. The `codes` tables and the README's mirror drop the block from their Cause column.
+  - **README.** It cites no block, decision or Codex number. It keeps its links to `CLAUDE.md` and `docs/`.
+  - **Crate root.** The crate root documentation gains a features table, the native and browser adapters, streams versus handlers and `EventDelivery`, the unstable features, and a link to the README's guides.
+  - **The check.** A source test enforces this. Planted tests pass it:
+    - a "Block 1" in a `///`;
+    - a "D3" in a `//!`;
+    - a "Block 2" in a `cfg_attr` `doc`;
+    - a "Codex" in the README.
+
+    Each is reported. A "Block 4" in a `//` comment, and in a `#[cfg(test)]` module's documentation, is not.
+
+- **D4 The lint ratchet.**
+  - **Where the lints go.** `src/lib.rs` sets `#![deny(clippy::unwrap_used)]` and `#![warn(clippy::allow_attributes_without_reason)]`. As crate attributes they leave `tests/`, `benches/` and `examples/` alone. `allow-unwrap-in-tests = true` goes in `clippy.toml` and in `ci/wasm-clippy/clippy.toml`.
+  - **Allows.** Every `#[allow]` in `src/`, test modules included, gets a `reason = "…"`.
+    - It becomes `#[expect(…, reason = "…")]` where the lint fires in every build CI lints.
+    - It stays `allow` where the lint fires only in some feature sets or targets: the `cfg_attr` allows, `delivery.rs`'s `unused_mut`, and Block 54's module-level allows, each kept on one line starting `#![allow(`.
+  - The stale `protocol.rs:16` reason is corrected, or the allow is removed.
+
+- **D5 Mutation testing on every pull request.**
+  - **Job.** A `mutants` job in `ci.yml`, on pull requests, runs cargo-mutants 27.1.0 through the pinned `taiki-e/install-action`.
+  - **Diff and shards.**
+    - It mutates the diff `git diff HEAD^1 HEAD` of the pull request's merge commit (`--in-diff`, `--in-place`, `--no-shuffle`), with the `test` job's features.
+    - A planning step lists the mutants and sizes a matrix of 1 to 8 shards (`--shard k/n`, `--sharding round-robin`), about 15 minutes of mutants each, using the per-mutant time measured in 60c.
+    - Each shard keeps its baseline. It runs with an explicit `--timeout` of 5 times the baseline's test time and `timeout-minutes: 60`.
+  - **Tests and scope.**
+    - Tests: the library's unit tests (`--lib`), set in `.cargo/mutants.toml`.
+    - Examined: `src/` except `src/adapter/**`, `src/test_util/**`, `src/protocol/**` and the `__test-hooks` code.
+    - Mutants in code compiled out of that build are excluded by `exclude_re`.
+    - Every exclusion carries a comment giving its reason.
+  - **Failing.** A missed mutant fails the job: it reads `mutants.out/missed.txt`. A timeout counts as caught. A failing baseline or any other error fails the job. `mutants.out` is uploaded every time.
+  - **Weekly run.** `mutants.yml` runs every mutant in that scope weekly and on dispatch, in 16 shards, report-only. Its first report is triaged in a later block, which then makes it fail on misses.
+
+- **D6 Unused dependencies on every push.**
+  - The `lint` job runs `cargo shear --deny-warnings` with cargo-shear 1.14.0, pinned. It finds unused dependencies, dependencies in the wrong section, and unlinked files, without a build.
+  - Accepted findings go in `[package.metadata.cargo-shear]` `ignored`/`ignored-paths`, each with a comment giving its reason.
+  - Tools here are pinned by hand to releases at least 7 days old, as Block 57 D3's cooldown does for Dependabot.
+
+- **D7 Version.** No bump: documentation, tests and CI.
+
+**Sub-increments:**
+- **60a:** D1 and D2.
+- **60b:** D3 and D4, after Block 54c merges.
+- **60c:** D5 and D6, at any time.
+
+Value clause: As a team adopting Ferrifuge for a fleet, I want the alpha's API documented in plain terms, its secrets never printed, its core's sleep contract stated, and every change checked for untested logic and unused dependencies, so that what we build on is understandable, safe to log, and stays that way.
+
+**Structural acceptance:**
+- the `Input::Slept` and module docs state D1's four rules;
+- the D2 and D3 tests pass, including their planted cases.
+
+Each of these mutations is seen red once, recorded in the PR:
+- an `Input` arm printing its token;
+- a new `Action` variant with no sample;
+- a `Vec<u8>` field shown by derived `Debug`;
+- a "Block 1" in a public `///`;
+- an `unwrap()` in library code. The same `unwrap()` in a `#[cfg(test)]` module and in `tests/` stays green;
+- an untested change in `src/machine.rs` (`mutants`). A tested one stays green;
+- an unused dependency;
+- a dependency used only by tests placed in `[dependencies]`.
+
+**Exceptions introduced:** no scenario: documentation, unit and source tests, and CI checks, verified by the mutations above.
