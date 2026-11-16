@@ -10833,7 +10833,7 @@ Each of these mutations is seen red once, recorded in the PR:
 
 Source: Block 62's out of scope ("connections that http_stream or sse open after the attempt, for commands: a later block"). The tokio adapter sets a handshake deadline in one place only: the driver's `opened` (`src/adapter/driver.rs`, `with_deadline`). Emulation requests are polled outside it, so a connection that one of them starts gets no deadline. Its check then holds the request's own timer, and on a current-thread runtime the runtime too, for as long as the system takes. A resumed TLS session skips the check.
 
-**Dependencies:** Blocks 8 (http_stream, sse, emulation), 13 (commands in emulation requests, closing lets requests finish), 29 (`timeout` and `handshake_timeout`), 55 (Stability, "Fixes"; D3 dependency lines; D8; D9), 60 D3 (no block citations in docs), 61 D5 (typed failures), 62 (D1: the wrapper, the thread-local deadline, `KeepDeadline`, the cap).
+**Dependencies:** Blocks 8 (http_stream, sse, emulation), 13 (commands in emulation requests, closing lets requests finish), 29 (`timeout` and `handshake_timeout`), 55 (Stability, "Fixes"; D2 changelog date; D3 dependency lines; D8; D9), 60 D3 (no block citations in docs), 61 D5 (typed failures), 62 (D1: the wrapper, the thread-local deadline, `KeepDeadline`, the cap).
 
 **Out of scope:**
 - a separate bound on a command connection's TCP connect, proxy handshake or TLS (`handshake_timeout` or a new setting): the request's `timeout` already bounds all of them;
@@ -10860,8 +10860,9 @@ This block reverses Block 62's deferral of command connections. Block 0's "Rever
   - The README's "TLS verification" changes its sentence on later connections to "A connection that http_stream or sse opens later, for a command, is checked the same way, at most until that command's request runs out of `Config::timeout`: a check still running then fails the request with the same error, the transport closes, and the client reconnects."
   - `Config::handshake_timeout`'s documentation gains "A connection that `http_stream` or sse opens later, for a command, waits for its check at most until the request carrying the command runs out of [`timeout`](Config::timeout)."
 - **D4 Version.**
-  - The next pre-release, 1.0.0-alpha.3, with a "Fixed" entry: the request's documented `timeout` now holds (Block 55, Stability, "Fixes"; Block 62 D3).
-  - The README's dependency lines name 1.0.0-alpha.3 (Block 55 D3).
+  - Block 64 ships in 1.0.0-alpha.2 with Block 62's fix (owner, 2026-11-16: no separate pre-release). That version's "Fixed" section gains an entry: the request's documented `timeout` now holds (Block 55, Stability, "Fixes"; Block 62 D3). The section's date is 64a's merge date (Block 55 D2).
+  - The manifest's version and the README's dependency lines already name 1.0.0-alpha.2 (Block 55 D3); they do not change.
+  - The release commit is 64a's merge commit or a later commit of main. chaos-real and soak run on it (Block 55 D9, step 1; `release.yml`'s `verify` gates on that commit), and runs on an earlier commit do not count.
   - Tagging and releasing are the owner's (Block 55 D9).
 
 `VERIFY:`
