@@ -3,8 +3,10 @@
 // Block 6; Block 22.
 
 use super::super::body::{FailureKind, TransportFailure};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::Instant;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -46,6 +48,10 @@ pub(crate) enum Trust {
     ExtraRoots(Arc<[CertificateDer<'static>]>),
     /// The application's configuration, as given but for its ALPN.
     Raw(Arc<ClientConfig>),
+    /// A stub of the operating system's verifier, wrapped as the
+    /// platform's is: the tests' way to that path on every platform.
+    #[cfg(all(test, feature = "unstable-webtransport"))]
+    OffThread(Arc<dyn ServerCertVerifier>),
 }
 
 impl std::fmt::Debug for Trust {
@@ -56,6 +62,8 @@ impl std::fmt::Debug for Trust {
             Self::Platform => f.write_str("Platform"),
             Self::ExtraRoots(roots) => write!(f, "ExtraRoots(<{}>)", roots.len()),
             Self::Raw(_) => f.write_str("Raw(..)"),
+            #[cfg(all(test, feature = "unstable-webtransport"))]
+            Self::OffThread(_) => f.write_str("OffThread(..)"),
         }
     }
 }
@@ -66,7 +74,31 @@ impl std::fmt::Debug for Trust {
 pub(in crate::adapter) struct Tls {
     trust: Trust,
     /// Its own TLS settings, built at its first secure attempt.
-    config: BuildOnce<Arc<ClientConfig>>,
+    config: BuildOnce<Settings>,
+}
+
+/// TLS settings, and the verifier wrapper they verify through, if any: a
+/// WebTransport handshake copies the settings with the wrapper bound to
+/// its deadline.
+// Block 62, D1.
+#[derive(Clone, Debug)]
+pub(in crate::adapter) struct Settings {
+    pub(in crate::adapter) config: Arc<ClientConfig>,
+    #[cfg_attr(
+        not(feature = "unstable-webtransport"),
+        allow(dead_code, reason = "read by the WebTransport transport")
+    )]
+    pub(in crate::adapter) off_thread: Option<OffThread>,
+}
+
+impl Settings {
+    /// Settings verifying as `config` does, through no wrapper.
+    fn plain(config: ClientConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            off_thread: None,
+        }
+    }
 }
 
 impl Tls {
@@ -93,12 +125,28 @@ impl Tls {
     /// read again by the next one.
     // Block 6, review item C7.
     pub(in crate::adapter) fn setup(&self) -> Result<(Arc<ClientConfig>, bool), TransportFailure> {
+        self.settings_kept()
+            .map(|(settings, keep)| (settings.config, keep))
+    }
+
+    /// [`Tls::config`], with the verifier wrapper it verifies through.
+    #[cfg(feature = "unstable-webtransport")]
+    pub(in crate::adapter) fn settings(&self) -> Result<Settings, TransportFailure> {
+        self.settings_kept().map(|(settings, _)| settings)
+    }
+
+    fn settings_kept(&self) -> Result<(Settings, bool), TransportFailure> {
         match &self.trust {
             Trust::Platform => platform_setup(),
-            Trust::ExtraRoots(roots) => self
+            Trust::ExtraRoots(roots) => self.config.get(|| verified_config(roots)),
+            Trust::Raw(raw) => self
                 .config
-                .get(|| verified_config(roots).map(|(config, keep)| (Arc::new(config), keep))),
-            Trust::Raw(raw) => self.config.get(|| Ok((Arc::new(http1_only(raw)), true))),
+                .get(|| Ok((Settings::plain(http1_only(raw)), true))),
+            #[cfg(all(test, feature = "unstable-webtransport"))]
+            Trust::OffThread(stub) => self.config.get(|| {
+                off_thread_settings(Arc::clone(stub), Arc::new(crypto_provider()))
+                    .map(|settings| (settings, true))
+            }),
         }
     }
 }
@@ -128,9 +176,9 @@ fn http1_only(raw: &ClientConfig) -> ClientConfig {
 /// The crypto provider is set explicitly rather than taken from the process
 /// default: when another crate also enables another rustls provider, rustls
 /// cannot pick a default and panics.
-fn platform_setup() -> Result<(Arc<ClientConfig>, bool), TransportFailure> {
-    static CONFIG: BuildOnce<Arc<ClientConfig>> = BuildOnce::new();
-    CONFIG.get(|| verified_config(&[]).map(|(config, keep)| (Arc::new(config), keep)))
+fn platform_setup() -> Result<(Settings, bool), TransportFailure> {
+    static CONFIG: BuildOnce<Settings> = BuildOnce::new();
+    CONFIG.get(|| verified_config(&[]))
 }
 
 /// How servers are verified in this build and on this platform, for tests.
@@ -167,17 +215,11 @@ pub(in crate::adapter) const VERIFIER: &str = if cfg!(all(
 ))]
 fn verified_config(
     extra: &[CertificateDer<'static>],
-) -> Result<(ClientConfig, bool), TransportFailure> {
+) -> Result<(Settings, bool), TransportFailure> {
     let provider = Arc::new(crypto_provider());
     let verifier = platform_verifier(extra, &provider)?;
-    let config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
     // The operating system reads its store at each verification.
-    Ok((config, true))
+    off_thread_settings(verifier, provider).map(|settings| (settings, true))
 }
 
 /// TLS settings verifying servers as this build does on this platform, also
@@ -199,7 +241,7 @@ fn verified_config(
 )))]
 fn verified_config(
     extra: &[CertificateDer<'static>],
-) -> Result<(ClientConfig, bool), TransportFailure> {
+) -> Result<(Settings, bool), TransportFailure> {
     let found = rustls_native_certs::load_native_certs();
     roots_config(found.certs, extra, found.errors.is_empty())
 }
@@ -344,6 +386,204 @@ impl<V: ServerCertVerifier> ServerCertVerifier for Guarded<V> {
     }
 }
 
+/// The message of a certificate verification that did not finish by the
+/// handshake's deadline, or that more late verifications than
+/// [`MAX_LATE`] refused at once.
+// Block 62, D1.
+pub(in crate::adapter) const VERIFICATION_TIMEOUT: &str =
+    "handshake timeout: certificate verification did not finish";
+
+/// How many verification threads may still run past their deadline in the
+/// process; past them, a verification fails at once.
+// Block 62, D1.
+const MAX_LATE: usize = 8;
+
+/// The verification threads still running past their deadline.
+#[cfg_attr(
+    not(all(
+        not(feature = "fips"),
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "windows",
+            target_os = "android"
+        )
+    )),
+    allow(dead_code, reason = "the wrapper of the platform verifier")
+)]
+static LATE: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// The handshake deadline of the attempt this thread polls, while it
+    /// polls it.
+    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Runs `poll` with `deadline` as this thread's handshake deadline, the one
+/// set before restored afterwards, even when `poll` panics.
+// Block 62, D1.
+pub(in crate::adapter) fn with_deadline<T>(
+    deadline: Option<Instant>,
+    poll: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DEADLINE.set(self.0);
+        }
+    }
+    let _restore = Restore(DEADLINE.replace(deadline));
+    poll()
+}
+
+/// The handshake deadline of the attempt this thread polls, if any.
+#[cfg_attr(
+    not(feature = "unstable-webtransport"),
+    allow(dead_code, reason = "read by the WebTransport transport")
+)]
+pub(in crate::adapter) fn deadline() -> Option<Instant> {
+    DEADLINE.get()
+}
+
+/// The operating system's verifier, run on a thread of its own: it may
+/// fetch over the network and block for seconds, which must not hold the
+/// runtime's thread past the handshake's deadline.
+///
+/// Each check of a server's certificate runs on a new thread, which the
+/// handshake waits for until its deadline: its own, or else the one of the
+/// attempt the calling thread polls; without either, until the check
+/// ends. On a multi-thread runtime it waits inside `block_in_place`, so
+/// that the runtime's other tasks, timers and sockets go on on another
+/// thread. Past the deadline the check fails, and its thread runs on until
+/// the operating system returns; while [`MAX_LATE`] such threads run, a
+/// check fails at once.
+// Block 62, D1.
+#[derive(Clone)]
+pub(in crate::adapter) struct OffThread {
+    inner: Arc<dyn ServerCertVerifier>,
+    /// The deadline of the handshake that copied it, for a handshake run
+    /// on a task other than the attempt's.
+    deadline: Option<Instant>,
+    /// The late threads counted against [`MAX_LATE`]: the process's.
+    late: &'static AtomicUsize,
+}
+
+impl OffThread {
+    #[cfg_attr(
+        not(all(
+            not(feature = "fips"),
+            any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "windows",
+                target_os = "android"
+            )
+        )),
+        allow(dead_code, reason = "the wrapper of the platform verifier")
+    )]
+    fn new(inner: Arc<dyn ServerCertVerifier>) -> Self {
+        Self {
+            inner,
+            deadline: None,
+            late: &LATE,
+        }
+    }
+
+    /// A copy waiting until `deadline`, whichever thread calls it.
+    #[cfg_attr(
+        not(feature = "unstable-webtransport"),
+        allow(dead_code, reason = "used by the WebTransport transport")
+    )]
+    pub(in crate::adapter) fn until(&self, deadline: Option<Instant>) -> Self {
+        Self {
+            deadline,
+            ..self.clone()
+        }
+    }
+}
+
+impl std::fmt::Debug for OffThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OffThread").field(&self.inner).finish()
+    }
+}
+
+/// TLS settings verifying servers through `inner`, run off the runtime's
+/// thread.
+// Block 62, D1.
+#[cfg_attr(
+    not(all(
+        not(feature = "fips"),
+        any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "windows",
+            target_os = "android"
+        )
+    )),
+    allow(dead_code, reason = "the wrapper of the platform verifier")
+)]
+fn off_thread_settings(
+    inner: Arc<dyn ServerCertVerifier>,
+    provider: Arc<CryptoProvider>,
+) -> Result<Settings, TransportFailure> {
+    let off_thread = OffThread::new(inner);
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(off_thread.clone()))
+        .with_no_client_auth();
+    Ok(Settings {
+        config: Arc::new(config),
+        off_thread: Some(off_thread),
+    })
+}
+
+impl ServerCertVerifier for OffThread {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[rustls::DistinguishedName]> {
+        self.inner.root_hint_subjects()
+    }
+}
+
 /// The TLS settings trusting `platform` and `extra`, kept when `complete`:
 /// read without errors. Unreadable platform certificates are skipped, as
 /// browsers do; the extra ones were checked by `ClientBuilder::build`.
@@ -366,7 +606,7 @@ fn roots_config(
     platform: Vec<CertificateDer<'static>>,
     extra: &[CertificateDer<'static>],
     complete: bool,
-) -> Result<(ClientConfig, bool), TransportFailure> {
+) -> Result<(Settings, bool), TransportFailure> {
     let mut roots = RootCertStore::empty();
     let (added, _) = roots.add_parsable_certificates(platform);
     let (extra_added, _) = roots.add_parsable_certificates(extra.iter().cloned());
@@ -381,7 +621,7 @@ fn roots_config(
         .map_err(|e| TransportFailure::new(FailureKind::Tls, e.to_string()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok((config, complete))
+    Ok((Settings::plain(config), complete))
 }
 
 /// The index of the first certificate of `roots` webpki cannot take as a
@@ -599,7 +839,9 @@ pub(in crate::adapter) mod tests {
         );
     }
 
-    /// The verifier this build uses on this platform (Block 22, D1).
+    /// The verifier this build uses on this platform (Block 22, D1), and
+    /// whether its settings run it off the runtime's thread: the platform's
+    /// always is (Block 62, D1).
     #[test]
     fn the_build_verifies_with_its_platforms_verifier() {
         let expected = if cfg!(feature = "fips") {
@@ -614,8 +856,13 @@ pub(in crate::adapter) mod tests {
         } else {
             "webpki"
         };
-        println!("verifier: {VERIFIER}");
+        let settings = Tls::default().settings_kept().expect("TLS settings").0;
+        let wrapped = format!("{:?}", settings.config).contains("OffThread(");
+
+        println!("verifier: {VERIFIER}, off the runtime's thread: {wrapped}");
         assert_eq!(VERIFIER, expected);
+        assert_eq!(wrapped, expected == "platform");
+        assert_eq!(settings.off_thread.is_some(), wrapped);
     }
 
     /// The chosen verifier trusts an extra root and refuses a server whose
