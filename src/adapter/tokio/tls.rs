@@ -1234,31 +1234,44 @@ pub(in crate::adapter) mod tests {
     }
 
     /// On a multi-thread runtime the verification waits off the runtime:
-    /// another task's timer fires while it runs (Block 62, D1).
+    /// another task's timer, armed before the connect and firing every
+    /// 25 ms, fires while it runs (Block 62, D1). The check is on the
+    /// verification's window, wherever it falls: a slow device's handshake
+    /// can reach the verifier after a single 100 ms timer has fired.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_verification_leaves_a_multi_thread_runtime_running() {
         let slow = Arc::new(Slow::default());
         let client = slow_client(wss(tls_server().await), &slow);
         let start = Instant::now();
-        let timer = ticker();
+        let ticks = Arc::new(Mutex::new(Vec::new()));
+        let ticker = tokio::spawn({
+            let ticks = Arc::clone(&ticks);
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    ticks.lock().unwrap().push(Instant::now());
+                }
+            }
+        });
 
         client.connect();
         let message = tokio::time::timeout(SLOW_CHECK * 2, first_error(&client))
             .await
             .expect("an error event");
         let failed = Instant::now();
-        let ticked = timer.await.expect("the ticker");
+        ticker.abort();
+        let ticks = ticks.lock().unwrap().clone();
         let started = slow.started();
 
         assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
         assert_eq!(started.len(), 1);
         assert!(failed - start < BOUND, "{:?}", failed - start);
         assert!(
-            started[0] < ticked && ticked < failed,
-            "the timer fired {:?} after the start, the verification started {:?} after it and ended {:?} after it",
-            ticked - start,
+            ticks.iter().any(|&tick| started[0] < tick && tick < failed),
+            "no tick during the verification, which started {:?} after the start and ended {:?} after it; ticks at {:?}",
             started[0] - start,
-            failed - start
+            failed - start,
+            ticks.iter().map(|&tick| tick - start).collect::<Vec<_>>()
         );
         client.disconnect();
     }
