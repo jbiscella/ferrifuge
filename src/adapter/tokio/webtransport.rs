@@ -27,6 +27,7 @@ use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, Var
 
 use super::super::body::Decoder;
 use super::net::Network;
+use super::tls::{OffThread, Settings, deadline};
 use super::transport::Inbound;
 use crate::sans_io::FrameId;
 
@@ -215,7 +216,7 @@ impl WebTransport {
             )));
         }
         let (host, address) = resolve(&url).await?;
-        let tls = network.tls.config()?;
+        let tls = network.tls.settings()?;
         let options = connect_options(&url, target.headers, network)?;
         let memory = &network.alpn;
         let mut alpn = memory.first(target.endpoint);
@@ -547,12 +548,18 @@ fn connect_options(
 /// (<https://github.com/BiagioFesta/wtransport/issues/335>), are never called.
 // D4, D5, D6, D12, D15.
 fn client_config(
-    tls: &Arc<TlsConfig>,
+    tls: &Settings,
     alpn: Alpn,
     host: &str,
     address: SocketAddr,
 ) -> Result<ClientConfig, TransportFailure> {
-    let tls = quic_tls(tls, alpn);
+    // The handshake runs in quinn's task, where the attempt's deadline is
+    // not set: the copy's verifier wrapper carries it (Block 62, D1).
+    let verifier = tls
+        .off_thread
+        .as_ref()
+        .map(|wrapper| wrapper.until(deadline()));
+    let tls = quic_tls(&tls.config, alpn, verifier);
     check_quic(&tls, host).map_err(|message| TransportFailure::new(FailureKind::Tls, message))?;
     let reset_key = ResetKey::new(&tls)?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
@@ -571,11 +578,20 @@ fn client_config(
     Ok(config)
 }
 
-/// A copy of `tls` offering `alpn`, the application's own left unchanged.
-// D4, D5; Block 49 row 53.
-pub(in crate::adapter) fn quic_tls(tls: &TlsConfig, alpn: Alpn) -> Arc<TlsConfig> {
+/// A copy of `tls` offering `alpn`, verifying through `verifier` when
+/// given, the application's own left unchanged.
+// D4, D5; Block 49 row 53; Block 62, D1.
+pub(in crate::adapter) fn quic_tls(
+    tls: &TlsConfig,
+    alpn: Alpn,
+    verifier: Option<OffThread>,
+) -> Arc<TlsConfig> {
     let mut copy = tls.clone();
     copy.alpn_protocols = alpn.protocols();
+    if let Some(verifier) = verifier {
+        copy.dangerous()
+            .set_certificate_verifier(Arc::new(verifier));
+    }
     Arc::new(copy)
 }
 
@@ -812,8 +828,8 @@ mod tests {
             let config = tls.config().expect("TLS settings");
             let before = config.alpn_protocols.clone();
 
-            let first = quic_tls(&config, Alpn::H3);
-            let retry = quic_tls(&config, Alpn::None);
+            let first = quic_tls(&config, Alpn::H3, None);
+            let retry = quic_tls(&config, Alpn::None, None);
 
             assert_eq!(first.alpn_protocols, [b"h3".to_vec()]);
             assert_eq!(retry.alpn_protocols, Vec::<Vec<u8>>::new());
@@ -829,14 +845,14 @@ mod tests {
     #[test]
     fn a_configuration_quic_cannot_use_fails_both_checks() {
         for tls12 in [true, false] {
-            let checked = check_quic(&quic_tls(&unfit(tls12), Alpn::H3), "localhost");
+            let checked = check_quic(&quic_tls(&unfit(tls12), Alpn::H3, None), "localhost");
 
             let error = checked.expect_err("refused");
             assert!(error.contains("TLS 1.3"), "{error}");
             assert!(error.contains("webtransport"), "{error}");
         }
         assert_eq!(
-            check_quic(&quic_tls(&raw(None, &[]), Alpn::H3), "localhost"),
+            check_quic(&quic_tls(&raw(None, &[]), Alpn::H3, None), "localhost"),
             Ok(())
         );
     }
@@ -1021,8 +1037,8 @@ mod tests {
     fn the_webtransport_configuration_of_the_fips_build_is_fips() {
         let tls = Tls::new(Trust::Platform).config().expect("TLS settings");
 
-        assert!(quic_tls(&tls, Alpn::H3).fips());
-        assert!(quic_tls(&tls, Alpn::None).fips());
+        assert!(quic_tls(&tls, Alpn::H3, None).fips());
+        assert!(quic_tls(&tls, Alpn::None, None).fips());
     }
 
     /// A WebTransport server on `localhost` presenting `chain`, whose TLS

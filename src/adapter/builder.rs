@@ -502,7 +502,7 @@ pub(super) fn check_webtransport(
             .strip_prefix('[')
             .and_then(|host| host.strip_suffix(']'))
             .map_or_else(|| host.clone(), str::to_owned);
-        check_quic(&quic_tls(raw, Alpn::H3), &host).map_err(error)
+        check_quic(&quic_tls(raw, Alpn::H3, None), &host).map_err(error)
     }
 }
 

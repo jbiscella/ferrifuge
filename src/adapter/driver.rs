@@ -144,6 +144,12 @@ impl KeyedTimers {
         self.0.remove(&key);
     }
 
+    /// When `key`'s timer is due, if it runs.
+    #[cfg(adapter_tokio)]
+    fn deadline(&self, key: TimerKey) -> Option<platform::Instant> {
+        self.0.get(&key).map(|(sleep, _)| sleep.deadline())
+    }
+
     fn shorten(&mut self, key: TimerKey, by: Duration) {
         if let Some((sleep, _)) = self.0.get_mut(&key) {
             shortened(sleep, by);
@@ -350,6 +356,21 @@ impl Driver {
                 self.upper_streak = 0;
             }
             let mut from_upper = false;
+            // The attempt's handshake deadline, the connect timeout's while
+            // the transport opens: the operating system's certificate
+            // verifier waits no longer while the open is polled (Block 62,
+            // D1).
+            #[cfg(adapter_tokio)]
+            let deadline = self
+                .opening
+                .as_ref()
+                .and_then(|_| {
+                    self.timers
+                        .deadline(TimerKey::Client(crate::sans_io::Timer::ConnectTimeout))
+                })
+                .map(platform::Instant::into_std);
+            #[cfg(adapter_browser)]
+            let deadline = ();
             // Biased, in this order: the inline handler, the open, the
             // transport, the actions wake, then the timers and the rest.
             // What reached the transport is handled before a timer that
@@ -368,7 +389,7 @@ impl Driver {
                     self.upper_input(waited.load(Ordering::Relaxed));
                     continue;
                 }
-                (id, result) = opened(&mut self.opening), if !yielding => {
+                (id, result) = opened(&mut self.opening, deadline), if !yielding => {
                     from_upper = true;
                     self.opening = None;
                     match result {
@@ -909,15 +930,37 @@ fn callback_panicked() -> TokenError {
     TokenError::Failed("token callback panicked".to_owned())
 }
 
+/// The handshake deadline of an attempt, natively; the browser's
+/// verification is the browser's.
+#[cfg(adapter_tokio)]
+type HandshakeDeadline = Option<std::time::Instant>;
+#[cfg(adapter_browser)]
+type HandshakeDeadline = ();
+
 /// Resolves when the transport being opened is ready; never without one.
+/// Natively, each poll of the open has `deadline` as its thread's handshake
+/// deadline.
+// Block 62, D1.
 async fn opened(
     opening: &mut Option<(TransportId, Opening)>,
+    deadline: HandshakeDeadline,
 ) -> (
     TransportId,
     Result<Transport, super::body::TransportFailure>,
 ) {
     match opening {
-        Some((id, future)) => (*id, future.await),
+        #[cfg(adapter_tokio)]
+        Some((id, future)) => {
+            let polled = std::future::poll_fn(|cx| {
+                super::tokio::tls::with_deadline(deadline, || future.as_mut().poll(cx))
+            });
+            (*id, polled.await)
+        }
+        #[cfg(adapter_browser)]
+        Some((id, future)) => {
+            let () = deadline;
+            (*id, future.await)
+        }
         None => std::future::pending().await,
     }
 }
