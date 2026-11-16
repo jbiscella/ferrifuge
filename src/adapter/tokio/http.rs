@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, FuturesUnordered};
@@ -26,6 +26,7 @@ use super::super::body::{
 use super::super::shared::lock;
 use super::net::{Jar, Network};
 use super::proxy::PROXY_AUTHENTICATION_REQUIRED;
+use super::tls::WithDeadline;
 use super::transport::Inbound;
 use crate::sans_io::{FrameId, TransportKind};
 
@@ -241,11 +242,29 @@ impl HttpTransport {
             .header(CONTENT_TYPE, self.content_type)
             .body(frame);
         let timeout = self.request_timeout;
+        // The request's one deadline: its timer ends there, and it is the
+        // thread's handshake deadline on every poll of the request, so a
+        // connection the request starts verifies within it. Past what the
+        // clock counts, there is none, as a timer that far never fires.
+        // Block 64, D1.
+        let deadline = Instant::now().checked_add(timeout);
         let jar = self.jar.clone();
-        self.requests.push(Box::pin(async move {
+        let exchange = async move {
             let answered = async {
-                let response = tokio::time::timeout(timeout, request.send())
-                    .await
+                let outcome = match deadline {
+                    // The request is polled before the timer: a check
+                    // failing at the deadline fails the request with its
+                    // own error (tokio `time/timeout.rs`, `poll`).
+                    Some(deadline) => {
+                        tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(deadline),
+                            request.send(),
+                        )
+                        .await
+                    }
+                    None => Ok(request.send().await),
+                };
+                let response = outcome
                     .map_err(|_| {
                         TransportFailure::new(
                             FailureKind::Timeout,
@@ -254,9 +273,17 @@ impl HttpTransport {
                     })?
                     .map_err(|e| {
                         let failure = request_error(e);
+                        // A request failing at or after its deadline ran out
+                        // of time, whatever reqwest's error says (Block 64,
+                        // D2).
+                        let late = deadline.is_some_and(|deadline| Instant::now() >= deadline);
                         TransportFailure {
+                            kind: if late {
+                                FailureKind::Timeout
+                            } else {
+                                failure.kind
+                            },
                             message: format!("emulation request failed: {}", failure.message),
-                            ..failure
                         }
                     })?;
                 let status = response.status();
@@ -275,7 +302,9 @@ impl HttpTransport {
                 }
             };
             (id, answered.await)
-        }));
+        };
+        self.requests
+            .push(Box::pin(WithDeadline::new(deadline, exchange)));
     }
 
     /// Closes the stream, and lets the emulation requests in flight finish,
@@ -1639,7 +1668,7 @@ mod tests {
         }
     }
 
-    /// The set-up of Block 64's tests: an http_stream transport whose
+    /// The set-up of Block 64's tests: an `http_stream` transport whose
     /// stream is served plain and whose emulation endpoint is the local TLS
     /// server, verified through the slow stub of the operating system's
     /// verifier, with requests allowed `timeout`. A command's connection is
