@@ -1160,6 +1160,40 @@ mod tests {
         assert_eq!(handshakes.load(Ordering::SeqCst), 1);
     }
 
+    // Block 62, D1: the handshake runs in quinn's task, where the
+    // attempt's deadline is not set; the copy of the TLS settings carries
+    // it to the verifier wrapper, so a slow verification fails the attempt
+    // at the deadline, as the driver's poll sets it.
+    #[tokio::test]
+    async fn a_slow_verification_fails_the_webtransport_attempt_at_its_deadline() {
+        use super::super::tls::tests::Slow;
+        use super::super::tls::{VERIFICATION_TIMEOUT, with_deadline};
+        let (_, chain, key) = private_chain();
+        let slow = Arc::new(Slow::default());
+        let network = Network::new(
+            Tls::new(Trust::OffThread(Arc::clone(&slow) as _)),
+            Proxy::none(),
+        );
+        let (url, _, _) = server(chain, key, &[b"h3"]).await;
+        let headers = http::HeaderMap::new();
+        let start = std::time::Instant::now();
+        let deadline = start + Duration::from_secs(1);
+
+        let mut opening = std::pin::pin!(open(&url, &network, &headers));
+        let opened = tokio::time::timeout(
+            Duration::from_secs(4),
+            std::future::poll_fn(|cx| with_deadline(Some(deadline), || opening.as_mut().poll(cx))),
+        )
+        .await
+        .expect("the attempt ends");
+        let failed = start.elapsed();
+
+        let message = opened.err().map(|error| error.message).unwrap_or_default();
+        assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
+        assert_eq!(slow.started().len(), 1);
+        assert!(failed < Duration::from_millis(1500), "{failed:?}");
+    }
+
     // D5: an endpoint remembered without ALPN whose server now requires
     // `h3` closes the handshake with crypto error 0x78; the memory of that
     // endpoint is dropped and the attempt reaches it offering `h3`, on its

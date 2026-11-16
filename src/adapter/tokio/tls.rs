@@ -815,6 +815,264 @@ pub(in crate::adapter) mod tests {
         )
     }
 
+    /// How long the slow stub's check takes, and the handshake timeout of
+    /// the clients using it (Block 62, structural acceptance).
+    const SLOW_CHECK: Duration = Duration::from_secs(2);
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
+    /// The bound of a failed attempt, and of another task's timer.
+    const BOUND: Duration = Duration::from_millis(1500);
+
+    use std::time::Duration;
+
+    /// A stub of the operating system's verifier taking [`SLOW_CHECK`] to
+    /// accept every chain, recording when each check started.
+    #[derive(Debug, Default)]
+    pub(in crate::adapter) struct Slow {
+        started: Mutex<Vec<Instant>>,
+    }
+
+    impl Slow {
+        /// When the checks started.
+        pub(in crate::adapter) fn started(&self) -> Vec<Instant> {
+            self.started.lock().unwrap().clone()
+        }
+    }
+
+    impl ServerCertVerifier for Slow {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            self.started.lock().unwrap().push(Instant::now());
+            std::thread::sleep(SLOW_CHECK);
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer<'_>,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            crypto_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
+    }
+
+    /// Whether `verified` is the timeout of a verification.
+    pub(in crate::adapter) fn timed_out<T>(verified: &Result<T, rustls::Error>) -> bool {
+        matches!(verified, Err(rustls::Error::General(message)) if message == VERIFICATION_TIMEOUT)
+    }
+
+    /// A ninth verification while eight run past their deadline fails at
+    /// once, without a thread of its own; the late threads free their
+    /// places as their checks end (Block 62, D1).
+    #[test]
+    fn a_ninth_verification_past_its_deadline_fails_at_once() {
+        static LATE_HERE: AtomicUsize = AtomicUsize::new(0);
+        let slow = Arc::new(Slow::default());
+        let wrapper = OffThread {
+            inner: Arc::clone(&slow) as Arc<dyn ServerCertVerifier>,
+            deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
+            late: &LATE_HERE,
+        };
+        let (_, chain, _) = private_chain();
+        let checks: Vec<_> = (0..MAX_LATE)
+            .map(|_| {
+                let wrapper = wrapper.clone();
+                let chain = chain.clone();
+                std::thread::spawn(move || verify_chain(&wrapper, &chain))
+            })
+            .collect();
+        let late: Vec<_> = checks
+            .into_iter()
+            .map(|check| check.join().expect("a verification"))
+            .collect();
+        let ninth = wrapper.until(Some(Instant::now() + HANDSHAKE_TIMEOUT));
+
+        let start = Instant::now();
+        let refused = verify_chain(&ninth, &chain);
+        let took = start.elapsed();
+
+        assert!(late.iter().all(timed_out), "{late:?}");
+        assert!(timed_out(&refused), "{refused:?}");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert_eq!(slow.started().len(), MAX_LATE);
+        let freed = Instant::now() + SLOW_CHECK + BOUND;
+        while LATE_HERE.load(Ordering::Acquire) > 0 && Instant::now() < freed {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(LATE_HERE.load(Ordering::Acquire), 0);
+    }
+
+    /// The wrapper returns what the verifier it wraps returned, and goes on
+    /// with its panic.
+    #[test]
+    fn the_wrapper_returns_the_verifiers_result_and_its_panic() {
+        let accepting = OffThread::new(Arc::new(Stub { panics: false }));
+        let panicking = OffThread::new(Arc::new(Stub { panics: true }));
+
+        let accepted = verify(&accepting);
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify(&panicking)));
+
+        assert!(accepted.is_ok(), "{accepted:?}");
+        assert!(panicked.is_err());
+    }
+
+    fn verify_chain(
+        verifier: &impl ServerCertVerifier,
+        chain: &CertificateDer<'static>,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        verifier.verify_server_cert(
+            chain,
+            &[],
+            &ServerName::try_from("localhost").expect("a name"),
+            &[],
+            UnixTime::now(),
+        )
+    }
+
+    /// A TLS server on 127.0.0.1 presenting a private chain, handshaking
+    /// with each connection and nothing more: the `wss://` endpoint of it.
+    async fn tls_server() -> String {
+        let (_, chain, key) = private_chain();
+        let config = ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![chain], key)
+            .expect("server configuration");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a listener");
+        let port = listener.local_addr().expect("its address").port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let _ = acceptor.accept(tcp).await;
+                });
+            }
+        });
+        format!("wss://127.0.0.1:{port}/connection/websocket")
+    }
+
+    /// A client of `endpoint` whose TLS settings verify through the wrapper
+    /// around `slow`, with a handshake timeout of [`HANDSHAKE_TIMEOUT`].
+    fn slow_client(endpoint: String, slow: &Arc<Slow>) -> crate::Client {
+        let settings = off_thread_settings(
+            Arc::clone(slow) as Arc<dyn ServerCertVerifier>,
+            Arc::new(crypto_provider()),
+        )
+        .expect("TLS settings");
+        crate::Client::builder(endpoint)
+            .config(crate::Config::default().handshake_timeout(HANDSHAKE_TIMEOUT))
+            .tls_config(settings.config)
+            .build()
+            .expect("a client")
+    }
+
+    /// The message of the client's first error event.
+    async fn first_error(client: &crate::Client) -> String {
+        use futures_util::StreamExt;
+        let mut events = client.events();
+        while let Some(event) = events.next().await {
+            if let crate::ClientEvent::Error(error) = event {
+                return error.message;
+            }
+        }
+        panic!("the events ended without an error");
+    }
+
+    /// A task sleeping 100 ms: when it woke.
+    fn ticker() -> tokio::task::JoinHandle<Instant> {
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Instant::now()
+        })
+    }
+
+    /// On a current-thread runtime a slow verification holds the thread
+    /// until the attempt's handshake deadline only: the attempt fails with
+    /// the verification's timeout, and another task's timer fires late but
+    /// within the same bound (Block 62, D1).
+    #[test]
+    fn a_slow_verification_holds_a_current_thread_runtime_until_the_handshake_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let slow = Arc::new(Slow::default());
+            let client = slow_client(tls_server().await, &slow);
+            let start = Instant::now();
+            let ticker = ticker();
+
+            client.connect();
+            let message = tokio::time::timeout(SLOW_CHECK * 2, first_error(&client))
+                .await
+                .expect("an error event");
+            let failed = start.elapsed();
+            let ticked = ticker.await.expect("the ticker") - start;
+
+            assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
+            assert_eq!(slow.started().len(), 1);
+            assert!(failed < BOUND, "{failed:?}");
+            assert!(ticked < BOUND, "{ticked:?}");
+            client.disconnect();
+        });
+    }
+
+    /// On a multi-thread runtime the verification waits off the runtime:
+    /// another task's timer fires while it runs (Block 62, D1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_verification_leaves_a_multi_thread_runtime_running() {
+        let slow = Arc::new(Slow::default());
+        let client = slow_client(tls_server().await, &slow);
+        let start = Instant::now();
+        let ticker = ticker();
+
+        client.connect();
+        let message = tokio::time::timeout(SLOW_CHECK * 2, first_error(&client))
+            .await
+            .expect("an error event");
+        let failed = Instant::now();
+        let ticked = ticker.await.expect("the ticker");
+        let started = slow.started();
+
+        assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
+        assert_eq!(started.len(), 1);
+        assert!(failed - start < BOUND, "{:?}", failed - start);
+        assert!(
+            started[0] < ticked && ticked < failed,
+            "the timer fired {:?} after the start, the verification started {:?} after it and ended {:?} after it",
+            ticked - start,
+            started[0] - start,
+            failed - start
+        );
+        client.disconnect();
+    }
+
     /// Android's verifier is guarded (Block 24, D5): without the setup the
     /// handshake fails naming the call, with it the check is the wrapped
     /// verifier's, and its panic becomes an error.
