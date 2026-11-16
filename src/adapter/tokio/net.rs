@@ -14,7 +14,7 @@ use super::super::body::TransportFailure;
 use super::super::shared::lock;
 use super::connector::Shared;
 use super::proxy::{self, Proxy, ProxyTarget};
-use super::tls::{BuildOnce, Tls, plain_tls_config};
+use super::tls::{BuildOnce, KeepDeadline, Tls, plain_tls_config};
 
 /// The network settings of one client.
 #[derive(Debug, Default)]
@@ -346,6 +346,10 @@ fn build(tls: ClientConfig, decide: Decide) -> Result<reqwest::Client, Transport
         // unreachable endpoint, rather than splitting the stream and the
         // commands between two servers.
         .redirect(reqwest::redirect::Policy::none())
+        // A connection keeps the handshake deadline of the attempt that
+        // started it, also when hyper finishes it on a task of its own
+        // (Block 62, D1).
+        .connector_layer(KeepDeadline)
         .build()
         .map_err(|e| TransportFailure::other(e.to_string()))
 }
