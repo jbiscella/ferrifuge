@@ -70,11 +70,24 @@ jobs:
           # Each allowed document is compared by its blob hash at the pin and
           # at the head, so the compare API's 300-file limit cannot hide one,
           # and the issue key changes only when an allowed document does.
+          # A document's blob hash at a revision; "absent" only for HTTP 404,
+          # any other failure fails the check instead of faking a change.
+          blob() {
+            local out
+            if out=$(gh api "repos/$RS_REPO/contents/$1?ref=$2" --jq .sha 2>"$RUNNER_TEMP/blob.err"); then
+              echo "$out"
+            elif grep -q "HTTP 404" "$RUNNER_TEMP/blob.err"; then
+              echo absent
+            else
+              cat "$RUNNER_TEMP/blob.err" >&2
+              return 1
+            fi
+          }
           rs_docs=""
           rs_key=""
           for doc in docs/spec.md docs/api.md README.md CHANGELOG.md; do
-            before=$(gh api "repos/$RS_REPO/contents/$doc?ref=$RS_PIN" --jq .sha 2>/dev/null || echo absent)
-            after=$(gh api "repos/$RS_REPO/contents/$doc?ref=$rs_head" --jq .sha 2>/dev/null || echo absent)
+            before=$(blob "$doc" "$RS_PIN")
+            after=$(blob "$doc" "$rs_head")
             rs_key="$rs_key$after"
             if [ "$before" != "$after" ]; then
               rs_docs="$rs_docs  - \`$doc\`: https://github.com/$RS_REPO/commits/$rs_branch/$doc"$'\n'
