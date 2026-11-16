@@ -415,8 +415,8 @@ const MAX_LATE: usize = 8;
 static LATE: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    /// The handshake deadline of the attempt this thread polls, while it
-    /// polls it.
+    /// The handshake deadline of the attempt or the emulation request this
+    /// thread polls, while it polls it.
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
@@ -484,6 +484,17 @@ pub(in crate::adapter) struct WithDeadline<F> {
     deadline: Option<Instant>,
 }
 
+impl<F> WithDeadline<F> {
+    /// `inner`, polled with `deadline` as its thread's handshake deadline.
+    // Block 64, D1.
+    pub(in crate::adapter) fn new(deadline: Option<Instant>, inner: F) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            deadline,
+        }
+    }
+}
+
 impl<F: Future> Future for WithDeadline<F> {
     type Output = F::Output;
 
@@ -496,7 +507,8 @@ impl<F: Future> Future for WithDeadline<F> {
     }
 }
 
-/// The handshake deadline of the attempt this thread polls, if any.
+/// The handshake deadline of the attempt or the emulation request this
+/// thread polls, if any.
 pub(in crate::adapter) fn deadline() -> Option<Instant> {
     DEADLINE.get()
 }
@@ -507,8 +519,8 @@ pub(in crate::adapter) fn deadline() -> Option<Instant> {
 ///
 /// Each check of a server's certificate runs on a new thread, which the
 /// handshake waits for until its deadline: its own, or else the one of the
-/// attempt the calling thread polls; without either, until the check
-/// ends. On a multi-thread runtime it waits inside `block_in_place`, so
+/// attempt or the emulation request the calling thread polls; without
+/// either, until the check ends. On a multi-thread runtime it waits inside `block_in_place`, so
 /// that the runtime's other tasks, timers and sockets go on on another
 /// thread. Past the deadline the check fails, and its thread runs on until
 /// the operating system returns; while [`MAX_LATE`] such threads run, a
