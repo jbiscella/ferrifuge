@@ -1576,8 +1576,10 @@ same error. On a multi-thread runtime the client waits inside
 sockets go on. On a current-thread runtime nothing else on that runtime runs
 until the check returns or the timeout runs out, so use a multi-thread
 runtime, or give the client one of its own with `ClientBuilder::runtime`. A
-connection that http_stream or sse opens later, for a command, waits for its
-check without that bound, unless its TLS session is resumed. On Linux and
+connection that http_stream or sse opens later, for a command, is checked
+the same way, at most until that command's request runs out of
+`Config::timeout`: a check still running then fails the request with the
+same error, the transport closes, and the client reconnects. On Linux and
 other Unix systems, and in the `fips` build, webpki verifies without network
 requests. A `tls_config` verifier is called as given, inside the handshake.
 
