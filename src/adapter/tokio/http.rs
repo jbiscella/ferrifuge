@@ -1781,7 +1781,12 @@ mod tests {
         let ended = start.elapsed();
 
         assert!(
-            matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if !reason.contains(VERIFICATION_TIMEOUT)),
+            matches!(
+                &inbound,
+                Ok(Inbound::Closed { reason, .. })
+                    if reason.starts_with("emulation request failed")
+                        && !reason.contains(VERIFICATION_TIMEOUT)
+            ),
             "{inbound:?} after {ended:?}"
         );
         assert!(ended >= SLOW_CHECK, "{ended:?}");
