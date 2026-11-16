@@ -252,6 +252,9 @@ impl Subscription {
     /// [`Subscription::publish`] does; `data` is encoded when this returns,
     /// so the future borrows nothing.
     ///
+    /// Large integers are encoded as
+    /// [`Client::publish_json`](crate::Client::publish_json) describes.
+    ///
     /// ```no_run
     /// # async fn run(subscription: ferrifuge::Subscription) -> Result<(), ferrifuge::JsonCallError> {
     /// subscription.publish_json(&serde_json::json!({"text": "hi"})).await?;

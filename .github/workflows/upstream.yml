@@ -33,9 +33,9 @@ jobs:
       REPO: ${{ github.repository }}
       # The pins CLAUDE.md follows. Update them here when CLAUDE.md moves.
       JS_REPO: centrifugal/centrifuge-js
-      JS_PIN: 63ed73e5704a8173f3836fba8e34b503ac80faba
+      JS_PIN: 0f427565a9bdf81bca7b5d9c3f0eccf9a900ae55
       RS_REPO: centrifugal/centrifuge-rust
-      RS_PIN: 88d6edf178f6db370d8e6756d389c89bf100436b
+      RS_PIN: b46be09a0cd9c8523474259001fd7af829014722
     steps:
       - name: Compare upstream with the pins
         shell: bash
