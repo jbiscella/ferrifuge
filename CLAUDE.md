@@ -10729,6 +10729,7 @@ Source: the reviewer's review of run 43702627832 (2026-11-15). That run's failur
 - the webpki path (Linux, fips): it does no I/O;
 - a raw `tls_config`'s verifier: the application's;
 - asynchronous verification inside rustls, which rustls 0.23 does not offer.
+- connections that http_stream or sse open after the attempt, for commands: a later block.
 
 This block amends Block 55 D8. It reverses no exclusion.
 
@@ -10736,8 +10737,8 @@ This block amends Block 55 D8. It reverses no exclusion.
 - **D1 The wrapper.** On macOS, iOS, Windows and Android, the platform verifier (on Android, behind `Guarded`) is wrapped once, in `tls.rs`.
   - `verify_server_cert` takes owned copies of its arguments and runs the inner call on a thread of its own.
   - It waits for that thread: inside `tokio::task::block_in_place` when the current runtime is multi-thread, so that its timers and sockets move to another worker; plainly otherwise, so a current-thread runtime is held until the verification ends or the deadline passes. rustls calls the verifier synchronously and cannot resume a failed handshake, so nothing can wait on the verifier asynchronously, and a second handshake per new chain is not worth its cost. 62b's README text says so and recommends a multi-thread runtime.
-  - The driver sets a thread-local deadline, the attempt's handshake deadline, while it polls the opening. WebTransport's handshake runs in quinn's own task, so the deadline travels instead in the verifier wrapper of the TLS copy `quic_tls` makes for each handshake. The wait ends at the deadline. Without one, the wait is unbounded.
-  - Past the deadline, verification fails with "handshake timeout: certificate verification did not finish". A thread whose verification outlasts its deadline runs until the verification returns; at most 8 such threads per process, past which a verification fails at once with the same error.
+  - The driver sets a thread-local deadline, the attempt's handshake deadline, while it polls the opening. WebTransport's handshake runs in quinn's own task, so the deadline travels instead in the verifier wrapper of the TLS copy `quic_tls` makes for each handshake. The wait ends at the deadline. Without one, the wait is unbounded. A connector layer on reqwest's client takes the thread's deadline when a connection starts and sets it on every poll of that connection, so one that hyper finishes on a task of its own keeps it.
+  - Past the deadline, verification fails with "handshake timeout: certificate verification did not finish". A thread whose verification outlasts its deadline runs until the verification returns; a verification that starts while 8 or more such threads run in the process fails at once with the same error. Verifications already running may still become late, so the count passes 8 by at most their number.
 - **D2 The statement (62a).**
   - The README's "TLS verification" gains, after "No setting accepts invalid certificates.", the reviewer's paragraph of 2026-11-15, beginning "**Verification can block.**".
   - `Config::handshake_timeout`'s documentation gains "The operating system's certificate verification is not interrupted: the timeout is checked once it returns."
@@ -10759,6 +10760,7 @@ Value clause: As an app developer on a fleet whose networks block revocation ser
   - with `unstable-webtransport`, a WebTransport attempt against the local QUIC test server fails with D1's message within 1.5 s;
   - on a multi-thread runtime with two workers, another task's 100 ms timer fires during the verification;
   - a ninth verification past its deadline fails at once.
+  - a connection started under a deadline and polled on another task verifies against that deadline.
 - The verifier-kind unit test reports the wrapper on macOS, iOS, Windows and Android.
 
 Each of these mutations is seen red once, recorded in the PR:
@@ -10766,6 +10768,7 @@ Each of these mutations is seen red once, recorded in the PR:
 - the deadline ignored;
 - the WebTransport copy built without its deadline;
 - the cap removed;
+- the connector layer removed;
 - the wrapper skipped on Windows.
 
 **Exceptions introduced:** no scenario. The operating system's timing cannot be staged against a server, so the stub verifier stands in for it.
