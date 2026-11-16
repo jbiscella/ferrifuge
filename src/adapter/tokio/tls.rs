@@ -540,6 +540,96 @@ fn off_thread_settings(
     })
 }
 
+/// The error of a verification past its deadline.
+fn verification_timeout() -> rustls::Error {
+    rustls::Error::General(VERIFICATION_TIMEOUT.to_owned())
+}
+
+type Verified = Result<ServerCertVerified, rustls::Error>;
+
+/// Where a verification thread leaves its result for the handshake waiting
+/// on it.
+#[derive(Default)]
+struct Check {
+    state: Mutex<CheckState>,
+    done: Condvar,
+}
+
+#[derive(Default)]
+enum CheckState {
+    #[default]
+    Running,
+    /// The verifier returned, or panicked.
+    Done(std::thread::Result<Verified>),
+    /// The handshake stopped waiting: the thread counts as late until it
+    /// ends.
+    Late,
+}
+
+impl Check {
+    fn state(&self) -> std::sync::MutexGuard<'_, CheckState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run by the verification thread once the verifier returned.
+    fn finish(&self, verified: std::thread::Result<Verified>, late: &AtomicUsize) {
+        let mut state = self.state();
+        if matches!(*state, CheckState::Late) {
+            late.fetch_sub(1, Ordering::AcqRel);
+        } else {
+            *state = CheckState::Done(verified);
+            self.done.notify_one();
+        }
+    }
+
+    /// The verifier's result, or the timeout once `deadline` passed, the
+    /// thread then counted in `late`. A panic of the verifier goes on here.
+    fn wait(&self, deadline: Option<Instant>, late: &AtomicUsize) -> Verified {
+        let mut state = self.state();
+        loop {
+            if matches!(*state, CheckState::Done(_)) {
+                let CheckState::Done(verified) = std::mem::take(&mut *state) else {
+                    unreachable!("matched above")
+                };
+                return verified.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            }
+            state = match deadline {
+                None => self
+                    .done
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        *state = CheckState::Late;
+                        late.fetch_add(1, Ordering::AcqRel);
+                        return Err(verification_timeout());
+                    }
+                    self.done
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+    }
+}
+
+/// Runs `wait`, which blocks: inside `block_in_place` on a multi-thread
+/// runtime, so that its other tasks move to another thread; as it is
+/// otherwise, holding a current-thread runtime until it returns.
+// Block 62, D1.
+fn off_runtime<T>(wait: impl FnOnce() -> T) -> T {
+    let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
+        runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    });
+    if multi_thread {
+        tokio::task::block_in_place(wait)
+    } else {
+        wait()
+    }
+}
+
 impl ServerCertVerifier for OffThread {
     fn verify_server_cert(
         &self,
@@ -549,8 +639,46 @@ impl ServerCertVerifier for OffThread {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        self.inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        let deadline = self.deadline.or_else(deadline);
+        if self.late.load(Ordering::Acquire) >= MAX_LATE
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(verification_timeout());
+        }
+        let check = Arc::new(Check::default());
+        let job = {
+            let check = Arc::clone(&check);
+            let inner = Arc::clone(&self.inner);
+            let late = self.late;
+            let end_entity = end_entity.clone().into_owned();
+            let intermediates: Vec<CertificateDer<'static>> = intermediates
+                .iter()
+                .map(|certificate| certificate.clone().into_owned())
+                .collect();
+            let server_name = server_name.to_owned();
+            let ocsp_response = ocsp_response.to_vec();
+            move || {
+                let verified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inner.verify_server_cert(
+                        &end_entity,
+                        &intermediates,
+                        &server_name,
+                        &ocsp_response,
+                        now,
+                    )
+                }));
+                check.finish(verified, late);
+            }
+        };
+        std::thread::Builder::new()
+            .name("ferrifuge-verify".to_owned())
+            .spawn(job)
+            .map_err(|e| {
+                rustls::Error::General(format!(
+                    "certificate verification could not start a thread: {e}"
+                ))
+            })?;
+        off_runtime(|| check.wait(deadline, self.late))
     }
 
     fn verify_tls12_signature(
@@ -1026,14 +1154,14 @@ pub(in crate::adapter) mod tests {
             let slow = Arc::new(Slow::default());
             let client = slow_client(tls_server().await, &slow);
             let start = Instant::now();
-            let ticker = ticker();
+            let timer = ticker();
 
             client.connect();
             let message = tokio::time::timeout(SLOW_CHECK * 2, first_error(&client))
                 .await
                 .expect("an error event");
             let failed = start.elapsed();
-            let ticked = ticker.await.expect("the ticker") - start;
+            let ticked = timer.await.expect("the ticker") - start;
 
             assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
             assert_eq!(slow.started().len(), 1);
@@ -1050,14 +1178,14 @@ pub(in crate::adapter) mod tests {
         let slow = Arc::new(Slow::default());
         let client = slow_client(tls_server().await, &slow);
         let start = Instant::now();
-        let ticker = ticker();
+        let timer = ticker();
 
         client.connect();
         let message = tokio::time::timeout(SLOW_CHECK * 2, first_error(&client))
             .await
             .expect("an error event");
         let failed = Instant::now();
-        let ticked = ticker.await.expect("the ticker");
+        let ticked = timer.await.expect("the ticker");
         let started = slow.started();
 
         assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
