@@ -2150,6 +2150,7 @@ mod tests {
                 let code = [
                     "#[cfg(test)]\nmod tests",
                     "#[cfg(test)]\n#[cfg(adapter_tokio)]\nmod tests",
+                    "#[cfg(test)]\npub(in crate::adapter) mod tests",
                 ]
                 .iter()
                 .filter_map(|marker| text.find(marker))
