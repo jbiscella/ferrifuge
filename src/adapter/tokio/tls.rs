@@ -520,11 +520,11 @@ pub(in crate::adapter) fn deadline() -> Option<Instant> {
 /// Each check of a server's certificate runs on a new thread, which the
 /// handshake waits for until its deadline: its own, or else the one of the
 /// attempt or the emulation request the calling thread polls; without
-/// either, until the check ends. On a multi-thread runtime it waits inside `block_in_place`, so
-/// that the runtime's other tasks, timers and sockets go on on another
-/// thread. Past the deadline the check fails, and its thread runs on until
-/// the operating system returns; while [`MAX_LATE`] such threads run, a
-/// check fails at once.
+/// either, until the check ends. On a multi-thread runtime it waits inside
+/// `block_in_place`, so that the runtime's other tasks, timers and sockets
+/// go on on another thread. Past the deadline the check fails, and its
+/// thread runs on until the operating system returns; while [`MAX_LATE`]
+/// such threads run, a check fails at once.
 // Block 62, D1.
 #[derive(Clone)]
 pub(in crate::adapter) struct OffThread {
