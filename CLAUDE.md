@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–63 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–64 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -91,6 +91,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 20, out of scope | committing the generated Protobuf code instead of generating it at build time | reviewer, 2026-11-14, delegated by the owner | 56 |
 | Block 24, out of scope | emulator and simulator CI running a client against Centrifugo (design C) | reviewer, 2026-11-14, delegated by the owner | 58 |
 | Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |
+| Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |
 
 ### Test layers
 
@@ -10729,7 +10730,7 @@ Source: the reviewer's review of run 43702627832 (2026-11-15). That run's failur
 - the webpki path (Linux, fips): it does no I/O;
 - a raw `tls_config`'s verifier: the application's;
 - asynchronous verification inside rustls, which rustls 0.23 does not offer.
-- connections that http_stream or sse open after the attempt, for commands: a later block.
+- connections that http_stream or sse open after the attempt, for commands: a later block (reversed by Block 64: the request carrying the command bounds their verification).
 
 This block amends Block 55 D8. It reverses no exclusion.
 
@@ -10823,3 +10824,75 @@ Each of these mutations is seen red once, recorded in the PR:
 **Amendments to earlier blocks.** The before-string appears once.
 - **Block 15, "Decisions"** (63a): the sentence "`next()` is cancel-safe: a cancelled read loses no event." stays as it is. Insert this bullet on the line after it, before "- **No stream, no hold-up.**":
   "- **Cooperative reads.** On the tokio adapter, a stream read gives the runtime a turn once the reading task has spent its tokio budget, taking nothing on that turn, so it stays cancel-safe; events, order and delivery are unchanged (amended by Block 63 D1)."
+
+---
+
+## Block 64 — Certificate verification of a command's connection
+
+**Goal:** on macOS, iOS, Windows and Android, a connection that `http_stream` or sse opens for a command after the attempt waits for the operating system's certificate check at most until the request carrying the command runs out of `Config::timeout`. That restores the bound that `timeout` already documents for the request. The waiting itself follows Block 62: off the runtime's thread, inside `block_in_place` on a multi-thread runtime, under the same cap.
+
+Source: Block 62's out of scope ("connections that http_stream or sse open after the attempt, for commands: a later block"). The tokio adapter sets a handshake deadline in one place only: the driver's `opened` (`src/adapter/driver.rs`, `with_deadline`). Emulation requests are polled outside it, so a connection that one of them starts gets no deadline. Its check then holds the request's own timer, and on a current-thread runtime the runtime too, for as long as the system takes. A resumed TLS session skips the check.
+
+**Dependencies:** Blocks 8 (http_stream, sse, emulation), 13 (commands in emulation requests, closing lets requests finish), 29 (`timeout` and `handshake_timeout`), 55 (Stability, "Fixes"; D3 dependency lines; D8; D9), 60 D3 (no block citations in docs), 61 D5 (typed failures), 62 (D1: the wrapper, the thread-local deadline, `KeepDeadline`, the cap).
+
+**Out of scope:**
+- a separate bound on a command connection's TCP connect, proxy handshake or TLS (`handshake_timeout` or a new setting): the request's `timeout` already bounds all of them;
+- the websocket and WebTransport transports: commands go on the connection the attempt opened;
+- the browser, whose fetch verifies by itself;
+- the webpki path, and a raw `tls_config`'s verifier (Block 62, out of scope);
+- what happens to a transport whose emulation request fails: Block 8, unchanged.
+
+This block reverses Block 62's deferral of command connections. Block 0's "Reversed exclusions" gains the row | Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |, and Block 62's out-of-scope line says so. It amends no decision.
+
+**Decisions** (reviewer, 2026-11-16, delegated by the owner):
+- **D1 The request's deadline.**
+  - Each emulation request of the tokio `http_stream` and sse transports has one deadline: the instant `send` creates it, plus `Config::timeout`.
+  - That instant ends the request's timer (`tokio::time::timeout_at`).
+  - The same instant is the thread's handshake deadline on every poll of the request, wherever it is polled: `recv`, and the drain of `close`. The request's future is wrapped once, when `send` creates it, with Block 62's `with_deadline`.
+  - A connection the request starts takes that deadline through `KeepDeadline` (Block 62 D1), and keeps it on any task. A proxy's TLS on that connection takes it too.
+  - Why not `handshake_timeout`: it is the attempt's, the time allowed for opening a transport, and a command's connection opens none. reqwest's `timeout`, Go's `Client.Timeout` and OkHttp's `callTimeout` all bound connect and TLS inside the request's own time.
+  - No new setting and no public API. The doc comments on the thread-local deadline and on `OffThread` say "of the attempt or the emulation request".
+- **D2 The failure.**
+  - Kind: a request whose `send` fails at or after its deadline fails with `FailureKind::Timeout`, whatever reqwest's error says. The kind follows from the deadline, never from the message (Block 61 D5).
+  - Message: `request_error`'s, that is "emulation request failed: " followed by reqwest's chain. For a check past its deadline, the chain ends in "handshake timeout: certificate verification did not finish".
+  - Consequences: like any failed emulation request, it ends the transport, and the client reconnects with connecting code 1 "transport closed". A call the request carries fails with code 1 "timeout" or code 11 "connection closed", whichever the driver sees first. These are the codes of a request that runs out of `timeout` today. No code changes.
+- **D3 Documentation.**
+  - The README's "TLS verification" changes its sentence on later connections to "A connection that http_stream or sse opens later, for a command, is checked the same way, at most until that command's request runs out of `Config::timeout`: a check still running then fails the request with the same error, the transport closes, and the client reconnects."
+  - `Config::handshake_timeout`'s documentation gains "A connection that `http_stream` or sse opens later, for a command, waits for its check at most until the request carrying the command runs out of [`timeout`](Config::timeout)."
+- **D4 Version.**
+  - The next pre-release, 1.0.0-alpha.3, with a "Fixed" entry: the request's documented `timeout` now holds (Block 55, Stability, "Fixes"; Block 62 D3).
+  - The README's dependency lines name 1.0.0-alpha.3 (Block 55 D3).
+  - Tagging and releasing are the owner's (Block 55 D9).
+
+`VERIFY:`
+- that hyper-util's legacy client calls the connector, and so `KeepDeadline`, inside the poll of reqwest's request future;
+- that rustls 0.23 skips `verify_server_cert` on a resumed session, TLS 1.2 and 1.3;
+- that `tokio::time::timeout_at` polls the request before its timer.
+
+**Sub-increments:**
+- the spec PR: this text, the Block 62 and Block 0 amendments and line 3;
+- **64a:** D1–D4, one pull request, red first.
+
+Value clause: As an app developer whose client falls back to http_stream or sse on a network that blocks revocation servers, I want a command's new connection to wait for certificate verification no longer than the command's timeout, so that a slow check cannot hold my calls and my runtime past the time I configured.
+
+**Structural acceptance (64a):**
+- Set-up, in `src/adapter/tokio/http.rs`:
+  - Block 62's stub verifier (2 s) through `Trust::OffThread`;
+  - the stream served plain by `serve_once`, and the emulation endpoint on the local TLS server (`tls_server`), so the command's connection is the first TLS connection and cannot resume.
+- On a current-thread runtime, with `timeout` 1 s:
+  - after one `send`, `recv` returns `Inbound::Closed` whose reason contains D2's text, within 1.5 s of the send;
+  - another task's 100 ms timer, started at the send, fires within 1.5 s;
+  - the stub started once.
+- The failed request's result, taken from the transport's request set, has kind `FailureKind::Timeout`.
+- With `timeout` 3 s, the request's failure does not contain D2's text and comes at least 2 s after the send: the check was waited for.
+
+Each of these mutations is seen red once, recorded in the PR:
+- the request polled without its deadline;
+- the deadline without `timeout` (the send instant);
+- the kind left as reqwest's.
+
+**Exceptions introduced:** no scenario. The operating system's timing cannot be staged against a server, so the stub verifier stands in for it (Block 62).
+
+**Amendments to earlier blocks.** Each before-string appears once.
+- **Block 62, "Out of scope"** (spec PR): "- connections that http_stream or sse open after the attempt, for commands: a later block." becomes "- connections that http_stream or sse open after the attempt, for commands: a later block (reversed by Block 64: the request carrying the command bounds their verification)."
+- **Block 0, "Reversed exclusions"** (spec PR): the row "| Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |" followed by an empty line and "### Test layers" gains, between them, the row "| Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |". The Block 53 row alone also appears at line 10494 and line 10698, so the anchor is that row followed by "\n\n### Test layers".
