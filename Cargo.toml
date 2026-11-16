@@ -51,6 +51,7 @@ tokio = [
     "dep:hyper-util",
     "dep:hyper-rustls",
     "dep:tower-service",
+    "dep:tower-layer",
     "dep:http",
     "dep:base64",
     "dep:percent-encoding",
@@ -156,6 +157,10 @@ rustls-platform-verifier = { version = "0.7.1", optional = true }
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-legacy", "client-proxy", "client-proxy-system", "tokio"], optional = true }
 hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "tls12"], optional = true }
 tower-service = { version = "0.3.3", optional = true }
+# The connector layer that keeps an attempt's handshake deadline on a
+# connection reqwest's pool finishes on a task of its own (Block 62, D1);
+# at reqwest's version, already locked.
+tower-layer = { version = "0.3.3", optional = true }
 http = { version = "1.5.0", optional = true }
 base64 = { version = "0.23.1", optional = true }
 percent-encoding = { version = "2.3.2", optional = true }

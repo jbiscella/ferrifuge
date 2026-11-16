@@ -4,6 +4,7 @@
 
 use super::super::body::{FailureKind, TransportFailure};
 use std::cell::Cell;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
@@ -436,11 +437,66 @@ pub(in crate::adapter) fn with_deadline<T>(
     poll()
 }
 
+/// A layer of the HTTP client's connector: each connection takes the
+/// handshake deadline of the thread that starts it, and has it set on every
+/// poll, on whichever task polls it. hyper finishes a connection that an
+/// idle one beat on a task of its own.
+// Block 62, D1; hyper-util 0.1.21 client/legacy/client.rs:427-447.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::adapter) struct KeepDeadline;
+
+impl<S> tower_layer::Layer<S> for KeepDeadline {
+    type Service = KeptDeadline<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        KeptDeadline(inner)
+    }
+}
+
+/// The connector under [`KeepDeadline`].
+#[derive(Clone, Debug)]
+pub(in crate::adapter) struct KeptDeadline<S>(S);
+
+impl<S: tower_service::Service<R>, R> tower_service::Service<R> for KeptDeadline<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = WithDeadline<S::Future>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        let deadline = deadline();
+        WithDeadline {
+            inner: Box::pin(with_deadline(deadline, || self.0.call(request))),
+            deadline,
+        }
+    }
+}
+
+/// A future polled with `deadline` as its thread's handshake deadline.
+pub(in crate::adapter) struct WithDeadline<F> {
+    inner: std::pin::Pin<Box<F>>,
+    deadline: Option<Instant>,
+}
+
+impl<F: Future> Future for WithDeadline<F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let deadline = self.deadline;
+        with_deadline(deadline, || self.inner.as_mut().poll(cx))
+    }
+}
+
 /// The handshake deadline of the attempt this thread polls, if any.
-#[cfg_attr(
-    not(feature = "unstable-webtransport"),
-    allow(dead_code, reason = "read by the WebTransport transport")
-)]
 pub(in crate::adapter) fn deadline() -> Option<Instant> {
     DEADLINE.get()
 }

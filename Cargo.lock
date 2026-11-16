@@ -1300,6 +1300,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
+ "tower-layer",
  "tower-service",
  "tracing",
  "tracing-subscriber",
