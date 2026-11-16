@@ -10758,7 +10758,7 @@ Value clause: As an app developer on a fleet whose networks block revocation ser
 - Each test uses a stub verifier sleeping 2 s and `handshake_timeout` 1 s:
   - on a current-thread runtime, the attempt fails with D1's message within 1.5 s, and another task's 100 ms timer fires within 1.5 s too, bounded by the deadline;
   - with `unstable-webtransport`, a WebTransport attempt against the local QUIC test server fails with D1's message within 1.5 s;
-  - on a multi-thread runtime with two workers, another task's 100 ms timer fires during the verification;
+  - on a multi-thread runtime with two workers, another task's timer, armed before the connect and firing every 25 ms, fires at least once between the verification's start and the attempt's failure;
   - a ninth verification past its deadline fails at once.
   - a connection started under a deadline and polled on another task verifies against that deadline.
 - The verifier-kind unit test reports the wrapper on macOS, iOS, Windows and Android.
