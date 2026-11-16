@@ -503,8 +503,10 @@ impl OffThread {
 }
 
 impl std::fmt::Debug for OffThread {
+    // Its name only: the verifier it wraps may print its extra roots
+    // (Block 22, D5).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("OffThread").field(&self.inner).finish()
+        f.debug_struct("OffThread").finish_non_exhaustive()
     }
 }
 
@@ -1243,7 +1245,7 @@ pub(in crate::adapter) mod tests {
             "webpki"
         };
         let settings = Tls::default().settings_kept().expect("TLS settings").0;
-        let wrapped = format!("{:?}", settings.config).contains("OffThread(");
+        let wrapped = format!("{:?}", settings.config).contains("OffThread {");
 
         println!("verifier: {VERIFIER}, off the runtime's thread: {wrapped}");
         assert_eq!(VERIFIER, expected);

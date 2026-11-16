@@ -948,6 +948,11 @@ const INVENTORY: &[(&str, &str, Covered)] = &[
         Covered::NoSecret("prints its name only"),
     ),
     (
+        "src/adapter/tokio/tls.rs",
+        "OffThread",
+        Covered::NoSecret("prints its name only"),
+    ),
+    (
         "src/call.rs",
         "JsonCallError",
         Covered::NoSecret("prints the decode error and the result data by its length only"),
