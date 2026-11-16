@@ -59,6 +59,9 @@ pub struct Config {
     /// saying "handshake timeout: certificate verification did not finish".
     /// On a current-thread runtime, waiting for the check holds the
     /// runtime's thread until the check returns or the timeout runs out.
+    /// A connection that `http_stream` or sse opens later, for a command,
+    /// waits for its check at most until the request carrying the command
+    /// runs out of [`timeout`](Config::timeout).
     ///
     /// More than 0, or building the client fails.
     // Block 53.
