@@ -50,7 +50,7 @@ pub(crate) enum Trust {
     Raw(Arc<ClientConfig>),
     /// A stub of the operating system's verifier, wrapped as the
     /// platform's is: the tests' way to that path on every platform.
-    #[cfg(all(test, feature = "unstable-webtransport"))]
+    #[cfg(test)]
     OffThread(Arc<dyn ServerCertVerifier>),
 }
 
@@ -62,7 +62,7 @@ impl std::fmt::Debug for Trust {
             Self::Platform => f.write_str("Platform"),
             Self::ExtraRoots(roots) => write!(f, "ExtraRoots(<{}>)", roots.len()),
             Self::Raw(_) => f.write_str("Raw(..)"),
-            #[cfg(all(test, feature = "unstable-webtransport"))]
+            #[cfg(test)]
             Self::OffThread(_) => f.write_str("OffThread(..)"),
         }
     }
@@ -142,7 +142,7 @@ impl Tls {
             Trust::Raw(raw) => self
                 .config
                 .get(|| Ok((Settings::plain(http1_only(raw)), true))),
-            #[cfg(all(test, feature = "unstable-webtransport"))]
+            #[cfg(test)]
             Trust::OffThread(stub) => self.config.get(|| {
                 off_thread_settings(Arc::clone(stub), Arc::new(crypto_provider()))
                     .map(|settings| (settings, true))
@@ -1082,8 +1082,8 @@ pub(in crate::adapter) mod tests {
     }
 
     /// A TLS server on 127.0.0.1 presenting a private chain, handshaking
-    /// with each connection and nothing more: the `wss://` endpoint of it.
-    async fn tls_server() -> String {
+    /// with each connection and nothing more: its port.
+    pub(in crate::adapter) async fn tls_server() -> u16 {
         let (_, chain, key) = private_chain();
         let config = ServerConfig::builder_with_provider(Arc::new(crypto_provider()))
             .with_safe_default_protocol_versions()
@@ -1104,6 +1104,10 @@ pub(in crate::adapter) mod tests {
                 });
             }
         });
+        port
+    }
+
+    fn wss(port: u16) -> String {
         format!("wss://127.0.0.1:{port}/connection/websocket")
     }
 
@@ -1154,7 +1158,7 @@ pub(in crate::adapter) mod tests {
             .expect("a runtime");
         runtime.block_on(async {
             let slow = Arc::new(Slow::default());
-            let client = slow_client(tls_server().await, &slow);
+            let client = slow_client(wss(tls_server().await), &slow);
             let start = Instant::now();
             let timer = ticker();
 
@@ -1178,7 +1182,7 @@ pub(in crate::adapter) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_verification_leaves_a_multi_thread_runtime_running() {
         let slow = Arc::new(Slow::default());
-        let client = slow_client(tls_server().await, &slow);
+        let client = slow_client(wss(tls_server().await), &slow);
         let start = Instant::now();
         let timer = ticker();
 
