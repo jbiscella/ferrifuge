@@ -1003,7 +1003,7 @@ pub(in crate::adapter) mod tests {
 
     /// How long the slow stub's check takes, and the handshake timeout of
     /// the clients using it (Block 62, structural acceptance).
-    const SLOW_CHECK: Duration = Duration::from_secs(2);
+    pub(in crate::adapter) const SLOW_CHECK: Duration = Duration::from_secs(2);
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
     /// The bound of a failed attempt, and of another task's timer.
     const BOUND: Duration = Duration::from_millis(1500);

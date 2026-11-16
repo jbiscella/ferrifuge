@@ -1638,4 +1638,124 @@ mod tests {
             assert_eq!(message, expected, "{name}");
         }
     }
+
+    /// The set-up of Block 64's tests: an http_stream transport whose
+    /// stream is served plain and whose emulation endpoint is the local TLS
+    /// server, verified through the slow stub of the operating system's
+    /// verifier, with requests allowed `timeout`. A command's connection is
+    /// then the first TLS connection of its settings, so it cannot resume.
+    async fn slow_command_connection(
+        timeout: Duration,
+    ) -> (HttpTransport, Arc<super::super::tls::tests::Slow>) {
+        use super::super::net::Network;
+        use super::super::proxy::Proxy;
+        use super::super::tls::tests::{Slow, tls_server};
+        use super::super::tls::{Tls, Trust};
+
+        let stream = serve_once(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+            "/connection/http_stream",
+            Duration::ZERO,
+        )
+        .await;
+        let emulation = format!("https://127.0.0.1:{}/emulation", tls_server().await);
+        let slow = Arc::new(Slow::default());
+        let network = Network::new(
+            Tls::new(Trust::OffThread(Arc::clone(&slow) as _)),
+            Proxy::none(),
+        );
+        let transport = HttpTransport::open(
+            TransportKind::HttpStream,
+            &stream,
+            b"{}".to_vec(),
+            Some(&emulation),
+            timeout,
+            HeaderSet::default(),
+            &network,
+            false,
+            LIMIT,
+        )
+        .await
+        .expect("an open stream");
+        (transport, slow)
+    }
+
+    /// The bound of Block 64's failed request, and of another task's timer.
+    const COMMAND_BOUND: Duration = Duration::from_millis(1500);
+
+    /// On a current-thread runtime, a slow check of a command's new
+    /// connection holds the runtime until the request's timeout only: the
+    /// transport ends with the verification's timeout, and another task's
+    /// timer fires within the same bound (Block 64, D1 and D2).
+    #[tokio::test]
+    async fn a_slow_check_of_a_commands_connection_ends_at_the_requests_timeout() {
+        use super::super::tls::VERIFICATION_TIMEOUT;
+        use std::time::Instant;
+
+        let (mut transport, slow) = slow_command_connection(Duration::from_secs(1)).await;
+        let start = Instant::now();
+        let timer = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Instant::now()
+        });
+
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
+        let ended = start.elapsed();
+        let ticked = timer.await.expect("the timer") - start;
+
+        assert!(
+            matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if reason.contains(VERIFICATION_TIMEOUT)),
+            "{inbound:?} after {ended:?}"
+        );
+        assert!(ended < COMMAND_BOUND, "{ended:?}");
+        assert!(ticked < COMMAND_BOUND, "{ticked:?}");
+        assert_eq!(slow.started().len(), 1);
+    }
+
+    /// The request a check outlasted fails as a timeout, whatever reqwest's
+    /// error says (Block 64, D2; Block 61, D5).
+    #[tokio::test]
+    async fn a_command_request_past_its_deadline_fails_as_a_timeout() {
+        use super::super::tls::VERIFICATION_TIMEOUT;
+
+        let (mut transport, _slow) = slow_command_connection(Duration::from_secs(1)).await;
+
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
+        let (_, result) = tokio::time::timeout(TIMEOUT, transport.requests.next())
+            .await
+            .expect("the request ends")
+            .expect("a request in flight");
+
+        let failure = result.err().expect("a failed request");
+        assert!(
+            failure.message.contains(VERIFICATION_TIMEOUT),
+            "{failure:?}"
+        );
+        assert_eq!(failure.kind, FailureKind::Timeout, "{failure:?}");
+    }
+
+    /// A request allowed longer than the check waits for it: its failure,
+    /// the TLS server's closing, comes after the check, without the
+    /// verification's timeout (Block 64, D1).
+    #[tokio::test]
+    async fn a_command_request_allowed_longer_than_the_check_waits_for_it() {
+        use super::super::tls::VERIFICATION_TIMEOUT;
+        use super::super::tls::tests::SLOW_CHECK;
+        use std::time::Instant;
+
+        let (mut transport, slow) = slow_command_connection(Duration::from_secs(3)).await;
+        let start = Instant::now();
+
+        transport.send(FrameId::for_tests(1), b"{}".to_vec());
+        let inbound = tokio::time::timeout(TIMEOUT, transport.recv(true)).await;
+        let ended = start.elapsed();
+
+        assert!(
+            matches!(&inbound, Ok(Inbound::Closed { reason, .. }) if !reason.contains(VERIFICATION_TIMEOUT)),
+            "{inbound:?} after {ended:?}"
+        );
+        assert!(ended >= SLOW_CHECK, "{ended:?}");
+        assert_eq!(slow.started().len(), 1);
+    }
 }
