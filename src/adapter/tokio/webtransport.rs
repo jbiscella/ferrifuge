@@ -1188,7 +1188,10 @@ mod tests {
         .expect("the attempt ends");
         let failed = start.elapsed();
 
-        let message = opened.err().map(|error| error.message).unwrap_or_default();
+        let message = opened.err().map_or_else(
+            || format!("the attempt opened after {failed:?}"),
+            |error| error.message,
+        );
         assert!(message.contains(VERIFICATION_TIMEOUT), "{message}");
         assert_eq!(slow.started().len(), 1);
         assert!(failed < Duration::from_millis(1500), "{failed:?}");
