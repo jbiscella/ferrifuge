@@ -175,7 +175,7 @@ Add it to `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrifuge = "1.0.0-alpha.1"
+ferrifuge = "1.0.0-alpha.2"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -1397,7 +1397,7 @@ let config = Config::default()
 a build without ring turns default features off:
 
 ```toml
-ferrifuge = { version = "1.0.0-alpha.1", default-features = false, features = ["tokio", "fips"] }
+ferrifuge = { version = "1.0.0-alpha.2", default-features = false, features = ["tokio", "fips"] }
 ```
 
 When several providers are enabled, the strongest one is used: `fips`, then
@@ -1472,7 +1472,7 @@ results the client yields, to test the code that handles them:
 
 ```toml
 [dev-dependencies]
-ferrifuge = { version = "1.0.0-alpha.1", features = ["test-util"] }
+ferrifuge = { version = "1.0.0-alpha.2", features = ["test-util"] }
 ```
 
 ```rust
@@ -1560,16 +1560,26 @@ share one `tls_config` instead. `ferrifuge::rustls` re-exports the rustls
 version Ferrifuge uses: moving to another rustls 0.x line is a breaking
 release of Ferrifuge. No setting accepts invalid certificates.
 
-**Verification can block.** On macOS, iOS, Windows and Android the operating
-system's verifier runs inside the TLS handshake and returns only once the
-system has decided, which can include fetching intermediate certificates or
-revocation data over the network (on Windows, up to 10 s per fetch). Until
-it returns, the client waits on its runtime's thread and its timers,
-`handshake_timeout` included, do not fire. On a current-thread runtime
-nothing else on that runtime runs meanwhile; on a multi-thread runtime its
-timers and sockets can wait too. reqwest and hyper-rustls with the same
-verifier behave the same. Give the client a runtime of its own with
-`ClientBuilder::runtime` where that matters.
+**Verification can take time.** On macOS, iOS, Windows and Android the
+operating system's verifier decides on the server's certificate, which can
+include fetching intermediate certificates or revocation data over the
+network (on Windows, up to 10 s per fetch). rustls calls the verifier
+synchronously inside the TLS handshake and cannot resume a handshake once it
+has failed, so Ferrifuge runs the verifier on a thread of its own and waits
+for it at most until the attempt's `handshake_timeout` runs out. A check
+still running then fails the attempt with an error saying "handshake
+timeout: certificate verification did not finish", and the next transport is
+tried. The check's thread runs on until the system returns; while eight or
+more such threads run in the process, a new check fails at once with the
+same error. On a multi-thread runtime the client waits inside
+`tokio::task::block_in_place`, so the runtime's other tasks, timers and
+sockets go on. On a current-thread runtime nothing else on that runtime runs
+until the check returns or the timeout runs out, so use a multi-thread
+runtime, or give the client one of its own with `ClientBuilder::runtime`. A
+connection that http_stream or sse opens later, for a command, waits for its
+check without that bound, unless its TLS session is resumed. On Linux and
+other Unix systems, and in the `fips` build, webpki verifies without network
+requests. A `tls_config` verifier is called as given, inside the handshake.
 
 ### Proxies
 

@@ -1,6 +1,6 @@
 [package]
 name = "ferrifuge"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Centrifugo client SDK for Rust"

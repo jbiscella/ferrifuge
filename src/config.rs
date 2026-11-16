@@ -54,8 +54,11 @@ pub struct Config {
     /// takes longer fails the attempt with "handshake timeout", and the
     /// next transport is tried. Default 5 s.
     ///
-    /// The operating system's certificate verification is not interrupted:
-    /// the timeout is checked once it returns.
+    /// It also bounds the operating system's certificate verification: a
+    /// check still running when it runs out fails the attempt with an error
+    /// saying "handshake timeout: certificate verification did not finish".
+    /// On a current-thread runtime, waiting for the check holds the
+    /// runtime's thread until the check returns or the timeout runs out.
     ///
     /// More than 0, or building the client fails.
     // Block 53.
