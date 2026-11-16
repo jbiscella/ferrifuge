@@ -684,6 +684,10 @@ impl Client {
     /// bytes. For an RPC that returns no data, use [`Client::rpc`]: empty
     /// data is not JSON.
     ///
+    /// Large integers: `data` is encoded as [`Client::publish_json`]
+    /// describes, and the result decoded as
+    /// [`Publication::json`](crate::Publication::json) describes.
+    ///
     /// ```no_run
     /// # async fn run(client: ferrifuge::Client) -> Result<(), ferrifuge::JsonCallError> {
     /// #[derive(serde::Serialize)]
@@ -756,6 +760,11 @@ impl Client {
     /// [`Client::publish`] does; `data` is encoded when this returns, so
     /// the future borrows nothing. Under the Protobuf protocol the data are
     /// the JSON bytes, which a JSON client receives unchanged.
+    ///
+    /// A JavaScript reader, such as centrifuge-js without its `bigIntegers`
+    /// option, rounds a JSON number past 2^53, so an integer that may grow
+    /// past it, such as a 64-bit id, is best sent as a JSON string, for
+    /// example with `serde_with`'s `DisplayFromStr`.
     ///
     /// ```no_run
     /// # async fn run(client: ferrifuge::Client) -> Result<(), ferrifuge::JsonCallError> {
@@ -832,6 +841,9 @@ impl Client {
     /// Sets `key` of the map channel `channel` to `data` encoded as JSON,
     /// as [`Client::map_publish`] does; `data` is encoded when this
     /// returns, so the future borrows nothing.
+    ///
+    /// Large integers are encoded as
+    /// [`Client::publish_json`](crate::Client::publish_json) describes.
     ///
     /// Unstable: requires the `unstable` feature, follows centrifuge-js
     /// 63ed73e and Centrifugo's experimental map subscriptions (v6.8.0 and

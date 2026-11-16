@@ -292,6 +292,11 @@ impl Publication {
     /// borrow from the data, e.g. a `&str` or a
     /// [`RawValue`](serde_json::value::RawValue).
     ///
+    /// Integers decode exactly into Rust integer types up to `i128` and
+    /// `u128`; a `serde_json::Value` holds them exactly only within 64 bits,
+    /// unless the application enables `serde_json`'s `arbitrary_precision`
+    /// feature.
+    ///
     /// ```
     /// # use ferrifuge::Publication;
     /// #[derive(serde::Deserialize)]

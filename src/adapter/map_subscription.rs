@@ -205,6 +205,9 @@ impl MapSubscription {
     /// Sets `key` of the map to `data` encoded as JSON, as
     /// [`MapSubscription::publish`] does.
     ///
+    /// Large integers are encoded as
+    /// [`Client::publish_json`](crate::Client::publish_json) describes.
+    ///
     /// # Errors
     ///
     /// [`JsonCallError::Encode`] when `data` does not encode, and nothing is
