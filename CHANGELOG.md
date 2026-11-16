@@ -14,6 +14,22 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] - 2026-11-16
+
+### Fixed
+
+- On macOS, iOS, Windows and Android the operating system's certificate
+  verifier runs on a thread of its own, and the TLS handshake waits for it
+  at most until `Config::handshake_timeout` runs out: a check still running
+  then fails the attempt with "handshake timeout: certificate verification
+  did not finish" (Block 62, D1). On a multi-thread runtime the wait no
+  longer holds the runtime's other tasks, timers and sockets; a
+  current-thread runtime is held until the check returns or the timeout
+  runs out. While eight or more checks run past their timeout, a new one
+  fails at once. Before, the handshake waited on the runtime's thread for
+  as long as the system took, and `handshake_timeout` was checked only
+  once it returned.
+
 ## [1.0.0-alpha.1] - 2026-11-15
 
 Changes since 0.21.0, the last version on crates.io, are this section's
