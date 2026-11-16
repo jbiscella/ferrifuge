@@ -356,6 +356,55 @@ mod tests {
 
     use super::*;
 
+    /// A connection hyper starts in the attempt's poll keeps the attempt's
+    /// handshake deadline when it is polled on another task, as hyper does
+    /// with a connection an idle one beat: a slow verification fails it at
+    /// that deadline (Block 62, D1).
+    #[tokio::test]
+    async fn a_connection_started_under_a_deadline_and_polled_on_another_task_verifies_against_that_deadline()
+     {
+        use super::super::tls::tests::{Slow, tls_server};
+        use super::super::tls::{Trust, VERIFICATION_TIMEOUT, with_deadline};
+        use std::future::Future;
+        use std::time::{Duration, Instant};
+        let slow = Arc::new(Slow::default());
+        let network = Network::new(
+            Tls::new(Trust::OffThread(Arc::clone(&slow) as _)),
+            Proxy::none(),
+        );
+        let http = network.http_client(true).expect("an HTTP client");
+        let port = tls_server().await;
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        let mut request = Box::pin(http.get(format!("https://127.0.0.1:{port}/")).send());
+
+        let first = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(with_deadline(Some(deadline), || request.as_mut().poll(cx)))
+        })
+        .await;
+        assert!(first.is_pending(), "the connection did not start");
+        let sent = tokio::time::timeout(Duration::from_secs(4), tokio::spawn(request))
+            .await
+            .expect("the request ends")
+            .expect("the request's task");
+        let failed = start.elapsed();
+
+        let mut causes = Vec::new();
+        let mut cause = sent.as_ref().err().map(|e| e as &dyn std::error::Error);
+        while let Some(error) = cause {
+            causes.push(error.to_string());
+            cause = error.source();
+        }
+        assert!(
+            causes
+                .iter()
+                .any(|cause| cause.contains(VERIFICATION_TIMEOUT)),
+            "{causes:?} after {failed:?}"
+        );
+        assert_eq!(slow.started().len(), 1);
+        assert!(failed < Duration::from_millis(1500), "{failed:?}");
+    }
+
     /// A client's own HTTP client holds only the decisions, which hold no
     /// HTTP client: dropping the network frees both (Codex, #115).
     #[test]
