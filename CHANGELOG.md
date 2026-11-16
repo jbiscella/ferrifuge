@@ -29,6 +29,14 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
   fails at once. Before, the handshake waited on the runtime's thread for
   as long as the system took, and `handshake_timeout` was checked only
   once it returned.
+- On macOS, iOS, Windows and Android a connection that http_stream or sse
+  opens later, for a command, waits for the certificate check at most until
+  the request carrying the command runs out of `Config::timeout`: a check
+  still running then fails the request with "handshake timeout: certificate
+  verification did not finish", the transport closes, and the client
+  reconnects (Block 64, D1, D2). Before, the check held the request, and on
+  a current-thread runtime the runtime, for as long as the system took,
+  past the request's documented `timeout`.
 
 ## [1.0.0-alpha.1] - 2026-11-15
 
