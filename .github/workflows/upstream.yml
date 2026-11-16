@@ -67,21 +67,34 @@ jobs:
           rs_branch=$(gh api "repos/$RS_REPO" --jq .default_branch)
           rs_head=$(gh api "repos/$RS_REPO/commits/$rs_branch" --jq .sha)
           rs_release=$(gh api "repos/$RS_REPO/releases/latest" --jq .tag_name 2>/dev/null || echo none)
-          # shellcheck disable=SC2016 # a jq program, not shell
-          rs_docs=$(gh api "repos/$RS_REPO/compare/$RS_PIN...$rs_head" \
-            --jq '[.files[]? | select(.filename == "docs/spec.md" or .filename == "docs/api.md" or .filename == "README.md" or .filename == "CHANGELOG.md") | "  - `\(.filename)` (+\(.additions) -\(.deletions))"] | join("\n")')
+          # Each allowed document is compared by its blob hash at the pin and
+          # at the head, so the compare API's 300-file limit cannot hide one,
+          # and the issue key changes only when an allowed document does.
+          rs_docs=""
+          rs_key=""
+          for doc in docs/spec.md docs/api.md README.md CHANGELOG.md; do
+            before=$(gh api "repos/$RS_REPO/contents/$doc?ref=$RS_PIN" --jq .sha 2>/dev/null || echo absent)
+            after=$(gh api "repos/$RS_REPO/contents/$doc?ref=$rs_head" --jq .sha 2>/dev/null || echo absent)
+            rs_key="$rs_key$after"
+            if [ "$before" != "$after" ]; then
+              rs_docs="$rs_docs  - \`$doc\`: https://github.com/$RS_REPO/commits/$rs_branch/$doc"$'\n'
+            fi
+          done
+          rs_key=$(printf '%s' "$rs_key" | sha256sum | cut -c1-7)
           if [ -n "$rs_docs" ]; then
             changed=yes
             {
               echo "## centrifuge-rust (allowed documents only)"
               echo
               echo "- Pinned: \`${RS_PIN:0:7}\`. Now: \`${rs_head:0:7}\` on \`$rs_branch\`. Latest release: \`$rs_release\`."
-              echo "- Changed documents:"
-              echo "$rs_docs"
+              echo "- Changed documents, with their history:"
+              printf '%s' "$rs_docs"
               echo
               echo "Clean room: read only these four documents, never \`crates/\`, \`Replay.tla\` or \`xtask\`."
               echo
             } >> "$body"
+          else
+            rs_key=pinned
           fi
 
           if [ "$changed" = no ]; then
@@ -89,10 +102,12 @@ jobs:
             exit 0
           fi
 
-          title="Upstream moved: centrifuge-js ${js_head:0:7}, centrifuge-rust ${rs_head:0:7}"
+          js_key=${js_head:0:7}
+          [ "$js_head" = "$JS_PIN" ] && js_key=pinned
+          title="Upstream moved: centrifuge-js $js_key, centrifuge-rust documents $rs_key"
           existing=$(gh issue list --repo "$REPO" --state all --search "in:title \"$title\"" --json title --jq ".[] | select(.title == \"$title\") | .title")
           if [ -n "$existing" ]; then
-            echo "An issue already covers these heads: $title"
+            echo "An issue already covers these changes: $title"
             exit 0
           fi
           {
