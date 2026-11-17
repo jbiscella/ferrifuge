@@ -34,4 +34,15 @@ exclude_re = [
     'src/fossil\.rs:.* (replace|in) (write|len|number)\b',
     '^src/[^:]+:.* (replace|in) Machine::(with_seed|set_last_command_id|call_registries|codec_protocol|running_settings|timer_setting|subscription_timer_setting|call_timer_setting)\b',
     '^src/[^:]+:.* (replace|in) Calls::registries\b',
+    # Block 65 (D1, D4): equivalent and formatting mutants, each matched by
+    # file, function and change, any line.
+    # Equivalent: `value << 6` has its low 6 bits zero and a digit is below
+    # 64, so `|` and `^` give the same value.
+    "^src/fossil\\.rs:[0-9]+:[0-9]+: replace \\| with \\^ in Reader<'_>::number$",
+    # Formatting: a redacting `Debug` that prints nothing leaks nothing,
+    # and no behaviour reads it; leaks stay the redaction test's (Block 60
+    # D2).
+    '^src/call\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for RpcResult>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
+    '^src/map\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (MapEntry|MapUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
+    '^src/shared_poll\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (SharedPollSignature|SharedPollUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
 ]
