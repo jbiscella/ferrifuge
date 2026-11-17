@@ -1780,4 +1780,94 @@ mod tests {
     fn an_empty_frame_holds_no_reply() {
         assert_eq!(decode(&[]).unwrap(), []);
     }
+
+    #[test]
+    fn each_reply_of_a_frame_is_sized_with_its_length_prefix() {
+        let replies = [
+            pb::Reply::default(),
+            pb::Reply {
+                id: 1,
+                connect: Some(pb::ConnectResult {
+                    client: "c1".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+        let lengths: Vec<usize> = replies
+            .iter()
+            .map(|reply| reply.encode_length_delimited_to_vec().len())
+            .collect();
+
+        let sizes: Vec<usize> = decode_sized(&frame_of(&replies))
+            .unwrap()
+            .into_iter()
+            .map(|(_, size)| size)
+            .collect();
+
+        assert_eq!(sizes, lengths);
+    }
+
+    #[test]
+    fn a_command_with_a_two_byte_length_prefix_splits_whole() {
+        let commands = [
+            Command {
+                id: 2,
+                method: Method::Unsubscribe(UnsubscribeRequest {
+                    channel: "c".repeat(200),
+                }),
+            },
+            Command {
+                id: 3,
+                method: Method::Unsubscribe(UnsubscribeRequest {
+                    channel: "news".into(),
+                }),
+            },
+        ];
+        let frame = encode(&commands);
+
+        let split = split_commands(&frame);
+
+        assert_eq!(split, [encode(&commands[..1]), encode(&commands[1..])]);
+    }
+
+    #[test]
+    fn encodes_the_headers_of_a_connect_command() {
+        let frame = encode(&[Command {
+            id: 1,
+            method: Method::Connect(ConnectRequest {
+                headers: [("Authorization".to_owned(), "Bearer t".to_owned())].into(),
+                ..ConnectRequest::default()
+            }),
+        }]);
+
+        let sent = pb::Command::decode_length_delimited(frame.as_slice()).unwrap();
+
+        assert_eq!(
+            sent.connect.unwrap().headers,
+            [("Authorization".to_owned(), "Bearer t".to_owned())].into()
+        );
+    }
+
+    #[test]
+    fn a_subscribe_with_delta_asks_for_fossil() {
+        let delta_of = |delta: bool| {
+            let frame = encode(&[Command {
+                id: 2,
+                method: Method::Subscribe(SubscribeRequest {
+                    channel: "news".into(),
+                    delta,
+                    ..SubscribeRequest::default()
+                }),
+            }]);
+            pb::Command::decode_length_delimited(frame.as_slice())
+                .unwrap()
+                .subscribe
+                .unwrap()
+                .delta
+        };
+
+        assert_eq!(delta_of(true), "fossil");
+        assert_eq!(delta_of(false), "");
+    }
 }
