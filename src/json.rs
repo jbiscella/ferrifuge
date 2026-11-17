@@ -17,15 +17,14 @@ use crate::wire::{
 };
 use crate::{ClientInfo, Publication};
 
-/// A frame that is not valid JSON client protocol.
+/// A frame that is not valid JSON client protocol. The core drops it
+/// (`Codec::decode_sized`), so only tests show it, through `Debug`.
 #[derive(Debug)]
-pub(crate) struct DecodeError(serde_json::Error);
-
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "malformed JSON frame: {}", self.0)
-    }
-}
+pub(crate) struct DecodeError(
+    // `allow`, not `expect`: a build without an adapter allows dead code
+    // crate-wide.
+    #[allow(dead_code, reason = "read only through `Debug`")] serde_json::Error,
+);
 
 /// Encodes commands into one frame.
 pub(crate) fn encode(commands: &[Command]) -> Vec<u8> {
