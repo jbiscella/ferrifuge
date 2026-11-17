@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–65 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–66 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -447,7 +447,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 **Out of scope:** client certificates; custom root certificates (reversed by the owner decision of 2026-11-06: Block 22); HTTPS, which uses the same configuration once Block 8 adds it.
 
-**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). aws-lc-rs is not pinned (owner decision, Block 6 implementation): from 1.18 its `fips` feature builds AWS-LC-FIPS 4.x, submitted to NIST but not yet certified, while 1.17.x ships the FIPS 140-3 validated 3.x module (CMVP certificates #5314 static, #5298 dynamic), but pinning `<1.18` forces rustls `<= 0.23.43` and rustls-webpki `< 0.103.16` on every build (rustls 0.23.44+ and rustls-webpki 0.103.16 require aws-lc-rs 1.18), and those carry RUSTSEC-2026-0285 and RUSTSEC-2026-0346, fixed in rustls 0.23.45 and 0.23.46 only; a FIPS build therefore uses the 4.x module, and the README states that its certification is pending; revisit when 4.x is certified (the module check below then needs no change) or if rustls supports aws-lc-rs 1.17 again. The supported operating environments are those of the module's security policy. Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
+**Decisions:** cargo features `ring` (in `default`), `aws-lc-rs`, and `fips` (implies `aws-lc-rs`). aws-lc-rs is not pinned (owner decision, Block 6 implementation): from 1.18 its `fips` feature builds AWS-LC-FIPS 4.x, submitted to NIST but not yet certified, while 1.17.x ships the FIPS 140-3 validated 3.x module (CMVP certificates #5314 static, #5298 dynamic), but pinning `<1.18` forces rustls `<= 0.23.43` and rustls-webpki `<= 0.103.13` (rustls 0.23.44+ and rustls-webpki 0.103.14+ require aws-lc-rs 1.18), and those carry RUSTSEC-2026-0285 and RUSTSEC-2026-0346, fixed in rustls 0.23.45 and 0.23.46 only; the committed lock therefore uses the 4.x module, and an application may pin the certified 3.x chain instead (Block 66), and the README states that its certification is pending; revisit when 4.x is certified (the module check below then needs no change) or if rustls supports aws-lc-rs 1.17 again. The supported operating environments are those of the module's security policy. Cargo unifies features, so enabling `aws-lc-rs` or `fips` does not remove a default `ring`: a build without ring sets `default-features = false` (and re-enables `tokio`). Features stay additive: when several providers are enabled the strongest wins at run time (`fips` > `aws-lc-rs` > `ring`), never a compile error; the `tokio` adapter (the only TLS user) fails to compile without a provider feature, with a message naming the three; the runtime-agnostic core (`--no-default-features`) needs none and keeps compiling (Block 0).
 
 **Failed TLS setup (review item C7):** the TLS settings, which today include the platform's root certificates, are built at the first secure connection attempt and shared by every client in the process, as are the HTTP clients built from them; a build that fails is not kept, so the next secure attempt (each transport tried) builds again, and a transient failure (a CA bundle being replaced, no file descriptor left) heals without a restart. A read of the platform's root certificates that reports errors (an unreadable or malformed file, a store or trust setting the system fails to open) still serves the attempt when it found a certificate, but neither it nor the HTTP clients built from it are kept, so a later secure attempt reads again; a read without errors is kept. A file truncated without an error is not detected.
 
@@ -455,7 +455,7 @@ Verified (Centrifugo v6.10.1): `CENTRIFUGO_CLIENT_EXPIRED_CLOSE_DELAY=1s` makes 
 
 Value clause: As an app developer deploying under FedRAMP, I want to build the client with FIPS-validated cryptography, so that its TLS connections meet the FIPS 140 requirement.
 
-**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); mixed builds keep the precedence: `--features aws-lc-rs` (ring still on by default) uses aws-lc-rs, `--features fips` uses FIPS mode, both verified by the per-build unit test; CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives) and the linked AWS-LC module is the 4.x FIPS generation (its reported version), so a dependency update cannot silently switch to another module generation; `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement (today only the `fips` build does: aws-lc-fips-sys 0.14.3 is `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`, while aws-lc-sys 0.47.0, the locked version, no longer names OpenSSL; the README says so, 2026-11-07).
+**Structural acceptance:** the TLS configuration is built from the selected provider in one place; the default build links only ring, and `--no-default-features --features tokio,aws-lc-rs` (or `tokio,fips`) links only aws-lc (`cargo tree`); mixed builds keep the precedence: `--features aws-lc-rs` (ring still on by default) uses aws-lc-rs, `--features fips` uses FIPS mode, both verified by the per-build unit test; CI builds and tests those three feature sets, installing CMake and Go explicitly for the aws-lc ones, and runs the encrypted scenarios below (and Block 8's HTTPS one) in each; a unit test per build reports the provider in use, and for `fips` the TLS client configuration the transports actually use reports `fips() == true` (rustls checks TLS-level requirements there, beyond the provider's primitives) and CI checks the module generation through the resolved `aws-lc-fips-sys` (0.14.x in the committed lock, 0.13.11 on the certified chain; Block 66 D3), so a dependency update cannot silently switch to another module generation; `deny.toml` allows the OpenSSL license (aws-lc crates: `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`), and the README's license section notes that builds with `aws-lc-rs` or `fips` include OpenSSL-licensed code and its attribution requirement (today only the `fips` build does: aws-lc-fips-sys 0.14.3 is `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`, while aws-lc-sys 0.47.0, the locked version, no longer names OpenSSL; the README says so, 2026-11-07).
 
 The test server's certificate is issued by a test CA that the client trusts through `SSL_CERT_FILE`, which `rustls-native-certs` reads (verified in its source); no custom-root API is added (reversed by the owner decision of 2026-11-06: Block 22).
 
@@ -10949,3 +10949,78 @@ This mutation is seen red once, recorded in 65e's pull request:
 - one test the block added, removed on a scratch branch: a dispatched `mutants.yml` run fails the shard that holds its mutant, listing that mutant. The branch is then deleted.
 
 **Exceptions introduced:** no scenarios: unit tests, simplifications with no behaviour change, and a CI check (Block 5's precedent). A D2 fix is pinned by its red unit test.
+
+---
+
+## Block 66 — FIPS build on the certified AWS-LC module
+
+**Goal:** an application can build ferrifuge's `fips` build on AWS-LC FIPS 3.1.0, the module of CMVP certificate #5314 ("AWS-LC 3 Cryptographic Module (static)", Active, validated 2026-06-05, sunset 2031-06-04), by pinning up to five crates in its own `Cargo.lock`. Ferrifuge accepts that chain, CI proves it builds and runs in FIPS mode, and the README states the recipe, the advisories it carries and what the certificate covers. The committed lock keeps AWS-LC-FIPS 4.x (Block 6) until that module is certified.
+
+Source: owner, 2026-11-17 ("I want to achieve fips compliance right now"); issues #346 and #350. Block 6 kept the 3.x line out because it needs rustls versions with advisories. A probe on cfca4d5 found that only ferrifuge's `rustls = "0.23.46"` stops an application from choosing it, and that ferrifuge builds unchanged on rustls 0.23.43, passes its 706 library tests there and completes a handshake in FIPS mode (`awslc_version_string` "AWS-LC FIPS 3.1.0").
+
+**Dependencies:** Blocks 6 (providers, the module check, the README note), 20 (CHANGELOG), 22 (`root_certificates`, `tls_config` in the `fips` build), 55 (Stability, D9), 57 (workflow rules).
+
+**Out of scope:**
+- changing the committed lock's module (it stays 4.x);
+- a custom rustls crypto provider, or any cryptography written in-house (Block 0, Components);
+- Android, iOS and the browser, which have no FIPS path (Block 6);
+- `unstable-webtransport` on the chain: it resolves (with rcgen 0.14.9) but is not tested, and the README says so;
+- ignoring the chain's advisories in ferrifuge's `deny.toml`: ferrifuge's own lock stays current and passes cargo-deny (Block 0, Components). The 3.x chain is the application's choice, documented with its advisories.
+
+**Decisions:**
+- **D1 Requirements.**
+  - `rustls` drops its minimum from 0.23.46 to 0.23.43. The dev-dependencies `aws-lc-rs` (1.18.2 → 1.17.1) and `rcgen` (0.14.10 → 0.14.9) drop too, so that D3 can resolve the chain.
+  - The committed `Cargo.lock` keeps the current versions.
+  - Loosening a requirement is not a breaking change, and a fresh resolution still picks the newest versions. The README says that 0.23.43 is the certified chain's floor, not a recommendation.
+- **D2 The chain.** An application runs these commands in this order, each as `cargo update -p <crate> --precise <version>`:
+  1. rustls 0.23.43;
+  2. rustls-webpki 0.103.13;
+  3. rcgen 0.14.9, if its lock contains rcgen;
+  4. aws-lc-rs 1.17.1;
+  5. aws-lc-fips-sys 0.13.11, which bundles the AWS-LC-FIPS-3.1.0 source.
+
+  These are the newest versions that accept aws-lc-rs 1.17 (rustls-webpki 0.103.14+, rustls 0.23.44+ and rcgen 0.14.10 require 1.18). Later aws-lc-fips-sys releases bundle other, uncertified sources. ring is not linked.
+- **D3 CI.** A job `fips-certified` in `ci.yml`, on pull requests beside `providers` and on main, following Block 57. It installs CMake and Go as `providers` does, has `timeout-minutes: 45` and its own cache key. It:
+  - applies D2's commands to the committed lock in its checkout;
+  - fails unless the normal-edge tree of `--no-default-features --features tokio,fips` (`cargo tree -e normal`) lists exactly one `aws-lc-fips-sys`, v0.13.11, and no `ring`;
+  - runs `cargo test --lib --no-default-features --features tokio,fips`. This includes `tls_config_uses_the_build_provider`, which asserts `fips()` on the configuration ferrifuge builds, and the Block 22 refusal of a raw configuration that is not FIPS.
+
+  The `providers` job's `fips` leg fails unless its normal-edge tree lists exactly one `aws-lc-fips-sys`, a 0.14.x, so a lock update cannot change the committed module unnoticed.
+- **D4 The module test.** `fips_build_links_the_4x_fips_module` calls `aws_lc_rs::fips_version`, which aws-lc-rs 1.17.1 lacks.
+  - The generation check moves to D3's tree checks. The test keeps asserting `try_fips_mode` and is renamed `fips_build_runs_in_fips_mode`.
+  - A direct dev-dependency on aws-lc-fips-sys for its safe `AWSLC_VERSION_NUMBER_STRING` is rejected. Each aws-lc-fips-sys version has its own `links` name, so cargo can resolve a copy that is not the one aws-lc-rs links.
+- **D5 README.** The `fips` section states two module lines:
+  - the committed lock: AWS-LC-FIPS 4.x, submitted to NIST, not certified (link to the CMVP modules-in-process list; #346);
+  - the certified line: AWS-LC FIPS 3.1.0, certificate #5314 (link), with D2's commands in order and these notes:
+    - ferrifuge is not validated itself. The certificate covers the module only, when it is built, installed and operated as its security policy says (caveat, §11.1). Its tested environments are Amazon Linux 2023 on Graviton4 and on Intel Xeon Platinum 8375C. Other environments, and whether `aws-lc-fips-sys`'s build of the bundled source meets §11.1, are for the deployer to settle with their assessor;
+    - the build also compiles the non-FIPS `aws-lc-sys`, which rustls's `aws-lc-rs` feature names; the FIPS provider does not use it;
+    - the chain's advisories, each with whether it applies to a ferrifuge client:
+      - RUSTSEC-2026-0285 applies (handshake messages accepted across a key change; the handshake stays authenticated);
+      - RUSTSEC-2026-0349 applies, because ferrifuge keeps rustls's default session resumption (a later connection can lose post-quantum key exchange; no key or authentication is compromised);
+      - RUSTSEC-2026-0382 applies when the trust anchors (the system's or `root_certificates`) let a path reach the distrusted emSign intermediates;
+      - RUSTSEC-2026-0346 does not apply to ferrifuge's own configuration (only custom session stores that log; a raw `tls_config` is the application's);
+      - RUSTSEC-2026-0348 does not apply (rustls's `brotli` feature is off);
+      - RUSTSEC-2026-0042 does not apply (AWS-LC's X.509 and CRL code is unused; webpki verifies);
+      - RUSTSEC-2026-0043 does not apply (no AES-CCM suite).
+
+      The fixes ship only in releases outside the certified chain. An application using the chain lists these advisories in its own `deny.toml` and returns to the committed lock once 4.x is certified;
+    - `unstable-webtransport` is untested on this chain;
+    - the uses outside the module that are not security functions: SHA-1 for the websocket `Sec-WebSocket-Accept` check and `rand` for the websocket key and masking (tungstenite), and `fastrand` for backoff jitter (#350).
+- **D6 Version.** The next pre-release, under `## [Unreleased]`: "Changed" (the rustls minimum) and "Added" (the certified line). Releasing it is the owner's (Block 55 D9).
+
+`VERIFY:` in 66a, whether `aws-lc-sys` objects are linked into a `fips` binary or only compiled (`nm`), and word D5's note to match.
+
+**Amendments to earlier blocks:**
+- **Block 6, Decisions:** "rustls `<= 0.23.43` and rustls-webpki `< 0.103.16` on every build (rustls 0.23.44+ and rustls-webpki 0.103.16 require aws-lc-rs 1.18)" becomes "rustls `<= 0.23.43` and rustls-webpki `<= 0.103.13` (rustls 0.23.44+ and rustls-webpki 0.103.14+ require aws-lc-rs 1.18)". "a FIPS build therefore uses the 4.x module" becomes "the committed lock therefore uses the 4.x module, and an application may pin the certified 3.x chain instead (Block 66)".
+- **Block 6, Structural acceptance:** "and the linked AWS-LC module is the 4.x FIPS generation (its reported version)" becomes "and CI checks the module generation through the resolved `aws-lc-fips-sys` (0.14.x in the committed lock, 0.13.11 on the certified chain; Block 66 D3)".
+
+**Sub-increments:** the spec PR; **66a**, D1–D6 in one pull request, red first (D3).
+
+Value clause: As an app developer deploying under FedRAMP, I want to build the client on a FIPS 140-3 module with an active certificate, so that its TLS cryptography can meet the FIPS requirement today rather than when AWS-LC 4 is certified.
+
+**Structural acceptance (66a):**
+- D3's job passes on the pull request. Its log shows `aws-lc-fips-sys v0.13.11`, no ring, and the library tests' counts.
+- Seen red once, recorded in the pull request: the job with D2's `aws-lc-fips-sys` pin left out fails the 0.13.11 check.
+- The `providers` `fips` leg's 0.14.x check passes on the committed lock.
+
+**Exceptions introduced:** no scenario: a dependency range, a CI job, a lock check and documentation (Block 6's precedent for providers).
