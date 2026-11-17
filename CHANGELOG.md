@@ -14,6 +14,20 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
 
 ## [Unreleased]
 
+### Added
+
+- The `fips` build can run on AWS-LC FIPS 3.1.0, the module of CMVP
+  certificate #5314: an application pins five crates in its own lock, as
+  the README's "FIPS modules" section lists, with the advisories that chain
+  carries and what the certificate covers; CI builds and tests the `fips`
+  build on it (Block 66, D2, D3, D5).
+
+### Changed
+
+- The `rustls` requirement starts at 0.23.43 instead of 0.23.46, to allow
+  that chain; a fresh resolution still picks the newest version (Block 66,
+  D1).
+
 ## [1.0.0-alpha.2] - 2026-11-16
 
 ### Fixed
