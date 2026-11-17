@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–64 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–65 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -10897,3 +10897,55 @@ Each of these mutations is seen red once, recorded in the PR:
 **Amendments to earlier blocks.** Each before-string appears once.
 - **Block 62, "Out of scope"** (spec PR): "- connections that http_stream or sse open after the attempt, for commands: a later block." becomes "- connections that http_stream or sse open after the attempt, for commands: a later block (reversed by Block 64: the request carrying the command bounds their verification)."
 - **Block 0, "Reversed exclusions"** (spec PR): the row "| Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |" followed by an empty line and "### Test layers" gains, between them, the row "| Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |". The Block 53 row alone also appears at line 10494 and line 10698, so the anchor is that row followed by "\n\n### Test layers".
+
+---
+
+## Block 65 — Triage of the first weekly mutation report
+
+**Goal:** every mutant that the weekly mutation run (Block 60 D5) reports as missed is killed by a new unit test, removed by a simplification, or excluded with a stated reason. The weekly run then fails on a missed mutant, as the pull-request job already does.
+
+Source: Block 60 D5, "Weekly run": "Its first report is triaged in a later block, which then makes it fail on misses." The first full report is run 43982614806 (`mutants.yml`, dispatched on 37ac473): 1,557 caught, 119 timed out, 158 unviable, 264 missed. By D1's classes these are 222 test gaps, 32 equivalent mutants and 10 formatting-only mutants; none is reachable only through the @A or @D layers.
+
+**Dependencies:** Blocks 21 (D5, the `<redacted>` text), 55 (Stability, "Fixes"), 57 (workflow rules), 60 (D2, the redaction test; D5, the mutants scope, `.cargo/mutants.toml`, both workflows).
+
+**Out of scope:**
+- widening the mutants scope (`src/adapter/**`, `src/test_util/**`, `src/protocol/**`, `__test-hooks` code stay excluded: Block 60 D5);
+- running integration tests under cargo-mutants;
+- the timed-out mutants, which count as caught (Block 60 D5);
+- the pull-request job, which already fails on a miss.
+
+**Decisions** (reviewer, 2026-11-17, delegated by the owner):
+- **D1 Classes.** Each missed mutant is one of:
+  - **gap:** some input to the core, or call of a non-test function, yields a different action, event, return value, or value of an accessor the module's tests already use. It gets a unit test that fails with the mutant and passes without it.
+  - **equivalent:** nothing above differs.
+  - **formatting:** a `Debug` output, or a crate-private message no behaviour depends on. A public type's `Display`, a state's `as_str`, and the `<redacted>` text (`redacted`, `Secret`'s `Debug`, `Config`'s token field) are gaps: applications show or match the first two, and Block 21 D5 specifies the third. A `Debug` that prints nothing leaks nothing; leaks stay the redaction test's (Block 60 D2).
+  - **@A or @D only:** needs a named scenario and the reason no unit test reaches the code. The first report has none.
+
+  Equivalent or formatting code that can be simplified or removed with no behaviour change, so that the mutant no longer exists, is (a write-only field, a redundant condition, a dead arm). Otherwise the mutant gets an `exclude_re` entry in `.cargo/mutants.toml`, with a comment giving its reason.
+- **D2 A test that finds a bug.** A new test that fails on unmutated code, because the code contradicts its documentation or this spec, has found a bug. The fix follows Block 55 (Stability, "Fixes"): in the same pull request, its own commit after the red test, with a "Fixed" entry under `## [Unreleased]` in `CHANGELOG.md`.
+- **D3 Tests.** Unit tests go in the existing test modules of the file they cover, in those modules' style. One test may kill several mutants. No new dependency, no new public API, no new test accessor (`#[cfg(test)]` or `__test-hooks`).
+- **D4 Exclusion patterns.** Each entry names the file, the function and the change, with `:[0-9]+:` for the line, so that moving the line keeps it matching. Where that would also match another mutant, the pattern fixes the column too. A pattern that stops matching lets its mutant back in as missed, which fails a run.
+- **D5 The weekly gate.** The last sub-increment makes each `mutants.yml` shard fail, after writing its summary, when `mutants.out/missed.txt` is not empty, printing the missed mutants: the pull-request job's check (Block 60 D5). The upload still runs (`!cancelled()`). A timeout still counts as caught. The header comment no longer says "report-only".
+- **D6 Later misses.** A miss that the weekly run reports after this block is settled by D1 in a pull request of its own, before the next block's first pull request merges.
+- **D7 Record.** Each sub-increment's pull request lists its mutants from run 43982614806, each with its class and the test, simplification or exclusion that settles it. A class found wrong is corrected there.
+- **D8 Version.** No bump: tests, CI and simplifications with no behaviour change. A D2 fix goes under `## [Unreleased]`.
+
+**Sub-increments** (one pull request each, in this order; counts from run 43982614806 by D1's classes):
+
+| Id | Value clause | Files | Gaps / equivalent / formatting |
+|---|---|---|---|
+| 65a | As a maintainer, I want the codecs, the public types' texts and the `<redacted>` text pinned by unit tests, so that a change to them cannot pass unnoticed | in `src/`: `call.rs`, `config.rs`, `event.rs`, `fossil.rs`, `json.rs`, `map.rs`, `protobuf.rs`, `shared_poll.rs`, `statistics.rs`, `subscription.rs`, `token.rs` | 28 / 2 / 6 |
+| 65b | As a maintainer, I want the core's connection lifecycle, stale-transport guards and connection tokens pinned by unit tests, so that a regression there fails `cargo test --lib` | `src/sans_io.rs`; in `src/sans_io/`: `tokens.rs`, `transports.rs` | 44 / 7 / 2 |
+| 65c | As a maintainer, I want delivery, the read-ahead, calls, the write queue and batching pinned by unit tests, so that a regression there fails `cargo test --lib` | in `src/sans_io/`: `delivery.rs`, `inbound.rs`, `calls.rs`, `call.rs`, `batching.rs`, `debounce.rs` | 50 / 11 / 2 |
+| 65d | As a maintainer, I want client-side subscriptions and their tokens pinned by unit tests, so that a regression there fails `cargo test --lib` | in `src/sans_io/`: `subscriptions.rs`, `subscriptions/token_flow.rs` | 38 / 6 / 0 |
+| 65e | As a maintainer, I want map, shared poll and server-side subscriptions pinned by unit tests and the weekly run to fail on a missed mutant, so that a new gap anywhere in the core is caught within a week | in `src/sans_io/`: `subscriptions/map_flow.rs`, `subscriptions/shared_poll_flow.rs`, `subscriptions/shared_poll_flow/signing.rs`, `server_subscriptions.rs`; D5 | 62 / 6 / 0 |
+
+**Structural acceptance (each sub-increment):**
+- `cargo mutants` with `--file <path>` for each file of the row, under `.cargo/mutants.toml` (never `--exclude`, which replaces its `exclude_globs`), run locally or in a dispatched job, reports no missed mutant; its counts are in the pull request.
+- `cargo mutants --list` before and after the commit that changes `.cargo/mutants.toml` differs by exactly the mutants D7 lists as excluded.
+- 65e: a `mutants.yml` run dispatched on the pull request's head concludes success, with every shard's `missed.txt` empty.
+
+This mutation is seen red once, recorded in 65e's pull request:
+- one test the block added, removed on a scratch branch: a dispatched `mutants.yml` run fails the shard that holds its mutant, listing that mutant. The branch is then deleted.
+
+**Exceptions introduced:** no scenarios: unit tests, simplifications with no behaviour change, and a CI check (Block 5's precedent). A D2 fix is pinned by its red unit test.
