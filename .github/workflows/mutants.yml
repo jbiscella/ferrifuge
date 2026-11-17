@@ -1,7 +1,8 @@
 name: mutants
 
 # Every mutant in the library's core, weekly and on demand (Block 60, D5):
-# the scope, tests and features of `.cargo/mutants.toml`, in 16 shards.
+# the scope, tests and features of `.cargo/mutants.toml`, in 16 shards. A
+# dispatch may narrow it to named files (Block 65's acceptance runs).
 # Report-only: the missed mutants are listed in each shard's summary and
 # artifact, and a later block triages the first report and makes this run
 # fail on them.
@@ -9,6 +10,14 @@ on:
   schedule:
     - cron: "41 3 * * 6"
   workflow_dispatch:
+    inputs:
+      files:
+        description: >-
+          Space-separated source files to mutate (each `src/....rs`), as
+          `cargo mutants --file`; empty mutates the whole scope (Block 65)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -28,6 +37,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     env:
       SHARD: ${{ matrix.shard }}
+      FILES: ${{ inputs.files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,10 +57,20 @@ jobs:
 
       - name: Mutants
         run: |
+          # A dispatch may name files (Block 65): each must be a source
+          # file under src/, passed as one `--file` argument.
+          file_args=()
+          for file in $FILES; do
+            if ! [[ "$file" =~ ^src/[A-Za-z0-9_/]+\.rs$ ]]; then
+              echo "not a source file under src/: $file"
+              exit 1
+            fi
+            file_args+=(--file "$file")
+          done
           status=0
           cargo mutants --in-place --no-shuffle \
             --shard "$SHARD/16" --sharding round-robin \
-            --timeout-multiplier 5 || status=$?
+            --timeout-multiplier 5 "${file_args[@]}" || status=$?
           # 0: every mutant caught; 2: some missed; 3: some timed out. Any
           # other status is an error, which fails the shard.
           case "$status" in
