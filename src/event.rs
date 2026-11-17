@@ -317,7 +317,7 @@ pub enum ErrorKind {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{ClientEvent, ServerSubscriptionEvent};
+    use super::{ClientEvent, ServerSubscriptionEvent, State};
     use crate::{ClientInfo, Publication, SubscribedContext, SubscriptionEvent};
 
     const SECRET: &str = "s3cr3t-d4t4";
@@ -392,5 +392,13 @@ mod tests {
         };
 
         assert!(format!("{publication:?}").contains(r#"channel: Some("news.sport")"#));
+    }
+
+    #[test]
+    fn each_state_is_named_as_the_spec_names_it() {
+        assert_eq!(
+            [State::Disconnected, State::Connecting, State::Connected].map(State::as_str),
+            ["disconnected", "connecting", "connected"]
+        );
     }
 }

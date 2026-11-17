@@ -1680,6 +1680,41 @@ mod tests {
     }
 
     #[test]
+    fn each_reply_of_a_frame_is_sized_from_the_end_of_the_one_before() {
+        let frame = b"{}\n{\"id\":3,\"unsubscribe\":{}}";
+
+        let sizes: Vec<usize> = decode_sized(frame)
+            .unwrap()
+            .into_iter()
+            .map(|(_, size)| size)
+            .collect();
+
+        // The separator counts toward the reply after it.
+        assert_eq!(sizes, [2, frame.len() - 2]);
+    }
+
+    #[test]
+    fn a_publication_without_an_offset_has_none() {
+        let replies = decode(
+            concat!(
+                r#"{"push":{"channel":"news","pub":{"data":{}}}}"#,
+                "\n",
+                r#"{"push":{"channel":"news","pub":{"data":{},"offset":0}}}"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        for reply in &replies {
+            let ReplyResult::Push(Push::Publication { publication, .. }) = &reply.result else {
+                panic!("{reply:?}");
+            };
+            assert_eq!(publication.offset, None);
+        }
+        assert_eq!(replies.len(), 2);
+    }
+
+    #[test]
     fn unknown_results_and_pushes_are_unsupported_not_errors() {
         let replies =
             decode(b"{\"id\":5,\"ping\":{}}\n{\"push\":{\"channel\":\"c\",\"refresh\":{}}}")

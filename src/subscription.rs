@@ -472,3 +472,101 @@ impl std::fmt::Display for SubscriptionError {
 }
 
 impl std::error::Error for SubscriptionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_state_is_named_as_the_spec_names_it() {
+        assert_eq!(
+            [
+                SubscriptionState::Unsubscribed,
+                SubscriptionState::Subscribing,
+                SubscriptionState::Subscribed,
+            ]
+            .map(SubscriptionState::as_str),
+            ["unsubscribed", "subscribing", "subscribed"]
+        );
+    }
+
+    #[test]
+    fn a_publication_has_a_map_part_when_any_keyed_field_is_set() {
+        assert_eq!(MapPart::of(String::new(), false, 0), None);
+        for (key, removed, version) in [("k", false, 0), ("", true, 0), ("", false, 3)] {
+            assert_eq!(
+                MapPart::of(key.to_owned(), removed, version),
+                Some(Box::new(MapPart {
+                    key: key.to_owned(),
+                    removed,
+                    version,
+                })),
+                "{key:?} {removed} {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_errors_display_what_failed() {
+        assert_eq!(DataError::Unauthorized.to_string(), "unauthorized");
+        assert_eq!(
+            DataError::Failed("down".into()).to_string(),
+            "data callback failed: down"
+        );
+        assert_eq!(
+            StateError::new("down").to_string(),
+            "subscription getState callback failed: down"
+        );
+        assert_eq!(
+            [
+                SubscriptionError::AlreadyExists {
+                    channel: "news".into(),
+                },
+                SubscriptionError::ClientClosed,
+                SubscriptionError::InvalidTagFilter {
+                    reason: "empty key".into(),
+                },
+                SubscriptionError::TagFilterWithDelta,
+                SubscriptionError::ZeroDelay {
+                    option: "min_resubscribe_delay",
+                },
+            ]
+            .map(|error| error.to_string()),
+            [
+                "a subscription to channel news already exists",
+                "the client is closed",
+                "invalid tag filter: empty key",
+                "a tag filter cannot be combined with delta compression",
+                "min_resubscribe_delay must be more than 0",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(any(adapter_tokio, adapter_browser))]
+    fn a_resubscribe_delay_of_0_is_refused() {
+        use std::time::Duration;
+
+        use crate::sans_io::SubscriptionOptions;
+
+        let options = |min: u64, max: u64| SubscriptionOptions {
+            min_resubscribe_delay: Duration::from_millis(min),
+            max_resubscribe_delay: Duration::from_millis(max),
+            ..SubscriptionOptions::default()
+        };
+
+        assert_eq!(check_resubscribe_delays(&options(1, 1)), Ok(()));
+        assert_eq!(
+            check_resubscribe_delays(&options(0, 1)),
+            Err(SubscriptionError::ZeroDelay {
+                option: "min_resubscribe_delay",
+            })
+        );
+        assert_eq!(
+            check_resubscribe_delays(&options(1, 0)),
+            Err(SubscriptionError::ZeroDelay {
+                option: "max_resubscribe_delay",
+            })
+        );
+    }
+}
