@@ -1413,11 +1413,68 @@ Ferrifuge never calls (certificate hashes, parsing a peer's certificate);
 a release build contains neither, and the root `clippy.toml` refuses the
 calls that would reach them.
 
-`fips` builds the AWS-LC-FIPS 4.x module. That module has been submitted to
-NIST for FIPS 140-3 validation but is not certified yet. The certified 3.x
-module needs aws-lc-rs 1.17, which only rustls versions with known
-vulnerabilities (RUSTSEC-2026-0285, RUSTSEC-2026-0346) accept. Check the
-module's status on the NIST CMVP list before relying on it for compliance.
+#### FIPS modules
+
+The `fips` build runs on one of two AWS-LC FIPS modules, chosen by your
+`Cargo.lock`:
+
+- **AWS-LC-FIPS 4.x**, what a fresh resolution picks. It has been submitted
+  to NIST for FIPS 140-3 validation but is not certified yet: see the
+  [CMVP modules in process](https://csrc.nist.gov/projects/cryptographic-module-validation-program/modules-in-process/modules-in-process-list).
+- **AWS-LC FIPS 3.1.0**, the module of CMVP certificate
+  [#5314](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314)
+  (Active, validated 2026-06-05). To use it, run these commands in your
+  project, in this order:
+
+  ```sh
+  cargo update -p rustls --precise 0.23.43
+  cargo update -p rustls-webpki --precise 0.103.13
+  cargo update -p rcgen --precise 0.14.9   # only if your lock contains rcgen
+  cargo update -p aws-lc-rs --precise 1.17.1
+  cargo update -p aws-lc-fips-sys --precise 0.13.11
+  ```
+
+  These are the newest versions that accept aws-lc-rs 1.17; later
+  aws-lc-fips-sys releases bundle other, uncertified sources. Ferrifuge's
+  rustls requirement starts at 0.23.43 only to allow this chain, not as a
+  recommendation. CI builds and tests the `fips` build on it. ring is not
+  linked.
+
+On the certified chain:
+
+- Ferrifuge itself is not validated. The certificate covers the module only,
+  when it is built, installed and operated as its security policy says (its
+  caveat; §11.1). Its tested environments are Amazon Linux 2023 on AWS
+  Graviton4 and on Intel Xeon Platinum 8375C. Other environments, and whether
+  aws-lc-fips-sys's build of the bundled source meets §11.1, are for you to
+  settle with your assessor.
+- The build also compiles the non-FIPS `aws-lc-sys`, which rustls's
+  `aws-lc-rs` feature names; the FIPS provider does not use it.
+- The chain carries these RustSec advisories; their fixes ship only in
+  releases outside it. Each, for a Ferrifuge client:
+  - RUSTSEC-2026-0285 applies: TLS 1.3 handshake messages are accepted
+    across a key change. The handshake stays authenticated.
+  - RUSTSEC-2026-0349 applies, because Ferrifuge keeps rustls's default
+    session resumption: a later connection can lose post-quantum key
+    exchange. No key or authentication is compromised.
+  - RUSTSEC-2026-0382 applies when your trust anchors (the system's or
+    `root_certificates`) let a path reach the distrusted emSign
+    intermediates.
+  - RUSTSEC-2026-0346 does not apply to Ferrifuge's own configuration (only
+    custom session stores that log; a raw `tls_config` is yours).
+  - RUSTSEC-2026-0348 does not apply: rustls's `brotli` feature is off.
+  - RUSTSEC-2026-0042 does not apply: AWS-LC's X.509 and CRL code is unused;
+    webpki verifies.
+  - RUSTSEC-2026-0043 does not apply: no AES-CCM cipher suite.
+
+  List them in your own `deny.toml`, and return to a fresh resolution once
+  AWS-LC-FIPS 4.x is certified.
+- `unstable-webtransport` is not tested on this chain.
+
+In both, these uses outside the module are not security functions: SHA-1
+for the websocket `Sec-WebSocket-Accept` check and `rand` for the websocket
+key and frame masking (both in tungstenite), and `fastrand` for backoff
+jitter.
 
 Without default features, ferrifuge has no runtime or network dependency.
 With `unstable-machine`, `ferrifuge::machine::Machine` then takes inputs (API
