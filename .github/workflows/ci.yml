@@ -246,6 +246,18 @@ jobs:
           # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
           test -z "$(cargo tree -e normal $WITHOUT_RING -i ring 2>/dev/null)"
 
+      # The committed lock's FIPS module is AWS-LC-FIPS 4.x: exactly one
+      # aws-lc-fips-sys, a 0.14.x, so a lock update cannot change the module
+      # unnoticed (Block 66 D3).
+      - name: the FIPS module is the 4.x generation
+        if: matrix.provider == 'fips'
+        run: |
+          # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
+          found=$(cargo tree -e normal $WITHOUT_RING --prefix none | grep -E '^aws-lc-fips-sys v' | sort -u)
+          echo "$found"
+          test "$(echo "$found" | wc -l)" -eq 1
+          echo "$found" | grep -Eq '^aws-lc-fips-sys v0\.14\.'
+
       - name: clippy
         run: |
           # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
@@ -262,6 +274,61 @@ jobs:
         env:
           PROVIDER: ${{ matrix.provider }}
         run: cargo test --lib --features "$PROVIDER,unstable-webtransport" -- tls_config fips_build webtransport
+
+  # The fips build on the certified AWS-LC FIPS 3.1.0 module (CMVP #5314):
+  # the committed lock with the pins an application applies (Block 66 D2,
+  # D3), then the library tests in FIPS mode.
+  fips-certified:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FIPS_ONLY: --no-default-features --features tokio,fips
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: fips-certified
+
+      # The FIPS module needs CMake and Go, as in the providers job.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      # In this order: each pin makes room for the next (Block 66 D2).
+      - name: Pin the certified chain
+        run: |
+          cargo update -p rustls --precise 0.23.43
+          cargo update -p rustls-webpki --precise 0.103.13
+          cargo update -p rcgen --precise 0.14.9
+          cargo update -p aws-lc-rs --precise 1.17.1
+          cargo update -p aws-lc-fips-sys --precise 0.13.11
+
+      - name: The FIPS module is AWS-LC FIPS 3.1.0, and ring is not linked
+        run: |
+          # shellcheck disable=SC2086 # $FIPS_ONLY holds several flags: split on purpose
+          found=$(cargo tree -e normal $FIPS_ONLY --prefix none | grep -E '^aws-lc-fips-sys v' | sort -u)
+          echo "$found"
+          test "$found" = "aws-lc-fips-sys v0.13.11"
+          # shellcheck disable=SC2086 # $FIPS_ONLY holds several flags: split on purpose
+          test -z "$(cargo tree -e normal $FIPS_ONLY -i ring 2>/dev/null)"
+
+      - name: cargo test
+        run: |
+          # shellcheck disable=SC2086 # $FIPS_ONLY holds several flags: split on purpose
+          cargo test --lib $FIPS_ONLY
 
   test:
     runs-on: ubuntu-latest
