@@ -453,6 +453,14 @@ mod tests {
     }
 
     #[test]
+    fn a_target_of_exactly_the_limit_is_built() {
+        let delta = delta(3, b"3:abc", b"abc");
+
+        assert_eq!(apply(b"", &delta, 3).as_deref(), Ok(&b"abc"[..]));
+        assert_eq!(apply(b"", &delta, 2), Err(DeltaError::TooLarge));
+    }
+
+    #[test]
     fn written_deltas_copy_what_base_and_target_share() {
         let base = b"the quick brown fox jumps";
         let target = b"the quick red fox jumps";

@@ -386,4 +386,24 @@ mod tests {
         };
         assert_eq!(set, assigned);
     }
+
+    #[test]
+    fn only_protobuf_requests_a_websocket_subprotocol() {
+        assert_eq!(
+            Protocol::Protobuf.websocket_subprotocol(),
+            Some("centrifuge-protobuf")
+        );
+        assert_eq!(Protocol::Json.websocket_subprotocol(), None);
+    }
+
+    // Block 21, D5: a token shows as `<redacted>`, no token as `""`.
+    #[test]
+    fn the_debug_output_shows_the_token_as_redacted() {
+        let with = format!("{:?}", Config::default().token("s3cr3t"));
+        let without = format!("{:?}", Config::default());
+
+        assert!(with.contains("token: <redacted>, data"), "{with}");
+        assert!(!with.contains("s3cr3t"), "{with}");
+        assert!(without.contains(r#"token: "", data"#), "{without}");
+    }
 }

@@ -54,3 +54,24 @@ pub(crate) fn redacted(token: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt
         f.write_str("<redacted>")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_errors_display_what_failed() {
+        assert_eq!(TokenError::Unauthorized.to_string(), "unauthorized");
+        assert_eq!(
+            TokenError::Failed("down".into()).to_string(),
+            "token callback failed: down"
+        );
+    }
+
+    // Block 21, D5: a token shows as `<redacted>`, no token as `""`.
+    #[test]
+    fn a_secret_shows_as_redacted_and_none_as_empty() {
+        assert_eq!(format!("{:?}", Secret("s3cr3t".into())), "<redacted>");
+        assert_eq!(format!("{:?}", Secret::default()), r#""""#);
+    }
+}
