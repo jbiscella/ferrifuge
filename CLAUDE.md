@@ -10437,7 +10437,7 @@ This block amends Block 0's "Code hygiene" row: library-only lints are set in `s
     - Mutants in code compiled out of that build are excluded by `exclude_re`.
     - Every exclusion carries a comment giving its reason.
   - **Failing.** A missed mutant fails the job: it reads `mutants.out/missed.txt`. A timeout counts as caught. A failing baseline or any other error fails the job. `mutants.out` is uploaded every time.
-  - **Weekly run.** `mutants.yml` runs every mutant in that scope weekly and on dispatch, in 16 shards, report-only. Its first report is triaged in a later block, which then makes it fail on misses.
+  - **Weekly run.** `mutants.yml` runs every mutant in that scope weekly and on dispatch, in 16 shards, report-only. A dispatch may name source files (input `files`, each `src/….rs`); it then mutates only those, as `--file` (Block 65). Its first report is triaged in a later block, which then makes it fail on misses.
 
 - **D6 Unused dependencies on every push.**
   - The `lint` job runs `cargo shear --deny-warnings` with cargo-shear 1.14.0, pinned. It finds unused dependencies, dependencies in the wrong section, and unlinked files, without a build.
@@ -10941,9 +10941,9 @@ Source: Block 60 D5, "Weekly run": "Its first report is triaged in a later block
 | 65e | As a maintainer, I want map, shared poll and server-side subscriptions pinned by unit tests and the weekly run to fail on a missed mutant, so that a new gap anywhere in the core is caught within a week | in `src/sans_io/`: `subscriptions/map_flow.rs`, `subscriptions/shared_poll_flow.rs`, `subscriptions/shared_poll_flow/signing.rs`, `server_subscriptions.rs`; D5 | 62 / 6 / 0 |
 
 **Structural acceptance (each sub-increment):**
-- `cargo mutants` with `--file <path>` for each file of the row, under `.cargo/mutants.toml` (never `--exclude`, which replaces its `exclude_globs`), run locally or in a dispatched job, reports no missed mutant; its counts are in the pull request.
+- `cargo mutants` with `--file <path>` for each file of the row, under `.cargo/mutants.toml` (never `--exclude`, which replaces its `exclude_globs`), run locally or by dispatching `mutants.yml` with the row's files (`files` input; Block 60 D5), reports no missed mutant; its counts, and a dispatched run's id, are in the pull request.
 - `cargo mutants --list` before and after the commit that changes `.cargo/mutants.toml` differs by exactly the mutants D7 lists as excluded.
-- 65e: a `mutants.yml` run dispatched on the pull request's head concludes success, with every shard's `missed.txt` empty.
+- 65e: a `mutants.yml` run dispatched on the pull request's head with no `files` concludes success, with every shard's `missed.txt` empty.
 
 This mutation is seen red once, recorded in 65e's pull request:
 - one test the block added, removed on a scratch branch: a dispatched `mutants.yml` run fails the shard that holds its mutant, listing that mutant. The branch is then deleted.
