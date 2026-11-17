@@ -1482,16 +1482,12 @@ pub(in crate::adapter) mod tests {
         assert_eq!(config.fips(), cfg!(feature = "fips"));
     }
 
-    /// A dependency update must not switch the FIPS build to another
-    /// module generation unnoticed (Block 6: AWS-LC-FIPS 4.x).
+    /// The FIPS build runs in FIPS mode. CI checks the module generation
+    /// through the resolved `aws-lc-fips-sys` instead (Block 66 D3, D4):
+    /// aws-lc-rs 1.17.1, on the certified chain, has no `fips_version`.
     #[cfg(feature = "fips")]
     #[test]
-    fn fips_build_links_the_4x_fips_module() {
-        // The FIPS module generation, not the AWS-LC release
-        // (`awslc_version`), which aws-lc-rs documents as unfit for it.
-        let generation = aws_lc_rs::fips_version();
-
-        assert_eq!(generation, Some(4), "FIPS module generation");
+    fn fips_build_runs_in_fips_mode() {
         assert!(aws_lc_rs::try_fips_mode().is_ok(), "not in FIPS mode");
     }
 }
