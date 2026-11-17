@@ -30,6 +30,11 @@ ignore = [
     # Unmaintained, no known vulnerability. Remove once a testcontainers
     # release drops it: https://github.com/testcontainers/testcontainers-rs/pull/1006
     { id = "RUSTSEC-2026-0440", reason = "dev-only via testcontainers; upstream fix in testcontainers-rs#1006" },
+    # Dev-only, through cucumber 0.23.0 (the latest), which runs the
+    # scenarios; nothing ferrifuge ships depends on it. Unmaintained, no
+    # known vulnerability. Remove once a cucumber release drops it:
+    # https://github.com/cucumber-rs/cucumber/issues/407
+    { id = "RUSTSEC-2026-0542", reason = "dev-only via cucumber; upstream issue cucumber-rs/cucumber#407" },
 ]
 
 [licenses]
