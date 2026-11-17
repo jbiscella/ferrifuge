@@ -146,7 +146,9 @@ tracing = { version = "0.1.44", default-features = false, features = ["std", "lo
 # http_stream and sse (Block 8). No provider of its own: it is given the
 # client's TLS configuration, so the build's provider applies (Block 6).
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "socks"], optional = true }
-rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "logging"], optional = true }
+# 0.23.43: the floor of the certified AWS-LC FIPS 3.1.0 chain (Block 66
+# D1), not a recommendation; a fresh resolution picks the newest.
+rustls = { version = "0.23.43", default-features = false, features = ["std", "tls12", "logging"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 # The operating system's verifier on macOS, iOS and Windows (Block 22); at
 # reqwest's version, which links it in every build already.
@@ -234,9 +236,10 @@ ferrifuge = { path = ".", default-features = false, features = ["__test-hooks", 
 # `TransportError` and `TransportParameters`, which quinn does not
 # re-export: wtransport's own copy, no feature of its own (Block 48, D19).
 quinn-proto = { version = "0.11.19", default-features = false }
-# Reports the linked AWS-LC module in the fips build's unit test. Its
-# backend comes from rustls (fips) or reqwest (other test builds).
-aws-lc-rs = { version = "1.18.2", default-features = false }
+# Checks FIPS mode in the fips build's unit test. Its backend comes from
+# rustls (fips) or reqwest (other test builds). 1.17.1, the version of the
+# certified AWS-LC FIPS 3.1.0 chain, so CI can resolve it (Block 66 D1).
+aws-lc-rs = { version = "1.17.1", default-features = false }
 axum = "0.8.9"
 base64 = "0.23.1"
 # The generator of the committed src/protocol/ code and its protoc, run only
@@ -251,7 +254,9 @@ hmac = "0.13.0"
 # Orders the changelog's versions by SemVer precedence in the release
 # scenarios (Block 55, D4); already in the lock file.
 semver = "1.0.28"
-rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+# 0.14.9, the newest that accepts the certified chain's aws-lc-rs 1.17
+# (Block 66 D1).
+rcgen = { version = "0.14.9", default-features = false, features = ["ring", "pem"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
