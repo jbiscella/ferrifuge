@@ -191,16 +191,15 @@ impl Reader<'_> {
     // D2.
     fn number(&mut self) -> Result<u32, DeltaError> {
         let mut value: u64 = 0;
-        let mut digits = 0;
+        let start = self.at;
         while let Some(digit) = self.delta.get(self.at).copied().and_then(digit) {
             value = (value << 6) | u64::from(digit);
             if value > u64::from(u32::MAX) {
                 return Err(DeltaError::Number);
             }
-            digits += 1;
             self.at += 1;
         }
-        if digits == 0 {
+        if self.at == start {
             return Err(DeltaError::Number);
         }
         u32::try_from(value).map_err(|_| DeltaError::Number)
