@@ -591,6 +591,15 @@ fn the_compression_ratio_is_zero_without_bytes_and_can_be_negative() {
 }
 
 #[test]
+fn the_compression_ratio_is_the_share_of_bytes_saved() {
+    let mut statistics = crate::DeltaStatistics::default();
+
+    statistics.count(true, 25, 100);
+
+    assert!((statistics.compression_ratio() - 0.75).abs() < f64::EPSILON);
+}
+
+#[test]
 fn a_new_machine_reports_zeros() {
     let machine = Machine::new(Config::default());
 

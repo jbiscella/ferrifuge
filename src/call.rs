@@ -275,6 +275,45 @@ mod tests {
     }
 
     #[test]
+    fn since_and_reverse_set_only_their_fields() {
+        let position = StreamPosition::new(3, "e");
+
+        assert_eq!(
+            HistoryOptions::default()
+                .limit(5)
+                .since(position.clone())
+                .reverse(true),
+            HistoryOptions {
+                limit: Some(5),
+                since: Some(position),
+                reverse: true,
+            }
+        );
+        assert_eq!(
+            HistoryOptions::default().all().reverse(true),
+            HistoryOptions {
+                limit: None,
+                since: None,
+                reverse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_call_error_displays_its_message_code_and_temporary_flag() {
+        assert_eq!(
+            CallError::new(108, "not available").to_string(),
+            "not available (code 108)"
+        );
+        assert_eq!(
+            CallError::new(108, "not available")
+                .temporary(true)
+                .to_string(),
+            "not available (code 108, temporary)"
+        );
+    }
+
+    #[test]
     fn a_decode_error_shows_its_data_only_by_length() {
         #[derive(Debug, serde::Deserialize)]
         #[expect(dead_code, reason = "its field is read only through `Debug`")]
