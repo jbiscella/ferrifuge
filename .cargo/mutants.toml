@@ -50,4 +50,11 @@ exclude_re = [
     # Equivalent: it only swaps maps already empty for new ones, freeing
     # their capacity, which nothing observes; Block 46 D15 keeps it.
     '^src/sans_io/debounce\.rs:[0-9]+:[0-9]+: replace Machine::close_windows_of with \(\)$',
+    # Equivalent: without an interval the gate finds no windows and is
+    # false anyway; the check spares the others the gate's key, a String
+    # clone per map publication (Block 46 D3: nothing else is looked at).
+    '^src/sans_io/subscriptions\.rs:[0-9]+:[0-9]+: replace Machine::has_debounce_interval -> bool with true$',
+    # Equivalent: REJECT_UNRECOVERED (2) and CHANNEL_COMPACTION (1) are
+    # disjoint bits, so `|` and `^` give the same flags.
+    '^src/sans_io/subscriptions\.rs:[0-9]+:[0-9]+: replace \| with \^ in Machine::subscribe_request$',
 ]

@@ -2901,11 +2901,13 @@ impl Machine {
         }
         if self.subscriptions.owns_command(reply.id) {
             // Only a subscribe sent with the connect command can be in
-            // flight before its reply (Block 36, D5).
-            if self.state != State::Connected && self.awaits_subscribe(reply.id) {
-                self.reply_before_connect("subscribe");
-            } else {
+            // flight before its reply (Block 36, D5): unsubscribes,
+            // sub_refreshes and track commands go out only while connected,
+            // and every exit from Connected drains them.
+            if self.state == State::Connected {
                 self.subscription_command_reply(reply);
+            } else {
+                self.reply_before_connect("subscribe");
             }
             return;
         }
