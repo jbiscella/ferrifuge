@@ -5501,4 +5501,86 @@ mod tests {
             (67_108_864, 67_108_864)
         );
     }
+
+    /// A token machine over two websockets, reconnecting after a connection
+    /// whose refresh came due meanwhile, whose second transport opened and
+    /// asked for a connect token, then said it is unsupported: the third
+    /// transport is not open yet and has sent nothing.
+    fn token_asked_for_a_transport_given_up() -> (Machine, FetchId) {
+        let mut machine = token_machine("t0")
+            .with_transports(vec![TransportKind::WebSocket, TransportKind::WebSocket])
+            .unwrap();
+        let first = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(first));
+        machine.handle(frame(
+            first,
+            r#"{"id":1,"connect":{"client":"c","expires":true,"ttl":30}}"#,
+        ));
+        machine.handle(Input::TransportClosed {
+            transport: first,
+            code: None,
+            reason: String::new(),
+        });
+        let second = opened_transport(&machine.fire(Timer::Reconnect));
+        machine.fire(Timer::Refresh);
+        let fetch = fetch_requested(&machine.handle(Input::TransportOpened(second)));
+        opened_transport(&machine.handle(Input::TransportUnsupported(second)));
+        (machine, fetch)
+    }
+
+    // A connect token fetched for a websocket that gave way meanwhile is
+    // sent on nothing: the next transport has not opened.
+    #[test]
+    fn a_connect_token_for_a_transport_given_up_is_sent_on_nothing() {
+        let (mut machine, fetch) = token_asked_for_a_transport_given_up();
+
+        let actions = machine.handle(Input::TokenFetched {
+            fetch,
+            result: Ok("t1".into()),
+        });
+
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::Send { .. } | Action::OpenTransport { .. })),
+            "{actions:?}"
+        );
+    }
+
+    // A reconnect delay that fires while a transport is being opened
+    // starts no other attempt.
+    #[test]
+    fn a_reconnect_delay_firing_with_a_transport_opening_does_nothing() {
+        let (mut machine, fetch) = token_asked_for_a_transport_given_up();
+        machine.handle(Input::TokenFetched {
+            fetch,
+            result: Err(TokenError::Failed("down".into())),
+        });
+
+        let actions = machine.fire(Timer::Reconnect);
+
+        assert_eq!(actions, []);
+    }
+
+    // A connect timeout that fires once connected does nothing, even with
+    // an emulated transport told open after the connect reply.
+    #[test]
+    fn a_connect_timeout_firing_once_connected_does_nothing() {
+        let mut machine = machine()
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        let id = machine.connect_command.expect("a connect command");
+        machine.handle(frame(
+            transport,
+            &format!(r#"{{"id":{id},"connect":{{"client":"c"}}}}"#),
+        ));
+        machine.handle(Input::TransportOpened(transport));
+        assert_eq!(machine.state(), State::Connected);
+
+        let actions = machine.fire(Timer::ConnectTimeout);
+
+        assert_eq!(actions, []);
+        assert_eq!(machine.state(), State::Connected);
+    }
 }
