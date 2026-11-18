@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–69 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–70 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -92,6 +92,7 @@ Precedence on conflict: spec > `client.proto` > centrifuge-js behaviour. A centr
 | Block 24, out of scope | emulator and simulator CI running a client against Centrifugo (design C) | reviewer, 2026-11-14, delegated by the owner | 58 |
 | Block 53, out of scope | numbered settings for debounce and shared poll timers | reviewer, 2026-11-15, delegated by the owner | 61 |
 | Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |
+| Block 57, out of scope | SARIF upload to code scanning (CodeQL's analysis; `workflow-lint`'s findings stay out) | owner, 2026-11-17 (issue #347) | 70 |
 
 ### Test layers
 
@@ -10143,7 +10144,7 @@ The rerun line of D2 is a stated property, with no test.
 **Dependencies:** Blocks 20 (release.yml's rules, D1), 51 and 52 (chaos-real.yml, soak.yml), 56 (the final workflows it lints).
 
 **Out of scope:**
-- making `workflow-lint` a required check, SARIF upload to code scanning (it needs `security-events: write` and the repository's code-scanning settings): the owner's;
+- making `workflow-lint` a required check, SARIF upload of its findings to code scanning (it needs `security-events: write` and the repository's code-scanning settings): the owner's (code scanning itself: reversed by Block 70, for CodeQL's analysis);
 - OpenSSF Scorecard, egress control of runners, container images by digest (`docker pull` by tag);
 - Renovate: Dependabot stays.
 
@@ -11402,3 +11403,78 @@ Value clause: As an app developer whose organisation requires supply-chain evide
   - the `package` job with `SOURCE_DATE_EPOCH` set (no `serialNumber`).
 
 **Exceptions introduced:** no scenario: a release workflow, two scripts and documentation (Block 20's precedent). The attestations and the release assets are verified by the first real release (D8).
+
+---
+
+## Block 70 — Code scanning and secret scanning
+
+**Goal:** CodeQL analyses the crate's Rust code, the native and the browser builds, on every pull request, on main and weekly, its alerts reaching GitHub code scanning; gitleaks scans the whole history for secrets on every CI run, and a pre-commit hook lets a contributor run it before committing. Every action is SHA-pinned and every downloaded tool checked against its digest.
+
+Source: owner, 2026-11-17, issue #347. Block 57 left "SARIF upload to code scanning" to the owner; the owner's issue now asks for code scanning. This block reverses that exclusion for CodeQL's analysis; Block 0's "Reversed exclusions" gains its row, and Block 57's out-of-scope line says so. Uploading `workflow-lint`'s own findings stays out: zizmor already fails the job on any finding.
+
+Facts this block relies on (verified while drafting and reviewing, 2026-11-18):
+- CodeQL analyses Rust, generally available since CodeQL 2.23.3 (October 2025), in `build-mode: none` only (the extractor's `build_modes` lists `none` alone).
+- The extractor loads the crate through rust-analyzer: it runs build scripts (`load_out_dirs_from_check`) and expands proc macros. It uses its own fixed toolchain (1.99.0 in its current source, installed by rustup on demand), not the runner's. A file outside the loaded module tree (e.g. under an inactive `cfg`) is still extracted, but "without semantics": no macro expansion, no type or call resolution.
+- Its options, read from `CODEQL_EXTRACTOR_RUST_OPTION_<NAME>` (comma- or newline-separated lists):
+  - `CARGO_FEATURES`: every feature by default; when set, only those, and without `default` unless listed;
+  - `CARGO_TARGET`: the target to analyse, as `cargo --target`; the host by default;
+  - `CARGO_CFG_OVERRIDES`: cfgs to set, or unset with a leading `-`, in every crate.
+- `github/codeql-action` v4.39.3 is commit `33d7b85da1a04171e211befe2c739303b9a4c066` (2026-11-04, the latest v4 release).
+- The repository is public and owned by a personal account. Code scanning's default setup is `not-configured`, so a workflow's upload (advanced setup) is accepted; with default setup on, it would be rejected. The upload needs `security-events: write`; `actions: read` is needed only on private repositories.
+- Code scanning adds its own "CodeQL" check to a pull request, reporting the alerts it introduces; which severities fail it, and whether it blocks merging, are repository settings.
+- Secret scanning is on; push protection, non-provider patterns and validity checks are off (repository settings).
+- gitleaks v8.30.1 (2026-03-21, commit `83d9cd684c87d95d656c1458ef04895a7f1cbd8e`) is MIT-licensed; its release ships `gitleaks_8.30.1_linux_x64.tar.gz`, SHA-256 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`, and a checksums file. `gitleaks-action` is under its own end-user licence agreement, with a licence key for organisations. The pinned `taiki-e/install-action` does not list gitleaks.
+- gitleaks' own pre-commit hooks are `gitleaks` (built with Go by pre-commit), `gitleaks-docker` and `gitleaks-system`; each runs `gitleaks git --pre-commit --redact --staged --verbose`.
+- gitleaks reports a secret in the commit that added its line. An inline `gitleaks:allow` hides only lines that carry it, so it cannot hide a commit already in the history; `.gitleaksignore` lists findings by fingerprint (`<commit>:<file>:<rule>:<line>`), each tied to one commit.
+- gitleaks' `aws-access-token` rule allowlists keys ending in `EXAMPLE`; its `generic-api-key` rule skips values containing a stopword such as `log-` (so `tests/log_facade.rs`'s `tok-1f9e-log-facade` is not reported).
+- Dependabot updates `.pre-commit-config.yaml` (`package-ecosystem: pre-commit`, since 2026-03-10), revs pinned by SHA with their `# frozen:` comment included.
+- The repository has no pre-commit configuration and no CONTRIBUTING file; the README's "Development" section has a "Continuous integration" subsection.
+
+**Dependencies:** Blocks 0 (Reversed exclusions), 6 (the `fips` feature, which needs CMake and Go), 44 (the browser adapter under `cfg(adapter_browser)`, set by `build.rs`), 57 (D1 `workflow-lint`, D2 SHA pins and toolchains, D3 Dependabot and its cooldown, D4 expressions, D5 credentials, D6 grants, D9 accepted findings).
+
+**Amends** (line numbers on 8a14f75; each "before" string appears once):
+- **Block 0, "Reversed exclusions"**, line 94: the row "| Block 62, out of scope | connections that http_stream or sse open after the attempt, for commands | reviewer, 2026-11-16, delegated by the owner | 64 |" followed by an empty line and "### Test layers" gains, between them, the row "| Block 57, out of scope | SARIF upload to code scanning (CodeQL's analysis; `workflow-lint`'s findings stay out) | owner, 2026-11-17 (issue #347) | 70 |". The Block 62 row also appears inside Block 64's text, so the anchor is that row followed by "\n\n### Test layers".
+- **Block 57, "Out of scope"**, line 10146: "- making `workflow-lint` a required check, SARIF upload to code scanning (it needs `security-events: write` and the repository's code-scanning settings): the owner's;" becomes "- making `workflow-lint` a required check, SARIF upload of its findings to code scanning (it needs `security-events: write` and the repository's code-scanning settings): the owner's (code scanning itself: reversed by Block 70, for CodeQL's analysis);".
+
+**Out of scope:**
+- the repository's settings: code scanning's default setup (stays off), the CodeQL check's failure severities, rulesets and required checks, push protection, non-provider patterns, validity checks: the owner's;
+- CodeQL's `actions` and `javascript-typescript` languages: zizmor and actionlint cover the workflows, and the JavaScript is CI tooling;
+- other SAST tools (Semgrep's Rust rules are few; clippy already runs);
+- SARIF upload of gitleaks' findings: the job fails on any finding, with redacted output;
+- scanning dependencies' sources (cargo-deny's advisories cover them).
+
+**Decisions:**
+- **D1 CodeQL workflow.** A new `.github/workflows/codeql.yml`, apart from `ci.yml` so that the `security-events: write` grant and the analysis' schedule stay out of it:
+  - triggers: pull requests, pushes to main, weekly (`cron`, as GitHub's starter workflow: the pinned bundle fixes the queries, so a scan without a change finds nothing new), `workflow_dispatch`; no path filter (Block 57 D1's reason);
+  - top level `contents: read` (Block 57 D6); `concurrency` as `ci.yml`'s, cancelling only on pull requests;
+  - one job, `analyze`, `timeout-minutes: 30`, granting `contents: read` and `security-events: write`; `actions/checkout` at the pinned SHA with `persist-credentials: false`; `github/codeql-action/init` and `/analyze` at v4.39.3 by SHA, `languages: rust`, `build-mode: none`, `queries: security-extended`, `category: /language:rust/target:<entry>`;
+  - a matrix of two entries, `fail-fast: false` (D2, D3). Each entry's options reach the extractor through the job's `env:` from matrix values, never inside a `run:` (Block 57 D4).
+- **D2 Native entry.** The host target with every feature but `fips`, listed in `CODEQL_EXTRACTOR_RUST_OPTION_CARGO_FEATURES`. `fips` would turn off the `not(feature = "fips")` items, which hold more code than the one provider function and the tests it turns on, and its module needs CMake and Go to build. A step, after the job installs `stable` with rustup (Block 57 D2), fails unless the list equals the package's features in `cargo metadata` without `default` and `fips`, so that a new feature cannot be left out silently.
+- **D3 Browser entry.** `CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET=wasm32-unknown-unknown`, the features `browser,test-util,unstable` (those of the `wasm` CI job), and `CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES=adapter_browser`: the cfg `build.rs` sets for that target and feature, set directly because the extractor's own toolchain has no wasm32 standard library, and its build-script run may not complete for that target. Without this entry the browser adapter is extracted without semantics. `VERIFY:` that `src/adapter/browser/websocket.rs` is extracted with semantics in this entry (the acceptance below); if it is not, stop and report.
+- **D4 CodeQL alerts.** The first analysis's alerts are triaged in 70a, each listed in the pull request: fixed; or dismissed through code scanning with its reason (false positive, used in tests) and a comment naming the code; or, when the fix is larger than a few lines, left open with a sub-increment 70b named for it. Later alerts follow the same rule. No query is disabled and no path excluded (Block 57 D9: nothing ignored without a finding and its reason).
+- **D5 Secret scan.** A `secrets` job in `ci.yml`, on `ci`'s triggers with no path filter, as `workflow-lint`, `timeout-minutes: 10`, no grant beyond the top level:
+  - `actions/checkout` with `fetch-depth: 0` and `persist-credentials: false`;
+  - gitleaks v8.30.1 downloaded from its release and checked against the SHA-256 above, as the `actionlint` step does (the version, asset and digest in the job's `env:`);
+  - a step that fails unless `.pre-commit-config.yaml` pins the same version (D6's `rev:` line), so that the hook and the job cannot drift;
+  - `gitleaks git --redact --exit-code 1 .` over the whole history (about 1,200 commits today: seconds). A finding fails the job.
+- **D6 Accepted secret findings.** A real secret is reported to the owner, who revokes it; a revoked secret, or a false positive, already in the history is listed in `.gitleaksignore` by its fingerprint, under a `#` line giving its reason. That is the only way to accept a commit already made (Facts), and a fingerprint cannot hide another commit. A false positive in a new change carries an inline `gitleaks:allow` comment with its reason instead. No `.gitleaks.toml` unless a rule needs configuration, as Block 57 D9 says of zizmor's. The first full-history run's findings are settled in 70a, each listed in the pull request.
+- **D7 Pre-commit.** `.pre-commit-config.yaml` with gitleaks' `gitleaks` hook, `repo: https://github.com/gitleaks/gitleaks`, `rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1` (the form `pre-commit autoupdate --freeze` writes). It reads the same `.gitleaksignore`. It is opt-in for each clone: the `secrets` job, and push protection once the owner enables it, are the gates.
+- **D8 Dependabot.** The `github-actions` entry already covers `codeql.yml`. A `pre-commit` entry, weekly, `cooldown: default-days: 7`, commit prefix `[deps]` (as the other two), bumps the hook; its pull request then fails D5's version check until the job's version, asset digest and the hook's commit are bumped with it, by hand, as actionlint's.
+- **D9 Documentation.** The README's "Development" → "Continuous integration" names the `analyze` workflow and the `secrets` job, says how to enable the hook (`pre-commit install`) and how a finding is settled (D6), and lists the owner's settings: default setup kept off, push protection, the CodeQL check's failure severities and the required checks. No changelog entry: nothing in the published crate changes.
+
+**Sub-increments:** the spec PR (this text, the amendments, line 3 as `blocks 0–70`); **70a**, D1–D9; **70b** only if D4 names one.
+
+Value clause: As a maintainer of a client that fleets of devices run, I want each change scanned for security flaws and leaked secrets, so that a vulnerable pattern or a committed credential is caught before it ships.
+
+**Structural acceptance (70a):**
+- `workflow-lint` (actionlint, zizmor) passes on `codeql.yml` and the `secrets` job, and every new `uses:` is SHA-pinned;
+- the CodeQL run on the pull request completes and uploads both entries; their durations are recorded;
+- from one run with `init`'s `debug: true` (reverted before merging), the debug database shows `src/adapter/browser/websocket.rs` extracted with semantics in the browser entry and without in the native one (no "semantic analyzer unavailable" diagnostic for it in the former), recorded in the pull request;
+- the `secrets` job passes, with D6's settled findings listed;
+- seen red once, recorded in the pull request:
+  - `gitleaks git` and the pre-commit hook on a local scratch commit adding a generated AWS-format key (not one ending in `EXAMPLE`, which the rule allowlists); the commit is never pushed, so neither GitHub's secret scanning nor AWS sees it;
+  - the `secrets` job with `.pre-commit-config.yaml`'s rev changed (D5's version check);
+  - D2's feature check with one feature removed from the list;
+  - zizmor with `github/codeql-action/init` pinned by tag (unpinned-uses).
+
+**Exceptions introduced:** no scenario: a workflow, a CI job, a hook configuration and documentation (Block 57's precedent), verified by the runs and mutations above.
