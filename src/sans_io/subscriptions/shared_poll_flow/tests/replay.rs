@@ -688,3 +688,60 @@ fn a_backoff_equal_to_the_reply_deadline_is_still_the_retry() {
         "seed 175 no longer draws 5 s at the third failure ({delays:?}): pick a new seed"
     );
 }
+
+// Block 65e: mutants of run 43982614806 the tests above let through.
+
+// disconnect() stops a track request's reply deadline.
+#[test]
+fn disconnect_stops_a_track_requests_reply_deadline() {
+    let (mut machine, _, id) = subscribed(false, false);
+    let tracked = track(&mut machine, id, &[("a", 0)], "sig1");
+    let deadline = deadlines_set(&machine, &tracked)[0];
+
+    let disconnected = machine.handle(Input::Disconnect);
+
+    assert!(
+        cancelled(&disconnected).contains(&deadline),
+        "{disconnected:?}"
+    );
+}
+
+// A track refused with code 100, not temporary, untracks its keys and is
+// not retried.
+#[test]
+fn a_track_refused_with_code_100_untracks_and_is_not_retried() {
+    let (mut machine, transport, id) = subscribed(false, false);
+    let command = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+
+    let refused = machine.handle(failing(transport, &command, 100, false));
+
+    assert_eq!(updates(&refused).len(), 1, "{refused:?}");
+    assert_eq!(requests(&refused, 2).len(), 1, "{refused:?}");
+    assert!(retries_set(&machine, &refused).is_empty(), "{refused:?}");
+}
+
+// An accepted track request starts the replay backoff over: the next
+// failure waits the first step's delay.
+#[test]
+fn an_accepted_track_starts_the_replay_backoff_over() {
+    let (mut machine, transport, id) = subscribed(false, false);
+    machine.rng = fastrand::Rng::with_seed(7);
+    let mut command = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
+    for _ in 0..3 {
+        let failed = machine.handle(failing(transport, &command, 500, true));
+        let (timer, _) = retries_set(&machine, &failed)[0];
+        command = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1)[0].clone();
+    }
+    machine.handle(reply_to(transport, &command));
+    let next = requests(&track(&mut machine, id, &[("b", 0)], "sig2"), 1)[0].clone();
+    let want = crate::backoff::delay(
+        0,
+        Duration::from_secs(1),
+        Duration::from_secs(15),
+        &mut machine.rng.clone(),
+    );
+
+    let failed = machine.handle(failing(transport, &next, 500, true));
+
+    assert_eq!(retries_set(&machine, &failed)[0].1, want, "{failed:?}");
+}
