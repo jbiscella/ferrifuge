@@ -1616,3 +1616,88 @@ fn the_build_names_the_browser_it_runs_in() {
         assert_eq!(in_safari(), safari, "{BROWSER:?} in {agent}");
     }
 }
+
+/// A WebSocket shim keeping the arguments of its last call in `seen.args`
+/// and constructing the page's WebSocket; with `protocol`, the socket's
+/// `protocol` property reads it (Block 67).
+fn recording_websocket(protocol: Option<&str>) -> (js_sys::Function, js_sys::Object) {
+    let seen = js_sys::Object::new();
+    let make = js_sys::Function::new_with_args(
+        "seen, protocol",
+        "return function (...args) {
+           seen.args = args;
+           const socket = new globalThis.WebSocket(...args);
+           if (protocol !== null) {
+             Object.defineProperty(socket, 'protocol', { get: () => protocol });
+           }
+           return socket;
+         };",
+    );
+    let shim = make
+        .call2(
+            &JsValue::NULL,
+            &seen,
+            &protocol.map_or(JsValue::NULL, JsValue::from_str),
+        )
+        .expect("a shim")
+        .unchecked_into();
+    (shim, seen)
+}
+
+// @W scenario: A browser client offers its custom subprotocols after the encoding's own value
+#[wasm_bindgen_test]
+async fn a_browser_client_offers_its_custom_subprotocols_after_the_encodings_own() {
+    let (shim, seen) = recording_websocket(None);
+    let client = Client::builder_with_transports([(TransportKind::WebSocket, endpoint())])
+        .websocket(shim)
+        .websocket_subprotocols(["tenant-a"])
+        .build()
+        .expect("a valid client");
+    let mut events = client.events();
+
+    client.connect();
+
+    assert_eq!(connected_over(&mut events).await, "websocket");
+    let args: js_sys::Array = js_sys::Reflect::get(&seen, &JsValue::from_str("args"))
+        .expect("the arguments")
+        .unchecked_into();
+    let offered = args.get(1);
+    assert!(js_sys::Array::is_array(&offered), "{offered:?}");
+    let offered: Vec<String> = offered
+        .unchecked_into::<js_sys::Array>()
+        .iter()
+        .map(|value| value.as_string().expect("a string"))
+        .collect();
+    assert_eq!(offered, ["centrifuge-json", "tenant-a"]);
+}
+
+// @W scenario: A browser socket reporting another subprotocol fails the attempt
+#[wasm_bindgen_test]
+async fn a_browser_socket_reporting_another_subprotocol_fails_the_attempt() {
+    let (shim, _) = recording_websocket(Some("tenant-a"));
+    let client = Client::builder_with_transports([(TransportKind::WebSocket, endpoint())])
+        .websocket(shim)
+        .websocket_subprotocols(["tenant-a"])
+        .build()
+        .expect("a valid client");
+    let mut events = client.events();
+
+    client.connect();
+
+    let error = loop {
+        match next(&mut events).await {
+            ClientEvent::Connecting(_) => {}
+            ClientEvent::Error(error) => break error,
+            event => panic!("not connecting or an error: {event:?}"),
+        }
+    };
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (
+            ferrifuge::ErrorKind::Transport,
+            "websocket subprotocol not accepted"
+        )
+    );
+    assert_eq!(client.state(), ferrifuge::State::Connecting);
+    client.disconnect();
+}

@@ -47,8 +47,8 @@ pub(in crate::adapter) struct Open {
     /// The endpoint's index, for the records.
     pub(in crate::adapter) endpoint: usize,
     pub(in crate::adapter) url: String,
-    /// Websocket subprotocol of the configured encoding, if it needs one.
-    pub(in crate::adapter) subprotocol: Option<&'static str>,
+    /// The websocket subprotocols offered, and the encoding (Block 67).
+    pub(in crate::adapter) offer: super::subprotocols::Offer,
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) max_message: usize,
     pub(in crate::adapter) headers: HeaderSet,
@@ -65,7 +65,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
         kind,
         endpoint,
         url,
-        subprotocol,
+        offer,
         timeout,
         max_message,
         headers,
@@ -93,12 +93,12 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
     match kind {
         TransportKind::WebSocket => Box::pin(async move {
             let headers = headers.current();
-            WebSocket::open(&url, subprotocol, timeout, &headers, &network, max_message)
+            WebSocket::open(&url, &offer, timeout, &headers, &network, max_message)
                 .await
                 .map(|websocket| Transport::WebSocket(Box::new(websocket)))
         }),
         TransportKind::HttpStream | TransportKind::Sse => {
-            let protobuf = subprotocol.is_some();
+            let protobuf = offer.protobuf;
             Box::pin(async move {
                 HttpTransport::open(
                     kind,
@@ -120,7 +120,7 @@ pub(in crate::adapter) fn open(open: Open, log: &Log) -> Opening {
             let headers = headers.current();
             let target = webtransport::Target {
                 url: &url,
-                protobuf: subprotocol.is_some(),
+                protobuf: offer.protobuf,
                 timeout,
                 headers: &headers,
                 max_message,

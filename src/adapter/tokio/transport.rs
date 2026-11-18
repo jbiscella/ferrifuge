@@ -1,5 +1,6 @@
 //! Websocket transport of the tokio adapter.
 
+use crate::adapter::subprotocols::NOT_ACCEPTED;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
@@ -156,14 +157,14 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 impl WebSocket {
-    /// Opens a connection to `url` (`ws://` or `wss://`), asking for
-    /// `subprotocol` if any. A frame not written within `timeout` of being
+    /// Opens a connection to `url` (`ws://` or `wss://`), offering the
+    /// subprotocols of `offer`, the server to select one it accepts. A frame not written within `timeout` of being
     /// queued ends the connection, and closing it takes at most `timeout`.
     /// A message or frame over `max_message` bytes ends it too, reported as
     /// [`Inbound::TooLarge`].
     pub(crate) async fn open(
         url: &str,
-        subprotocol: Option<&str>,
+        offer: &crate::adapter::subprotocols::Offer,
         timeout: Duration,
         headers: &reqwest::header::HeaderMap,
         network: &Network,
@@ -196,9 +197,11 @@ impl WebSocket {
         for (name, value) in headers {
             request.headers_mut().insert(name.clone(), value.clone());
         }
-        if let Some(subprotocol) = subprotocol {
-            let value = HeaderValue::from_str(subprotocol)
-                .map_err(|e| TransportFailure::other(e.to_string()))?;
+        // One header with every value: servers read the first line only
+        // (Block 67, D3). Checked tokens make a valid header value.
+        if let Some(offered) = offer.header() {
+            let value = HeaderValue::from_str(&offered)
+                .map_err(|_| TransportFailure::other(NOT_ACCEPTED))?;
             request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
         }
         // With the application's Cookie, in one header (Block 43, D3).
@@ -206,11 +209,27 @@ impl WebSocket {
         let stream = secure(stream, &request, tls)
             .await
             .map_err(|error| handshake_error(&error, url, network))?;
-        // tungstenite fails the handshake unless the server accepts the
-        // subprotocol asked for.
+        // tungstenite fails the handshake when the server selects none of
+        // the values offered, or one not offered; with the application's
+        // values, the encoding's own must be the one (Block 67, D4).
         let (stream, response) = upgrade(request, stream, max_message)
             .await
-            .map_err(|error| handshake_error(&error, url, network))?;
+            .map_err(|error| {
+                use tokio_tungstenite::tungstenite::error::{ProtocolError, SubProtocolError};
+                match error {
+                    Error::Protocol(ProtocolError::SecWebSocketSubProtocolError(
+                        SubProtocolError::NoSubProtocol | SubProtocolError::InvalidSubProtocol,
+                    )) if offer.custom() => TransportFailure::other(NOT_ACCEPTED),
+                    error => handshake_error(&error, url, network),
+                }
+            })?;
+        let selected = response
+            .headers()
+            .get(SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok());
+        if !offer.accepts(selected) {
+            return Err(TransportFailure::other(NOT_ACCEPTED));
+        }
         network.store_cookies(url, response.status().as_u16(), response.headers());
         Ok(Self {
             stream,
@@ -476,7 +495,7 @@ mod tests {
         let url = echo_then_close(3001, "shutdown").await;
         let mut ws = WebSocket::open(
             &url,
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
@@ -530,7 +549,7 @@ mod tests {
         let url = sending(&[16, 17]).await;
         let mut ws = WebSocket::open(
             &url,
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
@@ -565,7 +584,7 @@ mod tests {
         });
         let mut ws = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
@@ -617,7 +636,7 @@ mod tests {
         });
         let mut ws = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
@@ -659,7 +678,7 @@ mod tests {
         let timeout = Duration::from_millis(200);
         let mut ws = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             timeout,
             &HeaderMap::new(),
             &Network::default(),
@@ -719,7 +738,7 @@ mod tests {
         let timeout = Duration::from_millis(100);
         let mut ws = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             timeout,
             &HeaderMap::new(),
             &Network::default(),
@@ -761,7 +780,7 @@ mod tests {
         });
         let mut ws = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),
@@ -819,7 +838,7 @@ mod tests {
 
             let result = WebSocket::open(
                 &url,
-                None,
+                &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
                 TIMEOUT,
                 &HeaderMap::new(),
                 &Network::default(),
@@ -1067,7 +1086,7 @@ mod tests {
 
         let result = WebSocket::open(
             &format!("ws://{address}"),
-            None,
+            &crate::adapter::subprotocols::Offer::new(crate::Protocol::Json, &[]),
             TIMEOUT,
             &HeaderMap::new(),
             &Network::default(),

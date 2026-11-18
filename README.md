@@ -1018,6 +1018,42 @@ carries JSON or Protobuf; sse carries JSON only, as in Centrifugo, so
 building a client with the Protobuf protocol and an sse endpoint fails with
 a configuration error.
 
+### Websocket subprotocols
+
+A gateway that routes websocket clients on `Sec-WebSocket-Protocol`, before
+any message is read (on a tenant id, for example), can be given values of
+the application's own:
+
+```rust,no_run
+let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
+    .websocket_subprotocols(["tenant-a"])
+    .build()?;
+# Ok::<(), ferrifuge::ClientError>(())
+```
+
+- The upgrade carries one `Sec-WebSocket-Protocol` header: the encoding's
+  own value first, `centrifuge-protobuf`, or `centrifuge-json` for JSON
+  (which Centrifugo selects; without it, Centrifugo answers with no
+  subprotocol and the handshake fails), then the application's values, in
+  order. Without values of its own, a client offers what it offered before:
+  `centrifuge-protobuf` for Protobuf, nothing for JSON.
+- The server must select the encoding's value. One that selects none, or
+  one of the application's values, fails the attempt: an `error` event of
+  kind transport, "websocket subprotocol not accepted", and the next
+  transport is tried.
+- Each value must be a token (RFC 6455), not repeat another, and not be
+  `centrifuge-json` or `centrifuge-protobuf`; otherwise `build()` fails,
+  naming the value's index, never the value.
+- No log record, error message or `Debug` output of the client carries a
+  value (`Debug` shows how many). The websocket library logs them at TRACE
+  (see Logging).
+- `http_stream`, sse and WebTransport carry no subprotocol: after a fallback
+  to them the values are not sent. `http_headers` and `emulated_headers`
+  reach those transports.
+- The browser build passes the same list to the WebSocket constructor, as
+  an array, the application's `websocket` shim included, and checks
+  `WebSocket.protocol` once it opens.
+
 ### WebTransport (unstable)
 
 With the `unstable-webtransport` feature, a client can connect over
@@ -2023,7 +2059,8 @@ entries and exits show at TRACE under the target `tracing::span::active`.
 Keep Ferrifuge's dependencies at INFO or above in production: they log on
 their own, through `log`. At TRACE, tungstenite 0.30 logs the whole
 websocket upgrade request, its query and header values included (the
-`Cookie` header of a client with a cookie jar among them), and every frame
+`Cookie` header of a client with a cookie jar, and the websocket
+subprotocols, among them), and every frame
 sent and received, the connect frame with its token. reqwest's own `Jar`,
 if an application uses one, logs cookie values at DEBUG; `MemoryJar` logs
 none.

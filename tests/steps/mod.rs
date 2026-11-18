@@ -88,6 +88,7 @@ mod sleep;
 mod slow;
 mod statistics;
 mod sub_tokens;
+mod subprotocols;
 mod subscriptions;
 mod tag_filters;
 mod test_support;
@@ -253,6 +254,8 @@ pub(crate) struct ClientWorld {
     pub(crate) calls: calls::Calls,
     /// Connect data of a Block 17 scenario.
     pub(crate) connect_data: connect_data::ConnectData,
+    /// Block 67.
+    pub(crate) subprotocols: subprotocols::Subprotocols,
     /// Batches of a Block 18 scenario.
     pub(crate) batching: batching::Batching,
     pub(crate) delta: delta::Delta,

@@ -161,6 +161,14 @@ struct State {
     connects_answered_at: Vec<std::time::Instant>,
     /// Whether each upgrade asked for the Protobuf subprotocol, in order.
     protobuf_upgrades: Vec<bool>,
+    /// Each upgrade's `Sec-WebSocket-Protocol` lines, in order (Block 67,
+    /// D8).
+    subprotocol_lines: Vec<Vec<String>>,
+    /// The value each upgrade selected, if any, in order.
+    subprotocols_selected: Vec<Option<String>>,
+    /// When set, every upgrade answers so, in place of the selection
+    /// Centrifugo makes.
+    subprotocol_answer: Option<SubprotocolAnswer>,
     /// Per channel, the offset up to which the history has expired.
     expired: std::collections::HashMap<String, u64>,
     /// Publications a recovery may bring back at most; more fail it.
@@ -341,14 +349,8 @@ impl FakeServer {
                                 HeaderValue::from_str(cookie).expect("a cookie"),
                             );
                         }
+                        protobuf = answer_subprotocol(&mut state, request, &mut response);
                         drop(state);
-                        protobuf = asks_for_protobuf(request);
-                        if protobuf {
-                            response.headers_mut().insert(
-                                "sec-websocket-protocol",
-                                HeaderValue::from_static(protobuf::SUBPROTOCOL),
-                            );
-                        }
                         Ok(response)
                     },
                 )
@@ -538,6 +540,22 @@ impl FakeServer {
     /// (Block 37b).
     pub(crate) fn protobuf_upgrades(&self) -> Vec<bool> {
         self.state.lock().unwrap().protobuf_upgrades.clone()
+    }
+
+    /// Each upgrade's `Sec-WebSocket-Protocol` lines, in order (Block 67).
+    pub(crate) fn subprotocol_lines(&self) -> Vec<Vec<String>> {
+        self.state.lock().unwrap().subprotocol_lines.clone()
+    }
+
+    /// The value each upgrade selected, if any, in order (Block 67).
+    pub(crate) fn subprotocols_selected(&self) -> Vec<Option<String>> {
+        self.state.lock().unwrap().subprotocols_selected.clone()
+    }
+
+    /// Makes every upgrade answer with `answer`, whatever the client
+    /// offered (Block 67, D8).
+    pub(crate) fn answer_subprotocols_with(&self, answer: SubprotocolAnswer) {
+        self.state.lock().unwrap().subprotocol_answer = Some(answer);
     }
 
     /// Makes every accepted upgrade's response set `cookies` (Block 43).
@@ -950,14 +968,61 @@ impl Drop for FakeServer {
     }
 }
 
-fn asks_for_protobuf(request: &Request) -> bool {
-    request
+/// How the fake server answers a websocket upgrade's subprotocols, in
+/// place of the selection Centrifugo makes (Block 67, D8).
+#[derive(Clone)]
+pub(crate) enum SubprotocolAnswer {
+    /// This value.
+    Value(String),
+    /// No `Sec-WebSocket-Protocol` header.
+    None,
+}
+
+/// Records `request`'s `Sec-WebSocket-Protocol` lines in `state` and sets
+/// the answer in `response`: the value Centrifugo selects, unless a step
+/// set another; whether the connection speaks Protobuf.
+fn answer_subprotocol(state: &mut State, request: &Request, response: &mut Response) -> bool {
+    state.subprotocol_lines.push(
+        request
+            .headers()
+            .get_all("sec-websocket-protocol")
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect(),
+    );
+    let selected = select_subprotocol(request);
+    let answer = match &state.subprotocol_answer {
+        Some(SubprotocolAnswer::Value(value)) => Some(value.clone()),
+        Some(SubprotocolAnswer::None) => None,
+        None => selected.map(str::to_owned),
+    };
+    state.subprotocols_selected.push(answer.clone());
+    if let Some(answer) = answer {
+        response.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_str(&answer).expect("a token"),
+        );
+    }
+    selected == Some(protobuf::SUBPROTOCOL)
+}
+
+/// The value Centrifugo selects from the upgrade's first
+/// `Sec-WebSocket-Protocol` line: the first of the client's values it
+/// supports, `centrifuge-json` or `centrifuge-protobuf`, if any (Block 67,
+/// D8; centrifuge `internal/websocket/server.go`).
+fn select_subprotocol(request: &Request) -> Option<&'static str> {
+    let line = request
         .headers()
-        .get_all("sec-websocket-protocol")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .any(|protocol| protocol.trim() == protobuf::SUBPROTOCOL)
+        .get("sec-websocket-protocol")?
+        .to_str()
+        .ok()?;
+    line.split(',')
+        .map(str::trim)
+        .find_map(|value| match value {
+            "centrifuge-json" => Some("centrifuge-json"),
+            protobuf::SUBPROTOCOL => Some(protobuf::SUBPROTOCOL),
+            _ => None,
+        })
 }
 
 /// Aborts its task when dropped.

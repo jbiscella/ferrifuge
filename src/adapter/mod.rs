@@ -28,6 +28,7 @@ mod ready;
 mod shared;
 #[cfg(feature = "unstable")]
 mod shared_poll_subscription;
+mod subprotocols;
 mod subscription;
 #[cfg(test)]
 #[cfg(adapter_tokio)]

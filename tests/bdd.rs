@@ -599,6 +599,13 @@ const IMPLEMENTED: &[&str] = &[
     "A firing of a deadline a sleep's answer replaced changes nothing",
     "No two timer settings share a number",
     "A duration of 0 is rejected",
+    // Block 67a.
+    "Without custom subprotocols the upgrade is unchanged",
+    "Custom subprotocols are offered after the encoding's own value",
+    "A client offering custom subprotocols connects to Centrifugo",
+    "A server that does not select the encoding's subprotocol fails the attempt",
+    "A subprotocol that is not a valid, unique application value fails the build",
+    "Subprotocol values appear in no Debug output and no log record",
 ];
 
 /// Server configuration of @A scenarios.
