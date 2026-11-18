@@ -211,7 +211,9 @@ impl ClientBuilder {
     /// With it on, a websocket endpoint must be `wss://`, an `http_stream`,
     /// sse or WebTransport endpoint `https://`, and an emulation endpoint,
     /// when one is set, `https://`, the scheme compared ignoring case. The
-    /// error names the transport and the scheme, never the endpoint.
+    /// error names the endpoint's transport, or `emulation`, and its scheme
+    /// only when that is `ws`, `wss`, `http` or `https`; never the endpoint
+    /// or any other part of it.
     ///
     /// A connector exempts no endpoint: a `ws://` endpoint over a stream the
     /// application supplies (a VPN tunnel, `test_util::Server`) needs this
@@ -304,18 +306,16 @@ impl Client {
             backend,
         } = builder;
         super::subprotocols::check(&websocket_subprotocols)?;
-        if tls_only {
-            // An endpoint's own error comes first (Block 68, D3).
-            for (kind, endpoint) in &endpoints {
-                check_endpoint(*kind, endpoint)?;
-            }
-            check_tls_only(&endpoints, emulation_endpoint.as_deref())?;
-        }
         let super::backend::Started {
             shared: backend_shared,
             driver: backend_driver,
             runtime,
         } = backend.start(&endpoints, emulation_endpoint.as_deref(), &config)?;
+        // After the backend's checks, each endpoint's own among them, and
+        // before anything starts (Block 68, D3).
+        if tls_only {
+            check_tls_only(&endpoints, emulation_endpoint.as_deref())?;
+        }
         let emulated_headers = emulated_header_map(&emulated_headers)?;
         check_limits(&config)?;
         let offer = super::subprotocols::Offer::new(config.protocol, &websocket_subprotocols);
@@ -879,6 +879,8 @@ fn check_limits(config: &Config) -> Result<(), ClientError> {
 mod tests {
     use super::*;
 
+    use crate::adapter::test_support::*;
+
     // Block 68: the tls_only rule.
     #[test]
     fn tls_only_needs_wss_for_the_websocket_and_https_for_the_rest() {
@@ -922,7 +924,6 @@ mod tests {
 
         assert!(client.is_ok(), "{:?}", client.err());
     }
-    use crate::adapter::test_support::*;
 
     #[test]
     fn http_header_names_are_case_insensitive_and_a_later_value_wins() {

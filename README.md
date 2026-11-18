@@ -1068,8 +1068,10 @@ let client = ferrifuge::Client::builder("wss://example.com/connection/websocket"
 - A websocket endpoint must be `wss://`; an `http_stream`, sse or
   WebTransport endpoint, and an emulation endpoint when one is set,
   `https://`. The scheme is compared ignoring case.
-- `build()` otherwise fails with a configuration error that names the
-  transport and the scheme, never the endpoint.
+- Otherwise `build()` fails with a configuration error that names the
+  endpoint's transport, or `emulation`, and its scheme only when that is
+  `ws`, `wss`, `http` or `https`; never the endpoint or any other part of
+  it.
 - A connector exempts no endpoint: a `ws://` endpoint over a stream the
   application supplies (a VPN tunnel, the test double of
   `test_util::Server`) needs `tls_only` off.
