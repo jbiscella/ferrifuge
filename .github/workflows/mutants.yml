@@ -3,9 +3,9 @@ name: mutants
 # Every mutant in the library's core, weekly and on demand (Block 60, D5):
 # the scope, tests and features of `.cargo/mutants.toml`, in 16 shards. A
 # dispatch may narrow it to named files (Block 65's acceptance runs).
-# Report-only: the missed mutants are listed in each shard's summary and
-# artifact, and a later block triages the first report and makes this run
-# fail on them.
+# A shard fails on a missed mutant, listing it after its summary, as the
+# pull-request job does (Block 65, D5); a timeout counts as caught. Each
+# later miss is settled in a pull request of its own (Block 65, D6).
 on:
   schedule:
     - cron: "41 3 * * 6"
@@ -83,6 +83,11 @@ jobs:
               echo "- $outcome: $(wc -l < "mutants.out/$outcome.txt" 2>/dev/null || echo 0)"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s mutants.out/missed.txt ]; then
+            echo "Missed mutants:"
+            cat mutants.out/missed.txt
+            exit 1
+          fi
 
       - name: Upload mutants.out
         if: ${{ !cancelled() }}
