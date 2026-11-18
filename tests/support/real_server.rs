@@ -317,17 +317,49 @@ impl Environment {
     /// [`RESTART_WITHIN`]: the environment's failure, not the client's.
     pub(crate) async fn restart(&self, graceful: bool) -> Result<(), String> {
         let start = tokio::time::Instant::now();
+        let container = self.centrifugo.as_str();
+        // `docker restart` is `stop` then `start`: run apart, a restart past
+        // its bound names the command that stalled (chaos-real 44219684753:
+        // one graceful restart of hundreds took over 30 s, where they take
+        // about 0.4 s).
+        let commands: [&[&str]; 2] = if graceful {
+            [&["stop", "-t", "3", container], &["start", container]]
+        } else {
+            [&["kill", "-s", "KILL", container], &["start", container]]
+        };
+        let done = std::sync::Mutex::new(Vec::new());
         let restarted = tokio::time::timeout(RESTART_WITHIN, async {
-            if graceful {
-                docker(&["restart", "-t", "3", &self.centrifugo]).await?;
-            } else {
-                docker(&["kill", "-s", "KILL", &self.centrifugo]).await?;
-                docker(&["start", &self.centrifugo]).await?;
+            for args in commands {
+                let began = tokio::time::Instant::now();
+                docker(args).await?;
+                done.lock()
+                    .unwrap()
+                    .push(format!("{} {:?}", args[0], began.elapsed()));
             }
             Ok::<_, String>(())
         })
-        .await
-        .map_err(|_| format!("docker did not restart the server within {RESTART_WITHIN:?}"))?;
+        .await;
+        let Ok(restarted) = restarted else {
+            let done = done.into_inner().unwrap_or_default();
+            let stalled = commands.get(done.len()).map_or("", |args| args[0]);
+            let state = tokio::time::timeout(
+                Duration::from_secs(10),
+                docker(&[
+                    "inspect",
+                    "-f",
+                    "{{.State.Status}}, started {{.State.StartedAt}}, finished {{.State.FinishedAt}}, exit {{.State.ExitCode}} {{.State.Error}}",
+                    container,
+                ]),
+            )
+            .await
+            .map_or_else(|_| "docker inspect timed out".to_owned(), |state| {
+                state.unwrap_or_else(|error| error)
+            });
+            return Err(format!(
+                "docker did not restart the server within {RESTART_WITHIN:?}: done {done:?}, \
+                 stalled in `docker {stalled}`; the container: {state}"
+            ));
+        };
         restarted?;
         self.wait_ready(RESTART_WITHIN.saturating_sub(start.elapsed()))
             .await
