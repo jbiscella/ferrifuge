@@ -11381,7 +11381,7 @@ Facts this block relies on (verified while drafting and reviewing, 2026-11-18):
   - `curl -sSfL -o ferrifuge-V.crate https://static.crates.io/crates/ferrifuge/ferrifuge-V.crate`;
   - `gh attestation verify ferrifuge-V.crate --repo jbiscella/ferrifuge --signer-workflow jbiscella/ferrifuge/.github/workflows/release.yml --source-ref refs/tags/vV`;
   - the same command with `--predicate-type https://cyclonedx.org/bom` for the SBOM;
-  - `gh release verify vV --repo jbiscella/ferrifuge` and `gh release verify-asset vV ferrifuge-V.cdx.json --repo jbiscella/ferrifuge`.
+  - `gh release verify vV --repo jbiscella/ferrifuge`; `gh release download vV --repo jbiscella/ferrifuge --pattern ferrifuge-V.cdx.json`; and `gh release verify-asset vV <file> --repo jbiscella/ferrifuge` for `ferrifuge-V.cdx.json` and `ferrifuge-V.crate`.
 
   It also says that the SBOM lists the versions of the tagged `Cargo.lock`, for every feature and target, not those an application's own lock resolves.
 - **D6 Dry run.** No `workflow_dispatch` on `release.yml`. Block 20 D1 triggers it only by a pushed `v*` tag, and a second trigger would add a path to the publishing job that only the `release` environment's tag rule would stop. Instead, the pull-request `package` job in `ci.yml` runs D1's install step and script before `cargo publish --dry-run`, then prints the `.crate`'s SHA-256. The attestations and the release assets are first exercised by the first real release (D8).
@@ -11397,7 +11397,7 @@ Value clause: As an app developer whose organisation requires supply-chain evide
 - the `package` job passes on the pull request, and its log shows D1's checks and the `.crate`'s SHA-256;
 - `scripts/release-digest 1.0.0-alpha.2` passes on the `.crate` packaged at 37ac473, and fails naming both digests on a copy with one byte changed;
 - seen red once, recorded in the pull request:
-  - zizmor with `id-token: write` moved to release.yml's top level (excessive-permissions);
+  - zizmor with `id-token: write` at release.yml's top level and `github-release`'s `permissions` removed, so that a job inherits it (excessive-permissions; a top-level grant that every job overrides is inert, and zizmor reports it only with `--persona pedantic`);
   - zizmor with `actions/attest` pinned by tag (unpinned-uses);
   - the `package` job with `SOURCE_DATE_EPOCH` set (no `serialNumber`).
 
