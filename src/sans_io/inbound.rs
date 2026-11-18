@@ -39,7 +39,6 @@ struct Held {
 #[derive(Debug, Default)]
 pub(super) struct Inbound {
     held: VecDeque<Held>,
-    bytes: usize,
     /// Events of handled messages not yet taken: the next message waits
     /// until there are none.
     waiting_for: HashSet<EventId>,
@@ -79,15 +78,15 @@ impl Machine {
                 continue;
             }
             // A call's reply settles it when read, ahead of held messages
-            // (Block 13; centrifuge-rust `docs/spec.md` §9.3).
-            if reply.id > 0 && self.calls.owns_command(reply.id) {
+            // (Block 13; centrifuge-rust `docs/spec.md` §9.3). Command ids
+            // are never 0 (`command_id`): a push owns no command and pauses
+            // no deadline.
+            if self.calls.owns_command(reply.id) {
                 self.reset_backoff_if_pending();
                 self.call_reply(reply);
                 continue;
             }
-            if reply.id > 0 {
-                self.pause_reply_deadline(reply.id);
-            }
+            self.pause_reply_deadline(reply.id);
             self.hold(transport, Item::Reply(Box::new(reply)), size.max(1));
         }
         self.handle_inbound();
@@ -118,7 +117,6 @@ impl Machine {
     }
 
     fn hold(&mut self, transport: TransportId, item: Item, size: usize) {
-        self.inbound.bytes += size;
         self.inbound.held.push_back(Held {
             transport,
             item,
@@ -180,7 +178,6 @@ impl Machine {
                 self.inbound.held.shrink_to(crate::RESTING_SLOTS);
                 break;
             };
-            self.inbound.bytes -= held.size;
             if Some(held.transport) != self.transport {
                 continue;
             }
@@ -244,7 +241,6 @@ impl Machine {
                 }
                 Item::Reply(reply) if self.map_page_early(reply, held.size) => {
                     let held = self.inbound.held.remove(index).expect("in range");
-                    self.inbound.bytes -= held.size;
                     self.inbound.handled = held.size;
                     if let Item::Reply(reply) = held.item {
                         self.reply(*reply);
@@ -265,15 +261,9 @@ impl Machine {
     /// resumes reading as the read-ahead is full or not.
     pub(super) fn update_reading(&mut self) {
         let current = self.transport;
-        let mut dropped = 0;
-        self.inbound.held.retain(|held| {
-            let keep = Some(held.transport) == current;
-            if !keep {
-                dropped += held.size;
-            }
-            keep
-        });
-        self.inbound.bytes -= dropped;
+        self.inbound
+            .held
+            .retain(|held| Some(held.transport) == current);
         let (messages, bytes) = self.read_ahead();
         let full = messages < self.inbound.held.len()
             || messages >= self.config.read_ahead_messages.max(1)
@@ -340,14 +330,6 @@ impl Machine {
             Some(held.transport) == self.transport
                 && matches!(held.item, Item::Closed { .. } | Item::TooLarge)
         })
-    }
-
-    /// Whether a message of `transport` is held.
-    pub(super) fn holds_messages_of(&self, transport: TransportId) -> bool {
-        self.inbound
-            .held
-            .iter()
-            .any(|held| held.transport == transport)
     }
 
     /// Whether the event `id` holds the messages read after the one that

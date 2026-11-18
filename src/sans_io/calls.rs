@@ -408,19 +408,12 @@ impl Machine {
         self.hold_in_batch(super::batching::HeldCommand::Call(id));
     }
 
-    /// Whether call `id` is still held, its batch's stop to release it.
-    pub(super) fn is_held(&self, id: CallId) -> bool {
-        self.calls
-            .by_id
-            .get(&id)
-            .is_some_and(|call| matches!(call.phase, Phase::Held))
-    }
-
     /// Held call `id` joins a frame of its stopped batch when it fits the
     /// write queue with what is unwritten and the calls of the frame being
     /// built (`batch_bytes`), which are not counted yet, the first fitting
     /// alone when nothing is unwritten; its command and size, or `None`
-    /// when it waits for room.
+    /// when it waits for room or is no longer registered (settled or
+    /// abandoned meanwhile).
     // Block 18, D4.
     pub(super) fn release_held(
         &mut self,
@@ -432,7 +425,8 @@ impl Machine {
         let unwritten = self.calls.unwritten_bytes + batch_bytes;
         let fits = unwritten == 0 || unwritten + size <= self.config.write_queue_bytes.max(1);
         if !self.can_send() || self.waits_for_room() || !fits {
-            // Behind the calls already waiting, with its deadline running.
+            // Among the calls waiting, in the order they were made (by
+            // id), with its deadline running.
             if let Some(call) = self.calls.by_id.get_mut(&id) {
                 call.phase = Phase::Room;
             }

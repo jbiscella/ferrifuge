@@ -46,4 +46,8 @@ exclude_re = [
     '^src/map\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (MapEntry|MapUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
     '^src/shared_poll\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (SharedPollSignature|SharedPollUpdate)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
     '^src/sans_io\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (SubscriptionOptions|ConnectData)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
+    '^src/sans_io/call\.rs:[0-9]+:[0-9]+: replace <impl std::fmt::Debug for (CallRequest|CallReply)>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)$',
+    # Equivalent: it only swaps maps already empty for new ones, freeing
+    # their capacity, which nothing observes; Block 46 D15 keeps it.
+    '^src/sans_io/debounce\.rs:[0-9]+:[0-9]+: replace Machine::close_windows_of with \(\)$',
 ]
