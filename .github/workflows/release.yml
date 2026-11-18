@@ -121,7 +121,7 @@ jobs:
       - name: SBOM
         run: scripts/release-sbom "$RUNNER_TEMP/assets"
 
-      # A re-run after the publish packages again instead (Block 69, D2).
+      # A re-run after the publish does not publish again (Block 69, D2).
       - name: Published already?
         id: published
         env:
@@ -147,8 +147,11 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish
 
-      - name: cargo package (a re-run)
-        if: steps.published.outputs.already == 'true'
+      # The file D2 checks and D3 attests. `cargo publish` leaves the file
+      # it uploaded under target/package/tmp-crate/, a path of its own; the
+      # same cargo on the same commit packages the same bytes, which the
+      # next step checks against crates.io.
+      - name: cargo package
         run: cargo package --no-verify
 
       # crates.io must serve the file attested (Block 69, D2).
