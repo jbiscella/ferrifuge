@@ -457,6 +457,9 @@ impl Stream {
     }
 }
 
+/// How long a request to Toxiproxy's API may take.
+const TOXIPROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Client of Toxiproxy's HTTP API (v2.13.0, README "HTTP API").
 #[derive(Clone)]
 pub(crate) struct Toxiproxy {
@@ -467,7 +470,12 @@ pub(crate) struct Toxiproxy {
 impl Toxiproxy {
     fn new(port: u16) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Bounded: a seed's cleanup runs after its 120 s bound, and an
+            // API that stalls would hold it, and the row, forever.
+            http: reqwest::Client::builder()
+                .timeout(TOXIPROXY_TIMEOUT)
+                .build()
+                .expect("a Toxiproxy client"),
             base: format!("http://127.0.0.1:{port}"),
         }
     }

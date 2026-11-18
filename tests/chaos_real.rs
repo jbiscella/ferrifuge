@@ -1564,7 +1564,10 @@ impl SeedRun<'_> {
         match fault.kind.toxic() {
             Some(toxic) => {
                 for stream in &fault.streams {
-                    let _ = toxics.remove(PROXY, &format!("{toxic}-{stream}")).await;
+                    toxics
+                        .remove(PROXY, &format!("{toxic}-{stream}"))
+                        .await
+                        .unwrap_or_else(|error| panic!("{error}"));
                 }
             }
             None => match fault.kind {
@@ -1577,9 +1580,10 @@ impl SeedRun<'_> {
                         *end = Some(unix_ms());
                     }
                 }
-                _ => {
-                    let _ = toxics.set_enabled(PROXY, true).await;
-                }
+                _ => toxics
+                    .set_enabled(PROXY, true)
+                    .await
+                    .unwrap_or_else(|error| panic!("{error}")),
             },
         }
         self.record_fault(&format!("fault {:?} removed", fault.kind));
@@ -1941,7 +1945,11 @@ impl SeedRun<'_> {
     async fn heal(&mut self) -> Result<(), Violation> {
         // The last fault holds for its seeded time first (Codex, #259).
         self.end_fault().await?;
-        let _ = self.environment.toxics().set_enabled(PROXY, true).await;
+        self.environment
+            .toxics()
+            .set_enabled(PROXY, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
         self.wanted_connected = true;
         self.command(Command_::Connect).await;
         let deadline = Instant::now() + QUIESCENCE;
@@ -2426,7 +2434,11 @@ async fn run_seed(
         second.close().await;
     }
     run.remove().await;
-    let _ = environment.toxics().set_enabled(PROXY, true).await;
+    environment
+        .toxics()
+        .set_enabled(PROXY, true)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     let _ = run.child.process.start_kill();
     let log = run.child.log.lock().unwrap().clone();
     result.map_err(|violation| (violation, log))
@@ -2915,12 +2927,136 @@ async fn token_fetches_are_judged() {
     log("token fetches are judged by the client's own state and I5's flag");
 }
 
-/// The budget's seeds, or `FERRIFUGE_REAL_CHAOS_SEED` alone.
-async fn run_budget(environment: &Environment) -> Vec<Violation> {
-    let budget = env::var(BUDGET_VARIABLE)
+/// The row's budget: `FERRIFUGE_REAL_CHAOS_BUDGET_SECONDS`, else the default.
+fn budget() -> Duration {
+    env::var(BUDGET_VARIABLE)
         .ok()
         .and_then(|seconds| seconds.parse().ok())
-        .map_or(DEFAULT_BUDGET, Duration::from_secs);
+        .map_or(DEFAULT_BUDGET, Duration::from_secs)
+}
+
+/// How long past its budget a row may run before the watchdog stops it:
+/// the scenarios and planted faults before the budget, and the last seed's
+/// bound, its rerun and their cleanup after it.
+const OVERRUN: Duration = Duration::from_secs(15 * 60);
+/// The memory the machine keeps available, in KiB; under it for
+/// `LOW_SAMPLES` samples in a row, the watchdog stops the row.
+const MIN_AVAILABLE_KIB: u64 = 512 * 1024;
+const LOW_SAMPLES: u32 = 3;
+/// How often the watchdog samples, and how often it logs a sample.
+const SAMPLE_EVERY: Duration = Duration::from_secs(10);
+const LOG_EVERY: Duration = Duration::from_secs(60);
+
+/// Stops the row, with what it saw, while the job can still keep its log:
+/// past its budget and `OVERRUN`, or with the machine's memory nearly gone.
+/// A run whose runner was starved lost its log with the runner
+/// (chaos-real 44079012965, at 55 minutes of a 60-minute job); a hang the
+/// job's timeout stops keeps no counters either. Logs the parent's resident
+/// memory and the machine's available memory every minute, so a run that
+/// grows shows it.
+fn watchdog(budget: Duration) {
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let mut logged = Instant::now();
+        let mut low = 0;
+        loop {
+            std::thread::sleep(SAMPLE_EVERY);
+            let available = meminfo_kib("/proc/meminfo", "MemAvailable:");
+            let resident = meminfo_kib("/proc/self/status", "VmRSS:");
+            low = if available.is_some_and(|kib| kib < MIN_AVAILABLE_KIB) {
+                low + 1
+            } else {
+                0
+            };
+            let over = start.elapsed() > budget + OVERRUN;
+            let sample = format!(
+                "resources at {}s: parent rss {} MiB, available {} MiB",
+                start.elapsed().as_secs(),
+                resident.map_or(-1, |kib| i64::try_from(kib / 1024).unwrap_or(-1)),
+                available.map_or(-1, |kib| i64::try_from(kib / 1024).unwrap_or(-1)),
+            );
+            if logged.elapsed() >= LOG_EVERY || over || low >= LOW_SAMPLES {
+                log(&sample);
+                logged = Instant::now();
+            }
+            if over || low >= LOW_SAMPLES {
+                let why = if over {
+                    format!("the row ran past its budget {budget:?} and {OVERRUN:?}")
+                } else {
+                    format!(
+                        "available memory under {MIN_AVAILABLE_KIB} KiB for {LOW_SAMPLES} samples"
+                    )
+                };
+                log(&format!("watchdog: {why}; stopping the row"));
+                if let Ok(counters) = COUNTERS.lock() {
+                    for (name, count) in &counters.counts {
+                        println!("@P report {name}: {count}");
+                    }
+                }
+                for (program, args) in [
+                    ("ps", &["-eo", "pid,rss,pcpu,etime,args", "--sort=-rss"][..]),
+                    ("docker", &["stats", "--no-stream"][..]),
+                    ("docker", &["ps", "-a"][..]),
+                ] {
+                    if let Ok(output) = bounded(program).args(args).output() {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        for line in text.lines().take(25) {
+                            let line: String = line.chars().take(200).collect();
+                            log(&format!("{program}: {line}"));
+                        }
+                    }
+                }
+                // The exit drops nothing: the run's containers go here, as
+                // `Environment`'s drop would remove them (the run is
+                // `r<pid>`, and `r<pid>redis` for D6's Redis scenario).
+                let run = format!("ferrifuge-chaos-r{}", std::process::id());
+                if let Ok(output) = bounded("docker")
+                    .args(["ps", "-a", "--format", "{{.Names}}"])
+                    .output()
+                {
+                    let names = String::from_utf8_lossy(&output.stdout);
+                    let ours: Vec<&str> = names
+                        .lines()
+                        .filter(|name| {
+                            name.strip_prefix(&run).is_some_and(|rest| {
+                                rest.starts_with('-') || rest.starts_with("redis-")
+                            })
+                        })
+                        .collect();
+                    if !ours.is_empty() {
+                        let _ = bounded("docker").args(["rm", "-f"]).args(&ours).output();
+                    }
+                }
+                std::process::exit(1);
+            }
+        }
+    });
+}
+
+/// `program` under coreutils' `timeout`, 15 s: a starved or wedged Docker
+/// daemon, what the watchdog may be stopping the row for, must not hold
+/// it from its exit (reviewer).
+fn bounded(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("timeout");
+    command.args(["15", program]);
+    command
+}
+
+/// The value, in KiB, of `key` in a `/proc` file of `key value kB` lines.
+fn meminfo_kib(path: &str, key: &str) -> Option<u64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix(key))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The budget's seeds, or `FERRIFUGE_REAL_CHAOS_SEED` alone.
+async fn run_budget(environment: &Environment) -> Vec<Violation> {
+    let budget = budget();
     let only: Option<u64> = env::var(SEED_VARIABLE)
         .ok()
         .and_then(|seed| seed.parse().ok());
@@ -2997,6 +3133,7 @@ fn main() {
         println!("chaos_real skipped: set {RUN}=1, with Docker");
         return;
     }
+    watchdog(budget());
     seeds_fix_their_operations();
     suspensions_overlap_calls();
     holds_fit_the_window();
