@@ -70,6 +70,15 @@ pub(crate) async fn docker(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Now, as Docker's `--since` and `--until` take it (Unix seconds and
+/// nanoseconds).
+fn docker_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}", now.as_secs(), now.subsec_nanos())
+}
+
 /// A free TCP port on the loopback interface, to publish a container on.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -317,20 +326,79 @@ impl Environment {
     /// [`RESTART_WITHIN`]: the environment's failure, not the client's.
     pub(crate) async fn restart(&self, graceful: bool) -> Result<(), String> {
         let start = tokio::time::Instant::now();
+        let container = self.centrifugo.as_str();
+        // `docker restart` is `stop` then `start`: run apart, a restart past
+        // its bound names the command that stalled (chaos-real 44219684753:
+        // one graceful restart of hundreds took over 30 s, where they take
+        // about 0.4 s).
+        let commands: [&[&str]; 2] = if graceful {
+            [&["stop", "-t", "3", container], &["start", container]]
+        } else {
+            [&["kill", "-s", "KILL", container], &["start", container]]
+        };
+        let since = docker_now();
+        let mut done = Vec::new();
         let restarted = tokio::time::timeout(RESTART_WITHIN, async {
-            if graceful {
-                docker(&["restart", "-t", "3", &self.centrifugo]).await?;
-            } else {
-                docker(&["kill", "-s", "KILL", &self.centrifugo]).await?;
-                docker(&["start", &self.centrifugo]).await?;
+            for args in commands {
+                let at = docker_now();
+                let began = tokio::time::Instant::now();
+                docker(args).await?;
+                done.push(format!("{} at {at} took {:?}", args[0], began.elapsed()));
             }
             Ok::<_, String>(())
         })
-        .await
-        .map_err(|_| format!("docker did not restart the server within {RESTART_WITHIN:?}"))?;
-        restarted?;
+        .await;
+        let Ok(restarted) = restarted else {
+            let stalled = commands.get(done.len()).map_or("", |args| args[0]);
+            return Err(format!(
+                "docker did not restart the server within {RESTART_WITHIN:?}: done {done:?}, \
+                 stalled in `docker {stalled}`; {}",
+                self.daemon_view(&since).await
+            ));
+        };
+        restarted.map_err(|error| format!("{error}; done {done:?}"))?;
         self.wait_ready(RESTART_WITHIN.saturating_sub(start.elapsed()))
             .await
+            .map_err(|error| format!("{error}; docker done {done:?}"))
+    }
+
+    /// What Docker says of the Centrifugo container since `since`, for a
+    /// restart past its bound: its state, and the daemon's own timeline of
+    /// it (kill, die, stop, start), which tells a stalled CLI or API from a
+    /// stalled container. Each command bounded at 10 s (reviewer).
+    async fn daemon_view(&self, since: &str) -> String {
+        let bounded = |args: Vec<String>| async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            tokio::time::timeout(Duration::from_secs(10), docker(&args))
+                .await
+                .map_or_else(|_| "timed out".to_owned(), |out| out.unwrap_or_else(|e| e))
+        };
+        let state = bounded(vec![
+            "inspect".into(),
+            "-f".into(),
+            "{{.State.Status}}, pid {{.State.Pid}}, started {{.State.StartedAt}}, finished \
+             {{.State.FinishedAt}}, exit {{.State.ExitCode}}, oom {{.State.OOMKilled}}, \
+             restarts {{.RestartCount}} {{.State.Error}}"
+                .into(),
+            self.centrifugo.clone(),
+        ])
+        .await;
+        let events = bounded(vec![
+            "events".into(),
+            "--since".into(),
+            since.to_owned(),
+            "--until".into(),
+            docker_now(),
+            "--filter".into(),
+            format!("container={}", self.centrifugo),
+            "--format".into(),
+            "{{.TimeNano}} {{.Action}}".into(),
+        ])
+        .await;
+        format!(
+            "the container: {state}; its events: {}",
+            events.replace('\n', ", ")
+        )
     }
 
     /// The engine the environment was started with (D6).
@@ -457,6 +525,9 @@ impl Stream {
     }
 }
 
+/// How long a request to Toxiproxy's API may take.
+const TOXIPROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Client of Toxiproxy's HTTP API (v2.13.0, README "HTTP API").
 #[derive(Clone)]
 pub(crate) struct Toxiproxy {
@@ -467,7 +538,12 @@ pub(crate) struct Toxiproxy {
 impl Toxiproxy {
     fn new(port: u16) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Bounded: a seed's cleanup runs after its 120 s bound, and an
+            // API that stalls would hold it, and the row, forever.
+            http: reqwest::Client::builder()
+                .timeout(TOXIPROXY_TIMEOUT)
+                .build()
+                .expect("a Toxiproxy client"),
             base: format!("http://127.0.0.1:{port}"),
         }
     }
