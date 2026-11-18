@@ -2156,3 +2156,47 @@ fn a_live_reply_with_delta_off_ends_the_chains_and_data_stays_as_received() {
     assert!(delta_error(&pushed).is_none(), "{pushed:?}");
     assert_eq!(updates(&pushed)[0].data, br#"{"v":2}"#);
 }
+
+// Block 65c: a map page read after a disconnect push that is held waits
+// behind it, as every message after a held one does.
+#[test]
+fn a_page_read_after_a_held_disconnect_push_is_not_handled_early() {
+    let (mut machine, transport) = connected();
+    let news = machine
+        .add_subscription("news".into(), SubscriptionOptions::default())
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(news)));
+    let subscribe = subscribe_sent(&machine.handle(Input::Subscribe(news)));
+    for action in machine.handle(frame(
+        transport,
+        &format!(r#"{{"id":{},"subscribe":{{}}}}"#, id_of(&subscribe)),
+    )) {
+        if let Action::EmitSubscription(event, ..) = action {
+            machine.handle(Input::EventTaken(event));
+        }
+    }
+    // A publication not taken holds the messages read after it.
+    machine.handle(frame(
+        transport,
+        r#"{"push":{"channel":"news","pub":{"data":{}}}}"#,
+    ));
+    let id = machine
+        .add_map_subscription("scores".into(), options(2))
+        .unwrap();
+    machine.handle(Input::StreamOpened(Some(id)));
+    let first = subscribe_sent(&machine.handle(Input::Subscribe(id)));
+
+    let read = machine.handle(frame(
+        transport,
+        &format!(
+            "{}\n{}",
+            r#"{"push":{"disconnect":{"code":3001,"reason":"later"}}}"#,
+            format_args!(
+                r#"{{"id":{},"subscribe":{{"type":1,"phase":2,"cursor":"c1","epoch":"e1","offset":5}}}}"#,
+                id_of(&first)
+            )
+        ),
+    ));
+
+    assert!(sent(&read).is_empty(), "{read:?}");
+}

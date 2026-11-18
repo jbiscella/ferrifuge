@@ -350,3 +350,138 @@ fn a_computed_frame_size_is_the_encoded_length() {
             );
         });
 }
+
+// Block 65c: mutants of run 43982614806 the tests above let through.
+
+// After an HTTP 413, a call abandoned meanwhile is not resent, and a new
+// command does not join a resent one, which goes alone.
+#[test]
+fn after_a_413_an_abandoned_call_is_not_resent_and_new_commands_go_apart() {
+    let (mut machine, transport) = connected(
+        Config::default(),
+        vec![TransportKind::HttpStream],
+        r#"{"client":"c","session":"s","node":"n"}"#,
+    );
+    let (a, _) = call(&mut machine, rpc("a"));
+    call(&mut machine, rpc("b"));
+    let request = machine
+        .handle(Input::Flush)
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Send { frame, .. } => Some(frame),
+            _ => None,
+        })
+        .expect("one request");
+    machine.handle(Input::SendRejected {
+        transport,
+        frame: request,
+    });
+    machine.handle(Input::CallAbandoned(a));
+    call(&mut machine, rpc("c"));
+
+    let resent = sent(&machine.handle(Input::Flush));
+
+    assert_eq!(resent.len(), 2, "{resent:?}");
+    assert!(resent[0].contains(r#"\"method\":\"b\""#), "{resent:?}");
+    assert!(resent[1].contains(r#"\"method\":\"c\""#), "{resent:?}");
+}
+
+// A flush fills a frame up to `batch_frame_bytes` exactly; past it the
+// next frame gets its own id.
+#[test]
+fn a_flushed_frame_holds_commands_up_to_its_byte_limit() {
+    let flushed = |limit: usize| {
+        let (mut machine, _) = connected(
+            Config {
+                batch_frame_bytes: limit,
+                ..Config::default()
+            },
+            vec![TransportKind::WebSocket],
+            r#"{"client":"c"}"#,
+        );
+        call(&mut machine, rpc("a"));
+        call(&mut machine, rpc("b"));
+        machine
+            .handle(Input::Flush)
+            .into_iter()
+            .filter_map(|action| match action {
+                Action::Send { id, frame, .. } => Some((id, frame.len())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let whole = flushed(Config::default().batch_frame_bytes);
+    assert_eq!(whole.len(), 1, "{whole:?}");
+    let length = whole[0].1;
+
+    let exact = flushed(length);
+    let split = flushed(length - 1);
+
+    assert_eq!(exact.len(), 1, "{exact:?}");
+    assert_eq!(split.len(), 2, "{split:?}");
+    assert_ne!(split[0].0, split[1].0, "{split:?}");
+}
+
+// With automatic batching, a call that does not fit the write queue after
+// the calls buffered before it waits.
+#[test]
+fn a_buffered_call_past_the_write_queue_waits() {
+    let (mut machine, _) = connected(
+        Config {
+            write_queue_bytes: 60,
+            ..Config::default()
+        },
+        vec![TransportKind::WebSocket],
+        r#"{"client":"c"}"#,
+    );
+    machine.handle(Input::StartBatching);
+    call(&mut machine, rpc("a"));
+    call(&mut machine, rpc("b"));
+    machine.handle(Input::StopBatching);
+
+    assert_eq!(
+        sent(&machine.handle(Input::Flush)),
+        [r#"{"id":2,"rpc":{"method":"a","data":{}}}"#]
+    );
+}
+
+// A flushed frame with no call, written, frees no room: a call waiting for
+// room keeps waiting.
+#[test]
+fn a_written_frame_without_calls_frees_no_room() {
+    let (mut machine, transport) = connected(
+        Config {
+            write_queue_bytes: 100,
+            ..Config::default()
+        },
+        vec![TransportKind::WebSocket],
+        r#"{"client":"c","ping":25,"pong":true}"#,
+    );
+    let held = machine.add_call(rpc("a"));
+    let big = machine.add_call(CallRequest::Rpc {
+        method: "b".into(),
+        data: format!("\"{}\"", "x".repeat(40)).into_bytes(),
+    });
+    call(&mut machine, rpc("x"));
+    machine.handle(Input::Flush);
+    machine.handle(Input::Call(big));
+    machine.handle(Input::StartBatching);
+    machine.handle(Input::Call(held));
+    machine.handle(Input::StopBatching);
+    machine.handle(frame(transport, "{}"));
+    let pong = machine
+        .handle(Input::Flush)
+        .into_iter()
+        .find_map(|action| match action {
+            Action::Send { id, frame, .. } if frame == b"{}" => Some(id),
+            _ => None,
+        })
+        .expect("the pong");
+
+    machine.handle(Input::FrameWritten {
+        transport,
+        frame: pong,
+    });
+
+    assert_eq!(sent(&machine.handle(Input::Flush)), Vec::<String>::new());
+}

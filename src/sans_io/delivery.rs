@@ -536,7 +536,7 @@ impl Machine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Input, Timer};
+    use super::super::{Input, Timer, TransportId};
     use super::*;
     use crate::{ClientEvent, Config};
 
@@ -583,5 +583,186 @@ mod tests {
     fn a_stream_not_read_gets_errors_only_until_it_holds_256_events() {
         // The connecting event comes first.
         assert_eq!(errors_of_failed_attempts(300, false), 255);
+    }
+
+    // Block 65c: mutants of run 43982614806 the tests above let through.
+
+    /// A machine connected, subscribed to "news" (recoverable, epoch "e",
+    /// offset 0) with a stream for it, every event so far taken.
+    fn subscribed() -> (Machine, TransportId, SubscriptionId) {
+        let mut machine = Machine::new(Config::default());
+        let transport = machine
+            .handle(Input::Connect)
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a transport to open");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(transport, r#"{"id":1,"connect":{"client":"c"}}"#));
+        let id = machine
+            .add_subscription("news".into(), super::super::SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::StreamOpened(Some(id)));
+        machine.handle(Input::Subscribe(id));
+        let replied = machine.handle(frame(
+            transport,
+            r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":0}}"#,
+        ));
+        take_all(&mut machine, &replied);
+        (machine, transport, id)
+    }
+
+    fn frame(transport: TransportId, json: &str) -> Input {
+        Input::Frame {
+            transport,
+            data: json.as_bytes().to_vec(),
+        }
+    }
+
+    fn take_all(machine: &mut Machine, actions: &[Action]) {
+        for action in actions {
+            if let Action::Emit(id, _) | Action::EmitSubscription(id, ..) = action {
+                machine.handle(Input::EventTaken(*id));
+            }
+        }
+    }
+
+    /// The publication at offset 1 of "news", read; its event, not taken.
+    fn published(machine: &mut Machine, transport: TransportId) -> EventId {
+        machine
+            .handle(frame(
+                transport,
+                r#"{"push":{"channel":"news","pub":{"data":{},"offset":1}}}"#,
+            ))
+            .iter()
+            .find_map(|action| match action {
+                Action::EmitSubscription(id, ..) => Some(*id),
+                _ => None,
+            })
+            .expect("the publication's event")
+    }
+
+    // Removing a subscription keeps another's position to commit.
+    #[test]
+    fn removing_a_subscription_keeps_anothers_pending_position() {
+        let (mut machine, transport, news) = subscribed();
+        let other = machine
+            .add_subscription("other".into(), super::super::SubscriptionOptions::default())
+            .unwrap();
+        let event = published(&mut machine, transport);
+
+        machine.handle(Input::RemoveSubscription(other));
+        machine.handle(Input::EventTaken(event));
+
+        assert_eq!(
+            machine
+                .subscription_position(news)
+                .map(|position| position.offset),
+            Some(1)
+        );
+    }
+
+    // A handler that panics leaves the position where it was, epoch
+    // included.
+    #[test]
+    fn a_panicking_handler_leaves_the_position_where_it_was() {
+        let (mut machine, transport, news) = subscribed();
+        let event = published(&mut machine, transport);
+
+        machine.handle(Input::EventHanded(event));
+        machine.handle(Input::HandlerPanicked {
+            event,
+            message: "boom".into(),
+        });
+
+        assert_eq!(
+            machine.subscription_position(news),
+            Some(StreamPosition {
+                offset: 0,
+                epoch: "e".into()
+            })
+        );
+    }
+
+    /// Fails `attempts` more connection attempts of `machine`, the first
+    /// with `Input::Connect` when `first`; the error events emitted and
+    /// every event's id.
+    fn fail_attempts(machine: &mut Machine, attempts: usize, first: bool) -> (usize, Vec<EventId>) {
+        let mut errors = 0;
+        let mut ids = Vec::new();
+        for attempt in 0..attempts {
+            let mut actions = if first && attempt == 0 {
+                machine.handle(Input::Connect)
+            } else {
+                machine.fire(Timer::Reconnect)
+            };
+            let transport = actions
+                .iter()
+                .find_map(|action| match action {
+                    Action::OpenTransport { transport, .. } => Some(*transport),
+                    _ => None,
+                })
+                .expect("a transport to open");
+            actions.extend(machine.handle(Input::TransportFailed {
+                transport,
+                message: "refused".into(),
+            }));
+            for action in &actions {
+                if let Action::Emit(id, event) = action {
+                    errors += usize::from(matches!(event, ClientEvent::Error(_)));
+                    ids.push(*id);
+                }
+            }
+        }
+        (errors, ids)
+    }
+
+    // A stream closed and opened again starts with nothing held: its
+    // errors are delivered again.
+    #[test]
+    fn a_stream_opened_again_holds_none_of_the_closed_ones_events() {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        fail_attempts(&mut machine, 300, true);
+        machine.handle(Input::StreamClosed(None));
+        machine.handle(Input::StreamOpened(None));
+
+        assert_eq!(fail_attempts(&mut machine, 1, false).0, 1);
+    }
+
+    // Closing a subscription's stream forgets none of the client stream's
+    // events not yet taken: once taken, its errors flow again.
+    #[test]
+    fn closing_another_stream_keeps_the_client_streams_untaken_events() {
+        let mut machine = Machine::new(Config::default());
+        machine.handle(Input::StreamOpened(None));
+        let (_, ids) = fail_attempts(&mut machine, 300, true);
+        let news = machine
+            .add_subscription("news".into(), super::super::SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::StreamClosed(Some(news)));
+        for id in ids {
+            machine.handle(Input::EventTaken(id));
+        }
+
+        assert_eq!(fail_attempts(&mut machine, 1, false).0, 1);
+    }
+
+    // The last publication of a subscribe reply's own stream is the last
+    // one with no channel of its own.
+    #[test]
+    fn the_last_of_the_stream_is_the_last_publication_without_a_channel() {
+        let own = Publication::default();
+        let other = Publication {
+            channel: Some("x".into()),
+            ..Publication::default()
+        };
+
+        assert_eq!(
+            Machine::last_of_stream(&[own.clone(), other.clone(), own, other]),
+            Some(2)
+        );
     }
 }

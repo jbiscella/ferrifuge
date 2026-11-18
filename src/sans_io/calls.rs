@@ -1203,6 +1203,27 @@ mod tests {
         assert!(actions.iter().any(|action| matches!(action, Action::SetTimer(TimerKey::Call(a0, CallTimer::Connection), a2, _) if *a0 == id && *a2 == TIMEOUT)));
     }
 
+    // Block 65c: a message held behind events, unlike a close, does not
+    // queue a call.
+    #[test]
+    fn a_call_made_while_a_message_waits_behind_events_is_sent() {
+        let mut machine = machine();
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened(&mut machine);
+        connect_reply(&mut machine, transport);
+        machine.handle(frame(
+            transport,
+            r#"{"push":{"channel":"x","pub":{"data":{}}}}"#,
+        ));
+
+        let (_, actions) = rpc(&mut machine, "echo");
+
+        assert_eq!(
+            sent_text(&actions),
+            [r#"{"id":2,"rpc":{"method":"echo","data":{"n":1}}}"#]
+        );
+    }
+
     #[test]
     fn queued_calls_stay_queued_when_a_held_connect_reply_comes_after_the_close() {
         let mut machine = machine();
@@ -1689,6 +1710,16 @@ mod tests {
 
         assert_eq!(error_code(&actions), Some(codes::error::CONNECTION_CLOSED));
         assert_eq!(machine.state(), State::Connecting);
+        // Block 65c: the anomaly names the command the reply answers.
+        assert!(
+            actions.contains(&Action::Anomaly(
+                crate::sans_io::Anomaly::ReplyWithoutResult {
+                    transport,
+                    command: "history",
+                }
+            )),
+            "{actions:?}"
+        );
     }
 
     // Block 45, D8: a map publication and a removal are publish commands
@@ -1879,6 +1910,85 @@ mod tests {
                 .map(String::len)
                 .collect::<Vec<_>>(),
             [estimated]
+        );
+    }
+
+    // Block 65c: mutants of run 43982614806 the tests above let through.
+
+    /// A call whose request is `size` bytes of data under method `method`.
+    fn sized(machine: &mut Machine, method: &str, size: usize) -> CallId {
+        machine.add_call(CallRequest::Rpc {
+            method: method.into(),
+            data: format!("\"{}\"", "x".repeat(size)).into_bytes(),
+        })
+    }
+
+    // A batch frame with no call, written, frees no room: a call waiting
+    // for room keeps waiting.
+    #[test]
+    fn a_written_batch_frame_without_calls_frees_no_room() {
+        let mut machine = Machine::new(Config {
+            timeout: TIMEOUT,
+            write_queue_bytes: 100,
+            ..Config::default()
+        });
+        let transport = opened(&mut machine);
+        connect_reply(&mut machine, transport);
+        let news = machine
+            .add_subscription(
+                "news".into(),
+                crate::sans_io::SubscriptionOptions::default(),
+            )
+            .unwrap();
+        let held = sized(&mut machine, "a", 0);
+        let big = sized(&mut machine, "b", 40);
+        rpc(&mut machine, "x");
+        machine.handle(Input::Call(big));
+        machine.handle(Input::StartBatching);
+        machine.handle(Input::Call(held));
+        machine.handle(Input::Subscribe(news));
+        let stopped = machine.handle(Input::StopBatching);
+        let frames: Vec<(FrameId, String)> = stopped
+            .iter()
+            .filter_map(|action| match action {
+                Action::Send { id, frame, .. } => {
+                    Some((*id, String::from_utf8_lossy(frame).into_owned()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert!(!frames[0].1.contains("rpc"), "{frames:?}");
+
+        let written = machine.handle(Input::FrameWritten {
+            transport,
+            frame: frames[0].0,
+        });
+
+        assert_eq!(sent_text(&written), Vec::<String>::new());
+    }
+
+    // A subscription's reply starts the calls waiting for that
+    // subscription only.
+    #[test]
+    fn a_subscribe_reply_starts_only_its_own_subscriptions_calls() {
+        let (mut machine, transport, news) = subscribing();
+        let sport = machine
+            .add_subscription(
+                "sport".into(),
+                crate::sans_io::SubscriptionOptions::default(),
+            )
+            .unwrap();
+        machine.handle(Input::Subscribe(sport));
+        history(&mut machine, news);
+
+        let subscribed = machine.handle(frame(transport, r#"{"id":3,"subscribe":{}}"#));
+
+        assert!(
+            sent_text(&subscribed)
+                .iter()
+                .all(|text| !text.contains("history")),
+            "{subscribed:?}"
         );
     }
 }
