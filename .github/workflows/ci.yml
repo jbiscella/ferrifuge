@@ -269,6 +269,13 @@ jobs:
           # shellcheck disable=SC2086 # $WITHOUT_RING holds several flags: split on purpose
           cargo test --all-targets $WITHOUT_RING
 
+      - name: aws-lc-sys is not linked
+        if: matrix.provider == 'fips'
+        run: |
+          bin=target/debug/examples/quickstart
+          test "$(nm "$bin" | grep -c 'aws_lc_fips_0_14_')" -gt 0
+          test -z "$(nm "$bin" | grep -E 'aws_lc_[0-9]+_[0-9]+_[0-9]+_|aws_lc_sys')"
+
       # Default features keep ring enabled: the stronger provider must win.
       - name: precedence over the default ring
         env:
@@ -329,6 +336,16 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # $FIPS_ONLY holds several flags: split on purpose
           cargo test --lib $FIPS_ONLY
+
+      # aws-lc-sys is compiled but not linked (Block 66 D5): the binary has
+      # the FIPS module's symbols and none of aws-lc-sys's.
+      - name: aws-lc-sys is not linked
+        run: |
+          # shellcheck disable=SC2086 # $FIPS_ONLY holds several flags: split on purpose
+          cargo build --example quickstart $FIPS_ONLY
+          bin=target/debug/examples/quickstart
+          test "$(nm "$bin" | grep -c 'aws_lc_fips_0_13_11_')" -gt 0
+          test -z "$(nm "$bin" | grep -E 'aws_lc_[0-9]+_[0-9]+_[0-9]+_|aws_lc_sys')"
 
   test:
     runs-on: ubuntu-latest
