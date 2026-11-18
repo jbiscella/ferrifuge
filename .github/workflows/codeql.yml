@@ -22,8 +22,15 @@ concurrency:
   group: codeql-${{ github.event_name == 'schedule' && 'weekly' || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # As dtolnay/rust-toolchain set them (Block 57, D2).
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
   analyze:
+    # A name without the feature list, which changes as features are added.
+    name: analyze (${{ matrix.entry }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
