@@ -2230,7 +2230,8 @@ pull requests, on `main` and weekly, and uploads its alerts to code
 scanning. The `secrets` job runs gitleaks over the whole history and fails
 on any finding. To run gitleaks before each commit, install
 [pre-commit](https://pre-commit.com) and run `pre-commit install` in the
-clone; the hook pins the same gitleaks version as the job. A real secret
+clone; the hook pins the same gitleaks version as the job, and builds it
+with Go 1.21 or later (with no Go installed, pre-commit downloads one). A real secret
 is reported to the maintainer, who revokes it. A revoked secret, or a
 false positive, already in the history is listed in `.gitleaksignore` by
 its fingerprint, under a `#` line giving the reason; a false positive in a
