@@ -173,9 +173,10 @@ impl ClientBuilder {
 
     #[cfg_attr(docsrs, doc(cfg(all(target_arch = "wasm32", target_os = "unknown"))))]
     /// Opens websocket connections with `constructor`, called as one with
-    /// the URL and the subprotocol, in place of the page's `WebSocket`
-    /// (centrifuge-js `websocket`). The object it returns is used through
-    /// its `WebSocket` methods and properties, by name.
+    /// the URL and the subprotocol, or with the URL and an array of
+    /// subprotocols once `websocket_subprotocols` are set, in place of the
+    /// page's `WebSocket` (centrifuge-js `websocket`). The object it returns
+    /// is used through its `WebSocket` methods and properties, by name.
     // Block 44, D12.
     #[must_use]
     pub fn websocket(mut self, constructor: js_sys::Function) -> Self {

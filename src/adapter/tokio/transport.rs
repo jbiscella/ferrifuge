@@ -158,7 +158,7 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
 
 impl WebSocket {
     /// Opens a connection to `url` (`ws://` or `wss://`), offering the
-    /// subprotocols of `offer`, the server to select one it accepts. A frame not written within `timeout` of being
+    /// subprotocols of `offer`. A frame not written within `timeout` of being
     /// queued ends the connection, and closing it takes at most `timeout`.
     /// A message or frame over `max_message` bytes ends it too, reported as
     /// [`Inbound::TooLarge`].

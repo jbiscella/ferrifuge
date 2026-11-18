@@ -364,11 +364,13 @@ impl WebSocket {
         .await?;
         // A shim need not apply the browser's own check: the encoding's
         // value must be the one selected (Block 67, D6).
-        let selected = socket.websocket.protocol();
-        if !offer.accepts(Some(selected.as_str()).filter(|selected| !selected.is_empty())) {
-            return Err(TransportFailure::other(
-                crate::adapter::subprotocols::NOT_ACCEPTED,
-            ));
+        if offer.custom() {
+            let selected = socket.websocket.protocol();
+            if !offer.accepts(Some(selected.as_str()).filter(|selected| !selected.is_empty())) {
+                return Err(TransportFailure::other(
+                    crate::adapter::subprotocols::NOT_ACCEPTED,
+                ));
+            }
         }
         Ok(Self {
             socket,
