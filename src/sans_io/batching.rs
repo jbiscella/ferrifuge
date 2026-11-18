@@ -559,4 +559,89 @@ mod tests {
             .collect();
         assert_eq!(frames, [3, 2]);
     }
+
+    // Block 65c: mutants of run 43982614806 the tests above let through.
+
+    // A subscribe held in a batch is lost with the transport, as a sent one
+    // would be; the next transport's batch does not carry it.
+    #[test]
+    fn a_subscribe_held_in_a_batch_is_lost_with_the_transport() {
+        let mut machine = connected(Config::default());
+        let news = machine
+            .add_subscription("news".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::StartBatching);
+        let call = machine.add_call(rpc("a"));
+        machine.handle(Input::Call(call));
+        machine.handle(Input::Subscribe(news));
+        let transport = machine.transport.expect("a transport");
+        machine.handle(Input::TransportClosed {
+            transport,
+            code: None,
+            reason: String::new(),
+        });
+        let next = machine
+            .fire(crate::sans_io::Timer::Reconnect)
+            .iter()
+            .find_map(|action| match action {
+                Action::OpenTransport { transport, .. } => Some(*transport),
+                _ => None,
+            })
+            .expect("a new transport");
+        machine.handle(Input::TransportOpened(next));
+
+        let stopped = machine.handle(Input::StopBatching);
+
+        assert!(
+            sent(&stopped)
+                .iter()
+                .all(|(_, frame)| !String::from_utf8_lossy(frame).contains("subscribe")),
+            "{stopped:?}"
+        );
+    }
+
+    // A batch frame takes a command while the frame stays within
+    // `batch_frame_bytes`, its separator counted.
+    #[test]
+    fn a_batch_frame_takes_commands_up_to_its_byte_limit() {
+        let lines = |limit: usize| {
+            let mut machine = connected(Config {
+                batch_frame_bytes: limit,
+                ..Config::default()
+            });
+            machine.handle(Input::StartBatching);
+            for id in 2..4 {
+                let call = machine.add_call(rpc_300(id));
+                machine.handle(Input::Call(call));
+            }
+            sent(&machine.handle(Input::StopBatching))
+                .iter()
+                .map(|(_, frame)| frame.split(|byte| *byte == b'\n').count())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!((lines(601), lines(600)), (vec![2], vec![1, 1]));
+    }
+
+    // The calls of a batch frame count against the write queue: a call
+    // past it waits.
+    #[test]
+    fn the_calls_of_a_batch_frame_count_against_the_write_queue() {
+        let mut machine = connected(Config {
+            write_queue_bytes: 500,
+            ..Config::default()
+        });
+        machine.handle(Input::StartBatching);
+        for request in [rpc_300(2), rpc_300(3), rpc("c")] {
+            let call = machine.add_call(request);
+            machine.handle(Input::Call(call));
+        }
+
+        let frames = sent(&machine.handle(Input::StopBatching));
+
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let text = String::from_utf8_lossy(&frames[0].1).into_owned();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains(r#""id":2"#), "{text}");
+    }
 }

@@ -5584,4 +5584,74 @@ mod tests {
         assert_eq!(actions, []);
         assert_eq!(machine.state(), State::Connected);
     }
+
+    // Block 65c: mutants of run 43982614806 in the read-ahead (inbound.rs)
+    // the tests above let through.
+
+    // A ping read behind the connect reply, held with it, is answered only
+    // when that reply asked for pongs.
+    #[test]
+    fn a_ping_behind_the_connect_reply_is_answered_only_if_it_asks_for_pongs() {
+        for pong in [true, false] {
+            let (mut machine, transport) = awaiting_connect_reply();
+
+            let read = machine.handle(frame(
+                transport,
+                &format!(
+                    "{{\"id\":1,\"connect\":{{\"client\":\"c\",\"ping\":25,\"pong\":{pong}}}}}\n{{}}"
+                ),
+            ));
+
+            let pongs = read
+                .iter()
+                .filter(|action| {
+                    matches!(action, Action::Send { frame, .. } if frame.as_slice() == b"{}")
+                })
+                .count();
+            assert_eq!(pongs, usize::from(pong), "pong {pong}: {read:?}");
+        }
+    }
+
+    const HELD_PUSH: &str = r#"{"push":{"channel":"x","pub":{"data":{}}}}"#;
+
+    /// Connected under `config` (ping 25 s); the client stream leaves the
+    /// connected event untaken, so the messages read after it are held.
+    fn holding(config: Config) -> (Machine, TransportId) {
+        let mut machine = Machine::with_rng(config, false, fastrand::Rng::with_seed(7));
+        machine.handle(Input::StreamOpened(None));
+        let transport = opened_transport(&machine.handle(Input::Connect));
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(frame(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","ping":25}}"#,
+        ));
+        (machine, transport)
+    }
+
+    // The read-ahead stops at whichever limit comes first, and a frame read
+    // past it arms no ping deadline (Block 15).
+    #[test]
+    fn the_read_ahead_stops_at_either_limit_and_frames_past_it_arm_no_ping_deadline() {
+        for config in [
+            Config {
+                read_ahead_messages: 2,
+                ..Config::default()
+            },
+            Config {
+                read_ahead_bytes: 2 * HELD_PUSH.len() + 1,
+                ..Config::default()
+            },
+        ] {
+            let (mut machine, transport) = holding(config);
+            for _ in 0..3 {
+                machine.handle(frame(transport, HELD_PUSH));
+            }
+
+            let read = machine.handle(frame(transport, HELD_PUSH));
+
+            assert_eq!(machine.read_ahead(), (2, 2 * HELD_PUSH.len()));
+            assert!(!machine.wants_frames());
+            assert_eq!(server_ping_timer(&read), None, "{read:?}");
+        }
+    }
 }
