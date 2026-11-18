@@ -31,7 +31,8 @@ carried that version, from the blocks of `CLAUDE.md` that landed then.
   Centrifugo does (Block 67, D8).
 - `ClientBuilder::tls_only` makes `build()` refuse every endpoint that is
   not TLS (`wss://` for the websocket, `https://` for the others and the
-  emulation endpoint), naming the scheme, never the endpoint (Block 68).
+  emulation endpoint), naming the scheme only when it is `ws`, `wss`,
+  `http` or `https`, never the endpoint (Block 68).
 
 ### Changed
 
