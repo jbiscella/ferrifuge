@@ -178,12 +178,10 @@ struct Queued {
     request: SubRefreshRequest,
     purpose: Purpose,
     keys: Vec<String>,
-    /// The request it is a frame of.
+    /// The request it is a frame of: a frame waits while another frame of
+    /// its request is in flight.
     // D7.
     group: u64,
-    /// Waits for the reply of the frame before it.
-    // D7.
-    after_reply: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -803,7 +801,7 @@ impl Machine {
         let group = flow.next_group;
         flow.next_group += 1;
         let frames = SharedPollFlow::track_frames(&sub.channel, batches, untracked, budget);
-        for (number, (batches, untrack)) in frames.into_iter().enumerate() {
+        for (batches, untrack) in frames {
             let keys: Vec<String> = batches
                 .iter()
                 .flat_map(|batch| batch.items.iter().map(|item| item.key.clone()))
@@ -814,7 +812,7 @@ impl Machine {
                 untrack,
                 ..SubRefreshRequest::default()
             };
-            self.queue_request(id, request, purpose, keys, (group, number > 0));
+            self.queue_request(id, request, purpose, keys, group);
         }
         self.pump_requests(id);
     }
@@ -839,9 +837,12 @@ impl Machine {
         };
         let requests =
             SharedPollFlow::untrack_requests(&sub.channel, keys, flow.max_track_frame_bytes);
-        // Where they go: before the first queued frame of `group`, in order.
-        let mut at = self.shared_poll_flow(id).and_then(|flow| {
-            group.and_then(|group| flow.queue.iter().position(|queued| queued.group == group))
+        // Where they go: before the first queued frame of `group`, in order;
+        // the frames from there wait behind them.
+        let tail = group.and_then(|group| {
+            let flow = self.shared_poll_flow(id)?;
+            let at = flow.queue.iter().position(|queued| queued.group == group)?;
+            Some(flow.queue.split_off(at))
         });
         for keys in requests {
             let own = self.shared_poll_flow(id).map_or(0, |flow| {
@@ -857,28 +858,23 @@ impl Machine {
                 },
                 Purpose::Untrack,
                 keys,
-                (own, false),
+                own,
             );
-            if let (Some(index), Some(flow)) = (at, self.shared_poll_flow(id))
-                && let Some(queued) = flow.queue.pop_back()
-            {
-                flow.queue.insert(index, queued);
-                at = Some(index + 1);
-            }
+        }
+        if let (Some(mut tail), Some(flow)) = (tail, self.shared_poll_flow(id)) {
+            flow.queue.append(&mut tail);
         }
         self.pump_requests(id);
     }
 
-    /// Queues `request` of subscription `id`; `(group, after_reply)` says
-    /// which request it is a frame of, and whether it waits for the frame
-    /// before.
+    /// Queues `request` of subscription `id`, a frame of request `group`.
     fn queue_request(
         &mut self,
         id: SubscriptionId,
         request: SubRefreshRequest,
         purpose: Purpose,
         keys: Vec<String>,
-        (group, after_reply): (u64, bool),
+        group: u64,
     ) {
         if let Some(flow) = self.shared_poll_flow(id) {
             let generation = flow.generation;
@@ -888,7 +884,6 @@ impl Machine {
                 purpose,
                 keys,
                 group,
-                after_reply,
             });
         }
     }
@@ -939,7 +934,9 @@ impl Machine {
                 flow.queue.pop_front();
                 continue;
             }
-            if (emulated && busy) || (front.after_reply && sending) {
+            // A group's first frame never has another of its group in
+            // flight: groups are new for each request.
+            if (emulated && busy) || sending {
                 return;
             }
             let queued = flow.queue.pop_front().expect("checked above");
@@ -1531,7 +1528,7 @@ impl Machine {
             return Item::Dropped;
         };
         let held = tracked.version.max(handled.get(&key).copied().unwrap_or(0));
-        let duplicate = !removed && version > 0 && held > 0 && version <= held;
+        let duplicate = !removed && version > 0 && version <= held;
         // With delta on a duplicate, whole or delta, is no update but
         // becomes the key's base: the server's next delta applies to the
         // last value it sent (centrifuge `keyedWritePublication`), which
@@ -1583,7 +1580,8 @@ impl Machine {
         if version > 0 {
             handled.insert(key.clone(), version);
         }
-        let taken = (version > 0).then_some((key, version));
+        // Version 0, none, moves nothing when taken.
+        let taken = Some((key, version));
         Item::Update(SharedPollUpdate::from(publication), taken)
     }
 

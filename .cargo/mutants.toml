@@ -57,4 +57,12 @@ exclude_re = [
     # Equivalent: REJECT_UNRECOVERED (2) and CHANNEL_COMPACTION (1) are
     # disjoint bits, so `|` and `^` give the same flags.
     '^src/sans_io/subscriptions\.rs:[0-9]+:[0-9]+: replace \| with \^ in Machine::subscribe_request$',
+    # Formatting: the queue it clears is never sent from (the next
+    # subscribe starts a new generation before any request goes out); only
+    # Machine's Debug shows it.
+    '^src/sans_io/subscriptions/shared_poll_flow\.rs:[0-9]+:[0-9]+: replace SharedPollFlow::connection_lost with \(\)$',
+    # Equivalent: the refresh timer runs exactly while armed, and a firing
+    # of a setting not running never gets here (Machine::handle); Block 53
+    # D2 keeps the guard.
+    '^src/sans_io/subscriptions/shared_poll_flow/signing\.rs:[0-9]+:[0-9]+: replace && with \|\| in Machine::refresh_fired$',
 ]
