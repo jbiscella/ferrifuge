@@ -17,19 +17,33 @@ fn timers_set(actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
         .collect()
 }
 
-/// The retry timers set among `actions`: those not of `Config::timeout`,
-/// a request's reply deadline.
-fn retries_set(actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
+/// Whether `timer` is one the shared poll flows hold as a retry (D7): a
+/// request's reply deadline is not. Told apart by the machine's own record,
+/// not by the delay: a retry's backoff can equal `Config::timeout`, the
+/// deadline's delay (a 5 s backoff once counted as a deadline here).
+fn held_as_retry(machine: &Machine, timer: SharedPollTimer) -> bool {
+    machine
+        .subscriptions
+        .by_id
+        .values()
+        .filter_map(|sub| sub.flavor.shared_poll())
+        .any(|flow| flow.timers.iter().any(|(held, _)| *held == timer))
+}
+
+/// The retry timers set among `actions`, with their delays.
+fn retries_set(machine: &Machine, actions: &[Action]) -> Vec<(SharedPollTimer, Duration)> {
     timers_set(actions)
         .into_iter()
-        .filter(|(_, delay)| *delay != Config::default().timeout)
+        .filter(|(timer, _)| held_as_retry(machine, *timer))
         .collect()
 }
 
-fn deadlines_set(actions: &[Action]) -> Vec<SharedPollTimer> {
+/// The reply deadlines set among `actions`: the timers that are not
+/// retries.
+fn deadlines_set(machine: &Machine, actions: &[Action]) -> Vec<SharedPollTimer> {
     timers_set(actions)
         .into_iter()
-        .filter(|(_, delay)| *delay == Config::default().timeout)
+        .filter(|(timer, _)| !held_as_retry(machine, *timer))
         .map(|(timer, _)| timer)
         .collect()
 }
@@ -409,7 +423,7 @@ fn a_temporary_failure_replays_after_a_growing_backoff() {
             updates(&actions).is_empty() && requests(&actions, 2).is_empty(),
             "{actions:?}"
         );
-        let retries = retries_set(&actions);
+        let retries = retries_set(&machine, &actions);
         assert_eq!(retries.len(), 1, "{actions:?}");
         let (timer, delay) = retries[0];
         assert!(
@@ -432,7 +446,7 @@ fn a_temporary_failure_replays_after_a_growing_backoff() {
     machine.handle(reply_to(transport, &command));
     let command = requests(&track(&mut machine, id, &[("c", 0)], "sig3"), 1)[0].clone();
     let actions = machine.handle(failing(transport, &command, 500, true));
-    let (_, delay) = retries_set(&actions)[0];
+    let (_, delay) = retries_set(&machine, &actions)[0];
     assert!(
         delay <= Duration::from_secs(2),
         "not started over: {delay:?}"
@@ -447,11 +461,11 @@ fn a_replay_retry_ends_when_the_subscription_leaves_subscribed() {
     let mut command = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
     for _ in 0..6 {
         let actions = machine.handle(failing(transport, &command, 500, true));
-        let timer = retries_set(&actions)[0].0;
+        let timer = retries_set(&machine, &actions)[0].0;
         command = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1)[0].clone();
     }
     let actions = machine.handle(failing(transport, &command, 500, true));
-    let timer = retries_set(&actions)[0].0;
+    let timer = retries_set(&machine, &actions)[0].0;
 
     let lost = machine.handle(Input::Disconnect);
     assert!(cancelled(&lost).contains(&timer), "{lost:?}");
@@ -461,7 +475,7 @@ fn a_replay_retry_ends_when_the_subscription_leaves_subscribed() {
 
     let command = requests(&replay, 1)[0].clone();
     let actions = machine.handle(failing(transport, &command, 500, true));
-    let (timer, delay) = retries_set(&actions)[0];
+    let (timer, delay) = retries_set(&machine, &actions)[0];
     assert!(
         delay <= Duration::from_secs(2),
         "not started over: {delay:?}"
@@ -479,7 +493,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
     let (mut machine, transport, id) = subscribed(false, false);
     let actions = track(&mut machine, id, &[("a", 0)], "sig1");
     let command = requests(&actions, 1)[0].clone();
-    let deadline = deadlines_set(&actions);
+    let deadline = deadlines_set(&machine, &actions);
     assert_eq!(deadline.len(), 1, "{actions:?}");
 
     let fired = machine.fire_key(TimerKey::SharedPoll(deadline[0]));
@@ -490,7 +504,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
     );
     assert_eq!(error.message, "timeout");
     assert_eq!(machine.state(), State::Connected);
-    let (retry, delay) = retries_set(&fired)[0];
+    let (retry, delay) = retries_set(&machine, &fired)[0];
     assert!(delay <= Duration::from_secs(2), "{delay:?}");
     let late = machine.handle(frame(
         transport,
@@ -508,14 +522,14 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
     );
 
     let actions = machine.handle(Input::UntrackKeys(id, vec!["a".into()]));
-    let deadline = deadlines_set(&actions)[0];
+    let deadline = deadlines_set(&machine, &actions)[0];
     let fired = machine.fire_key(TimerKey::SharedPoll(deadline));
     let error = &errors(&fired)[0];
     assert_eq!(
         (error.kind, error.code),
         (ErrorKind::Untrack, codes::error::TIMEOUT)
     );
-    assert!(retries_set(&fired).is_empty(), "{fired:?}");
+    assert!(retries_set(&machine, &fired).is_empty(), "{fired:?}");
 }
 
 // I13 (47c): the reply deadline of a request made before the subscription
@@ -524,7 +538,7 @@ fn a_request_without_a_reply_on_websocket_reports_a_timeout_and_replays() {
 fn the_deadline_of_an_earlier_subscribe_changes_nothing() {
     let (mut machine, transport, id) = subscribed(false, false);
     let actions = track(&mut machine, id, &[("a", 0)], "sig1");
-    let deadline = deadlines_set(&actions)[0];
+    let deadline = deadlines_set(&machine, &actions)[0];
     resubscribed_by_the_server(&mut machine, transport, &serde_json::json!({"type": 4}));
 
     let fired = machine.fire_key(TimerKey::SharedPoll(deadline));
@@ -542,9 +556,10 @@ fn one_replay_retry_per_subscription_and_close_ends_it() {
     let first = requests(&track(&mut machine, id, &[("a", 0)], "sig1"), 1)[0].clone();
     let second = requests(&track(&mut machine, id, &[("b", 0)], "sig2"), 1)[0].clone();
 
-    let (timer, _) = retries_set(&machine.handle(failing(transport, &first, 500, true)))[0];
+    let failed = machine.handle(failing(transport, &first, 500, true));
+    let (timer, _) = retries_set(&machine, &failed)[0];
     let replaced = machine.handle(failing(transport, &second, 1, false));
-    let (again, _) = retries_set(&replaced)[0];
+    let (again, _) = retries_set(&machine, &replaced)[0];
     assert!(cancelled(&replaced).contains(&timer), "{replaced:?}");
     assert!(
         requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1).is_empty(),
@@ -571,7 +586,7 @@ fn a_temporary_failure_of_a_later_replay_frame_replays_from_the_start() {
         requests(&failed, 1).is_empty(),
         "the rest stops: {failed:?}"
     );
-    let (timer, _) = retries_set(&failed)[0];
+    let (timer, _) = retries_set(&machine, &failed)[0];
     let again = requests(&machine.fire_key(TimerKey::SharedPoll(timer)), 1);
 
     assert_eq!(again.len(), 1, "one frame at a time");
@@ -610,4 +625,33 @@ fn an_epoch_flip_during_a_replay_starts_it_over_from_version_0() {
     let carried: Vec<(String, u64)> = frames.iter().flat_map(items).collect();
     let expected: Vec<(String, u64)> = (0..30).map(|n| (format!("k{n:03}"), 0)).collect();
     assert_eq!(carried, expected);
+}
+
+// A replay retry whose backoff equals `Config::timeout`, the delay of a
+// request's reply deadline, is still the retry: seed 175 draws 5 s for the
+// third failure (the flake of `a_temporary_failure_replays_after_a_growing_backoff`,
+// whose helper told the two apart by the delay).
+#[test]
+fn a_backoff_equal_to_the_reply_deadline_is_still_the_retry() {
+    let (mut machine, transport, id) = subscribed(false, false);
+    machine.rng = fastrand::Rng::with_seed(175);
+    track(&mut machine, id, &[("a", 0)], "sig1");
+    let mut command = requests(&track(&mut machine, id, &[("b", 3)], "sig2"), 1)[0].clone();
+    let mut delays = Vec::new();
+    for attempt in 0..3 {
+        let (code, temporary) = if attempt % 2 == 0 {
+            (500, true)
+        } else {
+            (1, false)
+        };
+        let actions = machine.handle(failing(transport, &command, code, temporary));
+        let retries = retries_set(&machine, &actions);
+        assert_eq!(retries.len(), 1, "{actions:?}");
+        assert!(deadlines_set(&machine, &actions).is_empty(), "{actions:?}");
+        let (timer, delay) = retries[0];
+        delays.push(delay);
+        let fired = machine.fire_key(TimerKey::SharedPoll(timer));
+        command = requests(&fired, 1)[0].clone();
+    }
+    assert_eq!(delays[2], Config::default().timeout, "{delays:?}");
 }
