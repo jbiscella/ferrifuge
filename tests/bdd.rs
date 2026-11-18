@@ -606,6 +606,12 @@ const IMPLEMENTED: &[&str] = &[
     "A server that does not select the encoding's subprotocol fails the attempt",
     "A subprotocol that is not a valid, unique application value fails the build",
     "Subprotocol values appear in no Debug output and no log record",
+    // Block 68a.
+    "With tls_only an endpoint that is not TLS fails the build",
+    "With tls_only an emulation endpoint that is not TLS fails the build",
+    "With tls_only a connector does not exempt a plain endpoint",
+    "With tls_only TLS endpoints build, whatever the scheme's case",
+    "Without tls_only endpoints that are not TLS build as before",
 ];
 
 /// Server configuration of @A scenarios.

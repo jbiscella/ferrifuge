@@ -262,7 +262,8 @@ impl Server {
     }
 
     /// The endpoint to build a client with, together with
-    /// [`Server::connector`].
+    /// [`Server::connector`]. It is a `ws://` endpoint: a client built with
+    /// `ClientBuilder::tls_only` refuses it.
     #[must_use]
     pub fn endpoint(&self) -> String {
         ENDPOINT.to_owned()

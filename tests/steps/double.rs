@@ -22,7 +22,7 @@ use super::{ClientWorld, EVENT_TIMEOUT};
 /// called, and what the steps saw.
 #[derive(Debug, Default)]
 pub(crate) struct Doubles {
-    server: Option<Server>,
+    pub(super) server: Option<Server>,
     calls: Arc<AtomicUsize>,
     /// Holds the connector's new connections while set.
     hold: Arc<Hold>,

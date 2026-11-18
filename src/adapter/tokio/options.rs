@@ -242,7 +242,9 @@ impl ClientBuilder {
     /// a connector the client reads no proxy setting, the environment's and
     /// the system's included. A connector carries the websocket only:
     /// [`ClientBuilder::build`] fails with an `http_stream` or sse
-    /// endpoint, or after [`ClientBuilder::proxy`].
+    /// endpoint, or after [`ClientBuilder::proxy`]. It exempts no endpoint
+    /// from [`ClientBuilder::tls_only`]: a `ws://` endpoint over its stream
+    /// needs that off.
     // Block 37.
     #[must_use]
     pub fn connector(mut self, connector: impl Connector + 'static) -> Self {

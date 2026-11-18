@@ -47,6 +47,9 @@ pub struct ClientBuilder {
     /// [`ClientBuilder::build`].
     // Block 67.
     pub(super) websocket_subprotocols: Vec<String>,
+    /// Whether `build()` refuses an endpoint that is not TLS.
+    // Block 68.
+    pub(super) tls_only: bool,
     /// The client's handler, set once it is built; behind a mutex so that
     /// the builder stays `Sync` for a handler that is only `Send`.
     // Block 41b.
@@ -100,6 +103,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("emulated_headers", &HeaderNames(&self.emulated_headers))
             // How many, never the values (Block 67, D5).
             .field("websocket_subprotocols", &self.websocket_subprotocols.len())
+            .field("tls_only", &self.tls_only)
             .field("handler", &self.handler.is_some())
             .field("event_delivery", &self.event_delivery);
         self.backend.fields(&mut f);
@@ -200,6 +204,27 @@ impl ClientBuilder {
         self
     }
 
+    /// Makes [`ClientBuilder::build`] refuse every endpoint that is not TLS,
+    /// so that an endpoint configured by mistake cannot carry a token in
+    /// clear text; off by default, and a later call replaces an earlier one.
+    ///
+    /// With it on, a websocket endpoint must be `wss://`, an `http_stream`,
+    /// sse or WebTransport endpoint `https://`, and an emulation endpoint,
+    /// when one is set, `https://`, the scheme compared ignoring case. The
+    /// error names the transport and the scheme, never the endpoint.
+    ///
+    /// A connector exempts no endpoint: a `ws://` endpoint over a stream the
+    /// application supplies (a VPN tunnel, `test_util::Server`) needs this
+    /// off. The client follows no redirect, except that a browser's
+    /// `EventSource` follows one it cannot refuse. A proxy's own scheme is
+    /// not checked: an `http://` proxy carries a TLS endpoint's connection
+    /// encrypted, through a tunnel.
+    #[must_use]
+    pub fn tls_only(mut self, enabled: bool) -> Self {
+        self.tls_only = enabled;
+        self
+    }
+
     /// Sets the absolute URL of the emulation endpoint, where commands over
     /// `http_stream` and sse go, e.g. when the server is behind a path
     /// prefix; by default `/emulation` on the server of the stream endpoint
@@ -273,11 +298,19 @@ impl Client {
             emulation_endpoint,
             emulated_headers,
             websocket_subprotocols,
+            tls_only,
             handler: _,
             event_delivery,
             backend,
         } = builder;
         super::subprotocols::check(&websocket_subprotocols)?;
+        if tls_only {
+            // An endpoint's own error comes first (Block 68, D3).
+            for (kind, endpoint) in &endpoints {
+                check_endpoint(*kind, endpoint)?;
+            }
+            check_tls_only(&endpoints, emulation_endpoint.as_deref())?;
+        }
         let super::backend::Started {
             shared: backend_shared,
             driver: backend_driver,
@@ -547,6 +580,56 @@ pub(super) fn check_webtransport(
     }
 }
 
+/// Refuses, for `tls_only`, an endpoint that is not TLS: `wss` for the
+/// websocket, `https` for the other transports and for the emulation
+/// endpoint. The message names the scheme only when it is one of the four
+/// the transports know, never anything else of the endpoint.
+// Block 68, D2.
+fn check_tls_only(
+    endpoints: &[(TransportKind, String)],
+    emulation_endpoint: Option<&str>,
+) -> Result<(), ClientError> {
+    let refused = |name: &str, endpoint: &str, expected: &str| {
+        let scheme = endpoint
+            .trim()
+            .split_once(':')
+            .map(|(scheme, _)| scheme.to_ascii_lowercase());
+        if scheme.as_deref() == Some(expected) {
+            return None;
+        }
+        Some(match scheme.as_deref() {
+            Some(scheme @ ("ws" | "wss" | "http" | "https")) => {
+                format!(
+                    "tls_only refuses the {name} endpoint: its scheme {scheme} is not {expected}"
+                )
+            }
+            _ => format!("tls_only refuses the {name} endpoint: its scheme is not {expected}"),
+        })
+    };
+    let error = |message: String, transport: Option<TransportKind>| ClientError {
+        kind: ErrorKind::Configuration,
+        code: codes::error::BAD_CONFIGURATION,
+        message,
+        transport,
+    };
+    for (kind, endpoint) in endpoints {
+        let expected = if *kind == TransportKind::WebSocket {
+            "wss"
+        } else {
+            "https"
+        };
+        if let Some(message) = refused(kind.as_str(), endpoint, expected) {
+            return Err(error(message, Some(*kind)));
+        }
+    }
+    if let Some(message) =
+        emulation_endpoint.and_then(|endpoint| refused("emulation", endpoint, "https"))
+    {
+        return Err(error(message, None));
+    }
+    Ok(())
+}
+
 /// Refuses an endpoint the transport cannot use: an empty one, or an
 /// `http(s)://` one for the websocket transport, which needs `ws(s)://`;
 /// `http(s)://` is right for `http_stream` and sse. The message leaves the
@@ -795,6 +878,50 @@ fn check_limits(config: &Config) -> Result<(), ClientError> {
 #[cfg(adapter_tokio)]
 mod tests {
     use super::*;
+
+    // Block 68: the tls_only rule.
+    #[test]
+    fn tls_only_needs_wss_for_the_websocket_and_https_for_the_rest() {
+        let ok = |kind: TransportKind, endpoint: &str| {
+            check_tls_only(&[(kind, endpoint.to_owned())], None)
+        };
+
+        assert!(ok(TransportKind::WebSocket, " WSS://example.invalid/x ").is_ok());
+        assert!(ok(TransportKind::HttpStream, "https://example.invalid/x").is_ok());
+        assert!(ok(TransportKind::Sse, "HTTPS://example.invalid/x").is_ok());
+        #[cfg(feature = "unstable-webtransport")]
+        assert!(ok(TransportKind::WebTransport, "https://example.invalid/x").is_ok());
+        let refused = ok(TransportKind::Sse, "user:secret@example.invalid").expect_err("refused");
+        assert_eq!(
+            refused.message,
+            "tls_only refuses the sse endpoint: its scheme is not https"
+        );
+        let emulation = check_tls_only(
+            &[(
+                TransportKind::WebSocket,
+                "wss://example.invalid/x".to_owned(),
+            )],
+            Some("http://example.invalid/emulation"),
+        )
+        .expect_err("refused");
+        assert_eq!(
+            (emulation.message.as_str(), emulation.transport),
+            (
+                "tls_only refuses the emulation endpoint: its scheme http is not https",
+                None
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_later_tls_only_call_replaces_an_earlier_one() {
+        let client = Client::builder("ws://example.invalid/connection/websocket")
+            .tls_only(true)
+            .tls_only(false)
+            .build();
+
+        assert!(client.is_ok(), "{:?}", client.err());
+    }
     use crate::adapter::test_support::*;
 
     #[test]
