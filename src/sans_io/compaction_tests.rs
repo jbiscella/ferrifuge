@@ -274,3 +274,53 @@ fn a_removed_subscription_leaves_no_id_behind() {
     assert!(machine.subscriptions_by_compact_id_is_empty());
     assert_eq!(delivered(&machine.handle(frame(transport, PUB_7))), []);
 }
+
+// Block 65d: mutants of run 43982614806 the tests above let through.
+
+// Removing the earlier holder of an id leaves the new holder's.
+#[test]
+fn removing_an_ids_earlier_holder_keeps_the_new_holders() {
+    let (mut machine, transport, news) = subscribed();
+    let other = machine
+        .add_subscription(
+            "sport".into(),
+            SubscriptionOptions::default().channel_compaction(true),
+        )
+        .unwrap();
+    machine.handle(Input::Subscribe(other));
+    machine.handle(frame(transport, r#"{"id":3,"subscribe":{"id":7}}"#));
+    machine.handle(Input::RemoveSubscription(news));
+
+    let actions = machine.handle(frame(transport, PUB_7));
+
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::EmitSubscription(_, to, SubscriptionEvent::Publication(_)) if *to == other
+        )),
+        "{actions:?}"
+    );
+}
+
+// A subscribe reply without an id maps no id.
+#[test]
+fn a_subscribe_reply_without_an_id_maps_none() {
+    let mut machine = Machine::new(Config::default());
+    let transport = connect(&mut machine, Input::Connect, 1);
+    let id = machine
+        .add_subscription("news".into(), SubscriptionOptions::default())
+        .unwrap();
+    machine.handle(Input::Subscribe(id));
+    machine.handle(frame(transport, r#"{"id":2,"subscribe":{}}"#));
+
+    assert!(machine.subscriptions_by_compact_id_is_empty());
+}
+
+// An unsubscribed subscription's id delivers nothing to it.
+#[test]
+fn an_unsubscribed_holder_gets_no_push_of_its_id() {
+    let (mut machine, transport, id) = subscribed();
+    machine.handle(Input::Unsubscribe(id));
+
+    assert_eq!(delivered(&machine.handle(frame(transport, PUB_7))), []);
+}

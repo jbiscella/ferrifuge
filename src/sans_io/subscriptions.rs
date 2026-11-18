@@ -4649,4 +4649,366 @@ mod tests {
             (true, "e", 5)
         );
     }
+
+    // Block 65d: mutants of run 43982614806 the tests above let through.
+
+    fn refresh_set(actions: &[Action], id: SubscriptionId) -> Option<Duration> {
+        actions.iter().find_map(|action| match action {
+            Action::SetTimer(TimerKey::Subscription(of, SubscriptionTimer::Refresh), delay, _)
+                if *of == id =>
+            {
+                Some(*delay)
+            }
+            _ => None,
+        })
+    }
+
+    fn cancels_reply(actions: &[Action], id: SubscriptionId) -> bool {
+        actions.contains(&Action::CancelTimer(TimerKey::Subscription(
+            id,
+            SubscriptionTimer::RefreshReply,
+        )))
+    }
+
+    // A subscription without a token has no refresh to shorten after a
+    // sleep.
+    #[test]
+    fn a_sleep_shortens_no_refresh_of_a_subscription_without_token() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+        let gap = Duration::from_secs(5);
+
+        let slept = machine.handle(Input::Slept { gap });
+
+        assert!(
+            !slept.contains(&Action::ShortenTimer(
+                TimerKey::Subscription(id, SubscriptionTimer::Refresh),
+                gap
+            )),
+            "{slept:?}"
+        );
+    }
+
+    #[test]
+    fn statistics_count_every_subscription() {
+        let mut machine = Machine::new(Config::default());
+        let none = machine.statistics().subscriptions;
+        machine
+            .add_subscription("a".into(), SubscriptionOptions::default())
+            .unwrap();
+        machine
+            .add_subscription("b".into(), SubscriptionOptions::default())
+            .unwrap();
+
+        assert_eq!((none, machine.statistics().subscriptions), (0, 2));
+    }
+
+    // A data or state callback running across a teardown is not started
+    // again by the next connection: its answer is still awaited.
+    #[test]
+    fn a_data_or_state_fetch_across_a_teardown_is_not_started_again() {
+        for options in [
+            SubscriptionOptions::default().data_source(),
+            SubscriptionOptions::default().state_source(),
+        ] {
+            let (mut machine, transport, id) = connected_with(options);
+            assert_eq!(fetches(&machine.handle(Input::Subscribe(id))), 1);
+            closed_with(&mut machine, transport, 3001);
+
+            assert_eq!(fetches(&reconnected(&mut machine, 2)), 0);
+        }
+    }
+
+    #[test]
+    fn a_subscribe_carries_positioned_recoverable_and_delta() {
+        let (mut machine, _, _) = connected();
+        let id = machine
+            .add_subscription(
+                "sport".into(),
+                SubscriptionOptions::default()
+                    .positioned(true)
+                    .recoverable(true)
+                    .delta(crate::DeltaFormat::Fossil),
+            )
+            .unwrap();
+
+        assert_eq!(
+            sent(&machine.handle(Input::Subscribe(id))),
+            [
+                r#"{"id":2,"subscribe":{"channel":"sport","positioned":true,"recoverable":true,"delta":"fossil"}}"#
+            ]
+        );
+    }
+
+    // A positioned stream that is not recoverable still reports its
+    // position.
+    #[test]
+    fn a_positioned_subscribe_reply_reports_its_stream_position() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        let replied = machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"positioned":true,"epoch":"e","offset":3}}"#,
+        ));
+
+        let position = replied.iter().find_map(|action| match action {
+            Action::EmitSubscription(_, _, SubscriptionEvent::Subscribed(context)) => {
+                Some(context.stream_position.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            position,
+            Some(Some(crate::StreamPosition {
+                offset: 3,
+                epoch: "e".into()
+            }))
+        );
+    }
+
+    // A subscribe reply's publications of another channel do not move the
+    // stream past the reply's own position.
+    #[test]
+    fn a_reply_publication_without_an_offset_leaves_the_replys_position() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"recoverable":true,"epoch":"e","offset":5,"publications":[{"data":{},"offset":3},{"data":{}}]}}"#,
+        ));
+
+        assert_eq!(offset_of(&machine, id), Some(5));
+    }
+
+    // A subscribe error from 100 on that is not temporary unsubscribes.
+    #[test]
+    fn a_subscribe_error_of_code_100_unsubscribes() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+
+        let replied = machine.handle(reply(
+            transport,
+            r#"{"id":2,"error":{"code":100,"message":"m"}}"#,
+        ));
+
+        assert_eq!(unsubscribed_codes(&replied), [100]);
+        assert_eq!(resubscribe_delay(&replied), None);
+    }
+
+    // A push with neither channel nor compact id goes to the subscription
+    // of the empty channel.
+    #[test]
+    fn a_push_without_channel_or_id_reaches_the_empty_channels_subscription() {
+        let mut machine = Machine::new(Config::default());
+        let transport = connect(&mut machine, Input::Connect, 1);
+        let id = machine
+            .add_subscription(String::new(), SubscriptionOptions::default())
+            .unwrap();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(transport, r#"{"id":2,"subscribe":{}}"#));
+
+        let pushed = machine.handle(reply(transport, r#"{"push":{"pub":{"data":{}}}}"#));
+
+        assert_eq!(publication_ids(&pushed).len(), 1, "{pushed:?}");
+    }
+
+    // A subscription lost with its connection, or ended by disconnect(),
+    // stops its refresh and its refresh reply deadline.
+    #[test]
+    fn a_lost_or_ended_subscription_stops_its_refresh_timers() {
+        let (_, id, lost) = token_subscription_lost();
+        assert!(cancels_reply(&lost, id), "{lost:?}");
+
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t1".into())
+                .token_source(),
+        );
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        let disconnected = machine.handle(Input::Disconnect);
+        assert!(cancels_refresh(&disconnected, id), "{disconnected:?}");
+    }
+
+    // Unsubscribes of a request refused with HTTP 413 are sent again,
+    // alone.
+    #[test]
+    fn unsubscribes_refused_with_413_are_sent_again() {
+        let mut machine = Machine::new(Config::default())
+            .with_transports(vec![TransportKind::HttpStream])
+            .unwrap();
+        let transport = opened(&machine.handle(Input::Connect)).expect("a transport");
+        machine.handle(Input::TransportOpened(transport));
+        machine.handle(reply(
+            transport,
+            r#"{"id":1,"connect":{"client":"c","session":"s","node":"n"}}"#,
+        ));
+        let mut ids = Vec::new();
+        for (channel, command) in [("a", 2), ("b", 3)] {
+            let id = machine
+                .add_subscription(channel.into(), SubscriptionOptions::default())
+                .unwrap();
+            machine.handle(Input::Subscribe(id));
+            machine.handle(reply(
+                transport,
+                &format!(r#"{{"id":{command},"subscribe":{{}}}}"#),
+            ));
+            ids.push(id);
+        }
+        machine.handle(Input::StartBatching);
+        for id in &ids {
+            machine.handle(Input::Unsubscribe(*id));
+        }
+        let frame = frame_sent(&machine.handle(Input::StopBatching));
+
+        let rejected = machine.handle(Input::SendRejected { transport, frame });
+
+        assert_eq!(sent(&rejected).len(), 2, "{rejected:?}");
+    }
+
+    // An empty subscription token denies access: unsubscribed, nothing
+    // sent.
+    #[test]
+    fn an_empty_subscription_token_unsubscribes() {
+        let (mut machine, _, id) = connected_with(SubscriptionOptions::default().token_source());
+        let fetch = subscription_token_fetch(&machine.handle(Input::Subscribe(id)));
+
+        let answered = machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok(String::new()),
+        });
+
+        assert_eq!(
+            unsubscribed_codes(&answered),
+            [codes::unsubscribed::UNAUTHORIZED]
+        );
+        assert_eq!(sent(&answered), Vec::<String>::new());
+    }
+
+    const LATE_REFRESH_REPLY: &str = r#"{"id":3,"sub_refresh":{"expires":true,"ttl":600}}"#;
+
+    // A refresh reply after the subscription left changes nothing.
+    #[test]
+    fn a_refresh_reply_after_an_unsubscribe_changes_nothing() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+        machine.handle(Input::Unsubscribe(id));
+
+        let late = machine.handle(reply(transport, LATE_REFRESH_REPLY));
+
+        assert!(!cancels_reply(&late, id), "{late:?}");
+    }
+
+    // A refresh with no reply in time is an error, retried after the
+    // refresh backoff; its late reply changes nothing.
+    #[test]
+    fn a_refresh_without_a_reply_in_time_is_retried_and_its_late_reply_ignored() {
+        let (mut machine, transport, id, fetch) = refresh_fetching();
+        machine.handle(Input::SubscriptionTokenFetched {
+            fetch,
+            result: Ok("u".into()),
+        });
+
+        let timed_out = machine.fire_subscription(id, SubscriptionTimer::RefreshReply);
+        let late = machine.handle(reply(transport, LATE_REFRESH_REPLY));
+
+        assert!(
+            timed_out.iter().any(|action| matches!(
+                action,
+                Action::EmitSubscription(_, of, SubscriptionEvent::Error(error))
+                    if *of == id
+                        && matches!(error.kind, crate::ErrorKind::SubscriptionRefresh)
+                        && error.code == codes::error::TIMEOUT
+            )),
+            "{timed_out:?}"
+        );
+        let retry = refresh_set(&timed_out, id).expect("a retry");
+        assert!(
+            (Duration::from_secs(10)..=Duration::from_secs(20)).contains(&retry),
+            "{retry:?}"
+        );
+        assert!(!cancels_reply(&late, id), "{late:?}");
+    }
+
+    // A refresh timer of a subscription unsubscribed meanwhile does
+    // nothing.
+    #[test]
+    fn a_refresh_firing_after_an_unsubscribe_does_nothing() {
+        let (mut machine, transport, id) = connected();
+        machine.handle(Input::Subscribe(id));
+        machine.handle(reply(
+            transport,
+            r#"{"id":2,"subscribe":{"expires":true,"ttl":60}}"#,
+        ));
+        machine.handle(Input::Unsubscribe(id));
+
+        let fired = machine.fire_subscription(id, SubscriptionTimer::Refresh);
+
+        assert!(
+            !fired
+                .iter()
+                .any(|action| matches!(action, Action::EmitSubscription(..))),
+            "{fired:?}"
+        );
+    }
+
+    // A refresh error below 100 is retried; from 100 on, only a temporary
+    // one is.
+    #[test]
+    fn refresh_errors_below_100_retry_and_from_100_unsubscribe() {
+        for (code, retried) in [(99, true), (100, false)] {
+            let (mut machine, transport, id, fetch) = refresh_fetching();
+            machine.handle(Input::SubscriptionTokenFetched {
+                fetch,
+                result: Ok("u".into()),
+            });
+
+            let replied = machine.handle(reply(
+                transport,
+                &format!(r#"{{"id":3,"error":{{"code":{code},"message":"m"}}}}"#),
+            ));
+
+            if retried {
+                assert_eq!(
+                    machine.subscription_state(id),
+                    Some(SubscriptionState::Subscribed)
+                );
+                assert!(refresh_set(&replied, id).is_some(), "{replied:?}");
+            } else {
+                assert_eq!(unsubscribed_codes(&replied), [100], "{replied:?}");
+            }
+        }
+    }
+
+    // A subscribe refused with an expired token resubscribes with a new
+    // one.
+    #[test]
+    fn a_subscribe_refused_with_an_expired_token_resubscribes() {
+        let (mut machine, transport, id) = connected_with(
+            SubscriptionOptions::default()
+                .token("t".into())
+                .token_source(),
+        );
+        machine.handle(Input::Subscribe(id));
+
+        let replied = machine.handle(reply(
+            transport,
+            r#"{"id":2,"error":{"code":109,"message":"expired"}}"#,
+        ));
+
+        assert_eq!(
+            machine.subscription_state(id),
+            Some(SubscriptionState::Subscribing)
+        );
+        assert!(resubscribe_delay(&replied).is_some(), "{replied:?}");
+    }
 }
