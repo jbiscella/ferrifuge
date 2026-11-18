@@ -972,14 +972,10 @@ impl Machine {
         let Some(load) = map.load.as_ref() else {
             return false;
         };
+        // `fault` rejects a state page repeating its cursor (Codex, #198).
         fault(load, result).is_none()
             && load.epoch.as_ref().is_none_or(|kept| *kept == result.epoch)
             && load.bytes.saturating_add(size) <= map.max_state_bytes
-            // The last state page has no cursor; `fault` rejects a repeated
-            // one (Codex, #198).
-            && (result.phase == STREAM
-                || result.cursor.is_empty()
-                || result.cursor != load.asked_cursor)
     }
 }
 
