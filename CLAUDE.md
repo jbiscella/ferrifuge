@@ -1,6 +1,6 @@
 # CLAUDE.md — Rust Centrifugo client SDK
 
-Status: DRAFT — blocks 0–68 of N. Further blocks to be appended.
+Status: DRAFT — blocks 0–69 of N. Further blocks to be appended.
 
 Markers used below:
 - `VERIFY:` a detail not confirmed from documentation; resolve by reading the cited source before implementing. If the source contradicts the scenario, stop and report — do not silently adapt.
@@ -3181,11 +3181,11 @@ Order of the blocks:
 **Decisions** (reviewer, 2026-11-06, delegated by the owner, after a three-amigos round table on the draft):
 - **D1 Release workflow.** `.github/workflows/release.yml`, triggered by a pushed tag `v*`, in three jobs, so that every check comes before the publish, which cannot be undone (a version can only be yanked):
   - `verify` (no environment; `contents: read`, `actions: read`): runs `scripts/check-release-tag` (D2), checks that the tagged commit is on `main` and that the `ci` run of the push to `main` with that head commit has concluded with success (a run still in progress fails the release, which is re-run later), that the latest real run of `chaos-real` for that commit, and of `soak` once Block 52 gates it, concluded with success (`scripts/validation-run gate`, Block 51 D11 and D12, Block 52 D11), and runs `cargo-semver-checks` (a pinned version, default features and `test-util`, as the pull-request job; Block 37 D7) against the crate's latest version on crates.io, skipped only when the index has none;
-  - `publish` (`needs: verify`; environment `release`; `id-token: write`): `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token);
-  - `github-release` (`needs: publish`; `contents: write`): the GitHub release with that version's changelog section as its notes, marked as a pre-release for a pre-release version (Block 55 D4); re-running it never publishes again.
+  - `publish` (`needs: verify`; environment `release`; `contents: read`, `id-token: write`, `attestations: write`): the SBOM, then `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token), or `cargo package` on a re-run, then the attestations of the `.crate` crates.io serves (Block 69);
+  - `github-release` (`needs: publish`; `contents: write`): the GitHub release, the SBOM and the `.crate` attached (Block 69), with that version's changelog section as its notes, marked as a pre-release for a pre-release version (Block 55 D4); re-running it never publishes again.
   Every action is pinned by commit SHA; checkouts use `persist-credentials: false`; no build cache is used; each job installs its named toolchain with the runner's `rustup` (Block 57 D2).
 - **D2 Release check.** `scripts/check-release-tag` (bash and cargo only, so it runs on every CI OS) takes a tag and succeeds only when the tag is exactly `v` followed by the `Cargo.toml` version, with nothing after it (a pre-release's suffix is part of the version, Block 55 D4), and `CHANGELOG.md` has a section for that version; otherwise it fails naming the version the tag must be, or the missing section. The workflow and a test run it.
-- **D3 Package contents.** `Cargo.toml` lists what is published (`include`): `src`, `proto`, `build.rs`, `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; Cargo adds `Cargo.toml.orig`, `Cargo.lock` and `.cargo_vcs_info.json`. Tests, benches, fixtures, workflows, `.claude`, `CLAUDE.md`, `deny.toml` and the logo stay out (today 155 files are packaged). The published crate's own unit tests do not build, as `src/fossil.rs` includes fixtures that are not shipped; that is accepted (they run in this repository). A `package` CI job on pull requests runs `cargo publish --dry-run`, which builds the crate as published (verified: `build.rs`, `proto/` and `protoc-bin-vendored` work; the path-only dev-dependency on itself is dropped). Amended by Block 56: `build.rs` sets only the adapter cfgs and the generated code ships under `src/protocol/`, so the packaged build runs no generator.
+- **D3 Package contents.** `Cargo.toml` lists what is published (`include`): `src`, `proto`, `build.rs`, `README.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`; Cargo adds `Cargo.toml.orig`, `Cargo.lock` and `.cargo_vcs_info.json`. Tests, benches, fixtures, workflows, `.claude`, `CLAUDE.md`, `deny.toml` and the logo stay out (today 155 files are packaged). The published crate's own unit tests do not build, as `src/fossil.rs` includes fixtures that are not shipped; that is accepted (they run in this repository). A `package` CI job on pull requests runs `scripts/release-sbom` (Block 69 D1) and `cargo publish --dry-run`, which builds the crate as published (verified: `build.rs`, `proto/` and `protoc-bin-vendored` work; the path-only dev-dependency on itself is dropped). Amended by Block 56: `build.rs` sets only the adapter cfgs and the generated code ships under `src/protocol/`, so the packaged build runs no generator.
 - **D4 Changelog.** `CHANGELOG.md` in Keep a Changelog form, written by hand: `## [Unreleased]` on top, then `## [x.y.z] - YYYY-MM-DD` for each version from 0.1.0, newest first, with Added, Changed, Deprecated, Removed, Fixed and Security subsections, backfilled from the history (the version each block reached, `git log -G'^version'` on `Cargo.toml`, and the block table of this file); no compare links for versions never tagged. A pull request that changes the public API or behaviour adds an `Unreleased` entry; the release moves them under the new version.
 - **D5 Security policy.** `SECURITY.md`: reports go through GitHub private vulnerability reporting (the repository's "Report a vulnerability" button), never public issues; the supported versions are the latest release; fixes are released as a patch of its minor, or, while it is a 1.0.0 pre-release, as the next pre-release (Block 55 D6), and announced as a GitHub security advisory, with a RustSec advisory requested for crates.io users. No response-time commitment.
 - **D6 MSRV policy.** `rust-version` in `Cargo.toml` is the floor; it is raised only when a dependency or a language feature needs it, never in a patch release, and the changelog says so. The `msrv` CI job checks it for every feature set CI builds: the default (ring), the core alone, `aws-lc-rs` and `fips`, installing CMake and Go for the last two as the `providers` job does (closing the analysis's finding F4).
@@ -11312,3 +11312,93 @@ Value clause: As an app developer shipping to devices outside my control, I want
 - the `@W` scenario runs on the `browser` jobs;
 - cargo-semver-checks reports a minor change;
 - clippy passes on every feature set.
+
+---
+
+## Block 69 — SBOM and provenance for each release
+
+**Goal:** each release carries a CycloneDX software bill of materials (SBOM) of the published crate, attached to its GitHub release, and two GitHub artifact attestations of the `.crate` file crates.io serves: its build provenance and its SBOM. An application can verify both with `gh attestation verify`, and the release's assets with `gh release verify-asset`. Trusted publishing and the SHA-pinned actions stay.
+
+Source: owner, 2026-11-17, issue #348. Today `release.yml` (Block 20) publishes with trusted publishing and creates a GitHub release with notes only; nothing records the dependency set or attests the published file.
+
+Where this block goes beyond the issue, and why:
+- the issue asks for provenance of the published crate; D3 also attests the SBOM with the `.crate` as its subject, so that a scanner can fetch a signed SBOM by the file's digest;
+- the release also carries the `.crate`, so that `gh release verify-asset` checks it against the immutable release.
+
+Facts this block relies on (verified while drafting and reviewing, 2026-11-18):
+- crates.io stores the uploaded `.crate` unchanged. For 1.0.0-alpha.2, the SHA-256 of `https://static.crates.io/crates/ferrifuge/ferrifuge-1.0.0-alpha.2.crate`, the sparse index's `cksum` and the API's `checksum` are the same (`9c9d17b1…3116`). The API's `trustpub_data` names the publishing run (43981105646) and commit (37ac473). crates.io has no attestation support (rust-lang/rfcs#3403, Sigstore, closed unmerged).
+- `cargo package` reproduces the published bytes across nearby cargo versions, not across distant ones. On 37ac473, cargo 1.99.1 on another machine packages the SHA-256 that the publish run's cargo 1.100.0 uploaded; cargo 1.88 packages another. `release.yml` installs the current `stable` in each job, so a later re-run may get a newer cargo.
+- `cargo publish` writes `target/package/ferrifuge-<version>.crate` and waits up to 60 seconds by default for the index to list the new version (cargo's documentation).
+- `actions/attest` v4.2.2 (`1e69f48acb82d1966a394da916b4c1698aa569d6`, the latest release, 2026-08-04):
+  - with only `subject-path` it attests SLSA build provenance;
+  - with `sbom-path` it attests the SBOM, predicate type `https://cyclonedx.org/bom` for CycloneDX;
+  - it accepts a CycloneDX document only when `bomFormat`, `serialNumber` and `specVersion` are all present;
+  - it needs `id-token: write` and `attestations: write`. `artifact-metadata: write` is only for a storage record, which it makes only with `push-to-registry` (an OCI image);
+  - on a public repository, Sigstore's public-good instance signs.
+- cargo-cyclonedx 0.5.9 (OWASP CycloneDX) is listed, with its SHA-256, by the pinned `taiki-e/install-action` v2.90.3; 0.5.10 (2026-11-10) is not. It:
+  - reads `cargo metadata` and `Cargo.lock`, and by default lists every dependency, transitive ones included;
+  - leaves dev-dependencies out and keeps build-dependencies;
+  - takes `--all-features`, `--target all`, `--format json` (default XML) and `--spec-version 1.5` (default 1.3, at most 1.5);
+  - with `--override-filename <name>`, writes `<name>.json` next to `Cargo.toml`;
+  - with `SOURCE_DATE_EPOCH` set, omits `serialNumber`, which `actions/attest` then refuses.
+- The repository has immutable releases on. A published release takes no new asset. `gh release create <tag> <files>` creates a draft, uploads the files and then publishes it, and deletes the draft if an upload fails. An immutable release gets GitHub's release attestation, which `gh release verify` and `gh release verify-asset` check (gh 2.75.0 and later).
+
+**Dependencies:** Blocks 20 (D1 the release jobs and their grants, D3 the `package` job, D4 the changelog), 55 (D9: releasing is the owner's), 57 (D2 SHA pins, D3 Dependabot, D6 job grants, D7 no cache in release.yml, D9 no ignores).
+
+**Amends** (line numbers on 8f7f3c4; each "before" string appears once):
+- **Block 20 D1**, line 3184: "`publish` (`needs: verify`; environment `release`; `id-token: write`): `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token);" becomes "`publish` (`needs: verify`; environment `release`; `contents: read`, `id-token: write`, `attestations: write`): the SBOM, then `cargo publish` with a token from `rust-lang/crates-io-auth-action` (trusted publishing, no stored token), or `cargo package` on a re-run, then the attestations of the `.crate` crates.io serves (Block 69);".
+- **Block 20 D1**, line 3185: "`github-release` (`needs: publish`; `contents: write`): the GitHub release with" becomes "`github-release` (`needs: publish`; `contents: write`): the GitHub release, the SBOM and the `.crate` attached (Block 69), with".
+- **Block 20 D3**, line 3188: "A `package` CI job on pull requests runs `cargo publish --dry-run`, which builds" becomes "A `package` CI job on pull requests runs `scripts/release-sbom` (Block 69 D1) and `cargo publish --dry-run`, which builds".
+
+**Out of scope:**
+- v1.0.0-alpha.1 and alpha.2: their releases are immutable, and a later run cannot attest a build it did not run;
+- SPDX, and an SBOM per feature set or target: one CycloneDX document covering every feature and target is a superset that scanners read;
+- attaching attestation bundles to the release: they are fetched by digest from GitHub's attestations API (`gh attestation download`);
+- signing on crates.io's side, which has no support;
+- a `workflow_dispatch` trigger on `release.yml` (D6).
+
+**Decisions:**
+- **D1 SBOM.** `scripts/release-sbom <dir>` (bash, cargo, jq):
+  - it runs `cargo cyclonedx --all-features --target all --format json --spec-version 1.5 --override-filename ferrifuge-<version>.cdx`, `<version>` being `Cargo.toml`'s;
+  - it runs without `SOURCE_DATE_EPOCH`, so each document has a random `serialNumber` and its own timestamp, as CycloneDX asks of each generated BOM and as `actions/attest` requires;
+  - it moves `ferrifuge-<version>.cdx.json` out of the checkout into `<dir>`;
+  - it fails unless `Cargo.lock` is unchanged, `bomFormat` is `CycloneDX`, `specVersion` is `1.5`, `serialNumber` is present, `metadata.component` is `ferrifuge` at `<version>`, and no component is `cucumber` or `criterion` (dev-dependencies only).
+
+  In `publish`, first: `cargo-cyclonedx@0.5.9` through the pinned `taiki-e/install-action`, then the script into `$RUNNER_TEMP`. A failure stops the release before anything irreversible.
+- **D2 Publish, idempotent.**
+  - The job asks the crates.io API for `/api/v1/crates/ferrifuge/<version>`, with the `verify` job's User-Agent. On 404 it runs `cargo publish`. On 200 (a re-run after the publish) it runs `cargo package --no-verify` and does not publish. Any other status fails.
+  - Either way, `scripts/release-digest <version> <crate>` then reads `https://index.crates.io/fe/rr/ferrifuge` every 10 seconds, for at most 5 minutes, until it lists the version. It requires the version's `cksum` to equal the SHA-256 of `target/package/ferrifuge-<version>.crate`, and fails naming both digests when they differ, or when the time runs out. Nothing is attested after a failure.
+  - On a re-run, a mismatch means another cargo packaged differently (Facts). That version then stays without attestations, and the README says from which version the attestations exist.
+- **D3 Attestations.** After D2's check, in the same job: `actions/attest` v4.2.2 by SHA with `subject-path` the `.crate` (build provenance), then again with the same `subject-path` and `sbom-path` the SBOM.
+  - The `publish` job grants `contents: read`, `id-token: write` and `attestations: write`. The top level stays `{}`, and no job grants `artifact-metadata`.
+  - A re-run attests again. Duplicates are harmless, since verification accepts any valid attestation.
+  - A failure after the publish leaves the version published and unattested until the job is re-run. The owner approves the `release` environment again for that re-run, and D2 takes its re-run branch.
+- **D4 Release assets.** After D3, `publish` uploads the `.crate` and the SBOM as one workflow artifact: `actions/upload-artifact` at the SHA the other workflows pin (v7.0.2), with `overwrite: true` for a re-run and `if-no-files-found: error`. `github-release` downloads it with `actions/download-artifact` v8.0.2 (`9000827ccba6bdab643e8b6fd33ac0654aef8333`), with no grant beyond `contents: write`. Then:
+  - a published release for the tag: it skips (re-running never publishes again);
+  - a draft for the tag (a run stopped between upload and publish): it deletes the draft and keeps the tag (`gh release delete <tag> --yes`), then creates the release as below;
+  - none: `gh release create <tag> --verify-tag --title <tag> --notes-file notes.md [--prerelease] ferrifuge-<version>.cdx.json ferrifuge-<version>.crate`, which uploads before publishing (Facts).
+- **D5 Documentation.** A README section "Verifying a release", after "Stability". It states what is attested and attached, and from which version on. For version V, with gh 2.75.0 or later, logged in:
+  - `curl -sSfL -o ferrifuge-V.crate https://static.crates.io/crates/ferrifuge/ferrifuge-V.crate`;
+  - `gh attestation verify ferrifuge-V.crate --repo jbiscella/ferrifuge --signer-workflow jbiscella/ferrifuge/.github/workflows/release.yml --source-ref refs/tags/vV`;
+  - the same command with `--predicate-type https://cyclonedx.org/bom` for the SBOM;
+  - `gh release verify vV --repo jbiscella/ferrifuge` and `gh release verify-asset vV ferrifuge-V.cdx.json --repo jbiscella/ferrifuge`.
+
+  It also says that the SBOM lists the versions of the tagged `Cargo.lock`, for every feature and target, not those an application's own lock resolves.
+- **D6 Dry run.** No `workflow_dispatch` on `release.yml`. Block 20 D1 triggers it only by a pushed `v*` tag, and a second trigger would add a path to the publishing job that only the `release` environment's tag rule would stop. Instead, the pull-request `package` job in `ci.yml` runs D1's install step and script before `cargo publish --dry-run`, then prints the `.crate`'s SHA-256. The attestations and the release assets are first exercised by the first real release (D8).
+- **D7 Version.** Under `## [Unreleased]`, "Added": each release's SBOM and its two attestations. Releasing is the owner's (Block 55 D9).
+- **D8 First release.** After the owner's first release with this block, the implementer runs D5's commands against it and records their output in issue #348 before closing it.
+
+**Sub-increments:** the spec PR (this text, the amendments, line 3 as `blocks 0–69`); **69a**, D1–D7; D8 after the owner's release.
+
+Value clause: As an app developer whose organisation requires supply-chain evidence, I want each Ferrifuge release to come with a verifiable SBOM and build provenance, so that I can show which code and dependencies I ship and that crates.io serves what CI built.
+
+**Structural acceptance (69a):**
+- `workflow-lint` (actionlint, zizmor) passes, and every new `uses:` is SHA-pinned;
+- the `package` job passes on the pull request, and its log shows D1's checks and the `.crate`'s SHA-256;
+- `scripts/release-digest 1.0.0-alpha.2` passes on the `.crate` packaged at 37ac473, and fails naming both digests on a copy with one byte changed;
+- seen red once, recorded in the pull request:
+  - zizmor with `id-token: write` moved to release.yml's top level (excessive-permissions);
+  - zizmor with `actions/attest` pinned by tag (unpinned-uses);
+  - the `package` job with `SOURCE_DATE_EPOCH` set (no `serialNumber`).
+
+**Exceptions introduced:** no scenario: a release workflow, two scripts and documentation (Block 20's precedent). The attestations and the release assets are verified by the first real release (D8).
