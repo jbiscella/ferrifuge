@@ -1,25 +1,30 @@
-//! The websocket subprotocols a client offers (Block 67).
+//! The websocket subprotocols a client offers.
+// Block 67.
 
 use std::sync::Arc;
 
 use crate::{ClientError, ErrorKind, Protocol, codes};
 
 /// The message of an attempt whose server did not select the encoding's
-/// subprotocol; it names no value (Block 67, D4).
+/// subprotocol; it names no value.
+// Block 67, D4.
 pub(in crate::adapter) const NOT_ACCEPTED: &str = "websocket subprotocol not accepted";
 
 /// The values a websocket upgrade offers: the encoding's own first, then
-/// the application's (D3).
+/// the application's.
+// D3.
 #[derive(Clone)]
 pub(in crate::adapter) struct Offer {
     values: Arc<[String]>,
     /// The application set values: the server must select the first.
     custom: bool,
-    /// The encoding is Protobuf (D7: read apart from the offer).
+    /// The encoding is Protobuf, read apart from the offer.
+    // D7.
     pub(in crate::adapter) protobuf: bool,
 }
 
-/// The count only: the values may carry identifiers (D5).
+/// The count only: the values may carry identifiers.
+// D5.
 impl std::fmt::Debug for Offer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Offer")
@@ -56,7 +61,8 @@ impl Offer {
         &self.values
     }
 
-    /// The one `Sec-WebSocket-Protocol` header's value, if any (D3).
+    /// The one `Sec-WebSocket-Protocol` header's value, if any.
+    // D3.
     #[cfg_attr(not(adapter_tokio), allow(dead_code, reason = "the tokio adapter's"))]
     pub(in crate::adapter) fn header(&self) -> Option<String> {
         (!self.values.is_empty()).then(|| self.values.join(", "))
@@ -68,7 +74,8 @@ impl Offer {
     }
 
     /// Whether the server's `selected` value, if any, lets the attempt go
-    /// on: with the application's values, only the encoding's own (D4).
+    /// on: with the application's values, only the encoding's own.
+    // D4.
     pub(in crate::adapter) fn accepts(&self, selected: Option<&str>) -> bool {
         !self.custom
             || selected
@@ -85,8 +92,9 @@ fn is_token(value: &str) -> bool {
             .all(|byte| (0x21..=0x7e).contains(&byte) && !b"()<>@,;:\\\"/[]?={}".contains(&byte))
 }
 
-/// Checks the application's values (D2): each a token, none repeated,
-/// none of the encodings'; the error names the value's index, never it.
+/// Checks the application's values: each a token, none repeated, none
+/// of the encodings'; the error names the value's index, never it.
+// D2.
 pub(in crate::adapter) fn check(values: &[String]) -> Result<(), ClientError> {
     for (index, value) in values.iter().enumerate() {
         let problem = if !is_token(value) {

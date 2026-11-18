@@ -159,7 +159,7 @@ struct State {
     subscribes_answered_at: Vec<std::time::Instant>,
     /// When each JSON connect reply went out (Block 36).
     connects_answered_at: Vec<std::time::Instant>,
-    /// Whether each upgrade asked for the Protobuf subprotocol, in order.
+    /// Whether each upgrade selected the Protobuf subprotocol, in order.
     protobuf_upgrades: Vec<bool>,
     /// Each upgrade's `Sec-WebSocket-Protocol` lines, in order (Block 67,
     /// D8).

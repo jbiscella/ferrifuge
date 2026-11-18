@@ -1024,18 +1024,17 @@ A gateway that routes websocket clients on `Sec-WebSocket-Protocol`, before
 any message is read (on a tenant id, for example), can be given values of
 the application's own:
 
-```rust,no_run
+```rust
 let client = ferrifuge::Client::builder("wss://example.com/connection/websocket")
     .websocket_subprotocols(["tenant-a"])
     .build()?;
-# Ok::<(), ferrifuge::ClientError>(())
 ```
 
 - The upgrade carries one `Sec-WebSocket-Protocol` header: the encoding's
   own value first, `centrifuge-protobuf`, or `centrifuge-json` for JSON
   (which Centrifugo selects; without it, Centrifugo answers with no
   subprotocol and the handshake fails), then the application's values, in
-  order. Without values of its own, a client offers what it offered before:
+  order. Without values of its own, a client offers only the encoding's:
   `centrifuge-protobuf` for Protobuf, nothing for JSON.
 - The server must select the encoding's value. One that selects none, or
   one of the application's values, fails the attempt: an `error` event of
@@ -1043,7 +1042,7 @@ let client = ferrifuge::Client::builder("wss://example.com/connection/websocket"
   transport is tried.
 - Each value must be a token (RFC 6455), not repeat another, and not be
   `centrifuge-json` or `centrifuge-protobuf`; otherwise `build()` fails,
-  naming the value's index, never the value.
+  naming the value's index (from 0, across calls), never the value.
 - No log record, error message or `Debug` output of the client carries a
   value (`Debug` shows how many). The websocket library logs them at TRACE
   (see Logging).
@@ -2060,8 +2059,8 @@ Keep Ferrifuge's dependencies at INFO or above in production: they log on
 their own, through `log`. At TRACE, tungstenite 0.30 logs the whole
 websocket upgrade request, its query and header values included (the
 `Cookie` header of a client with a cookie jar, and the websocket
-subprotocols, among them), and every frame
-sent and received, the connect frame with its token. reqwest's own `Jar`,
+subprotocols, among them), and every frame sent and received, the connect
+frame with its token. reqwest's own `Jar`,
 if an application uses one, logs cookie values at DEBUG; `MemoryJar` logs
 none.
 rustls-platform-verifier logs each failed verification at ERROR, with no

@@ -46,7 +46,8 @@ type Fetching = platform::BoxFuture<'static, Result<String, TokenError>>;
 pub(super) struct Driver {
     /// Endpoints of the transports, in the machine's order.
     pub(super) endpoints: Vec<String>,
-    /// The websocket subprotocols offered, and the encoding (Block 67).
+    /// The websocket subprotocols offered, and the encoding.
+    // Block 67.
     pub(super) offer: super::subprotocols::Offer,
     /// Where commands over emulated transports go, when not the default.
     pub(super) emulation_endpoint: Option<String>,

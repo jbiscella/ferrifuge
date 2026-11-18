@@ -768,6 +768,7 @@ async fn no_builder_or_handle_shows_a_secret() {
         )
         .http_headers([("authorization", s.text("http-header"))])
         .emulated_headers([("x-token", s.text("builder-emulated-header"))])
+        .websocket_subprotocols([s.text("builder-websocket-subprotocol")])
         .proxy(Proxy::all(target.clone()));
     #[cfg(feature = "cookies")]
     let builder = {
@@ -865,6 +866,11 @@ const INVENTORY: &[(&str, &str, Covered)] = &[
         Covered::Inside("ClientBuilder"),
     ),
     ("src/adapter/client.rs", "Client", Covered::Sampled),
+    (
+        "src/adapter/subprotocols.rs",
+        "Offer",
+        Covered::NoSecret("prints how many values, never them"),
+    ),
     ("src/adapter/client.rs", "WeakClient", Covered::Sampled),
     (
         "src/adapter/handler.rs",

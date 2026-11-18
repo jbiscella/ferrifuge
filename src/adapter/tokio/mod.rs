@@ -47,7 +47,8 @@ pub(in crate::adapter) struct Open {
     /// The endpoint's index, for the records.
     pub(in crate::adapter) endpoint: usize,
     pub(in crate::adapter) url: String,
-    /// The websocket subprotocols offered, and the encoding (Block 67).
+    /// The websocket subprotocols offered, and the encoding.
+    // Block 67.
     pub(in crate::adapter) offer: super::subprotocols::Offer,
     pub(in crate::adapter) timeout: Duration,
     pub(in crate::adapter) max_message: usize,
